@@ -196,7 +196,15 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
         //   280:    tpidrro_el0 (read-only at EL0)
         //   288:    esr_el1 (not restore)
 
-        // Switch TTBR back to user
+        // Check SPSR mode bits [3:0] to decide TTBR switch
+        ldr x9, [sp, #264]  // Load Trapframe.spsr
+        and x9, x9, #0xF    // Extract mode bits
+        cmp x9, #0x5        // EL1h?
+        b.eq 2f             // Skip TTBR switch for kernel tasks
+        cmp x9, #0x9        // EL2h?
+        b.eq 2f             // Skip TTBR switch for VHE host kernel tasks
+
+        // --- User task path: switch TTBR back to user ---
         mrs x10, tpidr_el1 // x10 = CPU struct ptr
         ldr x9, [x10, #16]  // user ttbr0
         msr ttbr0_el1, x9   // Switch to user TTBR
@@ -204,17 +212,20 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
         tlbi vmalle1is
         dsb ish
         isb
+        b   3f
 
-        // Restore user SP/PC/SPSR
+        2: // --- Kernel task path: no TTBR switch needed ---
+
+        3:
+        // Restore SP/PC/SPSR
         ldr x9, [sp, #248]  // Load Trapframe.sp
-        msr sp_el0, x9    // Restore user SP
-        ldr x9, [sp, #256]   // Load Trapframe.epc
-        msr elr_el1, x9     // Restore user PC
+        msr sp_el0, x9      // Restore SP_EL0
+        ldr x9, [sp, #256]  // Load Trapframe.epc
+        msr elr_el1, x9     // Restore ELR_EL1
         ldr x9, [sp, #264]  // Load Trapframe.spsr
-        msr spsr_el1, x9
-    
+        msr spsr_el1, x9    // Restore SPSR_EL1
 
-        // Restore user TLS
+        // Restore TLS
         ldr x9, [sp, #272]
         msr tpidr_el0, x9
         ldr x9, [sp, #280]
@@ -263,7 +274,17 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
         .wrapping_sub(_user_trap_entry as *const () as usize);
     let trampoline_base = get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
-    set_trapvector(trampoline_base);
+
+    // Determine VBAR based on target EL:
+    // - EL0 (user task): trampoline vector (handles Lower EL traps)
+    // - EL1 (kernel task like idle): kernel vector (handles Current EL traps)
+    if crate::arch::is_privileged_return_mode(trapframe.spsr) {
+        // EL1h/EL2h — kernel task: use kernel vector so privileged traps are handled
+        set_trapvector(get_kernel_trapvector_paddr());
+    } else {
+        // EL0t — user task: use trampoline vector
+        set_trapvector(trampoline_base);
+    }
 
     unsafe {
         asm!(

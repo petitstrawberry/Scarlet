@@ -26,6 +26,16 @@ fn current_el_number() -> u64 {
     (get_current_el() >> 2) & 0x3
 }
 
+fn get_hcr_el2() -> u64 {
+    if current_el_number() != 2 {
+        return 0;
+    }
+
+    let val: u64;
+    unsafe { asm!("mrs {}, hcr_el2", out(reg) val) };
+    val
+}
+
 /// Get DAIF value
 fn get_daif() -> u64 {
     let val: u64;
@@ -208,12 +218,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             print_trap_info(trapframe, esr);
 
             crate::println!(
-                "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x}",
+                "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x} CurrentEL=EL{} SPSR={:#x} DAIF={:#x} HCR_EL2={:#x}",
                 trap_kind,
                 kind_str,
                 esr,
                 get_far_el1(),
                 trapframe.elr,
+                current_el_number(),
+                trapframe.spsr,
+                get_daif(),
+                get_hcr_el2(),
             );
 
             loop {

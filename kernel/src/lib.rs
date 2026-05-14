@@ -319,7 +319,7 @@ use vm::{
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    crate::println!("[Scarlet Kernel] panic: {}", info);
+    crate::early_println!("[Scarlet Kernel] panic: {}", info);
 
     // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
     //     task.exit(1); // Exit the task with error code 1
@@ -870,6 +870,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
     println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+
     if let Some(hook) = boot_info.start_secondary_cpus_hook {
         hook();
         fence(Ordering::SeqCst);
@@ -907,7 +910,6 @@ pub fn wait_for_ap_release() {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     use core::sync::atomic::Ordering;
-
     crate::arch::vm::switch_to_kernel_page_table();
 
     println!("[Scarlet Kernel] AP {}: initializing...", cpu_id);
@@ -924,6 +926,9 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     }
 
     crate::arch::vm::register_trampoline_for_ap();
+
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
 
     let next_task_id = crate::sched::scheduler::start_scheduler();
     if let Some(next_task_id) = next_task_id {

@@ -437,6 +437,8 @@ pub struct Task {
     pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
     pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
+    pub pinned_cpu: Option<usize>,
+    pub last_cpu: atomic::AtomicUsize,
 
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
@@ -568,6 +570,8 @@ impl Task {
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: Mutex::new(None),
+            pinned_cpu: None,
+            last_cpu: atomic::AtomicUsize::new(0),
             // Already protected
             event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: Mutex::new(true),

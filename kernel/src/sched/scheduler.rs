@@ -361,11 +361,57 @@ static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
     [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
 static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
+static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
+pub fn register_online_cpu(cpu_id: usize) {
+    let mut cpus = ONLINE_CPUS.lock();
+    if !cpus.contains(&cpu_id) {
+        cpus.push(cpu_id);
+    }
+}
+
+pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
+    let cpus = ONLINE_CPUS.lock();
+    for &cpu_id in cpus.iter() {
+        f(cpu_id);
+    }
+}
+
+pub fn num_online_cpus() -> usize {
+    ONLINE_CPUS.lock().len()
+}
+
 pub fn select_cpu() -> usize {
-    NEXT_CPU.fetch_add(1, Ordering::Relaxed) % MAX_NUM_CPUS
+    let cpus = ONLINE_CPUS.lock();
+    if cpus.is_empty() {
+        return 0;
+    }
+    let idx = NEXT_CPU.fetch_add(1, Ordering::Relaxed) % cpus.len();
+    cpus[idx]
+}
+
+fn is_cpu_online(cpu_id: usize) -> bool {
+    ONLINE_CPUS.lock().contains(&cpu_id)
+}
+
+fn find_least_loaded_cpu() -> usize {
+    let cpus = ONLINE_CPUS.lock();
+    if cpus.is_empty() {
+        return 0;
+    }
+    let mut best_cpu = cpus[0];
+    let mut best_len = ready_queue(best_cpu).lock().len();
+    for &cpu_id in cpus.iter().skip(1) {
+        let len = ready_queue(cpu_id).lock().len();
+        if len < best_len {
+            best_len = len;
+            best_cpu = cpu_id;
+        }
+    }
+    best_cpu
 }
 
 #[inline]
@@ -404,12 +450,13 @@ pub fn push_ready_task(cpu_id: usize, task_id: usize) {
 }
 
 fn ready_queue_contains(task_id: usize) -> bool {
-    for cpu_id in 0..MAX_NUM_CPUS {
-        if ready_queue(cpu_id).lock().contains(&task_id) {
-            return true;
+    let mut found = false;
+    for_each_online_cpu(|cpu_id| {
+        if !found && ready_queue(cpu_id).lock().contains(&task_id) {
+            found = true;
         }
-    }
-    false
+    });
+    found
 }
 
 pub fn mark_blocked(task_id: usize) {
@@ -447,10 +494,8 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     if let Some(current_id) = old_current_task_id {
         if let Some(task) = TaskPool::get_task_mut(current_id) {
             match task.state.load(Ordering::SeqCst) {
-                TaskState::Ready => push_ready_task(cpu_id, current_id),
-                TaskState::Running => {
+                TaskState::Ready | TaskState::Running => {
                     task.state.store(TaskState::Ready, Ordering::SeqCst);
-                    push_ready_task(cpu_id, current_id);
                 }
                 TaskState::Zombie => finalize_zombie(current_id, task.get_parent_id()),
                 TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
@@ -458,32 +503,61 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         }
     }
 
+    let old_current_runnable = old_current_task_id.is_some_and(|id| {
+        TaskPool::get_task(id)
+            .is_some_and(|t| t.state.load(Ordering::SeqCst) == TaskState::Ready)
+    });
+
     loop {
         let task_id = { ready_queue(cpu_id).lock().pop_front() };
 
         let task_id = match task_id {
             Some(id) => id,
             None => {
-                // Work stealing: try to take a task from another CPU's queue,
-                // but skip tasks currently running on that CPU.
                 let mut stolen = None;
-                for remote_cpu in 0..MAX_NUM_CPUS {
-                    if remote_cpu == cpu_id {
-                        continue;
+                for_each_online_cpu(|remote_cpu| {
+                    if stolen.is_some() || remote_cpu == cpu_id {
+                        return;
                     }
                     let mut remote_q = ready_queue(remote_cpu).lock();
                     if let Some(remote_id) = remote_q.pop_front() {
-                        if current_task_id(remote_cpu) == Some(remote_id) {
-                            remote_q.push_back(remote_id);
-                            continue;
+                        if let Some(task) = TaskPool::get_task(remote_id) {
+                            if task.pinned_cpu.is_some() {
+                                remote_q.push_back(remote_id);
+                                return;
+                            }
                         }
                         stolen = Some(remote_id);
-                        break;
                     }
-                }
+                });
                 match stolen {
                     Some(id) => id,
                     None => {
+                        if old_current_runnable {
+                            if let Some(current_id) = old_current_task_id {
+                                if let Some(task) = TaskPool::get_task_mut(current_id) {
+                                    task.state.store(TaskState::Running, Ordering::SeqCst);
+                                    task.time_slice.store(
+                                        task.default_time_slice.load(Ordering::SeqCst),
+                                        Ordering::SeqCst,
+                                    );
+                                }
+                                set_current_task_id(cpu_id, Some(current_id));
+                                return (old_current_task_id, Some(current_id));
+                            }
+                        }
+                        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+                        if idle_id != 0 {
+                            if let Some(task) = TaskPool::get_task_mut(idle_id) {
+                                task.state.store(TaskState::Running, Ordering::SeqCst);
+                                task.time_slice.store(
+                                    task.default_time_slice.load(Ordering::SeqCst),
+                                    Ordering::SeqCst,
+                                );
+                            }
+                            set_current_task_id(cpu_id, Some(idle_id));
+                            return (old_current_task_id, Some(idle_id));
+                        }
                         set_current_task_id(cpu_id, None);
                         return (old_current_task_id, None);
                     }
@@ -513,8 +587,12 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     Ordering::SeqCst,
                 );
                 let next_task_id = task.get_id();
+                if let Some(old_id) = old_current_task_id {
+                    if old_current_runnable && old_id != next_task_id {
+                        push_ready_task(cpu_id, old_id);
+                    }
+                }
                 set_current_task_id(cpu_id, Some(next_task_id));
-                push_ready_task(cpu_id, next_task_id);
                 return (old_current_task_id, Some(next_task_id));
             }
         }
@@ -561,6 +639,7 @@ pub fn schedule(trapframe: &mut Trapframe) {
         if current_task_id != Some(next_task_id) {
             if let Some(current_task_id) = current_task_id {
                 let current_task = get_task_by_id(current_task_id).unwrap();
+                current_task.last_cpu.store(cpu_id, Ordering::SeqCst);
                 current_task.vcpu.lock().store(trapframe);
 
                 #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
@@ -591,6 +670,30 @@ pub fn schedule(trapframe: &mut Trapframe) {
 }
 
 /// Start the scheduler and return the first runnable task ID (if any).
+fn idle_loop() -> ! {
+    loop {
+        idle();
+    }
+}
+
+fn idle_entry() {
+    idle_loop()
+}
+
+pub fn spawn_idle_task(cpu_id: usize) -> usize {
+    let name = alloc::format!("idle{}", cpu_id);
+    let mut task = new_kernel_task(name, 0, idle_entry);
+    task.pinned_cpu = Some(cpu_id);
+    task.init();
+    // Idle task is used as a fallback in pick_next when no real tasks are available.
+    let task_id = match get_task_pool().add_task(task) {
+        Ok(id) => id,
+        Err(e) => panic!("Failed to add idle task: {}", e),
+    };
+    IDLE_TASK_IDS[cpu_id].store(task_id, Ordering::SeqCst);
+    task_id
+}
+
 pub fn start_scheduler() -> Option<usize> {
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
@@ -621,7 +724,22 @@ pub fn get_task_by_id(task_id: usize) -> Option<&'static mut Task> {
 }
 
 pub fn wake_task(task_id: usize) -> bool {
-    wake_task_on(task_id, get_cpu().get_cpuid())
+    let target_cpu = {
+        let Some(task) = TaskPool::get_task(task_id) else {
+            return false;
+        };
+        if let Some(pinned) = task.pinned_cpu {
+            pinned
+        } else {
+            let last = task.last_cpu.load(Ordering::SeqCst);
+            if last > 0 && is_cpu_online(last) {
+                last
+            } else {
+                find_least_loaded_cpu()
+            }
+        }
+    };
+    wake_task_on(task_id, target_cpu)
 }
 
 pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
@@ -666,7 +784,7 @@ pub fn cleanup_zombie(task_id: usize) {
 pub fn remove_from_ready_queues(task_id: usize) {
     let _irq_guard = IrqGuard::new();
 
-    for cpu_id in 0..MAX_NUM_CPUS {
+    for_each_online_cpu(|cpu_id| {
         let mut queue = ready_queue(cpu_id).lock();
         while let Some(pos) = queue.iter().position(|&id| id == task_id) {
             queue.remove(pos);
@@ -675,7 +793,7 @@ pub fn remove_from_ready_queues(task_id: usize) {
         if current_task_id(cpu_id) == Some(task_id) {
             set_current_task_id(cpu_id, None);
         }
-    }
+    });
 }
 
 pub fn remove_from_zombie_queue(task_id: usize) {
@@ -695,7 +813,7 @@ pub fn remove_task_from_queues(task_id: usize) {
 pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
     let mut ids = alloc::vec::Vec::new();
 
-    for cpu_id in 0..MAX_NUM_CPUS {
+    for_each_online_cpu(|cpu_id| {
         if let Some(task_id) = current_task_id(cpu_id) {
             if !ids.contains(&task_id) {
                 ids.push(task_id);
@@ -708,7 +826,7 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
                 ids.push(task_id);
             }
         }
-    }
+    });
 
     let zombie_queue = ZOMBIE_QUEUE.lock();
     for &task_id in zombie_queue.iter() {
@@ -794,6 +912,7 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
     cpu.set_kernel_stack(sp);
 
     let task_ptr = task as *mut Task;
+    let task_mode = task.vcpu.lock().get_mode();
     unsafe {
         let trapframe = (*task_ptr).get_trapframe();
         (*task_ptr).vcpu.lock().switch(trapframe);
@@ -801,7 +920,7 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
 
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
-    set_next_mode(task.vcpu.lock().get_mode());
+    set_next_mode(task_mode);
     set_trapvector(get_trampoline_trap_vector());
 }
 

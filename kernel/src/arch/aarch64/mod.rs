@@ -111,9 +111,12 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     // Populate the trapframe from the task VCPU state.
     // Use a raw pointer to avoid borrow checker conflicts with get_trapframe().
     let task_ptr = task as *mut Task;
+    let task_mode = task.vcpu.lock().get_mode();
     unsafe {
         let trapframe = (*task_ptr).get_trapframe();
         (*task_ptr).vcpu.lock().switch(trapframe);
+
+        trapframe.spsr = target_spsr_for_mode(task_mode);
 
         // Ensure IRQs are unmasked in the user PSTATE after `eret`.
         crate::arch::configure_user_entry(
@@ -130,10 +133,14 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
-    // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
+    // Program per-CPU arch pointer and the target trap vector right before the jump.
     let cpu_id = cpu.get_cpuid();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
-    set_trapvector(trampoline_base);
+    if is_privileged_return_mode(task.get_trapframe().spsr) {
+        set_trapvector(get_kernel_trapvector_paddr());
+    } else {
+        set_trapvector(trampoline_base);
+    }
 
     let trapframe_addr = (kernel_sp as usize).wrapping_sub(core::mem::size_of::<Trapframe>());
 
@@ -420,23 +427,24 @@ pub fn get_trapvector() -> usize {
 pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::UserEntryOptions) {
     use crate::arch::UserReturnIrqPolicy;
 
-    // DAIF bits in PSTATE/SPSR: D=9, A=8, I=7, F=6. 1 means masked.
     const DAIF_I: u64 = 1 << 7;
     const DAIF_F: u64 = 1 << 6;
-    match options.irq_policy {
-        UserReturnIrqPolicy::Inherit => {}
-        UserReturnIrqPolicy::Enable => {
-            trapframe.spsr &= !DAIF_I;
-            trapframe.spsr &= !DAIF_F;
-        }
-        UserReturnIrqPolicy::Disable => {
-            trapframe.spsr |= DAIF_I;
-            trapframe.spsr |= DAIF_F;
-        }
-    }
+    const DAIF_MASK: u64 = DAIF_I | DAIF_F;
+    const SPSR_MODE_MASK: u64 = 0xF;
 
-    // Configure EL0 FP/SIMD access for the next user return.
-    // DTB-driven runtime gating complements the build-time feature.
+    let el = if let Some(task) = crate::sched::scheduler::current_task(get_cpu().get_cpuid()) {
+        target_spsr_for_mode(task.vcpu.lock().get_mode())
+    } else {
+        target_spsr_for_mode(crate::arch::Mode::User)
+    };
+
+    let daif = match options.irq_policy {
+        UserReturnIrqPolicy::Inherit => trapframe.spsr & DAIF_MASK,
+        UserReturnIrqPolicy::Enable => 0,
+        UserReturnIrqPolicy::Disable => DAIF_MASK,
+    };
+    trapframe.spsr = el | daif | (trapframe.spsr & !(SPSR_MODE_MASK | DAIF_MASK));
+
     if crate::arch::user_fpu_enabled() {
         let cpu_id = get_cpu().get_cpuid();
         if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
@@ -499,11 +507,30 @@ pub fn get_cpu() -> &'static mut Aarch64 {
     return unsafe { transmute(tpidr_el1) };
 }
 
-pub fn set_next_mode(_mode: crate::arch::Mode) {
-    // AArch64 return mode is currently chosen in the trampoline (`_switch_to_user`).
-    // Keep this as a no-op so shared scheduler code can call it without
-    // architecture-specific branching or noisy TODO logs.
-    let _ = _mode;
+pub fn set_next_mode(mode: crate::arch::Mode) {
+    let spsr = target_spsr_for_mode(mode);
+    // SAFETY: writing SPSR_EL1 only affects the exception-return EL.
+    unsafe {
+        core::arch::asm!("msr spsr_el1, {0}", in(reg) spsr);
+    }
+}
+
+pub fn is_privileged_return_mode(spsr: u64) -> bool {
+    matches!(spsr & 0xF, 0x5 | 0x9)
+}
+
+fn target_spsr_for_mode(mode: crate::arch::Mode) -> u64 {
+    const SPSR_EL0T: u64 = 0x0;
+    const SPSR_EL1H: u64 = 0x5;
+    const SPSR_EL2H: u64 = 0x9;
+
+    match mode {
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel if is_vhe_enabled() => {
+            SPSR_EL2H
+        }
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel => SPSR_EL1H,
+        _ => SPSR_EL0T,
+    }
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.

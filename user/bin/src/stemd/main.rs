@@ -12,7 +12,7 @@
 
 extern crate scarlet_std as std;
 
-use core::{hint::spin_loop, sync::atomic::fence};
+use core::sync::atomic::fence;
 use sbus_client as sbus;
 use std::{
     format,
@@ -1562,15 +1562,6 @@ tty = "/dev/tty0"
             }
         }
     }
-
-    // Start idle thread early so sbusd can run
-    println!("stemd: Starting idle thread");
-    let _idle = thread::spawn(|| {
-        loop {
-            scarlet_std::thread::yield_now();
-            spin_loop();
-        }
-    });
 
     // Phase 2: Register with sbus (now that sbusd should be running)
     println!("stemd: Registering with sbus...");
