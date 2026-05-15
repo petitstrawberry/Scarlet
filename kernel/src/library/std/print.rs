@@ -53,14 +53,13 @@ macro_rules! println {
     ($fmt:expr, $($arg:tt)*) => ($crate::print!(concat!($fmt, "\n"), $($arg)*));
 }
 
-static WRITE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
-
 pub fn _print(args: fmt::Arguments) {
+    let _guard = crate::log::PrintGuard::acquire();
+
     struct LogWriter;
 
     impl fmt::Write for LogWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            let _lock = WRITE_LOCK.lock();
             for &b in s.as_bytes() {
                 crate::log::write_byte(b);
             }
@@ -76,8 +75,6 @@ pub fn _print(args: fmt::Arguments) {
     struct CharDeviceWriter<'a>(&'a dyn CharDevice);
     impl<'a> fmt::Write for CharDeviceWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            let _lock = WRITE_LOCK.lock();
-
             for byte in s.bytes() {
                 if self.0.write_byte(byte).is_err() {
                     return Err(fmt::Error);
@@ -121,6 +118,9 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
-    // Final fallback: early console
-    early_println!("[print] No usable character device found; using early console");
+    // Final fallback: write directly to the early console while still holding
+    // the global print guard. Calling early_println! here would re-enter the
+    // same print lock and deadlock.
+    let mut early = crate::earlycon::EarlyConsole::new();
+    let _ = early.write_fmt(args);
 }
