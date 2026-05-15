@@ -1,6 +1,7 @@
 use core::arch::naked_asm;
 use core::{arch::asm, mem::transmute};
 
+use crate::arch::trap::interrupt::arch_interrupt_handler;
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
@@ -122,7 +123,7 @@ pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
 
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
-        panic!("Interrupt is not supported in kernel mode");
+        arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_kernel_exception_handler(trapframe, cause & !0x8000000000000000);
     }

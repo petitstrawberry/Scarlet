@@ -133,6 +133,16 @@ impl Uart {
     fn can_write(&self) -> bool {
         self.reg_read(LSR_OFFSET) & LSR_THRE != 0
     }
+
+    fn drain_rx(&self) {
+        // Drain all available RX bytes. Reading only one byte can leave the
+        // FIFO non-empty without producing a new edge, which loses interactive
+        // input such as "ls\n" after the first interrupt.
+        while self.can_read() {
+            let c = self.read_byte_internal();
+            self.emit_event(&InputEvent { data: c });
+        }
+    }
 }
 
 impl Serial for Uart {
@@ -283,21 +293,7 @@ impl EventCapableDevice for Uart {
 
 impl InterruptCapableDevice for Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        // let inner = self.inner.lock();
-        // Check interrupt identification register
-        let iir = self.reg_read(IIR_OFFSET);
-
-        if iir & IIR_PENDING == 0 {
-            let c = self.read_byte_internal();
-            if c != 0 {
-                // Emit received character event
-                self.emit_event(&InputEvent { data: c as u8 });
-            } else {
-                // No data available, return Ok
-                return Ok(());
-            }
-        }
-
+        self.drain_rx();
         Ok(())
     }
 

@@ -91,6 +91,13 @@ pub fn enable_external_interrupts() {
     // }
 }
 
+/// Enable software interrupt reception at CPU level.
+///
+/// AArch64 scheduler IPIs are delivered as GIC SGIs, which share the IRQ CPU
+/// mask with other external interrupts. The per-SGI source enable is handled by
+/// the GIC driver, so there is no separate architectural CPU bit to set here.
+pub fn enable_software_interrupts() {}
+
 /// Disable external interrupts (IRQ) at CPU level.
 pub fn disable_external_interrupts() {
     // unsafe {

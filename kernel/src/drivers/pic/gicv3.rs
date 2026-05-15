@@ -30,6 +30,9 @@ const MAX_INTERRUPTS: InterruptId = 1020;
 /// Maximum number of CPUs supported by this implementation.
 const MAX_CPUS: CpuId = 8;
 
+/// SGI used by the scheduler to request a reschedule on another CPU.
+const RESCHEDULE_SGI: u32 = 0;
+
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
 const GICD_TYPER: usize = 0x0004;
@@ -250,6 +253,16 @@ impl GicV3 {
             // Group 1 for SGI/PPI.
             mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
 
+            // Enable SGI 0 used by the scheduler as the reschedule IPI.
+            mmio::write8(
+                self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + RESCHEDULE_SGI as usize,
+                0x80,
+            );
+            mmio::write32(
+                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
+                1 << RESCHEDULE_SGI,
+            );
+
             // Set virtual timer PPI priority to 0x80.
             let timer_ppi = crate::drivers::pic::arm_generic_timer::timer_ppi_irq();
             mmio::write8(
@@ -448,7 +461,7 @@ impl ExternalInterruptController for GicV3 {
         self.validate_cpu_id(target_cpu_id)?;
 
         let intid = match ipi_type {
-            crate::interrupt::controllers::LocalInterruptType::Software => 0u64,
+            crate::interrupt::controllers::LocalInterruptType::Software => RESCHEDULE_SGI as u64,
             crate::interrupt::controllers::LocalInterruptType::External => 1u64,
             crate::interrupt::controllers::LocalInterruptType::Timer => {
                 crate::drivers::pic::arm_generic_timer::timer_ppi_irq() as u64
@@ -460,10 +473,10 @@ impl ExternalInterruptController for GicV3 {
         }
 
         // ICC_SGI1R_EL1 fields used here:
-        //   [27:24] Aff3, [23:16] Aff2, [15:4] INTID, [3:0] ignored when using RS/Aff1/TargetList,
-        //   [55:48] Aff1, [47:44] RS, [43:40] IRM, [39:32] TargetList.
-        // QEMU virt uses a flat affinity layout, so targeting by Aff1=0 and a 1-bit target mask
-        // for CPU IDs < 8 is sufficient for Scarlet's current environment.
+        //   [55:48] Aff3, [47:44] RS, [40] IRM, [39:32] Aff2,
+        //   [27:24] INTID, [23:16] Aff1, [15:0] TargetList.
+        // QEMU virt uses a flat affinity layout, so Aff1/2/3=0 and a
+        // 1-bit TargetList mask for CPU IDs < 8 is sufficient here.
         let target_mask = 1u64
             .checked_shl(target_cpu_id)
             .ok_or(InterruptError::InvalidCpuId)?;

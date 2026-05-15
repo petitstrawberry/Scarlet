@@ -476,10 +476,19 @@ pub fn are_interrupts_enabled() -> bool {
     arch::interrupt::are_interrupts_enabled()
 }
 
+/// Enable software interrupt reception at CPU level.
+///
+/// RISC-V uses this for SSIE (reschedule IPIs). AArch64 SGIs are GIC-backed and
+/// do not require a separate architectural CPU bit beyond the IRQ mask.
+pub fn enable_software_interrupts() {
+    arch::interrupt::enable_software_interrupts();
+}
+
 /// Enable CPU interrupt reception (stage 2).
 ///
 /// This should run after device drivers have registered their handlers and
 /// enabled the desired interrupt lines in the controller.
 pub fn enable_cpu_interrupts() {
     enable_external_interrupts();
+    enable_software_interrupts();
 }

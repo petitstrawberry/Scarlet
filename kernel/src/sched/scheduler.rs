@@ -377,18 +377,18 @@ fn release_deferred_prev(cpu_id: usize) {
         .compare_exchange(cpu_id, NO_CPU, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        // Now that ownership is released, enqueue the task so other CPUs
-        // (or this one) can claim it on the next pick_next round.
+        // Requeue the previous task on the CPU that just switched away from it.
+        // This keeps kernel-context resume paths CPU-local. New task placement
+        // and wakeups provide SMP distribution without stealing suspended
+        // kernel contexts from another CPU's ready queue.
         if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
-            let target = task.last_cpu.load(Ordering::SeqCst);
-            let target = if is_cpu_online(target) {
-                target
-            } else {
-                cpu_id
-            };
-            push_ready_task(target, prev_id);
+            push_ready_task(cpu_id, prev_id);
         }
     }
+}
+
+pub fn complete_deferred_context_switch(cpu_id: usize) {
+    release_deferred_prev(cpu_id);
 }
 
 fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
@@ -595,23 +595,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                 }
             }
             None => {
-                let mut stolen = None;
-                for_each_online_cpu(|remote_cpu| {
-                    if stolen.is_some() || remote_cpu == cpu_id {
-                        return;
-                    }
-                    let mut remote_q = ready_queue(remote_cpu).lock();
-                    if let Some(remote_id) = remote_q.pop_front() {
-                        stolen = Some(remote_id);
-                    }
-                });
-                match stolen {
-                    Some(id) => {
-                        push_ready_task(cpu_id, id);
-                        continue;
-                    }
-                    None => break 'outer,
-                }
+                break 'outer;
             }
         }
     }
@@ -683,6 +667,9 @@ pub fn add_task(task: Task, cpu_id: usize) -> usize {
         Err(e) => panic!("Failed to add task: {}", e),
     };
     push_ready_task(cpu_id, task_id);
+    if is_cpu_online(cpu_id) && cpu_id != get_cpu().get_cpuid() {
+        crate::arch::send_reschedule_ipi(cpu_id);
+    }
     task_id
 }
 
@@ -781,6 +768,26 @@ pub fn start_scheduler() -> Option<usize> {
     next_task_id
 }
 
+pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
+    let Some(task) = TaskPool::get_task(task_id) else {
+        panic!("Kernel task {} not found", task_id);
+    };
+
+    let mut boot_context = crate::arch::context::KernelContext::new();
+    let to_ctx_ptr = &*task.kernel_context.lock() as *const crate::arch::context::KernelContext;
+
+    // SAFETY: `task_id` is the current runnable task selected by `start_scheduler`,
+    // and `to_ctx_ptr` points to its initialized kernel context. `boot_context`
+    // is a temporary save area for the boot/AP context and remains valid here.
+    unsafe {
+        crate::arch::switch::switch_to(&mut boot_context as *mut _, to_ctx_ptr);
+    }
+
+    loop {
+        idle();
+    }
+}
+
 pub fn current_task(cpu_id: usize) -> Option<&'static Task> {
     current_task_id(cpu_id).and_then(TaskPool::get_task)
 }
@@ -788,6 +795,16 @@ pub fn current_task(cpu_id: usize) -> Option<&'static Task> {
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
     assert_valid_cpu_id(cpu_id);
     decode_task_id(CURRENT_TASK_IDS[cpu_id].load(Ordering::SeqCst))
+}
+
+pub fn current_task_is_idle(cpu_id: usize) -> bool {
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    idle_id != 0 && current_task_id(cpu_id) == Some(idle_id)
+}
+
+pub fn has_ready_tasks(cpu_id: usize) -> bool {
+    assert_valid_cpu_id(cpu_id);
+    !READY_QUEUES[cpu_id].lock().is_empty()
 }
 
 pub fn get_task_by_id(task_id: usize) -> Option<&'static Task> {
@@ -806,7 +823,12 @@ pub fn wake_task(task_id: usize) -> bool {
             if is_cpu_online(last) {
                 last
             } else {
-                find_least_loaded_cpu()
+                let current = get_cpu().get_cpuid();
+                if is_cpu_online(current) {
+                    current
+                } else {
+                    find_least_loaded_cpu()
+                }
             }
         }
     };
@@ -955,6 +977,8 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             unsafe {
                 crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
             }
+
+            release_deferred_prev(cpu_id);
 
             #[cfg(feature = "hypervisor")]
             {

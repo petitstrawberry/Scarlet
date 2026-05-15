@@ -6,14 +6,14 @@ const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 9;
 
 pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
-        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(),
+        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(trapframe),
         SUPERVISOR_TIMER_INTERRUPT => handle_timer_interrupt(trapframe),
         SUPERVISOR_EXTERNAL_INTERRUPT => handle_external_interrupt(trapframe),
         _ => handle_unknown_interrupt(trapframe, cause),
     }
 }
 
-fn handle_software_interrupt() {
+fn handle_software_interrupt(trapframe: &mut Trapframe) {
     // Clear SSIP (Supervisor Software Interrupt Pending) to prevent
     // re-triggering. SBI send_ipi sets MSIP via M-mode, which fires
     // SSIP in S-mode. We must clear it here.
@@ -24,6 +24,8 @@ fn handle_software_interrupt() {
             options(nostack)
         );
     }
+
+    crate::sched::scheduler::schedule(trapframe);
 }
 
 /// Handle timer interrupt from CLINT
@@ -49,7 +51,7 @@ fn handle_external_interrupt(trapframe: &mut Trapframe) {
 
     // Claim and handle external interrupt through PLIC
     match crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id) {
-        Ok(Some(interrupt_id)) => {
+        Ok(Some(_interrupt_id)) => {
             // crate::println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
         }
         Ok(None) => {
@@ -61,6 +63,13 @@ fn handle_external_interrupt(trapframe: &mut Trapframe) {
         Err(e) => {
             crate::println!("[interrupt] Failed to handle external interrupt: {}", e);
         }
+    }
+
+    let cpu_id = cpu_id as usize;
+    if crate::sched::scheduler::current_task_is_idle(cpu_id)
+        && crate::sched::scheduler::has_ready_tasks(cpu_id)
+    {
+        crate::sched::scheduler::schedule(trapframe);
     }
 }
 

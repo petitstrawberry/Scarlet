@@ -2034,7 +2034,20 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
+    crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if current_task.task_type == TaskType::Kernel {
+            let entry = current_task.vcpu.lock().get_pc();
+            // SAFETY: `new_kernel_task` stores a valid `fn()` entry pointer in
+            // the kernel-mode VCPU PC before the task is made runnable.
+            let entry: fn() = unsafe { core::mem::transmute(entry as usize) };
+            entry();
+            current_task.exit(0);
+            loop {
+                crate::arch::instruction::idle();
+            }
+        }
+
         setup_task_execution(cpu, current_task);
         arch_switch_to_user(current_task.get_trapframe());
     }

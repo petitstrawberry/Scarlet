@@ -875,19 +875,27 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     crate::sched::scheduler::register_online_cpu(cpu_id);
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 
-    if let Some(hook) = boot_info.start_secondary_cpus_hook {
-        hook();
-        fence(Ordering::SeqCst);
-    }
-
     // Use println here to avoid any potential console lock issues.
     println!("[Scarlet Kernel] Scheduler will start...");
     println!("[Scarlet Kernel] Calling start_scheduler()...");
 
     let next_task_id = start_scheduler();
+    // Keep APs behind the release barrier until the BSP has claimed the
+    // first runnable task. Otherwise a fast AP can steal the init task from
+    // the BSP's ready queue before the boot CPU enters it, which makes early
+    // userspace startup nondeterministic on SMP systems. The BSP is not
+    // assumed to have CPU ID 0.
+    if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        hook();
+        fence(Ordering::SeqCst);
+    }
     if let Some(next_task_id) = next_task_id {
         let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
-        crate::arch::first_switch_to_user(next_task);
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            crate::arch::first_switch_to_user(next_task);
+        }
     }
 
     println!("[Scarlet Kernel] No runnable task; entering idle loop");
@@ -913,10 +921,9 @@ pub fn wait_for_ap_release() {
 pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     use core::sync::atomic::Ordering;
     crate::arch::vm::switch_to_kernel_page_table();
+    crate::arch::init_ap_cpu(cpu_id);
 
     println!("[Scarlet Kernel] AP {}: initializing...", cpu_id);
-
-    crate::arch::init_ap_cpu(cpu_id);
 
     crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
     crate::interrupt::enable_cpu_interrupts();
@@ -936,7 +943,11 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     if let Some(next_task_id) = next_task_id {
         let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
             .expect("AP: first runnable task must exist");
-        crate::arch::first_switch_to_user(next_task);
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            crate::arch::first_switch_to_user(next_task);
+        }
     }
 
     println!("[Scarlet Kernel] AP {}: idle", cpu_id);

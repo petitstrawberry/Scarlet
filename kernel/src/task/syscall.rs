@@ -121,7 +121,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
-        Ok(mut child_task) => {
+        Ok(child_task) => {
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.lock().iregs.set_return_value(0); /* Set the return value to 0 in the child task */
@@ -141,7 +141,6 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().iregs.set_arg(0, child_arg);
             }
 
-            let cpu_id = get_cpu().get_cpuid();
             let parent_id = parent_task.get_id();
 
             // Handle SetTls flag: set TLS pointer and tp register
@@ -159,6 +158,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             }
 
             // Add child to scheduler and get the allocated ID
+            let cpu_id = get_cpu().get_cpuid();
             let child_id = add_task(child_task, cpu_id);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
@@ -806,9 +806,9 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 /// # Returns
 /// This function does not return on success (system shuts down)
 /// Returns error code on failure
+#[allow(unreachable_code)]
 pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     use crate::arch::shutdown;
-    use crate::task::TaskState;
 
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
