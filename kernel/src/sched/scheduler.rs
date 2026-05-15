@@ -354,8 +354,36 @@ static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::n
 static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
 static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+
+pub fn note_idle_to_user_handoff(cpu_id: usize, task_id: usize) {
+    if cpu_id < MAX_NUM_CPUS {
+        PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(task_id, Ordering::SeqCst);
+    }
+}
+
+pub fn take_idle_to_user_handoff(cpu_id: usize, current_task_id: usize) -> bool {
+    if cpu_id >= MAX_NUM_CPUS {
+        return false;
+    }
+
+    PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id]
+        .compare_exchange(current_task_id, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
+
+pub const DEBUG_SMP_TASK_FLOW: bool = false;
+
+static DEBUG_ENQUEUE_SEQ: AtomicUsize = AtomicUsize::new(0);
+static DEBUG_REMOTE_ENQUEUE_TASK: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static DEBUG_REMOTE_ENQUEUE_FROM_CPU: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(NO_CPU) }; MAX_NUM_CPUS];
+static DEBUG_REMOTE_ENQUEUE_SEQ: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 
 const NO_CPU: usize = usize::MAX;
 
@@ -363,6 +391,41 @@ const TASK_ID_MASK: usize = MAX_TASKS - 1;
 
 static SCHEDULE_PREV_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+
+fn debug_remote_enqueue_snapshot(cpu_id: usize) -> (Option<usize>, usize, usize) {
+    let task_id = decode_task_id(DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].load(Ordering::SeqCst));
+    let from_cpu = DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].load(Ordering::SeqCst);
+    let seq = DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].load(Ordering::SeqCst);
+    (task_id, from_cpu, seq)
+}
+
+fn debug_task_name(task_id: usize) -> alloc::string::String {
+    TaskPool::get_task(task_id)
+        .map(|task| task.name.read().clone())
+        .unwrap_or_else(|| "<missing>".to_string())
+}
+
+pub fn debug_log_reschedule_ipi(cpu_id: usize, from_kernel: bool, can_schedule: bool) {
+    if !DEBUG_SMP_TASK_FLOW {
+        return;
+    }
+
+    let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+    println!(
+        "[SMPDBG ipi-recv] cpu={} from_kernel={} can_schedule={} current={:?} expected_task={:?} expected_name={} expected_from={} seq={} ready_len={}",
+        cpu_id,
+        from_kernel,
+        can_schedule,
+        current_task_id(cpu_id),
+        expected_task,
+        expected_task
+            .map(debug_task_name)
+            .unwrap_or_else(|| "<none>".to_string()),
+        from_cpu,
+        seq,
+        ready_queue(cpu_id).lock().len(),
+    );
+}
 
 fn release_deferred_prev(cpu_id: usize) {
     let prev = decode_prev_task(SCHEDULE_PREV_TASK[cpu_id].swap(0, Ordering::SeqCst));
@@ -377,6 +440,13 @@ fn release_deferred_prev(cpu_id: usize) {
         .compare_exchange(cpu_id, NO_CPU, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
+        // Idle tasks are never enqueued into the ready queue. They are
+        // selected by the fallback in pick_next() when the queue is empty.
+        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+        if prev_id == idle_id {
+            task.state.store(TaskState::Ready, Ordering::SeqCst);
+            return;
+        }
         // Requeue the previous task on the CPU that just switched away from it.
         // This keeps kernel-context resume paths CPU-local. New task placement
         // and wakeups provide SMP distribution without stealing suspended
@@ -580,13 +650,34 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                         finalize_zombie(task.get_id(), task.get_parent_id());
                         continue;
                     }
-                    TaskState::Terminated => continue,
-                    TaskState::Blocked(_) => continue,
+                    TaskState::Terminated => {
+                        continue;
+                    }
+                    TaskState::Blocked(blocked) => {
+                        let _ = blocked;
+                        continue;
+                    }
                     TaskState::Ready | TaskState::Running => {
                         if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
                             continue;
                         }
                         if try_claim_ready_task(task, cpu_id) {
+                            if DEBUG_SMP_TASK_FLOW {
+                                let (expected_task, _from_cpu, seq) =
+                                    debug_remote_enqueue_snapshot(cpu_id);
+                                if expected_task.is_some() {
+                                    println!(
+                                        "[SMPDBG pick-selected] cpu={} old={:?} next={} next_name={} expected_task={:?} expected_match={} seq={}",
+                                        cpu_id,
+                                        old_id,
+                                        task_id,
+                                        task.name.read().as_str(),
+                                        expected_task,
+                                        expected_task == Some(task_id),
+                                        seq,
+                                    );
+                                }
+                            }
                             next_id = Some(task_id);
                             break 'outer;
                         }
@@ -657,20 +748,83 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     }
 
     set_current_task_id(cpu_id, Some(next_id));
+    if DEBUG_SMP_TASK_FLOW {
+        let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+        if expected_task.is_some() && expected_task != Some(next_id) {
+            println!(
+                "[SMPDBG pick-mismatch] cpu={} old={:?} next={} next_name={} expected_task={:?} expected_from={} seq={}",
+                cpu_id,
+                old_id,
+                next_id,
+                debug_task_name(next_id),
+                expected_task,
+                from_cpu,
+                seq,
+            );
+        }
+    }
     (old_id, Some(next_id))
 }
 
 pub fn add_task(task: Task, cpu_id: usize) -> usize {
     let _irq_guard = IrqGuard::new();
+    let task_id = register_task(task);
+    enqueue_task(task_id, cpu_id);
+    task_id
+}
+
+/// Add a task to the global task pool without making it runnable yet.
+///
+/// This is useful for fork/clone paths that need the allocated task ID before
+/// finalizing parent/child relationships or ABI-specific setup.  The caller
+/// must eventually call [`enqueue_task`] to make the task visible to the
+/// scheduler.
+pub fn register_task(task: Task) -> usize {
     let task_id = match get_task_pool().add_task(task) {
         Ok(id) => id,
         Err(e) => panic!("Failed to add task: {}", e),
     };
+    task_id
+}
+
+/// Make a registered task runnable on the specified CPU.
+pub fn enqueue_task(task_id: usize, cpu_id: usize) {
+    let _irq_guard = IrqGuard::new();
+    let current_cpu = get_cpu().get_cpuid();
+    let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Some(task) = TaskPool::get_task(task_id) {
+        task.last_cpu.store(cpu_id, Ordering::SeqCst);
+    }
     push_ready_task(cpu_id, task_id);
+    if DEBUG_SMP_TASK_FLOW {
+        println!(
+            "[SMPDBG enqueue] seq={} from_cpu={} target_cpu={} task={} name={} remote={} ready_len={}",
+            seq,
+            current_cpu,
+            cpu_id,
+            task_id,
+            debug_task_name(task_id),
+            cpu_id != current_cpu,
+            ready_queue(cpu_id).lock().len(),
+        );
+    }
     if is_cpu_online(cpu_id) && cpu_id != get_cpu().get_cpuid() {
+        DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(current_cpu, Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(seq, Ordering::SeqCst);
+        if DEBUG_SMP_TASK_FLOW {
+            println!(
+                "[SMPDBG ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
+                seq,
+                current_cpu,
+                cpu_id,
+                task_id,
+                debug_task_name(task_id),
+                ready_queue(cpu_id).lock().len(),
+            );
+        }
         crate::arch::send_reschedule_ipi(cpu_id);
     }
-    task_id
 }
 
 /// Called every timer tick. Decrements the current task's time_slice.
@@ -698,9 +852,14 @@ pub fn schedule(trapframe: &mut Trapframe) {
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
     let (current_task_id, next_task_id) = pick_next(cpu);
+    let idle_task_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
 
     if let Some(next_task_id) = next_task_id {
         if current_task_id != Some(next_task_id) {
+            if current_task_id == Some(idle_task_id) && next_task_id != idle_task_id {
+                note_idle_to_user_handoff(cpu_id, next_task_id);
+            }
+
             if let Some(current_task_id) = current_task_id {
                 if let Some(current_task) = TaskPool::get_task(current_task_id) {
                     current_task.last_cpu.store(cpu_id, Ordering::SeqCst);
@@ -739,6 +898,7 @@ fn idle_loop() -> ! {
 }
 
 fn idle_entry() {
+    register_online_cpu(get_cpu().get_cpuid());
     idle_loop()
 }
 
@@ -774,11 +934,13 @@ pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
     };
 
     let mut boot_context = crate::arch::context::KernelContext::new();
-    let to_ctx_ptr = &*task.kernel_context.lock() as *const crate::arch::context::KernelContext;
+    let to_ctx_ptr = task.kernel_context.as_mut_ptr() as *const crate::arch::context::KernelContext;
 
     // SAFETY: `task_id` is the current runnable task selected by `start_scheduler`,
-    // and `to_ctx_ptr` points to its initialized kernel context. `boot_context`
-    // is a temporary save area for the boot/AP context and remains valid here.
+    // and `to_ctx_ptr` points to its initialized kernel context. The scheduler
+    // has claimed this task before the first switch, so no other CPU mutates the
+    // target context concurrently. `boot_context` is a temporary save area for
+    // the boot/AP context and remains valid here.
     unsafe {
         crate::arch::switch::switch_to(&mut boot_context as *mut _, to_ctx_ptr);
     }
@@ -845,7 +1007,9 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     loop {
         match state {
             TaskState::Blocked(_) => {}
-            _ => return false,
+            _ => {
+                return false;
+            }
         }
         match task.state.compare_exchange(
             state,
@@ -859,9 +1023,34 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     }
 
     unmark_blocked(task_id);
+    if DEBUG_SMP_TASK_FLOW {
+        println!(
+            "[SMPDBG wake-task-on] current_cpu={} target_cpu={} task={} name={} state=Ready enqueue",
+            get_cpu().get_cpuid(),
+            target_cpu,
+            task_id,
+            debug_task_name(task_id),
+        );
+    }
     push_ready_task(target_cpu, task_id);
 
     if target_cpu != get_cpu().get_cpuid() {
+        let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+        DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
+            .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
+        if DEBUG_SMP_TASK_FLOW {
+            println!(
+                "[SMPDBG wake-ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
+                seq,
+                get_cpu().get_cpuid(),
+                target_cpu,
+                task_id,
+                debug_task_name(task_id),
+                ready_queue(target_cpu).lock().len(),
+            );
+        }
         crate::arch::send_reschedule_ipi(target_cpu);
     }
 
@@ -942,26 +1131,52 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
 /// Perform kernel context switch between tasks.
 fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) {
     if from_task_id != to_task_id {
+        if DEBUG_SMP_TASK_FLOW {
+            let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+            if expected_task.is_some() {
+                println!(
+                    "[SMPDBG kctx-enter] cpu={} from={} from_name={} to={} to_name={} expected_task={:?} expected_from={} expected_match={} seq={}",
+                    cpu_id,
+                    from_task_id,
+                    debug_task_name(from_task_id),
+                    to_task_id,
+                    debug_task_name(to_task_id),
+                    expected_task,
+                    from_cpu,
+                    expected_task == Some(to_task_id),
+                    seq,
+                );
+            }
+        }
         let mut from_ctx_ptr: *mut crate::arch::context::KernelContext = core::ptr::null_mut();
         let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
 
-        {
-            if let Some(from_task) = TaskPool::get_task(from_task_id) {
-                from_ctx_ptr = &mut *from_task.kernel_context.lock();
+        if let Some(from_task) = TaskPool::get_task(from_task_id) {
+            // The currently running task is owned by this CPU, and its kernel
+            // context is the save target of the low-level switch code. Do not
+            // take `kernel_context`'s spin mutex here: a task can be switched
+            // out while code higher in its kernel stack still owns unrelated
+            // locks, and blocking in the scheduler makes SMP remote wakeups
+            // deadlock-prone. The `running_cpu` ownership token provides the
+            // required exclusion for context switching.
+            from_ctx_ptr = from_task.kernel_context.as_mut_ptr();
 
-                #[cfg(feature = "user-fpu")]
-                crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
+            #[cfg(feature = "user-fpu")]
+            crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
 
-                #[cfg(feature = "user-vector")]
-                crate::arch::fpu::kernel_switch_out_user_vector(
-                    cpu_id,
-                    from_task_id,
-                    &mut *from_task.vcpu.lock(),
-                );
-            }
-            if let Some(to_task) = TaskPool::get_task(to_task_id) {
-                to_ctx_ptr = &*to_task.kernel_context.lock();
-            }
+            #[cfg(feature = "user-vector")]
+            crate::arch::fpu::kernel_switch_out_user_vector(
+                cpu_id,
+                from_task_id,
+                &mut *from_task.vcpu.lock(),
+            );
+        }
+        if let Some(to_task) = TaskPool::get_task(to_task_id) {
+            // `pick_next()` successfully claimed `to_task.running_cpu` for this
+            // CPU before reaching this point, so no other CPU may save/restore
+            // this kernel context concurrently. Read it locklessly for the same
+            // reason as `from_ctx_ptr` above.
+            to_ctx_ptr = to_task.kernel_context.as_mut_ptr() as *const _;
         }
 
         if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
@@ -975,7 +1190,37 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             let hypervisor_switch_data = crate::arch::hv::switch::HypervisorSwitchData::save();
 
             unsafe {
+                if DEBUG_SMP_TASK_FLOW {
+                    let (expected_task, _from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+                    if expected_task.is_some() {
+                        println!(
+                            "[SMPDBG kctx-switch-to] cpu={} from={} to={} to_name={} expected_task={:?} expected_match={} seq={}",
+                            cpu_id,
+                            from_task_id,
+                            to_task_id,
+                            debug_task_name(to_task_id),
+                            expected_task,
+                            expected_task == Some(to_task_id),
+                            seq,
+                        );
+                    }
+                }
                 crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+            }
+
+            if DEBUG_SMP_TASK_FLOW {
+                let (expected_task, _from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+                if expected_task.is_some() {
+                    println!(
+                        "[SMPDBG kctx-resume] cpu={} resumed={} resumed_name={} switched_from={} expected_task={:?} seq={}",
+                        cpu_id,
+                        from_task_id,
+                        debug_task_name(from_task_id),
+                        to_task_id,
+                        expected_task,
+                        seq,
+                    );
+                }
             }
 
             release_deferred_prev(cpu_id);
@@ -999,12 +1244,32 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 
 /// Setup task execution by configuring hardware and user context.
 pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
+    if DEBUG_SMP_TASK_FLOW {
+        let cpu_id = cpu.get_cpuid();
+        let (expected_task, _from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
+        if expected_task.is_some() {
+            let vcpu = task.vcpu.lock();
+            println!(
+                "[SMPDBG setup-task-exec] cpu={} task={} name={} mode={:?} pc={:#x} expected_task={:?} expected_match={} seq={}",
+                cpu_id,
+                task.get_id(),
+                task.name.read().as_str(),
+                vcpu.get_mode(),
+                vcpu.get_pc(),
+                expected_task,
+                expected_task == Some(task.get_id()),
+                seq,
+            );
+        }
+    }
+
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
         task.get_kernel_stack_bottom_paddr()
     };
 
+    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu.get_cpuid()));
     cpu.set_kernel_stack(sp);
 
     let task_mode = task.vcpu.lock().get_mode();

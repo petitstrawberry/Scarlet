@@ -59,7 +59,7 @@ pub fn write_bytes(data: &[u8]) {
 pub fn write_byte(b: u8) {
     let pos = HEAD.fetch_add(1, Ordering::Relaxed);
     BUF[pos % LOG_BUF_SIZE].store(b, Ordering::Relaxed);
-    READER_WAKER.wake_all();
+    // READER_WAKER.wake_all();
 
     let tail = TAIL.load(Ordering::Relaxed);
     if pos + 1 - tail > LOG_BUF_SIZE {

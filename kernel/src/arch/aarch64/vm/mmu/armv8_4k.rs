@@ -19,6 +19,15 @@ use crate::vm::vmem::VirtualMemoryPermission;
 const SCARLET_MAIR_EL1: u64 = 0x44ff00;
 const SCARLET_TCR_EL1: u64 = 0x1_B510_3510;
 const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
+/// Bits we always clear in SCTLR_EL1 when (re)enabling the MMU.
+///
+/// - bit 1 (A): Strict alignment check for all data accesses. We must keep
+///   this DISABLED so that unaligned loads/stores to Normal memory (e.g.
+///   SIMD `ldr q0, [x8]` from a non-16B-aligned address) do not raise
+///   alignment faults (DFSC=0x21). Limine may leave this set, so we clear it
+///   explicitly. SP-alignment checks (SA/SA0, bits 3/4) are intentionally
+///   left untouched.
+const SCTLR_EL1_DISABLE_MASK: u64 = 1 << 1;
 const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
 
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)
@@ -309,9 +318,6 @@ impl PageTable {
     pub fn switch(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);
 
-        // Remember kernel TTBR for trampoline
-        crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
-
         unsafe {
             let mut sctlr: u64;
             asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
@@ -326,6 +332,7 @@ impl PageTable {
                     "dsb nsh",
                     "isb",
                     "mrs {tmp}, sctlr_el1",
+                    "bic {tmp}, {tmp}, {sctlr_clear}",
                     "orr {tmp}, {tmp}, {sctlr_flags}",
                     "msr sctlr_el1, {tmp}",
                     "dsb sy",
@@ -334,6 +341,7 @@ impl PageTable {
                     tcr = in(reg) SCARLET_TCR_EL1,
                     ttbr = in(reg) ttbr_val,
                     sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+                    sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
                     tmp = lateout(reg) _,
                     options(nostack),
                 );
@@ -369,7 +377,6 @@ impl PageTable {
 
     pub fn switch_for_boot(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);
-        crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
         unsafe {
             asm!(
                 "msr mair_el1, {mair}",
@@ -832,6 +839,7 @@ pub fn init_mmu_registers() {
             "msr tcr_el1, {tcr}",
             "isb",
             "mrs {tmp}, sctlr_el1",
+            "bic {tmp}, {tmp}, {sctlr_clear}",
             "orr {tmp}, {tmp}, {sctlr_flags}",
             "msr sctlr_el1, {tmp}",
             "dsb sy",
@@ -839,6 +847,7 @@ pub fn init_mmu_registers() {
             mair = in(reg) SCARLET_MAIR_EL1,
             tcr = in(reg) SCARLET_TCR_EL1,
             sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+            sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
             tmp = lateout(reg) _,
             options(nostack),
         );
@@ -863,7 +872,9 @@ pub fn sync_el1_translation_registers_if_needed() {
             options(nostack),
         );
 
-        if mair == SCARLET_MAIR_EL1 && tcr == SCARLET_TCR_EL1 {
+        let alignment_check_enabled = (sctlr & SCTLR_EL1_DISABLE_MASK) != 0;
+
+        if mair == SCARLET_MAIR_EL1 && tcr == SCARLET_TCR_EL1 && !alignment_check_enabled {
             return;
         }
 
@@ -871,11 +882,17 @@ pub fn sync_el1_translation_registers_if_needed() {
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
             "isb",
+            "mrs {tmp}, sctlr_el1",
+            "bic {tmp}, {tmp}, {sctlr_clear}",
+            "msr sctlr_el1, {tmp}",
+            "isb",
             "tlbi vmalle1",
             "dsb nsh",
             "isb",
             mair = in(reg) SCARLET_MAIR_EL1,
             tcr = in(reg) SCARLET_TCR_EL1,
+            sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
+            tmp = lateout(reg) _,
             options(nostack),
         );
     }

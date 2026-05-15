@@ -41,6 +41,13 @@ pub fn save_kernel_page_table() {
     }
     KERNEL_TTBR0.store(ttbr0, Ordering::Release);
     KERNEL_TTBR1.store(ttbr1, Ordering::Release);
+    get_cpu().set_kernel_ttbr0(ttbr0);
+}
+
+pub fn sync_saved_kernel_ttbr0_for_current_cpu() {
+    let ttbr0 = KERNEL_TTBR0.load(Ordering::Acquire);
+    assert!(ttbr0 != 0, "kernel TTBR0 not initialized");
+    get_cpu().set_kernel_ttbr0(ttbr0);
 }
 
 pub fn switch_to_kernel_page_table() {
@@ -48,6 +55,7 @@ pub fn switch_to_kernel_page_table() {
     let ttbr1 = KERNEL_TTBR1.load(Ordering::Acquire);
     assert!(ttbr0 != 0, "kernel page table not initialized");
     assert!(ttbr1 != 0, "kernel TTBR1 not initialized");
+    mmu::sync_el1_translation_registers_if_needed();
     unsafe {
         core::arch::asm!(
             "msr ttbr0_el1, {}",

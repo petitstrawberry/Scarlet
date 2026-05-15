@@ -13,7 +13,7 @@ use core::arch::{asm, naked_asm};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
-use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_arch, set_trapvector};
+use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
@@ -160,8 +160,8 @@ pub extern "C" fn _user_trap_entry() {
             msr ttbr0_el1, x11 // Switch to kernel TTBR
 
             isb
-            tlbi vmalle1is
-            dsb ish
+            tlbi vmalle1
+            dsb nsh
             isb
 
             // 3. Call Handler
@@ -209,8 +209,8 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
         ldr x9, [x10, #16]  // user ttbr0
         msr ttbr0_el1, x9   // Switch to user TTBR
         isb
-        tlbi vmalle1is
-        dsb ish
+        tlbi vmalle1
+        dsb nsh
         isb
         b   3f
 

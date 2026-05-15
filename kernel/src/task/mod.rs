@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cell::UnsafeCell, sync::atomic};
+use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
@@ -48,6 +49,51 @@ use alloc::collections::BTreeMap;
 use core::ops::Range;
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
+
+/// Lock type used for the architecture kernel context.
+///
+/// The scheduler needs a stable raw pointer to this context while performing
+/// low-level context switches. `SpinMutex` exposes `as_mut_ptr()` for that
+/// scheduler-only path, while normal setup code still uses `lock()`.
+pub type KernelContextMutex = SpinMutex<KernelContext>;
+
+/// Snapshot of task state exposed to user space via the `GetTaskInfo` syscall.
+///
+/// This is a fixed-size, `#[repr(C)]` structure so that the kernel and user
+/// library can agree on the layout without sharing a header.
+///
+/// Future fields can be appended without breaking backward compatibility
+/// (user space simply reads fewer bytes on older kernels).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TaskInfo {
+    /// Namespace-local PID visible to user space.
+    pub pid: usize,
+    /// Namespace-local parent PID (0 if none).
+    pub ppid: usize,
+    /// Task state as a discriminant (see `TaskState::to_u8`):
+    ///   0 = NotInitialized, 1 = Ready, 2 = Running,
+    ///   3 = Blocked(Interruptible), 4 = Blocked(Uninterruptible),
+    ///   5 = Zombie, 6 = Terminated.
+    pub state: u8,
+    /// Task type: 0 = Kernel, 1 = User.
+    pub task_type: u8,
+    /// CPU the task last ran on (MAX_CPU = no CPU).
+    pub cpu_id: u8,
+    /// Reserved for future use.
+    pub _reserved: u8,
+    /// Exit status (meaningful only when `state == Zombie`).
+    pub exit_status: i32,
+    /// Thread-group ID (process ID for multi-threaded tasks).
+    pub tgid: usize,
+    /// Null-terminated task name (truncated to fit).
+    pub name: [u8; 64],
+}
+
+impl TaskInfo {
+    /// Maximum task name length (excluding null terminator).
+    pub const NAME_CAP: usize = 63;
+}
 
 /// Global registry of task-specific wakers for waitpid
 static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
@@ -423,7 +469,7 @@ pub struct Task {
     /// VCPU state for context switching
     pub vcpu: Mutex<Vcpu>,
     /// Kernel context for context switching
-    pub kernel_context: Mutex<KernelContext>,
+    pub kernel_context: KernelContextMutex,
     /// Virtual memory manager (already thread-safe internally)
     pub vm_manager: VirtualMemoryManager,
     /// Default ABI module (task-local: only accessed by the executing hart)
@@ -566,7 +612,7 @@ impl Task {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
                 TaskType::User => crate::arch::Mode::User,
             })),
-            kernel_context: Mutex::new(KernelContext::new()),
+            kernel_context: KernelContextMutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
@@ -2036,11 +2082,34 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            let vcpu = current_task.vcpu.lock();
+            crate::println!(
+                "[SMPDBG task-entry] cpu={} task={} name={} type={:?} state={:?} running_cpu={} last_cpu={} pc={:#x} mode={:?}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+                current_task.task_type,
+                current_task.state.load(Ordering::SeqCst),
+                current_task.running_cpu.load(Ordering::SeqCst),
+                current_task.last_cpu.load(Ordering::SeqCst),
+                vcpu.get_pc(),
+                vcpu.get_mode(),
+            );
+        }
         if current_task.task_type == TaskType::Kernel {
             let entry = current_task.vcpu.lock().get_pc();
             // SAFETY: `new_kernel_task` stores a valid `fn()` entry pointer in
             // the kernel-mode VCPU PC before the task is made runnable.
             let entry: fn() = unsafe { core::mem::transmute(entry as usize) };
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG task-entry-kernel-jump] cpu={} task={} entry={:#x}",
+                    cpu.get_cpuid(),
+                    current_task.get_id(),
+                    entry as usize,
+                );
+            }
             entry();
             current_task.exit(0);
             loop {
@@ -2048,6 +2117,14 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             }
         }
 
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            crate::println!(
+                "[SMPDBG task-entry-user-jump] cpu={} task={} name={}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+            );
+        }
         setup_task_execution(cpu, current_task);
         arch_switch_to_user(current_task.get_trapframe());
     }

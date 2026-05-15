@@ -936,7 +936,6 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
 
     crate::arch::vm::register_trampoline_for_ap();
 
-    crate::sched::scheduler::register_online_cpu(cpu_id);
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 
     let next_task_id = crate::sched::scheduler::start_scheduler();

@@ -24,6 +24,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     match claimed {
         Ok(Some(interrupt_id)) => {
             if interrupt_id == RESCHEDULE_SGI {
+                crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, true);
                 crate::sched::scheduler::schedule(trapframe);
                 ran_scheduler = true;
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {

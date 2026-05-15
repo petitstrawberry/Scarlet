@@ -1,3 +1,4 @@
+use crate::arch::trap::{PRIV_S_MODE, prev_mode};
 use crate::arch::{Trapframe, get_cpu};
 
 const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 1;
@@ -5,15 +6,24 @@ const SUPERVISOR_TIMER_INTERRUPT: usize = 5;
 const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 9;
 
 pub fn arch_interrupt_handler(trapframe: &mut Trapframe, cause: usize) {
+    let from_kernel = prev_mode() == PRIV_S_MODE;
     match cause {
-        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(trapframe),
-        SUPERVISOR_TIMER_INTERRUPT => handle_timer_interrupt(trapframe),
+        SUPERVISOR_SOFTWARE_INTERRUPT => handle_software_interrupt(trapframe, from_kernel),
+        SUPERVISOR_TIMER_INTERRUPT => handle_timer_interrupt(trapframe, from_kernel),
         SUPERVISOR_EXTERNAL_INTERRUPT => handle_external_interrupt(trapframe),
         _ => handle_unknown_interrupt(trapframe, cause),
     }
 }
 
-fn handle_software_interrupt(trapframe: &mut Trapframe) {
+fn can_schedule_from_interrupt(from_kernel: bool) -> bool {
+    if !from_kernel {
+        return true;
+    }
+    let cpu_id = get_cpu().get_cpuid();
+    crate::sched::scheduler::current_task_is_idle(cpu_id)
+}
+
+fn handle_software_interrupt(trapframe: &mut Trapframe, from_kernel: bool) {
     // Clear SSIP (Supervisor Software Interrupt Pending) to prevent
     // re-triggering. SBI send_ipi sets MSIP via M-mode, which fires
     // SSIP in S-mode. We must clear it here.
@@ -25,11 +35,17 @@ fn handle_software_interrupt(trapframe: &mut Trapframe) {
         );
     }
 
-    crate::sched::scheduler::schedule(trapframe);
+    let cpu_id = get_cpu().get_cpuid();
+    let can_schedule = can_schedule_from_interrupt(from_kernel);
+    crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id, from_kernel, can_schedule);
+
+    if can_schedule {
+        crate::sched::scheduler::schedule(trapframe);
+    }
 }
 
 /// Handle timer interrupt from CLINT
-fn handle_timer_interrupt(trapframe: &mut Trapframe) {
+fn handle_timer_interrupt(trapframe: &mut Trapframe, from_kernel: bool) {
     #[cfg(feature = "hypervisor")]
     {
         if crate::arch::hv::trap::is_from_guest() {
@@ -41,8 +57,9 @@ fn handle_timer_interrupt(trapframe: &mut Trapframe) {
         }
     }
 
-    // Increment the global tick counter
-    crate::timer::tick(trapframe);
+    // Increment the global tick counter.  Only run scheduler accounting when
+    // the trapframe is safe to store as the current task context.
+    crate::timer::tick_with_scheduler(trapframe, can_schedule_from_interrupt(from_kernel));
 }
 
 /// Handle external interrupt from PLIC

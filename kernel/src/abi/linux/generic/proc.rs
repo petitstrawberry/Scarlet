@@ -1,7 +1,7 @@
 use crate::{
     abi::linux::generic::LinuxAbi,
-    arch::{Trapframe, get_cpu},
-    sched::scheduler::{add_task, get_task_by_id, schedule},
+    arch::Trapframe,
+    sched::scheduler::{get_task_by_id, schedule},
     task::{CloneFlags, mytask},
 };
 
@@ -560,7 +560,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     let ret = match parent_task.clone_task(cflags) {
-        Ok(mut child_task) => {
+        Ok(child_task) => {
             child_task.vcpu.lock().iregs.reg[10] = 0; // a0 = 0 in child
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
@@ -573,11 +573,12 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().iregs.reg[4] = tls; // x4 = tp
             }
 
-            let cpu_id = get_cpu().get_cpuid();
+            let cpu_id = crate::sched::scheduler::select_cpu();
             let parent_id = parent_task.get_id();
 
-            // Add child and get allocated ID
-            let child_id = add_task(child_task, cpu_id);
+            // Register first, complete clone metadata/TID writes, then enqueue.
+            // A remote CPU may run the child immediately after enqueue via IPI.
+            let child_id = crate::sched::scheduler::register_task(child_task);
 
             // Establish parent-child relationship now that both have valid IDs
             if let Some(child) = get_task_by_id(child_id) {
@@ -612,6 +613,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             }
+            crate::sched::scheduler::enqueue_task(child_id, cpu_id);
             child_id
         }
         Err(_) => usize::MAX,

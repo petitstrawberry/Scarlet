@@ -335,7 +335,17 @@ impl Waker {
         };
 
         if let Some(task_id) = task_id {
-            wake_task(task_id)
+            let woke = wake_task(task_id);
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG waker-wake-one] waker={} cpu={} task={} woke={}",
+                    self.name,
+                    crate::arch::get_cpu().get_cpuid(),
+                    task_id,
+                    woke,
+                );
+            }
+            woke
         } else {
             self.pending_wakes.fetch_add(1, Ordering::SeqCst);
             false
@@ -372,8 +382,18 @@ impl Waker {
 
         let mut woken_count = 0;
         for task_id in task_ids {
-            if wake_task(task_id) {
+            let woke = wake_task(task_id);
+            if woke {
                 woken_count += 1;
+            }
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG waker-wake-all] waker={} cpu={} task={} woke={}",
+                    self.name,
+                    crate::arch::get_cpu().get_cpuid(),
+                    task_id,
+                    woke,
+                );
             }
         }
 

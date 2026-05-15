@@ -31,8 +31,6 @@ pub use context::KernelContext;
 pub use earlycon::*;
 pub use registers::IntRegisters;
 
-pub use init_arch as init_ap_cpu;
-
 use crate::arch::vm::get_root_pagetable;
 use crate::vm::vmem::MemoryArea;
 
@@ -76,6 +74,23 @@ pub fn init_arch(cpu_id: usize) {
     // Get raw Aarch64 struct
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
     aarch64.cpuid = cpu_id as u64;
+
+    trap_init(aarch64);
+}
+
+pub fn init_ap_cpu(cpu_id: usize) {
+    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
+    // Get raw Aarch64 struct
+    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    aarch64.cpuid = cpu_id as u64;
+
+    unsafe {
+        asm!(
+            "mrs {0}, ttbr0_el1",
+            out(reg) aarch64.ttbr0,
+        );
+    }
+
     trap_init(aarch64);
 }
 
@@ -238,6 +253,13 @@ impl Aarch64 {
 
     pub fn set_kernel_ttbr0(&mut self, val: u64) {
         self.kernel_ttbr0 = val;
+
+        // The user trampoline may observe this CPU struct through a different
+        // VA alias, so push the update to PoC before returning to EL0.
+        crate::arch::aarch64::clean_dcache_to_poc_range(
+            self as *const _ as usize,
+            core::mem::size_of::<Aarch64>(),
+        );
     }
 
     pub fn get_kernel_ttbr0(&self) -> u64 {

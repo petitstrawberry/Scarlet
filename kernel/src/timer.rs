@@ -100,6 +100,17 @@ pub fn set_global_timekeeper(cpu_id: usize) {
 ///   per quantum system-wide regardless of how many CPUs are running.
 /// - Always calls sched_on_tick() for per-CPU scheduler accounting.
 pub fn tick(trapframe: &mut Trapframe) {
+    tick_with_scheduler(trapframe, true);
+}
+
+/// Timer interrupt handler with optional scheduler accounting.
+///
+/// Kernel-mode traps on a non-idle user task must not preempt via the normal
+/// user-task scheduler path: the trapframe describes an in-kernel continuation,
+/// not the task's user context.  Such paths still need timer re-arming and
+/// global timer processing, but scheduler accounting is deferred until the task
+/// returns to user mode or blocks explicitly.
+pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
@@ -112,8 +123,10 @@ pub fn tick(trapframe: &mut Trapframe) {
         check_software_timers(now);
     }
 
-    // Per-CPU scheduler accounting runs on every CPU regardless.
-    sched_on_tick(cpu_id, trapframe);
+    if run_scheduler {
+        // Per-CPU scheduler accounting runs on every CPU when preemption is safe.
+        sched_on_tick(cpu_id, trapframe);
+    }
 }
 
 /// Get the current tick count (monotonic, since boot)
