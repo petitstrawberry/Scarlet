@@ -777,6 +777,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[boot] Initializing timer...");
     // Initialize timer for the boot CPU (from BootInfo)
     get_kernel_timer().init(boot_info.cpu_id);
+    timer::set_global_timekeeper(boot_info.cpu_id);
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 

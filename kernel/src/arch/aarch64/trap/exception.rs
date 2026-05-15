@@ -5,6 +5,7 @@
 
 use core::arch::asm;
 use core::panic;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::{Trapframe, get_cpu};
@@ -12,6 +13,10 @@ use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::current_task;
 use crate::task::mytask;
 use crate::{early_println, println};
+
+static LAST_FAULT_FAR: AtomicU64 = AtomicU64::new(usize::MAX as u64);
+static LAST_FAULT_PC: AtomicU64 = AtomicU64::new(usize::MAX as u64);
+static LAST_FAULT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Get CurrentEL value
 fn get_current_el() -> u64 {
@@ -262,6 +267,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 /// Handle data page fault (like RISC-V cause 13/15)
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     let task = current_task(get_cpu().get_cpuid()).unwrap();
+    let pc = trapframe.get_current_pc();
 
     let op = if is_write {
         AccessOp::Store
@@ -278,6 +284,49 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     // Get ESR to determine fault type
     let esr = get_esr_el1();
     let dfsc = esr & 0x3f; // Data Fault Status Code (bits 5:0)
+    let prev_far = LAST_FAULT_FAR.load(Ordering::Relaxed);
+    let prev_pc = LAST_FAULT_PC.load(Ordering::Relaxed);
+
+    if prev_far == vaddr as u64 && prev_pc == pc as u64 {
+        let repeat = LAST_FAULT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if repeat <= 3 {
+            early_println!(
+                "[DF] repeat FAR={:#x} PC={:#x} DFSC={:#x} write={} pid={} task={}",
+                vaddr,
+                pc,
+                dfsc,
+                is_write,
+                task.get_id(),
+                task.name.read(),
+            );
+        }
+    } else {
+        LAST_FAULT_FAR.store(vaddr as u64, Ordering::Relaxed);
+        LAST_FAULT_PC.store(pc as u64, Ordering::Relaxed);
+        LAST_FAULT_COUNT.store(1, Ordering::Relaxed);
+        early_println!(
+            "[DF] fault FAR={:#x} PC={:#x} ESR={:#x} DFSC={:#x} write={} pid={} task={}",
+            vaddr,
+            pc,
+            esr,
+            dfsc,
+            is_write,
+            task.get_id(),
+            task.name.read(),
+        );
+        match task.vm_manager.search_memory_map(vaddr) {
+            Some(map) => early_println!(
+                "[DF] map=[{:#x}..{:#x}] perms={:#x} vm_start={:#x} shared={} owner={}",
+                map.vmarea.start,
+                map.vmarea.end,
+                map.permissions,
+                map.vm_start,
+                map.is_shared,
+                map.owner.is_some(),
+            ),
+            None => early_println!("[DF] no mapping for FAR={:#x}", vaddr),
+        }
+    }
 
     // Debug permission faults
     if dfsc >= 0x0d && dfsc <= 0x0f {
@@ -285,7 +334,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             "[PF] PERMISSION FAULT: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
             vaddr,
             is_write,
-            trapframe.get_current_pc(),
+            pc,
             dfsc
         );
         // Print current memory mapping for this address
@@ -329,14 +378,12 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
                     task.get_id(),
                     vaddr,
                     is_write,
-                    trapframe.get_current_pc()
+                    pc
                 );
             }
             panic!(
                 "Failed to map page for data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
-                vaddr,
-                is_write,
-                trapframe.get_current_pc()
+                vaddr, is_write, pc
             );
         }
     }

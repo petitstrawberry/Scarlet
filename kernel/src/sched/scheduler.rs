@@ -20,7 +20,7 @@
 //! - **Direct Indexing**: task_id == index for O(1) access without hash lookup
 //! - **ID Recycling**: Free list reuses task IDs to avoid exhaustion
 //!
-//! The pool provides `get_task()` and `get_task_mut()` which return `&'static`
+//! The pool provides `get_task()` which returns `&'static`
 //! references using raw pointers. This is **unsafe but practical** because:
 //!
 //! 1. Tasks are stored at fixed addresses (task_id == index)
@@ -33,7 +33,6 @@
 
 extern crate alloc;
 
-use core::panic;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
@@ -43,7 +42,6 @@ use crate::arch::get_trapvector;
 use crate::arch::set_next_mode;
 use crate::print;
 use crate::println;
-use crate::task::TaskType;
 use crate::{arch::set_trapvector, vm::get_trampoline_trap_vector};
 use crate::{
     arch::{
@@ -80,7 +78,7 @@ pub fn get_task_pool() -> &'static TaskPool {
 ///
 /// # Safety
 ///
-/// This struct provides unsafe access to tasks through `get_task()` and `get_task_mut()`
+/// This struct provides unsafe access to tasks through `get_task()`
 /// which return `&'static` references without holding locks. This is safe because:
 ///
 /// 1. **Stable Box Memory**: Tasks are stored in `Box<[Option<Task>; MAX_TASKS]>`.
@@ -98,7 +96,6 @@ pub fn get_task_pool() -> &'static TaskPool {
 ///
 /// **IMPORTANT**: Do NOT directly access the `tasks` array. Always use:
 /// - `TaskPool::get_task()` for immutable references
-/// - `TaskPool::get_task_mut()` for mutable references
 /// - `get_task_by_id()` which is the preferred public API
 ///
 /// Direct array access could violate safety assumptions and cause undefined behavior.
@@ -113,8 +110,13 @@ pub struct TaskPool {
     // Box-ed fixed-length array allocated on heap
     // Pointer is stable for the lifetime of the program
     //
-    // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() or get_task_mut() methods
+    // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() methods
     tasks: spin::Mutex<Box<[Option<Task>; MAX_TASKS]>>,
+
+    // Monotonically increasing generation for each task slot.
+    // Incremented every time a slot receives a new task so recycled IDs can
+    // be distinguished from stale deferred references.
+    slot_generations: Box<[AtomicUsize; MAX_TASKS]>,
 
     // Free list of recyclable task IDs
     // IDs are added here when tasks are removed
@@ -127,8 +129,6 @@ pub struct TaskPool {
 
 impl TaskPool {
     fn new() -> Self {
-        crate::println!("[SCHED] TaskPool::new() starting...");
-
         // Allocate uninitialized Box array directly on heap
         // No stack usage, no Vec overhead
         let mut tasks: Box<[core::mem::MaybeUninit<Option<Task>>; MAX_TASKS]> =
@@ -143,10 +143,9 @@ impl TaskPool {
         // SAFETY: All elements have been initialized with None
         let tasks: Box<[Option<Task>; MAX_TASKS]> = unsafe { core::mem::transmute(tasks) };
 
-        crate::println!("[SCHED] TaskPool created (heap allocation, stable pointers)");
-
         TaskPool {
             tasks: spin::Mutex::new(tasks),
+            slot_generations: Box::new([const { AtomicUsize::new(0) }; MAX_TASKS]),
             free_ids: spin::Mutex::new(VecDeque::new()),
             next_id: core::sync::atomic::AtomicUsize::new(1), // Start from 1, ID 0 is invalid
         }
@@ -202,8 +201,40 @@ impl TaskPool {
         task.set_id(task_id);
         task.set_namespace_id(namespace_id);
 
+        let generation = self.slot_generations[task_id]
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        debug_assert_ne!(generation, 0, "task slot generation wrapped to 0");
+
         tasks[task_id] = Some(task);
         Ok(task_id)
+    }
+
+    fn task_generation(&self, task_id: usize) -> Option<usize> {
+        if task_id >= MAX_TASKS {
+            return None;
+        }
+
+        let tasks = self.tasks.lock();
+        tasks[task_id].as_ref()?;
+        Some(self.slot_generations[task_id].load(Ordering::SeqCst))
+    }
+
+    fn get_task_if_generation(&self, task_id: usize, generation: usize) -> Option<&'static Task> {
+        if task_id >= MAX_TASKS || generation == 0 {
+            return None;
+        }
+
+        let tasks = self.tasks.lock();
+        let task = tasks[task_id].as_ref()?;
+        if self.slot_generations[task_id].load(Ordering::SeqCst) != generation {
+            return None;
+        }
+
+        // SAFETY: The Box<[T]> ensures the array pointer is stable.
+        // Once a Box is allocated, its underlying pointer never changes.
+        let ptr = task as *const Task;
+        Some(unsafe { &*ptr })
     }
 
     /// Get a task reference by ID
@@ -223,7 +254,7 @@ impl TaskPool {
     /// - The pointer remains valid for the lifetime of the program
     ///
     /// **Important**: Do NOT directly access `TaskPool::tasks` array.
-    /// Always use this method or `get_task_mut()` to ensure proper safety.
+    /// Always use this method to ensure proper safety.
     pub fn get_task(task_id: usize) -> Option<&'static Task> {
         if task_id >= MAX_TASKS {
             return None;
@@ -242,56 +273,12 @@ impl TaskPool {
         })
     }
 
-    /// Get a mutable task reference by ID
-    /// Returns a static mutable reference using raw pointer for lifetime extension
-    ///
-    /// # Safety
-    ///
-    /// This function is safe to use under the following conditions:
-    /// - The task must not be removed while the returned reference is in use
-    /// - In context switching scenarios, the currently running task is never removed
-    /// - Single-core execution ensures no concurrent access during context switch
-    ///
-    /// The returned reference points to a fixed location in the TaskPool's
-    /// Box-ed array (task_id == index), so the address is **stable**:
-    /// - Box guarantees the underlying array never moves
-    /// - Unlike Vec or HashMap, no reallocation can occur
-    /// - The pointer remains valid for the lifetime of the program
-    ///
-    /// **Important**: Do NOT directly access `TaskPool::tasks` array.
-    /// Always use this method or `get_task()` to ensure proper safety.
-    ///
-    /// # Note
-    /// This is technically UB in Rust (returning &'static mut without holding lock),
-    /// but safe in practice because:
-    /// - Box<[T]> provides stable memory location (pointer never changes)
-    /// - The scheduler ensures exclusive access during context switches
-    /// - Single-core execution prevents concurrent mutable access
-    /// - Currently running task is never removed
-    pub fn get_task_mut(task_id: usize) -> Option<&'static mut Task> {
-        if task_id >= MAX_TASKS {
-            return None;
-        }
-
-        let pool = get_task_pool();
-        let mut tasks = pool.tasks.lock();
-
-        // SAFETY: The Box<[T]> ensures the array pointer is stable.
-        // Once a Box is allocated, its underlying pointer never changes.
-        // Combined with scheduler guarantees (no removal of running task),
-        // this provides a de-facto &'static mut reference.
-        tasks[task_id].as_mut().map(|task| {
-            let ptr = task as *mut Task;
-            unsafe { &mut *ptr }
-        })
-    }
-
     /// Remove a task from the pool
     ///
     /// # Safety
     ///
     /// **CRITICAL**: This method invalidates all `&'static` references returned by
-    /// `get_task()` and `get_task_mut()` for this task_id. The scheduler must ensure:
+    /// `get_task()` for this task_id. The scheduler must ensure:
     ///
     /// 1. The task being removed is NOT currently running on any CPU
     /// 2. No context switch is in progress for this task
@@ -305,14 +292,17 @@ impl TaskPool {
         if task_id >= MAX_TASKS {
             return None;
         }
-
         let mut tasks = self.tasks.lock();
-        let task = tasks[task_id].take()?;
-
-        // Add ID to free list for reuse
+        let task = tasks[task_id].as_ref()?;
+        if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
+            return None;
+        }
+        if !matches!(task.state.load(Ordering::SeqCst), TaskState::Terminated) {
+            return None;
+        }
+        let task = tasks[task_id].take().unwrap();
         let mut free_ids = self.free_ids.lock();
         free_ids.push_back(task_id);
-
         Some(task)
     }
 
@@ -344,6 +334,7 @@ impl TaskPool {
         let mut tasks = self.tasks.lock();
         for i in 0..MAX_TASKS {
             tasks[i] = None;
+            self.slot_generations[i].store(0, Ordering::SeqCst);
         }
         drop(tasks);
 
@@ -365,6 +356,69 @@ static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
+
+const NO_CPU: usize = usize::MAX;
+
+const TASK_ID_MASK: usize = MAX_TASKS - 1;
+
+static SCHEDULE_PREV_TASK: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+
+fn release_deferred_prev(cpu_id: usize) {
+    let prev = decode_prev_task(SCHEDULE_PREV_TASK[cpu_id].swap(0, Ordering::SeqCst));
+    let Some((prev_id, prev_generation)) = prev else {
+        return;
+    };
+    let Some(task) = get_task_pool().get_task_if_generation(prev_id, prev_generation) else {
+        return;
+    };
+    if task
+        .running_cpu
+        .compare_exchange(cpu_id, NO_CPU, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        // Now that ownership is released, enqueue the task so other CPUs
+        // (or this one) can claim it on the next pick_next round.
+        if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
+            let target = task.last_cpu.load(Ordering::SeqCst);
+            let target = if is_cpu_online(target) {
+                target
+            } else {
+                cpu_id
+            };
+            push_ready_task(target, prev_id);
+        }
+    }
+}
+
+fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
+    if task
+        .running_cpu
+        .compare_exchange(NO_CPU, cpu_id, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+    if task
+        .state
+        .compare_exchange(
+            TaskState::Ready,
+            TaskState::Running,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        task.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        return false;
+    }
+    task.last_cpu.store(cpu_id, Ordering::SeqCst);
+    task.time_slice.store(
+        task.default_time_slice.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    true
+}
 
 pub fn register_online_cpu(cpu_id: usize) {
     let mut cpus = ONLINE_CPUS.lock();
@@ -430,6 +484,28 @@ fn decode_task_id(task_id: usize) -> Option<usize> {
 }
 
 #[inline]
+fn encode_prev_task(task_id: usize, generation: usize) -> usize {
+    debug_assert!(task_id <= TASK_ID_MASK);
+    debug_assert_ne!(generation, 0);
+    (generation << MAX_TASKS.ilog2()) | task_id
+}
+
+#[inline]
+fn decode_prev_task(encoded: usize) -> Option<(usize, usize)> {
+    if encoded == 0 {
+        return None;
+    }
+
+    let task_id = encoded & TASK_ID_MASK;
+    let generation = encoded >> MAX_TASKS.ilog2();
+    if task_id == 0 || generation == 0 {
+        return None;
+    }
+
+    Some((task_id, generation))
+}
+
+#[inline]
 fn ready_queue(cpu_id: usize) -> &'static spin::Mutex<VecDeque<usize>> {
     assert_valid_cpu_id(cpu_id);
     &READY_QUEUES[cpu_id]
@@ -447,16 +523,6 @@ pub fn push_ready_task(cpu_id: usize, task_id: usize) {
     if !queue.contains(&task_id) {
         queue.push_back(task_id);
     }
-}
-
-fn ready_queue_contains(task_id: usize) -> bool {
-    let mut found = false;
-    for_each_online_cpu(|cpu_id| {
-        if !found && ready_queue(cpu_id).lock().contains(&task_id) {
-            found = true;
-        }
-    });
-    found
 }
 
 pub fn mark_blocked(task_id: usize) {
@@ -489,29 +555,45 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
 fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     let _irq_guard = IrqGuard::new();
     let cpu_id = cpu.get_cpuid();
-    let old_current_task_id = current_task_id(cpu_id);
+    release_deferred_prev(cpu_id);
 
-    if let Some(current_id) = old_current_task_id {
-        if let Some(task) = TaskPool::get_task_mut(current_id) {
-            match task.state.load(Ordering::SeqCst) {
-                TaskState::Ready | TaskState::Running => {
-                    task.state.store(TaskState::Ready, Ordering::SeqCst);
+    let old_id = current_task_id(cpu_id);
+    let old_task = old_id.and_then(TaskPool::get_task);
+
+    let mut next_id: Option<usize> = None;
+    'outer: loop {
+        let candidate = { ready_queue(cpu_id).lock().pop_front() };
+        match candidate {
+            Some(task_id) => {
+                let Some(task) = TaskPool::get_task(task_id) else {
+                    continue;
+                };
+                if task.pinned_cpu.is_some_and(|p| p != cpu_id) {
+                    push_ready_task(task.pinned_cpu.unwrap(), task_id);
+                    continue;
                 }
-                TaskState::Zombie => finalize_zombie(current_id, task.get_parent_id()),
-                TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
+                match task.state.load(Ordering::SeqCst) {
+                    TaskState::NotInitialized => {
+                        panic!("Task must be initialized before scheduling")
+                    }
+                    TaskState::Zombie => {
+                        finalize_zombie(task.get_id(), task.get_parent_id());
+                        continue;
+                    }
+                    TaskState::Terminated => continue,
+                    TaskState::Blocked(_) => continue,
+                    TaskState::Ready | TaskState::Running => {
+                        if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
+                            continue;
+                        }
+                        if try_claim_ready_task(task, cpu_id) {
+                            next_id = Some(task_id);
+                            break 'outer;
+                        }
+                        continue;
+                    }
+                }
             }
-        }
-    }
-
-    let old_current_runnable = old_current_task_id.is_some_and(|id| {
-        TaskPool::get_task(id).is_some_and(|t| t.state.load(Ordering::SeqCst) == TaskState::Ready)
-    });
-
-    loop {
-        let task_id = { ready_queue(cpu_id).lock().pop_front() };
-
-        let task_id = match task_id {
-            Some(id) => id,
             None => {
                 let mut stolen = None;
                 for_each_online_cpu(|remote_cpu| {
@@ -520,82 +602,78 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     }
                     let mut remote_q = ready_queue(remote_cpu).lock();
                     if let Some(remote_id) = remote_q.pop_front() {
-                        if let Some(task) = TaskPool::get_task(remote_id) {
-                            if task.pinned_cpu.is_some() {
-                                remote_q.push_back(remote_id);
-                                return;
-                            }
-                        }
                         stolen = Some(remote_id);
                     }
                 });
                 match stolen {
-                    Some(id) => id,
-                    None => {
-                        if old_current_runnable {
-                            if let Some(current_id) = old_current_task_id {
-                                if let Some(task) = TaskPool::get_task_mut(current_id) {
-                                    task.state.store(TaskState::Ready, Ordering::SeqCst);
-                                    task.time_slice.store(
-                                        task.default_time_slice.load(Ordering::SeqCst),
-                                        Ordering::SeqCst,
-                                    );
-                                }
-                                set_current_task_id(cpu_id, Some(current_id));
-                                return (old_current_task_id, Some(current_id));
-                            }
-                        }
-                        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-                        if idle_id != 0 {
-                            if let Some(task) = TaskPool::get_task_mut(idle_id) {
-                                task.state.store(TaskState::Running, Ordering::SeqCst);
-                                task.time_slice.store(
-                                    task.default_time_slice.load(Ordering::SeqCst),
-                                    Ordering::SeqCst,
-                                );
-                            }
-                            set_current_task_id(cpu_id, Some(idle_id));
-                            return (old_current_task_id, Some(idle_id));
-                        }
-                        set_current_task_id(cpu_id, None);
-                        return (old_current_task_id, None);
+                    Some(id) => {
+                        push_ready_task(cpu_id, id);
+                        continue;
                     }
+                    None => break 'outer,
                 }
-            }
-        };
-
-        let Some(task) = TaskPool::get_task_mut(task_id) else {
-            continue;
-        };
-
-        match task.state.load(Ordering::SeqCst) {
-            TaskState::NotInitialized => panic!("Task must be initialized before scheduling"),
-            TaskState::Zombie => {
-                finalize_zombie(task.get_id(), task.get_parent_id());
-                continue;
-            }
-            TaskState::Terminated => {
-                let _ = get_task_pool().remove_task(task_id);
-                continue;
-            }
-            TaskState::Blocked(_) => continue,
-            TaskState::Ready | TaskState::Running => {
-                task.state.store(TaskState::Running, Ordering::SeqCst);
-                task.time_slice.store(
-                    task.default_time_slice.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
-                let next_task_id = task.get_id();
-                if let Some(old_id) = old_current_task_id {
-                    if old_current_runnable && old_id != next_task_id {
-                        push_ready_task(cpu_id, old_id);
-                    }
-                }
-                set_current_task_id(cpu_id, Some(next_task_id));
-                return (old_current_task_id, Some(next_task_id));
             }
         }
     }
+
+    if next_id.is_none() {
+        if let (Some(oid), Some(ot)) = (old_id, old_task) {
+            if ot.running_cpu.load(Ordering::SeqCst) == cpu_id
+                && matches!(
+                    ot.state.load(Ordering::SeqCst),
+                    TaskState::Running | TaskState::Ready
+                )
+            {
+                ot.state.store(TaskState::Running, Ordering::SeqCst);
+                ot.time_slice.store(
+                    ot.default_time_slice.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                set_current_task_id(cpu_id, Some(oid));
+                return (old_id, Some(oid));
+            }
+        }
+    }
+
+    if next_id.is_none() {
+        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+        if idle_id != 0 {
+            if let Some(task) = TaskPool::get_task(idle_id) {
+                if try_claim_ready_task(task, cpu_id) {
+                    next_id = Some(idle_id);
+                }
+            }
+        }
+    }
+
+    let Some(next_id) = next_id else {
+        set_current_task_id(cpu_id, None);
+        return (old_id, None);
+    };
+
+    if let (Some(oid), Some(ot), Some(nid)) = (old_id, old_task, Some(next_id)) {
+        if oid != nid {
+            match ot.state.load(Ordering::SeqCst) {
+                TaskState::Running | TaskState::Ready => {
+                    let _ = ot.state.compare_exchange(
+                        TaskState::Running,
+                        TaskState::Ready,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                }
+                TaskState::Zombie => finalize_zombie(oid, ot.get_parent_id()),
+                TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
+            }
+            if let Some(generation) = get_task_pool().task_generation(oid) {
+                SCHEDULE_PREV_TASK[cpu_id]
+                    .store(encode_prev_task(oid, generation), Ordering::SeqCst);
+            }
+        }
+    }
+
+    set_current_task_id(cpu_id, Some(next_id));
+    (old_id, Some(next_id))
 }
 
 pub fn add_task(task: Task, cpu_id: usize) -> usize {
@@ -614,7 +692,7 @@ pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
     let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
 
     if let Some(task_id) = current_task_id(cpu_id) {
-        if let Some(task) = TaskPool::get_task_mut(task_id) {
+        if let Some(task) = TaskPool::get_task(task_id) {
             let current_slice = task.time_slice.load(Ordering::SeqCst);
             if current_slice > 0 {
                 task.time_slice.store(current_slice - 1, Ordering::SeqCst);
@@ -637,28 +715,26 @@ pub fn schedule(trapframe: &mut Trapframe) {
     if let Some(next_task_id) = next_task_id {
         if current_task_id != Some(next_task_id) {
             if let Some(current_task_id) = current_task_id {
-                let current_task = get_task_by_id(current_task_id).unwrap();
-                current_task.last_cpu.store(cpu_id, Ordering::SeqCst);
-                current_task.vcpu.lock().store(trapframe);
-
-                #[cfg(all(feature = "hypervisor", target_arch = "riscv64"))]
-                {
-                    use crate::arch::hv::switch::{HypervisorSwitchData, VcpuSwitchData};
+                if let Some(current_task) = TaskPool::get_task(current_task_id) {
+                    current_task.last_cpu.store(cpu_id, Ordering::SeqCst);
+                    current_task.vcpu.lock().store(trapframe);
 
                     kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                }
-                #[cfg(not(all(feature = "hypervisor", target_arch = "riscv64")))]
-                {
-                    kernel_context_switch(cpu_id, current_task_id, next_task_id);
-                }
 
-                let current_task = get_task_by_id(current_task_id).unwrap();
-                current_task.vcpu.lock().switch(trapframe);
-                set_next_mode(current_task.vcpu.lock().get_mode());
+                    current_task.vcpu.lock().switch(trapframe);
+                    set_next_mode(current_task.vcpu.lock().get_mode());
+                } else {
+                    set_current_task_id(cpu_id, None);
+                    if let Some(next_task) = TaskPool::get_task(next_task_id) {
+                        setup_task_execution(get_cpu(), next_task);
+                        arch_switch_to_user(next_task.get_trapframe());
+                    }
+                }
             } else {
-                let next_task = get_task_by_id(next_task_id).unwrap();
-                setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user(next_task.get_trapframe());
+                if let Some(next_task) = TaskPool::get_task(next_task_id) {
+                    setup_task_execution(get_cpu(), next_task);
+                    arch_switch_to_user(next_task.get_trapframe());
+                }
             }
         }
     }
@@ -709,17 +785,13 @@ pub fn current_task(cpu_id: usize) -> Option<&'static Task> {
     current_task_id(cpu_id).and_then(TaskPool::get_task)
 }
 
-pub fn current_task_mut(cpu_id: usize) -> Option<&'static mut Task> {
-    current_task_id(cpu_id).and_then(TaskPool::get_task_mut)
-}
-
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
     assert_valid_cpu_id(cpu_id);
     decode_task_id(CURRENT_TASK_IDS[cpu_id].load(Ordering::SeqCst))
 }
 
-pub fn get_task_by_id(task_id: usize) -> Option<&'static mut Task> {
-    TaskPool::get_task_mut(task_id)
+pub fn get_task_by_id(task_id: usize) -> Option<&'static Task> {
+    TaskPool::get_task(task_id)
 }
 
 pub fn wake_task(task_id: usize) -> bool {
@@ -731,7 +803,7 @@ pub fn wake_task(task_id: usize) -> bool {
             pinned
         } else {
             let last = task.last_cpu.load(Ordering::SeqCst);
-            if last > 0 && is_cpu_online(last) {
+            if is_cpu_online(last) {
                 last
             } else {
                 find_least_loaded_cpu()
@@ -743,21 +815,29 @@ pub fn wake_task(task_id: usize) -> bool {
 
 pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let _irq_guard = IrqGuard::new();
-    let Some(task) = TaskPool::get_task_mut(task_id) else {
+    let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
 
-    if !matches!(task.state.load(Ordering::SeqCst), TaskState::Blocked(_)) {
-        return false;
+    let mut state = task.state.load(Ordering::SeqCst);
+    loop {
+        match state {
+            TaskState::Blocked(_) => {}
+            _ => return false,
+        }
+        match task.state.compare_exchange(
+            state,
+            TaskState::Ready,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break,
+            Err(actual) => state = actual,
+        }
     }
 
-    task.state.store(TaskState::Running, Ordering::SeqCst);
-    core::sync::atomic::fence(Ordering::SeqCst);
     unmark_blocked(task_id);
-
-    if !ready_queue_contains(task_id) {
-        push_ready_task(target_cpu, task_id);
-    }
+    push_ready_task(target_cpu, task_id);
 
     if target_cpu != get_cpu().get_cpuid() {
         crate::arch::send_reschedule_ipi(target_cpu);
@@ -771,13 +851,10 @@ pub fn cleanup_zombie(task_id: usize) {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
             zombie_queue.remove(pos);
-            crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
         }
     }
 
-    if let Some(_task) = get_task_pool().remove_task(task_id) {
-        crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
-    }
+    let _ = get_task_pool().remove_task(task_id);
 }
 
 pub fn remove_from_ready_queues(task_id: usize) {
@@ -787,10 +864,6 @@ pub fn remove_from_ready_queues(task_id: usize) {
         let mut queue = ready_queue(cpu_id).lock();
         while let Some(pos) = queue.iter().position(|&id| id == task_id) {
             queue.remove(pos);
-        }
-
-        if current_task_id(cpu_id) == Some(task_id) {
-            set_current_task_id(cpu_id, None);
         }
     });
 }
@@ -851,7 +924,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
         let mut to_ctx_ptr: *const crate::arch::context::KernelContext = core::ptr::null();
 
         {
-            if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
+            if let Some(from_task) = TaskPool::get_task(from_task_id) {
                 from_ctx_ptr = &mut *from_task.kernel_context.lock();
 
                 #[cfg(feature = "user-fpu")]
@@ -864,7 +937,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                     &mut *from_task.vcpu.lock(),
                 );
             }
-            if let Some(to_task) = TaskPool::get_task_mut(to_task_id) {
+            if let Some(to_task) = TaskPool::get_task(to_task_id) {
                 to_ctx_ptr = &*to_task.kernel_context.lock();
             }
         }
@@ -892,7 +965,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             let cpu = get_cpu();
             saved_arch_cpu_state.restore(cpu);
             set_trapvector(saved_trapvector);
-            if let Some(from_task) = TaskPool::get_task_mut(from_task_id) {
+            if let Some(from_task) = TaskPool::get_task(from_task_id) {
                 #[cfg(feature = "user-fpu")]
                 crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
             }
@@ -901,7 +974,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 }
 
 /// Setup task execution by configuring hardware and user context.
-pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
+pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
@@ -910,12 +983,9 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
 
     cpu.set_kernel_stack(sp);
 
-    let task_ptr = task as *mut Task;
     let task_mode = task.vcpu.lock().get_mode();
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
-    }
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
@@ -929,6 +999,8 @@ pub fn reset() {
     for cpu_id in 0..MAX_NUM_CPUS {
         ready_queue(cpu_id).lock().clear();
         set_current_task_id(cpu_id, None);
+        SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
+        IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
     }
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
@@ -937,7 +1009,7 @@ pub fn reset() {
 
 pub fn make_test_tasks() {
     println!("Making test tasks...");
-    let mut task0 = new_kernel_task("Task0".to_string(), 0, || {
+    let task0 = new_kernel_task("Task0".to_string(), 0, || {
         println!("Task0");
         let mut counter: usize = 0;
         loop {
@@ -959,7 +1031,7 @@ pub fn make_test_tasks() {
     task0.init();
     add_task(task0, 0);
 
-    let mut task1 = new_kernel_task("Task1".to_string(), 0, || {
+    let task1 = new_kernel_task("Task1".to_string(), 0, || {
         println!("Task1");
         let mut counter: usize = 0;
         loop {
@@ -978,7 +1050,7 @@ pub fn make_test_tasks() {
     task1.init();
     add_task(task1, 0);
 
-    let mut task2 = new_kernel_task("Task2".to_string(), 0, || {
+    let task2 = new_kernel_task("Task2".to_string(), 0, || {
         println!("Task2");
         /* Fizz Buzz */
         for i in 1..=1000000 {

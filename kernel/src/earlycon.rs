@@ -22,7 +22,6 @@ macro_rules! early_println {
 }
 
 struct EarlyConsole;
-
 impl Write for EarlyConsole {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for c in s.bytes() {

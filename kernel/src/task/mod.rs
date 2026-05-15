@@ -33,9 +33,8 @@ use crate::{
     mem::page::ContiguousPages,
     object::handle::HandleTable,
     sched::scheduler::{
-        current_task, current_task_mut, finalize_zombie, get_all_task_ids, get_task_by_id,
-        remove_from_ready_queues, remove_task_from_queues, schedule, setup_task_execution,
-        unmark_blocked,
+        current_task, finalize_zombie, get_all_task_ids, get_task_by_id, remove_from_ready_queues,
+        schedule, setup_task_execution, unmark_blocked,
     },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
@@ -47,7 +46,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -334,7 +333,7 @@ impl<T> TaskLocal<T> {
     #[inline]
     pub unsafe fn get(&self) -> &T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &*self.inner.get()
+        unsafe { &*self.inner.get() }
     }
 
     /// Get a mutable reference to the contained value.
@@ -347,7 +346,7 @@ impl<T> TaskLocal<T> {
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut(&self) -> &mut T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &mut *self.inner.get()
+        unsafe { &mut *self.inner.get() }
     }
 }
 
@@ -360,7 +359,7 @@ pub struct Task {
     namespace: RwLock<Arc<namespace::TaskNamespace>>,
     pub task_type: TaskType,
     pub entry: usize,
-    parent_id: Option<usize>,
+    parent_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
     /// Task Group ID - for job control and signal delivery (e.g., pipeline members)
@@ -439,6 +438,10 @@ pub struct Task {
     pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
     pub pinned_cpu: Option<usize>,
     pub last_cpu: atomic::AtomicUsize,
+    /// CPU that currently "owns" this task (has saved its context or is
+    /// actively running it). `usize::MAX` means unowned / available.
+    /// Used as a CAS claim token to prevent double-scheduling on SMP.
+    pub running_cpu: atomic::AtomicUsize,
 
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
@@ -535,7 +538,7 @@ impl Task {
             namespace: RwLock::new(ns),
             task_type,
             entry: 0,
-            parent_id: None,
+            parent_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
@@ -572,6 +575,7 @@ impl Task {
             kernel_stack_window_base: Mutex::new(None),
             pinned_cpu: None,
             last_cpu: atomic::AtomicUsize::new(0),
+            running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
             event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: Mutex::new(true),
@@ -1080,15 +1084,18 @@ impl Task {
     /// # Returns
     /// The parent task ID, or None if there is no parent
     pub fn get_parent_id(&self) -> Option<usize> {
-        self.parent_id
+        match self.parent_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
     }
 
     /// Set the parent task
     ///
     /// # Arguments
     /// * `parent_id` - The ID of the parent task
-    pub fn set_parent_id(&mut self, parent_id: usize) {
-        self.parent_id = Some(parent_id);
+    pub fn set_parent_id(&self, parent_id: usize) {
+        self.parent_id.store(parent_id, Ordering::SeqCst);
     }
 
     /// Add a child task
@@ -1492,10 +1499,8 @@ impl Task {
         if child.get_kernel_stack_window_base().is_none() {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
-        // Set the state to Ready
-        child
-            .state
-            .store(self.state.load(Ordering::SeqCst), Ordering::SeqCst);
+        // Cloned task starts as Ready regardless of parent's current state
+        child.state.store(TaskState::Ready, Ordering::SeqCst);
 
         // NOTE: Parent-child relationship will be established AFTER add_task()
         // when the child has a valid ID. The caller is responsible for calling:
@@ -1531,7 +1536,7 @@ impl Task {
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
 
-        match self.parent_id {
+        match self.get_parent_id() {
             Some(parent_id) => {
                 if get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
@@ -1559,7 +1564,7 @@ impl Task {
             // (current task path goes through schedule() -> pick_next -> finalize_zombie)
             if matches!(self.state.load(Ordering::SeqCst), TaskState::Zombie) {
                 unmark_blocked(self.id);
-                finalize_zombie(self.id, self.parent_id);
+                finalize_zombie(self.id, self.get_parent_id());
             }
             return;
         }
@@ -2029,9 +2034,14 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let current_task = current_task_mut(cpu.get_cpuid()).unwrap();
-    setup_task_execution(cpu, current_task);
-    arch_switch_to_user(current_task.get_trapframe());
+    if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        setup_task_execution(cpu, current_task);
+        arch_switch_to_user(current_task.get_trapframe());
+    }
+
+    loop {
+        crate::arch::instruction::idle();
+    }
 }
 
 #[cfg(test)]
@@ -2040,7 +2050,7 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
-    use crate::sched::scheduler::{add_task, get_task_by_id, remove_task_from_queues, reset};
+    use crate::sched::scheduler::{add_task, get_task_by_id, reset};
     use crate::task::CloneFlags;
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
@@ -2584,8 +2594,6 @@ mod tests {
         // Reset scheduler state before test
         reset();
 
-        use super::namespace;
-
         // Create task in root namespace
         let task = super::new_user_task("TestTask".to_string(), 0);
         assert_eq!(task.get_namespace().get_name(), "root");
@@ -2603,8 +2611,6 @@ mod tests {
     fn test_task_namespace_inheritance() {
         // Reset scheduler state before test
         reset();
-
-        use super::namespace;
 
         let mut parent = super::new_user_task("Parent".to_string(), 0);
         parent.init();
@@ -2712,9 +2718,6 @@ mod tests {
     fn test_all_abis_share_root_namespace_by_default() {
         // Reset scheduler state before test
         reset();
-
-        use super::namespace;
-        use alloc::vec::Vec;
 
         // Create tasks using default Task::new (which uses root namespace)
         let mut task1 = super::new_user_task("Task1".to_string(), 0);

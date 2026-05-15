@@ -88,7 +88,7 @@ pub fn init_arch(cpu_id: usize) {
 /// - Chooses the task-provided kernel stack (SP_EL1) for the upcoming EL0->EL1 traps.
 /// - Programs per-CPU trampoline-visible state (kernel stack top, trap handler, TTBR0).
 /// - Performs a direct transition via the trampoline exit path.
-pub fn first_switch_to_user(task: &mut Task) -> ! {
+pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
@@ -108,24 +108,18 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
 
-    // Populate the trapframe from the task VCPU state.
-    // Use a raw pointer to avoid borrow checker conflicts with get_trapframe().
-    let task_ptr = task as *mut Task;
     let task_mode = task.vcpu.lock().get_mode();
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
-        trapframe.spsr = target_spsr_for_mode(task_mode);
+    trapframe.spsr = target_spsr_for_mode(task_mode);
 
-        // Ensure IRQs are unmasked in the user PSTATE after `eret`.
-        crate::arch::configure_user_entry(
-            trapframe,
-            crate::arch::UserEntryOptions {
-                irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
-            },
-        );
-    }
+    crate::arch::configure_user_entry(
+        trapframe,
+        crate::arch::UserEntryOptions {
+            irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+        },
+    );
 
     // Compute trampoline exit target.
     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)

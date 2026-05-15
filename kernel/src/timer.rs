@@ -81,16 +81,38 @@ impl KernelTimer {
 // Global tick counter (monotonic, incremented by timer interrupt)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Increment the global tick counter. Call this from the timer interrupt handler.
+/// The CPU ID designated as the global timekeeper.
+/// Only this CPU advances TICK_COUNT and fires software timers.
+/// Initialized to u64::MAX (unset); call set_global_timekeeper() during boot.
+static GLOBAL_TIMEKEEPER_CPU: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Designate a CPU as the global timekeeper.
+/// Must be called once during boot (from start_kernel) before any timer interrupts fire.
+pub fn set_global_timekeeper(cpu_id: usize) {
+    GLOBAL_TIMEKEEPER_CPU.store(cpu_id as u64, Ordering::Relaxed);
+}
+
+/// Timer interrupt handler. Called on every CPU local timer interrupt.
+///
+/// - Re-arms the per-CPU local timer (all CPUs).
+/// - Advances the global TICK_COUNT and fires software timers only on the
+///   designated global timekeeper CPU, so global time advances exactly once
+///   per quantum system-wide regardless of how many CPUs are running.
+/// - Always calls sched_on_tick() for per-CPU scheduler accounting.
 pub fn tick(trapframe: &mut Trapframe) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);
-    let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    check_software_timers(now);
-    // Call scheduler tick handler to manage time slices
-    // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
+
+    // Only the designated global timekeeper advances global time and fires
+    // software timers. All other CPUs skip this block entirely.
+    if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
+        let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        check_software_timers(now);
+    }
+
+    // Per-CPU scheduler accounting runs on every CPU regardless.
     sched_on_tick(cpu_id, trapframe);
 }
 

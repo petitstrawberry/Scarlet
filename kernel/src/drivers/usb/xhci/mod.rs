@@ -548,7 +548,7 @@ impl XhciController {
         }
 
         crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, 0)
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
             .map_err(|_| "Failed to enable xHCI interrupt")
     }
 

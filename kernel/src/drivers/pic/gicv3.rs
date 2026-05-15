@@ -122,6 +122,13 @@ fn write_icc_igrpen1_el1(v: u64) {
 }
 
 #[inline]
+fn write_icc_sgi1r_el1(v: u64) {
+    unsafe {
+        asm!("msr ICC_SGI1R_EL1, {0}", "isb", in(reg) v, options(nostack));
+    }
+}
+
+#[inline]
 fn gicd_max_interrupt_id(dist_base_addr: usize) -> InterruptId {
     // GICD_TYPER.ITLinesNumber[4:0] gives (#interrupts / 32) - 1.
     // Convert this into a 0-based maximum interrupt ID.
@@ -430,6 +437,39 @@ impl ExternalInterruptController for GicV3 {
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
         self.init_redistributor(cpu_id);
         self.init_cpu_interface_sysregs();
+        Ok(())
+    }
+
+    fn send_ipi(
+        &self,
+        target_cpu_id: CpuId,
+        ipi_type: crate::interrupt::controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
+        self.validate_cpu_id(target_cpu_id)?;
+
+        let intid = match ipi_type {
+            crate::interrupt::controllers::LocalInterruptType::Software => 0u64,
+            crate::interrupt::controllers::LocalInterruptType::External => 1u64,
+            crate::interrupt::controllers::LocalInterruptType::Timer => {
+                crate::drivers::pic::arm_generic_timer::timer_ppi_irq() as u64
+            }
+        };
+
+        if intid >= 16 {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        // ICC_SGI1R_EL1 fields used here:
+        //   [27:24] Aff3, [23:16] Aff2, [15:4] INTID, [3:0] ignored when using RS/Aff1/TargetList,
+        //   [55:48] Aff1, [47:44] RS, [43:40] IRM, [39:32] TargetList.
+        // QEMU virt uses a flat affinity layout, so targeting by Aff1=0 and a 1-bit target mask
+        // for CPU IDs < 8 is sufficient for Scarlet's current environment.
+        let target_mask = 1u64
+            .checked_shl(target_cpu_id)
+            .ok_or(InterruptError::InvalidCpuId)?;
+        let sgi1r = (intid << 24) | target_mask;
+        write_icc_sgi1r_el1(sgi1r);
+
         Ok(())
     }
 }

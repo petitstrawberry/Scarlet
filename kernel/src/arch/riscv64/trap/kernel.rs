@@ -163,20 +163,9 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // Detect kernel stack overflow via guard-page hit
             // Also handle kstack window accesses that might not have VMA
             if let Some(task) = current_task(get_cpu().get_cpuid()) {
-                crate::println!(
-                    "[kpf] task found, checking kstack window for vaddr={:#x}",
-                    vaddr
-                );
                 if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-                    crate::println!("[kpf] kstack window base={:#x}", base);
                     let kstack_start = base + crate::environment::PAGE_SIZE;
                     let kstack_end = kstack_start + crate::environment::TASK_KERNEL_STACK_SIZE;
-                    crate::println!(
-                        "[kpf] kstack_start={:#x}, kstack_end={:#x}, vaddr={:#x}",
-                        kstack_start,
-                        kstack_end,
-                        vaddr
-                    );
 
                     // Guard page hit
                     if vaddr >= base && vaddr < kstack_start {
@@ -206,7 +195,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                                 true,
                                 false,
                             );
-                            crate::println!("Mapped kstack page at vaddr: {:#x}", page_vaddr);
                             return;
                         }
                     }
@@ -216,8 +204,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // For kernel addresses, check if they are valid
             let manager = get_kernel_vm_manager();
             loop {
-                crate::println!("[kernel] Handling page fault at vaddr: {:#x}", vaddr);
-
                 // Additional validation for suspicious addresses
                 if vaddr == 0 || vaddr == usize::MAX {
                     print_traplog(trapframe);
@@ -245,7 +231,6 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                         );
                     }
                 }
-                crate::println!("Mapped page at vaddr: {:#x}", vaddr);
 
                 if vaddr & 0b11 == 0 {
                     // If the address is aligned, we can stop

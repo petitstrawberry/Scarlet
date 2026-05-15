@@ -53,10 +53,14 @@ macro_rules! println {
     ($fmt:expr, $($arg:tt)*) => ($crate::print!(concat!($fmt, "\n"), $($arg)*));
 }
 
+static WRITE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub fn _print(args: fmt::Arguments) {
     struct LogWriter;
+
     impl fmt::Write for LogWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
+            let _lock = WRITE_LOCK.lock();
             for &b in s.as_bytes() {
                 crate::log::write_byte(b);
             }
@@ -72,6 +76,8 @@ pub fn _print(args: fmt::Arguments) {
     struct CharDeviceWriter<'a>(&'a dyn CharDevice);
     impl<'a> fmt::Write for CharDeviceWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
+            let _lock = WRITE_LOCK.lock();
+
             for byte in s.bytes() {
                 if self.0.write_byte(byte).is_err() {
                     return Err(fmt::Error);
