@@ -96,12 +96,17 @@ const HCR_EL2_GUEST_LO16: u16 = (HCR_EL2_GUEST & 0xffff) as u16;
 const HCR_EL2_GUEST_HI16: u16 = ((HCR_EL2_GUEST >> 16) & 0xffff) as u16;
 const HCR_EL2_GUEST_HI32: u16 = ((HCR_EL2_GUEST >> 32) & 0xffff) as u16;
 
-// In VHE format, bits 0/1 control EL0 access to the virtual timer/counter.
-// Guest EL1 uses CNTV_* directly; CNTP_* remains trapped because the EL1
-// physical timer enable fields are in the VHE-only bit 10/11 range.
+// In VHE mode (E2H=1), CNTHCTL_EL2 uses a different bit layout:
+//   bit 0  = EL0VTEN  (EL0 virtual timer access)
+//   bit 1  = EL0VCTEN (EL0 virtual counter access)
+//   bit 10 = EL1PCTEN (EL1 physical counter access, shifted by 10 in VHE)
+//   bit 11 = EL1PCEN  (EL1 physical timer access, shifted by 10 in VHE)
+//   bit 13 = EL1TVT   (trap EL1 virtual timer accesses in VHE)
+//   bit 14 = EL1TVCT  (trap EL1 virtual counter accesses in VHE)
 const CNTHCTL_EL2_EL0VTEN: u64 = 1 << 0;
 const CNTHCTL_EL2_EL0VCTEN: u64 = 1 << 1;
-const CNTHCTL_EL2_GUEST: u64 = CNTHCTL_EL2_EL0VTEN | CNTHCTL_EL2_EL0VCTEN;
+const CNTHCTL_EL2_EL1TVT: u64 = 1 << 13; // VHE: trap EL1 virtual timer (CNTV_CTL/CVAL/TVAL)
+const CNTHCTL_EL2_GUEST: u64 = CNTHCTL_EL2_EL0VTEN | CNTHCTL_EL2_EL0VCTEN | CNTHCTL_EL2_EL1TVT;
 const CNTHCTL_EL2_GUEST_LO16: u16 = (CNTHCTL_EL2_GUEST & 0xffff) as u16;
 
 pub(crate) static mut HOST_HV_CTX: HostHvContext = HostHvContext {
