@@ -24,6 +24,7 @@ impl Instruction {
 
 pub fn idle() -> ! {
     loop {
+        crate::arch::interrupt::enable_interrupts();
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
         }

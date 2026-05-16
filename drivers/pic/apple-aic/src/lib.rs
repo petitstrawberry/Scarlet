@@ -14,7 +14,7 @@ use scarlet::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::ExternalInterruptController,
     },
 };
@@ -553,11 +553,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let aic = Box::new(Aic::new(base_addr, max_cpus));
 
     // Register with interrupt manager
-    match InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(aic)
-            .map_err(|_| "Failed to register AIC")
-    }) {
+    match scarlet::interrupt::register_external_controller(aic)
+        .map_err(|_| "Failed to register AIC")
+    {
         Ok(()) => {
             scarlet::arch::interrupt::configure_timer_interrupt_route(
                 scarlet::arch::interrupt::TimerInterruptRoute::FastInterrupt,

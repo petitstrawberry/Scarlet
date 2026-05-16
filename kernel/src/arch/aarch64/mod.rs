@@ -74,6 +74,23 @@ pub fn init_arch(cpu_id: usize) {
     // Get raw Aarch64 struct
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
     aarch64.cpuid = cpu_id as u64;
+
+    trap_init(aarch64);
+}
+
+pub fn init_ap_cpu(cpu_id: usize) {
+    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
+    // Get raw Aarch64 struct
+    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    aarch64.cpuid = cpu_id as u64;
+
+    unsafe {
+        asm!(
+            "mrs {0}, ttbr0_el1",
+            out(reg) aarch64.ttbr0,
+        );
+    }
+
     trap_init(aarch64);
 }
 
@@ -86,7 +103,7 @@ pub fn init_arch(cpu_id: usize) {
 /// - Chooses the task-provided kernel stack (SP_EL1) for the upcoming EL0->EL1 traps.
 /// - Programs per-CPU trampoline-visible state (kernel stack top, trap handler, TTBR0).
 /// - Performs a direct transition via the trampoline exit path.
-pub fn first_switch_to_user(task: &mut Task) -> ! {
+pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
@@ -106,21 +123,18 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     cpu.set_trap_handler(get_user_trap_handler());
     cpu.set_next_address_space(task.vm_manager.get_asid());
 
-    // Populate the trapframe from the task VCPU state.
-    // Use a raw pointer to avoid borrow checker conflicts with get_trapframe().
-    let task_ptr = task as *mut Task;
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
+    let task_mode = task.vcpu.lock().get_mode();
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
-        // Ensure IRQs are unmasked in the user PSTATE after `eret`.
-        crate::arch::configure_user_entry(
-            trapframe,
-            crate::arch::UserEntryOptions {
-                irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
-            },
-        );
-    }
+    trapframe.spsr = target_spsr_for_mode(task_mode);
+
+    crate::arch::configure_user_entry(
+        trapframe,
+        crate::arch::UserEntryOptions {
+            irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+        },
+    );
 
     // Compute trampoline exit target.
     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
@@ -128,10 +142,14 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base.wrapping_add(trap_exit_offset);
 
-    // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
+    // Program per-CPU arch pointer and the target trap vector right before the jump.
     let cpu_id = cpu.get_cpuid();
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
-    set_trapvector(trampoline_base);
+    if is_privileged_return_mode(task.get_trapframe().spsr) {
+        set_trapvector(get_kernel_trapvector_paddr());
+    } else {
+        set_trapvector(trampoline_base);
+    }
 
     let trapframe_addr = (kernel_sp as usize).wrapping_sub(core::mem::size_of::<Trapframe>());
 
@@ -235,6 +253,13 @@ impl Aarch64 {
 
     pub fn set_kernel_ttbr0(&mut self, val: u64) {
         self.kernel_ttbr0 = val;
+
+        // The user trampoline may observe this CPU struct through a different
+        // VA alias, so push the update to PoC before returning to EL0.
+        crate::arch::aarch64::clean_dcache_to_poc_range(
+            self as *const _ as usize,
+            core::mem::size_of::<Aarch64>(),
+        );
     }
 
     pub fn get_kernel_ttbr0(&self) -> u64 {
@@ -418,26 +443,27 @@ pub fn get_trapvector() -> usize {
 pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::UserEntryOptions) {
     use crate::arch::UserReturnIrqPolicy;
 
-    // DAIF bits in PSTATE/SPSR: D=9, A=8, I=7, F=6. 1 means masked.
     const DAIF_I: u64 = 1 << 7;
     const DAIF_F: u64 = 1 << 6;
-    match options.irq_policy {
-        UserReturnIrqPolicy::Inherit => {}
-        UserReturnIrqPolicy::Enable => {
-            trapframe.spsr &= !DAIF_I;
-            trapframe.spsr &= !DAIF_F;
-        }
-        UserReturnIrqPolicy::Disable => {
-            trapframe.spsr |= DAIF_I;
-            trapframe.spsr |= DAIF_F;
-        }
-    }
+    const DAIF_MASK: u64 = DAIF_I | DAIF_F;
+    const SPSR_MODE_MASK: u64 = 0xF;
 
-    // Configure EL0 FP/SIMD access for the next user return.
-    // DTB-driven runtime gating complements the build-time feature.
+    let el = if let Some(task) = crate::sched::scheduler::current_task(get_cpu().get_cpuid()) {
+        target_spsr_for_mode(task.vcpu.lock().get_mode())
+    } else {
+        target_spsr_for_mode(crate::arch::Mode::User)
+    };
+
+    let daif = match options.irq_policy {
+        UserReturnIrqPolicy::Inherit => trapframe.spsr & DAIF_MASK,
+        UserReturnIrqPolicy::Enable => 0,
+        UserReturnIrqPolicy::Disable => DAIF_MASK,
+    };
+    trapframe.spsr = el | daif | (trapframe.spsr & !(SPSR_MODE_MASK | DAIF_MASK));
+
     if crate::arch::user_fpu_enabled() {
         let cpu_id = get_cpu().get_cpuid();
-        if let Some(task) = crate::sched::scheduler::get_scheduler().get_current_task(cpu_id) {
+        if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
             crate::arch::fpu::set_user_fpu_enabled(task.vcpu.lock().fpu_used);
         } else {
             crate::arch::fpu::set_user_fpu_enabled(false);
@@ -476,6 +502,12 @@ pub fn disable_interrupt() {
     }
 }
 
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    use crate::interrupt::controllers::LocalInterruptType;
+    let _ = crate::interrupt::InterruptManager::global()
+        .send_ipi(target_cpu as u32, LocalInterruptType::Software);
+}
+
 pub fn get_cpu() -> &'static mut Aarch64 {
     // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
     let tpidr_el1: usize;
@@ -490,11 +522,28 @@ pub fn get_cpu() -> &'static mut Aarch64 {
     return unsafe { transmute(tpidr_el1) };
 }
 
-pub fn set_next_mode(_mode: crate::arch::Mode) {
-    // AArch64 return mode is currently chosen in the trampoline (`_switch_to_user`).
-    // Keep this as a no-op so shared scheduler code can call it without
-    // architecture-specific branching or noisy TODO logs.
-    let _ = _mode;
+pub fn set_next_mode(mode: crate::arch::Mode) {
+    let spsr = target_spsr_for_mode(mode);
+    // SAFETY: writing SPSR_EL1 only affects the exception-return EL.
+    unsafe {
+        core::arch::asm!("msr spsr_el1, {0}", in(reg) spsr);
+    }
+}
+
+pub fn is_privileged_return_mode(spsr: u64) -> bool {
+    matches!(spsr & 0xF, 0x5 | 0x9)
+}
+
+fn target_spsr_for_mode(mode: crate::arch::Mode) -> u64 {
+    const SPSR_EL0T: u64 = 0x0;
+    const SPSR_EL1H: u64 = 0x5;
+    const SPSR_EL2H: u64 = 0x9;
+
+    match mode {
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel if is_vhe_enabled() => SPSR_EL2H,
+        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel => SPSR_EL1H,
+        _ => SPSR_EL0T,
+    }
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.

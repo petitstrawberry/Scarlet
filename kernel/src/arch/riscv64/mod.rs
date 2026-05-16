@@ -15,6 +15,7 @@ use crate::early_println;
 use crate::environment::MAX_NUM_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::sched::scheduler::get_task_by_id;
 use crate::task::Task;
 
 pub mod boot;
@@ -42,6 +43,13 @@ pub use registers::IntRegisters;
 use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
+
+/// Per-CPU initialization for secondary CPUs.
+///
+/// Configures trap vectors, FPU, and vector extension for the given hart.
+pub fn init_ap_cpu(cpu_id: usize) {
+    boot::init_cpu(cpu_id);
+}
 
 /// Per-hart ownership of the live Vector register file.
 ///
@@ -112,13 +120,10 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // the trap handler will mark the task as used and re-enable the extension.
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let (current_task_ptr, current_task_id, owner_task_ptr, owner_id, owner_dirty) = {
-        let sched = crate::sched::scheduler::get_scheduler();
-        let Some(current_task_id) = sched.get_current_task_id(cpu_id) else {
+        let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
             return;
         };
-        let Some(current_task_ptr) = sched
-            .get_task_by_id(current_task_id)
-            .map(|t| t as *mut Task)
+        let Some(current_task_ptr) = get_task_by_id(current_task_id).map(|t| t as *const Task)
         else {
             return;
         };
@@ -127,7 +132,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
         let owner_dirty = get_vector_owner_dirty(cpu_id);
         let owner_task_ptr =
             if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-                sched.get_task_by_id(owner_id).map(|t| t as *mut Task)
+                get_task_by_id(owner_id).map(|t| t as *const Task)
             } else {
                 None
             };
@@ -141,7 +146,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
         )
     };
 
-    let task = unsafe { &mut *current_task_ptr };
+    let task = unsafe { &*current_task_ptr };
 
     if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
@@ -163,7 +168,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // been saved, save it now before we clobber vregs with our restore.
     if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
         if let Some(owner_ptr) = owner_task_ptr {
-            let owner_task = unsafe { &mut *owner_ptr };
+            let owner_task = unsafe { &*owner_ptr };
             if owner_task.vcpu.lock().vector.is_none() {
                 owner_task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
                     crate::arch::riscv64::fpu::VectorContext::new(),
@@ -201,7 +206,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
 /// This avoids bootstrapping the first user entry via a timer IRQ.
 /// The function prepares trampoline-visible per-CPU state and then
 /// jumps to the trampoline exit path which performs `sret` into user mode.
-pub fn first_switch_to_user(task: &mut Task) -> ! {
+pub fn first_switch_to_user(task: &Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
@@ -227,11 +232,8 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     cpu.set_next_address_space(task.vm_manager.get_asid());
 
     // Populate the trapframe from the task VCPU state.
-    let task_ptr = task as *mut Task;
-    unsafe {
-        let trapframe = (*task_ptr).get_trapframe();
-        (*task_ptr).vcpu.lock().switch(trapframe);
-    }
+    let trapframe = task.get_trapframe();
+    task.vcpu.lock().switch(trapframe);
 
     // Ensure the next return is to the correct privilege mode.
     set_next_mode(task.vcpu.lock().get_mode());
@@ -493,6 +495,10 @@ pub fn disable_interrupt() {
         "
         );
     }
+}
+
+pub fn send_reschedule_ipi(target_cpu: usize) {
+    instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
 }
 
 /// Full memory barrier for normal memory (RAM).

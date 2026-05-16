@@ -45,7 +45,7 @@ use crate::drivers::usb::xhci::registers::{RegisterSpace, capability, operationa
 use crate::drivers::usb::xhci::ring::{DmaTrbRing, EventRing};
 use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::early_println;
-use crate::interrupt::{InterruptId, InterruptManager};
+use crate::interrupt::InterruptId;
 use crate::mem::page::ContiguousPages;
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
@@ -547,7 +547,8 @@ impl XhciController {
             );
         }
 
-        InterruptManager::with_manager(|mgr| mgr.enable_external_interrupt(interrupt_id, 0))
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
             .map_err(|_| "Failed to enable xHCI interrupt")
     }
 
@@ -1457,10 +1458,9 @@ pub fn bind_xhci_mmio(
 
     if let Some(interrupt_id) = interrupt {
         controller.enable_interrupts(interrupt_id)?;
-        InterruptManager::with_manager(|mgr| {
-            mgr.register_interrupt_device(interrupt_id, controller.clone())
-        })
-        .map_err(|_| "Failed to register xHCI interrupt device")?;
+        crate::interrupt::InterruptManager::global()
+            .register_interrupt_device(interrupt_id, controller.clone())
+            .map_err(|_| "Failed to register xHCI interrupt device")?;
         early_println!("[xHCI] Registered IRQ {}", interrupt_id);
     } else {
         early_println!("[xHCI] No interrupt provided for platform controller");

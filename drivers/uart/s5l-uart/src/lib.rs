@@ -21,7 +21,7 @@ use scarlet::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager, InterruptResult},
+    interrupt::{InterruptId, InterruptResult},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     traits::serial::Serial,
 };
@@ -116,7 +116,7 @@ impl S5lUart {
         let ucon = self.reg_read(UCON);
         self.reg_write(UCON, ucon | UCON_RXTHRESH_ENA | UCON_RXTO_ENA);
 
-        InterruptManager::with_manager(|mgr| mgr.enable_external_interrupt(interrupt_id, 0))
+        scarlet::interrupt::enable_external_interrupt(interrupt_id, 0)
             .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
@@ -370,9 +370,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         } else {
             scarlet::early_println!("[S5L] probe: interrupts enabled");
 
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(interrupt_id, uart.clone())
-            }) {
+            if let Err(e) =
+                scarlet::interrupt::register_interrupt_device(interrupt_id, uart.clone())
+            {
                 scarlet::early_println!("[S5L] probe: failed to register interrupt device: {}", e);
             } else {
                 scarlet::early_println!("[S5L] probe: interrupt device registered");

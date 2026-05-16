@@ -15,17 +15,24 @@ use core::arch::asm;
 
 use crate::environment::MAX_NUM_CPUS;
 use crate::interrupt::controllers::{LocalInterruptController, LocalInterruptType};
-use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
+use crate::interrupt::{CpuId, InterruptError, InterruptResult};
 
 /// CNTV_CTL_EL0 bit definitions
 const CNTV_CTL_ENABLE: u64 = 1 << 0;
 const CNTV_CTL_IMASK: u64 = 1 << 1;
 const CNTV_CTL_ISTATUS: u64 = 1 << 2;
 
-/// QEMU virt / ARM Generic Timer: Virtual Timer PPI is 27.
+/// Timer PPI number.
 ///
-/// We keep this as a constant so the IRQ handler can cheaply sanity-check timer pending state.
-pub const CNTV_PPI_IRQ: u32 = 27;
+/// EL1: Virtual Timer PPI 27.
+/// EL2 VHE: EL2 Physical Timer (CNTHP) PPI 26, reserving the virtual timer for guests.
+pub fn timer_ppi_irq() -> u32 {
+    if crate::arch::aarch64::is_vhe_enabled() {
+        26
+    } else {
+        27
+    }
+}
 
 #[inline]
 fn read_cntfrq_el0() -> u64 {
@@ -37,44 +44,52 @@ fn read_cntfrq_el0() -> u64 {
 }
 
 #[inline]
-fn read_cntvct_el0() -> u64 {
+fn read_counter() -> u64 {
     let v: u64;
     unsafe {
-        asm!("mrs {0}, cntvct_el0", out(reg) v, options(nostack));
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("mrs {0}, cntpct_el0", out(reg) v, options(nostack));
+        } else {
+            asm!("mrs {0}, cntvct_el0", out(reg) v, options(nostack));
+        }
     }
     v
 }
 
 #[inline]
-fn read_cntv_ctl_el0() -> u64 {
+fn read_timer_ctl() -> u64 {
     let v: u64;
     unsafe {
-        asm!("mrs {0}, cntv_ctl_el0", out(reg) v, options(nostack));
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("mrs {0}, cntp_ctl_el0", out(reg) v, options(nostack));
+        } else {
+            asm!("mrs {0}, cntv_ctl_el0", out(reg) v, options(nostack));
+        }
     }
     v
 }
 
 #[inline]
-fn write_cntv_ctl_el0(v: u64) {
+fn write_timer_ctl(v: u64) {
     unsafe {
-        asm!(
-            "msr cntv_ctl_el0, {0}",
-            "isb",
-            in(reg) v,
-            options(nostack)
-        );
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("msr cntp_ctl_el0, {0}", in(reg) v, options(nostack));
+        } else {
+            asm!("msr cntv_ctl_el0, {0}", in(reg) v, options(nostack));
+        }
+        asm!("isb", options(nostack));
     }
 }
 
 #[inline]
-fn write_cntv_cval_el0(v: u64) {
+fn write_timer_cval(v: u64) {
     unsafe {
-        asm!(
-            "msr cntv_cval_el0, {0}",
-            "isb",
-            in(reg) v,
-            options(nostack)
-        );
+        if crate::arch::aarch64::is_vhe_enabled() {
+            asm!("msr cntp_cval_el0, {0}", in(reg) v, options(nostack));
+        } else {
+            asm!("msr cntv_cval_el0, {0}", in(reg) v, options(nostack));
+        }
+        asm!("isb", options(nostack));
     }
 }
 
@@ -89,22 +104,22 @@ impl ArmGenericTimer {
     }
 
     pub fn is_timer_pending() -> bool {
-        (read_cntv_ctl_el0() & CNTV_CTL_ISTATUS) != 0
+        (read_timer_ctl() & CNTV_CTL_ISTATUS) != 0
     }
 
     fn enable_timer_interrupt() {
         // Enable timer and unmask interrupt.
-        let mut ctl = read_cntv_ctl_el0();
+        let mut ctl = read_timer_ctl();
         ctl |= CNTV_CTL_ENABLE;
         ctl &= !CNTV_CTL_IMASK;
-        write_cntv_ctl_el0(ctl);
+        write_timer_ctl(ctl);
     }
 
     fn disable_timer_interrupt() {
         // Mask timer interrupt; keep ENABLE as-is.
-        let mut ctl = read_cntv_ctl_el0();
+        let mut ctl = read_timer_ctl();
         ctl |= CNTV_CTL_IMASK;
-        write_cntv_ctl_el0(ctl);
+        write_timer_ctl(ctl);
     }
 }
 
@@ -116,7 +131,7 @@ impl LocalInterruptController for ArmGenericTimer {
     }
 
     fn enable_interrupt(
-        &mut self,
+        &self,
         _cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -130,7 +145,7 @@ impl LocalInterruptController for ArmGenericTimer {
     }
 
     fn disable_interrupt(
-        &mut self,
+        &self,
         _cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -163,7 +178,7 @@ impl LocalInterruptController for ArmGenericTimer {
         }
     }
 
-    fn send_software_interrupt(&mut self, _target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&self, _target_cpu: CpuId) -> InterruptResult<()> {
         Err(InterruptError::NotSupported)
     }
 
@@ -171,14 +186,14 @@ impl LocalInterruptController for ArmGenericTimer {
         Err(InterruptError::NotSupported)
     }
 
-    fn set_timer(&mut self, _cpu_id: CpuId, time: u64) -> InterruptResult<()> {
+    fn set_timer(&self, _cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         // Program absolute compare value.
-        write_cntv_cval_el0(time);
+        write_timer_cval(time);
         Ok(())
     }
 
     fn get_time(&self) -> u64 {
-        read_cntvct_el0()
+        read_counter()
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
@@ -192,9 +207,8 @@ unsafe impl Sync for ArmGenericTimer {}
 fn register_local_timer_controller() {
     // Register for all CPUs that Scarlet is configured to support.
     let controller = alloc::boxed::Box::new(ArmGenericTimer::new());
-    let _ = InterruptManager::with_manager(|mgr| {
-        mgr.register_local_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId))
-    });
+    let _ = crate::interrupt::InterruptManager::global()
+        .register_local_controller_for_range(controller, 0..(MAX_NUM_CPUS as CpuId));
 }
 
 crate::early_initcall!(register_local_timer_controller);

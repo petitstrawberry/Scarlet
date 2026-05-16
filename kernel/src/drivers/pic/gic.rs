@@ -13,11 +13,12 @@ use crate::{
     },
     driver_initcall, early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::{ExternalInterruptController, LocalInterruptType},
     },
 };
 use alloc::{boxed::Box, vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// GIC Distributor register offsets
 const GICD_CTLR: usize = 0x0000; // Distributor Control Register
@@ -65,7 +66,7 @@ pub struct Gic {
     ///
     /// GICv2 requires writing the same value returned by GICC_IAR back to
     /// GICC_EOIR to complete the interrupt (it includes CPUID bits).
-    last_iar: [u32; MAX_CPUS as usize],
+    last_iar: [AtomicU32; MAX_CPUS as usize],
 }
 
 impl Gic {
@@ -88,7 +89,7 @@ impl Gic {
             cpu_base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
-            last_iar: [0; MAX_CPUS as usize],
+            last_iar: core::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
 
@@ -192,7 +193,7 @@ impl Gic {
             }
 
             // Pre-enable the virtual timer PPI (ID 27).
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
+            let timer_ppi = crate::drivers::pic::arm_generic_timer::timer_ppi_irq();
             let timer_ppi_bit = 1u32 << timer_ppi;
             mmio::write32(self.dist_reg_addr(GICD_ISENABLER), timer_ppi_bit);
 
@@ -239,7 +240,7 @@ impl Gic {
         // [14:0] INTID
         let cpu_target_list = 1u32 << (target_cpu_id + 16);
         let int_id = match ipi_type {
-            LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
+            LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::timer_ppi_irq(),
             LocalInterruptType::Software => 0, // Software Generated Interrupt
             LocalInterruptType::External => 1, // Software Generated Interrupt
         };
@@ -269,19 +270,11 @@ impl Gic {
 
 impl ExternalInterruptController for Gic {
     fn init(&mut self) -> InterruptResult<()> {
-        // Initialize distributor
         self.init_distributor();
-
-        // Ensure the CPU interface is enabled for the boot CPU so PPIs/IRQs can be delivered.
-        self.init_cpu_interface(0);
         Ok(())
     }
 
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -313,11 +306,7 @@ impl ExternalInterruptController for Gic {
         Ok(())
     }
 
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        _cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, _cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
 
         // Disable the interrupt
@@ -370,7 +359,7 @@ impl ExternalInterruptController for Gic {
         Ok(threshold as Priority)
     }
 
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         // Read interrupt acknowledge register
@@ -378,7 +367,7 @@ impl ExternalInterruptController for Gic {
         let iar = unsafe { mmio::read32(iar_addr) };
 
         // Remember the raw acknowledge value for correct EOI later.
-        self.last_iar[cpu_id as usize] = iar;
+        self.last_iar[cpu_id as usize].store(iar, Ordering::Relaxed);
 
         // Extract interrupt ID (bits 0-9)
         let interrupt_id = iar & 0x3FF;
@@ -397,11 +386,7 @@ impl ExternalInterruptController for Gic {
         }
     }
 
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -409,12 +394,12 @@ impl ExternalInterruptController for Gic {
         let eoir_addr = self.cpu_reg_addr(cpu_id, GICC_EOIR);
         unsafe {
             // GICv2 expects the raw value read from GICC_IAR (includes CPUID bits).
-            let iar = self.last_iar[cpu_id as usize];
+            let iar = self.last_iar[cpu_id as usize].load(Ordering::Relaxed);
             let eoi_value = if iar != 0 { iar } else { interrupt_id };
             mmio::write32(eoir_addr, eoi_value);
         }
 
-        self.last_iar[cpu_id as usize] = 0;
+        self.last_iar[cpu_id as usize].store(0, Ordering::Relaxed);
 
         Ok(())
     }
@@ -439,6 +424,15 @@ impl ExternalInterruptController for Gic {
 
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
+    }
+
+    fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
+        self.send_ipi(target_cpu_id, ipi_type)
+    }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.init_cpu_interface(cpu_id);
+        Ok(())
     }
 }
 
@@ -506,7 +500,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // TODO: Parse actual interrupt count and CPU count from device tree
     let max_interrupts = 256; // Typical value
-    let max_cpus = 4; // Typical value
+    let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
     let gic = Box::new(Gic::new(
         dist_base_addr,
@@ -515,17 +509,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         max_cpus,
     ));
 
-    // Register with interrupt manager
-    InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(gic)
-            .map_err(|_| "Failed to register GIC")?;
-        Ok(())
-    })?;
+    crate::interrupt::InterruptManager::global()
+        .register_external_controller(gic)
+        .map_err(|_| "Failed to register GIC")?;
 
     crate::arch::interrupt::configure_timer_interrupt_route(
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
-        Some(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ),
+        Some(crate::drivers::pic::arm_generic_timer::timer_ppi_irq()),
     );
 
     Ok(())

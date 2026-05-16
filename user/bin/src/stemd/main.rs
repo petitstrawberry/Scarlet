@@ -12,7 +12,7 @@
 
 extern crate scarlet_std as std;
 
-use core::{hint::spin_loop, sync::atomic::fence};
+use core::sync::atomic::fence;
 use sbus_client as sbus;
 use std::{
     format,
@@ -94,9 +94,20 @@ struct RunningApp {
     exec_path: String,
 }
 
+/// Running service tracking
+#[derive(Debug, Clone)]
+struct RunningService {
+    name: String,
+    pid: i32,
+    exec_path: String,
+}
+
 // Global tracking for running applications
 // Thread-safe using Mutex (static, not mutable)
 static RUNNING_APPS: Mutex<Vec<RunningApp>> = Mutex::new(Vec::new());
+
+// Global tracking for running services
+static RUNNING_SERVICES: Mutex<Vec<RunningService>> = Mutex::new(Vec::new());
 
 // Global sbus connection for receiving method calls
 // Wrapped in Option to handle initialization
@@ -281,6 +292,23 @@ fn remove_running_app_by_pid(pid: i32) -> bool {
 fn find_running_app(app_id: &str) -> Option<RunningApp> {
     let apps = RUNNING_APPS.lock();
     apps.iter().find(|app| app.app_id == app_id).cloned()
+}
+
+fn add_running_service(name: String, pid: i32, exec_path: String) {
+    let mut services = RUNNING_SERVICES.lock();
+    services.push(RunningService {
+        name,
+        pid,
+        exec_path,
+    });
+}
+
+fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
+    let mut services = RUNNING_SERVICES.lock();
+    services
+        .iter()
+        .position(|service| service.pid == pid)
+        .map(|pos| services.remove(pos))
 }
 
 /// Focus a window by app_id
@@ -686,6 +714,11 @@ fn launch_service(service: &Service) -> Result<i32, &'static str> {
         }
         pid => {
             // println!("stemd: Service {} started with PID: {}", service.name, pid);
+            add_running_service(service.name.clone(), pid, service.exec.clone());
+            println!(
+                "stemd: Service '{}' launched with PID={} exec={}",
+                service.name, pid, service.exec
+            );
             Ok(pid)
         }
     }
@@ -1563,15 +1596,6 @@ tty = "/dev/tty0"
         }
     }
 
-    // Start idle thread early so sbusd can run
-    println!("stemd: Starting idle thread");
-    let _idle = thread::spawn(|| {
-        loop {
-            scarlet_std::thread::yield_now();
-            spin_loop();
-        }
-    });
-
     // Phase 2: Register with sbus (now that sbusd should be running)
     println!("stemd: Registering with sbus...");
     let mut registered = false;
@@ -1690,6 +1714,17 @@ tty = "/dev/tty0"
         if pid < 0 {
             continue;
         }
-        println!("stemd: Reaped child PID={} status={}", pid, status);
+        if let Some(service) = remove_running_service_by_pid(pid) {
+            println!(
+                "stemd: Reaped service PID={} status={} name={} exec={}",
+                pid, status, service.name, service.exec_path
+            );
+            continue;
+        }
+        if remove_running_app_by_pid(pid) {
+            println!("stemd: Reaped app PID={} status={}", pid, status);
+            continue;
+        }
+        println!("stemd: Reaped unknown child PID={} status={}", pid, status);
     }
 }

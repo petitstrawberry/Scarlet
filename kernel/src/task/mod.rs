@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cell::UnsafeCell, sync::atomic};
+use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
@@ -32,7 +33,10 @@ use crate::{
     ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
     object::handle::HandleTable,
-    sched::scheduler::{Scheduler, get_scheduler},
+    sched::scheduler::{
+        current_task, finalize_zombie, get_all_task_ids, get_task_by_id, remove_from_ready_queues,
+        schedule, setup_task_execution, unmark_blocked,
+    },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
         addr::{phys_to_virt, virt_to_phys},
@@ -43,8 +47,53 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
+
+/// Lock type used for the architecture kernel context.
+///
+/// The scheduler needs a stable raw pointer to this context while performing
+/// low-level context switches. `SpinMutex` exposes `as_mut_ptr()` for that
+/// scheduler-only path, while normal setup code still uses `lock()`.
+pub type KernelContextMutex = SpinMutex<KernelContext>;
+
+/// Snapshot of task state exposed to user space via the `GetTaskInfo` syscall.
+///
+/// This is a fixed-size, `#[repr(C)]` structure so that the kernel and user
+/// library can agree on the layout without sharing a header.
+///
+/// Future fields can be appended without breaking backward compatibility
+/// (user space simply reads fewer bytes on older kernels).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TaskInfo {
+    /// Namespace-local PID visible to user space.
+    pub pid: usize,
+    /// Namespace-local parent PID (0 if none).
+    pub ppid: usize,
+    /// Task state as a discriminant (see `TaskState::to_u8`):
+    ///   0 = NotInitialized, 1 = Ready, 2 = Running,
+    ///   3 = Blocked(Interruptible), 4 = Blocked(Uninterruptible),
+    ///   5 = Zombie, 6 = Terminated.
+    pub state: u8,
+    /// Task type: 0 = Kernel, 1 = User.
+    pub task_type: u8,
+    /// CPU the task last ran on (MAX_CPU = no CPU).
+    pub cpu_id: u8,
+    /// Reserved for future use.
+    pub _reserved: u8,
+    /// Exit status (meaningful only when `state == Zombie`).
+    pub exit_status: i32,
+    /// Thread-group ID (process ID for multi-threaded tasks).
+    pub tgid: usize,
+    /// Null-terminated task name (truncated to fit).
+    pub name: [u8; 64],
+}
+
+impl TaskInfo {
+    /// Maximum task name length (excluding null terminator).
+    pub const NAME_CAP: usize = 63;
+}
 
 /// Global registry of task-specific wakers for waitpid
 static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
@@ -330,7 +379,7 @@ impl<T> TaskLocal<T> {
     #[inline]
     pub unsafe fn get(&self) -> &T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &*self.inner.get()
+        unsafe { &*self.inner.get() }
     }
 
     /// Get a mutable reference to the contained value.
@@ -343,7 +392,7 @@ impl<T> TaskLocal<T> {
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut(&self) -> &mut T {
         // SAFETY: Upheld by caller (single-hart-per-task invariant).
-        &mut *self.inner.get()
+        unsafe { &mut *self.inner.get() }
     }
 }
 
@@ -356,7 +405,7 @@ pub struct Task {
     namespace: RwLock<Arc<namespace::TaskNamespace>>,
     pub task_type: TaskType,
     pub entry: usize,
-    parent_id: Option<usize>,
+    parent_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
     /// Task Group ID - for job control and signal delivery (e.g., pipeline members)
@@ -420,7 +469,7 @@ pub struct Task {
     /// VCPU state for context switching
     pub vcpu: Mutex<Vcpu>,
     /// Kernel context for context switching
-    pub kernel_context: Mutex<KernelContext>,
+    pub kernel_context: KernelContextMutex,
     /// Virtual memory manager (already thread-safe internally)
     pub vm_manager: VirtualMemoryManager,
     /// Default ABI module (task-local: only accessed by the executing hart)
@@ -433,6 +482,12 @@ pub struct Task {
     pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
     pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
+    pub pinned_cpu: Option<usize>,
+    pub last_cpu: atomic::AtomicUsize,
+    /// CPU that currently "owns" this task (has saved its context or is
+    /// actively running it). `usize::MAX` means unowned / available.
+    /// Used as a CAS claim token to prevent double-scheduling on SMP.
+    pub running_cpu: atomic::AtomicUsize,
 
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
@@ -529,7 +584,7 @@ impl Task {
             namespace: RwLock::new(ns),
             task_type,
             entry: 0,
-            parent_id: None,
+            parent_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
@@ -557,13 +612,16 @@ impl Task {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
                 TaskType::User => crate::arch::Mode::User,
             })),
-            kernel_context: Mutex::new(KernelContext::new()),
+            kernel_context: KernelContextMutex::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: Mutex::new(None),
+            pinned_cpu: None,
+            last_cpu: atomic::AtomicUsize::new(0),
+            running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
             event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: Mutex::new(true),
@@ -1072,15 +1130,18 @@ impl Task {
     /// # Returns
     /// The parent task ID, or None if there is no parent
     pub fn get_parent_id(&self) -> Option<usize> {
-        self.parent_id
+        match self.parent_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
     }
 
     /// Set the parent task
     ///
     /// # Arguments
     /// * `parent_id` - The ID of the parent task
-    pub fn set_parent_id(&mut self, parent_id: usize) {
-        self.parent_id = Some(parent_id);
+    pub fn set_parent_id(&self, parent_id: usize) {
+        self.parent_id.store(parent_id, Ordering::SeqCst);
     }
 
     /// Add a child task
@@ -1484,10 +1545,8 @@ impl Task {
         if child.get_kernel_stack_window_base().is_none() {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
-        // Set the state to Ready
-        child
-            .state
-            .store(self.state.load(Ordering::SeqCst), Ordering::SeqCst);
+        // Cloned task starts as Ready regardless of parent's current state
+        child.state.store(TaskState::Ready, Ordering::SeqCst);
 
         // NOTE: Parent-child relationship will be established AFTER add_task()
         // when the child has a valid ID. The caller is responsible for calling:
@@ -1523,9 +1582,9 @@ impl Task {
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
 
-        match self.parent_id {
+        match self.get_parent_id() {
             Some(parent_id) => {
-                if get_scheduler().get_task_by_id(parent_id).is_none() {
+                if get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state.store(TaskState::Terminated, Ordering::SeqCst);
                     return;
@@ -1547,13 +1606,18 @@ impl Task {
         // Task cleanup completed - ABI module handles event cleanup
 
         if mytask().is_none() || mytask().unwrap().get_id() != self.id {
-            // Not the current task, nothing more to do
+            // Non-current task: finalize zombie state manually
+            // (current task path goes through schedule() -> pick_next -> finalize_zombie)
+            if matches!(self.state.load(Ordering::SeqCst), TaskState::Zombie) {
+                unmark_blocked(self.id);
+                finalize_zombie(self.id, self.get_parent_id());
+            }
             return;
         }
 
         // The scheduler will handle saving the current task state internally
         if let Some(current_task) = mytask() {
-            get_scheduler().schedule(current_task.get_trapframe());
+            schedule(current_task.get_trapframe());
         }
     }
 
@@ -1574,8 +1638,7 @@ impl Task {
         let my_id = self.id;
 
         // Get all task IDs in the system
-        let scheduler = get_scheduler();
-        let all_task_ids = scheduler.get_all_task_ids();
+        let all_task_ids = get_all_task_ids();
 
         // Terminate all tasks with the same thread group ID (except self)
         for task_id in all_task_ids {
@@ -1583,7 +1646,7 @@ impl Task {
                 continue; // Skip self
             }
 
-            if let Some(task) = scheduler.get_task_by_id(task_id) {
+            if let Some(task) = get_task_by_id(task_id) {
                 if task.get_thread_group_id() == thread_group_id {
                     // Terminate this thread group member
                     crate::println!(
@@ -1604,6 +1667,8 @@ impl Task {
                         // Close handles to prevent resource leaks
                         (*task_ptr).handle_table.close_all();
                     }
+                    remove_from_ready_queues(task_id);
+                    unmark_blocked(task_id);
                 }
             }
         }
@@ -1625,7 +1690,7 @@ impl Task {
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
-        if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
+        if let Some(child_task) = get_task_by_id(child_id) {
             if child_task.get_state() == TaskState::Zombie {
                 let status = child_task.get_exit_status().unwrap_or(-1);
                 child_task.set_state(TaskState::Terminated);
@@ -1658,7 +1723,7 @@ impl Task {
 
         impl TimerHandler for SleepWakerHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
+                if let Some(task) = get_task_by_id(self.task_id) {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
                     // Memory barrier to ensure state change is visible
@@ -1985,7 +2050,7 @@ pub fn mytask() -> Option<&'static Task> {
     }
 
     let cpu = get_cpu();
-    get_scheduler().get_current_task(cpu.get_cpuid())
+    current_task(cpu.get_cpuid())
 }
 
 /// Set the current working directory for the current task via VfsManager
@@ -2015,13 +2080,58 @@ pub fn set_current_task_cwd(path: String) -> bool {
 /// This function is called when a task is first scheduled.
 pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
-    let current_task = unsafe {
-        get_scheduler()
-            .get_current_task_mut(cpu.get_cpuid())
-            .unwrap()
-    };
-    Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user(current_task.get_trapframe());
+    crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
+    if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            let vcpu = current_task.vcpu.lock();
+            crate::println!(
+                "[SMPDBG task-entry] cpu={} task={} name={} type={:?} state={:?} running_cpu={} last_cpu={} pc={:#x} mode={:?}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+                current_task.task_type,
+                current_task.state.load(Ordering::SeqCst),
+                current_task.running_cpu.load(Ordering::SeqCst),
+                current_task.last_cpu.load(Ordering::SeqCst),
+                vcpu.get_pc(),
+                vcpu.get_mode(),
+            );
+        }
+        if current_task.task_type == TaskType::Kernel {
+            let entry = current_task.vcpu.lock().get_pc();
+            // SAFETY: `new_kernel_task` stores a valid `fn()` entry pointer in
+            // the kernel-mode VCPU PC before the task is made runnable.
+            let entry: fn() = unsafe { core::mem::transmute(entry as usize) };
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG task-entry-kernel-jump] cpu={} task={} entry={:#x}",
+                    cpu.get_cpuid(),
+                    current_task.get_id(),
+                    entry as usize,
+                );
+            }
+            entry();
+            current_task.exit(0);
+            loop {
+                crate::arch::instruction::idle();
+            }
+        }
+
+        if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+            crate::println!(
+                "[SMPDBG task-entry-user-jump] cpu={} task={} name={}",
+                cpu.get_cpuid(),
+                current_task.get_id(),
+                current_task.name.read().as_str(),
+            );
+        }
+        setup_task_execution(cpu, current_task);
+        arch_switch_to_user(current_task.get_trapframe());
+    }
+
+    loop {
+        crate::arch::instruction::idle();
+    }
 }
 
 #[cfg(test)]
@@ -2030,6 +2140,7 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
+    use crate::sched::scheduler::{add_task, get_task_by_id, reset};
     use crate::task::CloneFlags;
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
@@ -2051,8 +2162,7 @@ mod tests {
     #[test_case]
     fn test_task_parent_child_relationship() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
@@ -2061,33 +2171,33 @@ mod tests {
         child_task.init();
 
         // Add tasks to scheduler to allocate IDs
-        let parent_id = scheduler.add_task(parent_task, 0);
-        let child_id = scheduler.add_task(child_task, 0);
+        let parent_id = add_task(parent_task, 0);
+        let child_id = add_task(child_task, 0);
 
         // Set parent-child relationship using allocated IDs
         // We need to do this sequentially due to borrow checker
         {
-            let child_task = scheduler.get_task_by_id(child_id).unwrap();
+            let child_task = get_task_by_id(child_id).unwrap();
             child_task.set_parent_id(parent_id);
         }
         {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent_task = get_task_by_id(parent_id).unwrap();
             parent_task.add_child(child_id);
         }
 
         // Verify parent-child relationship
         {
-            let child_task = scheduler.get_task_by_id(child_id).unwrap();
+            let child_task = get_task_by_id(child_id).unwrap();
             assert_eq!(child_task.get_parent_id(), Some(parent_id));
         }
         {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent_task = get_task_by_id(parent_id).unwrap();
             assert!(parent_task.get_children().contains(&child_id));
         }
 
         // Remove child and verify
         {
-            let parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent_task = get_task_by_id(parent_id).unwrap();
             assert!(parent_task.remove_child(child_id));
             assert!(!parent_task.get_children().contains(&child_id));
         }
@@ -2112,8 +2222,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_memory_copy() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
         parent_task.init();
@@ -2168,53 +2277,52 @@ mod tests {
         let child_page_allocations_len = child_task.page_allocations.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let parent_id = scheduler.add_task(parent_task, 0);
-        let child_id = scheduler.add_task(child_task, 0);
+        let parent_id = add_task(parent_task, 0);
+        let child_id = add_task(child_task, 0);
 
         // Establish parent-child relationship
         {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.set_parent_id(parent_id);
         }
         {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.add_child(child_id);
         }
 
         // Verify parent-child relationship was established (in separate scopes)
         {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             assert_eq!(child.get_parent_id(), Some(parent_id));
         }
         {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             assert!(parent.get_children().contains(&child_id));
         }
 
         // Get references for further verification (in separate scopes)
         let child_stack_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.stack_size.load(Ordering::SeqCst)
         };
         let child_data_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.data_size.load(Ordering::SeqCst)
         };
         let child_text_size = {
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.text_size.load(Ordering::SeqCst)
         };
         let parent_stack_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.stack_size.load(Ordering::SeqCst)
         };
         let parent_data_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.data_size.load(Ordering::SeqCst)
         };
         let parent_text_size = {
-            let parent = scheduler.get_task_by_id(parent_id).unwrap();
+            let parent = get_task_by_id(parent_id).unwrap();
             parent.text_size.load(Ordering::SeqCst)
         };
 
@@ -2226,7 +2334,7 @@ mod tests {
         // Find the corresponding memory map in child that matches our test allocation
         let child_mmap = {
             let mut found = None;
-            let child = scheduler.get_task_by_id(child_id).unwrap();
+            let child = get_task_by_id(child_id).unwrap();
             child.vm_manager.with_memmaps(|mm| {
                 for m in mm.values() {
                     if m.vmarea.start == vaddr
@@ -2299,8 +2407,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_stack_copy() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         let mut parent_task = super::new_user_task("ParentWithStack".to_string(), 0);
         parent_task.init();
@@ -2415,8 +2522,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_shared_memory() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use crate::environment::PAGE_SIZE;
         use crate::mem::page::allocate_raw_pages;
@@ -2532,8 +2638,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_with_clone_vm_shares_address_space() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use crate::environment::PAGE_SIZE;
 
@@ -2577,10 +2682,7 @@ mod tests {
     #[test_case]
     fn test_task_namespace_creation() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
+        reset();
 
         // Create task in root namespace
         let task = super::new_user_task("TestTask".to_string(), 0);
@@ -2588,23 +2690,17 @@ mod tests {
         assert!(task.get_namespace().is_root());
 
         // Add task to scheduler to allocate namespace ID
-        let task_id = scheduler.add_task(task, 0);
+        let task_id = add_task(task, 0);
 
         // Verify namespace-local ID was allocated
-        let ns_id = scheduler
-            .get_task_by_id(task_id)
-            .unwrap()
-            .get_namespace_id();
+        let ns_id = get_task_by_id(task_id).unwrap().get_namespace_id();
         assert!(ns_id >= 1); // Should start from 1
     }
 
     #[test_case]
     fn test_task_namespace_inheritance() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
+        reset();
 
         let mut parent = super::new_user_task("Parent".to_string(), 0);
         parent.init();
@@ -2619,27 +2715,19 @@ mod tests {
         );
 
         // Add both to scheduler to allocate namespace IDs
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let parent_id = scheduler.add_task(parent, 0);
-        let child_id = scheduler.add_task(child, 0);
+        let parent_id = add_task(parent, 0);
+        let child_id = add_task(child, 0);
 
         // But should have different namespace-local IDs
-        let parent_ns_id = scheduler
-            .get_task_by_id(parent_id)
-            .unwrap()
-            .get_namespace_id();
-        let child_ns_id = scheduler
-            .get_task_by_id(child_id)
-            .unwrap()
-            .get_namespace_id();
+        let parent_ns_id = get_task_by_id(parent_id).unwrap().get_namespace_id();
+        let child_ns_id = get_task_by_id(child_id).unwrap().get_namespace_id();
         assert_ne!(parent_ns_id, child_ns_id);
     }
 
     #[test_case]
     fn test_task_namespace_id_allocation() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
+        reset();
 
         use super::namespace;
 
@@ -2675,15 +2763,14 @@ mod tests {
         task3.init();
 
         // Add tasks to scheduler to allocate IDs
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        let id1 = scheduler.add_task(task1, 0);
-        let id2 = scheduler.add_task(task2, 0);
-        let id3 = scheduler.add_task(task3, 0);
+        let id1 = add_task(task1, 0);
+        let id2 = add_task(task2, 0);
+        let id3 = add_task(task3, 0);
 
         // All should have sequential namespace-local IDs
-        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
-        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
-        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        let ns_id1 = get_task_by_id(id1).unwrap().get_namespace_id();
+        let ns_id2 = get_task_by_id(id2).unwrap().get_namespace_id();
+        let ns_id3 = get_task_by_id(id3).unwrap().get_namespace_id();
         assert_eq!(ns_id1, 1);
         assert_eq!(ns_id2, 2);
         assert_eq!(ns_id3, 3);
@@ -2720,11 +2807,7 @@ mod tests {
     #[test_case]
     fn test_all_abis_share_root_namespace_by_default() {
         // Reset scheduler state before test
-        let scheduler = crate::sched::scheduler::get_scheduler();
-        scheduler.reset();
-
-        use super::namespace;
-        use alloc::vec::Vec;
+        reset();
 
         // Create tasks using default Task::new (which uses root namespace)
         let mut task1 = super::new_user_task("Task1".to_string(), 0);
@@ -2737,9 +2820,9 @@ mod tests {
         task3.init();
 
         // Add tasks to scheduler to allocate namespace IDs
-        let id1 = scheduler.add_task(task1, 0);
-        let id2 = scheduler.add_task(task2, 0);
-        let id3 = scheduler.add_task(task3, 0);
+        let id1 = add_task(task1, 0);
+        let id2 = add_task(task2, 0);
+        let id3 = add_task(task3, 0);
 
         // Verify all tasks have valid IDs after being added to scheduler
         assert_ne!(id1, 0, "Task ID should be non-zero after add_task");
@@ -2747,13 +2830,13 @@ mod tests {
         assert_ne!(id3, 0, "Task ID should be non-zero after add_task");
 
         // Get namespace IDs to verify (in separate scopes to avoid borrow issues)
-        let ns_id1 = scheduler.get_task_by_id(id1).unwrap().get_namespace_id();
+        let ns_id1 = get_task_by_id(id1).unwrap().get_namespace_id();
         assert_ne!(ns_id1, 0, "Namespace ID should be non-zero after add_task");
 
-        let ns_id2 = scheduler.get_task_by_id(id2).unwrap().get_namespace_id();
+        let ns_id2 = get_task_by_id(id2).unwrap().get_namespace_id();
         assert_ne!(ns_id2, 0, "Namespace ID should be non-zero after add_task");
 
-        let ns_id3 = scheduler.get_task_by_id(id3).unwrap().get_namespace_id();
+        let ns_id3 = get_task_by_id(id3).unwrap().get_namespace_id();
         assert_ne!(ns_id3, 0, "Namespace ID should be non-zero after add_task");
 
         // Verify namespace IDs are unique
@@ -2762,34 +2845,22 @@ mod tests {
 
         // Verify all tasks are in root namespace (in separate scopes)
         {
-            let task1 = scheduler.get_task_by_id(id1).unwrap();
+            let task1 = get_task_by_id(id1).unwrap();
             assert_eq!(task1.get_namespace().get_name(), "root");
         }
         {
-            let task2 = scheduler.get_task_by_id(id2).unwrap();
+            let task2 = get_task_by_id(id2).unwrap();
             assert_eq!(task2.get_namespace().get_name(), "root");
         }
         {
-            let task3 = scheduler.get_task_by_id(id3).unwrap();
+            let task3 = get_task_by_id(id3).unwrap();
             assert_eq!(task3.get_namespace().get_name(), "root");
         }
 
         // Verify all tasks share the same namespace instance
-        let ns1_id = scheduler
-            .get_task_by_id(id1)
-            .unwrap()
-            .get_namespace()
-            .get_id();
-        let ns2_id = scheduler
-            .get_task_by_id(id2)
-            .unwrap()
-            .get_namespace()
-            .get_id();
-        let ns3_id = scheduler
-            .get_task_by_id(id3)
-            .unwrap()
-            .get_namespace()
-            .get_id();
+        let ns1_id = get_task_by_id(id1).unwrap().get_namespace().get_id();
+        let ns2_id = get_task_by_id(id2).unwrap().get_namespace().get_id();
+        let ns3_id = get_task_by_id(id3).unwrap().get_namespace().get_id();
         assert_eq!(ns1_id, ns2_id, "All tasks should share root namespace");
         assert_eq!(ns2_id, ns3_id, "All tasks should share root namespace");
     }

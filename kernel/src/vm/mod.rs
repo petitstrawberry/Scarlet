@@ -37,7 +37,7 @@ use crate::environment::{
     KERNEL_HEAP_SIZE, KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START,
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::current_task;
 use crate::task::Task;
 use core::sync::atomic::Ordering;
 use spin::{Mutex, Once};
@@ -229,6 +229,7 @@ pub fn kernel_vm_init(
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
+    crate::arch::vm::save_kernel_page_table();
 
     // Initialize the ioremap subsystem now that the kernel VM manager and heap
     // are ready.  Device drivers call ioremap() to map their MMIO regions
@@ -623,9 +624,7 @@ pub fn switch_to_kernel_vm() {
 
 pub fn switch_to_user_vm(cpu: &mut Arch) {
     let cpu_id = cpu.get_cpuid();
-    let task = get_scheduler()
-        .get_current_task(cpu_id)
-        .expect("No current task found");
+    let task = current_task(cpu_id).expect("No current task found");
     let manager = &task.vm_manager;
     let root_page_table = manager
         .get_root_page_table()

@@ -20,6 +20,24 @@ static TAIL: AtomicUsize = AtomicUsize::new(0);
 
 pub static READER_WAKER: Waker = Waker::new_interruptible("kmsg");
 
+static PRINT_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+pub struct PrintGuard {
+    _irq_guard: crate::sync::irq_guard::IrqGuard,
+    _lock: spin::MutexGuard<'static, ()>,
+}
+
+impl PrintGuard {
+    pub fn acquire() -> Self {
+        let irq_guard = crate::sync::irq_guard::IrqGuard::new();
+        let lock = PRINT_LOCK.lock();
+        Self {
+            _irq_guard: irq_guard,
+            _lock: lock,
+        }
+    }
+}
+
 pub fn write_bytes(data: &[u8]) {
     let head = HEAD.load(Ordering::Relaxed);
     let mut pos = head;
@@ -41,7 +59,7 @@ pub fn write_bytes(data: &[u8]) {
 pub fn write_byte(b: u8) {
     let pos = HEAD.fetch_add(1, Ordering::Relaxed);
     BUF[pos % LOG_BUF_SIZE].store(b, Ordering::Relaxed);
-    READER_WAKER.wake_all();
+    // READER_WAKER.wake_all();
 
     let tail = TAIL.load(Ordering::Relaxed);
     if pos + 1 - tail > LOG_BUF_SIZE {

@@ -17,7 +17,7 @@ use scarlet::device::{
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use scarlet::driver_initcall;
-use scarlet::interrupt::{InterruptError, InterruptId, InterruptManager, InterruptResult};
+use scarlet::interrupt::{InterruptError, InterruptId, InterruptResult};
 use scarlet::vm;
 
 const REG_DATA_BASE: usize = 0x10_000;
@@ -228,12 +228,10 @@ impl ApplePinctrl {
                 irq_res.start as u32
             };
 
-            InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(irq_id, pinctrl.clone())
-            })
-            .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
+            scarlet::interrupt::register_interrupt_device(irq_id, pinctrl.clone())
+                .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
 
-            InterruptManager::with_manager(|mgr| mgr.enable_external_interrupt(irq_id, 0))
+            scarlet::interrupt::enable_external_interrupt(irq_id, 0)
                 .map_err(|_| "apple-pinctrl: failed to enable parent IRQ")?;
 
             pinctrl.parent_irqs.lock().push(irq_id);

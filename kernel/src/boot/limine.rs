@@ -2,7 +2,7 @@ use limine::BaseRevision;
 use limine::memmap;
 use limine::request::{
     DtbRequest, ExecutableAddressRequest, FramebufferRequest, FramebufferResponse, HhdmRequest,
-    MemmapRequest, MemmapResponse, ModulesRequest, ModulesResponse,
+    MemmapRequest, MemmapResponse, ModulesRequest, ModulesResponse, MpRequest, MpResponse,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -40,6 +40,10 @@ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 #[used]
 pub static MODULE_REQUEST: ModulesRequest = ModulesRequest::new();
+
+#[unsafe(link_section = ".limine_requests")]
+#[used]
+pub static MP_REQUEST: MpRequest = MpRequest::new(0);
 
 #[unsafe(link_section = ".limine_requests_end")]
 #[used]

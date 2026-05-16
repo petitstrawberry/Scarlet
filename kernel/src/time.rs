@@ -3,16 +3,17 @@
 //! This module provides time-related functionality for the kernel,
 //! including current time access for filesystem operations.
 
-use crate::timer::get_kernel_timer;
+use crate::timer::get_time_us;
 
 /// Get the current time in microseconds
 ///
 /// This function returns the current system time in microseconds since boot.
 /// For filesystem operations, this provides a monotonic timestamp.
 pub fn current_time() -> u64 {
-    // For now, use CPU 0's timer. In a multi-core system, this might need
-    // to be more sophisticated to get a consistent global timestamp.
-    get_kernel_timer().get_time_us(0)
+    // Use the current CPU's architected timer. The boot CPU is not guaranteed
+    // to be CPU 0, and the supported SMP platforms expose synchronized
+    // per-CPU timer counters.
+    get_time_us()
 }
 
 /// Get the current time in milliseconds

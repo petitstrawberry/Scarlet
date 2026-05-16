@@ -417,10 +417,9 @@ impl VirtioInputDevice {
         }
 
         // Enable interrupt in PLIC for CPU 0
-        crate::interrupt::InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0)
-        })
-        .map_err(|_| "Failed to enable interrupt in PLIC")?;
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to enable interrupt in PLIC")?;
 
         Ok(())
     }

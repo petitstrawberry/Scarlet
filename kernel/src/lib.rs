@@ -300,12 +300,11 @@ use crate::{
     device::graphics::manager::GraphicsManager,
     executor::executor::TransparentExecutor,
     fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager},
-    interrupt::InterruptManager,
 };
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, compiler_fence, fence};
 use mem::allocator::init_heap;
-use sched::scheduler::get_scheduler;
+use sched::scheduler::{add_task, get_task_by_id, start_scheduler};
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
@@ -403,6 +402,13 @@ pub struct BootInfo {
     /// Optional framebuffer physical memory area
     /// Used for early console output before graphics subsystem initialization
     pub framebuffer_paddr: Option<MemoryArea>,
+    /// Optional BSP hook to start secondary CPUs.
+    ///
+    /// Called by `start_kernel()` after all global one-time init is complete.
+    /// The BSP implementation wakes each secondary CPU and makes it call
+    /// `start_ap()` with the appropriate CPU ID. `None` for single-CPU or
+    /// test configurations.
+    pub start_secondary_cpus_hook: Option<fn()>,
 }
 
 impl BootInfo {
@@ -432,6 +438,7 @@ impl BootInfo {
         cmdline: Option<&'static str>,
         device_source: DeviceSource,
         framebuffer_paddr: Option<MemoryArea>,
+        start_secondary_cpus_hook: Option<fn()>,
     ) -> Self {
         Self {
             cpu_id,
@@ -443,6 +450,7 @@ impl BootInfo {
             cmdline,
             device_source,
             framebuffer_paddr,
+            start_secondary_cpus_hook,
         }
     }
 
@@ -660,7 +668,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Initialize interrupt controllers (stage 1) */
     early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
-    InterruptManager::get_manager().init_controllers();
+    crate::interrupt::InterruptManager::global().init_controllers();
+    crate::interrupt::InterruptManager::global()
+        .init_controllers_for_cpu(get_cpu().get_cpuid() as u32);
 
     fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
 
@@ -759,7 +769,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     /* Enable CPU interrupt reception (stage 2) */
     println!("[Scarlet Kernel] Enabling CPU interrupts...");
-    InterruptManager::get_manager().enable_cpu_interrupts();
+    crate::interrupt::enable_cpu_interrupts();
 
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 
@@ -767,12 +777,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[boot] Initializing timer...");
     // Initialize timer for the boot CPU (from BootInfo)
     get_kernel_timer().init(boot_info.cpu_id);
+    timer::set_global_timekeeper(boot_info.cpu_id);
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
     /* Initialize scheduler */
     println!("[boot] Initializing scheduler...");
-    let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
@@ -852,7 +862,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             println!("[Scarlet Kernel] Adding init task to scheduler...");
             let cpu_id = get_cpu().get_cpuid();
             println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
-            get_scheduler().add_task(task, cpu_id);
+            add_task(task, cpu_id);
             println!("[Scarlet Kernel] Init task added to scheduler");
         }
         Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
@@ -862,16 +872,30 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
     println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+
     // Use println here to avoid any potential console lock issues.
     println!("[Scarlet Kernel] Scheduler will start...");
     println!("[Scarlet Kernel] Calling start_scheduler()...");
 
-    let next_task_id = scheduler.start_scheduler();
+    let next_task_id = start_scheduler();
+    // Keep APs behind the release barrier until the BSP has claimed the
+    // first runnable task. Otherwise a fast AP can steal the init task from
+    // the BSP's ready queue before the boot CPU enters it, which makes early
+    // userspace startup nondeterministic on SMP systems. The BSP is not
+    // assumed to have CPU ID 0.
+    if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        hook();
+        fence(Ordering::SeqCst);
+    }
     if let Some(next_task_id) = next_task_id {
-        let next_task = scheduler
-            .get_task_by_id(next_task_id)
-            .expect("First runnable task must exist");
-        crate::arch::first_switch_to_user(next_task);
+        let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            crate::arch::first_switch_to_user(next_task);
+        }
     }
 
     println!("[Scarlet Kernel] No runnable task; entering idle loop");
@@ -880,14 +904,53 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 }
 
+use core::sync::atomic::AtomicBool;
+static AP_BARRIER: AtomicBool = AtomicBool::new(false);
+
+pub fn release_aps() {
+    AP_BARRIER.store(true, core::sync::atomic::Ordering::Release);
+}
+
+pub fn wait_for_ap_release() {
+    while !AP_BARRIER.load(core::sync::atomic::Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn start_ap(cpu_id: usize) {
-    println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
+pub extern "C" fn start_ap(cpu_id: usize) -> ! {
+    use core::sync::atomic::Ordering;
+    crate::arch::vm::switch_to_kernel_page_table();
+    crate::arch::init_ap_cpu(cpu_id);
+
+    println!("[Scarlet Kernel] AP {}: initializing...", cpu_id);
+
+    crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
+    crate::interrupt::enable_cpu_interrupts();
+    fence(Ordering::SeqCst);
 
     #[cfg(feature = "hypervisor")]
     {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
-    loop {}
+    crate::arch::vm::register_trampoline_for_ap();
+
+    crate::sched::scheduler::spawn_idle_task(cpu_id);
+
+    let next_task_id = crate::sched::scheduler::start_scheduler();
+    if let Some(next_task_id) = next_task_id {
+        let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
+            .expect("AP: first runnable task must exist");
+        if next_task.task_type == crate::task::TaskType::Kernel {
+            crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
+        } else {
+            crate::arch::first_switch_to_user(next_task);
+        }
+    }
+
+    println!("[Scarlet Kernel] AP {}: idle", cpu_id);
+    loop {
+        crate::arch::instruction::idle();
+    }
 }

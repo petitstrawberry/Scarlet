@@ -518,10 +518,9 @@ impl VirtioNetDevice {
             self.write32_register(Register::InterruptAck, isr & 0x03);
         }
 
-        crate::interrupt::InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0)
-        })
-        .map_err(|_| "Failed to enable interrupt in controller")?;
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to enable interrupt in controller")?;
 
         Ok(())
     }

@@ -19,7 +19,7 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager},
+    interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     traits::serial::Serial,
 };
@@ -97,10 +97,9 @@ impl Uart {
         self.reg_write(IER_OFFSET, IER_RDA);
 
         // Register interrupt with interrupt manager
-        InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
-        })
-        .map_err(|_| "Failed to enable interrupt")?;
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -133,6 +132,16 @@ impl Uart {
 
     fn can_write(&self) -> bool {
         self.reg_read(LSR_OFFSET) & LSR_THRE != 0
+    }
+
+    fn drain_rx(&self) {
+        // Drain all available RX bytes. Reading only one byte can leave the
+        // FIFO non-empty without producing a new edge, which loses interactive
+        // input such as "ls\n" after the first interrupt.
+        while self.can_read() {
+            let c = self.read_byte_internal();
+            self.emit_event(&InputEvent { data: c });
+        }
     }
 }
 
@@ -284,21 +293,7 @@ impl EventCapableDevice for Uart {
 
 impl InterruptCapableDevice for Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        // let inner = self.inner.lock();
-        // Check interrupt identification register
-        let iir = self.reg_read(IIR_OFFSET);
-
-        if iir & IIR_PENDING == 0 {
-            let c = self.read_byte_internal();
-            if c != 0 {
-                // Emit received character event
-                self.emit_event(&InputEvent { data: c as u8 });
-            } else {
-                // No data available, return Ok
-                return Ok(());
-            }
-        }
-
+        self.drain_rx();
         Ok(())
     }
 
@@ -379,9 +374,9 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
 
             // Register interrupt handler
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(uart_interrupt_id, uart.clone())
-            }) {
+            if let Err(e) = crate::interrupt::InterruptManager::global()
+                .register_interrupt_device(uart_interrupt_id, uart.clone())
+            {
                 crate::early_println!("Failed to register UART interrupt device: {}", e);
             } else {
                 crate::early_println!("UART interrupt device registered");

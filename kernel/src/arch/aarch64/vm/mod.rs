@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 use hashbrown::HashMap;
 use mmu::PageTable;
 use spin::Once;
@@ -23,6 +24,50 @@ use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, T
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+static KERNEL_TTBR0: AtomicU64 = AtomicU64::new(0);
+static KERNEL_TTBR1: AtomicU64 = AtomicU64::new(0);
+
+pub fn save_kernel_page_table() {
+    let ttbr0: u64;
+    let ttbr1: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, ttbr0_el1",
+            "mrs {}, ttbr1_el1",
+            out(reg) ttbr0,
+            out(reg) ttbr1,
+        );
+    }
+    KERNEL_TTBR0.store(ttbr0, Ordering::Release);
+    KERNEL_TTBR1.store(ttbr1, Ordering::Release);
+    get_cpu().set_kernel_ttbr0(ttbr0);
+}
+
+pub fn sync_saved_kernel_ttbr0_for_current_cpu() {
+    let ttbr0 = KERNEL_TTBR0.load(Ordering::Acquire);
+    assert!(ttbr0 != 0, "kernel TTBR0 not initialized");
+    get_cpu().set_kernel_ttbr0(ttbr0);
+}
+
+pub fn switch_to_kernel_page_table() {
+    let ttbr0 = KERNEL_TTBR0.load(Ordering::Acquire);
+    let ttbr1 = KERNEL_TTBR1.load(Ordering::Acquire);
+    assert!(ttbr0 != 0, "kernel page table not initialized");
+    assert!(ttbr1 != 0, "kernel TTBR1 not initialized");
+    mmu::sync_el1_translation_registers_if_needed();
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {}",
+            "msr ttbr1_el1, {}",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            in(reg) ttbr0,
+            in(reg) ttbr1,
+        );
+    }
+}
 
 unsafe extern "C" {
     static __TRAMPOLINE_START: usize;
@@ -333,6 +378,22 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.
 /// Per-task TTBR0 page tables should not pre-map the trampoline.
 pub fn setup_trampoline_for_user(_manager: &VirtualMemoryManager) {}
+
+pub fn register_trampoline_for_ap() {
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
+    let trampoline_size = trampoline_end - trampoline_start;
+
+    let arch = get_cpu().as_paddr_cpu();
+    let trampoline_vaddr_start = TRAMPOLINE_VA_END - trampoline_size;
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
+    let arch_offset = arch_paddr - trampoline_start;
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
+
+    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
+}
 
 #[cfg(test)]
 mod tests {

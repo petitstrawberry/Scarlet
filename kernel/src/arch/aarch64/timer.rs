@@ -4,24 +4,22 @@
 
 use core::arch::asm;
 
-use crate::{arch::get_cpu, arch::interrupt, interrupt::InterruptManager};
+use crate::{arch::get_cpu, arch::interrupt};
 
 pub fn timer_init() {
     // Local controller registration happens via early initcall.
 }
 
 pub fn get_time() -> u64 {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        mgr.get_time(cpu_id).unwrap_or(0)
-    })
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    crate::interrupt::InterruptManager::global()
+        .get_time(cpu_id)
+        .unwrap_or(0)
 }
 
 pub fn set_timer(_time: u64) {
-    InterruptManager::with_manager(|mgr| {
-        let cpu_id = get_cpu().get_cpuid() as u32;
-        let _ = mgr.set_timer(cpu_id, _time);
-    });
+    let cpu_id = get_cpu().get_cpuid() as u32;
+    let _ = crate::interrupt::InterruptManager::global().set_timer(cpu_id, _time);
 }
 
 pub struct ArchTimer {
@@ -33,10 +31,10 @@ pub struct ArchTimer {
 
 impl ArchTimer {
     pub fn new() -> Self {
-        let freq = InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            mgr.get_timer_frequency_hz(cpu_id).unwrap_or(0)
-        });
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        let freq = crate::interrupt::InterruptManager::global()
+            .get_timer_frequency_hz(cpu_id)
+            .unwrap_or(0);
 
         ArchTimer {
             next_event: 0,
@@ -51,17 +49,15 @@ impl ArchTimer {
     }
 
     pub fn get_time(&self) -> u64 {
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            mgr.get_time(cpu_id).unwrap_or(0)
-        })
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        crate::interrupt::InterruptManager::global()
+            .get_time(cpu_id)
+            .unwrap_or(0)
     }
 
     pub fn set_timer(&self, time: u64) {
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            let _ = mgr.set_timer(cpu_id, time);
-        });
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        let _ = crate::interrupt::InterruptManager::global().set_timer(cpu_id, time);
     }
 
     pub fn start(&mut self) {
@@ -103,10 +99,8 @@ impl ArchTimer {
 
         let _ = interrupt::disable_arch_timer_interrupt();
 
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            let _ = mgr.set_timer(cpu_id, u64::MAX);
-        });
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        let _ = crate::interrupt::InterruptManager::global().set_timer(cpu_id, u64::MAX);
     }
 
     pub fn set_interval_us(&mut self, interval_us: u64) {

@@ -4,6 +4,7 @@ pub mod sbi;
 
 pub fn idle() -> ! {
     loop {
+        crate::arch::interrupt::enable_interrupts();
         unsafe {
             asm!("wfi", options(nostack));
         }

@@ -24,8 +24,11 @@ use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
 
-use crate::arch::{Trapframe, get_cpu};
-use crate::sched::scheduler::get_scheduler;
+use crate::arch::Trapframe;
+use crate::sched::scheduler::{
+    enqueue_task, get_all_task_ids, get_task_by_id, register_task, remove_task_from_queues,
+    schedule,
+};
 use crate::task::{
     CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
@@ -121,7 +124,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
-        Ok(mut child_task) => {
+        Ok(child_task) => {
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.lock().iregs.set_return_value(0); /* Set the return value to 0 in the child task */
@@ -141,8 +144,6 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().iregs.set_arg(0, child_arg);
             }
 
-            let scheduler = get_scheduler();
-            let cpu_id = get_cpu().get_cpuid();
             let parent_id = parent_task.get_id();
 
             // Handle SetTls flag: set TLS pointer and tp register
@@ -159,23 +160,27 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().set_tls_pointer(tls_ptr);
             }
 
-            // Add child to scheduler and get the allocated ID
-            let child_id = scheduler.add_task(child_task, cpu_id);
+            // Register the child first, finish parent/child metadata, then enqueue it.
+            // On SMP, enqueueing before the metadata is complete lets a remote CPU
+            // start the child immediately from the reschedule IPI.
+            let cpu_id = crate::sched::scheduler::select_cpu();
+            let child_id = register_task(child_task);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
             // Establish parent-child relationship now that both have valid IDs
-            if let Some(child) = scheduler.get_task_by_id(child_id) {
+            if let Some(child) = get_task_by_id(child_id) {
                 child.set_parent_id(parent_id);
             }
-            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+            if let Some(parent) = get_task_by_id(parent_id) {
                 parent.add_child(child_id);
             }
 
             // Get the child's namespace-local PID (after add_task has set the IDs)
-            let child_ns_pid = scheduler
-                .get_task_by_id(child_id)
+            let child_ns_pid = get_task_by_id(child_id)
                 .map(|t| t.get_namespace_id())
                 .unwrap_or(0);
+
+            enqueue_task(child_id, cpu_id);
 
             /* Return the child task PID (namespace-local) to the parent task */
             child_ns_pid
@@ -572,7 +577,7 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Yield CPU to scheduler - returns when this task is scheduled again
-    get_scheduler().schedule(trapframe);
+    schedule(trapframe);
 
     0
 }
@@ -808,10 +813,9 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 /// # Returns
 /// This function does not return on success (system shuts down)
 /// Returns error code on failure
+#[allow(unreachable_code)]
 pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     use crate::arch::shutdown;
-    use crate::sched::scheduler::get_scheduler;
-    use crate::task::TaskState;
 
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -845,7 +849,6 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     // We iterate through all possible task IDs and terminate those that are running
     crate::println!("[SHUTDOWN] Step 1: Terminating all tasks...");
 
-    let scheduler = get_scheduler();
     let current_task_id = task.get_id();
 
     crate::println!("[SHUTDOWN] Dropping all tasks...");
@@ -853,7 +856,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
         if task_id == current_task_id {
             continue;
         }
-        scheduler.remove_task_from_queues(task_id);
+        remove_task_from_queues(task_id);
         if let Some(task) = crate::sched::scheduler::get_task_pool().remove_task(task_id) {
             drop(task);
         }
@@ -915,4 +918,105 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     // This line should never be reached if shutdown succeeds
     crate::println!("[SHUTDOWN] ERROR: Shutdown did not complete!");
     usize::MAX
+}
+
+/// Return the number of tasks currently visible to the caller.
+///
+/// # Arguments
+/// None.
+///
+/// # Returns
+/// The number of tasks in the system.
+pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    get_all_task_ids().len()
+}
+
+/// Populate a user-supplied buffer with [`TaskInfo`] snapshots.
+///
+/// # Arguments
+/// * `trapframe.get_arg(0)` — pointer to a user buffer of `TaskInfo` slots.
+/// * `trapframe.get_arg(1)` — capacity of the buffer (number of slots).
+///
+/// # Returns
+/// The number of `TaskInfo` entries actually written.  If the buffer is
+/// smaller than the total number of tasks, only the first `capacity` entries
+/// are written and the return value equals `capacity`.  The caller can
+/// compare against `GetTaskInfoCount` to detect truncation.
+pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::copy_to_user;
+    use crate::task::TaskInfo;
+    use core::sync::atomic::Ordering;
+
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let buf_ptr = trapframe.get_arg(0);
+    let capacity = trapframe.get_arg(1);
+    let caller_namespace = task.get_namespace();
+
+    let ids = get_all_task_ids();
+    let count = core::cmp::min(capacity, ids.len());
+
+    for (i, task_id) in ids.iter().take(count).enumerate() {
+        let Some(target) = get_task_by_id(*task_id) else {
+            continue;
+        };
+
+        // Resolve namespace-local PID/PPID.
+        let pid = caller_namespace.resolve_local_id(*task_id).unwrap_or(0);
+        let ppid = match target.get_parent_id() {
+            Some(parent_global) => caller_namespace
+                .resolve_local_id(parent_global)
+                .unwrap_or(0),
+            None => 0,
+        };
+
+        let state_u8 = target.state.load(Ordering::SeqCst).to_u8();
+        let task_type_u8 = match target.task_type {
+            super::TaskType::Kernel => 0,
+            super::TaskType::User => 1,
+        };
+        let cpu_id = target.last_cpu.load(Ordering::SeqCst) as u8; // saturates on MAX
+
+        let exit_status = target.exit_status.load(Ordering::SeqCst);
+
+        let tgid = caller_namespace
+            .resolve_local_id(target.get_thread_group_id())
+            .unwrap_or(0);
+
+        let mut name = [0u8; 64];
+        {
+            let task_name = target.name.read();
+            let bytes = task_name.as_bytes();
+            let len = core::cmp::min(bytes.len(), TaskInfo::NAME_CAP);
+            name[..len].copy_from_slice(&bytes[..len]);
+            // name[len] is already 0
+        }
+
+        let info = TaskInfo {
+            pid,
+            ppid,
+            state: state_u8,
+            task_type: task_type_u8,
+            cpu_id,
+            _reserved: 0,
+            exit_status,
+            tgid,
+            name,
+        };
+
+        let info_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &info as *const TaskInfo as *const u8,
+                core::mem::size_of::<TaskInfo>(),
+            )
+        };
+        let dest = buf_ptr + i * core::mem::size_of::<TaskInfo>();
+        // Best-effort: skip on copy error.
+        let _ = copy_to_user(task, dest, info_bytes);
+    }
+
+    count
 }

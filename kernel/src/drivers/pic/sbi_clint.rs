@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use crate::{
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptManager, InterruptResult,
+        CpuId, InterruptError, InterruptResult,
         controllers::{LocalInterruptController, LocalInterruptType},
     },
 };
@@ -46,7 +46,7 @@ impl LocalInterruptController for SbiClint {
 
     /// Enable a specific local interrupt type for a CPU
     fn enable_interrupt(
-        &mut self,
+        &self,
         _cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -70,7 +70,7 @@ impl LocalInterruptController for SbiClint {
 
     /// Disable a specific local interrupt type for a CPU
     fn disable_interrupt(
-        &mut self,
+        &self,
         cpu_id: CpuId,
         interrupt_type: LocalInterruptType,
     ) -> InterruptResult<()> {
@@ -80,8 +80,8 @@ impl LocalInterruptController for SbiClint {
                 self.set_timer(cpu_id, u64::MAX)
             }
             LocalInterruptType::Software => {
-                // Disable software interrupt by clearing MSIP
-                self.clear_software_interrupt(cpu_id)
+                self.validate_cpu_id(cpu_id)?;
+                Ok(())
             }
             LocalInterruptType::External => {
                 // External interrupts are not managed by CLINT
@@ -123,7 +123,7 @@ impl LocalInterruptController for SbiClint {
     }
 
     /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, _target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&self, _target_cpu: CpuId) -> InterruptResult<()> {
         Ok(())
     }
 
@@ -143,7 +143,7 @@ impl LocalInterruptController for SbiClint {
     }
 
     /// Set timer interrupt for a specific CPU
-    fn set_timer(&mut self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
+    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         // Set the timer compare register to the specified time using SBI
@@ -181,7 +181,7 @@ fn register_driver() {
 
     // Create the SBI timer controller
     let mut controller = Box::new(SbiClint {
-        max_cpus: 4,
+        max_cpus: crate::environment::MAX_NUM_CPUS as usize,
         timebase_frequency_hz,
     });
 
@@ -194,10 +194,10 @@ fn register_driver() {
     }
 
     // Register with InterruptManager instead of DeviceManager
-    match InterruptManager::global()
-        .lock()
-        .register_local_controller_for_range(controller, 0..4)
-    {
+    match crate::interrupt::InterruptManager::global().register_local_controller_for_range(
+        controller,
+        0..(crate::environment::MAX_NUM_CPUS as CpuId),
+    ) {
         Ok(_) => {}
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register CLINT: {}", e);

@@ -182,6 +182,14 @@ path = "src/lsm_unload.rs"
 name = "lsm_list"
 path = "src/lsm_list.rs"
 
+[[bin]]
+name = "ps"
+path = "src/ps.rs"
+
+[[bin]]
+name = "top"
+path = "src/top.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
