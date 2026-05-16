@@ -608,18 +608,6 @@ impl Aarch64VmObject {
             ) {
                 Ok(()) => {
                     set_guest_root_stage2(root, state.vmid);
-                    if trace_count < 32 {
-                        crate::println!(
-                            "[AARCH64-S2-MAP] count={} vmid={} gpa={:#x} hpa={:#x} level={} size={:#x} writable={}",
-                            trace_count,
-                            state.vmid,
-                            gpa,
-                            hpa,
-                            level,
-                            page_size,
-                            writable,
-                        );
-                    }
                     return Ok(());
                 }
                 Err("Cannot replace existing stage2 page table with a leaf") if level > 0 => {}

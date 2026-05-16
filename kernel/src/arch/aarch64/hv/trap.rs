@@ -276,7 +276,6 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
         return Some(VmExit::Unknown(ipa));
     };
     let Some(hpa) = resolve_guest_hpa(ipa, vm) else {
-        crate::println!("[AARCH64-S2] resolve failed ipa={:#x}", ipa);
         return Some(VmExit::FailEntry {
             hardware_entry_failure_reason: 0,
         });
@@ -284,18 +283,9 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
 
     match vm.map_stage2_page(ipa, hpa, writable && !slot.flags.readonly) {
         Ok(()) => None,
-        Err(e) => {
-            crate::println!(
-                "[AARCH64-S2] map failed ipa={:#x} hpa={:#x} writable={} err={}",
-                ipa,
-                hpa,
-                writable && !slot.flags.readonly,
-                e
-            );
-            Some(VmExit::FailEntry {
-                hardware_entry_failure_reason: 0,
-            })
-        }
+        Err(_) => Some(VmExit::FailEntry {
+            hardware_entry_failure_reason: 0,
+        }),
     }
 }
 
@@ -325,9 +315,6 @@ fn handle_host_irq_from_guest(trap_kind: usize) {
     }
 }
 
-static EXIT_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
-static HOST_IRQ_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
-
 pub fn is_from_guest() -> bool {
     let hcr: u64;
     // SAFETY: reading HCR_EL2 is side-effect free at EL2.
@@ -346,50 +333,12 @@ pub fn arch_guest_trap_handler(
 
     let esr = trapframe.esr_el1;
     if esr == 1 || esr == 2 {
-        let trace_count = HOST_IRQ_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if trace_count.is_multiple_of(10_000) {
-            crate::println!(
-                "[AARCH64-HOST-IRQ] count={} kind={} elr={:#x} lr={:#x} x0={:#x} x1={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} sp={:#x} spsr={:#x} cntvct={:#x} cntv_ctl={:#x} cntv_cval={:#x}",
-                trace_count,
-                esr,
-                trapframe.elr,
-                trapframe.regs.reg[30],
-                trapframe.regs.reg[0],
-                trapframe.regs.reg[1],
-                trapframe.regs.reg[19],
-                trapframe.regs.reg[20],
-                trapframe.regs.reg[21],
-                trapframe.regs.reg[22],
-                trapframe.sp,
-                trapframe.spsr,
-                super::vm::guest_virtual_count(&guest.sysregs),
-                guest.sysregs.cntv_ctl_el0,
-                guest.sysregs.cntv_cval_el0
-            );
-        }
         handle_host_irq_from_guest(esr as usize);
         return None;
     }
 
     let ec = ((esr >> ESR_EC_SHIFT) & ESR_EC_MASK) as u32;
     let iss = (esr & ESR_ISS_MASK) as u32;
-    let trace_count = EXIT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-    if trace_count.is_multiple_of(100_000) {
-        let ipa = if ec == ESR_EC_IABT_LOW || ec == ESR_EC_DABT_LOW {
-            guest_fault_ipa()
-        } else {
-            0
-        };
-        crate::println!(
-            "[AARCH64-EXIT] count={} esr={:#x} ec={:#x} iss={:#x} elr={:#x} ipa={:#x}",
-            trace_count,
-            esr,
-            ec,
-            iss,
-            trapframe.elr,
-            ipa
-        );
-    }
 
     match ec {
         ESR_EC_WFX => {

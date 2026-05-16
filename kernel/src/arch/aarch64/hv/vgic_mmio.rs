@@ -29,7 +29,7 @@ pub struct VgicDist {
 
 impl VgicDist {
     pub fn new(base: u64, nr_irqs: u32, num_lrs: usize) -> Self {
-        let typer = (nr_irqs / 32).saturating_sub(1) | (1 << 4) | (9 << 19);
+        let typer = (nr_irqs / 32).saturating_sub(1) | (1 << 10);
         Self {
             base,
             num_lrs,
