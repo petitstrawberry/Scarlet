@@ -7,7 +7,7 @@
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::sched_on_tick;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
@@ -81,18 +81,52 @@ impl KernelTimer {
 // Global tick counter (monotonic, incremented by timer interrupt)
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Increment the global tick counter. Call this from the timer interrupt handler.
+/// The CPU ID designated as the global timekeeper.
+/// Only this CPU advances TICK_COUNT and fires software timers.
+/// Initialized to u64::MAX (unset); call set_global_timekeeper() during boot.
+static GLOBAL_TIMEKEEPER_CPU: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Designate a CPU as the global timekeeper.
+/// Must be called once during boot (from start_kernel) before any timer interrupts fire.
+pub fn set_global_timekeeper(cpu_id: usize) {
+    GLOBAL_TIMEKEEPER_CPU.store(cpu_id as u64, Ordering::Relaxed);
+}
+
+/// Timer interrupt handler. Called on every CPU local timer interrupt.
+///
+/// - Re-arms the per-CPU local timer (all CPUs).
+/// - Advances the global TICK_COUNT and fires software timers only on the
+///   designated global timekeeper CPU, so global time advances exactly once
+///   per quantum system-wide regardless of how many CPUs are running.
+/// - Always calls sched_on_tick() for per-CPU scheduler accounting.
 pub fn tick(trapframe: &mut Trapframe) {
+    tick_with_scheduler(trapframe, true);
+}
+
+/// Timer interrupt handler with optional scheduler accounting.
+///
+/// Kernel-mode traps on a non-idle user task must not preempt via the normal
+/// user-task scheduler path: the trapframe describes an in-kernel continuation,
+/// not the task's user context.  Such paths still need timer re-arming and
+/// global timer processing, but scheduler accounting is deferred until the task
+/// returns to user mode or blocks explicitly.
+pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);
-    let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    check_software_timers(now);
-    // Call scheduler tick handler to manage time slices
-    let scheduler = get_scheduler();
-    // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
-    scheduler.on_tick(cpu_id, trapframe);
+
+    // Only the designated global timekeeper advances global time and fires
+    // software timers. All other CPUs skip this block entirely.
+    if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
+        let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        check_software_timers(now);
+    }
+
+    if run_scheduler {
+        // Per-CPU scheduler accounting runs on every CPU when preemption is safe.
+        sched_on_tick(cpu_id, trapframe);
+    }
 }
 
 /// Get the current tick count (monotonic, since boot)

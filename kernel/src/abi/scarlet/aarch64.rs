@@ -344,17 +344,22 @@ impl ScarletAbi {
                 Ok(())
             }
             ProcessControlType::Stop => {
-                // Set task state to blocked
                 task.set_state(crate::task::TaskState::Blocked(
                     crate::task::BlockedType::Interruptible,
                 ));
+                crate::sched::scheduler::mark_blocked(task.get_id());
+                crate::sched::scheduler::remove_from_ready_queues(task.get_id());
                 Ok(())
             }
             ProcessControlType::Continue => {
-                // Resume the task if it was stopped
                 let current_state = task.get_state();
                 if matches!(current_state, crate::task::TaskState::Blocked(_)) {
                     task.set_state(crate::task::TaskState::Ready);
+                    crate::sched::scheduler::unmark_blocked(task.get_id());
+                    crate::sched::scheduler::push_ready_task(
+                        crate::arch::get_cpu().get_cpuid(),
+                        task.get_id(),
+                    );
                 }
                 Ok(())
             }

@@ -27,6 +27,8 @@ use alloc::{
 use core::any::Any;
 use spin::RwLock;
 
+use crate::sched::scheduler::current_task_id;
+
 use super::{
     LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketControl, SocketDomain,
     SocketError, SocketObject, SocketProtocol, SocketState, SocketType,
@@ -1033,9 +1035,8 @@ impl Selectable for LocalSocket {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = match state {

@@ -8,7 +8,7 @@ use crate::{
     network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
     object::KernelObject,
     object::capability::selectable::Selectable,
-    sched::scheduler::get_scheduler,
+    sched::scheduler::schedule,
     task::mytask,
 };
 use alloc::sync::Arc;
@@ -1165,7 +1165,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         total_written
                     };
                 }
-                get_scheduler().schedule(trapframe);
+                schedule(trapframe);
                 return usize::MAX;
             }
             Err(_) => {

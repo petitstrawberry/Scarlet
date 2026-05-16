@@ -16,6 +16,7 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
+use crate::sched::scheduler::current_task_id;
 use crate::sync::waker::Waker;
 
 /// Internal state of a counter
@@ -263,9 +264,8 @@ impl Selectable for Counter {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = if interest.read {

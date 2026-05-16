@@ -269,6 +269,8 @@ impl PageTable {
             }
         }
 
+        unsafe { asm!("sfence.vma zero,zero") };
+
         Ok(())
     }
 
@@ -295,6 +297,7 @@ impl PageTable {
         };
         self.try_map_at_level(asid, vaddr, paddr, attrs, 0)
             .expect("map: couldn't install a 4 KiB leaf mapping");
+        unsafe { asm!("sfence.vma zero,zero") };
     }
 
     /// Attempts to install a leaf mapping at the specified page-table level.
@@ -352,7 +355,7 @@ impl PageTable {
 
         pte.set_ppn(ppn);
         pte.validate();
-        unsafe { asm!("sfence.vma zero,zero") };
+        // sfence.vma deferred to caller for batching.
         Ok(())
     }
 

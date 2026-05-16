@@ -16,7 +16,7 @@ use crate::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::ExternalInterruptController,
     },
 };
@@ -29,6 +29,9 @@ const MAX_INTERRUPTS: InterruptId = 1020;
 
 /// Maximum number of CPUs supported by this implementation.
 const MAX_CPUS: CpuId = 8;
+
+/// SGI used by the scheduler to request a reschedule on another CPU.
+const RESCHEDULE_SGI: u32 = 0;
 
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
@@ -118,6 +121,13 @@ fn write_icc_ctlr_el1(v: u64) {
 fn write_icc_igrpen1_el1(v: u64) {
     unsafe {
         asm!("msr ICC_IGRPEN1_EL1, {0}", "isb", in(reg) v, options(nostack));
+    }
+}
+
+#[inline]
+fn write_icc_sgi1r_el1(v: u64) {
+    unsafe {
+        asm!("msr ICC_SGI1R_EL1, {0}", "isb", in(reg) v, options(nostack));
     }
 }
 
@@ -243,8 +253,18 @@ impl GicV3 {
             // Group 1 for SGI/PPI.
             mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
 
+            // Enable SGI 0 used by the scheduler as the reschedule IPI.
+            mmio::write8(
+                self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + RESCHEDULE_SGI as usize,
+                0x80,
+            );
+            mmio::write32(
+                self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0),
+                1 << RESCHEDULE_SGI,
+            );
+
             // Set virtual timer PPI priority to 0x80.
-            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
+            let timer_ppi = crate::drivers::pic::arm_generic_timer::timer_ppi_irq();
             mmio::write8(
                 self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
                 0x80,
@@ -292,26 +312,11 @@ impl ExternalInterruptController for GicV3 {
             self.dist_base_addr,
             self.redist_base_addr
         );
-        // Configure distributor + redistributor for CPU0.
-
-        crate::early_println!("[interrupt] GICv3 init: distributor...");
         self.init_distributor();
-
-        crate::early_println!("[interrupt] GICv3 init: redistributor...");
-        self.init_redistributor(0);
-
-        crate::early_println!("[interrupt] GICv3 init: sysregs...");
-        self.init_cpu_interface_sysregs();
-
-        crate::early_println!("[interrupt] GICv3 init: done");
         Ok(())
     }
 
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -329,11 +334,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(())
     }
 
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -396,7 +397,7 @@ impl ExternalInterruptController for GicV3 {
         Ok(0)
     }
 
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         let iar = read_icc_iar1_el1();
@@ -410,11 +411,7 @@ impl ExternalInterruptController for GicV3 {
         }
     }
 
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -448,6 +445,45 @@ impl ExternalInterruptController for GicV3 {
 
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
+    }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.init_redistributor(cpu_id);
+        self.init_cpu_interface_sysregs();
+        Ok(())
+    }
+
+    fn send_ipi(
+        &self,
+        target_cpu_id: CpuId,
+        ipi_type: crate::interrupt::controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
+        self.validate_cpu_id(target_cpu_id)?;
+
+        let intid = match ipi_type {
+            crate::interrupt::controllers::LocalInterruptType::Software => RESCHEDULE_SGI as u64,
+            crate::interrupt::controllers::LocalInterruptType::External => 1u64,
+            crate::interrupt::controllers::LocalInterruptType::Timer => {
+                crate::drivers::pic::arm_generic_timer::timer_ppi_irq() as u64
+            }
+        };
+
+        if intid >= 16 {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        // ICC_SGI1R_EL1 fields used here:
+        //   [55:48] Aff3, [47:44] RS, [40] IRM, [39:32] Aff2,
+        //   [27:24] INTID, [23:16] Aff1, [15:0] TargetList.
+        // QEMU virt uses a flat affinity layout, so Aff1/2/3=0 and a
+        // 1-bit TargetList mask for CPU IDs < 8 is sufficient here.
+        let target_mask = 1u64
+            .checked_shl(target_cpu_id)
+            .ok_or(InterruptError::InvalidCpuId)?;
+        let sgi1r = (intid << 24) | target_mask;
+        write_icc_sgi1r_el1(sgi1r);
+
+        Ok(())
     }
 }
 
@@ -502,8 +538,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     })?;
 
     let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
-    // PlatformDeviceInfo doesn't expose CPU topology here; current bring-up is single-core.
-    let max_cpus = 1;
+    let max_cpus = crate::environment::MAX_NUM_CPUS as u32;
 
     crate::early_println!(
         "[interrupt] GICv3 selected: dist={:#x} redist={:#x} max_intid={} max_cpus={}",
@@ -520,16 +555,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         max_cpus,
     ));
 
-    InterruptManager::with_manager(|manager| {
-        manager
-            .register_external_controller(gic)
-            .map_err(|_| "Failed to register GICv3")?;
-        Ok(())
-    })?;
+    crate::interrupt::InterruptManager::global()
+        .register_external_controller(gic)
+        .map_err(|_| "Failed to register GICv3")?;
 
     crate::arch::interrupt::configure_timer_interrupt_route(
         crate::arch::interrupt::TimerInterruptRoute::ExternalControllerIrq,
-        Some(crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ),
+        Some(crate::drivers::pic::arm_generic_timer::timer_ppi_irq()),
     );
 
     Ok(())

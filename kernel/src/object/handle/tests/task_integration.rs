@@ -2,6 +2,7 @@ use super::super::*;
 use super::mock::MockTaskFileObject;
 use crate::fs::{FileType, SeekFrom};
 use crate::object::handle::HandleTable;
+use crate::sched::scheduler::{add_task, get_task_by_id, reset};
 use crate::task::{CloneFlags, new_user_task};
 use alloc::format;
 use alloc::string::ToString;
@@ -165,15 +166,14 @@ fn test_task_handle_table_error_conditions() {
 #[test_case]
 fn test_task_handle_table_clone_behavior() {
     // Reset scheduler state before test
-    let scheduler = crate::sched::scheduler::get_scheduler();
-    scheduler.reset();
+    reset();
 
     // Initialize parent task first, then add to scheduler
     let mut parent_task = new_user_task("ParentTask".to_string(), 1);
     parent_task.init();
 
-    let parent_id = scheduler.add_task(parent_task, 0);
-    let mut parent_task = scheduler.get_task_by_id(parent_id).unwrap();
+    let parent_id = crate::sched::scheduler::add_task(parent_task, 0);
+    let mut parent_task = get_task_by_id(parent_id).unwrap();
 
     // Open some files in parent
     let mock_file1 = Arc::new(MockTaskFileObject::new(b"parent_file_1".to_vec()));
@@ -246,15 +246,14 @@ fn test_task_handle_table_clone_behavior() {
 #[test_case]
 fn test_task_handle_table_memory_efficiency() {
     // Reset scheduler state before test
-    let scheduler = crate::sched::scheduler::get_scheduler();
-    scheduler.reset();
+    reset();
 
     // Initialize task first, then add to scheduler
     let mut task = new_user_task("MemoryTask".to_string(), 1);
     task.init();
 
-    let task_id = scheduler.add_task(task, 0);
-    let mut task = scheduler.get_task_by_id(task_id).unwrap();
+    let task_id = crate::sched::scheduler::add_task(task, 0);
+    let mut task = get_task_by_id(task_id).unwrap();
 
     // Test that repeated allocation/deallocation doesn't cause memory leaks
     for iteration in 0..50 {
@@ -291,15 +290,14 @@ fn test_task_handle_table_memory_efficiency() {
 #[test_case]
 fn test_task_handle_table_capability_access() {
     // Reset scheduler state before test
-    let scheduler = crate::sched::scheduler::get_scheduler();
-    scheduler.reset();
+    reset();
 
     // Initialize task first, then add to scheduler
     let mut task = new_user_task("CapabilityTask".to_string(), 1);
     task.init();
 
-    let task_id = scheduler.add_task(task, 0);
-    let mut task = scheduler.get_task_by_id(task_id).unwrap();
+    let task_id = crate::sched::scheduler::add_task(task, 0);
+    let mut task = get_task_by_id(task_id).unwrap();
 
     // Test accessing different capabilities through handles
     let mock_file = Arc::new(MockTaskFileObject::new(b"capability_test_data".to_vec()));

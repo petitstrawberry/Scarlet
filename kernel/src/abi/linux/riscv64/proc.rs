@@ -78,7 +78,7 @@ pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let exit_code = trapframe.get_arg(0) as i32;
 
     task.exit(exit_code);
-    get_scheduler().schedule(trapframe);
+    schedule(trapframe);
     usize::MAX
 }
 
@@ -86,8 +86,8 @@ pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit(exit_code);
-    get_scheduler().schedule(trapframe);
+    task.exit_group(exit_code);
+    schedule(trapframe);
     usize::MAX
 }
 
@@ -568,18 +568,18 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 child_task.vcpu.lock().iregs.reg[4] = tls; // x4 = tp
             }
 
-            let scheduler = get_scheduler();
-            let cpu_id = get_cpu().get_cpuid();
+            let cpu_id = crate::sched::scheduler::select_cpu();
             let parent_id = parent_task.get_id();
 
-            // Add child and get allocated ID
-            let child_id = scheduler.add_task(child_task, cpu_id);
+            // Register first, complete clone metadata/TID writes, then enqueue.
+            // A remote CPU may run the child immediately after enqueue via IPI.
+            let child_id = crate::sched::scheduler::register_task(child_task);
 
             // Establish parent-child relationship now that both have valid IDs
-            if let Some(child) = scheduler.get_task_by_id(child_id) {
+            if let Some(child) = get_task_by_id(child_id) {
                 child.set_parent_id(parent_id);
             }
-            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+            if let Some(parent) = get_task_by_id(parent_id) {
                 parent.add_child(child_id);
             }
 
@@ -598,8 +598,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             // IMPORTANT: Only write child TID when CLONE_CHILD_SETTID is set.
             // For CLONE_CHILD_CLEARTID, the pointer is a futex lock to clear on exit.
             if (flags & CLONE_CHILD_SETTID) != 0 && !child_tid_ptr.is_null() {
-                if let Some(paddr) = get_scheduler()
-                    .get_task_by_id(child_id)
+                if let Some(paddr) = get_task_by_id(child_id)
                     .unwrap()
                     .vm_manager
                     .translate_to_kva(child_tid_ptr as usize)
@@ -609,6 +608,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     }
                 }
             }
+            crate::sched::scheduler::enqueue_task(child_id, cpu_id);
             child_id
         }
         Err(_) => usize::MAX,

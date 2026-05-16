@@ -108,9 +108,9 @@ use crate::object::handle::syscall::{
 };
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_exit_group,
-    sys_get_tls, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone,
-    sys_sbrk, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_unregister_abi_zone,
-    sys_waitpid, sys_yield,
+    sys_get_task_info_count, sys_get_task_info_list, sys_get_tls, sys_getchar, sys_getpid,
+    sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_tid_address, sys_set_tls,
+    sys_shutdown, sys_sleep, sys_unregister_abi_zone, sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -184,6 +184,9 @@ syscall_table! {
     Yield = 21 => sys_yield,
 
     ExitGroup = 23 => sys_exit_group, // Exit all tasks in thread group
+    // Process information
+    GetTaskInfoCount = 24 => sys_get_task_info_count, // Number of tasks
+    GetTaskInfoList = 25 => sys_get_task_info_list,   // TaskInfo snapshots
     // TLS (Thread Local Storage) Management
     SetTls = 30 => sys_set_tls,
     GetTls = 31 => sys_get_tls,

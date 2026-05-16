@@ -21,7 +21,7 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::{InterruptId, InterruptManager},
+    interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     traits::serial::Serial,
 };
@@ -108,10 +108,9 @@ impl Pl011Uart {
         self.reg_write(UARTIMSC, IMSC_RXIM);
 
         // Register interrupt with interrupt manager
-        InterruptManager::with_manager(|mgr| {
-            mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
-        })
-        .map_err(|_| "Failed to enable interrupt")?;
+        crate::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -384,9 +383,9 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         } else {
             crate::early_println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
 
-            if let Err(e) = InterruptManager::with_manager(|mgr| {
-                mgr.register_interrupt_device(uart_interrupt_id, uart.clone())
-            }) {
+            if let Err(e) = crate::interrupt::InterruptManager::global()
+                .register_interrupt_device(uart_interrupt_id, uart.clone())
+            {
                 crate::early_println!("Failed to register PL011 interrupt device: {}", e);
             } else {
                 crate::early_println!("PL011 interrupt device registered");

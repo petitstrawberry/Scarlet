@@ -1,8 +1,8 @@
 use crate::{
-    arch::{Trapframe, get_cpu},
+    arch::Trapframe,
     fs::FileType,
     library::std::string::cstring_to_string,
-    sched::scheduler::get_scheduler,
+    sched::scheduler::{get_task_by_id, schedule},
     task::{CloneFlags, WaitError, get_parent_waitpid_waker, mytask},
 };
 use alloc::string::{String, ToString};
@@ -39,29 +39,30 @@ pub fn sys_fork(
 
     /* Clone the task */
     match parent_task.clone_task(CloneFlags::default()) {
-        Ok(mut child_task) => {
+        Ok(child_task) => {
             child_task.vcpu.lock().iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
 
-            let scheduler = get_scheduler();
-            let cpu_id = get_cpu().get_cpuid();
+            let cpu_id = crate::sched::scheduler::select_cpu();
             let parent_id = parent_task.get_id();
 
-            // Add child and get allocated ID
-            let child_id = scheduler.add_task(child_task, cpu_id);
+            // Register first, complete parent/child metadata, then enqueue.
+            // A remote CPU may run the child immediately after enqueue via IPI.
+            let child_id = crate::sched::scheduler::register_task(child_task);
 
             // Establish parent-child relationship now that both have valid IDs
-            if let Some(child) = scheduler.get_task_by_id(child_id) {
+            if let Some(child) = get_task_by_id(child_id) {
                 child.set_parent_id(parent_id);
             }
-            if let Some(parent) = scheduler.get_task_by_id(parent_id) {
+            if let Some(parent) = get_task_by_id(parent_id) {
                 parent.add_child(child_id);
             }
 
             // Get namespace-local ID to return to user space (this is the PID visible to xv6 programs)
-            let child_namespace_id = scheduler
-                .get_task_by_id(child_id)
+            let child_namespace_id = get_task_by_id(child_id)
                 .map(|t| t.get_namespace_id())
                 .unwrap_or(0);
+
+            crate::sched::scheduler::enqueue_task(child_id, cpu_id);
 
             /* Return the child task namespace ID as pid to the parent proc */
             child_namespace_id
@@ -80,7 +81,7 @@ pub fn sys_exit(
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
-    get_scheduler().schedule(trapframe);
+    schedule(trapframe);
     usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
@@ -144,8 +145,7 @@ pub fn sys_kill(
     }
 
     // Find the target task via scheduler
-    let scheduler = get_scheduler();
-    if let Some(target_task) = scheduler.get_task_by_id(pid) {
+    if let Some(target_task) = get_task_by_id(pid) {
         // For xv6 compatibility, immediately terminate the target task
         target_task.exit(9); // SIGKILL equivalent - exit with signal 9
         0 // Success

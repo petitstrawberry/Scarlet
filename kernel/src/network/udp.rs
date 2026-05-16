@@ -18,6 +18,7 @@ use crate::network::socket::{
     SocketState, SocketType,
 };
 use crate::object::capability::selectable::Selectable;
+use crate::sched::scheduler::current_task_id;
 
 /// Helper function to get local IP address bytes from the default interface
 fn get_local_ip_bytes() -> [u8; 4] {
@@ -433,9 +434,8 @@ impl crate::object::capability::Selectable for UdpSocket {
 
         let task_id = {
             use crate::arch::get_cpu;
-            use crate::sched::scheduler::get_scheduler;
             let cpu_id = get_cpu().get_cpuid();
-            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+            current_task_id(cpu_id).unwrap_or(0)
         };
 
         let woke = if interest.read {

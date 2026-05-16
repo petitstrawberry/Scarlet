@@ -1165,7 +1165,7 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                         total_written
                     };
                 }
-                get_scheduler().schedule(trapframe);
+                schedule(trapframe);
                 return usize::MAX;
             }
             Err(_) => {

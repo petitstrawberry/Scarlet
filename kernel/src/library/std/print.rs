@@ -54,7 +54,10 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
+    let _guard = crate::log::PrintGuard::acquire();
+
     struct LogWriter;
+
     impl fmt::Write for LogWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
             for &b in s.as_bytes() {
@@ -115,6 +118,9 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
-    // Final fallback: early console
-    early_println!("[print] No usable character device found; using early console");
+    // Final fallback: write directly to the early console while still holding
+    // the global print guard. Calling early_println! here would re-enter the
+    // same print lock and deadlock.
+    let mut early = crate::earlycon::EarlyConsole::new();
+    let _ = early.write_fmt(args);
 }

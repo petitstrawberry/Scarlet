@@ -16,6 +16,8 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
 
 use crate::arch::Arch;
@@ -26,6 +28,28 @@ use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, T
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
+
+pub fn save_kernel_page_table() {
+    let satp: u64;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) satp);
+    }
+    KERNEL_SATP.store(satp, Ordering::Release);
+}
+
+pub fn switch_to_kernel_page_table() {
+    let satp = KERNEL_SATP.load(Ordering::Acquire);
+    assert!(satp != 0, "kernel page table not initialized");
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {}",
+            "sfence.vma",
+            in(reg) satp,
+        );
+    }
+}
 
 unsafe extern "C" {
     static __TRAMPOLINE_START: usize;
@@ -312,6 +336,22 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
 
 pub fn setup_trampoline_for_user(manager: &VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+}
+
+pub fn register_trampoline_for_ap() {
+    let trampoline_start =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_START as *const usize as usize });
+    let trampoline_end =
+        kernel_virt_to_phys(unsafe { &__TRAMPOLINE_END as *const usize as usize }) - 1;
+    let trampoline_size = trampoline_end - trampoline_start;
+
+    let arch = get_cpu().as_paddr_cpu();
+    let trampoline_vaddr_start = TRAMPOLINE_VA_END - trampoline_size;
+    let arch_paddr = kernel_virt_to_phys(arch as *const Arch as usize);
+    let arch_offset = arch_paddr - trampoline_start;
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
+
+    crate::vm::set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
 }
 
 #[cfg(test)]

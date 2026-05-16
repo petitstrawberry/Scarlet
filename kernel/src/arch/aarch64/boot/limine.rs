@@ -1,22 +1,23 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
 
+use limine::mp::MpInfo;
+
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
-    MODULE_REQUEST, ensure_base_revision_supported, framebuffer_area, hhdm_physical_span,
-    module_area, reserve_front, response, select_usable_region,
+    MODULE_REQUEST, MP_REQUEST, ensure_base_revision_supported, framebuffer_area,
+    hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
 use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
-// VHE/hypervisor availability flags set during early boot
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
 
@@ -28,6 +29,66 @@ pub fn is_hv_available() -> bool {
     unsafe { HV_AVAILABLE }
 }
 
+#[unsafe(naked)]
+unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
+    naked_asm!(
+        // x0 = &MpInfo (from Limine)
+        "ldr x8, [x0, #8]",         // x8 = mp_info.mpidr (offset 8)
+        "and x8, x8, #0xff",        // x8 = cpu_id
+        // Compute stack_top = &KERNEL_STACK + STACK_SIZE * (cpu_id + 1)
+        "adrp x9, {kernel_stack}",
+        "add  x9, x9, #:lo12:{kernel_stack}",
+        "mov  x10, {stack_size}",
+        "add  x11, x8, #1",         // x11 = cpu_id + 1
+        "mul  x11, x11, x10",       // x11 = STACK_SIZE * (cpu_id + 1)
+        "add  x9, x9, x11",         // x9 = &KERNEL_STACK + offset = stack_top
+        // Switch to SP_EL1 and set stack
+        "msr spsel, #1",
+        "mov sp, x9",
+        "isb",
+        // x0 = cpu_id, jump to ap_entry_wait
+        "mov x0, x8",
+        "b {ap_wait}",
+        kernel_stack = sym KERNEL_STACK,
+        stack_size = const STACK_SIZE,
+        ap_wait = sym ap_entry_wait,
+    );
+}
+
+fn ap_entry_wait(cpu_id: usize) -> ! {
+    wait_for_ap_release();
+    start_ap(cpu_id)
+}
+
+fn start_secondary_cpus() {
+    crate::release_aps();
+}
+
+fn bootstrap_aps() {
+    let mp_resp = match MP_REQUEST.response() {
+        Some(resp) => resp,
+        None => {
+            early_println!("[aarch64] No Limine MP response, single-CPU mode");
+            return;
+        }
+    };
+
+    let bsp_mpidr = mp_resp.bsp_mpidr;
+    early_println!(
+        "[aarch64] BSP mpidr={:#x}, {} CPU(s) detected by Limine",
+        bsp_mpidr,
+        mp_resp.cpus().len()
+    );
+
+    for cpu in mp_resp.cpus() {
+        if cpu.mpidr == bsp_mpidr {
+            continue;
+        }
+        early_println!("[aarch64] Bootstrapping CPU mpidr={:#x}...", cpu.mpidr);
+        cpu.bootstrap(limine_ap_entry, cpu.mpidr);
+    }
+}
+
 #[inline(always)]
 fn current_el() -> u64 {
     let el: u64;
@@ -37,18 +98,13 @@ fn current_el() -> u64 {
     (el >> 2) & 0x3
 }
 
-/// With Limine Base Revision 6, the bootloader may enter the kernel at EL2.
-/// We check CurrentEL and verify VHE by reading HCR_EL2.E2H.
-/// _EL12 register aliases are only valid when VHE is active (E2H=1).
 fn detect_el() -> (u64, bool) {
     let el = current_el();
     let vhe = if el == 2 {
-        // SAFETY: Reading HCR_EL2 at EL2 is a safe system register access.
         let hcr_el2: u64;
         unsafe {
             asm!("mrs {}, HCR_EL2", out(reg) hcr_el2, options(nostack));
         }
-        // E2H bit (bit 34) indicates VHE is active
         (hcr_el2 & (1u64 << 34)) != 0
     } else {
         false
@@ -122,6 +178,8 @@ pub extern "C" fn limine_entry() -> ! {
     let cpu_id = current_cpu_id();
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
+    bootstrap_aps();
+
     let bootinfo = BootInfo::new(
         cpu_id,
         cpu_count,
@@ -132,6 +190,7 @@ pub extern "C" fn limine_entry() -> ! {
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
         framebuffer_paddr,
+        Some(start_secondary_cpus),
     );
 
     crate::arch::init_user_context_from_fdt();

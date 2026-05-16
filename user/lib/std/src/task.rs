@@ -1,4 +1,5 @@
 use crate::boxed::Box;
+use crate::string::ToString;
 use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use crate::vec::Vec;
 
@@ -637,4 +638,232 @@ pub enum ShutdownType {
 pub fn shutdown(shutdown_type: ShutdownType) -> ! {
     syscall1(Syscall::Shutdown, shutdown_type as usize);
     unreachable!("shutdown syscall should not return");
+}
+
+// ---------------------------------------------------------------------------
+// Task information (for ps / top)
+// ---------------------------------------------------------------------------
+
+/// Task state, mirroring the kernel `TaskState` discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TaskState {
+    NotInitialized = 0,
+    Ready = 1,
+    Running = 2,
+    BlockedInterruptible = 3,
+    BlockedUninterruptible = 4,
+    Zombie = 5,
+    Terminated = 6,
+}
+
+impl TaskState {
+    /// Parse from the raw kernel discriminant.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::NotInitialized),
+            1 => Some(Self::Ready),
+            2 => Some(Self::Running),
+            3 => Some(Self::BlockedInterruptible),
+            4 => Some(Self::BlockedUninterruptible),
+            5 => Some(Self::Zombie),
+            6 => Some(Self::Terminated),
+            _ => None,
+        }
+    }
+
+    /// Short human-readable label (fits in fixed-width columns).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotInitialized => "NotInit",
+            Self::Ready => "Ready",
+            Self::Running => "Running",
+            Self::BlockedInterruptible => "Sleep",
+            Self::BlockedUninterruptible => "DiskSlp",
+            Self::Zombie => "Zombie",
+            Self::Terminated => "Term",
+        }
+    }
+}
+
+impl core::fmt::Display for TaskState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a task runs in kernel or user mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TaskType {
+    Kernel = 0,
+    User = 1,
+}
+
+impl TaskType {
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Kernel),
+            1 => Some(Self::User),
+            _ => None,
+        }
+    }
+
+    /// Short label for display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Kernel => "K",
+            Self::User => "U",
+        }
+    }
+}
+
+impl core::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Snapshot of a single task's metadata.
+///
+/// This is the user-space mirror of `kernel::task::TaskInfo`.
+/// Obtained via [`task::info()`] or the lower-level [`task::info_raw()`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::task;
+///
+/// for t in task::info() {
+///     println!("{} {} {} CPU{}", t.pid(), t.name(), t.state(), t.cpu());
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TaskInfo {
+    pid: usize,
+    ppid: usize,
+    state: TaskState,
+    task_type: TaskType,
+    cpu: u8,
+    exit_status: i32,
+    tgid: usize,
+    name: crate::string::String,
+}
+
+impl TaskInfo {
+    /// Process ID (namespace-local).
+    pub fn pid(&self) -> usize {
+        self.pid
+    }
+    /// Parent PID (0 if none).
+    pub fn ppid(&self) -> usize {
+        self.ppid
+    }
+    /// Current task state.
+    pub fn state(&self) -> TaskState {
+        self.state
+    }
+    /// Whether this is a kernel or user task.
+    pub fn task_type(&self) -> TaskType {
+        self.task_type
+    }
+    /// CPU the task last ran on.
+    pub fn cpu(&self) -> u8 {
+        self.cpu
+    }
+    /// Exit status (meaningful only when `state == Zombie`).
+    pub fn exit_status(&self) -> i32 {
+        self.exit_status
+    }
+    /// Thread-group ID (PID for multi-threaded tasks).
+    pub fn tgid(&self) -> usize {
+        self.tgid
+    }
+    /// Task name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw C-layout struct for the syscall boundary
+// ---------------------------------------------------------------------------
+
+/// Opaque raw layout shared with the kernel (`#[repr(C)]`).
+///
+/// Users should prefer [`TaskInfo`] obtained through [`info()`].
+/// This type is public only for advanced use-cases that need zero-copy.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct RawTaskInfo {
+    pub pid: usize,
+    pub ppid: usize,
+    pub state: u8,
+    pub task_type: u8,
+    pub cpu_id: u8,
+    pub _reserved: u8,
+    pub exit_status: i32,
+    pub tgid: usize,
+    pub name: [u8; 64],
+}
+
+impl RawTaskInfo {
+    fn decode(&self) -> TaskInfo {
+        let end = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(self.name.len());
+        let name = core::str::from_utf8(&self.name[..end])
+            .unwrap_or("<invalid>")
+            .to_string();
+        TaskInfo {
+            pid: self.pid,
+            ppid: self.ppid,
+            state: TaskState::from_u8(self.state).unwrap_or(TaskState::NotInitialized),
+            task_type: TaskType::from_u8(self.task_type).unwrap_or(TaskType::Kernel),
+            cpu: self.cpu_id,
+            exit_status: self.exit_status,
+            tgid: self.tgid,
+            name,
+        }
+    }
+}
+
+/// Collect a snapshot of all task metadata.
+///
+/// This is the primary high-level API — analogous to reading `/proc`
+/// on a Unix system.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::task;
+///
+/// for t in task::info() {
+///     println!("{:>4} {:>4} {:>8} {} CPU{}", t.pid(), t.ppid(), t.state(), t.name(), t.cpu());
+/// }
+/// ```
+pub fn info() -> crate::vec::Vec<TaskInfo> {
+    let raw = info_raw();
+    raw.iter().map(|r| r.decode()).collect()
+}
+
+/// Collect raw task info snapshots (zero-allocation decode deferred).
+///
+/// Prefer [`info()`] for ergonomics. Use this when you need maximum
+/// performance or want to decode only a subset.
+pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
+    let total = syscall0(Syscall::GetTaskInfoCount);
+    let mut buf = crate::vec![RawTaskInfo {
+        pid: 0, ppid: 0, state: 0, task_type: 0, cpu_id: 0,
+        _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64],
+    }; total];
+    let n = syscall2(
+        Syscall::GetTaskInfoList,
+        buf.as_mut_ptr() as usize,
+        buf.len(),
+    );
+    buf.truncate(n);
+    buf
 }

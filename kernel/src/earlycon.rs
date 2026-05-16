@@ -21,8 +21,13 @@ macro_rules! early_println {
     ($fmt:expr, $($arg:tt)*) => ($crate::early_print!(concat!($fmt, "\n"), $($arg)*));
 }
 
-struct EarlyConsole;
+pub struct EarlyConsole;
 
+impl EarlyConsole {
+    pub const fn new() -> Self {
+        Self
+    }
+}
 impl Write for EarlyConsole {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for c in s.bytes() {

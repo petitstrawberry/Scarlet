@@ -97,6 +97,10 @@ pub extern "C" fn _user_trap_entry() {
                 mv      a0, sp
                 jalr    ra, t1, 0 // Riscv64.kernel_trap(a0: &mut Trapframe)
 
+                     /* Keep S-mode interrupts masked while sscratch temporarily
+                         contains the user a0 during the trampoline return path. */
+                     csrci   sstatus, 0x2
+
                 /* Return from Rust handler - restore trapframe and sret */
                 mv      a0, sp
                 /* epc */
@@ -311,6 +315,10 @@ pub extern "C" fn _switch_to_user(trapframe: &mut Trapframe) -> ! {
         .option norvc
         .option norelax
         .align 8
+            /* Keep S-mode interrupts masked while sscratch temporarily
+               contains the user a0 during the first user return path. */
+            csrci   sstatus, 0x2
+
                 /* Restore the context of the current hart from trapframe first */ 
                 /* epc */
                 ld     t0, 256(a0)

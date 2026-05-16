@@ -597,8 +597,7 @@ impl EventManager {
         {
             let cpu = crate::arch::get_cpu();
             let cpu_id = cpu.get_cpuid();
-            let sched = crate::sched::scheduler::get_scheduler();
-            if let Some(task) = sched.get_current_task(cpu_id) {
+            if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
                 return Some(task.get_id() as u32);
             }
             None
@@ -1008,9 +1007,7 @@ impl EventManager {
                 }
             }
             GroupTarget::AllTasks => {
-                let sched = crate::sched::scheduler::get_scheduler();
-                let all_ids: alloc::vec::Vec<u32> = sched
-                    .get_all_task_ids()
+                let all_ids: alloc::vec::Vec<u32> = crate::sched::scheduler::get_all_task_ids()
                     .into_iter()
                     .map(|x| x as u32)
                     .collect();
@@ -1062,9 +1059,7 @@ impl EventManager {
         _reliable: bool,
     ) -> Result<(), EventError> {
         // broadcast to every task in the system
-        let sched = crate::sched::scheduler::get_scheduler();
-        let all_ids: alloc::vec::Vec<u32> = sched
-            .get_all_task_ids()
+        let all_ids: alloc::vec::Vec<u32> = crate::sched::scheduler::get_all_task_ids()
             .into_iter()
             .map(|x| x as u32)
             .collect();
@@ -1095,9 +1090,7 @@ impl EventManager {
         drop(task_filters); // Release the lock early
 
         // Get the task and deliver event to its local queue
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             // Enforce buffer size from the target task's config
             let cfg = self.get_task_config_or_default(task_id);
             let mut queue = task.event_queue.lock();
@@ -1122,9 +1115,7 @@ impl EventManager {
     /// This method is deprecated - tasks now process events directly via process_pending_events()
     #[deprecated(note = "Use Task.process_pending_events() instead")]
     pub fn dequeue_event_for_task(&self, task_id: u32) -> Option<Event> {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let mut queue = task.event_queue.lock();
             queue.dequeue()
         } else {
@@ -1134,9 +1125,7 @@ impl EventManager {
 
     /// Get the number of pending events for a task
     pub fn get_pending_event_count(&self, task_id: u32) -> usize {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let queue = task.event_queue.lock();
             queue.len()
         } else {
@@ -1146,9 +1135,7 @@ impl EventManager {
 
     /// Check if a task has any pending events
     pub fn has_pending_events(&self, task_id: u32) -> bool {
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id as usize) {
             let queue = task.event_queue.lock();
             !queue.is_empty()
         } else {
@@ -1482,9 +1469,7 @@ impl crate::object::capability::EventReceiver for EventChannelObject {
         // Check if any subscriber task has pending events for THIS channel specifically
         let subscriber_ids = self.get_subscribers();
         for tid in subscriber_ids {
-            if let Some(task) =
-                crate::sched::scheduler::get_scheduler().get_task_by_id(tid as usize)
-            {
+            if let Some(task) = crate::sched::scheduler::get_task_by_id(tid as usize) {
                 let queue = task.event_queue.lock();
                 for (_prio, q) in queue.events.iter() {
                     for ev in q.iter() {
@@ -1504,9 +1489,7 @@ impl crate::object::capability::EventReceiver for EventChannelObject {
 impl crate::object::capability::EventReceiver for EventSubscriptionObject {
     fn has_pending_events(&self) -> bool {
         // Only consider events delivered to this subscription's channel and matching its local filters
-        if let Some(task) =
-            crate::sched::scheduler::get_scheduler().get_task_by_id(self.task_id as usize)
-        {
+        if let Some(task) = crate::sched::scheduler::get_task_by_id(self.task_id as usize) {
             let queue = task.event_queue.lock();
             let channel_name = self.channel_name.as_str();
             // Take a snapshot of local filters
@@ -2296,7 +2279,7 @@ mod tests {
         for i in 0..2 {
             let task =
                 crate::task::Task::new(format!("g_sess_{}", i), 1, crate::task::TaskType::Kernel);
-            crate::sched::scheduler::get_scheduler().add_task(task, 0);
+            crate::sched::scheduler::add_task(task, crate::sched::scheduler::select_cpu());
         }
 
         // For tests, get_current_task_id() returns Some(1), so join operations will add task 1

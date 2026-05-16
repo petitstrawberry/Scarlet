@@ -1,5 +1,5 @@
 [profile.dev]
-opt-level = 0
+opt-level = 3
 
 [build]
 target = "../targets/riscv64gc-unknown-scarlet-elf.json"

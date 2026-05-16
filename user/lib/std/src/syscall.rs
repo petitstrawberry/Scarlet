@@ -23,6 +23,10 @@ pub enum Syscall {
 
     ExitGroup = 23, // Exit all tasks in thread group
 
+    // Process information
+    GetTaskInfoCount = 24, // Number of tasks
+    GetTaskInfoList = 25,  // TaskInfo snapshots
+
     // TLS (Thread Local Storage) Management
     SetTls = 30,
     GetTls = 31,

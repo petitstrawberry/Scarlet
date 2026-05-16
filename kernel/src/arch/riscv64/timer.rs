@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::{arch::get_cpu, interrupt::InterruptManager};
+use crate::arch::get_cpu;
 
 pub type ArchTimer = Stimer;
 
@@ -12,15 +12,15 @@ pub struct Stimer {
 
 impl Stimer {
     pub fn new() -> Self {
-        let freq = InterruptManager::with_manager(|manager| {
+        let freq = {
             let cpu_id = get_cpu().get_cpuid() as u32;
-            match manager.get_timer_frequency_hz(cpu_id) {
+            match crate::interrupt::InterruptManager::global().get_timer_frequency_hz(cpu_id) {
                 Ok(freq) => freq,
                 Err(e) => {
                     panic!("Failed to get timer frequency: {}", e);
                 }
             }
-        });
+        };
 
         Stimer {
             next_event: 0,
@@ -36,12 +36,13 @@ impl Stimer {
 
     pub fn start(&mut self) {
         self.running = true;
-        InterruptManager::with_manager(|manager| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            if manager.set_timer(cpu_id, self.get_next_event()).is_err() {
-                panic!("Failed to set timer for CPU {}", cpu_id);
-            }
-        });
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        if crate::interrupt::InterruptManager::global()
+            .set_timer(cpu_id, self.get_next_event())
+            .is_err()
+        {
+            panic!("Failed to set timer for CPU {}", cpu_id);
+        }
 
         let mut sie: usize;
         unsafe {
@@ -60,12 +61,13 @@ impl Stimer {
 
     pub fn stop(&mut self) {
         self.running = false;
-        InterruptManager::with_manager(|manager| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            if manager.set_timer(cpu_id, 0xFFFFFFFFFFFFFFFF).is_err() {
-                panic!("Failed to stop timer for CPU {}", cpu_id);
-            }
-        });
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        if crate::interrupt::InterruptManager::global()
+            .set_timer(cpu_id, 0xFFFFFFFFFFFFFFFF)
+            .is_err()
+        {
+            panic!("Failed to stop timer for CPU {}", cpu_id);
+        }
 
         let mut sie: usize;
         unsafe {

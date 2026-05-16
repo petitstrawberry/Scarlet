@@ -13,7 +13,7 @@ use crate::{
     driver_initcall,
     interrupt::{
         controllers::{LocalInterruptController, LocalInterruptType},
-        CpuId, InterruptError, InterruptManager, InterruptResult,
+        CpuId, InterruptError, InterruptResult,
     },
 };
 use alloc::{boxed::Box, vec};
@@ -100,11 +100,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Enable a specific local interrupt type for a CPU
-    fn enable_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -126,11 +122,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Disable a specific local interrupt type for a CPU
-    fn disable_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         match interrupt_type {
@@ -139,8 +131,12 @@ impl LocalInterruptController for Clint {
                 self.set_timer(cpu_id, u64::MAX)
             }
             LocalInterruptType::Software => {
-                // Disable software interrupt by clearing MSIP
-                self.clear_software_interrupt(cpu_id)
+                let addr = self.msip_addr(cpu_id);
+                unsafe {
+                    write_volatile(addr as *mut u32, 0);
+                }
+
+                Ok(())
             }
             LocalInterruptType::External => {
                 // External interrupts are not managed by CLINT
@@ -190,7 +186,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(target_cpu)?;
 
         let addr = self.msip_addr(target_cpu);
@@ -217,7 +213,7 @@ impl LocalInterruptController for Clint {
     }
 
     /// Set timer interrupt for a specific CPU
-    fn set_timer(&mut self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
+    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
         // Set the timer compare register to the specified time using SBI
@@ -272,7 +268,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
+    let mut controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
 
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
@@ -285,9 +281,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Register with InterruptManager instead of DeviceManager
-    match InterruptManager::global()
-        .lock()
-        .register_local_controller_for_range(controller, 0..4)
+    match crate::interrupt::InterruptManager::global()
+        .register_local_controller_for_range(controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
     {
         Ok(_) => {
             crate::early_println!(
@@ -327,55 +322,46 @@ mod tests {
 
     #[test_case]
     fn test_clint_creation() {
-        let clint = Clint::new(0x200_0000, 4, 10_000_000);
-        assert_eq!(clint.max_cpus, 4);
+        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
+        assert_eq!(clint.max_cpus, crate::environment::MAX_NUM_CPUS as CpuId);
     }
 
     #[test_case]
     fn test_address_calculation() {
-        let clint = Clint::new(0x200_0000, 4, 10_000_000);
+        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
 
-        // Test MSIP addresses
         assert_eq!(clint.msip_addr(0), 0x200_0000);
         assert_eq!(clint.msip_addr(1), 0x200_0004);
         assert_eq!(clint.msip_addr(3), 0x200_000C);
 
-        // Test MTIMECMP addresses
         assert_eq!(clint.mtimecmp_addr(0), 0x200_4000);
         assert_eq!(clint.mtimecmp_addr(1), 0x200_4008);
         assert_eq!(clint.mtimecmp_addr(3), 0x200_4018);
 
-        // Test MTIME address
         assert_eq!(clint.mtime_addr(), 0x200_BFF8);
     }
 
     #[test_case]
     fn test_different_base_address() {
-        // Test with different base address to ensure base_addr is properly used
-        let clint = Clint::new(0x300_0000, 4, 10_000_000);
+        let clint = Clint::new(0x300_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
 
-        // Test MSIP addresses with different base
         assert_eq!(clint.msip_addr(0), 0x300_0000);
         assert_eq!(clint.msip_addr(1), 0x300_0004);
 
-        // Test MTIMECMP addresses with different base
         assert_eq!(clint.mtimecmp_addr(0), 0x300_4000);
         assert_eq!(clint.mtimecmp_addr(1), 0x300_4008);
 
-        // Test MTIME address with different base
         assert_eq!(clint.mtime_addr(), 0x300_BFF8);
     }
 
     #[test_case]
     fn test_validation() {
-        let clint = Clint::new(0x200_0000, 4, 10_000_000);
+        let clint = Clint::new(0x200_0000, crate::environment::MAX_NUM_CPUS as CpuId, 10_000_000);
 
-        // Valid CPU IDs should pass
         assert!(clint.validate_cpu_id(0).is_ok());
-        assert!(clint.validate_cpu_id(3).is_ok());
+        assert!(clint.validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId - 1).is_ok());
 
-        // Invalid CPU IDs should fail
-        assert!(clint.validate_cpu_id(4).is_err());
+        assert!(clint.validate_cpu_id(crate::environment::MAX_NUM_CPUS as CpuId).is_err());
         assert!(clint.validate_cpu_id(100).is_err());
     }
 }

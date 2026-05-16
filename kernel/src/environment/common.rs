@@ -1,4 +1,4 @@
-pub const MAX_NUM_CPUS: usize = 2;
+pub const MAX_NUM_CPUS: usize = 16;
 
 pub const STACK_SIZE: usize = 0x80000; // 128KiB
 pub const PAGE_SIZE: usize = 0x1000; // 4KB

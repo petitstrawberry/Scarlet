@@ -7,10 +7,11 @@
 extern crate alloc;
 
 use crate::arch::Trapframe;
-use crate::sched::scheduler::get_scheduler;
+use crate::sched::scheduler::{get_task_by_id, schedule, unmark_blocked, wake_task};
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// A synchronization primitive that manages waiting and waking of tasks
@@ -38,6 +39,10 @@ pub struct Waker {
     block_type: BlockedType,
     /// Human-readable name for debugging purposes
     name: &'static str,
+    /// Pending wake count: incremented by wake_one()/wake_all() when the queue
+    /// is empty (i.e. the wake arrived before the waiter enqueued itself).
+    /// Consumed by wait() so the task does not sleep on an already-fired wake.
+    pending_wakes: AtomicUsize,
 }
 
 impl Waker {
@@ -61,6 +66,7 @@ impl Waker {
             wait_queue: Mutex::new(VecDeque::new()),
             block_type: BlockedType::Interruptible,
             name,
+            pending_wakes: AtomicUsize::new(0),
         }
     }
 
@@ -84,6 +90,7 @@ impl Waker {
             wait_queue: Mutex::new(VecDeque::new()),
             block_type: BlockedType::Uninterruptible,
             name,
+            pending_wakes: AtomicUsize::new(0),
         }
     }
 
@@ -113,30 +120,59 @@ impl Waker {
     /// 1. Set task state to Blocked BEFORE adding to queue
     /// 2. This ensures wake_task() can safely operate even if called immediately
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
-        // CRITICAL: Set task state to Blocked FIRST, before adding to queue
-        // This prevents race condition where wake_one() is called after queue.push_back()
-        // but before set_state(), which would leave the task in Running state but not in queue
-        if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+        // Consume a pending wake that arrived before we enqueued ourselves.
+        // This closes the lost-wake window on SMP: if wake_one()/wake_all()
+        // fired while the queue was empty (between the caller's condition check
+        // and this wait() call), we return immediately instead of sleeping.
+        if self
+            .pending_wakes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                if n > 0 { Some(n - 1) } else { None }
+            })
+            .is_ok()
+        {
+            return;
+        }
+
+        if let Some(task) = get_task_by_id(task_id) {
             task.set_state(TaskState::Blocked(self.block_type));
         } else {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
         }
 
-        // Memory barrier to ensure state change is visible before queue operation
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        crate::sched::scheduler::mark_blocked(task_id);
 
-        // Now add task to wait queue - at this point task is already Blocked
-        // Even if wake_one() is called immediately, wake_task() will work correctly
-        {
+        // Enqueue and re-check pending_wakes under the same lock acquisition.
+        // This closes the SMP lost-wake window: wake_one()/wake_all() that fires
+        // after the initial pending_wakes check but before queue insertion will
+        // increment pending_wakes on an empty queue.  Re-checking here catches
+        // that case so the waiter never sleeps on an already-fired wake.
+        let late_wake = {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
+
+            self.pending_wakes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    if n > 0 { Some(n - 1) } else { None }
+                })
+                .is_ok()
+        };
+
+        if late_wake {
+            {
+                let mut queue = self.wait_queue.lock();
+                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
+                    queue.remove(pos);
+                }
+            }
+            unmark_blocked(task_id);
+            if let Some(task) = get_task_by_id(task_id) {
+                task.set_state(TaskState::Running);
+            }
+            return;
         }
 
-        // Memory barrier to ensure queue addition is visible before yielding
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        // Yield CPU to scheduler - returns when woken
-        get_scheduler().schedule(trapframe);
+        schedule(trapframe);
     }
 
     /// Block the task until woken or the timeout elapses.
@@ -165,8 +201,7 @@ impl Waker {
             impl TimerHandler for TimeoutWake {
                 fn on_timer_expired(self: Arc<Self>, _context: usize) {
                     self.timed_out.store(true, Ordering::SeqCst);
-                    let scheduler = get_scheduler();
-                    let _ = scheduler.wake_task(self.task_id);
+                    let _ = wake_task(self.task_id);
                 }
             }
 
@@ -212,8 +247,7 @@ impl Waker {
         impl TimerHandler for MinTimeoutWake {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
                 self.fired.store(true, Ordering::SeqCst);
-                let scheduler = get_scheduler();
-                let _ = scheduler.wake_task(self.task_id);
+                let _ = wake_task(self.task_id);
             }
         }
 
@@ -301,9 +335,19 @@ impl Waker {
         };
 
         if let Some(task_id) = task_id {
-            // Use the scheduler's wake_task method to move from blocked to ready queue
-            get_scheduler().wake_task(task_id)
+            let woke = wake_task(task_id);
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG waker-wake-one] waker={} cpu={} task={} woke={}",
+                    self.name,
+                    crate::arch::get_cpu().get_cpuid(),
+                    task_id,
+                    woke,
+                );
+            }
+            woke
         } else {
+            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
             false
         }
     }
@@ -331,11 +375,25 @@ impl Waker {
             ids
         };
 
+        if task_ids.is_empty() {
+            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
+            return 0;
+        }
+
         let mut woken_count = 0;
         for task_id in task_ids {
-            // Use the scheduler's wake_task method to move from blocked to ready queue
-            if get_scheduler().wake_task(task_id) {
+            let woke = wake_task(task_id);
+            if woke {
                 woken_count += 1;
+            }
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG waker-wake-all] waker={} cpu={} task={} woke={}",
+                    self.name,
+                    crate::arch::get_cpu().get_cpuid(),
+                    task_id,
+                    woke,
+                );
             }
         }
 
@@ -479,6 +537,7 @@ impl fmt::Debug for Waker {
             .field("block_type", &self.block_type)
             .field("waiting_count", &waiting_tasks.len())
             .field("waiting_task_ids", &*waiting_tasks)
+            .field("pending_wakes", &self.pending_wakes.load(Ordering::Relaxed))
             .finish()
     }
 }

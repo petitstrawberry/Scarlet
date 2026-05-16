@@ -1,17 +1,17 @@
-use crate::environment::STACK_SIZE;
-
-use limine::paging;
-use limine::request::{BspHartidRequest, PagingModeRequest};
+use limine::mp::MpInfo;
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
-    ensure_base_revision_supported, hhdm_physical_span, module_area, reserve_front, response,
-    select_usable_region,
+    MP_REQUEST, ensure_base_revision_supported, hhdm_physical_span, module_area, reserve_front,
+    response, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
-use crate::{BootInfo, DeviceSource, start_kernel};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
+use limine::paging;
+use limine::request::{BspHartidRequest, PagingModeRequest};
 
 static mut EARLY_BOOTINFO: Option<BootInfo> = None;
 
@@ -26,6 +26,40 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
     paging::PagingMode::RISCV_SV48,
     paging::PagingMode::RISCV_SV48,
 );
+
+unsafe extern "C" fn limine_ap_entry(info: &MpInfo) -> ! {
+    wait_for_ap_release();
+    start_ap(info.hartid as usize)
+}
+
+fn start_secondary_cpus() {
+    crate::release_aps();
+}
+
+fn bootstrap_aps() {
+    let mp_resp = match MP_REQUEST.response() {
+        Some(resp) => resp,
+        None => {
+            early_println!("[riscv64] No Limine MP response, single-CPU mode");
+            return;
+        }
+    };
+
+    let bsp_hartid = mp_resp.bsp_hartid;
+    early_println!(
+        "[riscv64] BSP hart={}, {} CPU(s) detected by Limine",
+        bsp_hartid,
+        mp_resp.cpus().len()
+    );
+
+    for cpu in mp_resp.cpus() {
+        if cpu.hartid == bsp_hartid {
+            continue;
+        }
+        early_println!("[riscv64] Bootstrapping hart {}...", cpu.hartid);
+        cpu.bootstrap(limine_ap_entry, cpu.hartid);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub fn limine_entry() -> ! {
@@ -86,11 +120,13 @@ pub fn limine_entry() -> ! {
         hhdm_offset,
         cmdline,
         DeviceSource::Fdt(relocated_fdt_paddr),
-        None, // RISC-V uses SBI debug console, not framebuffer
+        None,
+        Some(start_secondary_cpus),
     );
 
     crate::arch::init_user_context_from_fdt();
-    crate::arch::riscv64::boot::init_boot_cpu(bootinfo.cpu_id);
+    bootstrap_aps();
+    crate::arch::riscv64::boot::init_cpu(bootinfo.cpu_id);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;

@@ -10,7 +10,7 @@ use super::{
 use crate::{
     abi::linux::riscv64::LinuxRiscv64Abi,
     arch::Trapframe,
-    sched::scheduler::get_scheduler,
+    sched::scheduler::wake_task,
     task::mytask,
     time::current_time,
     timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
@@ -210,8 +210,7 @@ impl TimerHandler for PosixTimerHandler {
                 let mut locked = signal_state.lock();
                 locked.add_pending(signal);
                 drop(locked);
-                let scheduler = get_scheduler();
-                let _ = scheduler.wake_task(owner_task_id);
+                let _ = wake_task(owner_task_id);
             }
         }
 
