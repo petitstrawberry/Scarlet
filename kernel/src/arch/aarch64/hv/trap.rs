@@ -1,6 +1,9 @@
 use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::guest_vcpu::GuestVcpu;
 use super::switch::{HCR_EL2_HOST, HCR_EL2_VM, HOST_HV_CTX};
+use super::sysreg::GuestSystemRegs;
 use super::vm::Vm;
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
@@ -28,15 +31,26 @@ const ESR_SYS64_ISS_DIR_READ: u32 = 1;
 const ESR_SYS64_ISS_RT_MASK: u32 = 0x1f;
 const ESR_SYS64_ISS_RT_SHIFT: u32 = 5;
 
+const SYS_CNTFRQ_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7);
+const SYS_CNTP_CTL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (2 << 3) | 1;
+const SYS_CNTP_CVAL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (2 << 3) | 2;
+const SYS_CNTP_TVAL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (2 << 3);
+const SYS_CNTPCT_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | 1;
 const SYS_CNTV_CTL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (3 << 3) | 1;
 const SYS_CNTV_CVAL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (3 << 3) | 2;
 const SYS_CNTV_TVAL_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (3 << 3) | 0;
 const SYS_CNTVCT_EL0: u32 = (3 << 14) | (3 << 11) | (14 << 7) | (0 << 3) | 2;
+const SYS_MPIDR_EL1: u32 = (3 << 14) | (0 << 11) | (0 << 7) | (0 << 3) | 5;
+const SYS_ID_AA64PFR0_EL1: u32 = (3 << 14) | (4 << 3);
+const SYS_TCR2_EL1: u32 = (3 << 14) | (2 << 7) | 3;
+const SYS_PIRE0_EL1: u32 = (3 << 14) | (10 << 7) | (2 << 3) | 2;
+const SYS_PIR_EL1: u32 = (3 << 14) | (10 << 7) | (2 << 3) | 3;
+const TIMER_CTL_ENABLE: u64 = 1 << 0;
+const TIMER_CTL_ISTATUS: u64 = 1 << 2;
 
-const GIC_DIST_BASE: u64 = 0x0800_0000;
 const GIC_DIST_SIZE: u64 = 0x1_0000;
-const GIC_REDIST_BASE: u64 = 0x080A_0000;
-const GIC_REDIST_SIZE: u64 = 0x00F6_0000;
+const GIC_CPUI_SIZE: u64 = 0x2_0000;
+static UNKNOWN_GUEST_TRAP_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_sbi_timer_next_event(_next_event: u64) {}
 
@@ -67,8 +81,162 @@ fn esr_sys64_to_sysreg(iss: u32) -> u32 {
 fn is_timer_sysreg(sysreg: u32) -> bool {
     matches!(
         sysreg,
-        SYS_CNTV_CTL_EL0 | SYS_CNTV_CVAL_EL0 | SYS_CNTV_TVAL_EL0 | SYS_CNTVCT_EL0
+        SYS_CNTFRQ_EL0
+            | SYS_CNTP_CTL_EL0
+            | SYS_CNTP_CVAL_EL0
+            | SYS_CNTP_TVAL_EL0
+            | SYS_CNTPCT_EL0
+            | SYS_CNTV_CTL_EL0
+            | SYS_CNTV_CVAL_EL0
+            | SYS_CNTV_TVAL_EL0
+            | SYS_CNTVCT_EL0
     )
+}
+
+fn read_cntpct_el0() -> u64 {
+    let value: u64;
+    // SAFETY: reading the architected physical counter is side-effect free.
+    unsafe {
+        asm!("mrs {0}, cntpct_el0", out(reg) value, options(nostack));
+    }
+    value
+}
+
+fn guest_virtual_count(sysregs: &GuestSystemRegs) -> u64 {
+    read_cntpct_el0().wrapping_sub(sysregs.cntvoff_el2)
+}
+
+fn read_cntfrq_el0() -> u64 {
+    let value: u64;
+    // SAFETY: reading the architected counter frequency is side-effect free.
+    unsafe {
+        asm!("mrs {0}, cntfrq_el0", out(reg) value, options(nostack));
+    }
+    value
+}
+
+fn timer_ctl_with_status(sysregs: &GuestSystemRegs) -> u64 {
+    let mut ctl = sysregs.cntv_ctl_el0;
+    if (ctl & TIMER_CTL_ENABLE) != 0 && guest_virtual_count(sysregs) >= sysregs.cntv_cval_el0 {
+        ctl |= TIMER_CTL_ISTATUS;
+    } else {
+        ctl &= !TIMER_CTL_ISTATUS;
+    }
+    ctl
+}
+
+fn emulate_timer_sysreg(
+    trapframe: &mut Trapframe,
+    guest: &mut GuestVcpu,
+    sysreg: u32,
+    reg: u8,
+    is_read: bool,
+) -> bool {
+    let mut sysregs = guest.sysregs.clone();
+    sysregs.take_pending_into();
+
+    match sysreg {
+        SYS_CNTFRQ_EL0 if is_read => {
+            if reg < 31 {
+                trapframe.regs.reg[reg as usize] = read_cntfrq_el0() as usize;
+            }
+        }
+        SYS_CNTPCT_EL0 | SYS_CNTVCT_EL0 if is_read => {
+            if reg < 31 {
+                trapframe.regs.reg[reg as usize] = guest_virtual_count(&sysregs) as usize;
+            }
+        }
+        SYS_CNTP_CTL_EL0 | SYS_CNTV_CTL_EL0 if is_read => {
+            if reg < 31 {
+                trapframe.regs.reg[reg as usize] = timer_ctl_with_status(&sysregs) as usize;
+            }
+        }
+        SYS_CNTP_CTL_EL0 | SYS_CNTV_CTL_EL0 => {
+            if reg < 31 {
+                sysregs.cntv_ctl_el0 =
+                    (trapframe.regs.reg[reg as usize] as u64) & !TIMER_CTL_ISTATUS;
+            }
+        }
+        SYS_CNTP_CVAL_EL0 | SYS_CNTV_CVAL_EL0 if is_read => {
+            if reg < 31 {
+                trapframe.regs.reg[reg as usize] = sysregs.cntv_cval_el0 as usize;
+            }
+        }
+        SYS_CNTP_CVAL_EL0 | SYS_CNTV_CVAL_EL0 => {
+            if reg < 31 {
+                sysregs.cntv_cval_el0 = trapframe.regs.reg[reg as usize] as u64;
+            }
+        }
+        SYS_CNTP_TVAL_EL0 | SYS_CNTV_TVAL_EL0 if is_read => {
+            if reg < 31 {
+                trapframe.regs.reg[reg as usize] = sysregs
+                    .cntv_cval_el0
+                    .wrapping_sub(guest_virtual_count(&sysregs))
+                    as usize;
+            }
+        }
+        SYS_CNTP_TVAL_EL0 | SYS_CNTV_TVAL_EL0 => {
+            if reg < 31 {
+                sysregs.cntv_cval_el0 = guest_virtual_count(&sysregs)
+                    .wrapping_add(trapframe.regs.reg[reg as usize] as u64);
+            }
+        }
+        _ => return false,
+    }
+
+    guest.sysregs = sysregs;
+    trapframe.elr = trapframe.elr.wrapping_add(4);
+    true
+}
+
+fn virtual_id_sysreg_value(sysreg: u32) -> Option<u64> {
+    let op0 = (sysreg >> 14) & 0x3;
+    let op1 = (sysreg >> 11) & 0x7;
+    let crn = (sysreg >> 7) & 0xf;
+    let crm = (sysreg >> 3) & 0xf;
+
+    if op0 == 3 && op1 == 0 && crn == 0 {
+        Some(if sysreg == SYS_MPIDR_EL1 {
+            0x8000_0000
+        } else if sysreg == SYS_ID_AA64PFR0_EL1 {
+            0x11
+        } else if crm <= 7 {
+            0
+        } else {
+            return None;
+        })
+    } else {
+        None
+    }
+}
+
+fn emulate_el1_sysreg(
+    trapframe: &mut Trapframe,
+    guest: &mut GuestVcpu,
+    sysreg: u32,
+    reg: u8,
+    is_read: bool,
+) -> bool {
+    let mut sysregs = guest.sysregs.clone();
+    sysregs.take_pending_into();
+    let value = match sysreg {
+        SYS_TCR2_EL1 => &mut sysregs.tcr2_el1,
+        SYS_PIRE0_EL1 => &mut sysregs.pire0_el1,
+        SYS_PIR_EL1 => &mut sysregs.pir_el1,
+        _ => return false,
+    };
+
+    if is_read {
+        if reg < 31 {
+            trapframe.regs.reg[reg as usize] = *value as usize;
+        }
+    } else if reg < 31 {
+        *value = trapframe.regs.reg[reg as usize] as u64;
+    }
+
+    guest.sysregs = sysregs;
+    trapframe.elr = trapframe.elr.wrapping_add(4);
+    true
 }
 
 fn read_hpfar_el2() -> u64 {
@@ -108,6 +276,7 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
         return Some(VmExit::Unknown(ipa));
     };
     let Some(hpa) = resolve_guest_hpa(ipa, vm) else {
+        crate::println!("[AARCH64-S2] resolve failed ipa={:#x}", ipa);
         return Some(VmExit::FailEntry {
             hardware_entry_failure_reason: 0,
         });
@@ -115,11 +284,49 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
 
     match vm.map_stage2_page(ipa, hpa, writable && !slot.flags.readonly) {
         Ok(()) => None,
-        Err(_) => Some(VmExit::FailEntry {
-            hardware_entry_failure_reason: 0,
-        }),
+        Err(e) => {
+            crate::println!(
+                "[AARCH64-S2] map failed ipa={:#x} hpa={:#x} writable={} err={}",
+                ipa,
+                hpa,
+                writable && !slot.flags.readonly,
+                e
+            );
+            Some(VmExit::FailEntry {
+                hardware_entry_failure_reason: 0,
+            })
+        }
     }
 }
+
+fn handle_host_irq_from_guest(trap_kind: usize) {
+    let mut scratch = Trapframe::new();
+
+    if trap_kind == 2 && crate::arch::interrupt::is_arch_timer_pending() {
+        crate::timer::tick_with_scheduler(&mut scratch, false);
+        return;
+    }
+
+    let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
+    match crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id) {
+        Ok(Some(interrupt_id)) => {
+            if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
+                crate::timer::tick_with_scheduler(&mut scratch, false);
+            }
+        }
+        Ok(None) => {
+            if crate::arch::interrupt::is_arch_timer_pending() {
+                crate::timer::tick_with_scheduler(&mut scratch, false);
+            }
+        }
+        Err(e) => {
+            crate::println!("[AARCH64-HV] failed to handle host irq from guest: {}", e);
+        }
+    }
+}
+
+static EXIT_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
+static HOST_IRQ_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub fn is_from_guest() -> bool {
     let hcr: u64;
@@ -130,15 +337,64 @@ pub fn is_from_guest() -> bool {
     (hcr & HCR_EL2_VM) != 0
 }
 
-pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmExit> {
+pub fn arch_guest_trap_handler(
+    trapframe: &mut Trapframe,
+    vm: &Vm,
+    guest: &mut GuestVcpu,
+) -> Option<VmExit> {
+    guest.sysregs.take_pending_into();
+
     let esr = trapframe.esr_el1;
+    if esr == 1 || esr == 2 {
+        let trace_count = HOST_IRQ_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if trace_count.is_multiple_of(10_000) {
+            crate::println!(
+                "[AARCH64-HOST-IRQ] count={} kind={} elr={:#x} lr={:#x} x0={:#x} x1={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} sp={:#x} spsr={:#x} cntvct={:#x} cntv_ctl={:#x} cntv_cval={:#x}",
+                trace_count,
+                esr,
+                trapframe.elr,
+                trapframe.regs.reg[30],
+                trapframe.regs.reg[0],
+                trapframe.regs.reg[1],
+                trapframe.regs.reg[19],
+                trapframe.regs.reg[20],
+                trapframe.regs.reg[21],
+                trapframe.regs.reg[22],
+                trapframe.sp,
+                trapframe.spsr,
+                super::vm::guest_virtual_count(&guest.sysregs),
+                guest.sysregs.cntv_ctl_el0,
+                guest.sysregs.cntv_cval_el0
+            );
+        }
+        handle_host_irq_from_guest(esr as usize);
+        return None;
+    }
+
     let ec = ((esr >> ESR_EC_SHIFT) & ESR_EC_MASK) as u32;
     let iss = (esr & ESR_ISS_MASK) as u32;
+    let trace_count = EXIT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    if trace_count.is_multiple_of(100_000) {
+        let ipa = if ec == ESR_EC_IABT_LOW || ec == ESR_EC_DABT_LOW {
+            guest_fault_ipa()
+        } else {
+            0
+        };
+        crate::println!(
+            "[AARCH64-EXIT] count={} esr={:#x} ec={:#x} iss={:#x} elr={:#x} ipa={:#x}",
+            trace_count,
+            esr,
+            ec,
+            iss,
+            trapframe.elr,
+            ipa
+        );
+    }
 
     match ec {
         ESR_EC_WFX => {
             trapframe.elr = trapframe.elr.wrapping_add(4);
-            Some(VmExit::Hlt)
+            None
         }
         ESR_EC_HVC64 | ESR_EC_SMC64 => {
             let epc = trapframe.elr;
@@ -150,6 +406,22 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmE
             let sysreg = esr_sys64_to_sysreg(iss) as u64;
             let reg = ((iss >> ESR_SYS64_ISS_RT_SHIFT) & ESR_SYS64_ISS_RT_MASK) as u8;
             let is_read = (iss & ESR_SYS64_ISS_DIR_READ) != 0;
+
+            if emulate_el1_sysreg(trapframe, guest, sysreg as u32, reg, is_read) {
+                return None;
+            }
+
+            if emulate_timer_sysreg(trapframe, guest, sysreg as u32, reg, is_read) {
+                return None;
+            }
+
+            if is_read && let Some(value) = virtual_id_sysreg_value(sysreg as u32) {
+                if reg < 31 {
+                    trapframe.regs.reg[reg as usize] = value as usize;
+                }
+                trapframe.elr = trapframe.elr.wrapping_add(4);
+                return None;
+            }
 
             if !is_timer_sysreg(sysreg as u32) {
                 return Some(VmExit::IllegalInstruction {
@@ -187,9 +459,41 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmE
         ESR_EC_IABT_LOW => handle_guest_stage2_fault(vm, guest_fault_ipa(), false),
         ESR_EC_DABT_LOW => {
             let ipa = guest_fault_ipa();
-            if (ipa >= GIC_DIST_BASE && ipa < GIC_DIST_BASE + GIC_DIST_SIZE)
-                || (ipa >= GIC_REDIST_BASE && ipa < GIC_REDIST_BASE + GIC_REDIST_SIZE)
-            {
+
+            // Check registered in-kernel MMIO devices first
+            if let Some(device) = vm.find_mmio_device(ipa) {
+                let (base, _) = device.addr_range();
+                let offset = ipa - base;
+                let size = data_abort_access_size(iss);
+                let reg = data_abort_srt(iss);
+                let is_write = (iss & ESR_WNR) != 0;
+
+                if is_write {
+                    let data = if reg < 31 {
+                        trapframe.regs.reg[reg as usize] as u64
+                    } else {
+                        0
+                    };
+                    device.write(offset, size, data);
+                } else {
+                    let value = device.read(offset, size);
+                    if reg < 31 {
+                        trapframe.regs.reg[reg as usize] = value as usize;
+                    }
+                }
+
+                trapframe.elr = trapframe.elr.wrapping_add(4);
+                return None; // Handled in-kernel, continue guest
+            }
+
+            let is_gic_mmio = if let Some((dist_base, dist_size, cpu_base)) = vm.gic_mmio_range() {
+                let in_dist = ipa >= dist_base && ipa < dist_base + dist_size;
+                let in_cpu = cpu_base.is_some_and(|cpu| ipa >= cpu && ipa < cpu + GIC_CPUI_SIZE);
+                in_dist || in_cpu
+            } else {
+                false
+            };
+            if is_gic_mmio {
                 let epc = trapframe.elr;
                 let size = data_abort_access_size(iss);
                 let reg = data_abort_srt(iss);
@@ -259,7 +563,22 @@ pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Vm) -> Option<VmE
             inst_len: None,
         }),
         ESR_EC_BREAKPT_LOW | ESR_EC_BRK64 => Some(VmExit::Breakpoint { epc: trapframe.elr }),
-        _ => Some(VmExit::Unknown(esr)),
+        _ => {
+            let count = UNKNOWN_GUEST_TRAP_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 32 {
+                crate::println!(
+                    "[AARCH64-HV] unknown trap esr={:#x} ec={:#x} iss={:#x} elr={:#x} spsr={:#x} far={:#x} hpfar={:#x}",
+                    esr,
+                    ec,
+                    iss,
+                    trapframe.elr,
+                    trapframe.spsr,
+                    read_far_el2(),
+                    read_hpfar_el2()
+                );
+            }
+            Some(VmExit::Unknown(esr))
+        }
     }
 }
 

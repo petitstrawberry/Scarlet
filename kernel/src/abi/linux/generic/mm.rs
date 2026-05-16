@@ -464,6 +464,21 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
+pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let _addr = trapframe.get_arg(0);
+    let _length = trapframe.get_arg(1);
+    let _advice = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    0
+}
+
 pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,

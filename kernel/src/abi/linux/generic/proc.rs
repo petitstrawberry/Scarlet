@@ -1,5 +1,5 @@
 use crate::{
-    abi::linux::generic::LinuxAbi,
+    abi::linux::generic::{LinuxAbi, errno},
     arch::Trapframe,
     sched::scheduler::{get_task_by_id, schedule},
     task::{CloneFlags, mytask},
@@ -104,6 +104,35 @@ pub fn sys_set_robust_list(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     trapframe.increment_pc_next(task);
 
     0
+}
+
+pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+    let cpusetsize = trapframe.get_arg(1);
+    let mask_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if cpusetsize == 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+    if mask_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let kva = match task.vm_manager.translate_to_kva(mask_ptr) {
+        Some(kva) => kva,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let bytes_to_clear = cpusetsize.min(128);
+    unsafe {
+        core::ptr::write_bytes(kva as *mut u8, 0, bytes_to_clear);
+        *(kva as *mut usize) = 1;
+    }
+
+    core::mem::size_of::<usize>()
 }
 
 // pub fn sys_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -348,6 +377,64 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0 // Always succeed
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSysinfo {
+    uptime: isize,
+    loads: [usize; 3],
+    totalram: usize,
+    freeram: usize,
+    sharedram: usize,
+    bufferram: usize,
+    totalswap: usize,
+    freeswap: usize,
+    procs: u16,
+    pad: u16,
+    totalhigh: usize,
+    freehigh: usize,
+    mem_unit: u32,
+    _f: [u8; 0],
+}
+
+pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let info_ptr = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    if info_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let kva = match task.vm_manager.translate_to_kva(info_ptr) {
+        Some(kva) => kva,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let info = LinuxSysinfo {
+        uptime: crate::timer::ticks_to_ms(crate::timer::get_tick()) as isize / 1000,
+        loads: [0; 3],
+        totalram: 0,
+        freeram: 0,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: 1,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+        _f: [],
+    };
+
+    unsafe {
+        core::ptr::write(kva as *mut LinuxSysinfo, info);
+    }
+
+    0
+}
+
 pub fn sys_getuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -561,16 +648,16 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(child_task) => {
-            child_task.vcpu.lock().iregs.reg[10] = 0; // a0 = 0 in child
+            child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
                 child_task.vcpu.lock().set_sp(child_stack);
             }
-            // If CLONE_SETTLS requested, set tp (x4) to tls for child
+            // If CLONE_SETTLS requested, set the architecture-specific TLS pointer.
             #[allow(non_snake_case)]
             const CLONE_SETTLS: usize = 0x00080000;
             if (flags & CLONE_SETTLS) != 0 {
-                child_task.vcpu.lock().iregs.reg[4] = tls; // x4 = tp
+                child_task.vcpu.lock().set_tls_pointer(tls);
             }
 
             let cpu_id = crate::sched::scheduler::select_cpu();

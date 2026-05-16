@@ -33,6 +33,23 @@ pub mod reg {
     pub const SP: u32 = 31;
     pub const PC: u32 = 32;
     pub const PSTATE: u32 = 33;
+    pub const SCTLR_EL1: u32 = 34;
+    pub const VBAR_EL1: u32 = 35;
+    pub const TCR_EL1: u32 = 36;
+    pub const TTBR0_EL1: u32 = 37;
+    pub const TTBR1_EL1: u32 = 38;
+    pub const MAIR_EL1: u32 = 39;
+    pub const AMAIR_EL1: u32 = 40;
+    pub const ESR_EL1: u32 = 41;
+    pub const FAR_EL1: u32 = 42;
+    pub const ELR_EL1: u32 = 43;
+    pub const SPSR_EL1: u32 = 44;
+    pub const SP_EL1: u32 = 45;
+    pub const CPACR_EL1: u32 = 46;
+    pub const CONTEXTIDR_EL1: u32 = 47;
+    pub const CNTV_CTL_EL0: u32 = 48;
+    pub const CNTV_CVAL_EL0: u32 = 49;
+    pub const CNTVOFF_EL2: u32 = 50;
 
     pub const A0: u32 = X0;
     pub const A1: u32 = X1;

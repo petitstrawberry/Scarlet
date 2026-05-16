@@ -729,6 +729,22 @@ pub fn check_extension(_cap: usize) -> Option<usize> {
     None
 }
 
+pub fn validate_device_type(_device_type: u32) -> Result<(), ()> {
+    Err(())
+}
+
+pub fn set_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    Err(())
+}
+
+pub fn get_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    Err(())
+}
+
+pub fn has_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    Err(())
+}
+
 mod sbi_ext {
     pub const BASE: u64 = 0x10;
     pub const _PUTCHAR: u64 = 0x01;

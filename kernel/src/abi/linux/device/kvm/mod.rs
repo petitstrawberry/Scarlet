@@ -18,7 +18,8 @@ use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::types::InterruptType;
-use crate::hypervisor::{VcpuRef, VmObject, VmRef};
+use crate::hypervisor::vm::VmObject;
+use crate::hypervisor::{VcpuRef, VmRef};
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
@@ -73,6 +74,8 @@ pub const KVM_GET_VCPU_MMAP_SIZE: u32 = io_none(KVMIO, 0x04);
 pub const KVM_CREATE_VCPU: u32 = io_none(KVMIO, 0x41);
 pub const KVM_RUN: u32 = io_none(KVMIO, 0x80);
 pub const KVM_CREATE_IRQCHIP: u32 = io_none(KVMIO, 0x60);
+const KVM_CREATE_DEVICE: u32 =
+    io_read_write(KVMIO, 0xe0, core::mem::size_of::<KvmCreateDevice>() as u32);
 
 // _IOW(KVMIO, 0x86, struct kvm_interrupt)
 pub const KVM_INTERRUPT: u32 = io_write(KVMIO, 0x86, 4);
@@ -83,9 +86,25 @@ const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
 // _IOW(KVMIO, nr, struct)
 pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
 pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
+const KVM_REGISTER_COALESCED_MMIO: u32 = io_write(
+    KVMIO,
+    0x67,
+    core::mem::size_of::<KvmCoalescedMmioZone>() as u32,
+);
+const KVM_UNREGISTER_COALESCED_MMIO: u32 = io_write(
+    KVMIO,
+    0x68,
+    core::mem::size_of::<KvmCoalescedMmioZone>() as u32,
+);
 pub const KVM_SET_MP_STATE: u32 = io_write(KVMIO, 0x99, 4);
 pub const KVM_SET_REGS: u32 = io_write(KVMIO, 0x82, 256);
 pub const KVM_SET_ONE_REG: u32 = io_write(KVMIO, 0xAC, 16);
+const KVM_SET_DEVICE_ATTR: u32 =
+    io_write(KVMIO, 0xe1, core::mem::size_of::<KvmDeviceAttr>() as u32);
+const KVM_GET_DEVICE_ATTR: u32 =
+    io_write(KVMIO, 0xe2, core::mem::size_of::<KvmDeviceAttr>() as u32);
+const KVM_HAS_DEVICE_ATTR: u32 =
+    io_write(KVMIO, 0xe3, core::mem::size_of::<KvmDeviceAttr>() as u32);
 
 // _IOR(KVMIO, nr, struct)
 pub const KVM_GET_MP_STATE: u32 = io_read(KVMIO, 0x98, 4);
@@ -131,6 +150,31 @@ pub struct KvmUserspaceMemoryRegion {
     pub guest_phys_addr: u64,
     pub memory_size: u64,
     pub userspace_addr: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KvmCreateDevice {
+    pub type_: u32,
+    pub fd: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KvmCoalescedMmioZone {
+    addr: u64,
+    size: u32,
+    pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KvmDeviceAttr {
+    pub flags: u32,
+    pub group: u32,
+    pub attr: u64,
+    pub addr: u64,
 }
 
 #[repr(C)]
@@ -261,6 +305,7 @@ fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<u64> {
     let pages = get_run_pages().read();
     for entry in pages.iter() {
         if Arc::ptr_eq(&entry.vcpu, vcpu) {
+            refresh_run_page_from_poc(entry.page.vaddr);
             let kvm_run = unsafe { &*(entry.page.vaddr as *const KvmRun) };
             if kvm_run.exit_reason == KVM_EXIT_MMIO {
                 let mmio = unsafe { &kvm_run.exit_data.mmio };
@@ -309,6 +354,7 @@ pub fn write_vcpu_run_exit(vcpu: &VcpuRef, exit: &crate::hypervisor::VmExit) -> 
                 _padding: [0u8; 256],
             };
             write_vm_exit(kvm_run, exit, vcpu);
+            clean_run_page_to_poc(entry.page.vaddr);
             return true;
         }
     }
@@ -333,13 +379,14 @@ pub fn free_vcpu_run_page(vcpu: &VcpuRef) {
 
 pub fn handle_system_ioctl(
     request: u32,
-    _arg: usize,
+    arg: usize,
     abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
     match request {
         KVM_GET_API_VERSION => Ok(Some(KVM_API_VERSION)),
 
         KVM_CREATE_VM => {
+            crate::println!("[KVM] CREATE_VM");
             let task = mytask().ok_or(())?;
             let owner_mm = task.vm_manager.clone();
             let vm = crate::hypervisor::vm::GLOBAL_VM_MANAGER
@@ -357,16 +404,20 @@ pub fn handle_system_ioctl(
             const KVM_CAP_COALESCED_MMIO: usize = 15;
             const KVM_CAP_ONE_REG: usize = 70;
             const KVM_CAP_MAX_VCPUS: usize = 66;
-            match _arg {
+            const KVM_CAP_DEVICE_CTRL: usize = 89;
+            let result = match arg {
                 KVM_CAP_IRQCHIP => Ok(Some(1)),
                 KVM_CAP_ONE_REG => Ok(Some(1)),
                 KVM_CAP_NR_VCPUS => Ok(Some(1)),
                 KVM_CAP_MAX_VCPUS => Ok(Some(1)),
-                _ => match arch::check_extension(_arg) {
+                KVM_CAP_DEVICE_CTRL => Ok(Some(1)),
+                _ => match arch::check_extension(arg) {
                     Some(val) => Ok(Some(val)),
                     None => Ok(Some(0)),
                 },
-            }
+            };
+            crate::println!("[KVM] CHECK_EXTENSION: cap={} => {:?}", arg, result);
+            result
         }
 
         KVM_GET_VCPU_MMAP_SIZE => Ok(Some(core::mem::size_of::<KvmRun>())),
@@ -388,6 +439,7 @@ pub fn handle_vm_ioctl(
     match request {
         KVM_CREATE_VCPU => {
             let vcpu_id = arg as u32;
+            crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
             let task = mytask().ok_or(())?;
             let vcpu = vm.create_vcpu(vcpu_id).map_err(|_| ())?;
             register_vcpu_run_page(&vcpu).map_err(|_| ())?;
@@ -463,9 +515,84 @@ pub fn handle_vm_ioctl(
             Ok(Some(0))
         }
 
-        KVM_CREATE_IRQCHIP => Ok(Some(0)),
+        KVM_CREATE_IRQCHIP => {
+            crate::println!("[KVM] CREATE_IRQCHIP");
+            Ok(Some(0))
+        }
 
-        _ => arch::handle_vm_ioctl(request, arg, vm, abi),
+        KVM_REGISTER_COALESCED_MMIO | KVM_UNREGISTER_COALESCED_MMIO => Ok(Some(0)),
+
+        KVM_CREATE_DEVICE => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmCreateDevice.
+            let create = unsafe { &mut *(kva as *mut KvmCreateDevice) };
+            crate::println!("[KVM] CREATE_DEVICE: type={:#x}", create.type_);
+
+            arch::validate_device_type(create.type_)?;
+
+            let kernel_obj = KernelObject::HypervisorVm(Arc::clone(vm));
+            let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
+            let fd = abi.allocate_fd(handle).map_err(|_| ())?;
+            create.fd = fd as u32;
+            Ok(Some(0))
+        }
+
+        KVM_SET_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            crate::println!(
+                "[KVM] SET_DEVICE_ATTR: group={} attr={:#x}",
+                attr.group,
+                attr.attr
+            );
+            arch::set_device_attr(vm, attr)
+        }
+
+        KVM_GET_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            crate::println!(
+                "[KVM] GET_DEVICE_ATTR: group={} attr={:#x}",
+                attr.group,
+                attr.attr
+            );
+            arch::get_device_attr(vm, attr)
+        }
+
+        KVM_HAS_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            crate::println!(
+                "[KVM] HAS_DEVICE_ATTR: group={} attr={:#x}",
+                attr.group,
+                attr.attr
+            );
+            arch::has_device_attr(vm, attr)
+        }
+
+        _ => {
+            crate::println!("[KVM] VM_IOCTL unknown: request={:#x}", request);
+            arch::handle_vm_ioctl(request, arg, vm, abi)
+        }
     }
 }
 
@@ -477,6 +604,21 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static MMIO_PENDING_READ_REG: AtomicU8 = AtomicU8::new(0xFF);
 static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
+
+#[inline(always)]
+fn clean_run_page_to_poc(vaddr: usize) {
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::aarch64::clean_dcache_to_poc_range(vaddr, core::mem::size_of::<KvmRun>());
+}
+
+#[inline(always)]
+fn refresh_run_page_from_poc(vaddr: usize) {
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::aarch64::clean_invalidate_dcache_to_poc_range(
+        vaddr,
+        core::mem::size_of::<KvmRun>(),
+    );
+}
 
 pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
     match request {
@@ -491,6 +633,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                     let val = if arg != 0 {
                         let task = mytask().ok_or(())?;
                         let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+                        refresh_run_page_from_poc(kva);
                         // SAFETY: caller guarantees arg points to a valid KvmRun
                         let kvm_run = unsafe { &*(kva as *const KvmRun) };
                         if kvm_run.exit_reason == KVM_EXIT_MMIO {
@@ -562,6 +705,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                     // SAFETY: caller guarantees arg points to a valid KvmRun
                     let kvm_run = unsafe { &mut *(kva as *mut KvmRun) };
                     write_vm_exit(kvm_run, &exit, vcpu);
+                    clean_run_page_to_poc(kva);
                 }
 
                 break;

@@ -2,6 +2,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::{Once, RwLock};
 
 use crate::arch::hv::reg_index::reg;
@@ -43,22 +44,17 @@ const KVM_REG_SIZE_MASK: u64 = 0x00f0_0000_0000_0000;
 const KVM_REG_SIZE_U64: u64 = 0x0030_0000_0000_0000;
 const KVM_REG_SIZE_U32: u64 = 0x0020_0000_0000_0000;
 
-const KVM_REG_ARM64_TYPE_MASK: u64 = 0x0000_0000_ff00_0000;
-const KVM_REG_ARM64_TYPE_SHIFT: u64 = 24;
+const KVM_REG_ARM_COPROC_MASK: u64 = 0x0000_0000_0fff_0000;
+const KVM_REG_ARM_COPROC_SHIFT: u64 = 16;
 
-const KVM_REG_ARM64_CORE: u64 = 0x01 << KVM_REG_ARM64_TYPE_SHIFT;
-const KVM_REG_ARM64_SYSREG: u64 = 0x03 << KVM_REG_ARM64_TYPE_SHIFT;
+const KVM_REG_ARM_CORE: u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
+const KVM_REG_ARM64_SYSREG: u64 = 0x0013 << KVM_REG_ARM_COPROC_SHIFT;
 
-const KVM_REG_ARM64_SYSREG_OP0_SHIFT: u64 = 20;
-const KVM_REG_ARM64_SYSREG_OP0_MASK: u64 = 0x3;
-const KVM_REG_ARM64_SYSREG_OP1_SHIFT: u64 = 14;
-const KVM_REG_ARM64_SYSREG_OP1_MASK: u64 = 0x7;
-const KVM_REG_ARM64_SYSREG_CRN_SHIFT: u64 = 10;
-const KVM_REG_ARM64_SYSREG_CRN_MASK: u64 = 0xf;
-const KVM_REG_ARM64_SYSREG_CRM_SHIFT: u64 = 7;
-const KVM_REG_ARM64_SYSREG_CRM_MASK: u64 = 0xf;
-const KVM_REG_ARM64_SYSREG_OP2_SHIFT: u64 = 3;
-const KVM_REG_ARM64_SYSREG_OP2_MASK: u64 = 0x7;
+const KVM_REG_ARM64_SYSREG_OP0_SHIFT: u64 = 14;
+const KVM_REG_ARM64_SYSREG_OP1_SHIFT: u64 = 11;
+const KVM_REG_ARM64_SYSREG_CRN_SHIFT: u64 = 7;
+const KVM_REG_ARM64_SYSREG_CRM_SHIFT: u64 = 3;
+const KVM_REG_ARM64_SYSREG_OP2_SHIFT: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // PSCI constants (ARM DEN 0022E)
@@ -80,6 +76,7 @@ const PSCI_FN64_SYSTEM_OFF: u64 = 0xC4000008;
 const PSCI_FN64_SYSTEM_RESET: u64 = 0xC4000009;
 
 const SMCCC_RET_NOT_SUPPORTED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+static SMCCC_HELPER_RETURN_PC: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // In-kernel PSCI state (tracks per-VM PSCI SYSTEM_OFF/RESET results)
@@ -95,6 +92,21 @@ pub enum FirmwareCallResult {
     SystemReset,
     /// Not a PSCI call; forward to userspace as KVM_EXIT_MMIO or similar.
     ForwardToUserspace,
+}
+
+fn finish_smccc_function_call(vcpu: &VcpuRef) {
+    let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+    let helper_pc = SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire);
+    let x8 = vcpu.get_reg(reg::X8).unwrap_or(0);
+
+    if helper_pc == 0 && x8 != 0 {
+        SMCCC_HELPER_RETURN_PC.store(pc, Ordering::Release);
+    }
+
+    if pc == SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire) && x8 != 0 {
+        let _ = vcpu.set_reg(reg::X4, x8);
+        let _ = vcpu.set_reg(reg::PC, pc.wrapping_add(4));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,15 +125,25 @@ fn validate_one_reg_id(id: u64) -> Result<(), ()> {
 }
 
 fn kvm_reg_type(id: u64) -> u64 {
-    id & KVM_REG_ARM64_TYPE_MASK
+    id & KVM_REG_ARM_COPROC_MASK
 }
 
 fn kvm_reg_index(id: u64) -> u64 {
     id & 0x0000_ffff
 }
 
+const KVM_CORE_REGS_SP: u64 = 62;
+const KVM_CORE_REGS_PC: u64 = 64;
+const KVM_CORE_REGS_PSTATE: u64 = 66;
+const KVM_CORE_SP_EL1: u64 = 68;
+const KVM_CORE_ELR_EL1: u64 = 70;
+const KVM_CORE_SPSR_BASE: u64 = 72;
+const KVM_NR_SPSR: usize = 5;
+
 const fn encode_sysreg(op0: u64, op1: u64, crn: u64, crm: u64, op2: u64) -> u64 {
-    KVM_REG_ARM64_SYSREG
+    KVM_REG_ARM64
+        | KVM_REG_SIZE_U64
+        | KVM_REG_ARM64_SYSREG
         | (op0 << KVM_REG_ARM64_SYSREG_OP0_SHIFT)
         | (op1 << KVM_REG_ARM64_SYSREG_OP1_SHIFT)
         | (crn << KVM_REG_ARM64_SYSREG_CRN_SHIFT)
@@ -150,7 +172,7 @@ const SYSREG_ESR_EL1: u64 = encode_sysreg(3, 0, 5, 2, 0);
 const SYSREG_FAR_EL1: u64 = encode_sysreg(3, 0, 6, 0, 0);
 const SYSREG_ELR_EL1: u64 = encode_sysreg(3, 0, 4, 0, 1);
 const SYSREG_SPSR_EL1: u64 = encode_sysreg(3, 0, 4, 0, 0);
-const SYSREG_SP_EL1: u64 = encode_sysreg(3, 0, 4, 1, 0);
+const SYSREG_SP_EL1: u64 = encode_sysreg(3, 4, 4, 1, 0);
 const SYSREG_CPACR_EL1: u64 = encode_sysreg(3, 0, 1, 0, 2);
 const SYSREG_CONTEXTIDR_EL1: u64 = encode_sysreg(3, 0, 13, 0, 1);
 const SYSREG_CNTVOFF_EL2: u64 = encode_sysreg(3, 4, 14, 0, 3);
@@ -162,22 +184,18 @@ const SYSREG_ID_AA64MMFR1_EL1: u64 = encode_sysreg(3, 0, 0, 7, 1);
 const SYSREG_ID_AA64MMFR2_EL1: u64 = encode_sysreg(3, 0, 0, 7, 2);
 const SYSREG_ID_AA64PFR0_EL1: u64 = encode_sysreg(3, 0, 0, 4, 0);
 
-/// Per-vCPU sysreg state for registers that cannot be accessed via the
-/// generic VcpuRef::get_reg / set_reg interface. Stored separately so
-/// KVM_GET_ONE_REG / KVM_SET_ONE_REG can read/write timer registers etc.
+/// Per-vCPU KVM-only state for core registers that Scarlet does not execute.
 #[derive(Clone, Copy)]
 struct KvmArmVcpuSysregState {
-    cntv_ctl_el0: u64,
-    cntv_cval_el0: u64,
-    cntvoff_el2: u64,
+    sp_el0: u64,
+    spsr: [u64; 5],
 }
 
 impl Default for KvmArmVcpuSysregState {
     fn default() -> Self {
         Self {
-            cntv_ctl_el0: 0,
-            cntv_cval_el0: 0,
-            cntvoff_el2: 0,
+            sp_el0: 0,
+            spsr: [0; 5],
         }
     }
 }
@@ -246,13 +264,7 @@ pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
-        KVM_REG_ARM64_CORE => match kvm_reg_index(id) {
-            idx @ 0..=30 => vcpu.get_reg(idx as u32).map_err(|_| ()),
-            31 => vcpu.get_reg(reg::SP).map_err(|_| ()),
-            32 => vcpu.get_reg(reg::PC).map_err(|_| ()),
-            33 => vcpu.get_reg(reg::PSTATE).map_err(|_| ()),
-            _ => Err(()),
-        },
+        KVM_REG_ARM_CORE => get_one_core_reg(vcpu, kvm_reg_index(id)),
         KVM_REG_ARM64_SYSREG => get_one_sysreg(vcpu, id),
         _ => Err(()),
     }
@@ -262,14 +274,58 @@ pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
-        KVM_REG_ARM64_CORE => match kvm_reg_index(id) {
-            idx @ 0..=30 => vcpu.set_reg(idx as u32, value).map_err(|_| ()),
-            31 => vcpu.set_reg(reg::SP, value).map_err(|_| ()),
-            32 => vcpu.set_reg(reg::PC, value).map_err(|_| ()),
-            33 => vcpu.set_reg(reg::PSTATE, value).map_err(|_| ()),
-            _ => Err(()),
-        },
+        KVM_REG_ARM_CORE => set_one_core_reg(vcpu, kvm_reg_index(id), value),
         KVM_REG_ARM64_SYSREG => set_one_sysreg(vcpu, id, value),
+        _ => Err(()),
+    }
+}
+
+fn get_one_core_reg(vcpu: &VcpuRef, index: u64) -> Result<u64, ()> {
+    match index {
+        idx if idx <= 60 && idx % 2 == 0 => vcpu.get_reg((idx / 2) as u32).map_err(|_| ()),
+        KVM_CORE_REGS_SP => Ok(with_sysreg_state(vcpu, |s| s.sp_el0)),
+        KVM_CORE_REGS_PC => vcpu.get_reg(reg::PC).map_err(|_| ()),
+        KVM_CORE_REGS_PSTATE => vcpu.get_reg(reg::PSTATE).map_err(|_| ()),
+        KVM_CORE_SP_EL1 => vcpu.get_reg(reg::SP_EL1).map_err(|_| ()),
+        KVM_CORE_ELR_EL1 => vcpu.get_reg(reg::ELR_EL1).map_err(|_| ()),
+        idx if idx >= KVM_CORE_SPSR_BASE
+            && idx < KVM_CORE_SPSR_BASE + (KVM_NR_SPSR as u64 * 2)
+            && idx % 2 == 0 =>
+        {
+            let spsr_index = ((idx - KVM_CORE_SPSR_BASE) / 2) as usize;
+            if spsr_index == 0 {
+                vcpu.get_reg(reg::SPSR_EL1).map_err(|_| ())
+            } else {
+                Ok(with_sysreg_state(vcpu, |s| s.spsr[spsr_index]))
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn set_one_core_reg(vcpu: &VcpuRef, index: u64, value: u64) -> Result<(), ()> {
+    match index {
+        idx if idx <= 60 && idx % 2 == 0 => vcpu.set_reg((idx / 2) as u32, value).map_err(|_| ()),
+        KVM_CORE_REGS_SP => {
+            with_sysreg_state(vcpu, |s| s.sp_el0 = value);
+            Ok(())
+        }
+        KVM_CORE_REGS_PC => vcpu.set_reg(reg::PC, value).map_err(|_| ()),
+        KVM_CORE_REGS_PSTATE => vcpu.set_reg(reg::PSTATE, value).map_err(|_| ()),
+        KVM_CORE_SP_EL1 => vcpu.set_reg(reg::SP_EL1, value).map_err(|_| ()),
+        KVM_CORE_ELR_EL1 => vcpu.set_reg(reg::ELR_EL1, value).map_err(|_| ()),
+        idx if idx >= KVM_CORE_SPSR_BASE
+            && idx < KVM_CORE_SPSR_BASE + (KVM_NR_SPSR as u64 * 2)
+            && idx % 2 == 0 =>
+        {
+            let spsr_index = ((idx - KVM_CORE_SPSR_BASE) / 2) as usize;
+            with_sysreg_state(vcpu, |s| s.spsr[spsr_index] = value);
+            if spsr_index == 0 {
+                vcpu.set_reg(reg::SPSR_EL1, value).map_err(|_| ())
+            } else {
+                Ok(())
+            }
+        }
         _ => Err(()),
     }
 }
@@ -277,36 +333,29 @@ pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
 /// Map a decoded sysreg ID to a readable value. Returns Err for unknown regs.
 fn get_one_sysreg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
     match id {
-        // Timer registers — stored in per-vCPU sysreg state
-        SYSREG_CNTV_CTL_EL0 => Ok(with_sysreg_state(vcpu, |s| s.cntv_ctl_el0)),
-        SYSREG_CNTV_CVAL_EL0 => Ok(with_sysreg_state(vcpu, |s| s.cntv_cval_el0)),
-        SYSREG_CNTV_TVAL_EL0 => {
-            // Read CVAL and compute TVAL relative to current counter
-            let cval = with_sysreg_state(vcpu, |s| s.cntv_cval_el0);
-            // Return 0 as placeholder — guest can re-compute
-            let _ = cval;
-            Ok(0)
-        }
-        SYSREG_CNTVOFF_EL2 => Ok(with_sysreg_state(vcpu, |s| s.cntvoff_el2)),
+        SYSREG_CNTV_CTL_EL0 => vcpu.get_reg(reg::CNTV_CTL_EL0).map_err(|_| ()),
+        SYSREG_CNTV_CVAL_EL0 => vcpu.get_reg(reg::CNTV_CVAL_EL0).map_err(|_| ()),
+        SYSREG_CNTV_TVAL_EL0 => Ok(0),
+        SYSREG_CNTVOFF_EL2 => vcpu.get_reg(reg::CNTVOFF_EL2).map_err(|_| ()),
         // EL1 system registers — accessible via vcpu get_reg for known indices
         SYSREG_MPIDR_EL1 => {
             // Default MPIDR for single CPU: Aff0=0, Aff1=0, Aff2=0, MT=0, RES1=bit31
             Ok(0x80000000)
         }
-        SYSREG_SCTLR_EL1 => Ok(vcpu.get_reg(34).unwrap_or(0)), // Use extended reg space
-        SYSREG_VBAR_EL1 => Ok(vcpu.get_reg(35).unwrap_or(0)),
-        SYSREG_TCR_EL1 => Ok(vcpu.get_reg(36).unwrap_or(0)),
-        SYSREG_TTBR0_EL1 => Ok(vcpu.get_reg(37).unwrap_or(0)),
-        SYSREG_TTBR1_EL1 => Ok(vcpu.get_reg(38).unwrap_or(0)),
-        SYSREG_MAIR_EL1 => Ok(vcpu.get_reg(39).unwrap_or(0)),
-        SYSREG_AMAIR_EL1 => Ok(vcpu.get_reg(40).unwrap_or(0)),
-        SYSREG_ESR_EL1 => Ok(vcpu.get_reg(41).unwrap_or(0)),
-        SYSREG_FAR_EL1 => Ok(vcpu.get_reg(42).unwrap_or(0)),
-        SYSREG_ELR_EL1 => Ok(vcpu.get_reg(43).unwrap_or(0)),
-        SYSREG_SPSR_EL1 => Ok(vcpu.get_reg(44).unwrap_or(0)),
-        SYSREG_SP_EL1 => Ok(vcpu.get_reg(45).unwrap_or(0)),
-        SYSREG_CPACR_EL1 => Ok(vcpu.get_reg(46).unwrap_or(0)),
-        SYSREG_CONTEXTIDR_EL1 => Ok(vcpu.get_reg(47).unwrap_or(0)),
+        SYSREG_SCTLR_EL1 => vcpu.get_reg(reg::SCTLR_EL1).map_err(|_| ()),
+        SYSREG_VBAR_EL1 => vcpu.get_reg(reg::VBAR_EL1).map_err(|_| ()),
+        SYSREG_TCR_EL1 => vcpu.get_reg(reg::TCR_EL1).map_err(|_| ()),
+        SYSREG_TTBR0_EL1 => vcpu.get_reg(reg::TTBR0_EL1).map_err(|_| ()),
+        SYSREG_TTBR1_EL1 => vcpu.get_reg(reg::TTBR1_EL1).map_err(|_| ()),
+        SYSREG_MAIR_EL1 => vcpu.get_reg(reg::MAIR_EL1).map_err(|_| ()),
+        SYSREG_AMAIR_EL1 => vcpu.get_reg(reg::AMAIR_EL1).map_err(|_| ()),
+        SYSREG_ESR_EL1 => vcpu.get_reg(reg::ESR_EL1).map_err(|_| ()),
+        SYSREG_FAR_EL1 => vcpu.get_reg(reg::FAR_EL1).map_err(|_| ()),
+        SYSREG_ELR_EL1 => vcpu.get_reg(reg::ELR_EL1).map_err(|_| ()),
+        SYSREG_SPSR_EL1 => vcpu.get_reg(reg::SPSR_EL1).map_err(|_| ()),
+        SYSREG_SP_EL1 => vcpu.get_reg(reg::SP_EL1).map_err(|_| ()),
+        SYSREG_CPACR_EL1 => vcpu.get_reg(reg::CPACR_EL1).map_err(|_| ()),
+        SYSREG_CONTEXTIDR_EL1 => vcpu.get_reg(reg::CONTEXTIDR_EL1).map_err(|_| ()),
         // ID registers — return safe defaults
         SYSREG_ID_AA64PFR0_EL1 => Ok(0x00000011), // EL0=1,EL1=1
         SYSREG_ID_AA64DFR0_EL1 => Ok(0),
@@ -323,82 +372,25 @@ fn get_one_sysreg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
 fn set_one_sysreg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
     match id {
         // Timer registers
-        SYSREG_CNTV_CTL_EL0 => {
-            with_sysreg_state(vcpu, |s| s.cntv_ctl_el0 = value);
-            Ok(())
-        }
-        SYSREG_CNTV_CVAL_EL0 => {
-            with_sysreg_state(vcpu, |s| s.cntv_cval_el0 = value);
-            Ok(())
-        }
-        SYSREG_CNTV_TVAL_EL0 => {
-            // TVAL writes are relative; store as CVAL would need current counter.
-            // For now, accept and store 0 to CVAL.
-            let _ = value;
-            with_sysreg_state(vcpu, |s| s.cntv_cval_el0 = 0);
-            Ok(())
-        }
-        SYSREG_CNTVOFF_EL2 => {
-            with_sysreg_state(vcpu, |s| s.cntvoff_el2 = value);
-            Ok(())
-        }
+        SYSREG_CNTV_CTL_EL0 => vcpu.set_reg(reg::CNTV_CTL_EL0, value).map_err(|_| ()),
+        SYSREG_CNTV_CVAL_EL0 => vcpu.set_reg(reg::CNTV_CVAL_EL0, value).map_err(|_| ()),
+        SYSREG_CNTV_TVAL_EL0 => vcpu.set_reg(reg::CNTV_CVAL_EL0, value).map_err(|_| ()),
+        SYSREG_CNTVOFF_EL2 => vcpu.set_reg(reg::CNTVOFF_EL2, value).map_err(|_| ()),
         // EL1 system registers
-        SYSREG_SCTLR_EL1 => {
-            let _ = vcpu.set_reg(34, value);
-            Ok(())
-        }
-        SYSREG_VBAR_EL1 => {
-            let _ = vcpu.set_reg(35, value);
-            Ok(())
-        }
-        SYSREG_TCR_EL1 => {
-            let _ = vcpu.set_reg(36, value);
-            Ok(())
-        }
-        SYSREG_TTBR0_EL1 => {
-            let _ = vcpu.set_reg(37, value);
-            Ok(())
-        }
-        SYSREG_TTBR1_EL1 => {
-            let _ = vcpu.set_reg(38, value);
-            Ok(())
-        }
-        SYSREG_MAIR_EL1 => {
-            let _ = vcpu.set_reg(39, value);
-            Ok(())
-        }
-        SYSREG_AMAIR_EL1 => {
-            let _ = vcpu.set_reg(40, value);
-            Ok(())
-        }
-        SYSREG_ESR_EL1 => {
-            let _ = vcpu.set_reg(41, value);
-            Ok(())
-        }
-        SYSREG_FAR_EL1 => {
-            let _ = vcpu.set_reg(42, value);
-            Ok(())
-        }
-        SYSREG_ELR_EL1 => {
-            let _ = vcpu.set_reg(43, value);
-            Ok(())
-        }
-        SYSREG_SPSR_EL1 => {
-            let _ = vcpu.set_reg(44, value);
-            Ok(())
-        }
-        SYSREG_SP_EL1 => {
-            let _ = vcpu.set_reg(45, value);
-            Ok(())
-        }
-        SYSREG_CPACR_EL1 => {
-            let _ = vcpu.set_reg(46, value);
-            Ok(())
-        }
-        SYSREG_CONTEXTIDR_EL1 => {
-            let _ = vcpu.set_reg(47, value);
-            Ok(())
-        }
+        SYSREG_SCTLR_EL1 => vcpu.set_reg(reg::SCTLR_EL1, value).map_err(|_| ()),
+        SYSREG_VBAR_EL1 => vcpu.set_reg(reg::VBAR_EL1, value).map_err(|_| ()),
+        SYSREG_TCR_EL1 => vcpu.set_reg(reg::TCR_EL1, value).map_err(|_| ()),
+        SYSREG_TTBR0_EL1 => vcpu.set_reg(reg::TTBR0_EL1, value).map_err(|_| ()),
+        SYSREG_TTBR1_EL1 => vcpu.set_reg(reg::TTBR1_EL1, value).map_err(|_| ()),
+        SYSREG_MAIR_EL1 => vcpu.set_reg(reg::MAIR_EL1, value).map_err(|_| ()),
+        SYSREG_AMAIR_EL1 => vcpu.set_reg(reg::AMAIR_EL1, value).map_err(|_| ()),
+        SYSREG_ESR_EL1 => vcpu.set_reg(reg::ESR_EL1, value).map_err(|_| ()),
+        SYSREG_FAR_EL1 => vcpu.set_reg(reg::FAR_EL1, value).map_err(|_| ()),
+        SYSREG_ELR_EL1 => vcpu.set_reg(reg::ELR_EL1, value).map_err(|_| ()),
+        SYSREG_SPSR_EL1 => vcpu.set_reg(reg::SPSR_EL1, value).map_err(|_| ()),
+        SYSREG_SP_EL1 => vcpu.set_reg(reg::SP_EL1, value).map_err(|_| ()),
+        SYSREG_CPACR_EL1 => vcpu.set_reg(reg::CPACR_EL1, value).map_err(|_| ()),
+        SYSREG_CONTEXTIDR_EL1 => vcpu.set_reg(reg::CONTEXTIDR_EL1, value).map_err(|_| ()),
         // Read-only registers
         SYSREG_MPIDR_EL1
         | SYSREG_ID_AA64PFR0_EL1
@@ -427,16 +419,19 @@ pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
     match function_id {
         PSCI_FN_VERSION => {
             let _ = vcpu.set_reg(reg::X0, PSCI_VERSION_1_1);
+            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_CPU_OFF | PSCI_FN64_CPU_OFF => {
             // Single vCPU: refuse CPU_OFF
             let _ = vcpu.set_reg(reg::X0, PSCI_RET_DENIED);
+            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_CPU_ON | PSCI_FN64_CPU_ON => {
             // Multi-vCPU not yet supported
             let _ = vcpu.set_reg(reg::X0, PSCI_RET_NOT_SUPPORTED);
+            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_SYSTEM_OFF | PSCI_FN64_SYSTEM_OFF => FirmwareCallResult::SystemOff,
@@ -444,6 +439,7 @@ pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
         _ => {
             // Unknown PSCI / SMCCC function — return NOT_SUPPORTED
             let _ = vcpu.set_reg(reg::X0, SMCCC_RET_NOT_SUPPORTED);
+            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
     }
@@ -492,7 +488,7 @@ pub fn write_firmware_exit(kvm_run: &mut KvmRun, exit: &VmExit, vcpu: &VcpuRef) 
 pub fn check_extension(cap: usize) -> Option<usize> {
     const KVM_CAP_ARM_VM_IPA_SIZE: usize = 165;
     const KVM_CAP_ARM_PSCI: usize = 87;
-    const KVM_CAP_ARM_SET_DEVICE_ADDR: usize = 177;
+    const KVM_CAP_ARM_SET_DEVICE_ADDR: usize = 88;
     const KVM_CAP_ARM_PSCI_0_2: usize = 102;
 
     match cap {
@@ -501,6 +497,86 @@ pub fn check_extension(cap: usize) -> Option<usize> {
         KVM_CAP_ARM_SET_DEVICE_ADDR => Some(1),
         KVM_CAP_ARM_PSCI_0_2 => Some(1),
         _ => None,
+    }
+}
+
+pub fn validate_device_type(device_type: u32) -> Result<(), ()> {
+    match device_type {
+        KVM_DEV_TYPE_ARM_VGIC_V3 => Ok(()),
+        _ => Err(()),
+    }
+}
+
+pub fn set_device_attr(vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    match attr.group {
+        KVM_DEV_ARM_VGIC_GRP_ADDR => {
+            if attr.addr == 0 {
+                return Err(());
+            }
+            let task = crate::task::mytask().ok_or(())?;
+            let kva = task
+                .vm_manager
+                .translate_to_kva(attr.addr as usize)
+                .ok_or(())?;
+            // SAFETY: caller guarantees addr points to a valid u64
+            let addr = unsafe { core::ptr::read_volatile(kva as *const u64) };
+            match attr.attr {
+                KVM_VGIC_V3_ADDR_TYPE_DIST => {
+                    vm.set_vgicv3_dist_addr(addr);
+                    crate::println!("[KVM] VGICv3 DIST addr={:#x}", addr);
+                    Ok(Some(0))
+                }
+                KVM_VGIC_V3_ADDR_TYPE_REDIST => {
+                    vm.set_vgicv3_redist_addr(addr);
+                    crate::println!("[KVM] VGICv3 REDIST addr={:#x}", addr);
+                    Ok(Some(0))
+                }
+                _ => Err(()),
+            }
+        }
+        KVM_DEV_ARM_VGIC_GRP_NR_IRQS => {
+            if attr.addr == 0 {
+                return Err(());
+            }
+            let task = crate::task::mytask().ok_or(())?;
+            let kva = task
+                .vm_manager
+                .translate_to_kva(attr.addr as usize)
+                .ok_or(())?;
+            // SAFETY: caller guarantees addr points to a valid u32
+            let nr_irqs = unsafe { core::ptr::read_volatile(kva as *const u32) };
+            vm.set_vgic_nr_irqs(nr_irqs);
+            crate::println!("[KVM] VGICv3 NR_IRQS={}", nr_irqs);
+            Ok(Some(0))
+        }
+        KVM_DEV_ARM_VGIC_GRP_CTRL => match attr.attr {
+            KVM_DEV_ARM_VGIC_CTRL_INIT => {
+                vm.vgic_init()?;
+                crate::println!("[KVM] VGICv3 INIT");
+                Ok(Some(0))
+            }
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+pub fn get_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    Err(())
+}
+
+pub fn has_device_attr(_vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+    match attr.group {
+        KVM_DEV_ARM_VGIC_GRP_ADDR => match attr.attr {
+            KVM_VGIC_V3_ADDR_TYPE_DIST | KVM_VGIC_V3_ADDR_TYPE_REDIST => Ok(Some(0)),
+            _ => Err(()),
+        },
+        KVM_DEV_ARM_VGIC_GRP_NR_IRQS => Ok(Some(0)),
+        KVM_DEV_ARM_VGIC_GRP_CTRL => match attr.attr {
+            0 => Ok(Some(0)),
+            _ => Err(()),
+        },
+        _ => Err(()),
     }
 }
 
@@ -522,10 +598,18 @@ const fn io_read(ty: u32, nr: u32, size: u32) -> u32 {
 
 const KVM_ARM_PREFERRED_TARGET: u32 = io_read(KVMIO, 0xAF, 32);
 const KVM_ARM_VCPU_INIT: u32 = io_write(KVMIO, 0xAE, 32);
-const KVM_ARM_SET_DEVICE_ADDR: u32 = io_write(KVMIO, 0xB0, 16);
-const KVM_ARM_VCPU_FINALIZE: u32 = io_none(KVMIO, 0x85);
+const KVM_ARM_SET_DEVICE_ADDR: u32 =
+    io_write(KVMIO, 0xAB, core::mem::size_of::<KvmArmDeviceAddr>() as u32);
+const KVM_ARM_VCPU_FINALIZE: u32 = io_write(KVMIO, 0xC2, core::mem::size_of::<i32>() as u32);
 
 const KVM_ARM_TARGET_GENERIC_V8: u32 = 5;
+const KVM_DEV_TYPE_ARM_VGIC_V3: u32 = 7;
+const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0;
+const KVM_DEV_ARM_VGIC_GRP_NR_IRQS: u32 = 3;
+const KVM_DEV_ARM_VGIC_GRP_CTRL: u32 = 4;
+const KVM_VGIC_V3_ADDR_TYPE_DIST: u64 = 2;
+const KVM_VGIC_V3_ADDR_TYPE_REDIST: u64 = 3;
+const KVM_DEV_ARM_VGIC_CTRL_INIT: u64 = 0;
 
 const KVM_ARM_VCPU_POWER_OFF_BIT: u32 = 0;
 
@@ -602,7 +686,11 @@ pub fn handle_vm_ioctl(
             let task = mytask().ok_or(())?;
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmArmDeviceAddr
-            let _dev_addr = unsafe { &*(kva as *const KvmArmDeviceAddr) };
+            let dev_addr = unsafe { &*(kva as *const KvmArmDeviceAddr) };
+            const KVM_ARM_DEVICE_ID_SHIFT: u64 = 16;
+            let device_id = (dev_addr.id >> KVM_ARM_DEVICE_ID_SHIFT) & 0xFFFF;
+            let addr_type = dev_addr.id & 0xFFFF;
+            _vm.set_gic_device_addr(device_id, addr_type, dev_addr.addr);
             Ok(Some(0))
         }
 

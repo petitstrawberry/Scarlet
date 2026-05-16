@@ -100,6 +100,10 @@ impl Vcpu {
         self.sp as usize
     }
 
+    pub fn set_return_value(&mut self, value: usize) {
+        self.iregs.reg[0] = value;
+    }
+
     pub fn get_spsr(&self) -> u64 {
         self.spsr
     }

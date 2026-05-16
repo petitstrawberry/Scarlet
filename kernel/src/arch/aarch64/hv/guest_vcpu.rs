@@ -107,6 +107,23 @@ impl GuestVcpu {
             reg::SP => Ok(self.sysregs.sp_el1),
             reg::PC => Ok(self.pc),
             reg::PSTATE => Ok(self.spsr),
+            reg::SCTLR_EL1 => Ok(self.sysregs.sctlr_el1),
+            reg::VBAR_EL1 => Ok(self.sysregs.vbar_el1),
+            reg::TCR_EL1 => Ok(self.sysregs.tcr_el1),
+            reg::TTBR0_EL1 => Ok(self.sysregs.ttbr0_el1),
+            reg::TTBR1_EL1 => Ok(self.sysregs.ttbr1_el1),
+            reg::MAIR_EL1 => Ok(self.sysregs.mair_el1),
+            reg::AMAIR_EL1 => Ok(self.sysregs.amair_el1),
+            reg::ESR_EL1 => Ok(self.sysregs.esr_el1),
+            reg::FAR_EL1 => Ok(self.sysregs.far_el1),
+            reg::ELR_EL1 => Ok(self.sysregs.elr_el1),
+            reg::SPSR_EL1 => Ok(self.sysregs.spsr_el1),
+            reg::SP_EL1 => Ok(self.sysregs.sp_el1),
+            reg::CPACR_EL1 => Ok(self.sysregs.cpacr_el1),
+            reg::CONTEXTIDR_EL1 => Ok(self.sysregs.contextidr_el1),
+            reg::CNTV_CTL_EL0 => Ok(self.sysregs.cntv_ctl_el0),
+            reg::CNTV_CVAL_EL0 => Ok(self.sysregs.cntv_cval_el0),
+            reg::CNTVOFF_EL2 => Ok(self.sysregs.cntvoff_el2),
             _ => Err("Invalid register index"),
         }
     }
@@ -128,6 +145,74 @@ impl GuestVcpu {
             reg::PSTATE => {
                 self.spsr = value;
                 self.mode = mode_from_pstate(value);
+                Ok(())
+            }
+            reg::SCTLR_EL1 => {
+                self.sysregs.sctlr_el1 = value;
+                Ok(())
+            }
+            reg::VBAR_EL1 => {
+                self.sysregs.vbar_el1 = value;
+                Ok(())
+            }
+            reg::TCR_EL1 => {
+                self.sysregs.tcr_el1 = value;
+                Ok(())
+            }
+            reg::TTBR0_EL1 => {
+                self.sysregs.ttbr0_el1 = value;
+                Ok(())
+            }
+            reg::TTBR1_EL1 => {
+                self.sysregs.ttbr1_el1 = value;
+                Ok(())
+            }
+            reg::MAIR_EL1 => {
+                self.sysregs.mair_el1 = value;
+                Ok(())
+            }
+            reg::AMAIR_EL1 => {
+                self.sysregs.amair_el1 = value;
+                Ok(())
+            }
+            reg::ESR_EL1 => {
+                self.sysregs.esr_el1 = value;
+                Ok(())
+            }
+            reg::FAR_EL1 => {
+                self.sysregs.far_el1 = value;
+                Ok(())
+            }
+            reg::ELR_EL1 => {
+                self.sysregs.elr_el1 = value;
+                Ok(())
+            }
+            reg::SPSR_EL1 => {
+                self.sysregs.spsr_el1 = value;
+                Ok(())
+            }
+            reg::SP_EL1 => {
+                self.sysregs.sp_el1 = value;
+                Ok(())
+            }
+            reg::CPACR_EL1 => {
+                self.sysregs.cpacr_el1 = value;
+                Ok(())
+            }
+            reg::CONTEXTIDR_EL1 => {
+                self.sysregs.contextidr_el1 = value;
+                Ok(())
+            }
+            reg::CNTV_CTL_EL0 => {
+                self.sysregs.cntv_ctl_el0 = value;
+                Ok(())
+            }
+            reg::CNTV_CVAL_EL0 => {
+                self.sysregs.cntv_cval_el0 = value;
+                Ok(())
+            }
+            reg::CNTVOFF_EL2 => {
+                self.sysregs.cntvoff_el2 = value;
                 Ok(())
             }
             _ => Err("Invalid register index"),

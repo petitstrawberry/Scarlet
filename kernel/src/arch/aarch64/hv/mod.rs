@@ -1,10 +1,12 @@
 pub mod guest_vcpu;
 pub mod mmu;
+pub mod pl011_mmio;
 pub mod reg_index;
 pub mod switch;
 pub mod sysreg;
 pub mod trap;
 pub mod vgic;
+pub mod vgic_mmio;
 pub mod vm;
 
 use alloc::sync::Arc;
@@ -19,7 +21,7 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::hypervisor::vm::VmId;
 use crate::vm::manager::VirtualMemoryManager;
 
-const VTCR_EL2_RES1: u64 = 1 << 31;
+const VTCR_EL2_RES1: u64 = (1 << 31) | (1 << 23);
 const VTCR_EL2_PS_40BIT: u64 = 0b010 << 16;
 const VTCR_EL2_TG0_4K: u64 = 0b00 << 14;
 const VTCR_EL2_SH0_INNER_SHAREABLE: u64 = 0b11 << 12;

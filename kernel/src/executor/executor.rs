@@ -263,10 +263,10 @@ impl TransparentExecutor {
 
         if rebuild_required {
             // Step 5: Setup complete task environment for new ABI (includes VFS, CWD)
-            crate::println!(
-                "[TransparentExecutor] Setting up environment for ABI: {}",
-                abi_name
-            );
+            // crate::println!(
+            //     "[TransparentExecutor] Setting up environment for ABI: {}",
+            //     abi_name
+            // );
             Self::setup_task_environment(task, &mut abi)?;
         }
 

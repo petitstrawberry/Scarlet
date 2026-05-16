@@ -58,6 +58,10 @@ impl Vcpu {
         self.iregs.reg[2] = sp;
     }
 
+    pub fn set_return_value(&mut self, value: usize) {
+        self.iregs.set_return_value(value);
+    }
+
     pub fn get_mode(&self) -> Mode {
         self.mode
     }
