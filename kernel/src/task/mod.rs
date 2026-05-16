@@ -1695,6 +1695,7 @@ impl Task {
                 let status = child_task.get_exit_status().unwrap_or(-1);
                 child_task.set_state(TaskState::Terminated);
                 self.remove_child(child_id);
+                crate::sched::scheduler::cleanup_zombie(child_id);
                 Ok(status)
             } else {
                 Err(WaitError::ChildNotExited(
