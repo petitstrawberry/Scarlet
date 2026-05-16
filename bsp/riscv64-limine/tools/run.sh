@@ -127,7 +127,7 @@ fi
 qemu-system-riscv64 \
     -machine virt,acpi=off \
     -m 8G \
-    -smp 16 \
+    -smp 4 \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
