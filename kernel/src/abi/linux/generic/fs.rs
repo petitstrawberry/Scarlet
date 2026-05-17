@@ -2146,7 +2146,8 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
         }
         crate::object::KernelObject::HypervisorVcpu(vcpu) => {
-            let result = crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu);
+            let result =
+                crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu, trapframe);
             return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),

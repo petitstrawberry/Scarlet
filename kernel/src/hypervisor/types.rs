@@ -41,6 +41,7 @@ pub enum VmExit {
     Breakpoint {
         epc: u64,
     },
+    Wfi,
     Hlt,
     Shutdown,
     FailEntry {
@@ -154,7 +155,7 @@ impl VcpuExit {
                 epc: *epc,
                 ..Default::default()
             },
-            VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
+            VmExit::Wfi | VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
                 hardware_entry_failure_reason,

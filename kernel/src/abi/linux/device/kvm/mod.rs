@@ -681,6 +681,7 @@ fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
         VmExit::Breakpoint { epc } => {
             crate::println!("[KVM-RUN] exit#{} BREAKPOINT epc={:#x}", count, epc)
         }
+        VmExit::Wfi => crate::println!("[KVM-RUN] exit#{} WFI", count),
         VmExit::Hlt => crate::println!("[KVM-RUN] exit#{} HLT", count),
         VmExit::Shutdown => crate::println!("[KVM-RUN] exit#{} SHUTDOWN", count),
         VmExit::FailEntry {
@@ -697,7 +698,12 @@ fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
     }
 }
 
-pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
+pub fn handle_vcpu_ioctl(
+    request: u32,
+    arg: usize,
+    vcpu: &VcpuRef,
+    trapframe: &mut crate::arch::Trapframe,
+) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
             let run_count = KVM_RUN_ENTRY_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -742,6 +748,11 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
             loop {
                 let exit = vcpu.run().map_err(|_| ())?;
                 // log_vm_exit(&exit);
+
+                if matches!(exit, crate::hypervisor::VmExit::Wfi) {
+                    vcpu.wait_for_interrupt(trapframe);
+                    continue;
+                }
 
                 if let crate::hypervisor::VmExit::FirmwareCall { .. } = &exit {
                     match arch::handle_firmware_call_in_kernel(vcpu) {
@@ -923,6 +934,9 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &
             mmio.data[..core::mem::size_of::<u64>()].copy_from_slice(&data.to_le_bytes());
         }
         VmExit::Hlt => {
+            kvm_run.exit_reason = KVM_EXIT_HLT;
+        }
+        VmExit::Wfi => {
             kvm_run.exit_reason = KVM_EXIT_HLT;
         }
         VmExit::FirmwareCall { epc: _ } => {

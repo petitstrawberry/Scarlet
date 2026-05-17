@@ -12,5 +12,8 @@ echo "PATH is set to: $PATH"
 
 echo "Shell initialized successfully"
 
-# # Auto-start Linux guest via KVM
+# # Auto-start Linux guest via KVM (riscv64)
 # /scarlet/system/linux-riscv64/usr/bin/lkvm run -k /scarlet/system/linux-riscv64/usr/bin/guest-Image -i /scarlet/system/linux-riscv64/usr/bin/guest-initramfs.cpio.gz -p "console=ttyS0 rdinit=/sbin/init" --console serial -n mode=none -m 512
+
+# Auto-start Linux guest via KVM (aarch64)
+/scarlet/system/linux-aarch64/usr/bin/lkvm run -k /scarlet/system/linux-aarch64/usr/bin/guest-Image -i /scarlet/system/linux-aarch64/usr/bin/guest-initramfs.cpio.gz -p "console=ttyS0 earlycon=uart,mmio,0x1000000 rdinit=/sbin/init" --console serial --irqchip=gicv3 -n mode=none -m 512

@@ -22,12 +22,14 @@ use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
 use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
 use crate::object::capability::ControlOps;
+use crate::sync::Waker;
 use crate::task::mytask;
 use crate::vm::manager::VirtualMemoryManager;
 
 const IRQ_BIT_SOFTWARE: u64 = 1 << 0;
 const IRQ_BIT_TIMER: u64 = 1 << 1;
 const IRQ_BIT_EXTERNAL: u64 = 1 << 2;
+const IRQ_BIT_EXTERNAL_LINE: u64 = 1 << 3;
 const GUEST_TIMER_PPI: u32 = 27;
 const GUEST_IRQ_PRIORITY: u8 = 0x80;
 const TIMER_CTL_ENABLE: u64 = 1 << 0;
@@ -89,6 +91,15 @@ fn read_cntpct_el0() -> u64 {
     value
 }
 
+fn read_cntfrq_el0() -> u64 {
+    let value: u64;
+    // SAFETY: reading the architected counter frequency is side-effect free.
+    unsafe {
+        asm!("mrs {value}, cntfrq_el0", value = out(reg) value, options(nostack));
+    }
+    value
+}
+
 pub(crate) fn guest_virtual_count(sysregs: &GuestSystemRegs) -> u64 {
     read_cntpct_el0().wrapping_sub(sysregs.cntvoff_el2)
 }
@@ -144,6 +155,8 @@ pub struct Aarch64VcpuObject {
     irqs_pending: AtomicU64,
     irqs_pending_mask: AtomicU64,
     external_irqs_pending: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_changed: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    wfi_waker: Waker,
     last_irq_state: AtomicU64,
     vgic_num_lrs: usize,
 }
@@ -161,6 +174,8 @@ impl Aarch64VcpuObject {
             irqs_pending: AtomicU64::new(0),
             irqs_pending_mask: AtomicU64::new(0),
             external_irqs_pending: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_changed: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            wfi_waker: Waker::new_interruptible("aarch64-vcpu-wfi"),
             last_irq_state: AtomicU64::new(0),
             vgic_num_lrs: num_lrs,
         })
@@ -327,8 +342,9 @@ impl Aarch64VcpuObject {
         let mask = self.irqs_pending_mask.swap(0, Ordering::AcqRel);
         let pending = self.irqs_pending.load(Ordering::Acquire);
         let val = pending & mask;
+        let mut shadowed = self.last_irq_state.load(Ordering::Acquire);
 
-        if mask != 0 {
+        if (mask & IRQ_BIT_TIMER) != 0 {
             if (val & IRQ_BIT_TIMER) != 0 {
                 let _ = super::vgic::inject_shadow_virq(
                     vgic,
@@ -339,20 +355,50 @@ impl Aarch64VcpuObject {
             } else {
                 let _ = super::vgic::clear_shadow_virq(vgic, GUEST_TIMER_PPI);
             }
+            shadowed = (shadowed & !IRQ_BIT_TIMER) | (val & IRQ_BIT_TIMER);
+        }
 
+        if (mask & IRQ_BIT_EXTERNAL) != 0 {
             if (val & IRQ_BIT_EXTERNAL) != 0 {
                 let _ = super::vgic::inject_shadow_virq(vgic, 32, GUEST_IRQ_PRIORITY, true);
             } else {
                 let _ = super::vgic::clear_shadow_virq(vgic, 32);
             }
+            shadowed = (shadowed & !IRQ_BIT_EXTERNAL) | (val & IRQ_BIT_EXTERNAL);
+        }
 
+        if (mask & IRQ_BIT_SOFTWARE) != 0 {
             if (val & IRQ_BIT_SOFTWARE) != 0 {
                 let _ = super::vgic::inject_shadow_virq(vgic, 3, GUEST_IRQ_PRIORITY, false);
             } else {
                 let _ = super::vgic::clear_shadow_virq(vgic, 3);
             }
+            shadowed = (shadowed & !IRQ_BIT_SOFTWARE) | (val & IRQ_BIT_SOFTWARE);
+        }
 
-            self.last_irq_state.store(val, Ordering::Release);
+        if mask != 0 {
+            self.last_irq_state.store(shadowed, Ordering::Release);
+        }
+
+        if (mask & IRQ_BIT_EXTERNAL_LINE) != 0 {
+            let changed = {
+                let mut changed = self.external_irqs_changed.lock();
+                let copy = *changed;
+                *changed = [0; EXTERNAL_IRQ_BITMAP_WORDS];
+                copy
+            };
+            let external = *self.external_irqs_pending.lock();
+            for (word_index, word) in changed.iter().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let virq = (word_index * 64 + bit) as u32;
+                    if (external[word_index] & (1u64 << bit)) == 0 {
+                        let _ = super::vgic::clear_shadow_virq(vgic, virq);
+                    }
+                    bits &= !(1u64 << bit);
+                }
+            }
         }
 
         let external = *self.external_irqs_pending.lock();
@@ -365,6 +411,54 @@ impl Aarch64VcpuObject {
                 bits &= !(1u64 << bit);
             }
         }
+    }
+
+    fn has_pending_wfi_interrupt(&self) -> bool {
+        {
+            let mut state = self.state.lock();
+            self.update_virtual_timer_irq(&mut state.guest);
+        }
+
+        let pending = self.irqs_pending.load(Ordering::Acquire);
+        if (pending & (IRQ_BIT_TIMER | IRQ_BIT_EXTERNAL | IRQ_BIT_SOFTWARE)) != 0 {
+            return true;
+        }
+
+        self.external_irqs_pending
+            .lock()
+            .iter()
+            .any(|word| *word != 0)
+    }
+
+    fn guest_timer_timeout_ticks(&self) -> Option<u64> {
+        let state = self.state.lock();
+        let sysregs = &state.guest.sysregs;
+        let enabled = (sysregs.cntv_ctl_el0 & TIMER_CTL_ENABLE) != 0;
+        let masked = (sysregs.cntv_ctl_el0 & TIMER_CTL_IMASK) != 0;
+        if !enabled || masked {
+            return None;
+        }
+
+        let count = guest_virtual_count(sysregs);
+        if count >= sysregs.cntv_cval_el0 {
+            return Some(0);
+        }
+
+        let freq = read_cntfrq_el0();
+        if freq == 0 {
+            return Some(1);
+        }
+
+        let delta_cycles = sysregs.cntv_cval_el0 - count;
+        let tick_cycles =
+            ((freq as u128) * (crate::timer::TICK_INTERVAL_US as u128)).div_ceil(1_000_000) as u64;
+        let tick_cycles = tick_cycles.max(1);
+
+        Some(delta_cycles.div_ceil(tick_cycles).max(1))
+    }
+
+    fn wake_wfi_waiters(&self) {
+        self.wfi_waker.wake_all();
     }
 
     fn prepare_normal_task_and_save_guest(
@@ -395,6 +489,7 @@ impl VcpuObject for Aarch64VcpuObject {
 
         self.irqs_pending.fetch_or(bit, Ordering::Release);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+        self.wake_wfi_waiters();
     }
 
     fn clear_interrupt(&self, irq_type: InterruptType) {
@@ -426,14 +521,40 @@ impl VcpuObject for Aarch64VcpuObject {
             return;
         }
 
-        let mut pending = self.external_irqs_pending.lock();
-        if level {
-            pending[word_index] |= bit;
-        } else {
-            pending[word_index] &= !bit;
+        {
+            let mut pending = self.external_irqs_pending.lock();
+            if level {
+                pending[word_index] |= bit;
+            } else {
+                pending[word_index] &= !bit;
+            }
+        }
+        {
+            let mut changed = self.external_irqs_changed.lock();
+            changed[word_index] |= bit;
         }
         self.irqs_pending_mask
-            .fetch_or(IRQ_BIT_EXTERNAL, Ordering::Release);
+            .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
+        if level {
+            self.wake_wfi_waiters();
+        }
+    }
+
+    fn wait_for_interrupt(&self, trapframe: &mut Trapframe) {
+        if self.has_pending_wfi_interrupt() {
+            return;
+        }
+
+        let timeout_ticks = self.guest_timer_timeout_ticks();
+        if matches!(timeout_ticks, Some(0)) {
+            return;
+        }
+
+        let Some(task) = mytask() else {
+            return;
+        };
+        self.wfi_waker
+            .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {

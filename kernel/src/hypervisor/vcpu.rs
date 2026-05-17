@@ -39,5 +39,8 @@ pub trait VcpuObject: ControlOps + Send + Sync {
     }
     fn get_reg(&self, index: u32) -> Result<u64, &'static str>;
     fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str>;
+    fn wait_for_interrupt(&self, trapframe: &mut crate::arch::Trapframe) {
+        crate::sched::scheduler::schedule(trapframe);
+    }
     fn run(&self) -> Result<crate::hypervisor::VmExit, &'static str>;
 }

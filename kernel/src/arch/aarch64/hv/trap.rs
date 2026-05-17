@@ -7,7 +7,6 @@ use super::sysreg::GuestSystemRegs;
 use super::vm::Vm;
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
-use crate::sched::scheduler::schedule;
 
 const ESR_EC_SHIFT: u64 = 26;
 const ESR_EC_MASK: u64 = 0x3f;
@@ -359,7 +358,7 @@ pub fn arch_guest_trap_handler(
     match ec {
         ESR_EC_WFX => {
             trapframe.elr = trapframe.elr.wrapping_add(4);
-            None
+            Some(VmExit::Wfi)
         }
         ESR_EC_HVC64 | ESR_EC_SMC64 => {
             let epc = trapframe.elr;

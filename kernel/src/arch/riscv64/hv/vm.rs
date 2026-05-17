@@ -23,12 +23,15 @@ use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
 use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
 use crate::library::std::print;
 use crate::object::capability::ControlOps;
+use crate::sync::Waker;
 use crate::task::mytask;
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::{get_guest_trapvector_trampoline, get_trampoline_trap_vector};
 use crate::{hypervisor, print};
 
 pub type RiscvVmState = HypervisorCsrState;
+
+const VS_INTERRUPT_BITS: u64 = (1 << 2) | (1 << 6) | (1 << 10);
 
 /// Returns the RISC-V Stage-2 page size represented by a page-table level.
 ///
@@ -87,6 +90,7 @@ pub struct Riscv64VcpuObject {
     irqs_pending_mask: AtomicU64,
     last_hvip: AtomicU64,
     first_run: AtomicBool,
+    wfi_waker: Waker,
 }
 
 struct VcpuInternalState {
@@ -105,6 +109,7 @@ impl Riscv64VcpuObject {
             irqs_pending_mask: AtomicU64::new(0),
             last_hvip: AtomicU64::new(0),
             first_run: AtomicBool::new(true),
+            wfi_waker: Waker::new_interruptible("riscv64-vcpu-wfi"),
         })
     }
 
@@ -170,11 +175,9 @@ impl Riscv64VcpuObject {
 
         let hvip = read_hvip();
         let last_hvip = self.last_hvip.load(Ordering::Acquire);
-        let pending = self.irqs_pending.load(Ordering::Acquire);
 
-        let vs_bits = (1u64 << 2) | (1u64 << 6) | (1u64 << 10);
         let changed = last_hvip ^ hvip;
-        let guest_cleared = last_hvip & !hvip & changed & vs_bits;
+        let guest_cleared = last_hvip & !hvip & changed & VS_INTERRUPT_BITS;
 
         if guest_cleared != 0 {
             self.irqs_pending
@@ -182,6 +185,20 @@ impl Riscv64VcpuObject {
             self.irqs_pending_mask
                 .fetch_or(guest_cleared, Ordering::Release);
         }
+    }
+
+    fn has_pending_wfi_interrupt(&self) -> bool {
+        super::trap::check_sbi_timer_expired();
+
+        if (self.irqs_pending.load(Ordering::Acquire) & VS_INTERRUPT_BITS) != 0 {
+            return true;
+        }
+
+        (super::csr::read_hvip() & VS_INTERRUPT_BITS) != 0
+    }
+
+    fn wake_wfi_waiters(&self) {
+        self.wfi_waker.wake_all();
     }
 
     /// Prepares the current task to run the guest and saves the guest state back to the vCPU object.
@@ -213,6 +230,7 @@ impl VcpuObject for Riscv64VcpuObject {
 
         self.irqs_pending.fetch_or(bit, Ordering::Release);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+        self.wake_wfi_waiters();
     }
 
     fn clear_interrupt(&self, irq_type: InterruptType) {
@@ -224,6 +242,26 @@ impl VcpuObject for Riscv64VcpuObject {
 
         self.irqs_pending.fetch_and(!bit, Ordering::AcqRel);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+    }
+
+    fn wait_for_interrupt(&self, trapframe: &mut Trapframe) {
+        if self.has_pending_wfi_interrupt() {
+            return;
+        }
+
+        let timeout_ticks = super::trap::sbi_timer_timeout_ticks();
+        if matches!(timeout_ticks, Some(0)) {
+            super::trap::check_sbi_timer_expired();
+            return;
+        }
+
+        let Some(task) = mytask() else {
+            return;
+        };
+        self.wfi_waker
+            .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
+
+        super::trap::check_sbi_timer_expired();
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {

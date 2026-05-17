@@ -235,7 +235,7 @@ fn guest_hcr() -> u64 {
 
 #[inline(always)]
 fn guest_vmcr() -> u64 {
-    (0xFFu64 << ICH_VMCR_VPMR_SHIFT) | ICH_VMCR_VENG0 | ICH_VMCR_VENG1 | ICH_VMCR_VEOIM
+    (0xFFu64 << ICH_VMCR_VPMR_SHIFT) | ICH_VMCR_VENG0 | ICH_VMCR_VENG1
 }
 
 pub fn probe_vgic() -> usize {
@@ -292,7 +292,11 @@ pub fn inject_shadow_virq(state: &mut VgicState, vintid: u32, priority: u8, grou
         if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64)
             && (*lr & (3u64 << 62)) != ICH_LR_STATE_INVALID
         {
+            let old_state = *lr & (3u64 << 62);
             *lr = lr_val;
+            if old_state == ICH_LR_STATE_ACTIVE || old_state == ICH_LR_STATE_PENDING_ACTIVE {
+                *lr = (*lr & !(3u64 << 62)) | ICH_LR_STATE_PENDING_ACTIVE;
+            }
             return true;
         }
     }
@@ -325,7 +329,15 @@ pub fn clear_virq(num_lrs: usize, vintid: u32) -> bool {
 pub fn clear_shadow_virq(state: &mut VgicState, vintid: u32) -> bool {
     for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
         if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64) {
-            *lr = 0;
+            let old_state = *lr & (3u64 << 62);
+            match old_state {
+                ICH_LR_STATE_ACTIVE | ICH_LR_STATE_PENDING_ACTIVE => {
+                    *lr = (*lr & !(3u64 << 62)) | ICH_LR_STATE_ACTIVE;
+                }
+                _ => {
+                    *lr = 0;
+                }
+            }
             return true;
         }
     }

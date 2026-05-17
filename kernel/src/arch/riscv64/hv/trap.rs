@@ -9,6 +9,8 @@ use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
 
 const VSTIP_BIT: u64 = 1 << 6;
+const VS_INTERRUPT_BITS: u64 = (1 << 2) | (1 << 6) | (1 << 10);
+const INST_WFI: u32 = 0x1050_0073;
 
 static SBI_TIMER_NEXT_EVENT: AtomicU64 = AtomicU64::new(u64::MAX);
 
@@ -28,7 +30,7 @@ fn guest_time_now() -> u64 {
     read_rdtime().wrapping_add(csr::read_htimedelta())
 }
 
-fn check_sbi_timer_expired() {
+pub fn check_sbi_timer_expired() {
     let next = SBI_TIMER_NEXT_EVENT.load(Ordering::Acquire);
     if next == u64::MAX {
         return;
@@ -38,6 +40,33 @@ fn check_sbi_timer_expired() {
         let hvip = csr::read_hvip();
         csr::write_hvip(hvip | VSTIP_BIT);
     }
+}
+
+pub fn sbi_timer_timeout_ticks() -> Option<u64> {
+    let next = SBI_TIMER_NEXT_EVENT.load(Ordering::Acquire);
+    if next == u64::MAX {
+        return None;
+    }
+
+    let now = guest_time_now();
+    if now >= next {
+        return Some(0);
+    }
+
+    let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
+    let freq = crate::interrupt::InterruptManager::global()
+        .get_timer_frequency_hz(cpu_id)
+        .unwrap_or(10_000_000);
+    if freq == 0 {
+        return Some(1);
+    }
+
+    let delta_cycles = next - now;
+    let tick_cycles =
+        ((freq as u128) * (crate::timer::TICK_INTERVAL_US as u128)).div_ceil(1_000_000) as u64;
+    let tick_cycles = tick_cycles.max(1);
+
+    Some(delta_cycles.div_ceil(tick_cycles).max(1))
 }
 
 const CAUSE_ILLEGAL_INSTRUCTION: usize = 2;
@@ -339,36 +368,42 @@ fn arch_guest_trap_handler_inner(
         }
         CAUSE_VIRTUAL_INSTRUCTION => {
             let htinst = read_htinst();
-            let inst = htinst as u32;
+            let epc = csr::read_sepc();
+            let inst = if htinst != 0 {
+                htinst as u32
+            } else {
+                fetch_guest_inst(epc, vm)
+            };
 
             let hvip = csr::read_hvip();
             let vsie = csr::read_vsie();
             let vsstatus = csr::read_vsstatus();
 
-            let vs_bits = (1u64 << 2) | (1u64 << 6) | (1u64 << 10);
-            let pending = hvip & vs_bits;
-            let enabled = vsie & vs_bits;
+            let pending = hvip & VS_INTERRUPT_BITS;
+            let enabled = vsie & VS_INTERRUPT_BITS;
             let active = pending & enabled;
             let sie_enabled = (vsstatus & 0x02) != 0;
 
-            if active != 0 && sie_enabled {
-                let epc = csr::read_sepc();
+            if inst == INST_WFI {
                 trapframe.epc = epc.wrapping_add(4);
-                let c = WFI_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
-                if c % 10000 == 0 {
-                    crate::println!(
-                        "[WFI-NONE] #{} active={:#x} hvip={:#x} vsie={:#x}",
-                        c,
-                        active,
-                        hvip,
-                        vsie
-                    );
+                if active != 0 && sie_enabled {
+                    let c = WFI_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if c % 10000 == 0 {
+                        crate::println!(
+                            "[WFI-NONE] #{} active={:#x} hvip={:#x} vsie={:#x}",
+                            c,
+                            active,
+                            hvip,
+                            vsie
+                        );
+                    }
+                    return None;
                 }
-                return None;
+                return Some(VmExit::Wfi);
             }
 
             Some(VmExit::VirtualInstruction {
-                epc: trapframe.epc,
+                epc,
                 inst: Some(inst),
                 inst_len: Some(4),
             })
