@@ -945,7 +945,6 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 static MMIO_PENDING_READ_REG: AtomicU8 = AtomicU8::new(0xFF);
 static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
 static VM_EXIT_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
-static KVM_RUN_ENTRY_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[inline(always)]
 fn clean_run_page_to_poc(vaddr: usize) {
@@ -1026,6 +1025,7 @@ fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
         VmExit::Wfi => crate::println!("[KVM-RUN] exit#{} WFI", count),
         VmExit::Hlt => crate::println!("[KVM-RUN] exit#{} HLT", count),
         VmExit::Shutdown => crate::println!("[KVM-RUN] exit#{} SHUTDOWN", count),
+        VmExit::HostInterrupt => crate::println!("[KVM-RUN] exit#{} HOST_INTERRUPT", count),
         VmExit::FailEntry {
             hardware_entry_failure_reason,
         } => crate::println!(
@@ -1048,9 +1048,6 @@ pub fn handle_vcpu_ioctl(
 ) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
-            let run_count = KVM_RUN_ENTRY_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            // crate::println!("[KVM-RUN] entry#{}", run_count);
-
             if let Some(task) = mytask() {
                 task.default_time_slice.store(10, Ordering::SeqCst);
             }
@@ -1093,6 +1090,11 @@ pub fn handle_vcpu_ioctl(
 
                 if matches!(exit, crate::hypervisor::VmExit::Wfi) {
                     vcpu.wait_for_interrupt(trapframe);
+                    continue;
+                }
+
+                if matches!(exit, crate::hypervisor::VmExit::HostInterrupt) {
+                    crate::sched::scheduler::schedule(trapframe);
                     continue;
                 }
 
@@ -1304,6 +1306,9 @@ fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &
         }
         VmExit::InternalError => {
             kvm_run.exit_reason = KVM_EXIT_INTERNAL_ERROR;
+        }
+        VmExit::HostInterrupt => {
+            kvm_run.exit_reason = KVM_EXIT_UNKNOWN;
         }
         VmExit::Unknown(_) => {
             kvm_run.exit_reason = KVM_EXIT_UNKNOWN;

@@ -47,6 +47,7 @@ pub enum VmExit {
     FailEntry {
         hardware_entry_failure_reason: u64,
     },
+    HostInterrupt,
     InternalError,
     Unknown(u64),
 }
@@ -164,6 +165,7 @@ impl VcpuExit {
                 fail_code: *hardware_entry_failure_reason,
                 ..Default::default()
             },
+            VmExit::HostInterrupt => Self::new(VcpuExitReason::Unknown),
             VmExit::InternalError => Self::new(VcpuExitReason::InternalError),
             VmExit::Unknown(code) => Self {
                 reason: VcpuExitReason::Unknown,

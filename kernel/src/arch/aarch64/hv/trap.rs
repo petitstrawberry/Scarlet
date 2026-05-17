@@ -2,7 +2,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::guest_vcpu::GuestVcpu;
-use super::switch::{HCR_EL2_HOST, HCR_EL2_VM, HOST_HV_CTX};
+use super::switch::{HCR_EL2_HOST, HCR_EL2_VM, current_host_hv_context};
 use super::sysreg::GuestSystemRegs;
 use super::vm::Vm;
 use crate::arch::Trapframe;
@@ -54,6 +54,7 @@ const TIMER_CTL_ISTATUS: u64 = 1 << 2;
 
 const GIC_DIST_SIZE: u64 = 0x1_0000;
 const GIC_CPUI_SIZE: u64 = 0x2_0000;
+const RESCHEDULE_SGI: u32 = 0;
 static UNKNOWN_GUEST_TRAP_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_sbi_timer_next_event(_next_event: u64) {}
@@ -304,18 +305,25 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
     }
 }
 
-fn handle_host_irq_from_guest(trap_kind: usize, _trapframe: &Trapframe, _guest: &GuestVcpu) {
+fn handle_host_irq_from_guest(
+    trap_kind: usize,
+    _trapframe: &Trapframe,
+    _guest: &GuestVcpu,
+) -> bool {
     let mut scratch = Trapframe::new();
 
     if trap_kind == 2 && crate::arch::interrupt::is_arch_timer_pending() {
         crate::timer::tick_with_scheduler(&mut scratch, false);
-        return;
+        return false;
     }
 
     let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
     match crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id) {
         Ok(Some(interrupt_id)) => {
-            if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
+            if interrupt_id == RESCHEDULE_SGI {
+                crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, true);
+                return crate::sched::scheduler::has_ready_tasks(cpu_id as usize);
+            } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
                 crate::timer::tick_with_scheduler(&mut scratch, false);
             }
         }
@@ -328,6 +336,8 @@ fn handle_host_irq_from_guest(trap_kind: usize, _trapframe: &Trapframe, _guest: 
             crate::println!("[AARCH64-HV] failed to handle host irq from guest: {}", e);
         }
     }
+
+    false
 }
 
 pub fn is_from_guest() -> bool {
@@ -348,8 +358,11 @@ pub fn arch_guest_trap_handler(
 
     let esr = trapframe.esr_el1;
     if esr == 1 || esr == 2 {
-        handle_host_irq_from_guest(esr as usize, trapframe, guest);
-        return None;
+        return if handle_host_irq_from_guest(esr as usize, trapframe, guest) {
+            Some(VmExit::HostInterrupt)
+        } else {
+            None
+        };
     }
 
     let ec = ((esr >> ESR_EC_SHIFT) & ESR_EC_MASK) as u32;
@@ -547,8 +560,7 @@ pub fn arch_guest_trap_handler(
 }
 
 pub fn clear_guest_mode() {
-    // SAFETY: reading the saved host HCR_EL2 value is part of the EL2 guest-exit path.
-    let host_hcr = unsafe { core::ptr::addr_of!(HOST_HV_CTX.hcr_el2).read_volatile() };
+    let host_hcr = current_host_hv_context().hcr_el2;
     let restore_hcr = if host_hcr == 0 {
         HCR_EL2_HOST
     } else {

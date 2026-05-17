@@ -2,6 +2,7 @@ use core::arch::asm;
 use core::arch::naked_asm;
 
 use crate::arch::{Arch, Trapframe};
+use crate::environment::MAX_NUM_CPUS;
 
 use super::guest_vcpu::GuestVcpu;
 use super::sysreg::{GuestSystemRegs, HypervisorSystemRegs, capture_guest_sysregs};
@@ -37,7 +38,7 @@ fn is_guest_context() -> bool {
     (hcr_el2 & HCR_EL2_VM) != 0
 }
 
-#[repr(C)]
+#[repr(C, align(128))]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct HostHvContext {
     pub(crate) hcr_el2: u64,
@@ -55,6 +56,28 @@ pub(crate) struct HostHvContext {
     pub(crate) tpidr_el0: u64,
     pub(crate) tpidrro_el0: u64,
     pub(crate) cntkctl_el1: u64,
+}
+
+impl HostHvContext {
+    pub(crate) const fn zero() -> Self {
+        Self {
+            hcr_el2: 0,
+            vbar_el2: 0,
+            vbar_el1: 0,
+            ich_hcr_el2: 0,
+            ich_vmcr_el2: 0,
+            tpidr_el1: 0,
+            daif: 0,
+            cnthctl_el2: 0,
+            cntv_ctl_el0: 0,
+            cntv_cval_el0: 0,
+            cntvoff_el2: 0,
+            sp_el0: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
+            cntkctl_el1: 0,
+        }
+    }
 }
 
 pub(crate) const HCR_EL2_VM: u64 = 1 << 0;
@@ -114,25 +137,36 @@ const CNTHCTL_EL2_EL1TVT: u64 = 1 << 13; // VHE: trap EL1 virtual timer (CNTV_CT
 const CNTHCTL_EL2_GUEST: u64 = CNTHCTL_EL2_EL0VTEN | CNTHCTL_EL2_EL0VCTEN | CNTHCTL_EL2_EL1TVT;
 const CNTHCTL_EL2_GUEST_LO16: u16 = (CNTHCTL_EL2_GUEST & 0xffff) as u16;
 
-pub(crate) static mut HOST_HV_CTX: HostHvContext = HostHvContext {
-    hcr_el2: 0,
-    vbar_el2: 0,
-    vbar_el1: 0,
-    ich_hcr_el2: 0,
-    ich_vmcr_el2: 0,
-    tpidr_el1: 0,
-    daif: 0,
-    cnthctl_el2: 0,
-    cntv_ctl_el0: 0,
-    cntv_cval_el0: 0,
-    cntvoff_el2: 0,
-    sp_el0: 0,
-    tpidr_el0: 0,
-    tpidrro_el0: 0,
-    cntkctl_el1: 0,
-};
+pub(crate) static mut HOST_HV_CTXS: [HostHvContext; MAX_NUM_CPUS] =
+    [HostHvContext::zero(); MAX_NUM_CPUS];
 
-pub(crate) static mut GUEST_TRAPFRAME_PTR: usize = 0;
+pub(crate) static mut GUEST_TRAPFRAME_PTRS: [usize; MAX_NUM_CPUS] = [0; MAX_NUM_CPUS];
+
+pub(crate) fn save_current_host_hv_context(context: HostHvContext) {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    if cpu_id >= MAX_NUM_CPUS {
+        return;
+    }
+
+    // SAFETY: each CPU writes only its own slot, selected by the CPU ID.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(HOST_HV_CTXS) as *mut HostHvContext;
+        base.add(cpu_id).write_volatile(context);
+    }
+}
+
+pub(crate) fn current_host_hv_context() -> HostHvContext {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    if cpu_id >= MAX_NUM_CPUS {
+        return HostHvContext::zero();
+    }
+
+    // SAFETY: each CPU reads only its own slot, selected by the CPU ID.
+    unsafe {
+        let base = core::ptr::addr_of!(HOST_HV_CTXS) as *const HostHvContext;
+        base.add(cpu_id).read_volatile()
+    }
+}
 
 unsafe extern "C" {
     fn el2_guest_exit_vector_base();
@@ -261,8 +295,11 @@ pub unsafe extern "C" fn el2_guest_exit_vector() {
         "stp x0, x1, [sp, #-16]!",
         "mov x30, #3",
         "5:",
-        "adrp x0, {trapframe_ptr}",
-        "ldr x0, [x0, #:lo12:{trapframe_ptr}]",
+        "mrs x0, mpidr_el1",
+        "and x0, x0, #0xff",
+        "adrp x1, {trapframe_ptrs}",
+        "add x1, x1, #:lo12:{trapframe_ptrs}",
+        "ldr x0, [x1, x0, lsl #3]",
         "stp x2, x3, [x0, #16]",
         "stp x4, x5, [x0, #32]",
         "stp x6, x7, [x0, #48]",
@@ -298,7 +335,7 @@ pub unsafe extern "C" fn el2_guest_exit_vector() {
         "adrp x1, {trap_exit}",
         "add x1, x1, #:lo12:{trap_exit}",
         "br x1",
-        trapframe_ptr = sym GUEST_TRAPFRAME_PTR,
+        trapframe_ptrs = sym GUEST_TRAPFRAME_PTRS,
         trap_exit = sym arch_guest_trap_exit,
     );
 }
@@ -318,8 +355,11 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "stp x25, x26, [sp, #48]",
         "stp x27, x28, [sp, #64]",
         "stp x29, x30, [sp, #80]",
-        "adrp x3, {trapframe_ptr}",
-        "str x0, [x3, #:lo12:{trapframe_ptr}]",
+        "mrs x3, mpidr_el1",
+        "and x3, x3, #0xff",
+        "adrp x4, {trapframe_ptrs}",
+        "add x4, x4, #:lo12:{trapframe_ptrs}",
+        "str x0, [x4, x3, lsl #3]",
         "adrp x4, {guest_exit_vector_base}",
         "add x4, x4, #:lo12:{guest_exit_vector_base}",
         "msr vbar_el1, x4",
@@ -404,7 +444,7 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "isb",
         "mrs x30, tpidr_el2",
         "eret",
-        trapframe_ptr = sym GUEST_TRAPFRAME_PTR,
+        trapframe_ptrs = sym GUEST_TRAPFRAME_PTRS,
         guest_exit_vector_base = sym el2_guest_exit_vector_base,
         guest_hcr_lo = const HCR_EL2_GUEST_LO16,
         guest_hcr_hi16 = const HCR_EL2_GUEST_HI16,
@@ -448,8 +488,11 @@ pub extern "C" fn arch_guest_trap_exit() {
         "ldr x30, [sp], #16",
         "8:",
         // Restore host hypervisor context registers.
-        "adrp x0, {host_ctx}",
-        "add x0, x0, #:lo12:{host_ctx}",
+        "mrs x16, mpidr_el1",
+        "and x16, x16, #0xff",
+        "adrp x0, {host_ctxs}",
+        "add x0, x0, #:lo12:{host_ctxs}",
+        "add x0, x0, x16, lsl #7",
         "ldr x1, [x0, #0]",
         "ldr x2, [x0, #8]",
         "ldr x3, [x0, #16]",
@@ -487,7 +530,7 @@ pub extern "C" fn arch_guest_trap_exit() {
         "ldp x29, x30, [sp, #80]",
         "add sp, sp, #96",
         "ret",
-        host_ctx = sym HOST_HV_CTX,
+        host_ctxs = sym HOST_HV_CTXS,
         capture_snapshot = sym capture_guest_sysregs,
         guest_capture_hcr_lo = const HCR_EL2_GUEST_LO16,
         guest_capture_hcr_hi16 = const HCR_EL2_GUEST_HI16,

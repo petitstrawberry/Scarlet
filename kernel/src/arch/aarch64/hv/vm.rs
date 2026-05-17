@@ -11,7 +11,9 @@ use super::mmu::{
     STAGE2_MAX_PAGE_LEVEL, alloc_vmid, free_stage2, get_stage2_root, init_stage2,
     map_stage2_page_at_level_no_flush, set_guest_root_stage2, verify_hgatp_stage2,
 };
-use super::switch::{HOST_HV_CTX, arch_run_guest_loop};
+use super::switch::{
+    HostHvContext, arch_run_guest_loop, current_host_hv_context, save_current_host_hv_context,
+};
 use super::sysreg::GuestSystemRegs;
 use super::trap::arch_guest_trap_handler;
 use super::vgic::VgicState;
@@ -249,22 +251,24 @@ impl Aarch64VcpuObject {
                 cntkctl_el1 = out(reg) cntkctl_el1,
                 options(nostack),
             );
-            HOST_HV_CTX.hcr_el2 = hcr;
-            HOST_HV_CTX.vbar_el2 = vbar_el2;
-            HOST_HV_CTX.vbar_el1 = vbar_el1;
-            HOST_HV_CTX.ich_hcr_el2 = ich_hcr;
-            HOST_HV_CTX.ich_vmcr_el2 = ich_vmcr;
-            HOST_HV_CTX.tpidr_el1 = tpidr_el1;
-            HOST_HV_CTX.daif = daif;
-            HOST_HV_CTX.cnthctl_el2 = cnthctl_el2;
-            HOST_HV_CTX.cntv_ctl_el0 = cntv_ctl_el0;
-            HOST_HV_CTX.cntv_cval_el0 = cntv_cval_el0;
-            HOST_HV_CTX.cntvoff_el2 = cntvoff_el2;
-            HOST_HV_CTX.sp_el0 = sp_el0;
-            HOST_HV_CTX.tpidr_el0 = tpidr_el0;
-            HOST_HV_CTX.tpidrro_el0 = tpidrro_el0;
-            HOST_HV_CTX.cntkctl_el1 = cntkctl_el1;
         }
+        save_current_host_hv_context(HostHvContext {
+            hcr_el2: hcr,
+            vbar_el2,
+            vbar_el1,
+            ich_hcr_el2: ich_hcr,
+            ich_vmcr_el2: ich_vmcr,
+            tpidr_el1,
+            daif,
+            cnthctl_el2,
+            cntv_ctl_el0,
+            cntv_cval_el0,
+            cntvoff_el2,
+            sp_el0,
+            tpidr_el0,
+            tpidrro_el0,
+            cntkctl_el1,
+        });
 
         // Step 2: Set VTTBR_EL2 to guest stage-2 page table
         vm.set_guest_root_pagetable();
@@ -296,7 +300,8 @@ impl Aarch64VcpuObject {
     }
 
     fn restore_host_vgic_state(&self) {
-        let (ich_hcr, ich_vmcr) = unsafe { (HOST_HV_CTX.ich_hcr_el2, HOST_HV_CTX.ich_vmcr_el2) };
+        let host_context = current_host_hv_context();
+        let (ich_hcr, ich_vmcr) = (host_context.ich_hcr_el2, host_context.ich_vmcr_el2);
         super::vgic::restore_host_vgic(self.vgic_num_lrs, ich_hcr, ich_vmcr);
     }
 

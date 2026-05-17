@@ -2,6 +2,7 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 
 use super::switch::HCR_EL2_VM;
+use crate::environment::MAX_NUM_CPUS;
 
 // Pre-shifted system register encoding constants for use with
 // read_sysreg / write_sysreg (`.inst`-based accessors).
@@ -80,7 +81,24 @@ struct PendingSnapshot(UnsafeCell<Option<GuestSystemRegs>>);
 // the hypervisor world-switch path runs with interrupts disabled.
 unsafe impl Sync for PendingSnapshot {}
 
-static PENDING_GUEST_SYSREGS: PendingSnapshot = PendingSnapshot(UnsafeCell::new(None));
+static PENDING_GUEST_SYSREGS: [PendingSnapshot; MAX_NUM_CPUS] =
+    [const { PendingSnapshot(UnsafeCell::new(None)) }; MAX_NUM_CPUS];
+
+fn current_host_cpu_id_from_mpidr() -> usize {
+    let mpidr: u64;
+
+    // SAFETY: MPIDR_EL1 identifies the current physical CPU and is readable at EL2.
+    unsafe {
+        asm!("mrs {mpidr}, mpidr_el1", mpidr = out(reg) mpidr, options(nostack));
+    }
+
+    (mpidr & 0xff) as usize
+}
+
+fn pending_guest_sysregs_slot() -> Option<&'static PendingSnapshot> {
+    let cpu_id = current_host_cpu_id_from_mpidr();
+    PENDING_GUEST_SYSREGS.get(cpu_id)
+}
 
 #[inline(always)]
 fn guest_context_active() -> bool {
@@ -168,7 +186,9 @@ pub unsafe extern "C" fn capture_guest_sysregs() {
     // SAFETY: we are the sole writer; the slot is consumed before the next
     // guest entry so there is no aliasing with a concurrent reader.
     unsafe {
-        *PENDING_GUEST_SYSREGS.0.get() = Some(snapshot);
+        if let Some(slot) = pending_guest_sysregs_slot() {
+            *slot.0.get() = Some(snapshot);
+        }
     }
 }
 
@@ -211,20 +231,22 @@ impl GuestSystemRegs {
         // called before this function in the guest-exit path, and the slot is
         // cleared here so it cannot be double-consumed.
         unsafe {
-            (*PENDING_GUEST_SYSREGS.0.get()).take().unwrap_or_else(|| {
-                if guest_context_active() {
-                    read_guest_sysregs()
-                } else {
-                    Self::default()
-                }
-            })
+            pending_guest_sysregs_slot()
+                .and_then(|slot| (*slot.0.get()).take())
+                .unwrap_or_else(|| {
+                    if guest_context_active() {
+                        read_guest_sysregs()
+                    } else {
+                        Self::default()
+                    }
+                })
         }
     }
 
     pub fn take_pending() -> Option<Self> {
         // SAFETY: this is the same single-consumer slot used by `save`; callers
         // use it in the guest-exit path before the next guest entry.
-        unsafe { (*PENDING_GUEST_SYSREGS.0.get()).take() }
+        unsafe { pending_guest_sysregs_slot().and_then(|slot| (*slot.0.get()).take()) }
     }
 
     pub fn merge_hardware_snapshot(&mut self, snapshot: Self) {
