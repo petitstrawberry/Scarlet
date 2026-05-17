@@ -25,6 +25,9 @@ pub struct LinuxThreadState {
     pub robust_list_head: Option<usize>,
     pub robust_list_len: usize,
     pub tls_pointer: Option<usize>,
+    pub sigaltstack_sp: usize,
+    pub sigaltstack_size: usize,
+    pub sigaltstack_flags: u32,
     pub tgid: usize,
     pub pending_clone_is_thread: bool,
 }
@@ -304,6 +307,7 @@ syscall_table! {
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
     SchedGetaffinity = 123 => proc::sys_sched_getaffinity,
+    Sigaltstack = 132 => signal::sys_sigaltstack,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
     SetGid = 144 => proc::sys_setgid,

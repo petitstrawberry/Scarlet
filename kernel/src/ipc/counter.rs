@@ -8,7 +8,7 @@
 //!   (or decrements by 1 in semaphore mode)
 //! - write(8 bytes): Adds value to counter
 
-use alloc::{string::String, string::ToString, sync::Arc};
+use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 use spin::Mutex;
 
 use crate::object::KernelObject;
@@ -18,6 +18,11 @@ use crate::object::capability::selectable::{
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
 use crate::sched::scheduler::current_task_id;
 use crate::sync::waker::Waker;
+
+/// Observer notified when a counter is written.
+pub trait CounterWriteListener: Send + Sync {
+    fn on_counter_write(&self, value: u64);
+}
 
 /// Internal state of a counter
 struct CounterState {
@@ -35,6 +40,8 @@ struct SharedCounterData {
     read_waker: Waker,
     /// Waker for tasks waiting to write
     write_waker: Waker,
+    /// Listeners notified after successful writes
+    write_listeners: Mutex<Vec<Arc<dyn CounterWriteListener>>>,
 }
 
 impl SharedCounterData {
@@ -46,6 +53,7 @@ impl SharedCounterData {
             }),
             read_waker: Waker::new_interruptible("counter_read"),
             write_waker: Waker::new_interruptible("counter_write"),
+            write_listeners: Mutex::new(Vec::new()),
         })
     }
 }
@@ -194,8 +202,20 @@ impl Counter {
             // Wake up any waiting readers
             self.data.read_waker.wake_all();
 
+            if add_value != 0 {
+                let listeners = self.data.write_listeners.lock().clone();
+                for listener in listeners {
+                    listener.on_counter_write(add_value);
+                }
+            }
+
             return Ok(8);
         }
+    }
+
+    /// Add an observer notified after successful writes.
+    pub fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
+        self.data.write_listeners.lock().push(listener);
     }
 }
 
@@ -320,10 +340,17 @@ impl Selectable for Counter {
 pub trait CounterObject: StreamOps + Selectable + CloneOps {
     /// Check if this is a semaphore mode counter
     fn is_semaphore(&self) -> bool;
+
+    /// Add an observer notified after successful writes.
+    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>);
 }
 
 impl CounterObject for Counter {
     fn is_semaphore(&self) -> bool {
         self.data.state.lock().semaphore
+    }
+
+    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
+        self.add_write_listener(listener);
     }
 }

@@ -49,6 +49,7 @@ const KVM_REG_ARM_COPROC_SHIFT: u64 = 16;
 
 const KVM_REG_ARM_CORE: u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
 const KVM_REG_ARM64_SYSREG: u64 = 0x0013 << KVM_REG_ARM_COPROC_SHIFT;
+const KVM_REG_ARM_FW: u64 = 0x0014 << KVM_REG_ARM_COPROC_SHIFT;
 
 const KVM_REG_ARM64_SYSREG_OP0_SHIFT: u64 = 14;
 const KVM_REG_ARM64_SYSREG_OP1_SHIFT: u64 = 11;
@@ -56,13 +57,17 @@ const KVM_REG_ARM64_SYSREG_CRN_SHIFT: u64 = 7;
 const KVM_REG_ARM64_SYSREG_CRM_SHIFT: u64 = 3;
 const KVM_REG_ARM64_SYSREG_OP2_SHIFT: u64 = 0;
 
+const KVM_ARM_IRQ_TYPE_SHIFT: u32 = 24;
+const KVM_ARM_IRQ_TYPE_SPI: u32 = 1;
+const KVM_ARM_SPI_START: u32 = 32;
+
 // ---------------------------------------------------------------------------
 // PSCI constants (ARM DEN 0022E)
 // ---------------------------------------------------------------------------
 
 const PSCI_VERSION_1_1: u64 = (1 << 16) | 1;
-const PSCI_RET_NOT_SUPPORTED: u64 = 0xFFFF_FFFF_FFFF_FFFE;
-const PSCI_RET_DENIED: u64 = 0xFFFF_FFFF_FFFF_FFFC;
+const PSCI_RET_NOT_SUPPORTED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+const PSCI_RET_DENIED: u64 = 0xFFFF_FFFF_FFFF_FFFD;
 
 const PSCI_FN_VERSION: u64 = 0x84000000;
 const PSCI_FN_CPU_OFF: u64 = 0x84000002;
@@ -77,6 +82,12 @@ const PSCI_FN64_SYSTEM_RESET: u64 = 0xC4000009;
 
 const SMCCC_RET_NOT_SUPPORTED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 static SMCCC_HELPER_RETURN_PC: AtomicU64 = AtomicU64::new(0);
+static KVM_ARM_PSCI_VERSION: AtomicU64 = AtomicU64::new(PSCI_VERSION_1_1);
+
+const KVM_REG_ARM_PSCI_VERSION: u64 = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_FW;
+const KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1: u64 =
+    KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_FW | 1;
+const KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1_NOT_REQUIRED: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // In-kernel PSCI state (tracks per-VM PSCI SYSTEM_OFF/RESET results)
@@ -104,8 +115,10 @@ fn finish_smccc_function_call(vcpu: &VcpuRef) {
     }
 
     if pc == SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire) && x8 != 0 {
+        // Linux's arm64 SMCCC helper exits to KVM after the stack load and
+        // resumes at the result store. Preserve that PC and provide the result
+        // pointer through X4 so the helper can complete normally.
         let _ = vcpu.set_reg(reg::X4, x8);
-        let _ = vcpu.set_reg(reg::PC, pc.wrapping_add(4));
     }
 }
 
@@ -281,6 +294,7 @@ pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
     match kvm_reg_type(id) {
         KVM_REG_ARM_CORE => get_one_core_reg(vcpu, kvm_reg_index(id)),
         KVM_REG_ARM64_SYSREG => get_one_sysreg(vcpu, id),
+        KVM_REG_ARM_FW => get_one_fw_reg(id),
         _ => Err(()),
     }
 }
@@ -291,6 +305,26 @@ pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
     match kvm_reg_type(id) {
         KVM_REG_ARM_CORE => set_one_core_reg(vcpu, kvm_reg_index(id), value),
         KVM_REG_ARM64_SYSREG => set_one_sysreg(vcpu, id, value),
+        KVM_REG_ARM_FW => set_one_fw_reg(id, value),
+        _ => Err(()),
+    }
+}
+
+fn get_one_fw_reg(id: u64) -> Result<u64, ()> {
+    match id {
+        KVM_REG_ARM_PSCI_VERSION => Ok(KVM_ARM_PSCI_VERSION.load(Ordering::Acquire)),
+        KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1 => Ok(KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1_NOT_REQUIRED),
+        _ => Err(()),
+    }
+}
+
+fn set_one_fw_reg(id: u64, value: u64) -> Result<(), ()> {
+    match id {
+        KVM_REG_ARM_PSCI_VERSION => {
+            KVM_ARM_PSCI_VERSION.store(value, Ordering::Release);
+            Ok(())
+        }
+        KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1 => Ok(()),
         _ => Err(()),
     }
 }
@@ -519,14 +553,52 @@ pub fn check_extension(cap: usize) -> Option<usize> {
 
 pub fn validate_device_type(device_type: u32) -> Result<(), ()> {
     match device_type {
-        KVM_DEV_TYPE_ARM_VGIC_V3 => Ok(()),
+        KVM_DEV_TYPE_ARM_VGIC_V3 | KVM_DEV_TYPE_ARM_VGIC_ITS => Ok(()),
         _ => Err(()),
     }
 }
 
-pub fn set_device_attr(vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
-    match attr.group {
-        KVM_DEV_ARM_VGIC_GRP_ADDR => {
+pub fn default_device_type() -> u32 {
+    KVM_DEV_TYPE_ARM_VGIC_V3
+}
+
+pub fn irqfd_route_to_vcpu_irq(route: u32) -> u32 {
+    (KVM_ARM_IRQ_TYPE_SPI << KVM_ARM_IRQ_TYPE_SHIFT) | (KVM_ARM_SPI_START + route)
+}
+
+pub fn set_device_attr(
+    vm: &VmRef,
+    device_type: u32,
+    attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
+    match (device_type, attr.group) {
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, KVM_DEV_ARM_VGIC_GRP_ADDR) => {
+            if attr.attr == KVM_VGIC_ITS_ADDR_TYPE {
+                if attr.addr == 0 {
+                    return Err(());
+                }
+                let task = crate::task::mytask().ok_or(())?;
+                let kva = task
+                    .vm_manager
+                    .translate_to_kva(attr.addr as usize)
+                    .ok_or(())?;
+                // SAFETY: caller guarantees addr points to a valid u64
+                let addr = unsafe { core::ptr::read_volatile(kva as *const u64) };
+                crate::println!("[KVM] VGICv3 ITS addr={:#x}", addr);
+                Ok(Some(0))
+            } else {
+                Err(())
+            }
+        }
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
+            KVM_DEV_ARM_VGIC_CTRL_INIT => {
+                crate::println!("[KVM] VGICv3 ITS INIT");
+                Ok(Some(0))
+            }
+            _ => Err(()),
+        },
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, _) => Err(()),
+        (_, KVM_DEV_ARM_VGIC_GRP_ADDR) => {
             if attr.addr == 0 {
                 return Err(());
             }
@@ -551,7 +623,7 @@ pub fn set_device_attr(vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option
                 _ => Err(()),
             }
         }
-        KVM_DEV_ARM_VGIC_GRP_NR_IRQS => {
+        (_, KVM_DEV_ARM_VGIC_GRP_NR_IRQS) => {
             if attr.addr == 0 {
                 return Err(());
             }
@@ -566,7 +638,7 @@ pub fn set_device_attr(vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option
             crate::println!("[KVM] VGICv3 NR_IRQS={}", nr_irqs);
             Ok(Some(0))
         }
-        KVM_DEV_ARM_VGIC_GRP_CTRL => match attr.attr {
+        (_, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
             KVM_DEV_ARM_VGIC_CTRL_INIT => {
                 vm.vgic_init()?;
                 crate::println!("[KVM] VGICv3 INIT");
@@ -574,26 +646,43 @@ pub fn set_device_attr(vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option
             }
             _ => Err(()),
         },
-        _ => Err(()),
+        (_, _) => Err(()),
     }
 }
 
-pub fn get_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+pub fn get_device_attr(
+    _vm: &VmRef,
+    _device_type: u32,
+    _attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
     Err(())
 }
 
-pub fn has_device_attr(_vm: &VmRef, attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
-    match attr.group {
-        KVM_DEV_ARM_VGIC_GRP_ADDR => match attr.attr {
+pub fn has_device_attr(
+    _vm: &VmRef,
+    device_type: u32,
+    attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
+    match (device_type, attr.group) {
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, KVM_DEV_ARM_VGIC_GRP_ADDR) => match attr.attr {
+            KVM_VGIC_ITS_ADDR_TYPE => Ok(Some(0)),
+            _ => Err(()),
+        },
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
+            KVM_DEV_ARM_VGIC_CTRL_INIT => Ok(Some(0)),
+            _ => Err(()),
+        },
+        (KVM_DEV_TYPE_ARM_VGIC_ITS, _) => Err(()),
+        (_, KVM_DEV_ARM_VGIC_GRP_ADDR) => match attr.attr {
             KVM_VGIC_V3_ADDR_TYPE_DIST | KVM_VGIC_V3_ADDR_TYPE_REDIST => Ok(Some(0)),
             _ => Err(()),
         },
-        KVM_DEV_ARM_VGIC_GRP_NR_IRQS => Ok(Some(0)),
-        KVM_DEV_ARM_VGIC_GRP_CTRL => match attr.attr {
+        (_, KVM_DEV_ARM_VGIC_GRP_NR_IRQS) => Ok(Some(0)),
+        (_, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
             0 => Ok(Some(0)),
             _ => Err(()),
         },
-        _ => Err(()),
+        (_, _) => Err(()),
     }
 }
 
@@ -621,11 +710,13 @@ const KVM_ARM_VCPU_FINALIZE: u32 = io_write(KVMIO, 0xC2, core::mem::size_of::<i3
 
 const KVM_ARM_TARGET_GENERIC_V8: u32 = 5;
 const KVM_DEV_TYPE_ARM_VGIC_V3: u32 = 7;
+const KVM_DEV_TYPE_ARM_VGIC_ITS: u32 = 8;
 const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0;
 const KVM_DEV_ARM_VGIC_GRP_NR_IRQS: u32 = 3;
 const KVM_DEV_ARM_VGIC_GRP_CTRL: u32 = 4;
 const KVM_VGIC_V3_ADDR_TYPE_DIST: u64 = 2;
 const KVM_VGIC_V3_ADDR_TYPE_REDIST: u64 = 3;
+const KVM_VGIC_ITS_ADDR_TYPE: u64 = 4;
 const KVM_DEV_ARM_VGIC_CTRL_INIT: u64 = 0;
 
 const KVM_ARM_VCPU_POWER_OFF_BIT: u32 = 0;

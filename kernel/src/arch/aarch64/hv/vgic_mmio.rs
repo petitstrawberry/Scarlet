@@ -5,11 +5,13 @@ use crate::hypervisor::mmio::VirtualMmioDevice;
 const GICD_SIZE: u64 = 0x10000;
 const GICR_SIZE: u64 = 0x20000;
 const REG_WORDS: usize = 4;
+const CONFIG_WORDS: usize = REG_WORDS * 2;
 const GIC_IIDR_ARM: u32 = 0x43B;
 const GIC_PIDR2_ARCH_GICV3: u32 = 0x30;
 const GICD_CTLR_DS: u32 = 1 << 6;
 const GICR_WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
 const GICR_WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
+const GIC_ICFGR_EDGE_MASK: u32 = 0xaaaa_aaaa;
 
 struct VgicDistState {
     ctlr: u32,
@@ -19,6 +21,7 @@ struct VgicDistState {
     group: [u32; REG_WORDS],
     pending: [u32; REG_WORDS],
     active: [u32; REG_WORDS],
+    config: [u32; CONFIG_WORDS],
 }
 
 pub struct VgicDist {
@@ -41,6 +44,7 @@ impl VgicDist {
                 group: [0; REG_WORDS],
                 pending: [0; REG_WORDS],
                 active: [0; REG_WORDS],
+                config: [0; CONFIG_WORDS],
             }),
         }
     }
@@ -48,6 +52,17 @@ impl VgicDist {
     fn read_bitmap(offset: u64, base: u64, values: &[u32; REG_WORDS]) -> u32 {
         let index = ((offset - base) / 4) as usize;
         *values.get(index).unwrap_or(&0)
+    }
+
+    fn read_config(offset: u64, base: u64, values: &[u32; CONFIG_WORDS]) -> u32 {
+        let index = ((offset - base) / 4) as usize;
+        *values.get(index).unwrap_or(&0)
+    }
+
+    fn write_config(index: usize, value: u32, values: &mut [u32; CONFIG_WORDS]) {
+        if index < CONFIG_WORDS {
+            values[index] = value & GIC_ICFGR_EDGE_MASK;
+        }
     }
 
     fn set_enabled_bits(index: usize, bits: u32, enabled: &mut [u32; REG_WORDS]) {
@@ -127,7 +142,10 @@ impl VirtualMmioDevice for VgicDist {
                 Self::read_bitmap(offset, 0x0300, &state.active) as u64
             }
             0x0400..=0x047f => 0xa0,
-            0x0c00..=0x0c7c if offset % 4 == 0 => 0,
+            0x0c00..=0x0c7c if offset % 4 == 0 => {
+                let state = self.state.lock();
+                Self::read_config(offset, 0x0c00, &state.config) as u64
+            }
             0x6100..=0x61f8 if offset % 8 == 0 => 0,
             0xffe8 => GIC_PIDR2_ARCH_GICV3 as u64,
             _ => 0,
@@ -172,7 +190,10 @@ impl VirtualMmioDevice for VgicDist {
                 }
             }
             0x0400..=0x047f => {}
-            0x0c00..=0x0c7c if offset % 4 == 0 => {}
+            0x0c00..=0x0c7c if offset % 4 == 0 => {
+                let index = ((offset - 0x0c00) / 4) as usize;
+                Self::write_config(index, value, &mut state.config);
+            }
             0x6100..=0x61f8 if offset % 8 == 0 => {}
             _ => {}
         }
@@ -190,6 +211,7 @@ struct VgicRedistState {
     sgi_group: u32,
     sgi_pending: u32,
     sgi_active: u32,
+    sgi_config: [u32; 2],
 }
 
 pub struct VgicRedist {
@@ -210,6 +232,7 @@ impl VgicRedist {
                 sgi_group: 0,
                 sgi_pending: 0,
                 sgi_active: 0,
+                sgi_config: [GIC_ICFGR_EDGE_MASK, 0],
             }),
         }
     }
@@ -267,7 +290,11 @@ impl VirtualMmioDevice for VgicRedist {
             0x10280 => state.sgi_pending as u64,
             0x10300 => state.sgi_active as u64,
             0x10400..=0x1047f => 0xa0,
-            0x10c00..=0x10c7c if offset % 4 == 0 => 0,
+            0x10c00..=0x10c04 if offset % 4 == 0 => {
+                let index = ((offset - 0x10c00) / 4) as usize;
+                state.sgi_config[index] as u64
+            }
+            0x10c08..=0x10c7c if offset % 4 == 0 => 0,
             _ => 0,
         }
     }
@@ -296,7 +323,11 @@ impl VirtualMmioDevice for VgicRedist {
             0x10280 => state.sgi_pending &= !value,
             0x10300 => state.sgi_active &= !value,
             0x10400..=0x1047f => {}
-            0x10c00..=0x10c7c if offset % 4 == 0 => {}
+            0x10c00..=0x10c04 if offset % 4 == 0 => {
+                let index = ((offset - 0x10c00) / 4) as usize;
+                state.sgi_config[index] = value & GIC_ICFGR_EDGE_MASK;
+            }
+            0x10c08..=0x10c7c if offset % 4 == 0 => {}
             _ => {}
         }
     }

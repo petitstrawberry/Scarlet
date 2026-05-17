@@ -244,6 +244,10 @@ impl VcpuObject for Riscv64VcpuObject {
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
     }
 
+    fn trigger_irq(&self, _irq: u32) {
+        self.inject_interrupt(InterruptType::External);
+    }
+
     fn wait_for_interrupt(&self, trapframe: &mut Trapframe) {
         if self.has_pending_wfi_interrupt() {
             return;

@@ -16,12 +16,16 @@ use spin::{Once, RwLock};
 use crate::abi::linux::generic::LinuxAbi;
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
+use crate::fs::{FileMetadata, FilePermission, FileType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::types::InterruptType;
 use crate::hypervisor::vm::VmObject;
 use crate::hypervisor::{VcpuRef, VmRef};
+use crate::ipc::counter::{CounterObject, CounterWriteListener};
 use crate::object::KernelObject;
-use crate::object::capability::selectable::{SelectWaitOutcome, Selectable};
+use crate::object::capability::file::{FileObject, SeekFrom};
+use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
+use crate::object::capability::stream::{StreamError, StreamOps};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::task::mytask;
 
@@ -86,6 +90,7 @@ const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
 // _IOW(KVMIO, nr, struct)
 pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
 pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
+const KVM_IRQFD: u32 = io_write(KVMIO, 0x76, core::mem::size_of::<KvmIrqFd>() as u32);
 const KVM_IOEVENTFD: u32 = io_write(KVMIO, 0x79, core::mem::size_of::<KvmIoEventFd>() as u32);
 const KVM_REGISTER_COALESCED_MMIO: u32 = io_write(
     KVMIO,
@@ -180,6 +185,38 @@ struct KvmIoEventFd {
     pad: [u8; 36],
 }
 
+struct KvmIoEvent {
+    vm: VmRef,
+    addr: u64,
+    len: u32,
+    datamatch: u64,
+    flags: u32,
+    counter: Arc<dyn CounterObject>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KvmIrqFd {
+    fd: u32,
+    gsi: u32,
+    flags: u32,
+    resamplefd: u32,
+    pad: [u8; 16],
+}
+
+struct KvmIrqFdListener {
+    vm: VmRef,
+    vcpu_irq: u32,
+}
+
+impl CounterWriteListener for KvmIrqFdListener {
+    fn on_counter_write(&self, _value: u64) {
+        if let Some(vcpu) = self.vm.get_vcpu(0) {
+            vcpu.trigger_irq(self.vcpu_irq);
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KvmDeviceAttr {
@@ -187,6 +224,84 @@ pub struct KvmDeviceAttr {
     pub group: u32,
     pub attr: u64,
     pub addr: u64,
+}
+
+struct KvmCreatedDevice {
+    vm: VmRef,
+    device_type: u32,
+}
+
+impl StreamOps for KvmCreatedDevice {
+    fn read(&self, _buffer: &mut [u8]) -> Result<usize, StreamError> {
+        Err(StreamError::NotSupported)
+    }
+
+    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::NotSupported)
+    }
+}
+
+impl ControlOps for KvmCreatedDevice {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match handle_device_ioctl(command, arg, &self.vm, self.device_type) {
+            Ok(Some(value)) => i32::try_from(value).map_err(|_| "KVM ioctl return out of range"),
+            Ok(None) => Err("Unsupported KVM device ioctl"),
+            Err(_) => Err("KVM device ioctl failed"),
+        }
+    }
+}
+
+impl MemoryMappingOps for KvmCreatedDevice {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        Err("KVM device does not support mmap")
+    }
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
+impl Selectable for KvmCreatedDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
+    ) -> SelectWaitOutcome {
+        SelectWaitOutcome::Ready
+    }
+}
+
+impl FileObject for KvmCreatedDevice {
+    fn seek(&self, _whence: SeekFrom) -> Result<u64, StreamError> {
+        Err(StreamError::NotSupported)
+    }
+
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        Ok(FileMetadata {
+            file_type: FileType::Unknown,
+            size: 0,
+            permissions: FilePermission {
+                read: false,
+                write: true,
+                execute: false,
+            },
+            created_time: 0,
+            modified_time: 0,
+            accessed_time: 0,
+            file_id: 0,
+            link_count: 1,
+        })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 #[repr(C)]
@@ -272,17 +387,23 @@ struct KvmRunPage {
 
 struct KvmRunPageEntry {
     vcpu: VcpuRef,
+    vm: VmRef,
     page: KvmRunPage,
 }
 
 static KVM_RUN_PAGES: Once<RwLock<Vec<KvmRunPageEntry>>> = Once::new();
+static KVM_IOEVENTS: Once<RwLock<Vec<KvmIoEvent>>> = Once::new();
 
 fn get_run_pages() -> &'static RwLock<Vec<KvmRunPageEntry>> {
     KVM_RUN_PAGES.call_once(|| RwLock::new(Vec::new()))
 }
 
+fn get_ioevents() -> &'static RwLock<Vec<KvmIoEvent>> {
+    KVM_IOEVENTS.call_once(|| RwLock::new(Vec::new()))
+}
+
 /// Allocate a shared kvm_run page for the given vCPU and register it.
-pub fn register_vcpu_run_page(vcpu: &VcpuRef) -> Result<(), ()> {
+pub fn register_vcpu_run_page(vcpu: &VcpuRef, vm: &VmRef) -> Result<(), ()> {
     use crate::mem::page::allocate_raw_pages;
     use crate::vm::addr::virt_to_phys;
 
@@ -295,9 +416,20 @@ pub fn register_vcpu_run_page(vcpu: &VcpuRef) -> Result<(), ()> {
 
     get_run_pages().write().push(KvmRunPageEntry {
         vcpu: Arc::clone(vcpu),
+        vm: Arc::clone(vm),
         page: KvmRunPage { vaddr, paddr },
     });
     Ok(())
+}
+
+fn get_vcpu_vm(vcpu: &VcpuRef) -> Option<VmRef> {
+    let pages = get_run_pages().read();
+    for entry in pages.iter() {
+        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+            return Some(Arc::clone(&entry.vm));
+        }
+    }
+    None
 }
 
 /// Look up the physical address of a vCPU's shared kvm_run page.
@@ -352,6 +484,49 @@ fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<(u8, u64)> {
         }
     }
     None
+}
+
+fn mmio_data_mask(size: u8) -> u64 {
+    match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn signal_counter(counter: &dyn CounterObject) -> Result<(), ()> {
+    let value = 1u64.to_ne_bytes();
+    counter.write(&value).map(|_| ()).map_err(|_| ())
+}
+
+fn handle_ioeventfd_mmio(vcpu: &VcpuRef, addr: u64, size: u8, data: u64) -> Result<bool, ()> {
+    const KVM_IOEVENTFD_FLAG_DATAMATCH: u32 = 1 << 1;
+
+    let Some(vm) = get_vcpu_vm(vcpu) else {
+        return Ok(false);
+    };
+
+    let events = get_ioevents().read();
+    for event in events.iter() {
+        if !Arc::ptr_eq(&event.vm, &vm) || event.addr != addr {
+            continue;
+        }
+        if event.len != 0 && event.len != size as u32 {
+            continue;
+        }
+        if event.flags & KVM_IOEVENTFD_FLAG_DATAMATCH != 0 {
+            let mask = mmio_data_mask(size);
+            if (event.datamatch & mask) != (data & mask) {
+                continue;
+            }
+        }
+
+        signal_counter(event.counter.as_ref())?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// Write VmExit information into a vCPU's shared kvm_run page.
@@ -414,18 +589,24 @@ pub fn handle_system_ioctl(
 
         KVM_CHECK_EXTENSION => {
             const KVM_CAP_IRQCHIP: usize = 0;
+            const KVM_CAP_USER_MEMORY: usize = 3;
             const KVM_CAP_NR_VCPUS: usize = 9;
+            const KVM_CAP_MP_STATE: usize = 14;
             const KVM_CAP_COALESCED_MMIO: usize = 15;
+            const KVM_CAP_IRQFD: usize = 32;
             const KVM_CAP_IOEVENTFD: usize = 36;
             const KVM_CAP_ONE_REG: usize = 70;
             const KVM_CAP_MAX_VCPUS: usize = 66;
             const KVM_CAP_DEVICE_CTRL: usize = 89;
             let result = match arg {
                 KVM_CAP_IRQCHIP => Ok(Some(1)),
+                KVM_CAP_USER_MEMORY => Ok(Some(1)),
                 KVM_CAP_ONE_REG => Ok(Some(1)),
                 KVM_CAP_NR_VCPUS => Ok(Some(1)),
+                KVM_CAP_MP_STATE => Ok(Some(1)),
                 KVM_CAP_MAX_VCPUS => Ok(Some(1)),
                 KVM_CAP_DEVICE_CTRL => Ok(Some(1)),
+                KVM_CAP_IRQFD => Ok(Some(1)),
                 KVM_CAP_IOEVENTFD => Ok(Some(1)),
                 _ => match arch::check_extension(arg) {
                     Some(val) => Ok(Some(val)),
@@ -458,7 +639,7 @@ pub fn handle_vm_ioctl(
             crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
             let task = mytask().ok_or(())?;
             let vcpu = vm.create_vcpu(vcpu_id).map_err(|_| ())?;
-            register_vcpu_run_page(&vcpu).map_err(|_| ())?;
+            register_vcpu_run_page(&vcpu, vm).map_err(|_| ())?;
             let kernel_obj = KernelObject::HypervisorVcpu(vcpu);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
             let fd = abi.allocate_fd(handle).map_err(|_| ())?;
@@ -534,7 +715,54 @@ pub fn handle_vm_ioctl(
 
         KVM_REGISTER_COALESCED_MMIO | KVM_UNREGISTER_COALESCED_MMIO => Ok(Some(0)),
 
+        KVM_IRQFD => {
+            const KVM_IRQFD_FLAG_DEASSIGN: u32 = 1 << 0;
+
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmIrqFd.
+            let irqfd = unsafe { &*(kva as *const KvmIrqFd) };
+            if irqfd.flags & !KVM_IRQFD_FLAG_DEASSIGN != 0 {
+                crate::println!(
+                    "[KVM] IRQFD: unsupported flags={:#x} fd={} gsi={}",
+                    irqfd.flags,
+                    irqfd.fd,
+                    irqfd.gsi
+                );
+                return Err(());
+            }
+            crate::println!(
+                "[KVM] IRQFD: fd={} gsi={} flags={:#x}",
+                irqfd.fd,
+                irqfd.gsi,
+                irqfd.flags
+            );
+            if irqfd.flags & KVM_IRQFD_FLAG_DEASSIGN != 0 {
+                return Ok(Some(0));
+            }
+
+            let handle = abi.get_handle(irqfd.fd as usize).ok_or(())?;
+            let object = task.handle_table.get(handle).ok_or(())?;
+            let counter = object.as_counter().ok_or(())?;
+            let irqfd_route = irqfd.gsi;
+            let listener = Arc::new(KvmIrqFdListener {
+                vm: Arc::clone(vm),
+                vcpu_irq: arch::irqfd_route_to_vcpu_irq(irqfd_route),
+            });
+            counter.add_write_listener(listener);
+            Ok(Some(0))
+        }
+
         KVM_IOEVENTFD => {
+            const KVM_IOEVENTFD_FLAG_PIO: u32 = 1 << 0;
+            const KVM_IOEVENTFD_FLAG_DATAMATCH: u32 = 1 << 1;
+            const KVM_IOEVENTFD_FLAG_DEASSIGN: u32 = 1 << 2;
+            const SUPPORTED_FLAGS: u32 = KVM_IOEVENTFD_FLAG_DATAMATCH | KVM_IOEVENTFD_FLAG_DEASSIGN;
+
             if arg == 0 {
                 return Err(());
             }
@@ -550,6 +778,36 @@ pub fn handle_vm_ioctl(
                 event.fd,
                 event.flags
             );
+            if event.flags & KVM_IOEVENTFD_FLAG_PIO != 0 || event.flags & !SUPPORTED_FLAGS != 0 {
+                return Err(());
+            }
+            if event.flags & KVM_IOEVENTFD_FLAG_DEASSIGN != 0 {
+                let mut events = get_ioevents().write();
+                events.retain(|registered| {
+                    !(Arc::ptr_eq(&registered.vm, vm)
+                        && registered.addr == event.addr
+                        && registered.len == event.len
+                        && registered.datamatch == event.datamatch
+                        && registered.flags & KVM_IOEVENTFD_FLAG_DATAMATCH
+                            == event.flags & KVM_IOEVENTFD_FLAG_DATAMATCH)
+                });
+                return Ok(Some(0));
+            }
+
+            let handle = abi.get_handle(event.fd as usize).ok_or(())?;
+            let object = task.handle_table.get(handle).ok_or(())?;
+            let counter = match object {
+                KernelObject::Counter(counter) => counter,
+                _ => return Err(()),
+            };
+            get_ioevents().write().push(KvmIoEvent {
+                vm: Arc::clone(vm),
+                addr: event.addr,
+                len: event.len,
+                datamatch: event.datamatch,
+                flags: event.flags,
+                counter,
+            });
             Ok(Some(0))
         }
 
@@ -565,7 +823,11 @@ pub fn handle_vm_ioctl(
 
             arch::validate_device_type(create.type_)?;
 
-            let kernel_obj = KernelObject::HypervisorVm(Arc::clone(vm));
+            let device = Arc::new(KvmCreatedDevice {
+                vm: Arc::clone(vm),
+                device_type: create.type_,
+            });
+            let kernel_obj = KernelObject::from_file_object(device as Arc<dyn FileObject>);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
             let fd = abi.allocate_fd(handle).map_err(|_| ())?;
             create.fd = fd as u32;
@@ -585,7 +847,7 @@ pub fn handle_vm_ioctl(
                 attr.group,
                 attr.attr
             );
-            arch::set_device_attr(vm, attr)
+            arch::set_device_attr(vm, arch::default_device_type(), attr)
         }
 
         KVM_GET_DEVICE_ATTR => {
@@ -601,7 +863,7 @@ pub fn handle_vm_ioctl(
                 attr.group,
                 attr.attr
             );
-            arch::get_device_attr(vm, attr)
+            arch::get_device_attr(vm, arch::default_device_type(), attr)
         }
 
         KVM_HAS_DEVICE_ATTR => {
@@ -617,13 +879,60 @@ pub fn handle_vm_ioctl(
                 attr.group,
                 attr.attr
             );
-            arch::has_device_attr(vm, attr)
+            arch::has_device_attr(vm, arch::default_device_type(), attr)
         }
 
         _ => {
             crate::println!("[KVM] VM_IOCTL unknown: request={:#x}", request);
             arch::handle_vm_ioctl(request, arg, vm, abi)
         }
+    }
+}
+
+fn handle_device_ioctl(
+    request: u32,
+    arg: usize,
+    vm: &VmRef,
+    device_type: u32,
+) -> Result<Option<usize>, ()> {
+    match request {
+        KVM_SET_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            crate::println!(
+                "[KVM] SET_DEVICE_ATTR: device={:#x} group={} attr={:#x}",
+                device_type,
+                attr.group,
+                attr.attr
+            );
+            arch::set_device_attr(vm, device_type, attr)
+        }
+        KVM_GET_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            arch::get_device_attr(vm, device_type, attr)
+        }
+        KVM_HAS_DEVICE_ATTR => {
+            if arg == 0 {
+                return Err(());
+            }
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
+            let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
+            arch::has_device_attr(vm, device_type, attr)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -794,14 +1103,22 @@ pub fn handle_vcpu_ioctl(
                             continue;
                         }
                         arch::FirmwareCallResult::SystemOff
-                        | arch::FirmwareCallResult::SystemReset => break,
-                        arch::FirmwareCallResult::ForwardToUserspace => break,
+                        | arch::FirmwareCallResult::SystemReset
+                        | arch::FirmwareCallResult::ForwardToUserspace => {}
                     }
                 }
 
                 if let crate::hypervisor::VmExit::MmioRead { reg, .. } = &exit {
                     MMIO_PENDING_READ_REG.store(*reg, Ordering::Release);
                     MMIO_PENDING_VALID.store(true, Ordering::Release);
+                }
+
+                if let crate::hypervisor::VmExit::MmioWrite {
+                    addr, size, data, ..
+                } = &exit
+                    && handle_ioeventfd_mmio(vcpu, *addr, *size, *data)?
+                {
+                    continue;
                 }
 
                 if !write_vcpu_run_exit(vcpu, &exit) && arg != 0 {

@@ -10,6 +10,10 @@ use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::hv::reg_index::reg;
 use crate::hypervisor::{VcpuRef, VmRef};
 
+pub fn irqfd_route_to_vcpu_irq(route: u32) -> u32 {
+    route
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct KvmRegs {
@@ -747,15 +751,31 @@ pub fn validate_device_type(_device_type: u32) -> Result<(), ()> {
     Err(())
 }
 
-pub fn set_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+pub fn default_device_type() -> u32 {
+    0
+}
+
+pub fn set_device_attr(
+    _vm: &VmRef,
+    _device_type: u32,
+    _attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
     Err(())
 }
 
-pub fn get_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+pub fn get_device_attr(
+    _vm: &VmRef,
+    _device_type: u32,
+    _attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
     Err(())
 }
 
-pub fn has_device_attr(_vm: &VmRef, _attr: &super::KvmDeviceAttr) -> Result<Option<usize>, ()> {
+pub fn has_device_attr(
+    _vm: &VmRef,
+    _device_type: u32,
+    _attr: &super::KvmDeviceAttr,
+) -> Result<Option<usize>, ()> {
     Err(())
 }
 

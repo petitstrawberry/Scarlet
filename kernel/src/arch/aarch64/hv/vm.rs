@@ -156,6 +156,8 @@ pub struct Aarch64VcpuObject {
     irqs_pending_mask: AtomicU64,
     external_irqs_pending: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
     external_irqs_changed: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_edge: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_injected: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
     wfi_waker: Waker,
     last_irq_state: AtomicU64,
     vgic_num_lrs: usize,
@@ -175,6 +177,8 @@ impl Aarch64VcpuObject {
             irqs_pending_mask: AtomicU64::new(0),
             external_irqs_pending: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
             external_irqs_changed: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_edge: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_injected: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
             wfi_waker: Waker::new_interruptible("aarch64-vcpu-wfi"),
             last_irq_state: AtomicU64::new(0),
             vgic_num_lrs: num_lrs,
@@ -323,18 +327,52 @@ impl Aarch64VcpuObject {
     fn sync_interrupts(&self, vgic: &VgicState) {
         let last_irq_state = self.last_irq_state.load(Ordering::Acquire);
         let timer_shadowed = last_irq_state & IRQ_BIT_TIMER;
-        if timer_shadowed == 0 {
-            return;
+        if timer_shadowed != 0 {
+            let timer_active = super::vgic::is_shadow_virq_pending(vgic, GUEST_TIMER_PPI);
+            if !timer_active {
+                self.irqs_pending
+                    .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+                self.irqs_pending_mask
+                    .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
+                self.last_irq_state
+                    .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+            }
         }
 
-        let timer_active = super::vgic::is_shadow_virq_pending(vgic, GUEST_TIMER_PPI);
-        if !timer_active {
-            self.irqs_pending
-                .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+        let edge_snapshot = *self.external_irqs_edge.lock();
+        let injected_snapshot = *self.external_irqs_injected.lock();
+        let mut completed = [0u64; EXTERNAL_IRQ_BITMAP_WORDS];
+        for (word_index, word) in edge_snapshot.iter().enumerate() {
+            let mut bits = *word & injected_snapshot[word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let virq = (word_index * 64 + bit) as u32;
+                if !super::vgic::is_shadow_virq_pending(vgic, virq) {
+                    completed[word_index] |= 1u64 << bit;
+                }
+                bits &= !(1u64 << bit);
+            }
+        }
+
+        if completed.iter().any(|word| *word != 0) {
+            {
+                let mut pending = self.external_irqs_pending.lock();
+                let mut edge = self.external_irqs_edge.lock();
+                let mut injected = self.external_irqs_injected.lock();
+                for i in 0..EXTERNAL_IRQ_BITMAP_WORDS {
+                    pending[i] &= !completed[i];
+                    edge[i] &= !completed[i];
+                    injected[i] &= !completed[i];
+                }
+            }
+            {
+                let mut changed = self.external_irqs_changed.lock();
+                for i in 0..EXTERNAL_IRQ_BITMAP_WORDS {
+                    changed[i] |= completed[i];
+                }
+            }
             self.irqs_pending_mask
-                .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
-            self.last_irq_state
-                .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+                .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
         }
     }
 
@@ -402,14 +440,68 @@ impl Aarch64VcpuObject {
         }
 
         let external = *self.external_irqs_pending.lock();
+        let injected_snapshot = *self.external_irqs_injected.lock();
         for (word_index, word) in external.iter().enumerate() {
-            let mut bits = *word;
+            // Edge IRQs remain pending until the LR is consumed, but must not be
+            // re-injected on every VM exit while the previous LR is still live.
+            let mut bits = *word & !injected_snapshot[word_index];
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
                 let virq = (word_index * 64 + bit) as u32;
-                let _ = super::vgic::inject_shadow_virq(vgic, virq, GUEST_IRQ_PRIORITY, true);
+                if super::vgic::inject_shadow_virq(vgic, virq, GUEST_IRQ_PRIORITY, true) {
+                    self.external_irqs_injected.lock()[word_index] |= 1u64 << bit;
+                }
                 bits &= !(1u64 << bit);
             }
+        }
+    }
+
+    fn decode_kvm_irq(&self, irq: u32) -> Option<u32> {
+        let irq_type = (irq >> KVM_ARM_IRQ_TYPE_SHIFT) & KVM_ARM_IRQ_TYPE_MASK;
+        let irq_num = irq & KVM_ARM_IRQ_NUM_MASK;
+        match irq_type {
+            KVM_ARM_IRQ_TYPE_SPI | KVM_ARM_IRQ_TYPE_PPI => Some(irq_num),
+            KVM_ARM_IRQ_TYPE_CPU => Some(irq_num),
+            _ => None,
+        }
+    }
+
+    fn set_external_irq_line(&self, irq: u32, level: bool, edge: bool) {
+        let Some(virq) = self.decode_kvm_irq(irq) else {
+            return;
+        };
+        let word_index = (virq / 64) as usize;
+        let bit = 1u64 << (virq % 64);
+        if word_index >= EXTERNAL_IRQ_BITMAP_WORDS {
+            return;
+        }
+
+        {
+            let mut pending = self.external_irqs_pending.lock();
+            if level {
+                pending[word_index] |= bit;
+            } else {
+                pending[word_index] &= !bit;
+            }
+        }
+        {
+            let mut edge_bits = self.external_irqs_edge.lock();
+            let mut injected = self.external_irqs_injected.lock();
+            if level && edge {
+                edge_bits[word_index] |= bit;
+            } else if !level {
+                edge_bits[word_index] &= !bit;
+                injected[word_index] &= !bit;
+            }
+        }
+        {
+            let mut changed = self.external_irqs_changed.lock();
+            changed[word_index] |= bit;
+        }
+        self.irqs_pending_mask
+            .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
+        if level {
+            self.wake_wfi_waiters();
         }
     }
 
@@ -504,40 +596,11 @@ impl VcpuObject for Aarch64VcpuObject {
     }
 
     fn set_irq_line(&self, irq: u32, level: bool) {
-        let irq_type = (irq >> KVM_ARM_IRQ_TYPE_SHIFT) & KVM_ARM_IRQ_TYPE_MASK;
-        let irq_num = irq & KVM_ARM_IRQ_NUM_MASK;
-        let virq = match irq_type {
-            KVM_ARM_IRQ_TYPE_SPI | KVM_ARM_IRQ_TYPE_PPI => Some(irq_num),
-            KVM_ARM_IRQ_TYPE_CPU => Some(irq_num),
-            _ => None,
-        };
+        self.set_external_irq_line(irq, level, false);
+    }
 
-        let Some(virq) = virq else {
-            return;
-        };
-        let word_index = (virq / 64) as usize;
-        let bit = 1u64 << (virq % 64);
-        if word_index >= EXTERNAL_IRQ_BITMAP_WORDS {
-            return;
-        }
-
-        {
-            let mut pending = self.external_irqs_pending.lock();
-            if level {
-                pending[word_index] |= bit;
-            } else {
-                pending[word_index] &= !bit;
-            }
-        }
-        {
-            let mut changed = self.external_irqs_changed.lock();
-            changed[word_index] |= bit;
-        }
-        self.irqs_pending_mask
-            .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
-        if level {
-            self.wake_wfi_waiters();
-        }
+    fn trigger_irq(&self, irq: u32) {
+        self.set_external_irq_line(irq, true, true);
     }
 
     fn wait_for_interrupt(&self, trapframe: &mut Trapframe) {
