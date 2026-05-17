@@ -301,7 +301,32 @@ pub fn get_vcpu_run_paddr(vcpu: &VcpuRef) -> Option<usize> {
     None
 }
 
-fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<u64> {
+fn decode_mmio_read_data(mmio: &KvmRunMmio) -> Option<(u8, u64)> {
+    if mmio.is_write != 0 {
+        return None;
+    }
+
+    let len = mmio.len as usize;
+    let value = match len {
+        1 => mmio.data[0] as u64,
+        2 => u16::from_le_bytes([mmio.data[0], mmio.data[1]]) as u64,
+        4 => u32::from_le_bytes([mmio.data[0], mmio.data[1], mmio.data[2], mmio.data[3]]) as u64,
+        8 => u64::from_le_bytes([
+            mmio.data[0],
+            mmio.data[1],
+            mmio.data[2],
+            mmio.data[3],
+            mmio.data[4],
+            mmio.data[5],
+            mmio.data[6],
+            mmio.data[7],
+        ]),
+        _ => return None,
+    };
+    Some((len as u8, value))
+}
+
+fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<(u8, u64)> {
     let pages = get_run_pages().read();
     for entry in pages.iter() {
         if Arc::ptr_eq(&entry.vcpu, vcpu) {
@@ -309,30 +334,7 @@ fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<u64> {
             let kvm_run = unsafe { &*(entry.page.vaddr as *const KvmRun) };
             if kvm_run.exit_reason == KVM_EXIT_MMIO {
                 let mmio = unsafe { &kvm_run.exit_data.mmio };
-                if mmio.is_write == 0 {
-                    let len = mmio.len as usize;
-                    return Some(match len {
-                        1 => mmio.data[0] as u64,
-                        2 => u16::from_le_bytes([mmio.data[0], mmio.data[1]]) as u64,
-                        4 => u32::from_le_bytes([
-                            mmio.data[0],
-                            mmio.data[1],
-                            mmio.data[2],
-                            mmio.data[3],
-                        ]) as u64,
-                        8 => u64::from_le_bytes([
-                            mmio.data[0],
-                            mmio.data[1],
-                            mmio.data[2],
-                            mmio.data[3],
-                            mmio.data[4],
-                            mmio.data[5],
-                            mmio.data[6],
-                            mmio.data[7],
-                        ]),
-                        _ => return None,
-                    });
-                }
+                return decode_mmio_read_data(mmio);
             }
             return None;
         }
@@ -505,11 +507,7 @@ pub fn handle_vm_ioctl(
             let irq_level = unsafe { &*(kva as *const KvmIrqLevel) };
 
             if let Some(vcpu) = vm.get_vcpu(0) {
-                if irq_level.level != 0 {
-                    vcpu.inject_interrupt(InterruptType::External);
-                } else {
-                    vcpu.clear_interrupt(InterruptType::External);
-                }
+                vcpu.set_irq_line(irq_level.irq, irq_level.level != 0);
             }
 
             Ok(Some(0))
@@ -600,10 +598,12 @@ pub fn handle_vm_ioctl(
 // VCPU-level ioctl dispatcher
 // ---------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 static MMIO_PENDING_READ_REG: AtomicU8 = AtomicU8::new(0xFF);
 static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
+static VM_EXIT_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
+static KVM_RUN_ENTRY_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[inline(always)]
 fn clean_run_page_to_poc(vaddr: usize) {
@@ -620,17 +620,97 @@ fn refresh_run_page_from_poc(vaddr: usize) {
     );
 }
 
+fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
+    use crate::hypervisor::VmExit;
+
+    let count = VM_EXIT_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    match exit {
+        VmExit::MmioRead {
+            epc,
+            addr,
+            size,
+            reg,
+        } => crate::println!(
+            "[KVM-RUN] exit#{} MMIO_READ epc={:#x} addr={:#x} size={} reg={}",
+            count,
+            epc,
+            addr,
+            size,
+            reg
+        ),
+        VmExit::MmioWrite {
+            epc,
+            addr,
+            size,
+            reg,
+            data,
+        } => crate::println!(
+            "[KVM-RUN] exit#{} MMIO_WRITE epc={:#x} addr={:#x} size={} reg={} data={:#x}",
+            count,
+            epc,
+            addr,
+            size,
+            reg,
+            data
+        ),
+        VmExit::FirmwareCall { epc } => {
+            crate::println!("[KVM-RUN] exit#{} FIRMWARE_CALL epc={:#x}", count, epc)
+        }
+        VmExit::VirtualInstruction {
+            epc,
+            inst,
+            inst_len,
+        } => crate::println!(
+            "[KVM-RUN] exit#{} VIRTUAL_INSTRUCTION epc={:#x} inst={:?} inst_len={:?}",
+            count,
+            epc,
+            inst,
+            inst_len
+        ),
+        VmExit::IllegalInstruction {
+            epc,
+            inst,
+            inst_len,
+        } => crate::println!(
+            "[KVM-RUN] exit#{} ILLEGAL_INSTRUCTION epc={:#x} inst={:?} inst_len={:?}",
+            count,
+            epc,
+            inst,
+            inst_len
+        ),
+        VmExit::Breakpoint { epc } => {
+            crate::println!("[KVM-RUN] exit#{} BREAKPOINT epc={:#x}", count, epc)
+        }
+        VmExit::Hlt => crate::println!("[KVM-RUN] exit#{} HLT", count),
+        VmExit::Shutdown => crate::println!("[KVM-RUN] exit#{} SHUTDOWN", count),
+        VmExit::FailEntry {
+            hardware_entry_failure_reason,
+        } => crate::println!(
+            "[KVM-RUN] exit#{} FAIL_ENTRY reason={:#x}",
+            count,
+            hardware_entry_failure_reason
+        ),
+        VmExit::InternalError => crate::println!("[KVM-RUN] exit#{} INTERNAL_ERROR", count),
+        VmExit::Unknown(code) => {
+            crate::println!("[KVM-RUN] exit#{} UNKNOWN code={:#x}", count, code)
+        }
+    }
+}
+
 pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
+            let run_count = KVM_RUN_ENTRY_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            // crate::println!("[KVM-RUN] entry#{}", run_count);
+
             if let Some(task) = mytask() {
                 task.default_time_slice.store(10, Ordering::SeqCst);
             }
 
             if MMIO_PENDING_VALID.load(Ordering::Acquire) {
                 let reg = MMIO_PENDING_READ_REG.load(Ordering::Acquire);
-                if reg < 32 {
-                    let val = if arg != 0 {
+                if reg != 0xFF {
+                    let result = if arg != 0 {
                         let task = mytask().ok_or(())?;
                         let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
                         refresh_run_page_from_poc(kva);
@@ -638,41 +718,21 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
                         let kvm_run = unsafe { &*(kva as *const KvmRun) };
                         if kvm_run.exit_reason == KVM_EXIT_MMIO {
                             let mmio = unsafe { &kvm_run.exit_data.mmio };
-                            if mmio.is_write == 0 {
-                                let len = mmio.len as usize;
-                                Some(match len {
-                                    1 => mmio.data[0] as u64,
-                                    2 => u16::from_le_bytes([mmio.data[0], mmio.data[1]]) as u64,
-                                    4 => u32::from_le_bytes([
-                                        mmio.data[0],
-                                        mmio.data[1],
-                                        mmio.data[2],
-                                        mmio.data[3],
-                                    ]) as u64,
-                                    8 => u64::from_le_bytes([
-                                        mmio.data[0],
-                                        mmio.data[1],
-                                        mmio.data[2],
-                                        mmio.data[3],
-                                        mmio.data[4],
-                                        mmio.data[5],
-                                        mmio.data[6],
-                                        mmio.data[7],
-                                    ]),
-                                    _ => 0,
-                                })
-                            } else {
-                                None
-                            }
+                            decode_mmio_read_data(mmio)
                         } else {
                             None
                         }
                     } else {
                         read_vcpu_run_mmio_data(vcpu)
                     };
-                    if let Some(val) = val {
-                        use crate::arch::hv::reg_index::reg;
-                        let _ = vcpu.set_reg(reg as u32, val);
+                    if let Some((size, val)) = result {
+                        // crate::println!(
+                        //     "[KVM-RUN] complete MMIO_READ reg={} size={} value={:#x}",
+                        //     reg,
+                        //     size,
+                        //     val
+                        // );
+                        arch::complete_mmio_read(vcpu, reg, size, val);
                     }
                 }
                 MMIO_PENDING_VALID.store(false, Ordering::Release);
@@ -681,6 +741,7 @@ pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Opt
             let mut sbi_count = 0u32;
             loop {
                 let exit = vcpu.run().map_err(|_| ())?;
+                // log_vm_exit(&exit);
 
                 if let crate::hypervisor::VmExit::FirmwareCall { .. } = &exit {
                     match arch::handle_firmware_call_in_kernel(vcpu) {

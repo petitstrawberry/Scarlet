@@ -154,6 +154,21 @@ mkdir -p "${INITRAMFS_STAGING}"
 
 tar -xf "${ROOTFS_TAR}" -C "${INITRAMFS_STAGING}"
 
+mkdir -p "${INITRAMFS_STAGING}/dev"
+rm -f \
+    "${INITRAMFS_STAGING}/dev/console" \
+    "${INITRAMFS_STAGING}/dev/null" \
+    "${INITRAMFS_STAGING}/dev/tty" \
+    "${INITRAMFS_STAGING}/dev/zero" \
+    "${INITRAMFS_STAGING}/dev/random" \
+    "${INITRAMFS_STAGING}/dev/urandom"
+mknod -m 600 "${INITRAMFS_STAGING}/dev/console" c 5 1
+mknod -m 666 "${INITRAMFS_STAGING}/dev/null" c 1 3
+mknod -m 666 "${INITRAMFS_STAGING}/dev/tty" c 5 0
+mknod -m 666 "${INITRAMFS_STAGING}/dev/zero" c 1 5
+mknod -m 666 "${INITRAMFS_STAGING}/dev/random" c 1 8
+mknod -m 666 "${INITRAMFS_STAGING}/dev/urandom" c 1 9
+
 pushd "${INITRAMFS_STAGING}" >/dev/null
 find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -9 > "${PREBUILT_DIR}/${ARCH}/bin/guest-initramfs.cpio.gz"
 popd >/dev/null

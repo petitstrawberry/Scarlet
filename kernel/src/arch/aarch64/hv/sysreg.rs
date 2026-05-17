@@ -24,6 +24,7 @@ const SYS_ESR_EL12: u32 = sys_reg(3, 5, 5, 2, 0);
 const SYS_FAR_EL12: u32 = sys_reg(3, 5, 6, 0, 0);
 const SYS_CPACR_EL12: u32 = sys_reg(3, 5, 1, 0, 2);
 const SYS_CONTEXTIDR_EL12: u32 = sys_reg(3, 5, 13, 0, 1);
+const SYS_CNTKCTL_EL12: u32 = sys_reg(3, 5, 14, 1, 0);
 
 /// Build a system register encoding in the pre-shifted format used by
 /// read_sysreg / write_sysreg.  `value << 5` yields the instruction bits
@@ -99,16 +100,25 @@ fn read_guest_sysregs() -> GuestSystemRegs {
     let cntv_cval_el0: u64;
     let cntvoff_el2: u64;
     let tpidr_el1: u64;
+    let tpidr_el0: u64;
+    let tpidrro_el0: u64;
+    let sp_el0: u64;
 
     // SAFETY: guest timer state is read from architected timer registers
     // while executing at EL2 in guest context (HCR_EL2.VM=1, TGE=0).
     unsafe {
         asm!(
+            "mrs {sp_el0}, sp_el0",
             "mrs {tpidr_el1}, tpidr_el1",
+            "mrs {tpidr_el0}, tpidr_el0",
+            "mrs {tpidrro_el0}, tpidrro_el0",
             "mrs {cntv_ctl_el0}, cntv_ctl_el0",
             "mrs {cntv_cval_el0}, cntv_cval_el0",
             "mrs {cntvoff_el2}, cntvoff_el2",
+            sp_el0 = out(reg) sp_el0,
             tpidr_el1 = out(reg) tpidr_el1,
+            tpidr_el0 = out(reg) tpidr_el0,
+            tpidrro_el0 = out(reg) tpidrro_el0,
             cntv_ctl_el0 = out(reg) cntv_ctl_el0,
             cntv_cval_el0 = out(reg) cntv_cval_el0,
             cntvoff_el2 = out(reg) cntvoff_el2,
@@ -134,10 +144,14 @@ fn read_guest_sysregs() -> GuestSystemRegs {
         far_el1: read_sysreg::<{ SYS_FAR_EL12 }>(),
         cpacr_el1: read_sysreg::<{ SYS_CPACR_EL12 }>(),
         contextidr_el1: read_sysreg::<{ SYS_CONTEXTIDR_EL12 }>(),
+        cntkctl_el1: read_sysreg::<{ SYS_CNTKCTL_EL12 }>(),
         tpidr_el1,
         cntv_ctl_el0,
         cntv_cval_el0,
         cntvoff_el2,
+        sp_el0,
+        tpidr_el0,
+        tpidrro_el0,
     }
 }
 
@@ -182,6 +196,10 @@ pub struct GuestSystemRegs {
     pub cntv_ctl_el0: u64,
     pub cntv_cval_el0: u64,
     pub cntvoff_el2: u64,
+    pub sp_el0: u64,
+    pub tpidr_el0: u64,
+    pub tpidrro_el0: u64,
+    pub cntkctl_el1: u64,
 }
 
 impl GuestSystemRegs {
@@ -241,6 +259,7 @@ impl GuestSystemRegs {
         write_sysreg::<{ SYS_FAR_EL12 }>(self.far_el1);
         write_sysreg::<{ SYS_CPACR_EL12 }>(self.cpacr_el1);
         write_sysreg::<{ SYS_CONTEXTIDR_EL12 }>(self.contextidr_el1);
+        write_sysreg::<{ SYS_CNTKCTL_EL12 }>(self.cntkctl_el1);
 
         // SAFETY: guest timer state is restored to architected timer registers
         // while executing at EL2.
@@ -250,10 +269,16 @@ impl GuestSystemRegs {
                 "msr cntv_ctl_el0, {cntv_ctl_el0}",
                 "msr cntv_cval_el0, {cntv_cval_el0}",
                 "msr cntvoff_el2, {cntvoff_el2}",
+                "msr sp_el0, {sp_el0}",
+                "msr tpidr_el0, {tpidr_el0}",
+                "msr tpidrro_el0, {tpidrro_el0}",
                 tpidr_el1 = in(reg) self.tpidr_el1,
                 cntv_ctl_el0 = in(reg) self.cntv_ctl_el0,
                 cntv_cval_el0 = in(reg) self.cntv_cval_el0,
                 cntvoff_el2 = in(reg) self.cntvoff_el2,
+                sp_el0 = in(reg) self.sp_el0,
+                tpidr_el0 = in(reg) self.tpidr_el0,
+                tpidrro_el0 = in(reg) self.tpidrro_el0,
                 options(nostack),
             );
         }

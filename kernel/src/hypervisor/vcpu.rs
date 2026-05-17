@@ -30,6 +30,13 @@ pub trait VcpuObject: ControlOps + Send + Sync {
     fn id(&self) -> VcpuId;
     fn inject_interrupt(&self, irq_type: InterruptType);
     fn clear_interrupt(&self, irq_type: InterruptType);
+    fn set_irq_line(&self, _irq: u32, level: bool) {
+        if level {
+            self.inject_interrupt(InterruptType::External);
+        } else {
+            self.clear_interrupt(InterruptType::External);
+        }
+    }
     fn get_reg(&self, index: u32) -> Result<u64, &'static str>;
     fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str>;
     fn run(&self) -> Result<crate::hypervisor::VmExit, &'static str>;

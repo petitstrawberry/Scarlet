@@ -175,6 +175,7 @@ const SYSREG_SPSR_EL1: u64 = encode_sysreg(3, 0, 4, 0, 0);
 const SYSREG_SP_EL1: u64 = encode_sysreg(3, 4, 4, 1, 0);
 const SYSREG_CPACR_EL1: u64 = encode_sysreg(3, 0, 1, 0, 2);
 const SYSREG_CONTEXTIDR_EL1: u64 = encode_sysreg(3, 0, 13, 0, 1);
+const SYSREG_CNTKCTL_EL1: u64 = encode_sysreg(3, 0, 14, 1, 0);
 const SYSREG_CNTVOFF_EL2: u64 = encode_sysreg(3, 4, 14, 0, 3);
 const SYSREG_ID_AA64DFR0_EL1: u64 = encode_sysreg(3, 0, 0, 5, 0);
 const SYSREG_ID_AA64ISAR0_EL1: u64 = encode_sysreg(3, 0, 0, 6, 0);
@@ -258,6 +259,20 @@ pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
     let _ = vcpu.set_reg(reg::SP, kvm_regs.sp);
     let _ = vcpu.set_reg(reg::PC, kvm_regs.pc);
     let _ = vcpu.set_reg(reg::PSTATE, kvm_regs.pstate);
+}
+
+pub fn complete_mmio_read(vcpu: &VcpuRef, target_reg: u8, size: u8, value: u64) {
+    if target_reg >= 31 {
+        return;
+    }
+
+    let mask = match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => !0,
+    };
+    let _ = vcpu.set_reg(target_reg as u32, value & mask);
 }
 
 pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
@@ -356,6 +371,7 @@ fn get_one_sysreg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
         SYSREG_SP_EL1 => vcpu.get_reg(reg::SP_EL1).map_err(|_| ()),
         SYSREG_CPACR_EL1 => vcpu.get_reg(reg::CPACR_EL1).map_err(|_| ()),
         SYSREG_CONTEXTIDR_EL1 => vcpu.get_reg(reg::CONTEXTIDR_EL1).map_err(|_| ()),
+        SYSREG_CNTKCTL_EL1 => vcpu.get_reg(reg::CNTKCTL_EL1).map_err(|_| ()),
         // ID registers — return safe defaults
         SYSREG_ID_AA64PFR0_EL1 => Ok(0x00000011), // EL0=1,EL1=1
         SYSREG_ID_AA64DFR0_EL1 => Ok(0),
@@ -391,6 +407,7 @@ fn set_one_sysreg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
         SYSREG_SP_EL1 => vcpu.set_reg(reg::SP_EL1, value).map_err(|_| ()),
         SYSREG_CPACR_EL1 => vcpu.set_reg(reg::CPACR_EL1, value).map_err(|_| ()),
         SYSREG_CONTEXTIDR_EL1 => vcpu.set_reg(reg::CONTEXTIDR_EL1, value).map_err(|_| ()),
+        SYSREG_CNTKCTL_EL1 => vcpu.set_reg(reg::CNTKCTL_EL1, value).map_err(|_| ()),
         // Read-only registers
         SYSREG_MPIDR_EL1
         | SYSREG_ID_AA64PFR0_EL1

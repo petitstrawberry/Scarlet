@@ -23,6 +23,7 @@ const SYS_ESR_EL12: u32 = sys_reg(3, 5, 5, 2, 0);
 const SYS_FAR_EL12: u32 = sys_reg(3, 5, 6, 0, 0);
 const SYS_CPACR_EL12: u32 = sys_reg(3, 5, 1, 0, 2);
 const SYS_CONTEXTIDR_EL12: u32 = sys_reg(3, 5, 13, 0, 1);
+const SYS_CNTKCTL_EL12: u32 = sys_reg(3, 5, 14, 1, 0);
 
 /// When TGE=1 (host VHE mode), _EL12 registers like ESR_EL12 and FAR_EL12
 /// are UNDEF. Only save/restore guest state when actually in guest context
@@ -50,6 +51,10 @@ pub(crate) struct HostHvContext {
     pub(crate) cntv_ctl_el0: u64,
     pub(crate) cntv_cval_el0: u64,
     pub(crate) cntvoff_el2: u64,
+    pub(crate) sp_el0: u64,
+    pub(crate) tpidr_el0: u64,
+    pub(crate) tpidrro_el0: u64,
+    pub(crate) cntkctl_el1: u64,
 }
 
 pub(crate) const HCR_EL2_VM: u64 = 1 << 0;
@@ -121,6 +126,10 @@ pub(crate) static mut HOST_HV_CTX: HostHvContext = HostHvContext {
     cntv_ctl_el0: 0,
     cntv_cval_el0: 0,
     cntvoff_el2: 0,
+    sp_el0: 0,
+    tpidr_el0: 0,
+    tpidrro_el0: 0,
+    cntkctl_el1: 0,
 };
 
 pub(crate) static mut GUEST_TRAPFRAME_PTR: usize = 0;
@@ -353,6 +362,14 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         "msr cntv_cval_el0, x4",
         "ldr x4, [x3, #424]",
         "msr cntvoff_el2, x4",
+        "ldr x4, [x3, #432]",
+        "msr sp_el0, x4",
+        "ldr x4, [x3, #440]",
+        "msr tpidr_el0, x4",
+        "ldr x4, [x3, #448]",
+        "msr tpidrro_el0, x4",
+        "ldr x4, [x3, #456]",
+        ".inst 0xd5000000 | ({sys_cntkctl_el12} << 5) | 4",
         "isb",
         "ldp x19, x20, [x3, #152]",
         "ldp x21, x22, [x3, #168]",
@@ -406,6 +423,7 @@ pub unsafe extern "C" fn arch_run_guest_loop(
         sys_far_el12 = const SYS_FAR_EL12,
         sys_cpacr_el12 = const SYS_CPACR_EL12,
         sys_contextidr_el12 = const SYS_CONTEXTIDR_EL12,
+        sys_cntkctl_el12 = const SYS_CNTKCTL_EL12,
     );
 }
 
@@ -435,24 +453,28 @@ pub extern "C" fn arch_guest_trap_exit() {
         "ldr x1, [x0, #0]",
         "ldr x2, [x0, #8]",
         "ldr x3, [x0, #16]",
-        "ldr x4, [x0, #24]",
-        "ldr x5, [x0, #32]",
         "ldr x6, [x0, #40]",
         "ldr x7, [x0, #48]",
         "ldr x8, [x0, #56]",
         "ldr x9, [x0, #64]",
         "ldr x10, [x0, #72]",
         "ldr x11, [x0, #80]",
+        "ldr x12, [x0, #88]",
+        "ldr x13, [x0, #96]",
+        "ldr x14, [x0, #104]",
+        "ldr x15, [x0, #112]",
         "msr hcr_el2, x1",
         "msr vbar_el2, x2",
         "msr vbar_el1, x3",
-        "msr ich_hcr_el2, x4",
-        "msr ich_vmcr_el2, x5",
         "msr tpidr_el1, x6",
         "msr cnthctl_el2, x8",
         "msr cntvoff_el2, x11",
         "msr cntv_cval_el0, x10",
         "msr cntv_ctl_el0, x9",
+        "msr sp_el0, x12",
+        "msr tpidr_el0, x13",
+        "msr tpidrro_el0, x14",
+        "msr cntkctl_el1, x15",
         "msr vttbr_el2, xzr",
         "isb",
         "msr daif, x7",

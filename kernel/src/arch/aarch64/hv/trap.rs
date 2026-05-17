@@ -7,6 +7,7 @@ use super::sysreg::GuestSystemRegs;
 use super::vm::Vm;
 use crate::arch::Trapframe;
 use crate::hypervisor::types::VmExit;
+use crate::sched::scheduler::schedule;
 
 const ESR_EC_SHIFT: u64 = 26;
 const ESR_EC_MASK: u64 = 0x3f;
@@ -45,6 +46,10 @@ const SYS_ID_AA64PFR0_EL1: u32 = (3 << 14) | (4 << 3);
 const SYS_TCR2_EL1: u32 = (3 << 14) | (2 << 7) | 3;
 const SYS_PIRE0_EL1: u32 = (3 << 14) | (10 << 7) | (2 << 3) | 2;
 const SYS_PIR_EL1: u32 = (3 << 14) | (10 << 7) | (2 << 3) | 3;
+const SYS_CLIDR_EL1: u32 = (3 << 14) | (1 << 11) | (0 << 7) | (0 << 3) | 1;
+const SYS_CCSIDR_EL1: u32 = (3 << 14) | (1 << 11) | (0 << 7) | (0 << 3) | 0;
+const SYS_CSSELR_EL1: u32 = (3 << 14) | (2 << 11) | (0 << 7) | (0 << 3) | 0;
+const SYS_CTR_EL0: u32 = (3 << 14) | (3 << 11) | (0 << 7) | (0 << 3) | 1;
 const TIMER_CTL_ENABLE: u64 = 1 << 0;
 const TIMER_CTL_ISTATUS: u64 = 1 << 2;
 
@@ -206,7 +211,18 @@ fn virtual_id_sysreg_value(sysreg: u32) -> Option<u64> {
             return None;
         })
     } else {
-        None
+        match sysreg {
+            // CLIDR_EL1: L1I + L1D (inner), no L2.  LoUIS=1, LoC=1, LoUU=1.
+            SYS_CLIDR_EL1 => Some((1 << 0) | (1 << 3) | (1 << 21) | (1 << 24) | (1 << 27)),
+            // CTR_EL0: 64-byte cache line, L1 I/D caches present.
+            SYS_CTR_EL0 => Some((4 << 16) | (4 << 0) | (1 << 14) | (1 << 30)),
+            // CCSIDR_EL1: return a plausible L1 64KB 4-way associativity.
+            // Raw format: (LineSize-4)<<0 | (Associativity-1)<<3 | (NumSets-1)<<13
+            SYS_CCSIDR_EL1 => Some((3 << 13) | (3 << 3) | 3),
+            // CSSELR_EL1: select L1 D-cache by default (0b00).
+            SYS_CSSELR_EL1 => Some(0),
+            _ => None,
+        }
     }
 }
 
@@ -289,7 +305,7 @@ fn handle_guest_stage2_fault(vm: &Vm, ipa: u64, writable: bool) -> Option<VmExit
     }
 }
 
-fn handle_host_irq_from_guest(trap_kind: usize) {
+fn handle_host_irq_from_guest(trap_kind: usize, _trapframe: &Trapframe, _guest: &GuestVcpu) {
     let mut scratch = Trapframe::new();
 
     if trap_kind == 2 && crate::arch::interrupt::is_arch_timer_pending() {
@@ -333,7 +349,7 @@ pub fn arch_guest_trap_handler(
 
     let esr = trapframe.esr_el1;
     if esr == 1 || esr == 2 {
-        handle_host_irq_from_guest(esr as usize);
+        handle_host_irq_from_guest(esr as usize, trapframe, guest);
         return None;
     }
 

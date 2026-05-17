@@ -50,6 +50,7 @@ pub mod reg {
     pub const CNTV_CTL_EL0: u32 = 48;
     pub const CNTV_CVAL_EL0: u32 = 49;
     pub const CNTVOFF_EL2: u32 = 50;
+    pub const CNTKCTL_EL1: u32 = 51;
 
     pub const A0: u32 = X0;
     pub const A1: u32 = X1;

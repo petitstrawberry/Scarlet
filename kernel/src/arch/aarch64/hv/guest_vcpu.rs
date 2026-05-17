@@ -2,6 +2,7 @@ use crate::arch::vcpu::Vcpu;
 use crate::arch::{Mode, Trapframe};
 use alloc::boxed::Box;
 
+use super::super::fpu::FpuContext;
 use super::reg_index::reg;
 use super::sysreg::GuestSystemRegs;
 
@@ -25,6 +26,7 @@ pub struct GuestVcpu {
     pc: u64,
     spsr: u64,
     pub(crate) sysregs: GuestSystemRegs,
+    fpu: FpuContext,
     fpu_used: bool,
     vector_used: bool,
     vector: Option<Box<[u8; 4096]>>,
@@ -40,6 +42,7 @@ impl GuestVcpu {
             pc: 0,
             spsr: PSR_MODE_EL1H,
             sysregs: GuestSystemRegs::default(),
+            fpu: FpuContext::new(),
             fpu_used: false,
             vector_used: false,
             vector: None,
@@ -73,11 +76,26 @@ impl GuestVcpu {
         self.mode = mode_from_pstate(self.spsr);
     }
 
+    pub fn save_fpu(&mut self) {
+        // SAFETY: CPTR_EL2 is configured to allow FP/SIMD access while the
+        // hypervisor runs. The guest owns the physical FP/SIMD register file
+        // until this snapshot is taken after guest exit.
+        unsafe { self.fpu.save() };
+        self.fpu_used = true;
+    }
+
+    pub fn restore_fpu(&self) {
+        // SAFETY: CPTR_EL2 is configured to allow FP/SIMD access while the
+        // hypervisor runs. This restores the vCPU's FP/SIMD state immediately
+        // before guest entry.
+        unsafe { self.fpu.restore() };
+    }
+
     pub fn get_mmio_data(&self, reg_idx: u8, size: u8) -> u64 {
-        if reg_idx == 0 || reg_idx as usize > 30 {
+        if reg_idx as usize >= self.iregs.len() {
             return 0;
         }
-        let val = self.iregs[reg_idx as usize - 1];
+        let val = self.iregs[reg_idx as usize];
         match size {
             1 => val & 0xFF,
             2 => val & 0xFFFF,
@@ -87,7 +105,7 @@ impl GuestVcpu {
     }
 
     pub fn set_mmio_data(&mut self, reg_idx: u8, size: u8, data: u64) {
-        if reg_idx == 0 || reg_idx as usize > 30 {
+        if reg_idx as usize >= self.iregs.len() {
             return;
         }
         let mask = match size {
@@ -96,9 +114,9 @@ impl GuestVcpu {
             4 => 0xFFFFFFFF,
             _ => !0,
         };
-        let old = self.iregs[reg_idx as usize - 1];
+        let old = self.iregs[reg_idx as usize];
         let new = (old & !mask) | (data & mask);
-        self.iregs[reg_idx as usize - 1] = new;
+        self.iregs[reg_idx as usize] = new;
     }
 
     pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -124,6 +142,7 @@ impl GuestVcpu {
             reg::CNTV_CTL_EL0 => Ok(self.sysregs.cntv_ctl_el0),
             reg::CNTV_CVAL_EL0 => Ok(self.sysregs.cntv_cval_el0),
             reg::CNTVOFF_EL2 => Ok(self.sysregs.cntvoff_el2),
+            reg::CNTKCTL_EL1 => Ok(self.sysregs.cntkctl_el1),
             _ => Err("Invalid register index"),
         }
     }
@@ -213,6 +232,10 @@ impl GuestVcpu {
             }
             reg::CNTVOFF_EL2 => {
                 self.sysregs.cntvoff_el2 = value;
+                Ok(())
+            }
+            reg::CNTKCTL_EL1 => {
+                self.sysregs.cntkctl_el1 = value;
                 Ok(())
             }
             _ => Err("Invalid register index"),

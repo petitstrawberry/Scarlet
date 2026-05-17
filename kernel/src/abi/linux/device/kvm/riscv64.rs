@@ -574,6 +574,20 @@ pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
     }
 }
 
+pub fn complete_mmio_read(vcpu: &VcpuRef, target_reg: u8, size: u8, value: u64) {
+    if target_reg == 0 {
+        return;
+    }
+
+    let mask = match size {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => !0,
+    };
+    let _ = vcpu.set_reg(target_reg as u32, value & mask);
+}
+
 // ---------------------------------------------------------------------------
 // Arch hook types (matching aarch64.rs interface)
 // ---------------------------------------------------------------------------
