@@ -615,6 +615,8 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Use TransparentExecutor for cross-ABI execution
     match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
         Ok(_) => {
+            _abi.close_on_exec_fds();
+            crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
@@ -636,6 +638,18 @@ enum OpenMode {
     ReadWrite = 0x002,
     Create = 0x200,
     Truncate = 0x400,
+}
+
+/// Linux sys_mount compatibility stub.
+///
+/// Firecracker may isolate its process with mount namespace operations before
+/// opening the KVM device. Scarlet does not yet implement Linux mount
+/// namespaces, so this syscall currently accepts the request without mutating
+/// VFS state.
+pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    0
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2
@@ -950,8 +964,9 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from Linux fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
-        if task.handle_table.remove(handle).is_some() {
-            0 // Success
+        if let Some(object) = task.handle_table.remove(handle) {
+            super::close_kernel_object_for_linux(&object);
+            0
         } else {
             usize::MAX // Handle not found in handle table
         }
@@ -2408,6 +2423,8 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         &path_str, &argv_refs, &envp_refs, task, trapframe, false,
     ) {
         Ok(_) => {
+            _abi.close_on_exec_fds();
+            crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0

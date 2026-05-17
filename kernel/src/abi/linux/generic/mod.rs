@@ -244,6 +244,40 @@ impl LinuxAbi {
             .collect()
     }
 
+    pub fn close_on_exec_fds(&mut self) {
+        use crate::task::mytask;
+
+        let close_fds: Vec<(usize, u32)> = {
+            let table = self.fd_table.read();
+            table
+                .fd_to_handle
+                .iter()
+                .zip(table.fd_flags.iter())
+                .enumerate()
+                .filter_map(|(fd, (&handle, &flags))| {
+                    if flags & fs::FD_CLOEXEC != 0 {
+                        handle.map(|handle| (fd, handle))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        let Some(task) = mytask() else {
+            return;
+        };
+
+        for (fd, handle) in close_fds {
+            let removed = self.remove_fd(fd);
+            if removed == Some(handle) {
+                if let Some(object) = task.handle_table.remove(handle) {
+                    close_kernel_object_for_linux(&object);
+                }
+            }
+        }
+    }
+
     pub fn process_signals(&self, trapframe: &mut Trapframe) -> bool {
         let mut signal_state = self.signal_state.lock();
         signal::process_pending_signals_with_state(&mut *signal_state, trapframe)
@@ -286,6 +320,31 @@ impl LinuxAbi {
     }
 }
 
+pub(crate) fn close_kernel_object_for_linux(object: &crate::object::KernelObject) {
+    #[cfg(feature = "network")]
+    if let crate::object::KernelObject::Socket(socket) = object {
+        use crate::network::{NetworkManager, ShutdownHow, SocketAddress, SocketState};
+
+        let manager = NetworkManager::get_manager();
+        let state = socket.state();
+
+        if matches!(state, SocketState::Bound | SocketState::Listening)
+            && let Ok(SocketAddress::Local(addr)) = socket.getsockname()
+        {
+            let path = addr.path();
+            if !path.is_empty() {
+                manager.unregister_named_socket(path);
+            }
+        }
+
+        let _ = socket.shutdown(ShutdownHow::Both);
+
+        if let Some(socket_id) = manager.get_socket_id(socket) {
+            manager.remove_socket(socket_id);
+        }
+    }
+}
+
 syscall_table! {
     dispatch_common_syscall,
     Invalid = 0 => |_abi: &mut crate::abi::linux::generic::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
@@ -303,6 +362,7 @@ syscall_table! {
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
+    Mount = 40 => fs::sys_mount,
     Ftruncate = 46 => fs::sys_ftruncate,
     Fallocate = 47 => fs::sys_fallocate,
     LinkAt = 37 => fs::sys_linkat,
@@ -332,6 +392,7 @@ syscall_table! {
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
     SetTidAddress = 96 => proc::sys_set_tid_address,
+    Waitid = 95 => proc::sys_waitid,
     Unshare = 97 => proc::sys_unshare,
     Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,

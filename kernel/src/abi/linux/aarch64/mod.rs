@@ -17,6 +17,41 @@ use crate::{
 
 pub mod signal;
 
+const TRACE_KVM_COMPAT_SYSCALLS: bool = false;
+
+fn trace_kvm_compat_syscall(trapframe: &crate::arch::Trapframe, syscall_number: usize) {
+    if !TRACE_KVM_COMPAT_SYSCALLS {
+        return;
+    }
+
+    let Some(task) = crate::task::mytask() else {
+        return;
+    };
+    let task_name = task.name.read();
+    if !task_name.contains("firectl") && !task_name.contains("firecracker") {
+        return;
+    }
+
+    match syscall_number {
+        40 | 56 | 57 | 95 | 97 | 124 | 135 | 167 | 172 | 178 | 220 | 221 | 222 | 226 | 260
+        | 278 | 434 => {
+            crate::println!(
+                "[linux-aarch64-trace] task={} pid={} syscall={} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+                task_name.as_str(),
+                task.get_id(),
+                syscall_number,
+                trapframe.get_arg(0),
+                trapframe.get_arg(1),
+                trapframe.get_arg(2),
+                trapframe.get_arg(3),
+                trapframe.get_arg(4),
+                trapframe.get_arg(5),
+            );
+        }
+        _ => {}
+    }
+}
+
 #[derive(Clone)]
 pub struct LinuxAarch64Abi(pub generic::LinuxAbi);
 
@@ -60,6 +95,8 @@ impl AbiModule for LinuxAarch64Abi {
         if syscall_number == 0 {
             return Err("Invalid syscall number");
         }
+
+        trace_kvm_compat_syscall(trapframe, syscall_number);
 
         if let Some(result) =
             generic::dispatch_common_syscall(&mut self.0, trapframe, syscall_number)

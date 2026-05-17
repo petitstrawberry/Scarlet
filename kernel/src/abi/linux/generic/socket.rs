@@ -316,6 +316,9 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     if set_cloexec {
                         let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
                     }
+                    if set_nonblock {
+                        let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+                    }
                     fd
                 }
                 Err(_) => {
@@ -632,6 +635,9 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
             Ok(fd) => {
                 if (flags & SOCK_CLOEXEC) != 0 {
                     let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+                }
+                if (flags & SOCK_NONBLOCK) != 0 {
+                    let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
                 }
                 fd
             }

@@ -78,10 +78,10 @@ pub enum ExecutorError {
     UnknownBinaryFormat,
     /// ABI not found or not supported
     UnsupportedAbi(String),
+    /// Binary file could not be opened
+    OpenFailed(String),
     /// Execution failed
     ExecutionFailed(String),
-    /// Resource allocation failed
-    ResourceAllocationFailed,
 }
 
 impl fmt::Display for ExecutorError {
@@ -89,8 +89,8 @@ impl fmt::Display for ExecutorError {
         match self {
             ExecutorError::UnknownBinaryFormat => write!(f, "Unknown binary format"),
             ExecutorError::UnsupportedAbi(abi) => write!(f, "Unsupported ABI: {}", abi),
+            ExecutorError::OpenFailed(path) => write!(f, "Failed to open executable: {}", path),
             ExecutorError::ExecutionFailed(msg) => write!(f, "Execution failed: {}", msg),
-            ExecutorError::ResourceAllocationFailed => write!(f, "Resource allocation failed"),
         }
     }
 }
@@ -297,10 +297,10 @@ impl TransparentExecutor {
             match vfs.open(&absolute_path, 0) {
                 // O_RDONLY
                 Ok(obj) => Ok(obj),
-                Err(e) => Err(ExecutorError::ResourceAllocationFailed),
+                Err(_) => Err(ExecutorError::OpenFailed(absolute_path)),
             }
         } else {
-            Err(ExecutorError::ResourceAllocationFailed)
+            Err(ExecutorError::OpenFailed(path.to_string()))
         }
     }
 

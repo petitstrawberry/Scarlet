@@ -58,11 +58,11 @@ pub struct VfsManager {
     /// Unique identifier for this VfsManager instance
     pub id: VfsManagerId,
     /// Mount tree for hierarchical mount point management
-    pub mount_tree: MountTree,
+    pub mount_tree: Arc<MountTree>,
     /// Current working directory: (VfsEntry, MountPoint) pair
     pub cwd: RwLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
     /// Strong references to all currently mounted filesystems
-    pub mounted_filesystems: RwLock<Vec<Arc<dyn FileSystemOperations>>>,
+    pub mounted_filesystems: Arc<RwLock<Vec<Arc<dyn FileSystemOperations>>>>,
 }
 
 static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
@@ -76,13 +76,13 @@ impl VfsManager {
         let root_node = root_fs.root_node();
         let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
 
-        let mount_tree = MountTree::new(dummy_root_entry.clone(), root_fs.clone());
+        let mount_tree = Arc::new(MountTree::new(dummy_root_entry.clone(), root_fs.clone()));
 
         Self {
             id: VfsManagerId::new(),
             mount_tree,
             cwd: RwLock::new(None),
-            mounted_filesystems: RwLock::new(vec![root_fs.clone()]),
+            mounted_filesystems: Arc::new(RwLock::new(vec![root_fs.clone()])),
         }
     }
 
@@ -90,13 +90,24 @@ impl VfsManager {
     pub fn new_with_root(root_fs: Arc<dyn FileSystemOperations>) -> Self {
         let root_node = root_fs.root_node();
         let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
-        let mount_tree = MountTree::new(dummy_root_entry.clone(), root_fs.clone());
+        let mount_tree = Arc::new(MountTree::new(dummy_root_entry.clone(), root_fs.clone()));
         Self {
             id: VfsManagerId::new(),
             mount_tree,
             cwd: RwLock::new(None),
-            mounted_filesystems: RwLock::new(vec![root_fs.clone()]),
+            mounted_filesystems: Arc::new(RwLock::new(vec![root_fs.clone()])),
         }
+    }
+
+    /// Create a new VFS manager sharing the same mount namespace as `source`,
+    /// while copying filesystem context such as the current working directory.
+    pub fn clone_with_shared_mount_namespace(source: &Arc<VfsManager>) -> Arc<VfsManager> {
+        Arc::new(Self {
+            id: VfsManagerId::new(),
+            mount_tree: source.mount_tree.clone(),
+            cwd: RwLock::new(source.cwd.read().clone()),
+            mounted_filesystems: source.mounted_filesystems.clone(),
+        })
     }
 
     /// Mount a filesystem at the specified path
@@ -482,7 +493,7 @@ impl VfsManager {
         }
 
         // 2) Recreate bind mounts after regular mounts are in place.
-        let mut bind_mounts: Vec<(usize, String, String)> = Vec::new();
+        let mut bind_mounts: Vec<(usize, String, Arc<VfsEntry>, Arc<MountPoint>)> = Vec::new();
         for mount in &all_mounts {
             if mount.is_root_mount() {
                 continue;
@@ -502,24 +513,14 @@ impl VfsManager {
                         "Bind source mount not found",
                     )
                 })?;
-            let source_path = namespace_path_of_entry(&containing_mount, &source_entry)?;
 
-            bind_mounts.push((depth, source_path, target_path));
+            bind_mounts.push((depth, target_path, source_entry, containing_mount));
         }
-        bind_mounts.sort_by_key(|(depth, source_path, target_path)| {
-            (*depth, target_path.clone(), source_path.clone())
-        });
-        for (_depth, source_path, target_path) in bind_mounts {
-            // Some systems may contain redundant self-binds (e.g. "/dev" -> "/dev")
-            // or bind mounts that effectively overlap existing mounts. Our mount tree does not
-            // support stacking multiple mounts at the same target, so treat these as no-ops.
-            if source_path == target_path {
-                continue;
-            }
-
+        bind_mounts.sort_by_key(|(depth, target_path, _, _)| (*depth, target_path.clone()));
+        for (_depth, target_path, source_entry, source_mount) in bind_mounts {
             // Ensure bind target exists before creating the bind mount.
             let _ = ensure_dir_path(&new_vfs, &target_path);
-            match new_vfs.bind_mount(&source_path, &target_path) {
+            match new_vfs.bind_mount_from_entry(source_entry, source_mount, &target_path) {
                 Ok(()) => {}
                 Err(e)
                     if e.kind == FileSystemErrorKind::InvalidPath
@@ -531,11 +532,7 @@ impl VfsManager {
                 Err(e) => {
                     return Err(with_context(
                         e,
-                        &alloc::format!(
-                            "deep-clone bind-mount replay '{}' -> '{}'",
-                            source_path,
-                            target_path
-                        ),
+                        &alloc::format!("deep-clone bind-mount replay at '{}'", target_path),
                     ));
                 }
             }

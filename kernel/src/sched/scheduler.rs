@@ -619,6 +619,19 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
     wake_task_waiters(task_id);
     if let Some(parent_id) = parent_id {
         wake_parent_waiters(parent_id);
+        if let Some(parent) = get_task_by_id(parent_id) {
+            let parent_thread_group = parent.get_thread_group_id();
+            for thread_id in get_all_task_ids() {
+                if thread_id == parent_id {
+                    continue;
+                }
+                if let Some(thread) = get_task_by_id(thread_id) {
+                    if thread.get_thread_group_id() == parent_thread_group {
+                        wake_parent_waiters(thread_id);
+                    }
+                }
+            }
+        }
     }
 }
 
