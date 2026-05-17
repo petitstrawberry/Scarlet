@@ -35,9 +35,19 @@
 
 use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 
-use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
+use crate::{
+    arch::Trapframe,
+    fs::FileType,
+    library::std::string::{cstring_to_string, parse_c_string_from_userspace},
+    task::mytask,
+};
 
-use crate::fs::{MAX_PATH_LENGTH, VfsManager};
+use crate::fs::{MAX_PATH_LENGTH, SeekFrom, VfsManager};
+
+const VFS_O_WRONLY: i32 = 0x1;
+const VFS_O_RDWR: i32 = 0x2;
+const VFS_O_TRUNC: i32 = 0x200;
+const VFS_O_APPEND: i32 = 0x400;
 
 /// Open a file or directory using VFS (VfsOpen)
 ///
@@ -55,41 +65,19 @@ use crate::fs::{MAX_PATH_LENGTH, VfsManager};
 /// * `usize::MAX` on error (file not found, permission denied, etc.)
 pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
     let _flags = trapframe.get_arg(1) as i32;
     let _mode = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if open fails
     trapframe.increment_pc_next(task);
 
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-
-            if i > MAX_PATH_LENGTH {
-                return usize::MAX; // Path too long
-            }
-        }
-    }
-
-    // Convert path bytes to string
-    let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => match to_absolute_path_v2(&task, s) {
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
 
     // Try to open the file using VFS
@@ -100,6 +88,21 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let file_obj = vfs.open(&path_str, _flags as u32);
     match file_obj {
         Ok(kernel_obj) => {
+            if let Some(file) = kernel_obj.as_file() {
+                if (_flags & VFS_O_TRUNC) != 0 {
+                    let writable = (_flags & VFS_O_WRONLY) != 0 || (_flags & VFS_O_RDWR) != 0;
+                    if !writable || file.truncate(0).is_err() {
+                        return usize::MAX;
+                    }
+                }
+
+                if (_flags & VFS_O_APPEND) != 0 && file.seek(SeekFrom::End(0)).is_err() {
+                    return usize::MAX;
+                }
+            } else if (_flags & (VFS_O_TRUNC | VFS_O_APPEND)) != 0 {
+                return usize::MAX;
+            }
+
             // Use simplified handle role classification
             use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 
@@ -109,10 +112,10 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
             let handle_type = HandleType::Regular;
 
             // Infer access mode from flags (simplified - full implementation would parse all open flags)
-            let access_mode = if _flags & 0x1 != 0 {
+            let access_mode = if _flags & VFS_O_WRONLY != 0 {
                 // O_WRONLY-like
                 AccessMode::WriteOnly
-            } else if _flags & 0x2 != 0 {
+            } else if _flags & VFS_O_RDWR != 0 {
                 // O_RDWR-like
                 AccessMode::ReadWrite
             } else {

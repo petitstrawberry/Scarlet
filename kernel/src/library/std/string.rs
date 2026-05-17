@@ -29,7 +29,7 @@ pub fn cstring_to_string(
         len += 1;
     }
 
-    if len > max_len {
+    if len == max_len {
         return Err(StringConversionError::ExceedsMaxLength);
     }
 
@@ -54,14 +54,19 @@ pub fn parse_c_string_from_userspace(
     }
 
     let mut bytes = Vec::new();
+    let mut found_nul = false;
     for i in 0..max_len {
         let mut byte = [0u8; 1];
         copy_from_user(task, ptr + i, &mut byte)
             .map_err(|_| StringConversionError::TranslationError)?;
         if byte[0] == 0 {
+            found_nul = true;
             break;
         }
         bytes.push(byte[0]);
+    }
+    if !found_nul {
+        return Err(StringConversionError::ExceedsMaxLength);
     }
 
     String::from_utf8(bytes).map_err(|_| StringConversionError::Utf8Error)
@@ -95,13 +100,13 @@ pub fn parse_string_array_from_userspace(
             break;
         }
 
+        if i >= max_strings {
+            return Err(StringConversionError::TooManyStrings);
+        }
+
         let string = parse_c_string_from_userspace(task, str_ptr, max_string_len)?;
         strings.push(string);
         i += 1;
-
-        if i > max_strings {
-            return Err(StringConversionError::TooManyStrings);
-        }
     }
 
     Ok(strings)
@@ -129,7 +134,7 @@ mod tests {
     fn test_cstring_to_string_truncated() {
         let cstr = b"Hello\0World\0";
         let result = cstring_to_string(cstr.as_ptr(), 5);
-        assert_eq!(result, Ok(("Hello".into(), 5)));
+        assert_eq!(result, Err(StringConversionError::ExceedsMaxLength));
     }
 
     #[test_case]
