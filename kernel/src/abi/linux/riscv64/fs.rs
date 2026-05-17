@@ -1096,6 +1096,9 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             total_read += n;
             remaining -= n;
             cur_user += n;
+            if n < chunk_size {
+                break;
+            }
         }
 
         trapframe.increment_pc_next(task);

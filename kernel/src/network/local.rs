@@ -566,29 +566,10 @@ impl StreamOps for LocalSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
 
-        // Debug: count read attempts
-        static READ_ATTEMPT_COUNTER: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        let attempt = READ_ATTEMPT_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
         loop {
             {
                 let read_buf_arc = self.read_buffer.read();
                 let mut read_data = read_buf_arc.data.write();
-                let is_nonblocking = *self.nonblocking.read();
-                let has_data = !read_data.is_empty();
-
-                // // Log every 100 attempts or first 5 attempts
-                // if attempt < 5 || attempt % 100 == 0 {
-                //     crate::println!(
-                //         "[LocalSocket::read] self={:p} attempt={} nonblocking={} has_data={} data_len={}",
-                //         self as *const _,
-                //         attempt,
-                //         is_nonblocking,
-                //         has_data,
-                //         read_data.len()
-                //     );
-                // }
 
                 if !read_data.is_empty() {
                     let bytes_to_read = buffer.len().min(read_data.len());
@@ -596,26 +577,12 @@ impl StreamOps for LocalSocket {
                         buffer[i] = read_data.pop_front().unwrap();
                     }
 
-                    // if attempt < 5 || attempt % 100 == 0 {
-                    //     crate::println!(
-                    //         "[LocalSocket::read] attempt={} returning {} bytes",
-                    //         attempt,
-                    //         bytes_to_read
-                    //     );
-                    // }
                     return Ok(bytes_to_read);
                 }
             } // Release locks before checking nonblocking/EOF
 
             // Check nonblocking mode before blocking
             if *self.nonblocking.read() {
-                // // Nonblocking mode: return WouldBlock error immediately
-                // if attempt < 5 || attempt % 100 == 0 {
-                //     crate::println!(
-                //         "[LocalSocket::read] attempt={} returning WouldBlock",
-                //         attempt
-                //     );
-                // }
                 return Err(StreamError::WouldBlock);
             }
 
@@ -745,7 +712,9 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::InvalidOperation);
         }
 
-        *self.max_backlog.write() = backlog;
+        // Some Linux applications pass backlog=0 and still expect at least one
+        // pending connection to be accepted. Keep the internal queue usable.
+        *self.max_backlog.write() = backlog.max(1);
         *state = SocketState::Listening;
 
         Ok(())
@@ -1081,49 +1050,24 @@ impl Selectable for LocalSocket {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        // crate::println!(
-        //     "[LocalSocket::set_nonblocking] self={:p} enabled={}",
-        //     self as *const _,
-        //     enabled
-        // );
         *self.nonblocking.write() = enabled;
-        let verify = *self.nonblocking.read();
-        // crate::println!(
-        //     "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
-        //     self as *const _,
-        //     verify
-        // );
     }
 
     fn is_nonblocking(&self) -> bool {
-        let value = *self.nonblocking.read();
-        // crate::println!(
-        //     "[LocalSocket::is_nonblocking] self={:p} returning={}",
-        //     self as *const _,
-        //     value
-        // );
-        value
+        *self.nonblocking.read()
     }
 }
 
 impl ControlOps for LocalSocket {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
-        // crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
         match command {
             crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
                 let enabled = arg != 0;
-                // crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
                 self.set_nonblocking(enabled);
-                let verify = self.is_nonblocking();
-                // crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
                 Ok(0)
             }
             crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
                 let is_nonblocking = self.is_nonblocking();
-                // crate::println!(
-                // "[LocalSocket::control] Getting nonblocking={}",
-                // is_nonblocking
-                // );
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
             _ => {

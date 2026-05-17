@@ -708,3 +708,27 @@ pub fn sys_tkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Many applications use tkill for thread management
     0
 }
+
+/// Linux sys_tgkill - Send a signal to a thread in a specific thread group.
+///
+/// This currently mirrors `tkill`'s permissive behavior. Go's runtime uses
+/// `tgkill` for internal signal delivery, so returning success is enough for
+/// runtimes that install handlers but do not require full signal semantics yet.
+pub fn sys_tgkill(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let _tgid = trapframe.get_arg(0) as i32;
+    let _tid = trapframe.get_arg(1) as i32;
+    let sig = trapframe.get_arg(2) as i32;
+
+    trapframe.increment_pc_next(task);
+
+    if sig < 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    0
+}

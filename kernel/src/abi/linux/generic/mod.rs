@@ -33,12 +33,31 @@ pub struct LinuxThreadState {
 }
 
 #[derive(Clone)]
+pub struct LinuxFdTable {
+    fd_to_handle: Vec<Option<u32>>,
+    fd_flags: Vec<u32>,
+    file_status_flags: Vec<u32>,
+    free_fds: Vec<usize>,
+}
+
+impl Default for LinuxFdTable {
+    fn default() -> Self {
+        let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
+        free_fds.reverse();
+
+        Self {
+            fd_to_handle: vec![None; MAX_FDS],
+            fd_flags: vec![0; MAX_FDS],
+            file_status_flags: vec![0; MAX_FDS],
+            free_fds,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct LinuxAbi {
     pub namespace: Arc<crate::task::namespace::TaskNamespace>,
-    pub fd_to_handle: Vec<Option<u32>>,
-    pub fd_flags: Vec<u32>,
-    pub file_status_flags: Vec<u32>,
-    pub free_fds: Vec<usize>,
+    fd_table: Arc<spin::RwLock<LinuxFdTable>>,
     pub signal_state: Arc<spin::Mutex<signal::SignalState>>,
     pub thread_state: LinuxThreadState,
     pub posix_timers: BTreeMap<u64, PosixTimer>,
@@ -47,17 +66,11 @@ pub struct LinuxAbi {
 
 impl Default for LinuxAbi {
     fn default() -> Self {
-        let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
-        free_fds.reverse();
-
         let namespace = crate::task::namespace::get_root_namespace().clone();
 
         Self {
             namespace,
-            fd_to_handle: vec![None; MAX_FDS],
-            fd_flags: vec![0; MAX_FDS],
-            file_status_flags: vec![0; MAX_FDS],
-            free_fds,
+            fd_table: Arc::new(spin::RwLock::new(LinuxFdTable::default())),
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
             posix_timers: BTreeMap::new(),
@@ -74,13 +87,19 @@ impl LinuxAbi {
         &mut self.thread_state
     }
 
+    pub fn unshare_fd_table(&mut self) {
+        let snapshot = self.fd_table.read().clone();
+        self.fd_table = Arc::new(spin::RwLock::new(snapshot));
+    }
+
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
-        let fd = if let Some(freed_fd) = self.free_fds.pop() {
+        let mut table = self.fd_table.write();
+        let fd = if let Some(freed_fd) = table.free_fds.pop() {
             freed_fd
         } else {
             return Err("Too many open files");
         };
-        self.fd_to_handle[fd] = Some(handle);
+        table.fd_to_handle[fd] = Some(handle);
         Ok(fd)
     }
 
@@ -88,19 +107,20 @@ impl LinuxAbi {
         if fd >= MAX_FDS {
             return Err("File descriptor out of range");
         }
-        if self.fd_to_handle[fd].is_some() {
+        let mut table = self.fd_table.write();
+        if table.fd_to_handle[fd].is_some() {
             return Err("File descriptor already in use");
         }
-        if let Some(pos) = self.free_fds.iter().position(|&x| x == fd) {
-            self.free_fds.remove(pos);
+        if let Some(pos) = table.free_fds.iter().position(|&x| x == fd) {
+            table.free_fds.remove(pos);
         }
-        self.fd_to_handle[fd] = Some(handle);
+        table.fd_to_handle[fd] = Some(handle);
         Ok(())
     }
 
     pub fn get_handle(&self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            self.fd_to_handle[fd]
+            self.fd_table.read().fd_to_handle[fd]
         } else {
             None
         }
@@ -108,10 +128,11 @@ impl LinuxAbi {
 
     pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            if let Some(handle) = self.fd_to_handle[fd].take() {
-                self.fd_flags[fd] = 0;
-                self.file_status_flags[fd] = 0;
-                self.free_fds.push(fd);
+            let mut table = self.fd_table.write();
+            if let Some(handle) = table.fd_to_handle[fd].take() {
+                table.fd_flags[fd] = 0;
+                table.file_status_flags[fd] = 0;
+                table.free_fds.push(fd);
                 Some(handle)
             } else {
                 None
@@ -122,7 +143,8 @@ impl LinuxAbi {
     }
 
     pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
-        for (fd, &mapped_handle) in self.fd_to_handle.iter().enumerate() {
+        let table = self.fd_table.read();
+        for (fd, &mapped_handle) in table.fd_to_handle.iter().enumerate() {
             if let Some(h) = mapped_handle {
                 if h == handle {
                     return Some(fd);
@@ -133,15 +155,17 @@ impl LinuxAbi {
     }
 
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
-        self.fd_to_handle[0] = Some(stdin_handle);
-        self.fd_to_handle[1] = Some(stdout_handle);
-        self.fd_to_handle[2] = Some(stderr_handle);
-        self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
+        let mut table = self.fd_table.write();
+        table.fd_to_handle[0] = Some(stdin_handle);
+        table.fd_to_handle[1] = Some(stdout_handle);
+        table.fd_to_handle[2] = Some(stderr_handle);
+        table.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
     }
 
     pub fn get_fd_flags(&self, fd: usize) -> Option<u32> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
-            Some(self.fd_flags[fd])
+        let table = self.fd_table.read();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            Some(table.fd_flags[fd])
         } else {
             None
         }
@@ -150,46 +174,51 @@ impl LinuxAbi {
     pub fn set_fd_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
         use crate::{object::handle::SpecialSemantics, task::mytask};
 
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
-            let handle = self.fd_to_handle[fd].unwrap();
-            self.fd_flags[fd] = flags;
-
-            if let Some(task) = mytask() {
-                if let Some(current_metadata) = task.handle_table.get_metadata(handle) {
-                    let mut new_metadata = current_metadata.clone();
-
-                    if flags & fs::FD_CLOEXEC != 0 {
-                        new_metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
-                    } else {
-                        if matches!(
-                            new_metadata.special_semantics,
-                            Some(SpecialSemantics::CloseOnExec)
-                        ) {
-                            new_metadata.special_semantics = None;
-                        }
-                    }
-
-                    let _ = task.handle_table.update_metadata(handle, new_metadata);
-                }
+        let handle = {
+            let mut table = self.fd_table.write();
+            if fd >= MAX_FDS || table.fd_to_handle[fd].is_none() {
+                return Err("Invalid file descriptor");
             }
+            let handle = table.fd_to_handle[fd].unwrap();
+            table.fd_flags[fd] = flags;
+            handle
+        };
 
-            Ok(())
-        } else {
-            Err("Invalid file descriptor")
+        if let Some(task) = mytask() {
+            if let Some(current_metadata) = task.handle_table.get_metadata(handle) {
+                let mut new_metadata = current_metadata.clone();
+
+                if flags & fs::FD_CLOEXEC != 0 {
+                    new_metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
+                } else {
+                    if matches!(
+                        new_metadata.special_semantics,
+                        Some(SpecialSemantics::CloseOnExec)
+                    ) {
+                        new_metadata.special_semantics = None;
+                    }
+                }
+
+                let _ = task.handle_table.update_metadata(handle, new_metadata);
+            }
         }
+
+        Ok(())
     }
 
     pub fn get_file_status_flags(&self, fd: usize) -> Option<u32> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
-            Some(self.file_status_flags[fd])
+        let table = self.fd_table.read();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            Some(table.file_status_flags[fd])
         } else {
             None
         }
     }
 
     pub fn set_file_status_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
-            self.file_status_flags[fd] = flags;
+        let mut table = self.fd_table.write();
+        if fd < MAX_FDS && table.fd_to_handle[fd].is_some() {
+            table.file_status_flags[fd] = flags;
             Ok(())
         } else {
             Err("Invalid file descriptor")
@@ -197,11 +226,18 @@ impl LinuxAbi {
     }
 
     pub fn fd_count(&self) -> usize {
-        self.fd_to_handle.iter().filter(|&&h| h.is_some()).count()
+        self.fd_table
+            .read()
+            .fd_to_handle
+            .iter()
+            .filter(|&&h| h.is_some())
+            .count()
     }
 
     pub fn allocated_fds(&self) -> Vec<usize> {
-        self.fd_to_handle
+        self.fd_table
+            .read()
+            .fd_to_handle
             .iter()
             .enumerate()
             .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
@@ -296,6 +332,7 @@ syscall_table! {
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
     SetTidAddress = 96 => proc::sys_set_tid_address,
+    Unshare = 97 => proc::sys_unshare,
     Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
@@ -307,6 +344,7 @@ syscall_table! {
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
     SchedGetaffinity = 123 => proc::sys_sched_getaffinity,
+    SchedYield = 124 => proc::sys_sched_yield,
     Sigaltstack = 132 => signal::sys_sigaltstack,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
@@ -327,6 +365,7 @@ syscall_table! {
     Sysinfo = 179 => proc::sys_sysinfo,
     Kill = 129 => signal::sys_tkill,
     Tkill = 130 => signal::sys_tkill,
+    Tgkill = 131 => signal::sys_tgkill,
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
@@ -335,8 +374,10 @@ syscall_table! {
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
     Madvise = 233 => mm::sys_madvise,
+    Accept4 = 242 => socket::sys_accept4,
     Getrandom = 278 => fs::sys_getrandom,
     MemfdCreate = 279 => proc::sys_memfd_create,
+    PidfdOpen = 434 => proc::sys_pidfd_open,
     Wait4 = 260 => proc::sys_wait4,
     Prlimit64 = 261 => proc::sys_prlimit64,
     Socket = 198 => socket::sys_socket,

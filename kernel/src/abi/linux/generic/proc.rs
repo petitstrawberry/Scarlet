@@ -106,6 +106,16 @@ pub fn sys_set_robust_list(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     0
 }
 
+pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let flags = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    crate::println!("[linux] unshare: flags={:#x} (stub)", flags);
+    0
+}
+
 pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let _pid = trapframe.get_arg(0);
@@ -133,6 +143,23 @@ pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     }
 
     core::mem::size_of::<usize>()
+}
+
+pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    trapframe.increment_pc_next(task);
+    schedule(trapframe);
+
+    0
+}
+
+pub fn sys_pidfd_open(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    trapframe.increment_pc_next(task);
+
+    errno::to_result(errno::ENOSYS)
 }
 
 // pub fn sys_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
