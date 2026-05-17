@@ -86,6 +86,7 @@ const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
 // _IOW(KVMIO, nr, struct)
 pub const KVM_SET_USER_MEMORY_REGION: u32 = io_write(KVMIO, 0x46, 32);
 pub const KVM_IRQ_LINE: u32 = io_write(KVMIO, 0x61, 8);
+const KVM_IOEVENTFD: u32 = io_write(KVMIO, 0x79, core::mem::size_of::<KvmIoEventFd>() as u32);
 const KVM_REGISTER_COALESCED_MMIO: u32 = io_write(
     KVMIO,
     0x67,
@@ -166,6 +167,17 @@ struct KvmCoalescedMmioZone {
     addr: u64,
     size: u32,
     pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KvmIoEventFd {
+    datamatch: u64,
+    addr: u64,
+    len: u32,
+    fd: i32,
+    flags: u32,
+    pad: [u8; 36],
 }
 
 #[repr(C)]
@@ -404,6 +416,7 @@ pub fn handle_system_ioctl(
             const KVM_CAP_IRQCHIP: usize = 0;
             const KVM_CAP_NR_VCPUS: usize = 9;
             const KVM_CAP_COALESCED_MMIO: usize = 15;
+            const KVM_CAP_IOEVENTFD: usize = 36;
             const KVM_CAP_ONE_REG: usize = 70;
             const KVM_CAP_MAX_VCPUS: usize = 66;
             const KVM_CAP_DEVICE_CTRL: usize = 89;
@@ -413,6 +426,7 @@ pub fn handle_system_ioctl(
                 KVM_CAP_NR_VCPUS => Ok(Some(1)),
                 KVM_CAP_MAX_VCPUS => Ok(Some(1)),
                 KVM_CAP_DEVICE_CTRL => Ok(Some(1)),
+                KVM_CAP_IOEVENTFD => Ok(Some(1)),
                 _ => match arch::check_extension(arg) {
                     Some(val) => Ok(Some(val)),
                     None => Ok(Some(0)),
@@ -519,6 +533,25 @@ pub fn handle_vm_ioctl(
         }
 
         KVM_REGISTER_COALESCED_MMIO | KVM_UNREGISTER_COALESCED_MMIO => Ok(Some(0)),
+
+        KVM_IOEVENTFD => {
+            if arg == 0 {
+                return Err(());
+            }
+
+            let task = mytask().ok_or(())?;
+            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
+            // SAFETY: caller guarantees arg points to a valid KvmIoEventFd.
+            let event = unsafe { &*(kva as *const KvmIoEventFd) };
+            crate::println!(
+                "[KVM] IOEVENTFD: addr={:#x} len={} fd={} flags={:#x}",
+                event.addr,
+                event.len,
+                event.fd,
+                event.flags
+            );
+            Ok(Some(0))
+        }
 
         KVM_CREATE_DEVICE => {
             if arg == 0 {

@@ -39,6 +39,8 @@ pub enum KernelObjectType {
     SharedMemory = 8,
     /// Counter for event notification (like eventfd)
     Counter = 9,
+    /// Timer object
+    Timer = 10,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -118,6 +120,23 @@ impl KernelObjectInfo {
                 pipe_ops: false,
                 event_ops: false,
                 clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
+    /// Create info for a Timer KernelObject
+    pub fn for_timer(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Timer,
+            capabilities: ObjectCapabilities {
+                stream_ops: true,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false,
                 reserved: [false; 3],
             },
             handle_role,

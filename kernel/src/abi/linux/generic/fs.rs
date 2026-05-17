@@ -2988,6 +2988,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     crate::object::KernelObject::File(_) => "File",
                     crate::object::KernelObject::Pipe(_) => "Pipe",
                     crate::object::KernelObject::Counter(_) => "Counter",
+                    crate::object::KernelObject::Timer(_) => "Timer",
                     crate::object::KernelObject::EventChannel(_) => "EventChannel",
                     crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
                     crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
@@ -3938,6 +3939,9 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         }
                         crate::object::KernelObject::Counter(_) => {
                             kind = "counter";
+                        }
+                        crate::object::KernelObject::Timer(_) => {
+                            kind = "timer";
                         }
                         crate::object::KernelObject::EventChannel(_) => {
                             kind = "event_channel";
