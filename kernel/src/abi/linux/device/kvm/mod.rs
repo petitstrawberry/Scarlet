@@ -575,7 +575,7 @@ pub fn handle_system_ioctl(
         KVM_GET_API_VERSION => Ok(Some(KVM_API_VERSION)),
 
         KVM_CREATE_VM => {
-            crate::println!("[KVM] CREATE_VM");
+            // crate::println!("[KVM] CREATE_VM");
             let task = mytask().ok_or(())?;
             let owner_mm = task.vm_manager.clone();
             let vm = crate::hypervisor::vm::GLOBAL_VM_MANAGER
@@ -613,7 +613,7 @@ pub fn handle_system_ioctl(
                     None => Ok(Some(0)),
                 },
             };
-            crate::println!("[KVM] CHECK_EXTENSION: cap={} => {:?}", arg, result);
+            // crate::println!("[KVM] CHECK_EXTENSION: cap={} => {:?}", arg, result);
             result
         }
 
@@ -636,7 +636,7 @@ pub fn handle_vm_ioctl(
     match request {
         KVM_CREATE_VCPU => {
             let vcpu_id = arg as u32;
-            crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
+            // crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
             let task = mytask().ok_or(())?;
             let vcpu = vm.create_vcpu(vcpu_id).map_err(|_| ())?;
             register_vcpu_run_page(&vcpu, vm).map_err(|_| ())?;
@@ -709,7 +709,7 @@ pub fn handle_vm_ioctl(
         }
 
         KVM_CREATE_IRQCHIP => {
-            crate::println!("[KVM] CREATE_IRQCHIP");
+            // crate::println!("[KVM] CREATE_IRQCHIP");
             Ok(Some(0))
         }
 
@@ -819,7 +819,7 @@ pub fn handle_vm_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmCreateDevice.
             let create = unsafe { &mut *(kva as *mut KvmCreateDevice) };
-            crate::println!("[KVM] CREATE_DEVICE: type={:#x}", create.type_);
+            // crate::println!("[KVM] CREATE_DEVICE: type={:#x}", create.type_);
 
             arch::validate_device_type(create.type_)?;
 

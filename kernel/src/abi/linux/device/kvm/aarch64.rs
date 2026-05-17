@@ -584,7 +584,7 @@ pub fn set_device_attr(
                     .ok_or(())?;
                 // SAFETY: caller guarantees addr points to a valid u64
                 let addr = unsafe { core::ptr::read_volatile(kva as *const u64) };
-                crate::println!("[KVM] VGICv3 ITS addr={:#x}", addr);
+                // crate::println!("[KVM] VGICv3 ITS addr={:#x}", addr);
                 Ok(Some(0))
             } else {
                 Err(())
@@ -592,7 +592,7 @@ pub fn set_device_attr(
         }
         (KVM_DEV_TYPE_ARM_VGIC_ITS, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
             KVM_DEV_ARM_VGIC_CTRL_INIT => {
-                crate::println!("[KVM] VGICv3 ITS INIT");
+                // crate::println!("[KVM] VGICv3 ITS INIT");
                 Ok(Some(0))
             }
             _ => Err(()),
@@ -612,12 +612,12 @@ pub fn set_device_attr(
             match attr.attr {
                 KVM_VGIC_V3_ADDR_TYPE_DIST => {
                     vm.set_vgicv3_dist_addr(addr);
-                    crate::println!("[KVM] VGICv3 DIST addr={:#x}", addr);
+                    // crate::println!("[KVM] VGICv3 DIST addr={:#x}", addr);
                     Ok(Some(0))
                 }
                 KVM_VGIC_V3_ADDR_TYPE_REDIST => {
                     vm.set_vgicv3_redist_addr(addr);
-                    crate::println!("[KVM] VGICv3 REDIST addr={:#x}", addr);
+                    // crate::println!("[KVM] VGICv3 REDIST addr={:#x}", addr);
                     Ok(Some(0))
                 }
                 _ => Err(()),
@@ -635,13 +635,13 @@ pub fn set_device_attr(
             // SAFETY: caller guarantees addr points to a valid u32
             let nr_irqs = unsafe { core::ptr::read_volatile(kva as *const u32) };
             vm.set_vgic_nr_irqs(nr_irqs);
-            crate::println!("[KVM] VGICv3 NR_IRQS={}", nr_irqs);
+            // crate::println!("[KVM] VGICv3 NR_IRQS={}", nr_irqs);
             Ok(Some(0))
         }
         (_, KVM_DEV_ARM_VGIC_GRP_CTRL) => match attr.attr {
             KVM_DEV_ARM_VGIC_CTRL_INIT => {
                 vm.vgic_init()?;
-                crate::println!("[KVM] VGICv3 INIT");
+                // crate::println!("[KVM] VGICv3 INIT");
                 Ok(Some(0))
             }
             _ => Err(()),
