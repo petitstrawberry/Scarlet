@@ -528,13 +528,13 @@ fn handle_kvm_vcpu_mmap(
     prot: usize,
     flags: usize,
 ) -> usize {
-    crate::println!(
-        "[KVM-VCPU-MMAP] addr={:#x} len={:#x} prot={:#x} flags={:#x}",
-        addr,
-        aligned_length,
-        prot,
-        flags
-    );
+    // crate::println!(
+    //     "[KVM-VCPU-MMAP] addr={:#x} len={:#x} prot={:#x} flags={:#x}",
+    //     addr,
+    //     aligned_length,
+    //     prot,
+    //     flags
+    // );
     const PROT_READ: usize = 0x1;
     const PROT_WRITE: usize = 0x2;
     const MAP_SHARED: usize = 0x01;

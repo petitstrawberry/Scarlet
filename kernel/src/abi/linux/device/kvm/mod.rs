@@ -663,14 +663,14 @@ pub fn handle_vm_ioctl(
             };
             // SAFETY: caller guarantees arg points to a valid KvmUserspaceMemoryRegion
             let region = unsafe { &*(kva as *const KvmUserspaceMemoryRegion) };
-            crate::println!(
-                "[KVM] SET_MEM: slot={} gpa={:#x} size={:#x} ua={:#x} flags={}",
-                region.slot,
-                region.guest_phys_addr,
-                region.memory_size,
-                region.userspace_addr,
-                region.flags
-            );
+            // crate::println!(
+            //     "[KVM] SET_MEM: slot={} gpa={:#x} size={:#x} ua={:#x} flags={}",
+            //     region.slot,
+            //     region.guest_phys_addr,
+            //     region.memory_size,
+            //     region.userspace_addr,
+            //     region.flags
+            // );
 
             let flags = MemorySlotFlags {
                 readonly: (region.flags & KVM_MEM_READONLY) != 0,
@@ -735,12 +735,12 @@ pub fn handle_vm_ioctl(
                 );
                 return Err(());
             }
-            crate::println!(
-                "[KVM] IRQFD: fd={} gsi={} flags={:#x}",
-                irqfd.fd,
-                irqfd.gsi,
-                irqfd.flags
-            );
+            // crate::println!(
+            //     "[KVM] IRQFD: fd={} gsi={} flags={:#x}",
+            //     irqfd.fd,
+            //     irqfd.gsi,
+            //     irqfd.flags
+            // );
             if irqfd.flags & KVM_IRQFD_FLAG_DEASSIGN != 0 {
                 return Ok(Some(0));
             }
@@ -771,13 +771,13 @@ pub fn handle_vm_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmIoEventFd.
             let event = unsafe { &*(kva as *const KvmIoEventFd) };
-            crate::println!(
-                "[KVM] IOEVENTFD: addr={:#x} len={} fd={} flags={:#x}",
-                event.addr,
-                event.len,
-                event.fd,
-                event.flags
-            );
+            // crate::println!(
+            //     "[KVM] IOEVENTFD: addr={:#x} len={} fd={} flags={:#x}",
+            //     event.addr,
+            //     event.len,
+            //     event.fd,
+            //     event.flags
+            // );
             if event.flags & KVM_IOEVENTFD_FLAG_PIO != 0 || event.flags & !SUPPORTED_FLAGS != 0 {
                 return Err(());
             }
@@ -842,11 +842,11 @@ pub fn handle_vm_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
             let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
-            crate::println!(
-                "[KVM] SET_DEVICE_ATTR: group={} attr={:#x}",
-                attr.group,
-                attr.attr
-            );
+            // crate::println!(
+            //     "[KVM] SET_DEVICE_ATTR: group={} attr={:#x}",
+            //     attr.group,
+            //     attr.attr
+            // );
             arch::set_device_attr(vm, arch::default_device_type(), attr)
         }
 
@@ -858,11 +858,11 @@ pub fn handle_vm_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
             let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
-            crate::println!(
-                "[KVM] GET_DEVICE_ATTR: group={} attr={:#x}",
-                attr.group,
-                attr.attr
-            );
+            // crate::println!(
+            //     "[KVM] GET_DEVICE_ATTR: group={} attr={:#x}",
+            //     attr.group,
+            //     attr.attr
+            // );
             arch::get_device_attr(vm, arch::default_device_type(), attr)
         }
 
@@ -874,11 +874,11 @@ pub fn handle_vm_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
             let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
-            crate::println!(
-                "[KVM] HAS_DEVICE_ATTR: group={} attr={:#x}",
-                attr.group,
-                attr.attr
-            );
+            // crate::println!(
+            //     "[KVM] HAS_DEVICE_ATTR: group={} attr={:#x}",
+            //     attr.group,
+            //     attr.attr
+            // );
             arch::has_device_attr(vm, arch::default_device_type(), attr)
         }
 
@@ -904,12 +904,12 @@ fn handle_device_ioctl(
             let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
             // SAFETY: caller guarantees arg points to a valid KvmDeviceAttr.
             let attr = unsafe { &*(kva as *const KvmDeviceAttr) };
-            crate::println!(
-                "[KVM] SET_DEVICE_ATTR: device={:#x} group={} attr={:#x}",
-                device_type,
-                attr.group,
-                attr.attr
-            );
+            // crate::println!(
+            //     "[KVM] SET_DEVICE_ATTR: device={:#x} group={} attr={:#x}",
+            //     device_type,
+            //     attr.group,
+            //     attr.attr
+            // );
             arch::set_device_attr(vm, device_type, attr)
         }
         KVM_GET_DEVICE_ATTR => {
@@ -1089,6 +1089,16 @@ pub fn handle_vcpu_ioctl(
                 // log_vm_exit(&exit);
 
                 if matches!(exit, crate::hypervisor::VmExit::Wfi) {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        let count = VM_EXIT_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if count < 16 {
+                            let pc = vcpu
+                                .get_reg(crate::arch::hv::reg_index::reg::PC)
+                                .unwrap_or(0);
+                            crate::println!("[KVM-RUN] WFI pc={:#x}", pc);
+                        }
+                    }
                     vcpu.wait_for_interrupt(trapframe);
                     continue;
                 }

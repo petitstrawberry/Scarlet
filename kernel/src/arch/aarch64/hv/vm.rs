@@ -841,12 +841,12 @@ impl Aarch64VmObject {
         state.mmio_devices.push(redist);
         state.vgic_initialized = true;
         drop(state);
-        crate::println!(
-            "[VGIC] INIT: dist={:#x} redist={:#x} nr_irqs={}",
-            dist_addr,
-            redist_addr,
-            nr_irqs
-        );
+        // crate::println!(
+        //     "[VGIC] INIT: dist={:#x} redist={:#x} nr_irqs={}",
+        //     dist_addr,
+        //     redist_addr,
+        //     nr_irqs
+        // );
         Ok(())
     }
 
