@@ -648,8 +648,11 @@ fn handle_sbi_in_kernel_impl(vcpu: &VcpuRef) -> FirmwareCallResult {
         }
         sbi_ext::TIME => match function_id {
             0 => {
-                crate::arch::hv::trap::set_sbi_timer_next_event(arg0);
-                let _ = vcpu.set_reg(reg::A0, sbi_err::SUCCESS);
+                let ret = match vcpu.set_virtual_timer_next_event(arg0) {
+                    Ok(()) => sbi_err::SUCCESS,
+                    Err(_) => sbi_err::FAILED,
+                };
+                let _ = vcpu.set_reg(reg::A0, ret);
                 FirmwareCallResult::Handled
             }
             _ => {
@@ -793,6 +796,7 @@ mod sbi_ext {
 
 mod sbi_err {
     pub const SUCCESS: u64 = 0;
+    pub const FAILED: u64 = u64::MAX;
     pub const ERR_DENIED: u64 = u64::MAX - 2;
     pub const NOT_SUPPORTED: u64 = u64::MAX - 1;
     pub const INVALID_PARAM: u64 = u64::MAX - 3;

@@ -4,6 +4,7 @@ use core::arch::asm;
 
 use crate::arch::Trapframe;
 use crate::arch::hv::csr::{self, read_htinst};
+use crate::arch::hv::guest_vcpu::GuestVcpu;
 use crate::arch::hv::vm::Riscv64VmObject;
 use crate::hypervisor::types::VmExit;
 use crate::timer::tick;
@@ -12,10 +13,7 @@ const VSTIP_BIT: u64 = 1 << 6;
 const VS_INTERRUPT_BITS: u64 = (1 << 2) | (1 << 6) | (1 << 10);
 const INST_WFI: u32 = 0x1050_0073;
 
-static SBI_TIMER_NEXT_EVENT: AtomicU64 = AtomicU64::new(u64::MAX);
-
-pub fn set_sbi_timer_next_event(next_event: u64) {
-    SBI_TIMER_NEXT_EVENT.store(next_event, Ordering::Release);
+pub fn clear_sbi_timer_pending() {
     let hvip = csr::read_hvip();
     csr::write_hvip(hvip & !VSTIP_BIT);
 }
@@ -30,20 +28,28 @@ fn guest_time_now() -> u64 {
     read_rdtime().wrapping_add(csr::read_htimedelta())
 }
 
-pub fn check_sbi_timer_expired() {
-    let next = SBI_TIMER_NEXT_EVENT.load(Ordering::Acquire);
-    if next == u64::MAX {
-        return;
-    }
-    if guest_time_now() >= next {
-        SBI_TIMER_NEXT_EVENT.store(u64::MAX, Ordering::Release);
-        let hvip = csr::read_hvip();
-        csr::write_hvip(hvip | VSTIP_BIT);
-    }
+pub fn set_sbi_timer_next_event(vcpu: &mut GuestVcpu, next_event: u64) {
+    vcpu.set_sbi_timer_next_event(next_event);
+    clear_sbi_timer_pending();
 }
 
-pub fn sbi_timer_timeout_ticks() -> Option<u64> {
-    let next = SBI_TIMER_NEXT_EVENT.load(Ordering::Acquire);
+pub fn check_sbi_timer_expired(vcpu: &mut GuestVcpu) -> bool {
+    let next = vcpu.sbi_timer_next_event();
+    if next == u64::MAX {
+        return false;
+    }
+    if guest_time_now() >= next {
+        vcpu.clear_sbi_timer_next_event();
+        let hvip = csr::read_hvip();
+        csr::write_hvip(hvip | VSTIP_BIT);
+        return true;
+    }
+
+    false
+}
+
+pub fn sbi_timer_timeout_ticks(vcpu: &GuestVcpu) -> Option<u64> {
+    let next = vcpu.sbi_timer_next_event();
     if next == u64::MAX {
         return None;
     }
@@ -226,6 +232,7 @@ static TIMER_NONE_COUNT: AtomicU64 = AtomicU64::new(0);
 fn arch_guest_trap_handler_inner(
     trapframe: &mut Trapframe,
     vm: &Riscv64VmObject,
+    vcpu: &mut GuestVcpu,
 ) -> Option<VmExit> {
     let scause = csr::read_scause();
     let is_interrupt = (scause & 0x8000_0000_0000_0000) != 0;
@@ -234,7 +241,7 @@ fn arch_guest_trap_handler_inner(
     if is_interrupt {
         if cause == SUPERVISOR_TIMER_INTERRUPT {
             tick(trapframe);
-            check_sbi_timer_expired();
+            check_sbi_timer_expired(vcpu);
             let c = TIMER_NONE_COUNT.fetch_add(1, Ordering::Relaxed);
             if c < 5 {
                 let sepc = csr::read_sepc();
@@ -412,8 +419,12 @@ fn arch_guest_trap_handler_inner(
     }
 }
 
-pub fn arch_guest_trap_handler(trapframe: &mut Trapframe, vm: &Riscv64VmObject) -> Option<VmExit> {
-    arch_guest_trap_handler_inner(trapframe, vm)
+pub fn arch_guest_trap_handler(
+    trapframe: &mut Trapframe,
+    vm: &Riscv64VmObject,
+    vcpu: &mut GuestVcpu,
+) -> Option<VmExit> {
+    arch_guest_trap_handler_inner(trapframe, vm, vcpu)
 }
 
 pub const HSTATUS_SPV: u64 = 1 << 7;

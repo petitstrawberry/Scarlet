@@ -188,7 +188,8 @@ impl Riscv64VcpuObject {
     }
 
     fn has_pending_wfi_interrupt(&self) -> bool {
-        super::trap::check_sbi_timer_expired();
+        let mut state = self.state.lock();
+        super::trap::check_sbi_timer_expired(&mut state.guest);
 
         if (self.irqs_pending.load(Ordering::Acquire) & VS_INTERRUPT_BITS) != 0 {
             return true;
@@ -253,9 +254,13 @@ impl VcpuObject for Riscv64VcpuObject {
             return;
         }
 
-        let timeout_ticks = super::trap::sbi_timer_timeout_ticks();
+        let timeout_ticks = {
+            let state = self.state.lock();
+            super::trap::sbi_timer_timeout_ticks(&state.guest)
+        };
         if matches!(timeout_ticks, Some(0)) {
-            super::trap::check_sbi_timer_expired();
+            let mut state = self.state.lock();
+            super::trap::check_sbi_timer_expired(&mut state.guest);
             return;
         }
 
@@ -265,7 +270,8 @@ impl VcpuObject for Riscv64VcpuObject {
         self.wfi_waker
             .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
 
-        super::trap::check_sbi_timer_expired();
+        let mut state = self.state.lock();
+        super::trap::check_sbi_timer_expired(&mut state.guest);
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -274,6 +280,18 @@ impl VcpuObject for Riscv64VcpuObject {
 
     fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str> {
         self.state.lock().guest.set_reg(index, value)
+    }
+
+    fn set_virtual_timer_next_event(&self, next_event: u64) -> Result<(), &'static str> {
+        let expired = {
+            let mut state = self.state.lock();
+            super::trap::set_sbi_timer_next_event(&mut state.guest, next_event);
+            super::trap::check_sbi_timer_expired(&mut state.guest)
+        };
+        if expired {
+            self.wake_wfi_waiters();
+        }
+        Ok(())
     }
 
     fn run(&self) -> Result<VmExit, &'static str> {
@@ -301,7 +319,7 @@ impl VcpuObject for Riscv64VcpuObject {
 
             self.inject_pending_interrupts();
 
-            match arch_guest_trap_handler(&mut guest_tf, &vm) {
+            match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
                 Some(exit) => {
                     self.prepare_normal_task_and_save_guest(task, &mut vcpu.guest, &mut guest_tf);
                     return Ok(exit);

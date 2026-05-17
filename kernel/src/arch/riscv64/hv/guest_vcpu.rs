@@ -23,6 +23,7 @@ pub struct GuestVcpu {
     mode: Mode,
     vm_id: u32,
     vcpu_id: u32,
+    sbi_timer_next_event: u64,
 }
 
 impl GuestVcpu {
@@ -39,6 +40,7 @@ impl GuestVcpu {
             csrs: GuestCsrState::default(),
             vm_id,
             vcpu_id,
+            sbi_timer_next_event: u64::MAX,
         }
     }
 
@@ -124,6 +126,18 @@ impl GuestVcpu {
     }
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    pub fn sbi_timer_next_event(&self) -> u64 {
+        self.sbi_timer_next_event
+    }
+
+    pub fn set_sbi_timer_next_event(&mut self, next_event: u64) {
+        self.sbi_timer_next_event = next_event;
+    }
+
+    pub fn clear_sbi_timer_next_event(&mut self) {
+        self.sbi_timer_next_event = u64::MAX;
     }
 
     pub fn get_gpr(&self, index: usize) -> u64 {
@@ -251,5 +265,6 @@ impl GuestVcpu {
         other.asid = self.asid;
         other.mode = self.mode;
         other.csrs = self.csrs;
+        other.sbi_timer_next_event = self.sbi_timer_next_event;
     }
 }
