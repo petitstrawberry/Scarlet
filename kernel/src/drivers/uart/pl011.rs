@@ -281,21 +281,11 @@ impl InterruptCapableDevice for Pl011Uart {
 
         if ris & IMSC_RXIM != 0 {
             // Receive interrupt - read all available data
-            let mut count = 0;
             while let Some(c) = self.read_byte_internal() {
                 // Emit received character event
                 self.emit_event(&InputEvent { data: c });
                 // Also store in buffer
                 self.rx_buffer.lock().push_back(c);
-                count += 1;
-
-                // Safety limit to prevent infinite loop
-                if count > 128 {
-                    crate::early_println!(
-                        "[PL011] Warning: read limit reached in interrupt handler"
-                    );
-                    break;
-                }
             }
         }
 
