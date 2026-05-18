@@ -62,7 +62,7 @@ enum Commands {
         #[arg(long)]
         module: Option<String>,
         #[arg(long)]
-        bsp: Option<String>,
+        project: Option<String>,
         #[arg(long)]
         kernel_path: Option<PathBuf>,
         #[arg(long)]
@@ -202,13 +202,13 @@ fn run() -> Result<(), String> {
         }
         Commands::New {
             module,
-            bsp,
+            project,
             kernel_path,
             kernel_rev,
             target,
         } => new_scaffold(
             module,
-            bsp,
+            project,
             kernel_path.as_deref(),
             kernel_rev.as_deref(),
             target.as_deref(),
@@ -951,16 +951,16 @@ const KERNEL_DEFAULT_REV: &str = "v0.17.0";
 
 fn new_scaffold(
     module: Option<String>,
-    bsp: Option<String>,
+    project: Option<String>,
     kernel_path: Option<&Path>,
     kernel_rev: Option<&str>,
     target: Option<&str>,
 ) -> Result<(), String> {
-    match (module, bsp) {
+    match (module, project) {
         (Some(name), None) => scaffold_module(&name, kernel_path, kernel_rev),
-        (None, Some(name)) => scaffold_bsp(&name, kernel_path, kernel_rev, target),
-        (Some(_), Some(_)) => Err("cannot specify both --module and --bsp".to_string()),
-        (None, None) => Err("specify --module or --bsp".to_string()),
+        (None, Some(name)) => scaffold_project(&name, kernel_path, kernel_rev, target),
+        (Some(_), Some(_)) => Err("cannot specify both --module and --project".to_string()),
+        (None, None) => Err("specify --module or --project".to_string()),
     }
 }
 
@@ -1162,32 +1162,32 @@ unstable-options = true
     Ok(())
 }
 
-fn render_bsp_build_rs() -> String {
+fn render_project_build_rs() -> String {
     "fn main() {}\n".to_string()
 }
 
-fn scaffold_bsp(
+fn scaffold_project(
     name: &str,
     kernel_path: Option<&Path>,
     kernel_rev: Option<&str>,
     target: Option<&str>,
 ) -> Result<(), String> {
-    let target = target.ok_or("--target is required for BSP")?;
-    let bsp_dir = PathBuf::from(name);
-    let kernel_spec = kernel_dependency_spec(kernel_path, kernel_rev, &bsp_dir)?;
-    let kernel_source = kernel_source_toml(kernel_path, kernel_rev, &bsp_dir)?;
+    let target = target.ok_or("--target is required for project")?;
+    let project_dir = PathBuf::from(name);
+    let kernel_spec = kernel_dependency_spec(kernel_path, kernel_rev, &project_dir)?;
+    let kernel_source = kernel_source_toml(kernel_path, kernel_rev, &project_dir)?;
     let target_json_dir = match kernel_path {
         Some(p) => {
             let abs = fs::canonicalize(p).map_err(|e| format!("{e}: {}", p.display()))?;
-            let rel = pathdiff(&abs, &bsp_dir)?;
+            let rel = pathdiff(&abs, &project_dir)?;
             format!("{}/targets/{}", rel.display(), target)
         }
         None => format!("../../kernel/targets/{target}"),
     };
-    let src_dir = bsp_dir.join("src");
-    let lds_dir = bsp_dir.join("lds");
-    let cargo_dir = bsp_dir.join(".cargo");
-    let scarlet_modules_dir = bsp_dir.join(".scarlet/scarlet-modules/src");
+    let src_dir = project_dir.join("src");
+    let lds_dir = project_dir.join("lds");
+    let cargo_dir = project_dir.join(".cargo");
+    let scarlet_modules_dir = project_dir.join(".scarlet/scarlet-modules/src");
 
     fs::create_dir_all(&src_dir)
         .map_err(|e| format!("failed to create {}: {e}", src_dir.display()))?;
@@ -1200,8 +1200,8 @@ fn scaffold_bsp(
 
     let crate_name = cargo_key_to_rust_identifier(name);
 
-    let build_rs = render_bsp_build_rs();
-    write_if_changed(&bsp_dir.join("build.rs"), &build_rs)?;
+    let build_rs = render_project_build_rs();
+    write_if_changed(&project_dir.join("build.rs"), &build_rs)?;
     let main_rs = r#"#![no_std]
 #![no_main]
 
@@ -1221,7 +1221,7 @@ pub extern "C" fn arch_start_kernel() -> ! {{
     .to_string();
     write_if_changed(&src_dir.join("main.rs"), &main_rs)?;
 
-    let bsp_cargo_toml = format!(
+    let project_cargo_toml = format!(
         r#"[package]
 name = "{crate_name}"
 version = "0.1.0"
@@ -1235,7 +1235,7 @@ path = "src/main.rs"
 scarlet_modules = {{ package = "scarlet-modules", path = ".scarlet/scarlet-modules" }}
 "#
     );
-    write_if_changed(&bsp_dir.join("Cargo.toml"), &bsp_cargo_toml)?;
+    write_if_changed(&project_dir.join("Cargo.toml"), &project_cargo_toml)?;
 
     let scarlet_config = format!(
         r#"config_version = 1
@@ -1257,7 +1257,7 @@ source = {kernel_source}
 [modules]
 "#
     );
-    write_if_changed(&bsp_dir.join("scarlet-config.toml"), &scarlet_config)?;
+    write_if_changed(&project_dir.join("scarlet-config.toml"), &scarlet_config)?;
 
     let cargo_config = format!(
         r#"[profile.dev]
@@ -1293,7 +1293,7 @@ scarlet = {{ {kernel_spec}, default-features = false }}
 "#
     );
     write_if_changed(
-        &bsp_dir.join(".scarlet/scarlet-modules/Cargo.toml"),
+        &project_dir.join(".scarlet/scarlet-modules/Cargo.toml"),
         &modules_cargo_toml,
     )?;
 
@@ -1305,13 +1305,13 @@ pub use scarlet;
 pub fn force_link() {}
 "#;
     write_if_changed(
-        &bsp_dir.join(".scarlet/scarlet-modules/src/lib.rs"),
+        &project_dir.join(".scarlet/scarlet-modules/src/lib.rs"),
         modules_lib_rs,
     )?;
 
-    let _ = write_if_changed(&bsp_dir.join(".gitignore"), ".scarlet\ntarget\n");
+    let _ = write_if_changed(&project_dir.join(".gitignore"), ".scarlet\ntarget\n");
 
-    eprintln!("cargo-scarlet: created BSP '{name}'");
+    eprintln!("cargo-scarlet: created project '{name}'");
     eprintln!("cargo-scarlet: REQUIRED: update .cargo/config.toml with runner");
     eprintln!("cargo-scarlet: REQUIRED: add linker script to lds/");
     eprintln!("cargo-scarlet: REQUIRED: implement boot entry in src/main.rs (arch_start_kernel)");

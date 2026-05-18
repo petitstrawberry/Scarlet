@@ -8,13 +8,13 @@ It should be understood as a **full resolved `.config`-style file** in the Kconf
 
 Its job is to describe:
 
-- which BSP target is being built
+- which project target is being built
 - which kernel crate/version is the core
 - which kernel features are enabled or disabled
 - which module options are enabled or disabled
 - the resolved source choice for the kernel and module inputs
 
-The build tool reads this file and generates the BSP-local `.scarlet/scarlet-modules` crate before invoking Cargo.
+The build tool reads this file and generates the project-local `.scarlet/scarlet-modules` crate before invoking Cargo.
 
 ## Design Principles
 
@@ -36,7 +36,7 @@ Recommended location:
 <project-root>/scarlet-config.toml
 ```
 
-In the intended model, `<project-root>` means the **BSP project root**.
+In the intended model, `<project-root>` means the **project root**.
 
 Example:
 
@@ -48,7 +48,7 @@ my-board-project/
 └─ .scarlet/
 ```
 
-The current Scarlet repository may still keep prototype BSPs under `bsp/`, but that is an implementation detail of the in-tree development environment, not the intended user-facing project model.
+The current Scarlet repository may still keep prototype projects under `projects/`, but that is an implementation detail of the in-tree development environment, not the intended user-facing project model.
 
 ## Top-Level Structure
 
@@ -59,7 +59,7 @@ config_version = 1
 name = "scarlet-qemu-riscv64"
 
 [board]
-name = "riscv64-limine"
+name = "riscv64-limine-full"
 target = "riscv64gc-unknown-none-elf"
 target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
 
@@ -110,22 +110,22 @@ This field is for tooling, logs, generated metadata, and diagnostics. It does no
 
 ```toml
 [board]
-name = "riscv64-limine"
+name = "riscv64-limine-full"
 target = "riscv64gc-unknown-none-elf"
 target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
 ```
 
 ### Fields
 
-- `name` — required string identifying the board/BSP profile
+- `name` — required string identifying the board/project profile
 - `target` — required Rust target triple or custom target base name
 - `target_json` — required path to the target JSON used by Cargo
 
 ### Purpose
 
-This section tells the build tool which BSP profile to prepare and which Cargo target configuration to invoke.
+This section tells the build tool which project profile to prepare and which Cargo target configuration to invoke.
 
-The build tool generates into the current BSP project root:
+The build tool generates into the current project root:
 
 ```text
 <project-root>/.scarlet/scarlet-modules/
@@ -184,7 +184,7 @@ package = "scarlet"
 source = { git = "https://github.com/scarlet-os/scarlet", rev = "v0.16.0" }
 ```
 
-Use when the BSP project should fetch the kernel from an online repository.
+Use when the project should fetch the kernel from an online repository.
 
 The exact publication mechanics may evolve, but the config format should already permit this source form.
 
@@ -267,7 +267,7 @@ More advanced metadata systems can be added later if needed, but they are not re
 
 ## Generated Output Mapping
 
-For each `enabled = true` module, the build tool writes the corresponding dependency into the BSP-local generated crate.
+For each `enabled = true` module, the build tool writes the corresponding dependency into the project-local generated crate.
 
 Conceptually:
 
@@ -310,7 +310,7 @@ Validation should happen in two layers:
    - check `enabled` presence
    - check valid source forms
 2. **Cargo graph validation**
-   - run `cargo metadata` against the BSP project after `.scarlet/scarlet-modules` is generated
+   - run `cargo metadata` against the project after `.scarlet/scarlet-modules` is generated
    - inspect the resolved package and feature graph
    - fail if Cargo resolution exposes dependency or feature breakage
 
@@ -331,7 +331,7 @@ config_version = 1
 name = "qemu-riscv64-dev"
 
 [board]
-name = "riscv64-limine"
+name = "riscv64-limine-full"
 target = "riscv64gc-unknown-none-elf"
 target_json = "kernel/targets/riscv64gc-unknown-none-elf.json"
 
@@ -368,8 +368,8 @@ Those can be layered on later if needed, but they should not blur the core respo
 
 ## Summary
 
-`scarlet-config.toml` is the declarative contract between Scarlet's build tool and its generated BSP-local module aggregation crate.
+`scarlet-config.toml` is the declarative contract between Scarlet's build tool and its generated project-local module aggregation crate.
 
 In one sentence:
 
-> the file says what the system should be built from, and the tool turns that into `.scarlet/scarlet-modules` for the chosen BSP.
+> the file says what the system should be built from, and the tool turns that into `.scarlet/scarlet-modules` for the chosen project.

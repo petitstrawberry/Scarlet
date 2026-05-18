@@ -1,5 +1,5 @@
 [package]
-name = "aarch64-limine-bsp"
+name = "aarch64-limine-full-project"
 version = "0.1.0"
 edition = "2024"
 

@@ -1,28 +1,28 @@
-# BSP-Local Generated Modules Architecture
+# Project-Local Generated Modules Architecture
 
 ## Overview
 
 This document describes the preferred Scarlet build-system direction for configurable kernel composition without per-build manifest editing.
 
-The intended product model is that the **BSP project itself is the main Scarlet project**. Users should think in terms of a BSP-rooted project that consumes Scarlet kernel and module crates, not in terms of a giant monorepo with BSPs hidden inside it.
+The intended product model is that the **project itself is the main Scarlet project**. Users should think in terms of a project-rooted project that consumes Scarlet kernel and module crates, not in terms of a giant monorepo with projects hidden inside it.
 
-That includes the kernel itself: the BSP project should be able to consume the kernel core from a registry/online source in the normal user-facing case, while still supporting local-tree development in the Scarlet repository.
+That includes the kernel itself: the project should be able to consume the kernel core from a registry/online source in the normal user-facing case, while still supporting local-tree development in the Scarlet repository.
 
 The design keeps:
 
 - the kernel as a stable core crate
-- BSP projects as the main user-facing project root and thin boot wrapper
+- projects as the main user-facing project root and thin boot wrapper
 - drivers, ABI implementations, filesystems, and similar subsystems as real reusable crates
 
 The only generated part is the module aggregation crate, which is produced from `scarlet-config.toml` by the build tool.
 
 ## Problem Statement
 
-Scarlet needs a way to select drivers and subsystems per target without forcing developers to repeatedly edit each BSP project's `Cargo.toml`.
+Scarlet needs a way to select drivers and subsystems per target without forcing developers to repeatedly edit each project's `Cargo.toml`.
 
 The design must avoid these failure modes:
 
-- manually toggling dependencies in each BSP manifest
+- manually toggling dependencies in each project manifest
 - making the kernel crate aware of every possible external module
 - turning module selection into implicit Cargo feature state spread across the tree
 - relying on `target/` as a stable source directory
@@ -32,9 +32,9 @@ The design must avoid these failure modes:
 At the time of writing, the in-tree Scarlet repository looks like this:
 
 - `kernel/Cargo.toml` defines the main kernel crate with package name `scarlet`
-- `bsp/riscv64-limine/Cargo.toml` and `bsp/aarch64-limine/Cargo.toml` are the final binary crates
-- both BSPs currently depend on `scarlet = { path = "../../kernel" }`
-- `Makefile.toml` invokes Cargo from inside each BSP directory for build, run, and clippy flows
+- `projects/riscv64-limine-full/Cargo.toml` and `projects/aarch64-limine-full/Cargo.toml` are the final binary crates
+- both projects currently depend on `scarlet = { path = "../../kernel" }`
+- `Makefile.toml` invokes Cargo from inside each project directory for build, run, and clippy flows
 - the kernel boot path already executes initcalls through:
   - `early_initcall_call()`
   - `driver_initcall_call()`
@@ -69,16 +69,16 @@ For the current in-tree Scarlet development repository, local paths remain the p
 
 ## Design Goals
 
-1. **No per-build BSP manifest editing**
-2. **No generated BSP project replacement**
+1. **No per-build project manifest editing**
+2. **No generated project replacement**
 3. **Kernel remains the stable core crate**
 4. **Module aggregation is ephemeral and config-derived**
-5. **Generated state stays local to the BSP project**
+5. **Generated state stays local to the project**
 6. **The design remains compatible with Cargo and rust-analyzer**
 
 ## Proposed Structure
 
-Each BSP project keeps a checked-in dependency on a generated crate inside its own directory.
+Each project keeps a checked-in dependency on a generated crate inside its own directory.
 
 Example layout:
 
@@ -93,11 +93,11 @@ my-board-project/
       └─ src/lib.rs
 ```
 
-The current in-tree `bsp/riscv64-limine/` and `bsp/aarch64-limine/` directories are repository-local prototypes of that future BSP project shape.
+The current in-tree `projects/riscv64-limine-full/` and `projects/aarch64-limine-full/` directories are repository-local prototypes of that future project shape.
 
-## BSP Manifest Contract
+## project Manifest Contract
 
-The BSP project's manifest stays stable and declares two direct dependencies:
+The project's manifest stays stable and declares two direct dependencies:
 
 ```toml
 [dependencies]
@@ -111,13 +111,13 @@ This is a one-time structural dependency.
 
 After that, module selection changes happen only through config regeneration.
 
-In the current in-tree repository prototype, the `scarlet` path is `../../kernel` instead. The important point is not the literal path string; the important point is that the BSP project has one stable dependency on the kernel core crate and one stable dependency on the generated module aggregation crate.
+In the current in-tree repository prototype, the `scarlet` path is `../../kernel` instead. The important point is not the literal path string; the important point is that the project has one stable dependency on the kernel core crate and one stable dependency on the generated module aggregation crate.
 
 Long-term, the build tool should be able to materialize or resolve the kernel dependency from whichever source the configuration specifies.
 
 ## Generated Crate Contract
 
-The build tool reads the BSP project's `scarlet-config.toml` and generates `.scarlet/scarlet-modules/` before any Cargo command runs.
+The build tool reads the project's `scarlet-config.toml` and generates `.scarlet/scarlet-modules/` before any Cargo command runs.
 
 Crucially, `scarlet-config.toml` should be treated as a **full resolved `.config`-style file**.
 
@@ -165,9 +165,9 @@ pub fn force_link() {
 }
 ```
 
-## BSP Runtime Anchor
+## project Runtime Anchor
 
-The BSP should reference the generated crate from a code path that is always linked.
+The project should reference the generated crate from a code path that is always linked.
 
 Conceptually:
 
@@ -181,11 +181,11 @@ pub extern "C" fn arch_start_kernel() -> ! {
 }
 ```
 
-The exact architecture-specific handoff differs per BSP, but the role is the same:
+The exact architecture-specific handoff differs per project, but the role is the same:
 
 - keep the generated module crate reachable
 - ensure selected modules are not dropped by dead-code elimination
-- preserve the existing BSP-to-kernel boot contract
+- preserve the existing project-to-kernel boot contract
 
 ## Module Crate Contract
 
@@ -216,7 +216,7 @@ Flow:
 
 1. module crate contributes initcall entries
 2. generated `scarlet-modules` crate references the module via `force_link()`
-3. BSP references `scarlet_modules::force_link()` from a guaranteed path
+3. project references `scarlet_modules::force_link()` from a guaranteed path
 4. final image retains the module objects
 5. kernel boot continues to execute initcalls using the existing initcall runners
 
@@ -224,17 +224,17 @@ So the generated module crate is a **link-time aggregation layer**, not a new ru
 
 ## Why the Generated Crate Lives Under `.scarlet/`
 
-The generated crate should stay inside the BSP directory, but it should not live under `target/`.
+The generated crate should stay inside the project directory, but it should not live under `target/`.
 
 Recommended location:
 
 ```text
-<bsp-project-root>/.scarlet/scarlet-modules/
+<project-project-root>/.scarlet/scarlet-modules/
 ```
 
 Reasons:
 
-- keeps generated state scoped to the BSP project
+- keeps generated state scoped to the project
 - avoids polluting the repository root
 - avoids using Cargo's disposable build-output directory as a source input
 - survives `cargo clean`
@@ -256,8 +256,8 @@ Required behavior:
 2. resolve enabled module options from dependency-like `[modules]` entries into concrete dependency definitions
 3. generate `.scarlet/scarlet-modules/Cargo.toml`
 4. generate `.scarlet/scarlet-modules/src/lib.rs`
-5. run `cargo metadata` against the generated BSP dependency graph and fail on invalid resolution
-6. do this before any Cargo command that touches the BSP project
+5. run `cargo metadata` against the generated project dependency graph and fail on invalid resolution
+6. do this before any Cargo command that touches the project
 
 That includes:
 
@@ -276,16 +276,16 @@ scarlet-config.toml
 build tool resolves enabled modules
         │
         ▼
-generate <bsp-project-root>/.scarlet/scarlet-modules/
+generate <project-project-root>/.scarlet/scarlet-modules/
         │
         ▼
 validate generated graph with cargo metadata
         │
         ▼
-run cargo from <bsp-project-root>/
+run cargo from <project-project-root>/
         │
         ▼
-BSP links kernel + generated scarlet-modules
+project links kernel + generated scarlet-modules
         │
         ▼
 selected module crates survive linking
@@ -297,9 +297,9 @@ kernel executes existing initcall pipeline
 ## Dependency Graph
 
 ```text
-BSP binary crate
+project binary crate
  ├─ scarlet                # kernel core crate
- └─ scarlet_modules        # generated BSP-local crate
+ └─ scarlet_modules        # generated project-local crate
       ├─ selected driver crates
       ├─ selected ABI crates
       ├─ selected filesystem crates
@@ -312,18 +312,18 @@ This design keeps the architectural roles clean.
 
 - **kernel** is the reusable core
 - **drivers / ABIs / filesystems** are the reusable components
-- **BSP** is the thin board-specific boot wrapper
+- **project** is the thin board-specific boot wrapper
 - **generated `scarlet-modules`** is only an ephemeral build artifact
 - **the build tool** is the place where config becomes dependency composition
 
-That means module selection is not embedded into the kernel crate and not manually maintained in every BSP manifest.
+That means module selection is not embedded into the kernel crate and not manually maintained in every project manifest.
 
 ## Operational Notes
 
 - `.scarlet/` should be gitignored
 - generation should be deterministic so rebuilds stay predictable
 - the generated crate should not contain hidden defaults not represented in `scarlet-config.toml`
-- if direct `cargo build` inside a BSP is expected to work, developers need a generation/bootstrap step first
+- if direct `cargo build` inside a project is expected to work, developers need a generation/bootstrap step first
 
 ## Non-Goals
 
@@ -336,8 +336,8 @@ This design does **not** aim to:
 
 ## Summary
 
-The BSP-local generated modules design gives Scarlet a Cargo-compatible way to compose the kernel from reusable crates without regenerating the BSP itself and without repeatedly editing BSP manifests.
+The project-local generated modules design gives Scarlet a Cargo-compatible way to compose the kernel from reusable crates without regenerating the project itself and without repeatedly editing project manifests.
 
 In one sentence:
 
-> keep the BSP fixed, keep the kernel core stable, and let the build tool synthesize a BSP-local module aggregation crate from `scarlet-config.toml`.
+> keep the project fixed, keep the kernel core stable, and let the build tool synthesize a project-local module aggregation crate from `scarlet-config.toml`.

@@ -1,12 +1,12 @@
-# BSP-Rooted Build System Implementation Plan
+# project-Rooted Build System Implementation Plan
 
 ## Goals
 
-- Make the **BSP project** the main Scarlet project model
+- Make the **project** the main Scarlet project model
 - Keep `scarlet-config.toml` as the source of truth for build composition
-- Generate `.scarlet/scarlet-modules/` inside the BSP project before Cargo runs
+- Generate `.scarlet/scarlet-modules/` inside the project before Cargo runs
 - Preserve the existing kernel boot and initcall contract
-- Avoid per-build `Cargo.toml` editing in BSP projects
+- Avoid per-build `Cargo.toml` editing in projects
 - Keep kernel, drivers, ABIs, filesystems, and subsystems as real reusable crates
 
 ## Key Decision: Is `cargo scarlet` required?
@@ -19,7 +19,7 @@ The architecture only requires a build tool that can:
 
 1. read `scarlet-config.toml`
 2. generate `.scarlet/scarlet-modules/`
-3. invoke Cargo for the BSP project
+3. invoke Cargo for the project
 
 That tool could initially be implemented in several forms:
 
@@ -45,19 +45,19 @@ So the recommended sequence is:
 
 1. implement generator core
 2. integrate it with repo-local `cargo make`
-3. validate BSP-rooted workflow end to end
+3. validate project-rooted workflow end to end
 4. only then promote the UX to `cargo scarlet`
 
 ## Scope & Assumptions
 
 - Current Scarlet repository layout remains the implementation baseline during development
-- The long-term user-facing model is a BSP-rooted external project
+- The long-term user-facing model is a project-rooted external project
 - Kernel remains the stable `scarlet` core crate
 - User-facing kernel/module distribution can assume registry/online acquisition as a normal case
 - Current in-tree Scarlet development still uses local-path workflows
 - Kernel source may come from a local tree, vendored checkout, git repository, or registry-like distribution source
 - Module crates provide `force_link()` anchors and integrate with the existing initcall model
-- Generated state lives at `<bsp-project-root>/.scarlet/scarlet-modules/`
+- Generated state lives at `<project-project-root>/.scarlet/scarlet-modules/`
 - `target/` is not used as the canonical location for generated source inputs
 
 ## Architecture Overview
@@ -86,10 +86,10 @@ generate .scarlet/scarlet-modules/Cargo.toml
 generate .scarlet/scarlet-modules/src/lib.rs
         │
         ▼
-run cargo in BSP project root
+run cargo in project root
         │
         ▼
-BSP links kernel core + generated module crate
+project links kernel core + generated module crate
         │
         ▼
 selected module crates survive linking
@@ -105,7 +105,7 @@ kernel executes existing initcall pipeline
 #### A. Documentation contract
 - Finalize the build-system architecture docs
 - Finalize the `scarlet-config.toml` specification
-- Finalize the expected BSP-rooted project shape
+- Finalize the expected project-rooted project shape
 - Keep `scarlet-config.toml` `.config`-style and move module metadata out of the config format
 
 #### B. Generated crate contract
@@ -134,35 +134,35 @@ kernel executes existing initcall pipeline
 - Convert resolved kernel/module sources into Cargo dependency entries
 - Filter only `enabled = true` module options into the generated crate
 
-#### C. Generate BSP-local crate
+#### C. Generate project-local crate
 - Write `.scarlet/scarlet-modules/Cargo.toml`
 - Write `.scarlet/scarlet-modules/src/lib.rs`
 - Make output deterministic
 - Ensure regeneration is idempotent when config does not change
-- Run `cargo metadata` on the BSP project after generation and treat resolution/feature breakage as a hard error
+- Run `cargo metadata` on the project after generation and treat resolution/feature breakage as a hard error
 
 ### Phase 3 — Integrate with the in-tree Scarlet repository
 
 #### A. Prototype integration in current repo
-- Update the in-tree BSP prototype manifests to include the static dependency on `.scarlet/scarlet-modules`
-- Add a generation pre-step before BSP Cargo commands
-- Keep the repo as the implementation testbed for the external BSP-rooted model
+- Update the in-tree project prototype manifests to include the static dependency on `.scarlet/scarlet-modules`
+- Add a generation pre-step before project Cargo commands
+- Keep the repo as the implementation testbed for the external project-rooted model
 
 #### B. `cargo make` integration
 - Add a `generate-scarlet-modules` task
-- Make BSP build/check/clippy/run tasks depend on generation
+- Make project build/check/clippy/run tasks depend on generation
 - Ensure clean workflows preserve reproducibility
 
 #### C. Validation
-- Build RISC-V BSP through the generation flow
-- Build AArch64 BSP through the generation flow
+- Build RISC-V project through the generation flow
+- Build AArch64 project through the generation flow
 - Verify that selected modules remain linked
 - Verify that initcalls still execute through the existing kernel path
 
-### Phase 4 — BSP-rooted external project workflow
+### Phase 4 — project-rooted external project workflow
 
-#### A. Create a reference BSP project template
-- Provide a minimal external BSP project skeleton
+#### A. Create a reference project template
+- Provide a minimal external project skeleton
 - Include `Cargo.toml`, `src/main.rs`, and `scarlet-config.toml`
 - Document user-facing registry-based examples and in-tree local-path examples for kernel and modules
 
@@ -171,8 +171,8 @@ kernel executes existing initcall pipeline
 - Document how rust-analyzer should work with the generated crate
 
 #### C. End-to-end verification
-- Create a sample external BSP project
-- Run generation + build from the BSP root
+- Create a sample external project
+- Run generation + build from the project root
 - Confirm the workflow no longer depends on monorepo-specific paths
 
 ### Phase 5 — CLI productization
@@ -197,14 +197,14 @@ This is where `cargo scarlet` becomes useful.
 
 The plan is considered complete when all of the following are true:
 
-1. BSP-rooted project model is fully documented
+1. project-rooted project model is fully documented
 2. `scarlet-config.toml` is documented and validated by tooling
 3. `.scarlet/scarlet-modules/` is generated from config before Cargo runs
-4. BSP manifests remain static across module selection changes
+4. project manifests remain static across module selection changes
 5. selected module crates are retained in the final kernel image
 6. existing initcall execution remains the runtime initialization mechanism
-7. both in-tree prototype BSPs build through the new generation flow
-8. at least one external BSP-rooted sample project works end to end
+7. both in-tree prototype projects build through the new generation flow
+8. at least one external project-rooted sample project works end to end
 
 ## Risks
 
@@ -218,7 +218,7 @@ The plan is considered complete when all of the following are true:
 
 ### 3. Monorepo path leakage
 - prototype paths from the Scarlet repo may accidentally leak into the external project model
-- mitigation: maintain an external sample BSP project as a first-class validation target
+- mitigation: maintain an external sample project as a first-class validation target
 
 ### 4. CLI over-design too early
 - starting with `cargo scarlet` could distract from the actual dependency-synthesis problem
@@ -227,8 +227,8 @@ The plan is considered complete when all of the following are true:
 ## Recommended Immediate Next Steps
 
 1. implement the generator core
-2. integrate generation into current `cargo make` BSP tasks
-3. patch the in-tree BSP prototype to depend on `.scarlet/scarlet-modules`
+2. integrate generation into current `cargo make` project tasks
+3. patch the in-tree project prototype to depend on `.scarlet/scarlet-modules`
 4. prove force-link + initcall retention with one real module
 5. only then decide whether to expose the workflow as `cargo scarlet`
 
@@ -238,4 +238,4 @@ The plan is considered complete when all of the following are true:
 
 The first real milestone is simpler:
 
-> given a BSP-rooted project and `scarlet-config.toml`, generate `.scarlet/scarlet-modules`, then build successfully with ordinary Cargo.
+> given a project-rooted project and `scarlet-config.toml`, generate `.scarlet/scarlet-modules`, then build successfully with ordinary Cargo.
