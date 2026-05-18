@@ -1048,9 +1048,7 @@ pub fn handle_vcpu_ioctl(
 ) -> Result<Option<usize>, ()> {
     match request {
         KVM_RUN => {
-            if let Some(task) = mytask() {
-                task.default_time_slice.store(10, Ordering::SeqCst);
-            }
+            crate::hypervisor::vcpu::mark_current_task_running_hv_vcpu();
 
             if MMIO_PENDING_VALID.load(Ordering::Acquire) {
                 let reg = MMIO_PENDING_READ_REG.load(Ordering::Acquire);

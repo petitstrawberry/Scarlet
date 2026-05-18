@@ -13,8 +13,8 @@ The prototype is intentionally simple:
 - it lives at the repository top level
 - it is a plain binary crate for now
 - it is intended to become publishable later (for example to `crates.io`)
-- it operates on BSP projects under `bsp/`
-- the in-tree `bsp/` projects serve as the current sample/reference projects
+- it operates on projects under `projects/`
+- the in-tree `projects/` projects serve as the current sample/reference projects
 
 ## Prototype Layout
 
@@ -23,14 +23,14 @@ Scarlet/
 ├─ cargo-scarlet/
 │  ├─ Cargo.toml
 │  └─ src/main.rs
-├─ bsp/
-│  ├─ riscv64-limine/
+├─ projects/
+│  ├─ riscv64-limine-full/
 │  │  ├─ Cargo.toml
 │  │  ├─ scarlet-config.toml
 │  │  ├─ src/main.rs
 │  │  └─ .scarlet/
 │  │     └─ scarlet-modules/
-│  ├─ aarch64-limine/
+│  ├─ aarch64-limine-full/
 │  │  ├─ Cargo.toml
 │  │  ├─ scarlet-config.toml
 │  │  ├─ src/main.rs
@@ -44,47 +44,50 @@ Scarlet/
 
 ## Commands
 
-### Generate BSP-local module crate
+### Refresh project-local module crate
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- generate --project bsp/riscv64-limine
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- check --project projects/riscv64-limine-full
 ```
 
 This reads:
 
 ```text
-bsp/riscv64-limine/scarlet-config.toml
+projects/riscv64-limine-full/scarlet-config.toml
 ```
 
 and generates:
 
 ```text
-bsp/riscv64-limine/.scarlet/scarlet-modules/Cargo.toml
-bsp/riscv64-limine/.scarlet/scarlet-modules/src/lib.rs
+projects/riscv64-limine-full/.scarlet/scarlet-modules/Cargo.toml
+projects/riscv64-limine-full/.scarlet/scarlet-modules/src/lib.rs
 ```
+
+The generated files are refreshed before the `check`, `build`, `clippy`, and
+`run` subcommands execute.
 
 ### Build through the prototype tool
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project bsp/riscv64-limine
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/riscv64-limine-full
 ```
 
 This prototype currently does:
 
 1. generate `.scarlet/scarlet-modules`
 2. run `cargo metadata`
-3. run `cargo build` for the BSP project
+3. run `cargo build` for the project
 
 ### Check through the prototype tool
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- check --project bsp/riscv64-limine
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- check --project projects/riscv64-limine-full
 ```
 
 ### Clippy through the prototype tool
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- clippy --project bsp/riscv64-limine
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- clippy --project projects/riscv64-limine-full
 ```
 
 By default this runs clippy with `-D warnings`.
@@ -92,7 +95,7 @@ By default this runs clippy with `-D warnings`.
 ### Run through the prototype tool
 
 ```bash
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project bsp/riscv64-limine --release
+cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project projects/riscv64-limine-full --release
 ```
 
 ### Initialize Scarlet build-system files inside an existing project
@@ -101,7 +104,7 @@ cargo run --manifest-path cargo-scarlet/Cargo.toml -- run --project bsp/riscv64-
 cargo run --manifest-path cargo-scarlet/Cargo.toml -- init --project /tmp/my-board-project
 ```
 
-This now assumes `/tmp/my-board-project` already exists as a board/BSP project.
+This now assumes `/tmp/my-board-project` already exists as a board/project.
 
 `init` adds or updates only the Scarlet build-system support files:
 
@@ -114,23 +117,22 @@ Board templates and `scarlet-config.toml` contents are expected to come from a s
 ### Repository-local wrapper for future `cargo scarlet` usage
 
 ```bash
-scripts/cargo-scarlet generate --project bsp/riscv64-limine
-scripts/cargo-scarlet check --project bsp/riscv64-limine
+scripts/cargo-scarlet check --project projects/riscv64-limine-full
 ```
 
 This wrapper is a local convenience shim before `cargo-scarlet` is published and installed as a real Cargo subcommand.
 
 ### Existing `cargo make` integration
 
-The root `Makefile.toml` now routes BSP build/clippy/run tasks through `cargo-scarlet` so generation and metadata validation stay on one path.
+The root `Makefile.toml` now routes project build/clippy/run tasks through `cargo-scarlet` so generation and metadata validation stay on one path.
 
 So existing flows like these also trigger generation first:
 
 ```bash
 cargo make build-kernel-debug-riscv64
 cargo make build-kernel-debug-aarch64
-cargo make clippy-bsp-riscv64
-cargo make clippy-bsp-aarch64
+cargo make clippy-project-riscv64
+cargo make clippy-project-aarch64
 ```
 
 ## Prototype Behavior
@@ -156,9 +158,9 @@ The generated `scarlet-modules` crate:
 - emits a `force_link()` function
 - calls `module_crate::force_link()` for each enabled module
 
-### BSP integration
+### project integration
 
-Each BSP now has:
+Each project now has:
 
 - a static dependency on `.scarlet/scarlet-modules`
 - a call to `scarlet_modules::force_link()` in `arch_start_kernel()`

@@ -59,7 +59,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "riscv64-limine-bsp"
+name = "riscv64-limine-full-project"
 version = "0.1.0"
 dependencies = [
  "scarlet-modules",

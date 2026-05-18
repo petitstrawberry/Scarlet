@@ -1,12 +1,12 @@
 config_version = 1
 
 [project]
-name = "scarlet-aarch64-limine"
+name = "scarlet-riscv64-limine-full"
 
 [board]
-name = "aarch64-limine"
-target = "aarch64-unknown-none-elf"
-target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
+name = "riscv64-limine-full"
+target = "riscv64gc-unknown-none-elf"
+target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
 
 [kernel]
 package = "scarlet"

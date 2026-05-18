@@ -1,5 +1,5 @@
 [package]
-name = "riscv64-limine-bsp"
+name = "aarch64-apple-limine-full-project"
 version = "0.1.0"
 edition = "2024"
 
