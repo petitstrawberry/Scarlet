@@ -6,6 +6,7 @@
 pub mod capability;
 pub mod handle;
 pub mod introspection;
+pub mod timer;
 
 use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
@@ -13,6 +14,7 @@ use crate::ipc::counter::{Counter, CounterObject};
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::pipe::PipeObject;
 use crate::ipc::shared_memory::SharedMemoryObject;
+use crate::object::timer::{Timer, TimerObject};
 use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
@@ -30,6 +32,7 @@ pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
     Counter(Arc<dyn CounterObject>),
+    Timer(Arc<dyn TimerObject>),
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
     #[cfg(feature = "network")]
@@ -81,6 +84,11 @@ impl KernelObject {
         KernelObject::Counter(counter as Arc<dyn CounterObject>)
     }
 
+    /// Create a KernelObject from a Timer
+    pub fn from_timer(timer: Arc<Timer>) -> Self {
+        KernelObject::Timer(timer as Arc<dyn TimerObject>)
+    }
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -97,6 +105,10 @@ impl KernelObject {
             KernelObject::Counter(counter) => {
                 // CounterObject implements StreamOps
                 let stream_ops: &dyn StreamOps = counter.as_ref();
+                Some(stream_ops)
+            }
+            KernelObject::Timer(timer) => {
+                let stream_ops: &dyn StreamOps = timer.as_ref();
                 Some(stream_ops)
             }
             #[cfg(feature = "network")]
@@ -140,6 +152,7 @@ impl KernelObject {
                 // Counter doesn't provide IPC stream operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => {
                 // SocketObject implements StreamIpcOps
@@ -181,6 +194,7 @@ impl KernelObject {
                 // Counter doesn't provide file operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't provide file operations
@@ -220,6 +234,7 @@ impl KernelObject {
                 // Counter doesn't provide pipe operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't provide pipe operations
@@ -283,6 +298,7 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = counter.as_ref();
                 Some(cloneable)
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't implement CloneOps, use Arc::clone directly
@@ -325,6 +341,7 @@ impl KernelObject {
                 // Counter doesn't provide control operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => {
                 // Try to get control operations through SocketObject trait
@@ -371,6 +388,7 @@ impl KernelObject {
                 // Counter doesn't provide memory mapping operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't provide memory mapping operations
@@ -413,6 +431,7 @@ impl KernelObject {
                 // Counter doesn't provide memory mapping operations
                 None
             }
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => {
                 // Sockets don't provide memory mapping operations
@@ -447,6 +466,7 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => None,
             KernelObject::Counter(_) => None,
+            KernelObject::Timer(_) => None,
             #[cfg(feature = "network")]
             KernelObject::Socket(_) => None,
             KernelObject::EventChannel(_) => None,
@@ -494,6 +514,17 @@ impl KernelObject {
         }
     }
 
+    /// Try to get TimerObject
+    pub fn as_timer(&self) -> Option<&dyn TimerObject> {
+        match self {
+            KernelObject::Timer(timer) => {
+                let timer_obj: &dyn TimerObject = timer.as_ref();
+                Some(timer_obj)
+            }
+            _ => None,
+        }
+    }
+
     /// Try to get Selectable capability for pselect/select readiness
     pub fn as_selectable(&self) -> Option<&dyn Selectable> {
         match self {
@@ -506,6 +537,10 @@ impl KernelObject {
             KernelObject::Counter(counter) => {
                 // CounterObject implements Selectable
                 let sel: &dyn Selectable = counter.as_ref();
+                Some(sel)
+            }
+            KernelObject::Timer(timer) => {
+                let sel: &dyn Selectable = timer.as_ref();
                 Some(sel)
             }
             #[cfg(feature = "network")]
@@ -534,6 +569,7 @@ impl KernelObject {
             KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
             KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
             KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
+            KernelObject::Timer(timer) => KernelObject::Timer(Arc::clone(timer)),
             #[cfg(feature = "network")]
             KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
             KernelObject::EventChannel(event_channel) => {
@@ -564,6 +600,7 @@ impl Clone for KernelObject {
                 KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
                 KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
                 KernelObject::Counter(counter) => KernelObject::Counter(Arc::clone(counter)),
+                KernelObject::Timer(timer) => KernelObject::Timer(Arc::clone(timer)),
                 #[cfg(feature = "network")]
                 KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
                 KernelObject::EventChannel(event_channel) => {

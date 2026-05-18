@@ -41,11 +41,13 @@ pub enum VmExit {
     Breakpoint {
         epc: u64,
     },
+    Wfi,
     Hlt,
     Shutdown,
     FailEntry {
         hardware_entry_failure_reason: u64,
     },
+    HostInterrupt,
     InternalError,
     Unknown(u64),
 }
@@ -154,7 +156,7 @@ impl VcpuExit {
                 epc: *epc,
                 ..Default::default()
             },
-            VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
+            VmExit::Wfi | VmExit::Hlt => Self::new(VcpuExitReason::Hlt),
             VmExit::Shutdown => Self::new(VcpuExitReason::Shutdown),
             VmExit::FailEntry {
                 hardware_entry_failure_reason,
@@ -163,6 +165,7 @@ impl VcpuExit {
                 fail_code: *hardware_entry_failure_reason,
                 ..Default::default()
             },
+            VmExit::HostInterrupt => Self::new(VcpuExitReason::Unknown),
             VmExit::InternalError => Self::new(VcpuExitReason::InternalError),
             VmExit::Unknown(code) => Self {
                 reason: VcpuExitReason::Unknown,

@@ -133,6 +133,10 @@ impl AbiModule for LinuxRiscv64Abi {
         _child_task: &crate::task::Task,
         _flags: crate::task::CloneFlags,
     ) -> Result<(), &'static str> {
+        if !_flags.is_set(crate::task::CloneFlagsDef::Files) {
+            self.0.unshare_fd_table();
+        }
+
         let mut ts = self.0.thread_state.clone();
         let parent_tgid = ts.tgid;
         let is_thread = ts.pending_clone_is_thread;

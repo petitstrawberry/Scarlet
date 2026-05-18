@@ -10,6 +10,8 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 const PAGE_SIZE: usize = 4096;
 const STAGE2_ROOT_SIZE: usize = PAGE_SIZE * 2;
+const STAGE2_ROOT_ENTRIES: usize = STAGE2_ROOT_SIZE / core::mem::size_of::<PageTableEntry>();
+pub const STAGE2_MAX_PAGE_LEVEL: usize = 2;
 
 /// ARM DDI 0487 stage-2 descriptor bits.
 const S2_VALID: u64 = 1 << 0;
@@ -30,7 +32,7 @@ const S2_VTTBR_VMID_MASK: u64 = 0xff;
 const S2_AP_RW: u64 = 0b11 << S2_AP_SHIFT;
 const S2_AP_RO: u64 = 0b01 << S2_AP_SHIFT;
 const S2_SH_IS: u64 = 0b11 << S2_SH_SHIFT;
-const S2_ATTR_NORMAL_WB: u64 = 0b111 << S2_ATTR_SHIFT;
+const S2_ATTR_NORMAL_WB: u64 = 0b1111 << S2_ATTR_SHIFT;
 
 static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
 static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
@@ -82,13 +84,13 @@ pub fn get_stage2_root(vmid: u16) -> Option<*mut Stage2PageTable> {
 #[repr(align(4096))]
 #[derive(Debug)]
 pub struct Stage2PageTable {
-    pub entries: [PageTableEntry; 512],
+    pub entries: [PageTableEntry; STAGE2_ROOT_ENTRIES],
 }
 
 impl Stage2PageTable {
     pub const fn new() -> Self {
         Stage2PageTable {
-            entries: [PageTableEntry::new(); 512],
+            entries: [PageTableEntry::new(); STAGE2_ROOT_ENTRIES],
         }
     }
 }
@@ -100,8 +102,15 @@ impl Default for Stage2PageTable {
 }
 
 fn allocate_stage2_root() -> *mut Stage2PageTable {
-    allocate_raw_pages_aligned(STAGE2_ROOT_SIZE / PAGE_SIZE, STAGE2_ROOT_SIZE)
-        as *mut Stage2PageTable
+    let ptr = allocate_raw_pages_aligned(STAGE2_ROOT_SIZE / PAGE_SIZE, STAGE2_ROOT_SIZE) as *mut u8;
+    if !ptr.is_null() {
+        // SAFETY: `ptr` points to the freshly allocated stage-2 root pages.
+        unsafe {
+            core::ptr::write_bytes(ptr, 0, STAGE2_ROOT_SIZE);
+        }
+        crate::arch::aarch64::clean_dcache_to_poc_range(ptr as usize, STAGE2_ROOT_SIZE);
+    }
+    ptr as *mut Stage2PageTable
 }
 
 fn allocate_stage2_table(vmid: u16) -> *mut PageTable {
@@ -109,6 +118,11 @@ fn allocate_stage2_table(vmid: u16) -> *mut PageTable {
     if ptr.is_null() {
         return ptr;
     }
+    // SAFETY: `ptr` points to one freshly allocated page-table page.
+    unsafe {
+        core::ptr::write_bytes(ptr as *mut u8, 0, PAGE_SIZE);
+    }
+    crate::arch::aarch64::clean_dcache_to_poc_range(ptr as usize, PAGE_SIZE);
     if let Some(vec) = get_stage2_tables().write().get_mut(&vmid) {
         vec.push(ptr as usize);
     }
@@ -121,9 +135,11 @@ fn table_descriptor(table_pa: usize) -> u64 {
 }
 
 #[inline(always)]
-fn stage2_page_descriptor(hpa: u64, writable: bool) -> u64 {
+fn stage2_leaf_descriptor(hpa: u64, writable: bool, page_level: usize) -> u64 {
+    let block_or_page = if page_level == 0 { S2_PAGE } else { 0 };
+
     S2_VALID
-        | S2_PAGE
+        | block_or_page
         | S2_ATTR_NORMAL_WB
         | if writable { S2_AP_RW } else { S2_AP_RO }
         | S2_SH_IS
@@ -202,9 +218,23 @@ pub fn walk_stage2(
     gpa: usize,
     vmid: u16,
 ) -> Option<*mut PageTableEntry> {
+    walk_stage2_to_level(pagetable, gpa, 0, vmid)
+}
+
+fn walk_stage2_to_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: usize,
+    target_page_level: usize,
+    vmid: u16,
+) -> Option<*mut PageTableEntry> {
+    if target_page_level > STAGE2_MAX_PAGE_LEVEL {
+        return None;
+    }
+
+    let target_table_level = 3 - target_page_level;
     let mut current_table = pagetable as *mut Stage2PageTable as *mut PageTableEntry;
 
-    for level in 1..=2 {
+    for level in 1..target_table_level {
         let index = stage2_index(gpa, level);
 
         // SAFETY: current_table always points to a valid stage-2 page-table page
@@ -232,6 +262,13 @@ pub fn walk_stage2(
     }
 
     let index = stage2_index(gpa, 3);
+    if target_table_level != 3 {
+        let index = stage2_index(gpa, target_table_level);
+        // SAFETY: current_table points to the requested target table level and
+        // index is within the architected range for that level.
+        return Some(unsafe { current_table.add(index) });
+    }
+
     // SAFETY: current_table points to the final L3 table and index is within range.
     Some(unsafe { current_table.add(index) })
 }
@@ -243,17 +280,51 @@ pub fn create_stage2_page_mapping(
     writable: bool,
     vmid: u16,
 ) -> Result<(), &'static str> {
-    let page_mask = (1u64 << S2_ADDR_SHIFT) - 1;
+    map_stage2_page_at_level(pagetable, gpa, hpa, writable, vmid, 0)
+}
+
+/// Maps a Stage-2 guest physical address to a host physical address at `level`.
+///
+/// Level 0 maps a 4 KiB page, level 1 maps a 2 MiB block, and level 2 maps a
+/// 1 GiB block. Intermediate tables are allocated as needed.
+pub fn map_stage2_page_at_level(
+    pagetable: &mut Stage2PageTable,
+    gpa: u64,
+    hpa: u64,
+    writable: bool,
+    vmid: u16,
+    level: usize,
+) -> Result<(), &'static str> {
+    map_stage2_page_at_level_no_flush(pagetable, gpa, hpa, writable, vmid, level)?;
+    flush_stage2_tlb();
+    Ok(())
+}
+
+pub fn map_stage2_page_at_level_no_flush(
+    pagetable: &mut Stage2PageTable,
+    gpa: u64,
+    hpa: u64,
+    writable: bool,
+    vmid: u16,
+    level: usize,
+) -> Result<(), &'static str> {
+    if level > STAGE2_MAX_PAGE_LEVEL {
+        return Err("invalid stage2 page level");
+    }
+
+    let page_size = 1u64 << (S2_ADDR_SHIFT + 9 * level as u64);
+    let page_mask = page_size - 1;
     let gpa = gpa & !page_mask;
     let hpa = hpa & !page_mask;
-    let pte = walk_stage2(pagetable, gpa as usize, vmid).ok_or("walk failed")?;
+    let pte = walk_stage2_to_level(pagetable, gpa as usize, level, vmid).ok_or("walk failed")?;
 
-    // SAFETY: walk_stage2 returns a valid pointer to the target L3 entry.
+    // SAFETY: walk_stage2_to_level returns a valid pointer to the requested
+    // target entry. Bit 1 is a table bit at L1/L2 but a page bit at L3.
     unsafe {
-        if ((*pte).entry & S2_VALID) != 0 && ((*pte).entry & S2_PAGE) == 0 {
+        if level > 0 && ((*pte).entry & (S2_VALID | S2_TABLE)) == (S2_VALID | S2_TABLE) {
             return Err("Cannot replace existing stage2 page table with a leaf");
         }
-        (*pte).entry = stage2_page_descriptor(hpa, writable);
+        (*pte).entry = stage2_leaf_descriptor(hpa, writable, level);
     }
 
     crate::arch::aarch64::clean_dcache_to_poc_range(
@@ -261,7 +332,11 @@ pub fn create_stage2_page_mapping(
         core::mem::size_of::<PageTableEntry>(),
     );
 
-    // SAFETY: the updated stage-2 mapping must be made visible before reuse.
+    Ok(())
+}
+
+pub fn flush_stage2_tlb() {
+    // SAFETY: the updated stage-2 mappings must be made visible before reuse.
     unsafe {
         asm!(
             "dsb ish",
@@ -271,8 +346,6 @@ pub fn create_stage2_page_mapping(
             options(nostack)
         );
     }
-
-    Ok(())
 }
 
 pub fn map_stage2_page_new(
@@ -291,17 +364,30 @@ mod tests {
 
     #[test_case]
     fn test_stage2_page_descriptor_bits() {
-        let descriptor = stage2_page_descriptor(0x1234_5000, true);
+        let descriptor = stage2_leaf_descriptor(0x1234_5000, true, 0);
 
         assert_eq!(descriptor & S2_VALID, S2_VALID);
         assert_eq!(descriptor & S2_PAGE, S2_PAGE);
-        assert_eq!(descriptor & (0b111 << S2_ATTR_SHIFT), S2_ATTR_NORMAL_WB);
+        assert_eq!(descriptor & (0b1111 << S2_ATTR_SHIFT), S2_ATTR_NORMAL_WB);
         assert_eq!(descriptor & (0b11 << S2_AP_SHIFT), S2_AP_RW);
         assert_eq!(descriptor & (0b11 << S2_SH_SHIFT), S2_SH_IS);
         assert_eq!(descriptor & S2_AF, S2_AF);
         assert_eq!(descriptor & S2_ADDR_MASK, 0x1234_5000);
         assert_eq!(descriptor & S2_XN, 0);
         assert_eq!(descriptor & S2_PXN, 0);
+    }
+
+    #[test_case]
+    fn test_stage2_block_descriptor_bits() {
+        let descriptor = stage2_leaf_descriptor(0x4000_0000, true, 2);
+
+        assert_eq!(descriptor & S2_VALID, S2_VALID);
+        assert_eq!(descriptor & S2_PAGE, 0);
+        assert_eq!(descriptor & (0b1111 << S2_ATTR_SHIFT), S2_ATTR_NORMAL_WB);
+        assert_eq!(descriptor & (0b11 << S2_AP_SHIFT), S2_AP_RW);
+        assert_eq!(descriptor & (0b11 << S2_SH_SHIFT), S2_SH_IS);
+        assert_eq!(descriptor & S2_AF, S2_AF);
+        assert_eq!(descriptor & S2_ADDR_MASK, 0x4000_0000);
     }
 
     #[test_case]

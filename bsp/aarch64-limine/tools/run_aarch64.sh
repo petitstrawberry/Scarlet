@@ -71,6 +71,7 @@ if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.
 fi
 
 QEMU_DEBUG_ARGS=""
+QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -161,7 +162,7 @@ qemu-system-aarch64 \
     -machine virt,virtualization=on,gic-version=3,acpi=off \
     -cpu max \
     -m 8G \
-    -smp 4 \
+    -smp "$QEMU_SMP" \
     -nographic \
     -serial mon:stdio \
     --no-reboot \

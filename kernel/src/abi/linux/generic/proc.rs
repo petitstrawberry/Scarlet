@@ -1,7 +1,7 @@
 use crate::{
-    abi::linux::generic::LinuxAbi,
+    abi::linux::generic::{LinuxAbi, errno},
     arch::Trapframe,
-    sched::scheduler::{get_task_by_id, schedule},
+    sched::scheduler::{get_all_task_ids, get_task_by_id, schedule},
     task::{CloneFlags, mytask},
 };
 
@@ -106,6 +106,62 @@ pub fn sys_set_robust_list(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     0
 }
 
+pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let flags = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    crate::println!("[linux] unshare: flags={:#x} (stub)", flags);
+    0
+}
+
+pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+    let cpusetsize = trapframe.get_arg(1);
+    let mask_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if cpusetsize == 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+    if mask_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let kva = match task.vm_manager.translate_to_kva(mask_ptr) {
+        Some(kva) => kva,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let bytes_to_clear = cpusetsize.min(128);
+    unsafe {
+        core::ptr::write_bytes(kva as *mut u8, 0, bytes_to_clear);
+        *(kva as *mut usize) = 1;
+    }
+
+    core::mem::size_of::<usize>()
+}
+
+pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    trapframe.increment_pc_next(task);
+    schedule(trapframe);
+
+    0
+}
+
+pub fn sys_pidfd_open(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+
+    trapframe.increment_pc_next(task);
+
+    errno::to_result(errno::ENOSYS)
+}
+
 // pub fn sys_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 //     let task = mytask().unwrap();
 //     let status_ptr = trapframe.get_arg(0) as *mut i32;
@@ -139,6 +195,35 @@ pub fn sys_set_robust_list(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
 //     let parent_waker = get_parent_waker(task.get_id());
 //     parent_waker.wait(task, trapframe);
 // }
+
+fn waitable_children_for_thread_group(task: &crate::task::Task) -> alloc::vec::Vec<usize> {
+    let thread_group_id = task.get_thread_group_id();
+    get_all_task_ids()
+        .into_iter()
+        .filter(|child_id| {
+            let Some(child) = get_task_by_id(*child_id) else {
+                return false;
+            };
+            let Some(parent_id) = child.get_parent_id() else {
+                return false;
+            };
+            let Some(parent) = get_task_by_id(parent_id) else {
+                return false;
+            };
+            parent.get_thread_group_id() == thread_group_id
+        })
+        .collect()
+}
+
+fn wait_owner_for_child(
+    task: &crate::task::Task,
+    child_pid: usize,
+) -> Option<&'static crate::task::Task> {
+    let child = get_task_by_id(child_pid)?;
+    let parent_id = child.get_parent_id()?;
+    let parent = get_task_by_id(parent_id)?;
+    (parent.get_thread_group_id() == task.get_thread_group_id()).then_some(parent)
+}
 
 #[allow(dead_code)]
 pub fn sys_kill(_abi: &mut LinuxAbi, _trapframe: &mut Trapframe) -> usize {
@@ -348,6 +433,64 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0 // Always succeed
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSysinfo {
+    uptime: isize,
+    loads: [usize; 3],
+    totalram: usize,
+    freeram: usize,
+    sharedram: usize,
+    bufferram: usize,
+    totalswap: usize,
+    freeswap: usize,
+    procs: u16,
+    pad: u16,
+    totalhigh: usize,
+    freehigh: usize,
+    mem_unit: u32,
+    _f: [u8; 0],
+}
+
+pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let info_ptr = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    if info_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let kva = match task.vm_manager.translate_to_kva(info_ptr) {
+        Some(kva) => kva,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let info = LinuxSysinfo {
+        uptime: crate::timer::ticks_to_ms(crate::timer::get_tick()) as isize / 1000,
+        loads: [0; 3],
+        totalram: 0,
+        freeram: 0,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs: 1,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 1,
+        _f: [],
+    };
+
+    unsafe {
+        core::ptr::write(kva as *mut LinuxSysinfo, info);
+    }
+
+    0
+}
+
 pub fn sys_getuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -519,6 +662,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const CLONE_VM: usize = 0x00000100;
     const CLONE_FS: usize = 0x00000200;
     const CLONE_FILES: usize = 0x00000400;
+    const CLONE_VFORK: usize = 0x00004000;
     // Thread-related flags (accepted but not fully implemented yet)
     #[allow(dead_code)]
     const CLONE_SIGHAND: usize = 0x00000800;
@@ -546,7 +690,10 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Map Linux clone flags to Scarlet CloneFlags
     let mut cflags = CloneFlags::new();
-    if (flags & CLONE_VM) != 0 {
+    // vfork children exec quickly and must not tear down the parent's address
+    // space during exec. Until Scarlet has Linux-like temporary mm sharing,
+    // treat CLONE_VFORK|CLONE_VM as a fork-style VM copy plus parent blocking.
+    if (flags & CLONE_VM) != 0 && (flags & CLONE_VFORK) == 0 {
         cflags.set(crate::task::CloneFlagsDef::Vm);
     }
     if (flags & CLONE_FS) != 0 {
@@ -561,16 +708,16 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(child_task) => {
-            child_task.vcpu.lock().iregs.reg[10] = 0; // a0 = 0 in child
+            child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
                 child_task.vcpu.lock().set_sp(child_stack);
             }
-            // If CLONE_SETTLS requested, set tp (x4) to tls for child
+            // If CLONE_SETTLS requested, set the architecture-specific TLS pointer.
             #[allow(non_snake_case)]
             const CLONE_SETTLS: usize = 0x00080000;
             if (flags & CLONE_SETTLS) != 0 {
-                child_task.vcpu.lock().iregs.reg[4] = tls; // x4 = tp
+                child_task.vcpu.lock().set_tls_pointer(tls);
             }
 
             let cpu_id = crate::sched::scheduler::select_cpu();
@@ -613,7 +760,18 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             }
+            let vfork_waker = if (flags & CLONE_VFORK) != 0 {
+                Some(crate::task::get_waitpid_waker(child_id))
+            } else {
+                None
+            };
+
             crate::sched::scheduler::enqueue_task(child_id, cpu_id);
+
+            if let Some(waker) = vfork_waker {
+                waker.wait(parent_id, trapframe);
+            }
+
             child_id
         }
         Err(_) => usize::MAX,
@@ -713,8 +871,9 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _options = trapframe.get_arg(2); // TODO: Handle WNOHANG, WUNTRACED, etc.
     let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
 
-    // Check if the task has any children
-    if task.get_children().is_empty() {
+    // Linux lets any thread in a thread group wait for children of the process.
+    let waitable_children = waitable_children_for_thread_group(task);
+    if waitable_children.is_empty() {
         trapframe.increment_pc_next(task);
         return usize::MAX - 9; // -ECHILD (no child processes)
     }
@@ -725,8 +884,11 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     loop {
         if pid == -1 {
             // Wait for any child process
-            for child_pid in task.get_children().clone() {
-                match task.wait(child_pid) {
+            for child_pid in waitable_children_for_thread_group(task) {
+                let Some(owner) = wait_owner_for_child(task, child_pid) else {
+                    continue;
+                };
+                match owner.wait(child_pid) {
                     Ok(status) => {
                         // Child has exited, return the status
                         if wstatus != core::ptr::null_mut() {
@@ -769,7 +931,7 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait(task.get_id(), task.get_trapframe());
+            parent_waker.wait(task.get_id(), trapframe);
             // Woken by child exit; re-check children.
             // Continue the loop to re-check after waking up
             continue;
@@ -778,12 +940,12 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let child_pid = pid as usize;
 
             // Check if this is actually our child
-            if !task.get_children().contains(&child_pid) {
+            let Some(owner) = wait_owner_for_child(task, child_pid) else {
                 trapframe.increment_pc_next(task);
                 return usize::MAX - 9; // -ECHILD (not our child)
-            }
+            };
 
-            match task.wait(child_pid) {
+            match owner.wait(child_pid) {
                 Ok(status) => {
                     // Child has exited, return the status
                     if wstatus != core::ptr::null_mut() {
@@ -818,7 +980,7 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
-                            child_waker.wait(task.get_id(), task.get_trapframe());
+                            child_waker.wait(task.get_id(), trapframe);
                             // Woken by specific child exit; re-check.
                             // Continue the loop to re-check after waking up
                             continue;
@@ -830,6 +992,168 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // pid <= 0 && pid != -1: wait for process group (not implemented)
             trapframe.increment_pc_next(task);
             return usize::MAX - 37; // -ENOSYS (function not implemented)
+        }
+    }
+}
+
+fn write_waitid_siginfo(
+    task: &crate::task::Task,
+    infop: usize,
+    pid: usize,
+    status: i32,
+) -> Result<(), usize> {
+    if infop == 0 {
+        return Ok(());
+    }
+
+    let Some(kva) = task.vm_manager.translate_to_kva(infop) else {
+        return Err(errno::to_result(errno::EFAULT));
+    };
+
+    // Linux siginfo_t is 128 bytes. For SIGCHLD, aarch64 uses:
+    // si_signo @ 0, si_errno @ 4, si_code @ 8, si_pid @ 16,
+    // si_uid @ 20, si_status @ 24.
+    unsafe {
+        core::ptr::write_bytes(kva as *mut u8, 0, 128);
+        *(kva as *mut i32).add(0) = 17; // SIGCHLD
+        *(kva as *mut i32).add(1) = 0;
+        *(kva as *mut i32).add(2) = 1; // CLD_EXITED
+        *((kva + 16) as *mut i32) = pid as i32;
+        *((kva + 20) as *mut u32) = 0;
+        *((kva + 24) as *mut i32) = status;
+    }
+
+    Ok(())
+}
+
+fn clear_waitid_siginfo(task: &crate::task::Task, infop: usize) -> Result<(), usize> {
+    if infop == 0 {
+        return Ok(());
+    }
+    let Some(kva) = task.vm_manager.translate_to_kva(infop) else {
+        return Err(errno::to_result(errno::EFAULT));
+    };
+    unsafe {
+        core::ptr::write_bytes(kva as *mut u8, 0, 128);
+    }
+    Ok(())
+}
+
+/// Linux waitid syscall.
+///
+/// This covers the process-waiting subset used by Go's os/exec path. It
+/// supports P_ALL and P_PID with WEXITED/WNOHANG/WNOWAIT. Other id types are
+/// left unsupported until Scarlet has pidfd/process-group objects.
+pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::task::{TaskState, get_parent_waitpid_waker, get_waitpid_waker};
+
+    const P_ALL: usize = 0;
+    const P_PID: usize = 1;
+    const WNOHANG: usize = 0x00000001;
+    const WEXITED: usize = 0x00000004;
+    const WNOWAIT: usize = 0x01000000;
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EPERM),
+    };
+
+    let idtype = trapframe.get_arg(0);
+    let id = trapframe.get_arg(1);
+    let infop = trapframe.get_arg(2);
+    let options = trapframe.get_arg(3);
+    let _rusage = trapframe.get_arg(4);
+
+    if options & WEXITED == 0 {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let nohang = options & WNOHANG != 0;
+    let nowait = options & WNOWAIT != 0;
+
+    loop {
+        match idtype {
+            P_ALL => {
+                let children = waitable_children_for_thread_group(task);
+                if children.is_empty() {
+                    trapframe.increment_pc_next(task);
+                    return errno::to_result(errno::ECHILD);
+                }
+
+                for child_pid in children {
+                    let Some(child_task) = get_task_by_id(child_pid) else {
+                        continue;
+                    };
+                    if child_task.get_state() != TaskState::Zombie {
+                        continue;
+                    }
+
+                    let status = child_task.get_exit_status().unwrap_or(-1);
+                    if let Err(err) = write_waitid_siginfo(task, infop, child_pid, status) {
+                        trapframe.increment_pc_next(task);
+                        return err;
+                    }
+                    if !nowait {
+                        if let Some(owner) = wait_owner_for_child(task, child_pid) {
+                            let _ = owner.wait(child_pid);
+                        }
+                    }
+                    trapframe.increment_pc_next(task);
+                    return 0;
+                }
+
+                if nohang {
+                    if let Err(err) = clear_waitid_siginfo(task, infop) {
+                        trapframe.increment_pc_next(task);
+                        return err;
+                    }
+                    trapframe.increment_pc_next(task);
+                    return 0;
+                }
+
+                get_parent_waitpid_waker(task.get_id()).wait(task.get_id(), trapframe);
+            }
+            P_PID => {
+                let child_pid = id;
+                let Some(owner) = wait_owner_for_child(task, child_pid) else {
+                    trapframe.increment_pc_next(task);
+                    return errno::to_result(errno::ECHILD);
+                };
+
+                let Some(child_task) = get_task_by_id(child_pid) else {
+                    trapframe.increment_pc_next(task);
+                    return errno::to_result(errno::ECHILD);
+                };
+
+                if child_task.get_state() == TaskState::Zombie {
+                    let status = child_task.get_exit_status().unwrap_or(-1);
+                    if let Err(err) = write_waitid_siginfo(task, infop, child_pid, status) {
+                        trapframe.increment_pc_next(task);
+                        return err;
+                    }
+                    if !nowait {
+                        let _ = owner.wait(child_pid);
+                    }
+                    trapframe.increment_pc_next(task);
+                    return 0;
+                }
+
+                if nohang {
+                    if let Err(err) = clear_waitid_siginfo(task, infop) {
+                        trapframe.increment_pc_next(task);
+                        return err;
+                    }
+                    trapframe.increment_pc_next(task);
+                    return 0;
+                }
+
+                get_waitpid_waker(child_pid).wait(task.get_id(), trapframe);
+            }
+            _ => {
+                trapframe.increment_pc_next(task);
+                return errno::to_result(errno::ENOSYS);
+            }
         }
     }
 }

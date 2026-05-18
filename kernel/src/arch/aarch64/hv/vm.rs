@@ -3,30 +3,147 @@ extern crate alloc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 use spin::Mutex;
 
 use super::guest_vcpu::GuestVcpu;
 use super::mmu::{
-    alloc_vmid, create_stage2_page_mapping, free_stage2, get_stage2_root, init_stage2,
-    set_guest_root_stage2, verify_hgatp_stage2,
+    STAGE2_MAX_PAGE_LEVEL, alloc_vmid, free_stage2, get_stage2_root, init_stage2,
+    map_stage2_page_at_level_no_flush, set_guest_root_stage2, verify_hgatp_stage2,
 };
-use super::switch::{HCR_EL2_GUEST, HOST_HV_CTX, arch_run_guest_loop, el2_guest_exit_vector};
+use super::switch::{
+    HostHvContext, arch_run_guest_loop, current_host_hv_context, save_current_host_hv_context,
+};
 use super::sysreg::GuestSystemRegs;
 use super::trap::arch_guest_trap_handler;
 use super::vgic::VgicState;
 use crate::arch::{Mode, Trapframe};
 use crate::hypervisor::memory::{MemorySlot, MemorySlotFlags, MemorySlotManager};
+use crate::hypervisor::mmio::VirtualMmioDeviceRef;
 use crate::hypervisor::types::{InterruptType, VmExit};
 use crate::hypervisor::vcpu::{VcpuId, VcpuObject};
 use crate::hypervisor::vm::{ScarletVmMemoryRegion, VmId, VmObject, vm_ctl};
 use crate::object::capability::ControlOps;
+use crate::sync::Waker;
 use crate::task::mytask;
 use crate::vm::manager::VirtualMemoryManager;
 
 const IRQ_BIT_SOFTWARE: u64 = 1 << 0;
 const IRQ_BIT_TIMER: u64 = 1 << 1;
 const IRQ_BIT_EXTERNAL: u64 = 1 << 2;
+const IRQ_BIT_EXTERNAL_LINE: u64 = 1 << 3;
+const GUEST_TIMER_PPI: u32 = 27;
+const GUEST_IRQ_PRIORITY: u8 = 0x80;
+const TIMER_CTL_ENABLE: u64 = 1 << 0;
+const TIMER_CTL_IMASK: u64 = 1 << 1;
+const TIMER_CTL_ISTATUS: u64 = 1 << 2;
+const EXTERNAL_IRQ_BITMAP_WORDS: usize = 4;
+const KVM_ARM_IRQ_TYPE_SHIFT: u32 = 24;
+const KVM_ARM_IRQ_TYPE_MASK: u32 = 0xf;
+const KVM_ARM_IRQ_NUM_MASK: u32 = 0xffff;
+const KVM_ARM_IRQ_TYPE_CPU: u32 = 0;
+const KVM_ARM_IRQ_TYPE_SPI: u32 = 1;
+const KVM_ARM_IRQ_TYPE_PPI: u32 = 2;
+static GUEST_TIMER_PPI_ENABLED_CPUS: AtomicU64 = AtomicU64::new(0);
+static GUEST_TIMER_PPI_ENABLE_WARNED: AtomicU32 = AtomicU32::new(0);
+
+fn stage2_page_size(level: usize) -> u64 {
+    1u64 << (12 + 9 * level)
+}
+
+fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
+    for level in (1..=STAGE2_MAX_PAGE_LEVEL).rev() {
+        let page_size = stage2_page_size(level);
+        let page_mask = page_size - 1;
+        let gpa_base = gpa & !page_mask;
+        let hpa_base = hpa & !page_mask;
+        if (gpa & page_mask) != (hpa & page_mask) {
+            continue;
+        }
+        if gpa_base < slot.guest_phys_addr || hpa_base < slot.userspace_addr {
+            continue;
+        }
+
+        let Some(page_end) = gpa_base.checked_add(page_size) else {
+            continue;
+        };
+        let Some(slot_end) = slot.guest_phys_addr.checked_add(slot.memory_size) else {
+            continue;
+        };
+        let Some(host_page_end) = hpa_base.checked_add(page_size) else {
+            continue;
+        };
+        let Some(host_slot_end) = slot.userspace_addr.checked_add(slot.memory_size) else {
+            continue;
+        };
+
+        if page_end <= slot_end && host_page_end <= host_slot_end {
+            return level;
+        }
+    }
+    0
+}
+
+fn read_cntpct_el0() -> u64 {
+    let value: u64;
+    // SAFETY: reading the architected physical counter is side-effect free.
+    unsafe {
+        asm!("mrs {value}, cntpct_el0", value = out(reg) value, options(nostack));
+    }
+    value
+}
+
+fn read_cntfrq_el0() -> u64 {
+    let value: u64;
+    // SAFETY: reading the architected counter frequency is side-effect free.
+    unsafe {
+        asm!("mrs {value}, cntfrq_el0", value = out(reg) value, options(nostack));
+    }
+    value
+}
+
+pub(crate) fn guest_virtual_count(sysregs: &GuestSystemRegs) -> u64 {
+    read_cntpct_el0().wrapping_sub(sysregs.cntvoff_el2)
+}
+
+fn enable_guest_timer_ppi_for_current_cpu() {
+    let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
+    let Some(cpu_mask) = 1u64.checked_shl(cpu_id) else {
+        return;
+    };
+
+    if (GUEST_TIMER_PPI_ENABLED_CPUS.load(Ordering::Acquire) & cpu_mask) != 0 {
+        return;
+    }
+
+    match crate::arch::interrupt::enable_external_interrupt_line(GUEST_TIMER_PPI) {
+        Ok(()) => {
+            GUEST_TIMER_PPI_ENABLED_CPUS.fetch_or(cpu_mask, Ordering::Release);
+        }
+        Err(e) => {
+            if GUEST_TIMER_PPI_ENABLE_WARNED.fetch_add(1, Ordering::Relaxed) == 0 {
+                crate::println!(
+                    "[AARCH64-HV] failed to enable guest virtual timer PPI: {}",
+                    e
+                );
+            }
+        }
+    }
+}
+
+fn save_host_user_fpu(task: &crate::task::Task) {
+    #[cfg(feature = "user-fpu")]
+    if crate::arch::user_fpu_enabled() {
+        crate::arch::fpu::kernel_switch_out_user_fpu(&mut *task.vcpu.lock());
+    }
+}
+
+fn restore_host_user_fpu(task: &crate::task::Task) {
+    #[cfg(feature = "user-fpu")]
+    if crate::arch::user_fpu_enabled() {
+        crate::arch::fpu::kernel_switch_in_user_fpu(&mut *task.vcpu.lock());
+    }
+}
 
 struct VcpuInternalState {
     guest: GuestVcpu,
@@ -39,6 +156,11 @@ pub struct Aarch64VcpuObject {
     state: Mutex<VcpuInternalState>,
     irqs_pending: AtomicU64,
     irqs_pending_mask: AtomicU64,
+    external_irqs_pending: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_changed: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_edge: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_injected: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    wfi_waker: Waker,
     last_irq_state: AtomicU64,
     vgic_num_lrs: usize,
 }
@@ -55,6 +177,11 @@ impl Aarch64VcpuObject {
             }),
             irqs_pending: AtomicU64::new(0),
             irqs_pending_mask: AtomicU64::new(0),
+            external_irqs_pending: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_changed: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_edge: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_injected: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            wfi_waker: Waker::new_interruptible("aarch64-vcpu-wfi"),
             last_irq_state: AtomicU64::new(0),
             vgic_num_lrs: num_lrs,
         })
@@ -72,56 +199,83 @@ impl Aarch64VcpuObject {
         vm: &Aarch64VmObject,
     ) {
         // Step 1: Save host EL2 state
+        enable_guest_timer_ppi_for_current_cpu();
+
         let hcr: u64;
-        let vbar: u64;
+        let vbar_el2: u64;
+        let vbar_el1: u64;
         let ich_hcr: u64;
         let ich_vmcr: u64;
+        let tpidr_el1: u64;
+        let daif: u64;
+        let cnthctl_el2: u64;
+        let cntv_ctl_el0: u64;
+        let cntv_cval_el0: u64;
+        let cntvoff_el2: u64;
+        let sp_el0: u64;
+        let tpidr_el0: u64;
+        let tpidrro_el0: u64;
+        let cntkctl_el1: u64;
         // SAFETY: the host kernel runs at EL2 in VHE mode, so EL2 register accesses are valid here.
         unsafe {
             asm!(
+                "mrs {daif}, daif",
+                "mrs {sp_el0}, sp_el0",
+                "mrs {tpidr_el0}, tpidr_el0",
+                "mrs {tpidrro_el0}, tpidrro_el0",
+                "mrs {cntkctl_el1}, cntkctl_el1",
                 "mrs {hcr}, hcr_el2",
-                "mrs {vbar}, vbar_el2",
+                "mrs {vbar_el2}, vbar_el2",
+                "mrs {vbar_el1}, vbar_el1",
                 "mrs {ich_hcr}, ich_hcr_el2",
                 "mrs {ich_vmcr}, ich_vmcr_el2",
+                "mrs {tpidr_el1}, tpidr_el1",
+                "mrs {cnthctl_el2}, cnthctl_el2",
+                "mrs {cntv_ctl_el0}, cntv_ctl_el0",
+                "mrs {cntv_cval_el0}, cntv_cval_el0",
+                "mrs {cntvoff_el2}, cntvoff_el2",
                 hcr = out(reg) hcr,
-                vbar = out(reg) vbar,
+                vbar_el2 = out(reg) vbar_el2,
+                vbar_el1 = out(reg) vbar_el1,
                 ich_hcr = out(reg) ich_hcr,
                 ich_vmcr = out(reg) ich_vmcr,
-                options(nostack),
-            );
-            HOST_HV_CTX.hcr_el2 = hcr;
-            HOST_HV_CTX.vbar_el2 = vbar;
-            HOST_HV_CTX.ich_hcr_el2 = ich_hcr;
-            HOST_HV_CTX.ich_vmcr_el2 = ich_vmcr;
-        }
-
-        // Step 2: Set VBAR_EL2 to guest exit vector
-        // SAFETY: VBAR_EL2 is retargeted to the guest exit vector before guest entry.
-        unsafe {
-            asm!(
-                "msr vbar_el2, {vector}",
-                "isb",
-                vector = in(reg) el2_guest_exit_vector as usize,
+                tpidr_el1 = out(reg) tpidr_el1,
+                daif = out(reg) daif,
+                cnthctl_el2 = out(reg) cnthctl_el2,
+                cntv_ctl_el0 = out(reg) cntv_ctl_el0,
+                cntv_cval_el0 = out(reg) cntv_cval_el0,
+                cntvoff_el2 = out(reg) cntvoff_el2,
+                sp_el0 = out(reg) sp_el0,
+                tpidr_el0 = out(reg) tpidr_el0,
+                tpidrro_el0 = out(reg) tpidrro_el0,
+                cntkctl_el1 = out(reg) cntkctl_el1,
                 options(nostack),
             );
         }
+        save_current_host_hv_context(HostHvContext {
+            hcr_el2: hcr,
+            vbar_el2,
+            vbar_el1,
+            ich_hcr_el2: ich_hcr,
+            ich_vmcr_el2: ich_vmcr,
+            tpidr_el1,
+            daif,
+            cnthctl_el2,
+            cntv_ctl_el0,
+            cntv_cval_el0,
+            cntvoff_el2,
+            sp_el0,
+            tpidr_el0,
+            tpidrro_el0,
+            cntkctl_el1,
+        });
 
-        // Step 3: Set VTTBR_EL2 to guest stage-2 page table
+        // Step 2: Set VTTBR_EL2 to guest stage-2 page table
         vm.set_guest_root_pagetable();
 
-        // Ensure all the above setup is visible before guest entry.
-        fence(Ordering::SeqCst);
-
-        // Step 4: Switch HCR_EL2 to guest config (clears TGE, enables VM)
-        // SAFETY: switching HCR_EL2 to the guest configuration is required for guest execution.
-        unsafe {
-            asm!("msr hcr_el2, {0}", "isb", in(reg) HCR_EL2_GUEST, options(nostack));
-        }
-
-        // Step 5: Restore guest _EL12 system registers (now safe: TGE=0)
-        vcpu.sysregs.restore();
-
-        // Step 6: Restore guest VGIC state
+        // Step 3: Restore guest VGIC state while still using the host VHE
+        // translation regime. HCR_EL2 is switched only after this point so the
+        // host does not execute general Rust code with guest trapping enabled.
         if vgic.hcr == 0 && vgic.vmcr == 0 {
             super::vgic::vgic_guest_entry_init(self.vgic_num_lrs);
             vgic.hcr = super::vgic::read_hcr();
@@ -132,6 +286,13 @@ impl Aarch64VcpuObject {
         }
 
         task.vcpu.lock().set_mode(vcpu.get_mode());
+
+        // Ensure all the above setup is visible before guest entry.
+        fence(Ordering::SeqCst);
+
+        // The final HCR_EL2 switch and EL12 sysreg restore are performed in
+        // the naked entry path immediately before eret. Keeping Rust execution
+        // under the host HCR avoids trapping host sysreg and memory accesses.
     }
 
     fn save_guest_vgic_state(&self, vgic: &mut VgicState) {
@@ -139,56 +300,262 @@ impl Aarch64VcpuObject {
     }
 
     fn restore_host_vgic_state(&self) {
-        let (ich_hcr, ich_vmcr) = unsafe { (HOST_HV_CTX.ich_hcr_el2, HOST_HV_CTX.ich_vmcr_el2) };
+        let host_context = current_host_hv_context();
+        let (ich_hcr, ich_vmcr) = (host_context.ich_hcr_el2, host_context.ich_vmcr_el2);
         super::vgic::restore_host_vgic(self.vgic_num_lrs, ich_hcr, ich_vmcr);
     }
 
-    fn sync_interrupts(&self, _guest: &GuestVcpu) {
-        let last_irq_state = self.last_irq_state.load(Ordering::Acquire);
-        let timer_shadowed = last_irq_state & IRQ_BIT_TIMER;
-        if timer_shadowed == 0 {
-            return;
+    fn update_virtual_timer_irq(&self, guest: &mut GuestVcpu) {
+        guest.sysregs.take_pending_into();
+
+        let enabled = (guest.sysregs.cntv_ctl_el0 & TIMER_CTL_ENABLE) != 0;
+        let masked = (guest.sysregs.cntv_ctl_el0 & TIMER_CTL_IMASK) != 0;
+        let count = guest_virtual_count(&guest.sysregs);
+        let expired = enabled && count >= guest.sysregs.cntv_cval_el0;
+
+        if expired {
+            guest.sysregs.cntv_ctl_el0 |= TIMER_CTL_ISTATUS;
+        } else {
+            guest.sysregs.cntv_ctl_el0 &= !TIMER_CTL_ISTATUS;
         }
 
-        let timer_active = super::vgic::is_virq_pending(self.vgic_num_lrs, 27);
-        if !timer_active {
+        if expired && !masked {
+            self.irqs_pending.fetch_or(IRQ_BIT_TIMER, Ordering::Release);
+        } else {
             self.irqs_pending
                 .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+        }
+        self.irqs_pending_mask
+            .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
+    }
+
+    fn sync_interrupts(&self, vgic: &VgicState) {
+        let last_irq_state = self.last_irq_state.load(Ordering::Acquire);
+        let timer_shadowed = last_irq_state & IRQ_BIT_TIMER;
+        if timer_shadowed != 0 {
+            let timer_active = super::vgic::is_shadow_virq_pending(vgic, GUEST_TIMER_PPI);
+            if !timer_active {
+                self.irqs_pending
+                    .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+                self.irqs_pending_mask
+                    .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
+                self.last_irq_state
+                    .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+            }
+        }
+
+        let edge_snapshot = *self.external_irqs_edge.lock();
+        let injected_snapshot = *self.external_irqs_injected.lock();
+        let mut completed = [0u64; EXTERNAL_IRQ_BITMAP_WORDS];
+        for (word_index, word) in edge_snapshot.iter().enumerate() {
+            let mut bits = *word & injected_snapshot[word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let virq = (word_index * 64 + bit) as u32;
+                if !super::vgic::is_shadow_virq_pending(vgic, virq) {
+                    completed[word_index] |= 1u64 << bit;
+                }
+                bits &= !(1u64 << bit);
+            }
+        }
+
+        if completed.iter().any(|word| *word != 0) {
+            {
+                let mut pending = self.external_irqs_pending.lock();
+                let mut edge = self.external_irqs_edge.lock();
+                let mut injected = self.external_irqs_injected.lock();
+                for i in 0..EXTERNAL_IRQ_BITMAP_WORDS {
+                    pending[i] &= !completed[i];
+                    edge[i] &= !completed[i];
+                    injected[i] &= !completed[i];
+                }
+            }
+            {
+                let mut changed = self.external_irqs_changed.lock();
+                for i in 0..EXTERNAL_IRQ_BITMAP_WORDS {
+                    changed[i] |= completed[i];
+                }
+            }
             self.irqs_pending_mask
-                .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
-            self.last_irq_state
-                .fetch_and(!IRQ_BIT_TIMER, Ordering::AcqRel);
+                .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
         }
     }
 
-    fn inject_pending_interrupts(&self, _guest: &mut GuestVcpu) {
+    fn inject_pending_interrupts(&self, vgic: &mut VgicState) {
         let mask = self.irqs_pending_mask.swap(0, Ordering::AcqRel);
-        if mask == 0 {
+        let pending = self.irqs_pending.load(Ordering::Acquire);
+        let val = pending & mask;
+        let mut shadowed = self.last_irq_state.load(Ordering::Acquire);
+
+        if (mask & IRQ_BIT_TIMER) != 0 {
+            if (val & IRQ_BIT_TIMER) != 0 {
+                let _ = super::vgic::inject_shadow_virq(
+                    vgic,
+                    GUEST_TIMER_PPI,
+                    GUEST_IRQ_PRIORITY,
+                    true,
+                );
+            } else {
+                let _ = super::vgic::clear_shadow_virq(vgic, GUEST_TIMER_PPI);
+            }
+            shadowed = (shadowed & !IRQ_BIT_TIMER) | (val & IRQ_BIT_TIMER);
+        }
+
+        if (mask & IRQ_BIT_EXTERNAL) != 0 {
+            if (val & IRQ_BIT_EXTERNAL) != 0 {
+                let _ = super::vgic::inject_shadow_virq(vgic, 32, GUEST_IRQ_PRIORITY, true);
+            } else {
+                let _ = super::vgic::clear_shadow_virq(vgic, 32);
+            }
+            shadowed = (shadowed & !IRQ_BIT_EXTERNAL) | (val & IRQ_BIT_EXTERNAL);
+        }
+
+        if (mask & IRQ_BIT_SOFTWARE) != 0 {
+            if (val & IRQ_BIT_SOFTWARE) != 0 {
+                let _ = super::vgic::inject_shadow_virq(vgic, 3, GUEST_IRQ_PRIORITY, false);
+            } else {
+                let _ = super::vgic::clear_shadow_virq(vgic, 3);
+            }
+            shadowed = (shadowed & !IRQ_BIT_SOFTWARE) | (val & IRQ_BIT_SOFTWARE);
+        }
+
+        if mask != 0 {
+            self.last_irq_state.store(shadowed, Ordering::Release);
+        }
+
+        if (mask & IRQ_BIT_EXTERNAL_LINE) != 0 {
+            let changed = {
+                let mut changed = self.external_irqs_changed.lock();
+                let copy = *changed;
+                *changed = [0; EXTERNAL_IRQ_BITMAP_WORDS];
+                copy
+            };
+            let external = *self.external_irqs_pending.lock();
+            for (word_index, word) in changed.iter().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let virq = (word_index * 64 + bit) as u32;
+                    if (external[word_index] & (1u64 << bit)) == 0 {
+                        let _ = super::vgic::clear_shadow_virq(vgic, virq);
+                    }
+                    bits &= !(1u64 << bit);
+                }
+            }
+        }
+
+        let external = *self.external_irqs_pending.lock();
+        let injected_snapshot = *self.external_irqs_injected.lock();
+        for (word_index, word) in external.iter().enumerate() {
+            // Edge IRQs remain pending until the LR is consumed, but must not be
+            // re-injected on every VM exit while the previous LR is still live.
+            let mut bits = *word & !injected_snapshot[word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let virq = (word_index * 64 + bit) as u32;
+                if super::vgic::inject_shadow_virq(vgic, virq, GUEST_IRQ_PRIORITY, true) {
+                    self.external_irqs_injected.lock()[word_index] |= 1u64 << bit;
+                }
+                bits &= !(1u64 << bit);
+            }
+        }
+    }
+
+    fn decode_kvm_irq(&self, irq: u32) -> Option<u32> {
+        let irq_type = (irq >> KVM_ARM_IRQ_TYPE_SHIFT) & KVM_ARM_IRQ_TYPE_MASK;
+        let irq_num = irq & KVM_ARM_IRQ_NUM_MASK;
+        match irq_type {
+            KVM_ARM_IRQ_TYPE_SPI | KVM_ARM_IRQ_TYPE_PPI => Some(irq_num),
+            KVM_ARM_IRQ_TYPE_CPU => Some(irq_num),
+            _ => None,
+        }
+    }
+
+    fn set_external_irq_line(&self, irq: u32, level: bool, edge: bool) {
+        let Some(virq) = self.decode_kvm_irq(irq) else {
+            return;
+        };
+        let word_index = (virq / 64) as usize;
+        let bit = 1u64 << (virq % 64);
+        if word_index >= EXTERNAL_IRQ_BITMAP_WORDS {
             return;
         }
 
+        {
+            let mut pending = self.external_irqs_pending.lock();
+            if level {
+                pending[word_index] |= bit;
+            } else {
+                pending[word_index] &= !bit;
+            }
+        }
+        {
+            let mut edge_bits = self.external_irqs_edge.lock();
+            let mut injected = self.external_irqs_injected.lock();
+            if level && edge {
+                edge_bits[word_index] |= bit;
+            } else if !level {
+                edge_bits[word_index] &= !bit;
+                injected[word_index] &= !bit;
+            }
+        }
+        {
+            let mut changed = self.external_irqs_changed.lock();
+            changed[word_index] |= bit;
+        }
+        self.irqs_pending_mask
+            .fetch_or(IRQ_BIT_EXTERNAL_LINE, Ordering::Release);
+        if level {
+            self.wake_wfi_waiters();
+        }
+    }
+
+    fn has_pending_wfi_interrupt(&self) -> bool {
+        {
+            let mut state = self.state.lock();
+            self.update_virtual_timer_irq(&mut state.guest);
+        }
+
         let pending = self.irqs_pending.load(Ordering::Acquire);
-        let val = pending & mask;
-
-        if (val & IRQ_BIT_TIMER) != 0 {
-            let _ = super::vgic::inject_virq(self.vgic_num_lrs, 27, 0x80, true);
-        } else {
-            let _ = super::vgic::clear_virq(self.vgic_num_lrs, 27);
+        if (pending & (IRQ_BIT_TIMER | IRQ_BIT_EXTERNAL | IRQ_BIT_SOFTWARE)) != 0 {
+            return true;
         }
 
-        if (val & IRQ_BIT_EXTERNAL) != 0 {
-            let _ = super::vgic::inject_virq(self.vgic_num_lrs, 32, 0x80, true);
-        } else {
-            let _ = super::vgic::clear_virq(self.vgic_num_lrs, 32);
+        self.external_irqs_pending
+            .lock()
+            .iter()
+            .any(|word| *word != 0)
+    }
+
+    fn guest_timer_timeout_ticks(&self) -> Option<u64> {
+        let state = self.state.lock();
+        let sysregs = &state.guest.sysregs;
+        let enabled = (sysregs.cntv_ctl_el0 & TIMER_CTL_ENABLE) != 0;
+        let masked = (sysregs.cntv_ctl_el0 & TIMER_CTL_IMASK) != 0;
+        if !enabled || masked {
+            return None;
         }
 
-        if (val & IRQ_BIT_SOFTWARE) != 0 {
-            let _ = super::vgic::inject_virq(self.vgic_num_lrs, 3, 0x80, false);
-        } else {
-            let _ = super::vgic::clear_virq(self.vgic_num_lrs, 3);
+        let count = guest_virtual_count(sysregs);
+        if count >= sysregs.cntv_cval_el0 {
+            return Some(0);
         }
 
-        self.last_irq_state.store(val, Ordering::Release);
+        let freq = read_cntfrq_el0();
+        if freq == 0 {
+            return Some(1);
+        }
+
+        let delta_cycles = sysregs.cntv_cval_el0 - count;
+        let tick_cycles =
+            ((freq as u128) * (crate::timer::TICK_INTERVAL_US as u128)).div_ceil(1_000_000) as u64;
+        let tick_cycles = tick_cycles.max(1);
+
+        Some(delta_cycles.div_ceil(tick_cycles).max(1))
+    }
+
+    fn wake_wfi_waiters(&self) {
+        self.wfi_waker.wake_all();
     }
 
     fn prepare_normal_task_and_save_guest(
@@ -197,7 +564,7 @@ impl Aarch64VcpuObject {
         vcpu: &mut GuestVcpu,
         guest_tf: &mut Trapframe,
     ) {
-        vcpu.sysregs = GuestSystemRegs::save();
+        vcpu.sysregs.take_pending_into();
         vcpu.save(guest_tf);
 
         let mut task_vcpu = task.vcpu.lock();
@@ -219,6 +586,7 @@ impl VcpuObject for Aarch64VcpuObject {
 
         self.irqs_pending.fetch_or(bit, Ordering::Release);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+        self.wake_wfi_waiters();
     }
 
     fn clear_interrupt(&self, irq_type: InterruptType) {
@@ -230,6 +598,31 @@ impl VcpuObject for Aarch64VcpuObject {
 
         self.irqs_pending.fetch_and(!bit, Ordering::AcqRel);
         self.irqs_pending_mask.fetch_or(bit, Ordering::Release);
+    }
+
+    fn set_irq_line(&self, irq: u32, level: bool) {
+        self.set_external_irq_line(irq, level, false);
+    }
+
+    fn trigger_irq(&self, irq: u32) {
+        self.set_external_irq_line(irq, true, true);
+    }
+
+    fn wait_for_interrupt(&self, trapframe: &mut Trapframe) {
+        if self.has_pending_wfi_interrupt() {
+            return;
+        }
+
+        let timeout_ticks = self.guest_timer_timeout_ticks();
+        if matches!(timeout_ticks, Some(0)) {
+            return;
+        }
+
+        let Some(task) = mytask() else {
+            return;
+        };
+        self.wfi_waker
+            .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
     }
 
     fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
@@ -247,27 +640,33 @@ impl VcpuObject for Aarch64VcpuObject {
         let task = mytask().ok_or("No current task")?;
         let mut guest_tf = Trapframe::new();
 
-        self.sync_interrupts(&vcpu.guest);
-        self.inject_pending_interrupts(&mut vcpu.guest);
+        save_host_user_fpu(task);
+
+        {
+            let vcpu_state = &mut *vcpu;
+            self.update_virtual_timer_irq(&mut vcpu_state.guest);
+            self.sync_interrupts(&vcpu_state.vgic);
+            self.inject_pending_interrupts(&mut vcpu_state.vgic);
+        }
 
         {
             let vcpu_state = &mut *vcpu;
             self.setup_for_guest(task, &mut vcpu_state.guest, &mut vcpu_state.vgic, &vm);
         }
+        vcpu.guest.restore_fpu();
         // SAFETY: the guest world switch restores host EL2 state before returning.
         unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
 
         loop {
+            vcpu.guest.save_fpu();
             self.save_guest_vgic_state(&mut vcpu.vgic);
             self.restore_host_vgic_state();
             vcpu.guest.save(&guest_tf);
 
-            self.sync_interrupts(&vcpu.guest);
-            self.inject_pending_interrupts(&mut vcpu.guest);
-
-            match arch_guest_trap_handler(&mut guest_tf, &vm) {
+            match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
                 Some(exit) => {
                     self.prepare_normal_task_and_save_guest(task, &mut vcpu.guest, &mut guest_tf);
+                    restore_host_user_fpu(task);
                     return Ok(exit);
                 }
                 None => {
@@ -276,9 +675,12 @@ impl VcpuObject for Aarch64VcpuObject {
                     // Without this, setup_for_guest() would restore stale sysregs from
                     // before the guest ran, clobbering any EL1 sysreg changes the guest
                     // made during its last execution phase.
-                    vcpu.guest.sysregs = GuestSystemRegs::save();
+                    vcpu.guest.sysregs.take_pending_into();
                     {
                         let vcpu_state = &mut *vcpu;
+                        self.update_virtual_timer_irq(&mut vcpu_state.guest);
+                        self.sync_interrupts(&vcpu_state.vgic);
+                        self.inject_pending_interrupts(&mut vcpu_state.vgic);
                         self.setup_for_guest(
                             task,
                             &mut vcpu_state.guest,
@@ -286,6 +688,7 @@ impl VcpuObject for Aarch64VcpuObject {
                             &vm,
                         );
                     }
+                    vcpu.guest.restore_fpu();
                     // SAFETY: same contract as the initial guest entry above.
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }
@@ -299,6 +702,12 @@ struct VmInternalState {
     memory_slots: MemorySlotManager,
     vmid: u16,
     fast_path_flags: u32,
+    gic_dist_addr: Option<u64>,
+    gic_cpu_addr: Option<u64>,
+    gic_redist_addr: Option<u64>,
+    mmio_devices: Vec<VirtualMmioDeviceRef>,
+    vgic_nr_irqs: u32,
+    vgic_initialized: bool,
 }
 
 pub type Vm = Aarch64VmObject;
@@ -329,6 +738,12 @@ impl Aarch64VmObject {
                 memory_slots: MemorySlotManager::new(),
                 vmid,
                 fast_path_flags: 0,
+                gic_dist_addr: None,
+                gic_cpu_addr: None,
+                gic_redist_addr: None,
+                mmio_devices: Vec::new(),
+                vgic_nr_irqs: 64,
+                vgic_initialized: false,
             }),
         })
     }
@@ -345,6 +760,96 @@ impl Aarch64VmObject {
         self.state.lock().vmid
     }
 
+    pub fn set_gic_device_addr(&self, device_id: u64, addr_type: u64, addr: u64) {
+        let mut state = self.state.lock();
+        const KVM_ARM_DEVICE_VGIC_V2: u64 = 0;
+        const KVM_VGIC_V2_ADDR_TYPE_DIST: u64 = 0;
+        const KVM_VGIC_V2_ADDR_TYPE_CPU: u64 = 1;
+
+        if device_id == KVM_ARM_DEVICE_VGIC_V2 {
+            match addr_type {
+                KVM_VGIC_V2_ADDR_TYPE_DIST => state.gic_dist_addr = Some(addr),
+                KVM_VGIC_V2_ADDR_TYPE_CPU => state.gic_cpu_addr = Some(addr),
+                _ => {}
+            }
+        }
+    }
+
+    pub fn gic_mmio_range(&self) -> Option<(u64, u64, Option<u64>)> {
+        let state = self.state.lock();
+        let dist = state.gic_dist_addr?;
+        // GICv3: redist present
+        if state.gic_redist_addr.is_some() {
+            return Some((dist, 0x10000, state.gic_redist_addr));
+        }
+        // GICv2: cpu interface present
+        Some((dist, 0x10000, state.gic_cpu_addr))
+    }
+
+    pub fn set_gicv3_addrs(&self, dist_addr: u64, redist_addr: u64) {
+        let mut state = self.state.lock();
+        state.gic_dist_addr = Some(dist_addr);
+        state.gic_redist_addr = Some(redist_addr);
+    }
+
+    pub fn register_mmio_device(&self, device: VirtualMmioDeviceRef) {
+        self.state.lock().mmio_devices.push(device);
+    }
+
+    pub fn find_mmio_device(&self, ipa: u64) -> Option<VirtualMmioDeviceRef> {
+        let state = self.state.lock();
+        for dev in &state.mmio_devices {
+            if dev.handles(ipa) {
+                return Some(Arc::clone(dev));
+            }
+        }
+        None
+    }
+
+    pub fn set_vgicv3_dist_addr(&self, addr: u64) {
+        self.state.lock().gic_dist_addr = Some(addr);
+    }
+
+    pub fn set_vgicv3_redist_addr(&self, addr: u64) {
+        self.state.lock().gic_redist_addr = Some(addr);
+    }
+
+    pub fn set_vgic_nr_irqs(&self, nr_irqs: u32) {
+        self.state.lock().vgic_nr_irqs = nr_irqs;
+    }
+
+    pub fn vgic_init(&self) -> Result<(), ()> {
+        let mut state = self.state.lock();
+        if state.vgic_initialized {
+            return Ok(());
+        }
+        let dist_addr = state.gic_dist_addr.ok_or(())?;
+        let redist_addr = state.gic_redist_addr.ok_or(())?;
+        let nr_irqs = if state.vgic_nr_irqs == 0 {
+            64
+        } else {
+            state.vgic_nr_irqs
+        };
+        let num_lrs = super::vgic::probe_vgic();
+
+        let dist: VirtualMmioDeviceRef =
+            Arc::new(super::vgic_mmio::VgicDist::new(dist_addr, nr_irqs, num_lrs));
+        let redist: VirtualMmioDeviceRef =
+            Arc::new(super::vgic_mmio::VgicRedist::new(redist_addr, num_lrs));
+
+        state.mmio_devices.push(dist);
+        state.mmio_devices.push(redist);
+        state.vgic_initialized = true;
+        drop(state);
+        crate::println!(
+            "[VGIC] INIT: dist={:#x} redist={:#x} nr_irqs={}",
+            dist_addr,
+            redist_addr,
+            nr_irqs
+        );
+        Ok(())
+    }
+
     pub fn find_memory_slot(&self, gpa: u64) -> Option<MemorySlot> {
         self.state.lock().memory_slots.find_slot(gpa).cloned()
     }
@@ -355,7 +860,33 @@ impl Aarch64VmObject {
         // SAFETY: get_stage2_root returns a valid raw pointer to a stage-2 page
         // table root owned by the hypervisor MMU subsystem for this vmid.
         let root = unsafe { &mut *root };
-        create_stage2_page_mapping(root, gpa, hpa, writable, state.vmid)
+        let level = state
+            .memory_slots
+            .find_slot(gpa)
+            .map(|slot| best_stage2_page_level(slot, gpa, hpa))
+            .unwrap_or(0);
+
+        for level in (0..=level).rev() {
+            let page_size = stage2_page_size(level);
+            let page_mask = page_size - 1;
+            match map_stage2_page_at_level_no_flush(
+                root,
+                gpa & !page_mask,
+                hpa & !page_mask,
+                writable,
+                state.vmid,
+                level,
+            ) {
+                Ok(()) => {
+                    set_guest_root_stage2(root, state.vmid);
+                    return Ok(());
+                }
+                Err("Cannot replace existing stage2 page table with a leaf") if level > 0 => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err("Cannot replace existing stage2 page table with a leaf")
     }
 
     pub fn set_guest_root_pagetable(&self) {

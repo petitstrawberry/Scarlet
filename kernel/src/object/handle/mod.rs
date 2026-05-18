@@ -152,6 +152,7 @@ impl HandleTable {
                 // Counter is used for event notification (IPC)
                 HandleType::IpcChannel
             }
+            KernelObject::Timer(_) => HandleType::IpcChannel,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
@@ -377,6 +378,11 @@ impl HandleTable {
                 introspection::KernelObjectInfo::for_shared_memory(handle_role, readable, writable),
             ),
             KernelObject::Counter(_) => Some(introspection::KernelObjectInfo::for_counter(
+                handle_role,
+                readable,
+                writable,
+            )),
+            KernelObject::Timer(_) => Some(introspection::KernelObjectInfo::for_timer(
                 handle_role,
                 readable,
                 writable,

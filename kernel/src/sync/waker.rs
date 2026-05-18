@@ -216,7 +216,15 @@ impl Waker {
 
             cancel_timer(id);
 
-            !handler.timed_out.load(Ordering::SeqCst)
+            let timed_out = handler.timed_out.load(Ordering::SeqCst);
+            if timed_out {
+                let mut queue = self.wait_queue.lock();
+                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
+                    queue.remove(pos);
+                }
+            }
+
+            !timed_out
         } else {
             self.wait(task_id, trapframe);
             true

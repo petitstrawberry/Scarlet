@@ -2,6 +2,7 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 
 use super::switch::HCR_EL2_VM;
+use crate::environment::MAX_NUM_CPUS;
 
 // Pre-shifted system register encoding constants for use with
 // read_sysreg / write_sysreg (`.inst`-based accessors).
@@ -24,6 +25,7 @@ const SYS_ESR_EL12: u32 = sys_reg(3, 5, 5, 2, 0);
 const SYS_FAR_EL12: u32 = sys_reg(3, 5, 6, 0, 0);
 const SYS_CPACR_EL12: u32 = sys_reg(3, 5, 1, 0, 2);
 const SYS_CONTEXTIDR_EL12: u32 = sys_reg(3, 5, 13, 0, 1);
+const SYS_CNTKCTL_EL12: u32 = sys_reg(3, 5, 14, 1, 0);
 
 /// Build a system register encoding in the pre-shifted format used by
 /// read_sysreg / write_sysreg.  `value << 5` yields the instruction bits
@@ -79,7 +81,24 @@ struct PendingSnapshot(UnsafeCell<Option<GuestSystemRegs>>);
 // the hypervisor world-switch path runs with interrupts disabled.
 unsafe impl Sync for PendingSnapshot {}
 
-static PENDING_GUEST_SYSREGS: PendingSnapshot = PendingSnapshot(UnsafeCell::new(None));
+static PENDING_GUEST_SYSREGS: [PendingSnapshot; MAX_NUM_CPUS] =
+    [const { PendingSnapshot(UnsafeCell::new(None)) }; MAX_NUM_CPUS];
+
+fn current_host_cpu_id_from_mpidr() -> usize {
+    let mpidr: u64;
+
+    // SAFETY: MPIDR_EL1 identifies the current physical CPU and is readable at EL2.
+    unsafe {
+        asm!("mrs {mpidr}, mpidr_el1", mpidr = out(reg) mpidr, options(nostack));
+    }
+
+    (mpidr & 0xff) as usize
+}
+
+fn pending_guest_sysregs_slot() -> Option<&'static PendingSnapshot> {
+    let cpu_id = current_host_cpu_id_from_mpidr();
+    PENDING_GUEST_SYSREGS.get(cpu_id)
+}
 
 #[inline(always)]
 fn guest_context_active() -> bool {
@@ -98,14 +117,26 @@ fn read_guest_sysregs() -> GuestSystemRegs {
     let cntv_ctl_el0: u64;
     let cntv_cval_el0: u64;
     let cntvoff_el2: u64;
+    let tpidr_el1: u64;
+    let tpidr_el0: u64;
+    let tpidrro_el0: u64;
+    let sp_el0: u64;
 
     // SAFETY: guest timer state is read from architected timer registers
     // while executing at EL2 in guest context (HCR_EL2.VM=1, TGE=0).
     unsafe {
         asm!(
+            "mrs {sp_el0}, sp_el0",
+            "mrs {tpidr_el1}, tpidr_el1",
+            "mrs {tpidr_el0}, tpidr_el0",
+            "mrs {tpidrro_el0}, tpidrro_el0",
             "mrs {cntv_ctl_el0}, cntv_ctl_el0",
             "mrs {cntv_cval_el0}, cntv_cval_el0",
             "mrs {cntvoff_el2}, cntvoff_el2",
+            sp_el0 = out(reg) sp_el0,
+            tpidr_el1 = out(reg) tpidr_el1,
+            tpidr_el0 = out(reg) tpidr_el0,
+            tpidrro_el0 = out(reg) tpidrro_el0,
             cntv_ctl_el0 = out(reg) cntv_ctl_el0,
             cntv_cval_el0 = out(reg) cntv_cval_el0,
             cntvoff_el2 = out(reg) cntvoff_el2,
@@ -117,10 +148,13 @@ fn read_guest_sysregs() -> GuestSystemRegs {
         vbar_el1: read_sysreg::<{ SYS_VBAR_EL12 }>(),
         sctlr_el1: read_sysreg::<{ SYS_SCTLR_EL12 }>(),
         tcr_el1: read_sysreg::<{ SYS_TCR_EL12 }>(),
+        tcr2_el1: 0,
         ttbr0_el1: read_sysreg::<{ SYS_TTBR0_EL12 }>(),
         ttbr1_el1: read_sysreg::<{ SYS_TTBR1_EL12 }>(),
         mair_el1: read_sysreg::<{ SYS_MAIR_EL12 }>(),
         amair_el1: read_sysreg::<{ SYS_AMAIR_EL12 }>(),
+        pire0_el1: 0,
+        pir_el1: 0,
         sp_el1: read_sysreg::<{ SYS_SP_EL1 }>(),
         elr_el1: read_sysreg::<{ SYS_ELR_EL12 }>(),
         spsr_el1: read_sysreg::<{ SYS_SPSR_EL12 }>(),
@@ -128,9 +162,14 @@ fn read_guest_sysregs() -> GuestSystemRegs {
         far_el1: read_sysreg::<{ SYS_FAR_EL12 }>(),
         cpacr_el1: read_sysreg::<{ SYS_CPACR_EL12 }>(),
         contextidr_el1: read_sysreg::<{ SYS_CONTEXTIDR_EL12 }>(),
+        cntkctl_el1: read_sysreg::<{ SYS_CNTKCTL_EL12 }>(),
+        tpidr_el1,
         cntv_ctl_el0,
         cntv_cval_el0,
         cntvoff_el2,
+        sp_el0,
+        tpidr_el0,
+        tpidrro_el0,
     }
 }
 
@@ -147,19 +186,25 @@ pub unsafe extern "C" fn capture_guest_sysregs() {
     // SAFETY: we are the sole writer; the slot is consumed before the next
     // guest entry so there is no aliasing with a concurrent reader.
     unsafe {
-        *PENDING_GUEST_SYSREGS.0.get() = Some(snapshot);
+        if let Some(slot) = pending_guest_sysregs_slot() {
+            *slot.0.get() = Some(snapshot);
+        }
     }
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct GuestSystemRegs {
     pub vbar_el1: u64,
     pub sctlr_el1: u64,
     pub tcr_el1: u64,
+    pub tcr2_el1: u64,
     pub ttbr0_el1: u64,
     pub ttbr1_el1: u64,
     pub mair_el1: u64,
     pub amair_el1: u64,
+    pub pire0_el1: u64,
+    pub pir_el1: u64,
     pub sp_el1: u64,
     pub elr_el1: u64,
     pub spsr_el1: u64,
@@ -167,9 +212,14 @@ pub struct GuestSystemRegs {
     pub far_el1: u64,
     pub cpacr_el1: u64,
     pub contextidr_el1: u64,
+    pub tpidr_el1: u64,
     pub cntv_ctl_el0: u64,
     pub cntv_cval_el0: u64,
     pub cntvoff_el2: u64,
+    pub sp_el0: u64,
+    pub tpidr_el0: u64,
+    pub tpidrro_el0: u64,
+    pub cntkctl_el1: u64,
 }
 
 impl GuestSystemRegs {
@@ -181,13 +231,38 @@ impl GuestSystemRegs {
         // called before this function in the guest-exit path, and the slot is
         // cleared here so it cannot be double-consumed.
         unsafe {
-            (*PENDING_GUEST_SYSREGS.0.get()).take().unwrap_or_else(|| {
-                if guest_context_active() {
-                    read_guest_sysregs()
-                } else {
-                    Self::default()
-                }
-            })
+            pending_guest_sysregs_slot()
+                .and_then(|slot| (*slot.0.get()).take())
+                .unwrap_or_else(|| {
+                    if guest_context_active() {
+                        read_guest_sysregs()
+                    } else {
+                        Self::default()
+                    }
+                })
+        }
+    }
+
+    pub fn take_pending() -> Option<Self> {
+        // SAFETY: this is the same single-consumer slot used by `save`; callers
+        // use it in the guest-exit path before the next guest entry.
+        unsafe { pending_guest_sysregs_slot().and_then(|slot| (*slot.0.get()).take()) }
+    }
+
+    pub fn merge_hardware_snapshot(&mut self, snapshot: Self) {
+        let tcr2_el1 = self.tcr2_el1;
+        let pire0_el1 = self.pire0_el1;
+        let pir_el1 = self.pir_el1;
+
+        *self = snapshot;
+        self.tcr2_el1 = tcr2_el1;
+        self.pire0_el1 = pire0_el1;
+        self.pir_el1 = pir_el1;
+    }
+
+    pub fn take_pending_into(&mut self) {
+        if let Some(snapshot) = Self::take_pending() {
+            self.merge_hardware_snapshot(snapshot);
         }
     }
 
@@ -206,17 +281,26 @@ impl GuestSystemRegs {
         write_sysreg::<{ SYS_FAR_EL12 }>(self.far_el1);
         write_sysreg::<{ SYS_CPACR_EL12 }>(self.cpacr_el1);
         write_sysreg::<{ SYS_CONTEXTIDR_EL12 }>(self.contextidr_el1);
+        write_sysreg::<{ SYS_CNTKCTL_EL12 }>(self.cntkctl_el1);
 
         // SAFETY: guest timer state is restored to architected timer registers
         // while executing at EL2.
         unsafe {
             asm!(
+                "msr tpidr_el1, {tpidr_el1}",
                 "msr cntv_ctl_el0, {cntv_ctl_el0}",
                 "msr cntv_cval_el0, {cntv_cval_el0}",
                 "msr cntvoff_el2, {cntvoff_el2}",
+                "msr sp_el0, {sp_el0}",
+                "msr tpidr_el0, {tpidr_el0}",
+                "msr tpidrro_el0, {tpidrro_el0}",
+                tpidr_el1 = in(reg) self.tpidr_el1,
                 cntv_ctl_el0 = in(reg) self.cntv_ctl_el0,
                 cntv_cval_el0 = in(reg) self.cntv_cval_el0,
                 cntvoff_el2 = in(reg) self.cntvoff_el2,
+                sp_el0 = in(reg) self.sp_el0,
+                tpidr_el0 = in(reg) self.tpidr_el0,
+                tpidrro_el0 = in(reg) self.tpidrro_el0,
                 options(nostack),
             );
         }

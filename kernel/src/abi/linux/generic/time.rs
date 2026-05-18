@@ -10,6 +10,8 @@ use super::{
 use crate::{
     abi::linux::generic::LinuxAbi,
     arch::Trapframe,
+    object::KernelObject,
+    object::timer::Timer,
     sched::scheduler::wake_task,
     task::mytask,
     time::current_time,
@@ -308,6 +310,171 @@ pub const CLOCK_MONOTONIC_RAW: i32 = 4;
 pub const CLOCK_REALTIME_COARSE: i32 = 5;
 pub const CLOCK_MONOTONIC_COARSE: i32 = 6;
 pub const CLOCK_BOOTTIME: i32 = 7;
+
+const TFD_NONBLOCK: i32 = 0o00004000;
+const TFD_CLOEXEC: i32 = 0o02000000;
+const TFD_TIMER_CANCEL_ON_SET: i32 = 1 << 1;
+
+/// Linux `timerfd_create` implementation.
+pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let clock_id = trapframe.get_arg(0) as i32;
+    let flags = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(&task);
+
+    if !is_supported_clock(clock_id) {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let valid_flags = TFD_NONBLOCK | TFD_CLOEXEC;
+    if (flags & !valid_flags) != 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let timer = Arc::new(Timer::new(clock_id, (flags & TFD_NONBLOCK) != 0));
+    let kernel_obj = KernelObject::from_timer(timer);
+    let handle = match task.handle_table.insert(kernel_obj) {
+        Ok(handle) => handle,
+        Err(_) => return errno::to_result(errno::EMFILE),
+    };
+
+    let linux_fd = match abi.allocate_fd(handle) {
+        Ok(linux_fd) => linux_fd,
+        Err(_) => {
+            let _ = task.handle_table.remove(handle);
+            return errno::to_result(errno::EMFILE);
+        }
+    };
+
+    if (flags & TFD_CLOEXEC) != 0 {
+        let _ = abi.set_fd_flags(linux_fd, crate::abi::linux::generic::fs::FD_CLOEXEC);
+    }
+    if (flags & TFD_NONBLOCK) != 0 {
+        let _ =
+            abi.set_file_status_flags(linux_fd, crate::abi::linux::generic::fs::O_NONBLOCK as u32);
+    }
+
+    linux_fd
+}
+
+/// Linux `timerfd_settime` implementation.
+pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let linux_fd = trapframe.get_arg(0);
+    let flags = trapframe.get_arg(1) as i32;
+    let new_value_ptr = trapframe.get_arg(2);
+    let old_value_ptr = trapframe.get_arg(3);
+
+    trapframe.increment_pc_next(&task);
+
+    let valid_flags = TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
+    if (flags & !valid_flags) != 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+    if new_value_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let handle = match abi.get_handle(linux_fd) {
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
+    };
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(kernel_obj) => kernel_obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+    let timer = match kernel_obj.as_timer() {
+        Some(timer) => timer,
+        None => return errno::to_result(errno::EINVAL),
+    };
+
+    let new_value_paddr = match task.vm_manager.translate_to_kva(new_value_ptr) {
+        Some(addr) => addr,
+        None => return errno::to_result(errno::EFAULT),
+    };
+    let new_spec = unsafe { *(new_value_paddr as *const ItimerSpec) };
+
+    let first_ns = match timespec_to_ns(&new_spec.it_value) {
+        Ok(ns) => ns,
+        Err(errno_val) => return errno::to_result(errno_val),
+    };
+    let interval_ns = match timespec_to_ns(&new_spec.it_interval) {
+        Ok(ns) => ns,
+        Err(errno_val) => return errno::to_result(errno_val),
+    };
+
+    if old_value_ptr != 0 {
+        let old_value_paddr = match task.vm_manager.translate_to_kva(old_value_ptr) {
+            Some(addr) => addr as *mut ItimerSpec,
+            None => return errno::to_result(errno::EFAULT),
+        };
+        let (remaining_ns, previous_interval_ns) = timer.snapshot();
+        let snapshot = ItimerSpec {
+            it_interval: ns_to_timespec(previous_interval_ns),
+            it_value: ns_to_timespec(remaining_ns),
+        };
+        unsafe {
+            *old_value_paddr = snapshot;
+        }
+    }
+
+    timer.set_time(first_ns, interval_ns, (flags & TIMER_ABSTIME) != 0);
+    0
+}
+
+/// Linux `timerfd_gettime` implementation.
+pub fn sys_timerfd_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    let linux_fd = trapframe.get_arg(0);
+    let curr_value_ptr = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(&task);
+
+    if curr_value_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let handle = match abi.get_handle(linux_fd) {
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
+    };
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(kernel_obj) => kernel_obj,
+        None => return errno::to_result(errno::EBADF),
+    };
+    let timer = match kernel_obj.as_timer() {
+        Some(timer) => timer,
+        None => return errno::to_result(errno::EINVAL),
+    };
+
+    let curr_value_paddr = match task.vm_manager.translate_to_kva(curr_value_ptr) {
+        Some(addr) => addr as *mut ItimerSpec,
+        None => return errno::to_result(errno::EFAULT),
+    };
+    let (remaining_ns, interval_ns) = timer.snapshot();
+    let snapshot = ItimerSpec {
+        it_interval: ns_to_timespec(interval_ns),
+        it_value: ns_to_timespec(remaining_ns),
+    };
+    unsafe {
+        *curr_value_paddr = snapshot;
+    }
+
+    0
+}
 
 /// Linux `timer_create` implementation.
 ///

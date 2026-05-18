@@ -1529,13 +1529,13 @@ impl Task {
         }
 
         if flags.is_set(CloneFlagsDef::Fs) {
-            // Clone the filesystem manager
             if let Some(vfs) = self.vfs.read().clone() {
-                *child.vfs.write() = Some(vfs.clone());
-                // Current working directory is managed within VfsManager
+                *child.vfs.write() = Some(vfs);
             } else {
                 *child.vfs.write() = None;
             }
+        } else if let Some(vfs) = self.vfs.read().clone() {
+            *child.vfs.write() = Some(VfsManager::clone_with_shared_mount_namespace(&vfs));
         }
 
         // Ensure the cloned task has its own high-VA kernel stack window.

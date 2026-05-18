@@ -5,7 +5,9 @@ use crate::{
     abi::linux::generic::errno,
     abi::linux::generic::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
     arch::Trapframe,
-    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
+    network::{
+        NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType, local::LocalSocket,
+    },
     object::KernelObject,
     object::capability::selectable::Selectable,
     sched::scheduler::schedule,
@@ -57,6 +59,90 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 pub const SOL_SOCKET: i32 = 1;
 pub const SCM_RIGHTS: i32 = 1;
 pub const MSG_DONTWAIT: i32 = 0x40;
+
+fn socket_error_to_errno(error: SocketError) -> usize {
+    match error {
+        SocketError::InvalidAddress | SocketError::InvalidArgument => errno::EINVAL,
+        SocketError::AddressInUse => errno::EADDRINUSE,
+        SocketError::AddressNotAvailable => errno::EADDRNOTAVAIL,
+        SocketError::ConnectionRefused => errno::ECONNREFUSED,
+        SocketError::ConnectionReset => errno::ECONNRESET,
+        SocketError::ConnectionAborted => errno::ECONNABORTED,
+        SocketError::NotConnected => errno::ENOTCONN,
+        SocketError::AlreadyConnected => errno::EISCONN,
+        SocketError::InvalidOperation => errno::EINVAL,
+        SocketError::NotListening => errno::EINVAL,
+        SocketError::NoConnections | SocketError::WouldBlock => errno::EAGAIN,
+        SocketError::NotSupported => errno::EOPNOTSUPP,
+        SocketError::NoRoute => errno::ENETUNREACH,
+        SocketError::ProtocolNotSupported => errno::EPROTONOSUPPORT,
+        SocketError::InvalidPacket | SocketError::Other(_) => errno::EIO,
+    }
+}
+
+fn write_socket_address_to_user(
+    task: &crate::task::Task,
+    addr_ptr: usize,
+    addrlen_ptr: usize,
+    socket_addr: crate::network::SocketAddress,
+) -> Result<(), usize> {
+    if addr_ptr == 0 || addrlen_ptr == 0 {
+        return Ok(());
+    }
+
+    let addr_paddr = task
+        .vm_manager
+        .translate_to_kva(addr_ptr)
+        .ok_or(errno::EFAULT)?;
+    let addrlen_paddr = task
+        .vm_manager
+        .translate_to_kva(addrlen_ptr)
+        .ok_or(errno::EFAULT)?;
+
+    unsafe {
+        let addrlen = *(addrlen_paddr as *const u32);
+
+        match socket_addr {
+            crate::network::SocketAddress::Local(addr) => {
+                if addrlen < 2 {
+                    return Err(errno::EINVAL);
+                }
+
+                let sockaddr = addr_paddr as *mut u16;
+                *sockaddr = AF_UNIX_U16;
+
+                let available_path_len = (addrlen - 2) as usize;
+                let path = addr.path().as_bytes();
+                let path_len = path.len().min(available_path_len);
+                if path_len > 0 {
+                    let path_start = (addr_paddr + 2) as *mut u8;
+                    core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, path_len);
+                    if path_len < available_path_len {
+                        *(path_start.add(path_len)) = 0;
+                    }
+                }
+
+                *(addrlen_paddr as *mut u32) = 2 + path_len as u32;
+                Ok(())
+            }
+            crate::network::SocketAddress::Inet(inet) => {
+                if addrlen < size_of::<SockaddrIn>() as u32 {
+                    return Err(errno::EINVAL);
+                }
+
+                let sockaddr = addr_paddr as *mut SockaddrIn;
+                (*sockaddr).sin_family = AF_INET_U16;
+                (*sockaddr).sin_port = u16::to_be(inet.port);
+                (*sockaddr).sin_addr = u32::from_be_bytes(inet.addr);
+                (*sockaddr).sin_zero = [0; 8];
+
+                *(addrlen_paddr as *mut u32) = size_of::<SockaddrIn>() as u32;
+                Ok(())
+            }
+            _ => Err(errno::EAFNOSUPPORT),
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -229,6 +315,9 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Ok(fd) => {
                     if set_cloexec {
                         let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+                    }
+                    if set_nonblock {
+                        let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
                     }
                     fd
                 }
@@ -456,7 +545,6 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if socket_arc.listen(backlog.max(0) as usize).is_err() {
-        crate::early_println!("[linux socket] listen failed fd {}", sockfd);
         return usize::MAX;
     }
 
@@ -478,15 +566,15 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - new socket file descriptor on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_accept(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
     let sockfd = trapframe.get_arg(0) as i32;
-    let _addr_ptr = trapframe.get_arg(1);
-    let _addrlen_ptr = trapframe.get_arg(2);
+    let addr_ptr = trapframe.get_arg(1);
+    let addrlen_ptr = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
@@ -526,10 +614,33 @@ pub fn sys_accept(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
+    let peer_addr = accepted_socket
+        .getpeername()
+        .unwrap_or(crate::network::SocketAddress::Local(
+            crate::network::LocalSocketAddress::unnamed(),
+        ));
+    if let Err(errno) = write_socket_address_to_user(task, addr_ptr, addrlen_ptr, peer_addr) {
+        return errno::to_result(errno);
+    }
+
+    if (flags & SOCK_NONBLOCK) != 0 {
+        if let Some(local_socket) = LocalSocket::from_socket_object(&accepted_socket) {
+            local_socket.set_nonblocking(true);
+        }
+    }
+
     let kernel_obj = KernelObject::Socket(accepted_socket);
     match task.handle_table.insert(kernel_obj) {
         Ok(handle) => match abi.allocate_fd(handle) {
-            Ok(fd) => fd,
+            Ok(fd) => {
+                if (flags & SOCK_CLOEXEC) != 0 {
+                    let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+                }
+                if (flags & SOCK_NONBLOCK) != 0 {
+                    let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+                }
+                fd
+            }
             Err(_) => {
                 let _ = task.handle_table.remove(handle);
                 usize::MAX
@@ -537,6 +648,22 @@ pub fn sys_accept(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         },
         Err(_) => usize::MAX,
     }
+}
+
+pub fn sys_accept(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    accept_with_flags(abi, trapframe, 0)
+}
+
+pub fn sys_accept4(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let flags = trapframe.get_arg(3) as i32;
+    let supported = SOCK_CLOEXEC | SOCK_NONBLOCK;
+    if (flags & !supported) != 0 {
+        if let Some(task) = mytask() {
+            trapframe.increment_pc_next(task);
+        }
+        return errno::to_result(errno::EINVAL);
+    }
+    accept_with_flags(abi, trapframe, flags)
 }
 
 /// Linux sys_connect implementation (mock)
@@ -625,12 +752,11 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
                 let socket_addr = match crate::network::LocalSocketAddress::from_path(path) {
                     Ok(addr) => crate::network::SocketAddress::Local(addr),
-                    Err(_) => return usize::MAX,
+                    Err(error) => return errno::to_result(socket_error_to_errno(error)),
                 };
 
-                if socket_arc.connect(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] connect failed {}", path);
-                    return usize::MAX;
+                if let Err(error) = socket_arc.connect(&socket_addr) {
+                    return errno::to_result(socket_error_to_errno(error));
                 }
             }
             AF_INET_U16 => {
@@ -641,9 +767,12 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     crate::network::Inet4SocketAddress::new(addr_bytes, port),
                 );
 
-                if socket_arc.connect(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] connect failed for INET address");
-                    return usize::MAX;
+                if let Err(error) = socket_arc.connect(&socket_addr) {
+                    crate::early_println!(
+                        "[linux socket] connect failed for INET address: {:?}",
+                        error
+                    );
+                    return errno::to_result(socket_error_to_errno(error));
                 }
             }
             _ => {

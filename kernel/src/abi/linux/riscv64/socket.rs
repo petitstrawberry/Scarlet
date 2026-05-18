@@ -5,7 +5,9 @@ use crate::{
     abi::linux::riscv64::errno,
     abi::linux::riscv64::fs::{FD_CLOEXEC, IoVec, O_NONBLOCK},
     arch::Trapframe,
-    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
+    network::{
+        NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType, local::LocalSocket,
+    },
     object::KernelObject,
     object::capability::selectable::Selectable,
     sched::scheduler::get_scheduler,
@@ -57,6 +59,26 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 pub const SOL_SOCKET: i32 = 1;
 pub const SCM_RIGHTS: i32 = 1;
 pub const MSG_DONTWAIT: i32 = 0x40;
+
+fn socket_error_to_errno(error: SocketError) -> usize {
+    match error {
+        SocketError::InvalidAddress | SocketError::InvalidArgument => errno::EINVAL,
+        SocketError::AddressInUse => errno::EADDRINUSE,
+        SocketError::AddressNotAvailable => errno::EADDRNOTAVAIL,
+        SocketError::ConnectionRefused => errno::ECONNREFUSED,
+        SocketError::ConnectionReset => errno::ECONNRESET,
+        SocketError::ConnectionAborted => errno::ECONNABORTED,
+        SocketError::NotConnected => errno::ENOTCONN,
+        SocketError::AlreadyConnected => errno::EISCONN,
+        SocketError::InvalidOperation => errno::EINVAL,
+        SocketError::NotListening => errno::EINVAL,
+        SocketError::NoConnections | SocketError::WouldBlock => errno::EAGAIN,
+        SocketError::NotSupported => errno::EOPNOTSUPP,
+        SocketError::NoRoute => errno::ENETUNREACH,
+        SocketError::ProtocolNotSupported => errno::EPROTONOSUPPORT,
+        SocketError::InvalidPacket | SocketError::Other(_) => errno::EIO,
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -628,9 +650,9 @@ pub fn sys_connect(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                     Err(_) => return usize::MAX,
                 };
 
-                if socket_arc.connect(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] connect failed {}", path);
-                    return usize::MAX;
+                if let Err(error) = socket_arc.connect(&socket_addr) {
+                    crate::early_println!("[linux socket] connect failed {}: {:?}", path, error);
+                    return errno::to_result(socket_error_to_errno(error));
                 }
             }
             AF_INET_U16 => {
@@ -641,9 +663,12 @@ pub fn sys_connect(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                     crate::network::Inet4SocketAddress::new(addr_bytes, port),
                 );
 
-                if socket_arc.connect(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] connect failed for INET address");
-                    return usize::MAX;
+                if let Err(error) = socket_arc.connect(&socket_addr) {
+                    crate::early_println!(
+                        "[linux socket] connect failed for INET address: {:?}",
+                        error
+                    );
+                    return errno::to_result(socket_error_to_errno(error));
                 }
             }
             _ => {

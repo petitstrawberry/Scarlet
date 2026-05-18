@@ -1,10 +1,12 @@
 pub mod guest_vcpu;
 pub mod mmu;
+pub mod pl011_mmio;
 pub mod reg_index;
 pub mod switch;
 pub mod sysreg;
 pub mod trap;
 pub mod vgic;
+pub mod vgic_mmio;
 pub mod vm;
 
 use alloc::sync::Arc;
@@ -19,7 +21,7 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::hypervisor::vm::VmId;
 use crate::vm::manager::VirtualMemoryManager;
 
-const VTCR_EL2_RES1: u64 = 1 << 31;
+const VTCR_EL2_RES1: u64 = (1 << 31) | (1 << 23);
 const VTCR_EL2_PS_40BIT: u64 = 0b010 << 16;
 const VTCR_EL2_TG0_4K: u64 = 0b00 << 14;
 const VTCR_EL2_SH0_INNER_SHAREABLE: u64 = 0b11 << 12;
@@ -32,6 +34,17 @@ const CNTHCTL_EL2_EL1PCEN: u64 = 1 << 1;
 const CNTHCTL_EL2_EL1PCTEN: u64 = 1 << 0;
 const CPTR_EL2_FPEN_EL1_EL0: u64 = 0b11 << 20;
 
+fn vtcr_el2_value() -> u64 {
+    VTCR_EL2_RES1
+        | VTCR_EL2_PS_40BIT
+        | VTCR_EL2_TG0_4K
+        | VTCR_EL2_SH0_INNER_SHAREABLE
+        | VTCR_EL2_ORGN0_WB
+        | VTCR_EL2_IRGN0_WB
+        | VTCR_EL2_SL0_L1
+        | VTCR_EL2_T0SZ_40BIT_IPA
+}
+
 pub fn create_vm(id: VmId, owner_mm: VirtualMemoryManager) -> Result<Arc<Vm>, &'static str> {
     Ok(Arc::new(vm::Vm::new(id, owner_mm)?))
 }
@@ -42,14 +55,7 @@ pub fn arch_init_hv() {
         return;
     }
 
-    let vtcr_el2 = VTCR_EL2_RES1
-        | VTCR_EL2_PS_40BIT
-        | VTCR_EL2_TG0_4K
-        | VTCR_EL2_SH0_INNER_SHAREABLE
-        | VTCR_EL2_ORGN0_WB
-        | VTCR_EL2_IRGN0_WB
-        | VTCR_EL2_SL0_L1
-        | VTCR_EL2_T0SZ_40BIT_IPA;
+    let vtcr_el2 = vtcr_el2_value();
 
     // SAFETY: the kernel is running at EL2 in VHE mode when hypervisor support
     // is available, so programming EL2 control registers is valid here.
@@ -71,18 +77,23 @@ pub fn arch_init_hv() {
 }
 
 pub fn init_hv_per_cpu(cpu_id: usize) {
+    let vtcr_el2 = vtcr_el2_value();
     let cnthctl_el2 = CNTHCTL_EL2_EL1PCEN | CNTHCTL_EL2_EL1PCTEN;
     let host_vbar = get_kernel_trapvector_paddr();
 
+    // VTCR_EL2 is banked per CPU. A vCPU task may run on any online host CPU,
+    // so every CPU must have the same stage-2 translation regime configured.
     // SAFETY: per-CPU hypervisor initialization runs on the current CPU while
     // executing at EL2, so EL2 timer/trap registers are directly accessible.
     unsafe {
         asm!(
+            "msr vtcr_el2, {vtcr}",
             "msr cnthctl_el2, {cnthctl}",
             "msr cptr_el2, {cptr}",
             "msr vbar_el2, {vbar}",
             "msr vttbr_el2, xzr",
             "isb",
+            vtcr = in(reg) vtcr_el2,
             cnthctl = in(reg) cnthctl_el2,
             cptr = in(reg) CPTR_EL2_FPEN_EL1_EL0,
             vbar = in(reg) host_vbar,
@@ -91,8 +102,9 @@ pub fn init_hv_per_cpu(cpu_id: usize) {
     }
 
     crate::println!(
-        "[shv] AArch64 hypervisor per-cpu init: cpu={} CNTHCTL_EL2={:#x} CPTR_EL2={:#x}",
+        "[shv] AArch64 hypervisor per-cpu init: cpu={} VTCR_EL2={:#x} CNTHCTL_EL2={:#x} CPTR_EL2={:#x}",
         cpu_id,
+        vtcr_el2,
         cnthctl_el2,
         CPTR_EL2_FPEN_EL1_EL0
     );

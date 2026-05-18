@@ -366,7 +366,7 @@ pub fn get_user_trapvector_paddr() -> usize {
 pub fn get_guest_trapvector_paddr() -> usize {
     #[cfg(feature = "hypervisor")]
     {
-        return hv::el2_guest_exit_vector as usize;
+        return hv::switch::guest_exit_vector_base();
     }
 
     #[allow(unreachable_code)]
@@ -540,7 +540,7 @@ fn target_spsr_for_mode(mode: crate::arch::Mode) -> u64 {
     const SPSR_EL2H: u64 = 0x9;
 
     match mode {
-        crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel if is_vhe_enabled() => SPSR_EL2H,
+        crate::arch::Mode::Kernel if is_vhe_enabled() => SPSR_EL2H,
         crate::arch::Mode::Kernel | crate::arch::Mode::GuestKernel => SPSR_EL1H,
         _ => SPSR_EL0T,
     }
@@ -636,6 +636,29 @@ pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
             addr = addr.saturating_add(line);
         }
         // Ensure the clean completes before subsequent operations (e.g. TLBI).
+        asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Clean and invalidate D-cache to Point of Coherency (PoC) for a virtual range.
+///
+/// Use this before reading memory that may have been modified through another
+/// virtual alias, such as a userspace mapping of a kernel-owned shared page.
+#[inline(always)]
+pub fn clean_invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc civac, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
         asm!("dsb sy", options(nostack));
     }
 }

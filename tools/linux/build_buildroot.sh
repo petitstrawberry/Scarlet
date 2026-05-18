@@ -30,8 +30,8 @@ if [[ ! -f rootfs.tar ]]; then
 fi
 
 tar -xf rootfs.tar -C linux-riscv64
-mkdir -p "${PREBUILT_DIR}"
-cp rootfs.tar "${PREBUILT_DIR}/linux-riscv64.tar"
+mkdir -p "${PREBUILT_DIR}/riscv64"
+cp rootfs.tar "${PREBUILT_DIR}/riscv64/rootfs.tar"
 
 popd >/dev/null
 popd >/dev/null

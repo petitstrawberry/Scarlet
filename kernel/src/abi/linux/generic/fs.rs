@@ -16,11 +16,113 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use spin::{Once, RwLock};
 
 use super::errno;
 
 static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
+static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
+static EPOLL_INTERESTS: Once<RwLock<Vec<EpollInterest>>> = Once::new();
+
+const EPOLL_HANDLE_BASE: u32 = 0x3000_0000;
+const EPOLLIN: u32 = 0x0001;
+const EPOLLPRI: u32 = 0x0002;
+const EPOLLOUT: u32 = 0x0004;
+const EPOLLERR: u32 = 0x0008;
+const EPOLLHUP: u32 = 0x0010;
+const EPOLL_CTL_ADD: i32 = 1;
+const EPOLL_CTL_DEL: i32 = 2;
+const EPOLL_CTL_MOD: i32 = 3;
+const EPOLL_EVENT_DATA_OFFSET: usize = 8;
+const EPOLL_EVENT_SIZE: usize = 16;
+
+#[derive(Clone, Copy)]
+struct EpollInterest {
+    epoll_handle: u32,
+    fd: i32,
+    events: u32,
+    data: u64,
+}
+
+fn epoll_interests() -> &'static RwLock<Vec<EpollInterest>> {
+    EPOLL_INTERESTS.call_once(|| RwLock::new(Vec::new()))
+}
+
+fn is_epoll_handle(handle: u32) -> bool {
+    (handle & 0xf000_0000) == EPOLL_HANDLE_BASE
+}
+
+fn read_linux_epoll_event(task: &crate::task::Task, event_ptr: usize) -> Option<(u32, u64)> {
+    if event_ptr == 0 {
+        return None;
+    }
+    let mut buf = [0u8; EPOLL_EVENT_SIZE];
+    if copy_from_user_pagewise(&mut buf, event_ptr, &task.vm_manager) != EPOLL_EVENT_SIZE {
+        return None;
+    }
+    let events = u32::from_ne_bytes(buf[0..4].try_into().ok()?);
+    let data = u64::from_ne_bytes(
+        buf[EPOLL_EVENT_DATA_OFFSET..EPOLL_EVENT_DATA_OFFSET + 8]
+            .try_into()
+            .ok()?,
+    );
+    Some((events, data))
+}
+
+fn write_linux_epoll_event(
+    task: &crate::task::Task,
+    event_ptr: usize,
+    index: usize,
+    events: u32,
+    data: u64,
+) -> bool {
+    let mut buf = [0u8; EPOLL_EVENT_SIZE];
+    buf[0..4].copy_from_slice(&events.to_ne_bytes());
+    buf[EPOLL_EVENT_DATA_OFFSET..EPOLL_EVENT_DATA_OFFSET + 8].copy_from_slice(&data.to_ne_bytes());
+    let ptr = event_ptr.saturating_add(index.saturating_mul(EPOLL_EVENT_SIZE));
+    copy_to_user_pagewise(ptr, &buf, &task.vm_manager) == EPOLL_EVENT_SIZE
+}
+
+fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollInterest) -> u32 {
+    let Some(handle) = abi.get_handle(interest.fd as usize) else {
+        return EPOLLERR | EPOLLHUP;
+    };
+    let Some(kobj) = task.handle_table.get(handle) else {
+        return EPOLLERR | EPOLLHUP;
+    };
+
+    let mut ready = 0u32;
+    let want_read = (interest.events & EPOLLIN) != 0;
+    let want_write = (interest.events & EPOLLOUT) != 0;
+    let want_except = (interest.events & EPOLLPRI) != 0;
+
+    if let Some(sel) = kobj.as_selectable() {
+        let rs = sel.current_ready(crate::object::capability::selectable::ReadyInterest {
+            read: want_read,
+            write: want_write,
+            except: want_except,
+        });
+        if want_read && rs.read {
+            ready |= EPOLLIN;
+        }
+        if want_write && rs.write {
+            ready |= EPOLLOUT;
+        }
+        if want_except && rs.except {
+            ready |= EPOLLPRI;
+        }
+    } else {
+        if want_read {
+            ready |= EPOLLIN;
+        }
+        if want_write {
+            ready |= EPOLLOUT;
+        }
+    }
+
+    ready
+}
 
 /// Copy bytes from a kernel buffer into a userspace virtual address range,
 /// resolving each page independently via `translate_to_kva`.
@@ -513,6 +615,8 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Use TransparentExecutor for cross-ABI execution
     match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
         Ok(_) => {
+            _abi.close_on_exec_fds();
+            crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
@@ -534,6 +638,18 @@ enum OpenMode {
     ReadWrite = 0x002,
     Create = 0x200,
     Truncate = 0x400,
+}
+
+/// Linux sys_mount compatibility stub.
+///
+/// Firecracker may isolate its process with mount namespace operations before
+/// opening the KVM device. Scarlet does not yet implement Linux mount
+/// namespaces, so this syscall currently accepts the request without mutating
+/// VFS state.
+pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    0
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2
@@ -848,8 +964,9 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from Linux fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
-        if task.handle_table.remove(handle).is_some() {
-            0 // Success
+        if let Some(object) = task.handle_table.remove(handle) {
+            super::close_kernel_object_for_linux(&object);
+            0
         } else {
             usize::MAX // Handle not found in handle table
         }
@@ -990,6 +1107,9 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             total_read += n;
             remaining -= n;
             cur_user += n;
+            if n < chunk_size {
+                break;
+            }
         }
 
         trapframe.increment_pc_next(task);
@@ -1913,7 +2033,7 @@ pub fn sys_link(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_linkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
 
     let olddirfd = trapframe.get_arg(0) as i32;
@@ -2114,6 +2234,8 @@ fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
 /// - 0 or positive value on success
 /// - usize::MAX on error (-1 in Linux)
 pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    const FIONBIO: u32 = 0x5421;
+
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let request = trapframe.get_arg(1) as u32;
@@ -2146,7 +2268,8 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
         }
         crate::object::KernelObject::HypervisorVcpu(vcpu) => {
-            let result = crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu);
+            let result =
+                crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu, trapframe);
             return match result {
                 Ok(Some(ret)) => ret,
                 Ok(None) => errno::to_result(errno::ENOTTY),
@@ -2154,6 +2277,21 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
         }
         _ => {}
+    }
+
+    if request == FIONBIO {
+        if let crate::object::KernelObject::Socket(socket) = &kernel_object {
+            let arg_paddr = match task.vm_manager.translate_to_kva(arg) {
+                Some(addr) => addr,
+                None => return errno::to_result(errno::EFAULT),
+            };
+            let enabled = unsafe { *(arg_paddr as *const i32) != 0 };
+            if let Some(selectable) = socket.as_selectable() {
+                selectable.set_nonblocking(enabled);
+                return 0;
+            }
+            return errno::to_result(errno::ENOTTY);
+        }
     }
 
     // Determine device capabilities for per-device translation
@@ -2285,6 +2423,8 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         &path_str, &argv_refs, &envp_refs, task, trapframe, false,
     ) {
         Ok(_) => {
+            _abi.close_on_exec_fds();
+            crate::task::wake_task_waiters(task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
@@ -2987,6 +3127,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     crate::object::KernelObject::File(_) => "File",
                     crate::object::KernelObject::Pipe(_) => "Pipe",
                     crate::object::KernelObject::Counter(_) => "Counter",
+                    crate::object::KernelObject::Timer(_) => "Timer",
                     crate::object::KernelObject::EventChannel(_) => "EventChannel",
                     crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
                     crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
@@ -3362,123 +3503,159 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Linux epoll_create1 implementation (stub)
-///
-/// Creates an epoll file descriptor. This is a stub implementation that
-/// simply returns a dummy file descriptor to prevent application crashes.
-/// Real epoll functionality is not implemented.
-///
-/// Arguments:
-/// - abi: LinuxAbi context  
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: flags (epoll creation flags)
-///
-/// Returns:
-/// - file descriptor on success
-/// - usize::MAX (Linux -1) on error
 pub fn sys_epoll_create1(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
-    let _flags = trapframe.get_arg(0) as i32;
+    const EPOLL_CLOEXEC: i32 = 0o2000000;
+    let flags = trapframe.get_arg(0) as i32;
+    if flags & !EPOLL_CLOEXEC != 0 {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EINVAL);
+    }
 
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Create a dummy file handle to act as an epoll fd
-    // This is a workaround since we don't have real epoll implementation
-    // We'll use a simple placeholder handle
-
-    // Use a high handle number that's unlikely to conflict with real handles
-    const EPOLL_DUMMY_HANDLE: u32 = 0x1000_0000;
-
-    // For now, just return a dummy fd number that doesn't conflict with real fds
-    // This is not a proper implementation, but it prevents crashes
-    match abi.allocate_fd(EPOLL_DUMMY_HANDLE) {
+    let id = NEXT_EPOLL_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
+    let handle = EPOLL_HANDLE_BASE | (id & 0x0fff_ffff);
+    match abi.allocate_fd(handle) {
         Ok(fd) => fd,
-        Err(_) => usize::MAX,
+        Err(_) => errno::to_result(errno::EMFILE),
     }
 }
 
-/// Linux epoll_ctl implementation (stub)
-///
-/// Controls an epoll file descriptor by adding, modifying, or removing
-/// file descriptors from the epoll interest list. This is a stub implementation
-/// that simply returns success without doing anything.
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: epfd (epoll file descriptor)
-///   - arg1: op (operation: EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLL_CTL_DEL)
-///   - arg2: fd (target file descriptor)
-///   - arg3: event (pointer to epoll_event structure)
-///
-/// Returns:
-/// - 0 on success
-/// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_ctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
 
-    let _epfd = trapframe.get_arg(0) as i32;
-    let _op = trapframe.get_arg(1) as i32;
-    let _fd = trapframe.get_arg(2) as i32;
-    let _event_ptr = trapframe.get_arg(3);
+    let epfd = trapframe.get_arg(0) as usize;
+    let op = trapframe.get_arg(1) as i32;
+    let fd = trapframe.get_arg(2) as i32;
+    let event_ptr = trapframe.get_arg(3);
 
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Stub implementation: just return success
-    // In a real implementation, we would:
-    // 1. Validate the epoll fd
-    // 2. Parse the operation (EPOLL_CTL_ADD/MOD/DEL)
-    // 3. Manage the interest list
-    // 4. Set up event monitoring
-    0 // Success
+    let Some(epoll_handle) = abi.get_handle(epfd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if !is_epoll_handle(epoll_handle) || fd < 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    match op {
+        EPOLL_CTL_ADD | EPOLL_CTL_MOD => {
+            let Some((events, data)) = read_linux_epoll_event(task, event_ptr) else {
+                return errno::to_result(errno::EFAULT);
+            };
+            if abi.get_handle(fd as usize).is_none() {
+                return errno::to_result(errno::EBADF);
+            }
+
+            let mut interests = epoll_interests().write();
+            if let Some(existing) = interests
+                .iter_mut()
+                .find(|interest| interest.epoll_handle == epoll_handle && interest.fd == fd)
+            {
+                if op == EPOLL_CTL_ADD {
+                    return errno::to_result(errno::EEXIST);
+                }
+                existing.events = events;
+                existing.data = data;
+            } else {
+                if op == EPOLL_CTL_MOD {
+                    return errno::to_result(errno::ENOENT);
+                }
+                interests.push(EpollInterest {
+                    epoll_handle,
+                    fd,
+                    events,
+                    data,
+                });
+            }
+            0
+        }
+        EPOLL_CTL_DEL => {
+            let mut interests = epoll_interests().write();
+            let before = interests.len();
+            interests
+                .retain(|interest| !(interest.epoll_handle == epoll_handle && interest.fd == fd));
+            if interests.len() == before {
+                errno::to_result(errno::ENOENT)
+            } else {
+                0
+            }
+        }
+        _ => errno::to_result(errno::EINVAL),
+    }
 }
 
-/// Linux epoll_wait implementation (stub)
-///
-/// Waits for events on an epoll file descriptor. This is a stub implementation
-/// that immediately returns 0 (no events ready) to prevent blocking.
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///   - arg0: epfd (epoll file descriptor)
-///   - arg1: events (pointer to epoll_event array)
-///   - arg2: maxevents (maximum number of events)
-///   - arg3: timeout (timeout in milliseconds)
-///
-/// Returns:
-/// - number of ready events
-/// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
 
-    let _epfd = trapframe.get_arg(0) as i32;
-    let _events_ptr = trapframe.get_arg(1);
-    let _maxevents = trapframe.get_arg(2) as i32;
-    let _timeout = trapframe.get_arg(3) as i32;
+    let epfd = trapframe.get_arg(0) as usize;
+    let events_ptr = trapframe.get_arg(1);
+    let maxevents = trapframe.get_arg(2) as usize;
+    let timeout_ms = trapframe.get_arg(3) as i32;
 
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Stub implementation: return 0 (no events ready)
-    // In a real implementation, we would:
-    // 1. Validate the epoll fd
-    // 2. Check for ready events
-    // 3. Block if no events and timeout > 0
-    // 4. Fill the events array with ready events
-    0 // No events ready
+    let Some(epoll_handle) = abi.get_handle(epfd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if !is_epoll_handle(epoll_handle) || events_ptr == 0 || maxevents == 0 {
+        return errno::to_result(errno::EINVAL);
+    }
+
+    let timeout_ticks = if timeout_ms < 0 {
+        None
+    } else {
+        Some(crate::timer::ns_to_ticks(timeout_ms as u64 * 1_000_000))
+    };
+    let deadline = timeout_ticks.map(|ticks| crate::timer::get_tick().saturating_add(ticks));
+
+    loop {
+        let interests: Vec<EpollInterest> = epoll_interests()
+            .read()
+            .iter()
+            .filter(|interest| interest.epoll_handle == epoll_handle)
+            .copied()
+            .collect();
+
+        let mut ready_count = 0usize;
+        for interest in interests {
+            if ready_count >= maxevents {
+                break;
+            }
+            let ready = epoll_ready_events(abi, task, interest);
+            if ready == 0 {
+                continue;
+            }
+            if !write_linux_epoll_event(task, events_ptr, ready_count, ready, interest.data) {
+                return errno::to_result(errno::EFAULT);
+            }
+            ready_count += 1;
+        }
+        if ready_count != 0 {
+            return ready_count;
+        }
+
+        if matches!(timeout_ticks, Some(0)) {
+            return 0;
+        }
+        if let Some(deadline) = deadline
+            && crate::timer::get_tick() >= deadline
+        {
+            return 0;
+        }
+        task.sleep(trapframe, 1);
+    }
 }
 
 /// Linux epoll_pwait implementation (stub)
@@ -3498,23 +3675,10 @@ pub fn sys_epoll_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - number of ready events
 /// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_pwait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX,
-    };
-
-    let _epfd = trapframe.get_arg(0) as i32;
-    let _events_ptr = trapframe.get_arg(1);
-    let _maxevents = trapframe.get_arg(2) as i32;
-    let _timeout = trapframe.get_arg(3) as i32;
+pub fn sys_epoll_pwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _sigmask_ptr = trapframe.get_arg(4);
 
-    // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
-
-    // Stub implementation: return 0 (no events ready)
-    0 // No events ready
+    sys_epoll_wait(abi, trapframe)
 }
 
 /// Minimal Linux pselect6 implementation (stub)
@@ -3814,13 +3978,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
             let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
             timeout_ticks = Some(ns_to_ticks(ns_u));
-            // crate::println!(
-            //     "[sys_ppoll] timeout ts={}s {}ns -> ns={} ticks={:?}",
-            //     ts.tv_sec,
-            //     ts.tv_nsec,
-            //     ns_u,
-            //     timeout_ticks
-            // );
         }
     }
 
@@ -3906,7 +4063,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let mut any_ready = false;
     let mut first_selectable_index: Option<usize> = None;
     let mut selectable_count = 0usize;
-    let mut ready_count = 0usize;
     {
         let abi_ref = &*abi;
         let task_ref: &crate::task::Task = &*task;
@@ -3914,7 +4070,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let eval = eval_pfd(pfd, abi_ref, task_ref);
             if eval.ready {
                 any_ready = true;
-                ready_count += 1;
             }
             if eval.selectable {
                 selectable_count += 1;
@@ -3922,73 +4077,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if first_selectable_index.is_none() && eval.selectable {
                 first_selectable_index = Some(idx);
             }
-
-            let mut kind = "unknown";
-            let mut socket_state: Option<u32> = None;
-            let fd_usize = pfd.fd as usize;
-            if let Some(handle) = abi_ref.get_handle(fd_usize) {
-                if let Some(kobj) = task_ref.handle_table.get(handle) {
-                    match kobj {
-                        crate::object::KernelObject::File(_) => {
-                            kind = "file";
-                        }
-                        crate::object::KernelObject::Pipe(_) => {
-                            kind = "pipe";
-                        }
-                        crate::object::KernelObject::Counter(_) => {
-                            kind = "counter";
-                        }
-                        crate::object::KernelObject::EventChannel(_) => {
-                            kind = "event_channel";
-                        }
-                        crate::object::KernelObject::EventSubscription(_) => {
-                            kind = "event_sub";
-                        }
-                        #[cfg(feature = "network")]
-                        crate::object::KernelObject::Socket(socket) => {
-                            kind = "socket";
-                            socket_state = Some(socket.state() as u32);
-                        }
-                        crate::object::KernelObject::SharedMemory(_) => {
-                            kind = "shmem";
-                        }
-                        #[cfg(feature = "hypervisor")]
-                        crate::object::KernelObject::HypervisorVm(_) => {
-                            kind = "hypervisor_vm";
-                        }
-                        #[cfg(feature = "hypervisor")]
-                        crate::object::KernelObject::HypervisorVcpu(_) => {
-                            kind = "hypervisor_vcpu";
-                        }
-                    }
-                }
-            }
-
-            // crate::println!(
-            //     "[sys_ppoll] fd={} events=0x{:x} revents=0x{:x} selectable={} kind={} socket_state={:?}",
-            //     pfd.fd,
-            //     pfd.events as u16,
-            //     pfd.revents as u16,
-            //     eval.selectable,
-            //     kind,
-            //     socket_state
-            // );
         }
-    }
-
-    {
-        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
-        // crate::println!(
-        //     "[sys_ppoll] task={} nfds={} selectable={} ready={} any_ready={} zero_poll={} timeout_ticks={:?} first_selectable={:?}",
-        //     task.name,
-        //     nfds,
-        //     selectable_count,
-        //     ready_count,
-        //     any_ready,
-        //     zero_poll,
-        //     timeout_ticks,
-        //     first_selectable_index
-        // );
     }
 
     if !any_ready {
@@ -4013,7 +4102,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     task.sleep(trapframe, 1);
 
                     any_ready = false;
-                    ready_count = 0;
                     {
                         let abi_ref = &*abi;
                         let task_ref: &crate::task::Task = &*task;
@@ -4021,7 +4109,6 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             let eval = eval_pfd(pfd, abi_ref, task_ref);
                             if eval.ready {
                                 any_ready = true;
-                                ready_count += 1;
                             }
                         }
                     }

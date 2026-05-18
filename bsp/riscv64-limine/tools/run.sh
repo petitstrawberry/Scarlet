@@ -59,6 +59,7 @@ EFI_VARS_TEMPLATE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd"
 EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
+QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -127,7 +128,7 @@ fi
 qemu-system-riscv64 \
     -machine virt,acpi=off \
     -m 8G \
-    -smp 4 \
+    -smp "$QEMU_SMP" \
     -nographic \
     -serial mon:stdio \
     --no-reboot \

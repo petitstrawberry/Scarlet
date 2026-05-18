@@ -235,7 +235,7 @@ fn guest_hcr() -> u64 {
 
 #[inline(always)]
 fn guest_vmcr() -> u64 {
-    (0xFFu64 << ICH_VMCR_VPMR_SHIFT) | ICH_VMCR_VENG0 | ICH_VMCR_VENG1 | ICH_VMCR_VEOIM
+    (0xFFu64 << ICH_VMCR_VPMR_SHIFT) | ICH_VMCR_VENG0 | ICH_VMCR_VENG1
 }
 
 pub fn probe_vgic() -> usize {
@@ -280,6 +280,37 @@ pub fn inject_virq(num_lrs: usize, vintid: u32, priority: u8, group1: bool) -> b
     false
 }
 
+pub fn inject_shadow_virq(state: &mut VgicState, vintid: u32, priority: u8, group1: bool) -> bool {
+    let mut lr_val = (vintid as u64) & ICH_LR_VINTID_MASK;
+    lr_val |= (priority as u64) << ICH_LR_PRIORITY_SHIFT;
+    lr_val |= ICH_LR_STATE_PENDING;
+    if group1 {
+        lr_val |= ICH_LR_GROUP;
+    }
+
+    for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
+        if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64)
+            && (*lr & (3u64 << 62)) != ICH_LR_STATE_INVALID
+        {
+            let old_state = *lr & (3u64 << 62);
+            *lr = lr_val;
+            if old_state == ICH_LR_STATE_ACTIVE || old_state == ICH_LR_STATE_PENDING_ACTIVE {
+                *lr = (*lr & !(3u64 << 62)) | ICH_LR_STATE_PENDING_ACTIVE;
+            }
+            return true;
+        }
+    }
+
+    for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
+        if (*lr & (3u64 << 62)) == ICH_LR_STATE_INVALID {
+            *lr = lr_val;
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn clear_virq(num_lrs: usize, vintid: u32) -> bool {
     for i in 0..num_lrs.min(16) {
         // SAFETY: LR indices are bounded to the architected 16-register maximum.
@@ -288,6 +319,24 @@ pub fn clear_virq(num_lrs: usize, vintid: u32) -> bool {
             // SAFETY: LR indices are bounded to the architected 16-register maximum.
             unsafe {
                 write_ich_lr(i, 0);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+pub fn clear_shadow_virq(state: &mut VgicState, vintid: u32) -> bool {
+    for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
+        if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64) {
+            let old_state = *lr & (3u64 << 62);
+            match old_state {
+                ICH_LR_STATE_ACTIVE | ICH_LR_STATE_PENDING_ACTIVE => {
+                    *lr = (*lr & !(3u64 << 62)) | ICH_LR_STATE_ACTIVE;
+                }
+                _ => {
+                    *lr = 0;
+                }
             }
             return true;
         }
@@ -306,6 +355,17 @@ pub fn is_virq_pending(num_lrs: usize, vintid: u32) -> bool {
         }
     }
     false
+}
+
+pub fn is_shadow_virq_pending(state: &VgicState, vintid: u32) -> bool {
+    state
+        .lr_shadow
+        .iter()
+        .take(state.num_lrs.min(16))
+        .any(|lr| {
+            (*lr & ICH_LR_VINTID_MASK) == (vintid as u64)
+                && (*lr & (3u64 << 62)) != ICH_LR_STATE_INVALID
+        })
 }
 
 pub fn save_lrs(num_lrs: usize, out: &mut [u64; 16]) {
