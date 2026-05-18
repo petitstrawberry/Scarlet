@@ -77,6 +77,10 @@ pub fn arch_init_hv() {
 }
 
 pub fn init_hv_per_cpu(cpu_id: usize) {
+    if !super::super::is_hv_available() {
+        return;
+    }
+
     let vtcr_el2 = vtcr_el2_value();
     let cnthctl_el2 = CNTHCTL_EL2_EL1PCEN | CNTHCTL_EL2_EL1PCTEN;
     let host_vbar = get_kernel_trapvector_paddr();

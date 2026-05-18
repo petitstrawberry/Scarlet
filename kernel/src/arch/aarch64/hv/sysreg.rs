@@ -102,6 +102,10 @@ fn pending_guest_sysregs_slot() -> Option<&'static PendingSnapshot> {
 
 #[inline(always)]
 fn guest_context_active() -> bool {
+    if !super::super::is_hv_available() {
+        return false;
+    }
+
     let hcr_el2: u64;
 
     // SAFETY: reading HCR_EL2 at EL2 is side-effect free.
