@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
 BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
-EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
+EFI_CODE="${SCARLET_EFI_CODE_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}"
 EFI_VARS="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 echo "Test runner starting..."
@@ -105,7 +105,7 @@ if [ ! -f "$EFI_CODE" ]; then
 fi
 
 if [ ! -f "$EFI_VARS" ]; then
-    cp /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd "$EFI_VARS"
+    cp "${SCARLET_EFI_VARS_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}" "$EFI_VARS"
 fi
 
 if [ "$DEBUG_MODE" = true ]; then

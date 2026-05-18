@@ -106,6 +106,11 @@ fi
 TEMP_OUTPUT=$(mktemp)
 
 find_efi_code() {
+    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_CODE.fd \
@@ -120,6 +125,11 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
+    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_VARS.fd \
