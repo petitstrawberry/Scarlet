@@ -341,6 +341,10 @@ fn handle_host_irq_from_guest(
 }
 
 pub fn is_from_guest() -> bool {
+    if !super::super::is_hv_available() {
+        return false;
+    }
+
     let hcr: u64;
     // SAFETY: reading HCR_EL2 is side-effect free at EL2.
     unsafe {

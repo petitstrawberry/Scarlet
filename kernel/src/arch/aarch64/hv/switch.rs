@@ -30,6 +30,10 @@ const SYS_CNTKCTL_EL12: u32 = sys_reg(3, 5, 14, 1, 0);
 /// are UNDEF. Only save/restore guest state when actually in guest context
 /// (VM bit set in HCR_EL2, meaning a guest was entered).
 fn is_guest_context() -> bool {
+    if !super::super::is_hv_available() {
+        return false;
+    }
+
     let hcr_el2: u64;
     // SAFETY: reading HCR_EL2 at EL2 is side-effect free.
     unsafe {
