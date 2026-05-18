@@ -2369,12 +2369,12 @@ pub fn sys_execve(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             Err(_) => return usize::MAX, // envp parsing error
         };
 
-    crate::println!(
-        "sys_execve: path: {}, argv: {:?}, envp: {:?}",
-        path_str,
-        argv_strings,
-        envp_strings
-    );
+    // crate::println!(
+    //     "sys_execve: path: {}, argv: {:?}, envp: {:?}",
+    //     path_str,
+    //     argv_strings,
+    //     envp_strings
+    // );
 
     // Debug: Print each argv element individually
     for (i, arg) in argv_strings.iter().enumerate() {

@@ -2397,22 +2397,22 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Err(_) => return usize::MAX, // envp parsing error
         };
 
-    crate::println!(
-        "sys_execve: path: {}, argv: {:?}, envp: {:?}",
-        path_str,
-        argv_strings,
-        envp_strings
-    );
+    // crate::println!(
+    //     "sys_execve: path: {}, argv: {:?}, envp: {:?}",
+    //     path_str,
+    //     argv_strings,
+    //     envp_strings
+    // );
 
-    // Debug: Print each argv element individually
-    for (i, arg) in argv_strings.iter().enumerate() {
-        crate::println!("  argv[{}]: \"{}\" (len={})", i, arg, arg.len());
-        for (j, byte) in arg.bytes().enumerate() {
-            if byte < 32 || byte > 126 {
-                crate::println!("    byte[{}]: 0x{:02x} (non-printable)", j, byte);
-            }
-        }
-    }
+    // // Debug: Print each argv element individually
+    // for (i, arg) in argv_strings.iter().enumerate() {
+    //     crate::println!("  argv[{}]: \"{}\" (len={})", i, arg, arg.len());
+    //     for (j, byte) in arg.bytes().enumerate() {
+    //         if byte < 32 || byte > 126 {
+    //             crate::println!("    byte[{}]: 0x{:02x} (non-printable)", j, byte);
+    //         }
+    //     }
+    // }
 
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
