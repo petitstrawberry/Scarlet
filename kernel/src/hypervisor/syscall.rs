@@ -136,6 +136,8 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
 
     // println!("[sys_shv_vcpu_run] before vcpu.run(), trapframe_addr={:x}, trapframe={:?}", trapframe as *const _ as usize, trapframe);
 
+    crate::hypervisor::vcpu::mark_current_task_running_hv_vcpu();
+
     // Run the vCPU
     let vm_exit = match vcpu.run() {
         Ok(exit) => exit,

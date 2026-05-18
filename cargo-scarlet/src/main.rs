@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -58,6 +59,18 @@ enum Commands {
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
+    Image {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        release: bool,
+        #[arg(long)]
+        kernel_elf: Option<PathBuf>,
+        #[arg(long)]
+        no_build: bool,
+    },
     New {
         #[arg(long)]
         module: Option<String>,
@@ -82,6 +95,8 @@ struct ScarletConfig {
     modules: BTreeMap<String, ModuleConfig>,
     #[serde(rename = "loadable_modules", default)]
     loadable_modules: BTreeMap<String, LoadableModuleConfig>,
+    #[serde(default)]
+    image: Option<ImageConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +152,37 @@ struct LoadableModuleConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     output: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageConfig {
+    #[serde(default)]
+    steps: Vec<ImageStepConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageStepConfig {
+    name: Option<String>,
+    kind: Option<String>,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    cwd: Option<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    inputs: Vec<ImageInputConfig>,
+    output: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageInputConfig {
+    source: String,
+    destination: String,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    skip_suffixes: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -200,6 +246,13 @@ fn run() -> Result<(), String> {
             let config = generate(&project)?;
             cargo_command(&project, &config, "run", target, release, &extra_args)
         }
+        Commands::Image {
+            project,
+            target,
+            release,
+            kernel_elf,
+            no_build,
+        } => build_project_image(&project, target, release, kernel_elf, no_build),
         Commands::New {
             module,
             project,
@@ -340,6 +393,33 @@ fn validate_config(config: &ScarletConfig) -> Result<(), String> {
 
     for (name, module) in &config.modules {
         validate_module(name, module)?;
+    }
+
+    if let Some(image) = &config.image {
+        for (index, step) in image.steps.iter().enumerate() {
+            let has_kind = step
+                .kind
+                .as_deref()
+                .is_some_and(|kind| !kind.trim().is_empty());
+            let has_command = step
+                .command
+                .as_deref()
+                .is_some_and(|command| !command.trim().is_empty());
+            if has_kind == has_command {
+                return Err(format!(
+                    "image.steps[{index}] must use exactly one of kind or command"
+                ));
+            }
+            if matches!(
+                step.kind.as_deref(),
+                Some("archive.newc" | "initramfs-newc")
+            ) && step.output.is_none()
+            {
+                return Err(format!(
+                    "image.steps[{index}] kind archive.newc requires output"
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -737,6 +817,537 @@ fn build_loadable_modules(
     }
 
     Ok(())
+}
+
+fn build_project_image(
+    project: &Path,
+    target: Option<String>,
+    release: bool,
+    kernel_elf: Option<PathBuf>,
+    no_build: bool,
+) -> Result<(), String> {
+    let project = normalize_project_path(project)?;
+    let config = generate(&project)?;
+
+    if !no_build {
+        cargo_command(&project, &config, "build", target.clone(), release, &[])?;
+        inject_ksym_section(&project, &config, target.as_deref(), release)?;
+        build_loadable_modules(&project, &config, release)?;
+    }
+
+    let kernel_elf = match kernel_elf {
+        Some(path) => absolutize_from_current_dir(&path)?,
+        None => project_kernel_elf_path(&project, &config, target.as_deref(), release)?,
+    };
+
+    if !kernel_elf.exists() {
+        return Err(format!("kernel ELF not found: {}", kernel_elf.display()));
+    }
+
+    let image = config
+        .image
+        .as_ref()
+        .ok_or("project has no [image] configuration")?;
+    if image.steps.is_empty() {
+        return Err("project image configuration has no [[image.steps]] entries".to_string());
+    }
+
+    let images_dir = project.join(".scarlet/images");
+    fs::create_dir_all(&images_dir)
+        .map_err(|error| format!("failed to create {}: {error}", images_dir.display()))?;
+
+    let target_triple = target_triple_for_project(&project, &config, target.as_deref())?;
+    let profile = if release { "release" } else { "debug" };
+
+    for (index, step) in image.steps.iter().enumerate() {
+        run_image_step(
+            &project,
+            &config,
+            step,
+            index,
+            &kernel_elf,
+            profile,
+            &target_triple,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn run_image_step(
+    project: &Path,
+    config: &ScarletConfig,
+    step: &ImageStepConfig,
+    index: usize,
+    kernel_elf: &Path,
+    profile: &str,
+    target_triple: &str,
+) -> Result<(), String> {
+    let step_name = step
+        .name
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("step-{index}"));
+    if let Some(kind) = step.kind.as_deref() {
+        return run_builtin_image_step(
+            project,
+            config,
+            step,
+            &step_name,
+            kind,
+            kernel_elf,
+            profile,
+            target_triple,
+        );
+    }
+
+    let cwd = match &step.cwd {
+        Some(cwd) => {
+            let rendered =
+                render_image_template(cwd, project, config, kernel_elf, profile, target_triple);
+            absolutize_from_base(project, Path::new(&rendered))?
+        }
+        None => project.to_path_buf(),
+    };
+
+    let rendered_args = step
+        .args
+        .iter()
+        .map(|arg| render_image_template(arg, project, config, kernel_elf, profile, target_triple))
+        .collect::<Vec<_>>();
+
+    let command_program = step
+        .command
+        .as_deref()
+        .ok_or("internal error: command image step without command")?;
+    let mut command = Command::new(render_image_template(
+        command_program,
+        project,
+        config,
+        kernel_elf,
+        profile,
+        target_triple,
+    ));
+    command.args(&rendered_args).current_dir(&cwd);
+
+    for (name, value) in &step.env {
+        command.env(
+            name,
+            render_image_template(value, project, config, kernel_elf, profile, target_triple),
+        );
+    }
+
+    eprintln!(
+        "cargo-scarlet: image {step_name}: running in {} -> {} {}",
+        cwd.display(),
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    let status = command
+        .status()
+        .map_err(|error| format!("failed to run image step {step_name}: {error}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "image step {step_name} failed with status {status}"
+        ))
+    }
+}
+
+fn run_builtin_image_step(
+    project: &Path,
+    config: &ScarletConfig,
+    step: &ImageStepConfig,
+    step_name: &str,
+    kind: &str,
+    kernel_elf: &Path,
+    profile: &str,
+    target_triple: &str,
+) -> Result<(), String> {
+    match kind {
+        "archive.newc" | "initramfs-newc" => build_initramfs_newc(
+            project,
+            config,
+            step,
+            step_name,
+            kernel_elf,
+            profile,
+            target_triple,
+        ),
+        _ => Err(format!("unknown image step kind `{kind}`")),
+    }
+}
+
+fn build_initramfs_newc(
+    project: &Path,
+    config: &ScarletConfig,
+    step: &ImageStepConfig,
+    step_name: &str,
+    kernel_elf: &Path,
+    profile: &str,
+    target_triple: &str,
+) -> Result<(), String> {
+    let output = render_required_path_template(
+        step.output.as_deref(),
+        "archive.newc output",
+        project,
+        config,
+        kernel_elf,
+        profile,
+        target_triple,
+    )?;
+    let stage_dir = project
+        .join(".scarlet/initramfs-stage")
+        .join(cargo_key_to_rust_identifier(step_name));
+    if stage_dir.exists() {
+        fs::remove_dir_all(&stage_dir)
+            .map_err(|error| format!("failed to remove {}: {error}", stage_dir.display()))?;
+    }
+    fs::create_dir_all(&stage_dir)
+        .map_err(|error| format!("failed to create {}: {error}", stage_dir.display()))?;
+
+    for input in &step.inputs {
+        let source = render_image_template(
+            &input.source,
+            project,
+            config,
+            kernel_elf,
+            profile,
+            target_triple,
+        );
+        let source = absolutize_from_base(project, Path::new(&source))?;
+        if !source.exists() {
+            if input.optional {
+                eprintln!(
+                    "cargo-scarlet: image {step_name}: skipping missing optional input {}",
+                    source.display()
+                );
+                continue;
+            }
+            return Err(format!("image input not found: {}", source.display()));
+        }
+
+        let destination = normalize_archive_path(&render_image_template(
+            &input.destination,
+            project,
+            config,
+            kernel_elf,
+            profile,
+            target_triple,
+        ))?;
+        let destination = stage_dir.join(destination);
+        copy_image_input(&source, &destination, &input.skip_suffixes)?;
+    }
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    write_newc_archive(&stage_dir, &output)?;
+    eprintln!(
+        "cargo-scarlet: image {step_name}: created newc archive {}",
+        output.display()
+    );
+    Ok(())
+}
+
+fn render_image_template(
+    value: &str,
+    project: &Path,
+    config: &ScarletConfig,
+    kernel_elf: &Path,
+    profile: &str,
+    target_triple: &str,
+) -> String {
+    let repo = std::env::current_dir().unwrap_or_else(|_| project.to_path_buf());
+    value
+        .replace("{project}", &project.display().to_string())
+        .replace("{repo}", &repo.display().to_string())
+        .replace("{kernel_elf}", &kernel_elf.display().to_string())
+        .replace("{profile}", profile)
+        .replace("{target_triple}", target_triple)
+        .replace("{board}", &config.board.name)
+}
+
+fn project_kernel_elf_path(
+    project: &Path,
+    config: &ScarletConfig,
+    target: Option<&str>,
+    release: bool,
+) -> Result<PathBuf, String> {
+    let target_triple = target_triple_for_project(project, config, target)?;
+    let profile = if release { "release" } else { "debug" };
+    Ok(project
+        .join("target")
+        .join(target_triple)
+        .join(profile)
+        .join("scarlet"))
+}
+
+fn target_triple_for_project(
+    project: &Path,
+    config: &ScarletConfig,
+    target: Option<&str>,
+) -> Result<String, String> {
+    let resolved_target = target.unwrap_or(&config.board.target_json);
+    let target_path = if Path::new(resolved_target).is_absolute() {
+        PathBuf::from(resolved_target)
+    } else {
+        project.join(resolved_target)
+    };
+    Ok(target_path
+        .file_stem()
+        .ok_or("target path has no file stem")?
+        .to_string_lossy()
+        .to_string())
+}
+
+fn absolutize_from_current_dir(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|error| format!("failed to get current directory: {error}"))?
+            .join(path))
+    }
+}
+
+fn absolutize_from_base(base: &Path, path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(base.join(path))
+    }
+}
+
+fn render_required_path_template(
+    value: Option<&str>,
+    field_name: &str,
+    project: &Path,
+    config: &ScarletConfig,
+    kernel_elf: &Path,
+    profile: &str,
+    target_triple: &str,
+) -> Result<PathBuf, String> {
+    let value = value.ok_or_else(|| format!("{field_name} is required"))?;
+    let rendered =
+        render_image_template(value, project, config, kernel_elf, profile, target_triple);
+    absolutize_from_base(project, Path::new(&rendered))
+}
+
+fn normalize_archive_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("archive destination must not be empty".to_string());
+    }
+    let trimmed = trimmed.trim_start_matches('/');
+    if trimmed.is_empty() {
+        Ok(PathBuf::new())
+    } else {
+        let path = Path::new(trimmed);
+        if path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        }) {
+            return Err(format!("invalid archive destination: {path:?}"));
+        }
+        Ok(path.to_path_buf())
+    }
+}
+
+fn copy_image_input(
+    source: &Path,
+    destination: &Path,
+    skip_suffixes: &[String],
+) -> Result<(), String> {
+    if source.is_dir() {
+        fs::create_dir_all(destination)
+            .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+        copy_dir_contents(source, destination, skip_suffixes)
+    } else {
+        if should_skip_path(source, skip_suffixes) {
+            return Ok(());
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        }
+        fs::copy(source, destination).map_err(|error| {
+            format!(
+                "failed to copy {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        copy_permissions(source, destination)
+    }
+}
+
+fn copy_dir_contents(
+    source: &Path,
+    destination: &Path,
+    skip_suffixes: &[String],
+) -> Result<(), String> {
+    for entry in sorted_dir_entries(source)? {
+        let file_name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("non-UTF-8 file name under {}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(file_name);
+        if source_path.is_dir() {
+            fs::create_dir_all(&destination_path).map_err(|error| {
+                format!("failed to create {}: {error}", destination_path.display())
+            })?;
+            copy_permissions(&source_path, &destination_path)?;
+            copy_dir_contents(&source_path, &destination_path, skip_suffixes)?;
+        } else if source_path.is_file() && !should_skip_path(&source_path, skip_suffixes) {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+            }
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "failed to copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+            copy_permissions(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_path(path: &Path, skip_suffixes: &[String]) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    skip_suffixes.iter().any(|suffix| name.ends_with(suffix))
+}
+
+fn copy_permissions(source: &Path, destination: &Path) -> Result<(), String> {
+    let permissions = fs::metadata(source)
+        .map_err(|error| format!("failed to stat {}: {error}", source.display()))?
+        .permissions();
+    fs::set_permissions(destination, permissions)
+        .map_err(|error| format!("failed to chmod {}: {error}", destination.display()))
+}
+
+fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to read dir entry in {}: {error}", path.display()))?;
+    entries.sort_by_key(|entry| entry.path());
+    Ok(entries)
+}
+
+fn write_newc_archive(source_root: &Path, output: &Path) -> Result<(), String> {
+    let mut file = fs::File::create(output)
+        .map_err(|error| format!("failed to create {}: {error}", output.display()))?;
+    write_newc_entry(&mut file, ".", 0o040755, &[])?;
+    write_newc_tree(&mut file, source_root, source_root)?;
+    write_newc_entry(&mut file, "TRAILER!!!", 0, &[])?;
+    Ok(())
+}
+
+fn write_newc_tree(output: &mut fs::File, root: &Path, path: &Path) -> Result<(), String> {
+    for entry in sorted_dir_entries(path)? {
+        let entry_path = entry.path();
+        let relative = entry_path
+            .strip_prefix(root)
+            .map_err(|error| format!("failed to strip path prefix: {error}"))?;
+        let name = relative
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 archive path: {}", relative.display()))?;
+        let metadata = fs::symlink_metadata(&entry_path)
+            .map_err(|error| format!("failed to stat {}: {error}", entry_path.display()))?;
+
+        if metadata.is_dir() {
+            write_newc_entry(output, name, 0o040000 | unix_mode(&metadata), &[])?;
+            write_newc_tree(output, root, &entry_path)?;
+        } else if metadata.is_file() {
+            let mut contents = Vec::new();
+            fs::File::open(&entry_path)
+                .map_err(|error| format!("failed to open {}: {error}", entry_path.display()))?
+                .read_to_end(&mut contents)
+                .map_err(|error| format!("failed to read {}: {error}", entry_path.display()))?;
+            write_newc_entry(output, name, 0o100000 | unix_mode(&metadata), &contents)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_newc_entry(
+    output: &mut fs::File,
+    name: &str,
+    mode: u32,
+    contents: &[u8],
+) -> Result<(), String> {
+    let name_size = name.len() + 1;
+    let file_size = contents.len();
+    let header = format!(
+        "070701{ino:08x}{mode:08x}{uid:08x}{gid:08x}{nlink:08x}{mtime:08x}{file_size:08x}{dev_major:08x}{dev_minor:08x}{rdev_major:08x}{rdev_minor:08x}{name_size:08x}{check:08x}",
+        ino = 0,
+        mode = mode,
+        uid = 0,
+        gid = 0,
+        nlink = 1,
+        mtime = 0,
+        file_size = file_size,
+        dev_major = 0,
+        dev_minor = 0,
+        rdev_major = 0,
+        rdev_minor = 0,
+        name_size = name_size,
+        check = 0,
+    );
+    output
+        .write_all(header.as_bytes())
+        .and_then(|_| output.write_all(name.as_bytes()))
+        .and_then(|_| output.write_all(&[0]))
+        .map_err(|error| format!("failed to write cpio header: {error}"))?;
+    pad4(output, 110 + name_size)?;
+    output
+        .write_all(contents)
+        .map_err(|error| format!("failed to write cpio contents: {error}"))?;
+    pad4(output, file_size)?;
+    Ok(())
+}
+
+fn pad4(output: &mut fs::File, size: usize) -> Result<(), String> {
+    let padding = (4 - (size % 4)) % 4;
+    if padding != 0 {
+        output
+            .write_all(&[0; 3][..padding])
+            .map_err(|error| format!("failed to write cpio padding: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn unix_mode(metadata: &fs::Metadata) -> u32 {
+    if metadata.permissions().readonly() {
+        0o444
+    } else {
+        0o755
+    }
 }
 
 fn build_loadable_module(

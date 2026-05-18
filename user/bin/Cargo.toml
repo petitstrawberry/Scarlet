@@ -14,6 +14,10 @@ name = "init"
 path = "src/init.rs"
 
 [[bin]]
+name = "microvm_init"
+path = "src/microvm_init.rs"
+
+[[bin]]
 name = "login"
 path = "src/login.rs"
 
