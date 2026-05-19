@@ -8,20 +8,13 @@ on:
 
 jobs:
 
-  test:
-
+  docker:
     runs-on: ubuntu-latest
-
     steps:
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@main
       with:
-        # this might remove tools that are actually needed,
-        # if set to "true" but frees about 6 GB
         tool-cache: false
-        
-        # all of these default to true, but feel free to set to
-        # "false" if necessary for your workflow
         android: true
         dotnet: true
         haskell: true
@@ -30,45 +23,94 @@ jobs:
         swap-storage: true
 
     - uses: actions/checkout@v4
-    
-    # Dockerfile と関連ファイルのハッシュを計算
+
     - name: Generate Docker cache key
       id: docker-cache-key
       run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
 
-    # Docker キャッシュを復元
     - name: Cache Docker image
       id: docker-cache
       uses: actions/cache@v3
       with:
         path: /tmp/docker-image
         key: ${{ steps.docker-cache-key.outputs.key }}
-    
-    # キャッシュがない場合のみビルド
+
     - name: Build the Docker image
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
         docker build . --file Dockerfile --tag scarlet-dev
         docker save scarlet-dev > /tmp/docker-image
-    
-    # キャッシュがある場合はロード
-    - name: Load cached Docker image
-      if: steps.docker-cache.outputs.cache-hit == 'true'
+
+  fmt:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Generate Docker cache key
+      id: docker-cache-key
+      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+
+    - name: Restore Docker image cache
+      uses: actions/cache@v3
+      with:
+        path: /tmp/docker-image
+        key: ${{ steps.docker-cache-key.outputs.key }}
+
+    - name: Load Docker image
       run: docker load < /tmp/docker-image
 
     - name: Run formatting check
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make fmt-check
 
+  test-riscv64:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Generate Docker cache key
+      id: docker-cache-key
+      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+
+    - name: Restore Docker image cache
+      uses: actions/cache@v3
+      with:
+        path: /tmp/docker-image
+        key: ${{ steps.docker-cache-key.outputs.key }}
+
+    - name: Load Docker image
+      run: docker load < /tmp/docker-image
+
     - name: Build scarlet kernel (riscv64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-riscv64
-      
+
     - name: Test scarlet kernel (riscv64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-riscv64
       timeout-minutes: 10
 
+  test-aarch64:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Generate Docker cache key
+      id: docker-cache-key
+      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+
+    - name: Restore Docker image cache
+      uses: actions/cache@v3
+      with:
+        path: /tmp/docker-image
+        key: ${{ steps.docker-cache-key.outputs.key }}
+
+    - name: Load Docker image
+      run: docker load < /tmp/docker-image
+
     - name: Build scarlet kernel (aarch64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-aarch64
-      
+
     - name: Test scarlet kernel (aarch64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-aarch64
       timeout-minutes: 10
