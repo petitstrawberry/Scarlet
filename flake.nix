@@ -207,8 +207,15 @@
             # EFI firmware paths (consumed by run/test scripts via env vars)
             SCARLET_EFI_CODE_RV64 = "${ovmf-riscv64-pflash}/FV/RISCV_VIRT_CODE.fd";
             SCARLET_EFI_VARS_RV64 = "${ovmf-riscv64-pflash}/FV/RISCV_VIRT_VARS.fd";
-            SCARLET_EFI_CODE_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
-            SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
+
+            # AArch64 needs two firmware tracks today:
+            # - HVF + GICv3 works with QEMU's bundled ArmVirt firmware.
+            # - TCG + EL2/VHE currently needs the self-built edk2-stable202502
+            #   firmware until the Limine/EDK2 handoff issue is resolved.
+            SCARLET_EFI_CODE_ARM64_HVF = "${pkgs.qemu}/share/qemu/edk2-aarch64-code.fd";
+            SCARLET_EFI_VARS_ARM64_HVF = "${pkgs.qemu}/share/qemu/edk2-arm-vars.fd";
+            SCARLET_EFI_CODE_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
+            SCARLET_EFI_VARS_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
 
