@@ -155,6 +155,13 @@ use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
   - `# Returns` for return values
   - `# Safety` for unsafe functions
   - Example code blocks with ` ```rust ```
+- **NEVER remove existing docstrings.** When modifying a function, trait, or struct,
+  preserve the original documentation and only add or update content as needed.
+  This includes `# Arguments`, `# Returns`, `# Safety`, and `# Examples` sections.
+- **In `pub trait`, all trait methods are implicitly `pub`.** Treat every `fn` in a
+  `pub trait` as a public API: it MUST have Rustdoc with `# Arguments`, `# Returns`,
+  etc. just like any other `pub fn`. Never remove or shorten existing docstrings on
+  trait methods.
 
 Example:
 ```rust
