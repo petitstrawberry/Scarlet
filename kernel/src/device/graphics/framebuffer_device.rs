@@ -503,6 +503,9 @@ impl MemoryMappingOps for FramebufferCharDevice {
         if fb_resource.physical_addr == 0 || fb_resource.size == 0 {
             return Err("Invalid framebuffer configuration");
         }
+        if fb_resource.physical_addr % crate::environment::PAGE_SIZE != 0 {
+            return Err("Framebuffer physical address must be page-aligned");
+        }
 
         // Basic validation
         // fb_resource.size is the page-aligned physical size, safe for mmap

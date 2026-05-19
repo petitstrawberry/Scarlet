@@ -91,10 +91,9 @@ fn build_limine_image(cli: &Cli) -> Result<(), String> {
     require_file(&cli.kernel)?;
     require_file(&cli.initramfs)?;
     require_command("git")?;
-    require_command("mkfs.vfat")?;
+    require_command("mformat")?;
     require_command("mmd")?;
     require_command("mcopy")?;
-    require_command("parted")?;
 
     let spec = cli.arch.spec();
     let output_parent = cli
@@ -140,7 +139,7 @@ fn build_limine_image(cli: &Cli) -> Result<(), String> {
         .map_err(|error| format!("failed to size {}: {error}", cli.output.display()))?;
     drop(image_file);
 
-    create_esp_image(&cli.output, spec.image_label, image_size_mb)?;
+    create_esp_image(&cli.output, spec.image_label)?;
     let esp_image = esp_mtools_path(&cli.output)?;
     let esp_image_str = esp_image.as_str();
 
@@ -199,57 +198,17 @@ fn build_limine_image(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
-const ESP_START_SECTOR: u64 = 2048;
-const SECTOR_SIZE: u64 = 512;
 const MIN_UEFI_IMAGE_SIZE_MB: u64 = 64;
 
-fn create_esp_image(image: &Path, label: &str, image_size_mb: u64) -> Result<(), String> {
-    let esp_size_kib = image_size_mb
-        .checked_sub(2)
-        .ok_or("UEFI image must leave room for GPT and ESP alignment")?
-        * 1024;
-    let offset = ESP_START_SECTOR.to_string();
-    let esp_blocks = esp_size_kib.to_string();
+fn create_esp_image(image: &Path, label: &str) -> Result<(), String> {
     run(
-        "parted",
-        &[
-            "-s",
-            path_str(image)?,
-            "--",
-            "mklabel",
-            "gpt",
-            "mkpart",
-            "ESP",
-            "fat32",
-            "1MiB",
-            "-1MiB",
-            "set",
-            "1",
-            "esp",
-            "on",
-        ],
-    )?;
-    run(
-        "mkfs.vfat",
-        &[
-            "-F",
-            "32",
-            "-n",
-            label,
-            "--offset",
-            &offset,
-            path_str(image)?,
-            &esp_blocks,
-        ],
+        "mformat",
+        &["-i", path_str(image)?, "-F", "-v", label, "::"],
     )
 }
 
 fn esp_mtools_path(image: &Path) -> Result<String, String> {
-    Ok(format!(
-        "{}@@{}",
-        path_str(image)?,
-        ESP_START_SECTOR * SECTOR_SIZE
-    ))
+    Ok(path_str(image)?.to_string())
 }
 
 fn limine_config(spec: &ArchSpec, cmdline: Option<&str>) -> String {

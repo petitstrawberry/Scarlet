@@ -18,6 +18,7 @@ mod integration_tests {
         },
         manager::DeviceManager,
     };
+    use crate::object::capability::MemoryMappingOps;
 
     fn setup_test_managers() -> (GraphicsManager, DeviceManager) {
         (GraphicsManager::new(), DeviceManager::new_for_test())
@@ -286,6 +287,26 @@ mod integration_tests {
         let mut buffer = [0u8; 10];
         assert_eq!(char_device.read(&mut buffer), 0);
         assert!(char_device.write(&[0x00, 0x01]).is_err());
+    }
+
+    #[test_case]
+    fn test_framebuffer_mmap_rejects_unaligned_physical_address() {
+        let config = FramebufferConfig::new(16, 16, PixelFormat::BGRA8888);
+        let resource = Arc::new(FramebufferResource {
+            source_device_id: 1,
+            logical_name: "fb-unaligned".to_string(),
+            config,
+            physical_addr: 0x1003,
+            size: crate::environment::PAGE_SIZE,
+            created_char_device_id: RwLock::new(None),
+        });
+        let char_device = FramebufferCharDevice::new(resource);
+
+        assert!(
+            char_device
+                .get_mapping_info(0, crate::environment::PAGE_SIZE)
+                .is_err()
+        );
     }
 
     #[test_case]

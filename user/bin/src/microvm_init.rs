@@ -57,24 +57,35 @@ fn mount_rootfs() -> Result<(), &'static str> {
     pivot_root("/mnt/newroot", "/mnt/newroot/old_root").map_err(|_| "pivot_root failed")
 }
 
+const FIRECRACKER: &str = "/system/linux-aarch64/usr/bin/firecracker";
+const FIRECRACKER_CONFIG: &str = "/etc/firecracker/scarlet-microvm-aarch64.json";
+const GUEST_KERNEL: &str = "/system/linux-aarch64/usr/bin/guest-Image";
+const GUEST_INITRAMFS: &str = "/system/linux-aarch64/usr/bin/guest-initramfs.cpio.gz";
+
+fn verify_guest_artifacts() -> Result<(), &'static str> {
+    File::open(FIRECRACKER).map_err(|_| "missing /usr/bin/firecracker in linux-aarch64 rootfs")?;
+    File::open(GUEST_KERNEL).map_err(|_| "missing /usr/bin/guest-Image in linux-aarch64 rootfs")?;
+    File::open(GUEST_INITRAMFS)
+        .map_err(|_| "missing /usr/bin/guest-initramfs.cpio.gz in linux-aarch64 rootfs")?;
+    Ok(())
+}
+
 fn exec_firecracker() -> ! {
-    let firecracker = "/system/linux-aarch64/usr/bin/firecracker";
-    let config = "/scarlet/system/linux-aarch64/etc/firecracker/unikraft-helloworld-aarch64.json";
     let argv = [
-        firecracker,
+        FIRECRACKER,
         "--no-api",
         "--no-seccomp",
         "--config-file",
-        config,
+        FIRECRACKER_CONFIG,
     ];
     let envp = [
-        "LD_LIBRARY_PATH=/scarlet/system/linux-aarch64/usr/lib:/scarlet/system/linux-aarch64/lib",
-        "PATH=/scarlet/system/linux-aarch64/bin:/scarlet/system/linux-aarch64/usr/bin:/scarlet/system/scarlet/bin",
+        "LD_LIBRARY_PATH=/usr/lib:/lib",
+        "PATH=/bin:/usr/bin:/scarlet/system/scarlet/bin",
     ];
 
-    println!("microvm-init: exec {}", firecracker);
-    let _ = execve_with_flags(firecracker, &argv, &envp, EXECVE_FORCE_ABI_REBUILD);
-    println!("microvm-init: failed to exec {}", firecracker);
+    println!("microvm-init: exec {}", FIRECRACKER);
+    let _ = execve_with_flags(FIRECRACKER, &argv, &envp, EXECVE_FORCE_ABI_REBUILD);
+    println!("microvm-init: failed to exec {}", FIRECRACKER);
     loop {}
 }
 
@@ -97,6 +108,11 @@ fn main() -> i32 {
     }
 
     if let Err(error) = setup_devfs() {
+        println!("microvm-init: {}", error);
+        return -1;
+    }
+
+    if let Err(error) = verify_guest_artifacts() {
         println!("microvm-init: {}", error);
         return -1;
     }
