@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
     echo "usage: $0 <rootfs-base> <scarlet-bin-dir> <modules-dir> <stage-dir> <output-image> [project-prebuilt-dir]" >&2
     exit 2
@@ -51,6 +53,12 @@ ensure_firecracker() {
     target="$STAGE_DIR/system/linux-aarch64/usr/bin/firecracker"
     if [ -x "$target" ]; then
         return 0
+    fi
+
+    if [ -n "$PROJECT_PREBUILT_DIR" ]; then
+        echo "microvm rootfs is missing Firecracker in project prebuilt artifacts" >&2
+        echo "Run: $SCRIPT_DIR/prepare_prebuilt.sh" >&2
+        exit 1
     fi
 
     if ! command -v curl >/dev/null 2>&1; then
@@ -116,7 +124,11 @@ for required in \
 do
     if [ ! -f "$required" ]; then
         echo "microvm rootfs is missing required artifact: ${required#$STAGE_DIR/}" >&2
-        echo "Build and deploy AArch64 Linux artifacts before building the microvm image." >&2
+        if [ -n "$PROJECT_PREBUILT_DIR" ]; then
+            echo "Run: $SCRIPT_DIR/prepare_prebuilt.sh" >&2
+        else
+            echo "Build and deploy AArch64 Linux artifacts before building the microvm image." >&2
+        fi
         exit 1
     fi
 done

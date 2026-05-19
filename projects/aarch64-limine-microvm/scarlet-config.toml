@@ -45,6 +45,7 @@ args = [
     "{repo}/mkfs/dist/modules/{target_triple}",
     "{project}/.scarlet/rootfs-stage",
     "{project}/.scarlet/images/rootfs-aarch64-microvm.ext2",
+    "{project}/prebuilt",
 ]
 
 [[image.steps]]

@@ -200,7 +200,7 @@ Scarlet implements a modern Virtual File System (VFS v2) with support for multip
 
 ## Development
 
-### Docker Environment (Recommended)
+### Docker Environment
 
 ```bash
 # Build and run development container
@@ -213,11 +213,30 @@ cargo make test-riscv64               # Run tests (RISC-V)
 cargo make debug-riscv64              # Debug with GDB
 ```
 
+### Nix Development Environment
+
+Use the Nix shell when you want to run QEMU on the host and use host virtualization
+support such as KVM or Apple Hypervisor Framework.
+
+```bash
+# Enter the development shell
+nix develop
+
+# Common commands:
+cargo make run-riscv64                # Build (release) and run (RISC-V)
+cargo make test-riscv64               # Run tests (RISC-V)
+cargo make run-aarch64                # Build (release) and run (AArch64)
+```
+
+The first `nix develop` may take time because it prepares the UEFI firmware used
+by the Limine workflows. AArch64 uses QEMU's pinned pc-bios EDK2 image as the
+macOS HVF + GICv3 baseline.
+
 ### Local Development
 
-Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
+Requirements without Docker or Nix: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 
-For the Limine workflows, the development environment needs the appropriate UEFI firmware packages (`qemu-efi-riscv64`, `qemu-efi-aarch64`). The provided Docker image should include them after rebuild.
+For the Limine workflows, the development environment needs the appropriate UEFI firmware packages (`qemu-efi-riscv64`, `qemu-efi-aarch64`). The provided Docker image includes distro packages, and the Nix shell exposes firmware paths through `SCARLET_EFI_*` environment variables.
 
 ### Build Commands
 

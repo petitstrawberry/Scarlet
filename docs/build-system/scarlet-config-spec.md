@@ -288,6 +288,35 @@ scarlet-driver-pl011 = { version = "0.1.0" }
 scarlet-abi-linux = { path = "../../../modules/abi/linux" }
 ```
 
+## Image Template Expansion
+
+Image steps may use template placeholders in command paths, arguments, working
+directories, environment values, input sources, input destinations, and output
+paths.
+
+Supported placeholders:
+
+- `{project}` — current Scarlet project root
+- `{repo}` — current working directory used to invoke `cargo-scarlet`
+- `{kernel_elf}` — kernel ELF path selected for the image command
+- `{profile}` — `debug` or `release`
+- `{target_triple}` — resolved Rust target triple
+- `{board}` — board name from `[board]`
+Project-specific artifact locations should be declared directly in
+`scarlet-config.toml`. For example:
+
+```toml
+args = [
+    "{repo}/mkfs/rootfs",
+    "{repo}/user/bin/dist/aarch64",
+    "{repo}/mkfs/dist/modules/{target_triple}",
+]
+```
+
+This keeps the artifact contract in the project recipe. If a project moves out
+of the monorepo, its own config should point at that repository's local artifact
+layout instead of relying on hidden global defaults.
+
 ## Validation Rules
 
 The build tool should validate at least the following:
