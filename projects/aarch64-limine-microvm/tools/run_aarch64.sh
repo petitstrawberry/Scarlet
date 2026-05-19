@@ -128,6 +128,14 @@ fi
 TEMP_OUTPUT=$(mktemp)
 
 find_efi_code() {
+    if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64_HVF}"
+        return 0
+    fi
+    if [ -n "${SCARLET_EFI_CODE_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64_EL2}"
+        return 0
+    fi
     if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
         return 0
@@ -146,6 +154,14 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
+    if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_VARS_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_HVF}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64_HVF}"
+        return 0
+    fi
+    if [ -n "${SCARLET_EFI_VARS_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64_EL2}"
+        return 0
+    fi
     if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
         return 0
@@ -161,6 +177,15 @@ find_efi_vars_template() {
         fi
     done
     return 1
+}
+
+ensure_efi_vars_writable() {
+    local vars_file="$1"
+
+    if ! chmod u+w "$vars_file" 2>/dev/null || [ ! -w "$vars_file" ]; then
+        echo "Error: AArch64 EFI vars runtime file is not writable: $vars_file"
+        exit 1
+    fi
 }
 
 EFI_CODE="$(find_efi_code || true)"
@@ -204,15 +229,20 @@ if [ -z "$EFI_VARS_TEMPLATE" ]; then
     exit 1
 fi
 
+echo "Using AArch64 EFI code: $EFI_CODE"
+echo "Using AArch64 EFI vars template: $EFI_VARS_TEMPLATE"
+
 if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
     EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
     if [ ! -f "$EFI_VARS_RUNTIME" ]; then
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     fi
+    ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
     set_efi_timeout_zero "$EFI_VARS_RUNTIME"
 else
     EFI_VARS_RUNTIME="$(mktemp "$PROJECT_DIR/.scarlet/images/AAVMF_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+    ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
     set_efi_timeout_zero "$EFI_VARS_RUNTIME"
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi

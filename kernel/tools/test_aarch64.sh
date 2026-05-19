@@ -83,7 +83,11 @@ if [ ! -f "$BOOT_IMAGE" ]; then
 fi
 
 find_efi_code() {
-    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_CODE_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64_EL2}"
+        return 0
+    fi
+    # Legacy environment variable takes priority for older devShells.
     if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
         return 0
@@ -102,7 +106,11 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
-    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_VARS_ARM64_EL2:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64_EL2}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64_EL2}"
+        return 0
+    fi
+    # Legacy environment variable takes priority for older devShells.
     if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
         return 0
@@ -120,6 +128,15 @@ find_efi_vars_template() {
     return 1
 }
 
+ensure_efi_vars_writable() {
+    local vars_file="$1"
+
+    if ! chmod u+w "$vars_file" 2>/dev/null || [ ! -w "$vars_file" ]; then
+        echo "Error: AArch64 EFI vars runtime file is not writable: $vars_file"
+        exit 1
+    fi
+}
+
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
 EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
@@ -135,6 +152,7 @@ if [ -z "$EFI_VARS_TEMPLATE" ]; then
 fi
 
 cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
+ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
 trap 'rm -f "$EFI_VARS_RUNTIME" "$TEMP_OUTPUT"' EXIT
 
 qemu-system-aarch64 \
