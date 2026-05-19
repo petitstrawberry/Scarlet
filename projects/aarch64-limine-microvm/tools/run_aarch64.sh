@@ -179,6 +179,15 @@ find_efi_vars_template() {
     return 1
 }
 
+ensure_efi_vars_writable() {
+    local vars_file="$1"
+
+    if ! chmod u+w "$vars_file" 2>/dev/null || [ ! -w "$vars_file" ]; then
+        echo "Error: AArch64 EFI vars runtime file is not writable: $vars_file"
+        exit 1
+    fi
+}
+
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
 EFI_VARS_PERSISTENT="$PROJECT_DIR/.scarlet/images/AAVMF_VARS.fd"
@@ -227,13 +236,13 @@ if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-
     EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
     if [ ! -f "$EFI_VARS_RUNTIME" ]; then
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
-        chmod u+w "$EFI_VARS_RUNTIME"
     fi
+    ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
     set_efi_timeout_zero "$EFI_VARS_RUNTIME"
 else
     EFI_VARS_RUNTIME="$(mktemp "$PROJECT_DIR/.scarlet/images/AAVMF_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
-    chmod u+w "$EFI_VARS_RUNTIME"
+    ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
     set_efi_timeout_zero "$EFI_VARS_RUNTIME"
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi

@@ -216,6 +216,8 @@
             SCARLET_EFI_VARS_ARM64_HVF = "${pkgs.qemu}/share/qemu/edk2-arm-vars.fd";
             SCARLET_EFI_CODE_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
             SCARLET_EFI_VARS_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
+            SCARLET_EFI_CODE_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
+            SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
 
