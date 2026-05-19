@@ -54,12 +54,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
 BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
 ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
-EFI_CODE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd"
-EFI_VARS_TEMPLATE="/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd"
+EFI_CODE="${SCARLET_EFI_CODE_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}"
+EFI_VARS_TEMPLATE="${SCARLET_EFI_VARS_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}"
 EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
+QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
+QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
+QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
+
+case ",$QEMU_MACHINE," in
+    *,virtualization=*)
+        ;;
+    *)
+        if { [ "${SCARLET_QEMU_VIRTUALIZATION:-0}" = "1" ] || [ "${SCARLET_QEMU_VIRTUALIZATION:-}" = "true" ]; } && [ "$QEMU_ACCEL" != "hvf" ]; then
+            QEMU_MACHINE="${QEMU_MACHINE},virtualization=on"
+        fi
+        ;;
+esac
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -126,8 +139,9 @@ else
 fi
 
 qemu-system-riscv64 \
-    -machine virt,acpi=off \
-    -m 8G \
+    -machine "$QEMU_MACHINE" \
+    -accel "$QEMU_ACCEL" \
+    -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
     -nographic \
     -serial mon:stdio \

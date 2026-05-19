@@ -79,7 +79,21 @@ if ! (
 fi
 
 QEMU_DEBUG_ARGS=""
+QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
+QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
+QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
+QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
+
+case ",$QEMU_MACHINE," in
+    *,virtualization=*)
+        ;;
+    *)
+        if { [ "${SCARLET_QEMU_VIRTUALIZATION:-1}" = "1" ] || [ "${SCARLET_QEMU_VIRTUALIZATION:-}" = "true" ]; } && [ "$QEMU_ACCEL" != "hvf" ]; then
+            QEMU_MACHINE="${QEMU_MACHINE},virtualization=on"
+        fi
+        ;;
+esac
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -114,6 +128,10 @@ fi
 TEMP_OUTPUT=$(mktemp)
 
 find_efi_code() {
+    if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_CODE.fd \
@@ -128,6 +146,10 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
+    if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_VARS.fd \
@@ -196,9 +218,10 @@ else
 fi
 
 qemu-system-aarch64 \
-    -machine virt,virtualization=on,gic-version=3,acpi=off \
-    -cpu max \
-    -m 8G \
+    -machine "$QEMU_MACHINE" \
+    -cpu "$QEMU_CPU" \
+    -accel "$QEMU_ACCEL" \
+    -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
     -nographic \
     -serial mon:stdio \

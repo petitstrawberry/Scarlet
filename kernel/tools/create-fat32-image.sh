@@ -98,7 +98,6 @@ mcopy -i "$IMAGE_PATH" /tmp/config.ini ::config.ini
 # Clean up temporary files
 rm -f /tmp/hello.txt /tmp/readme.txt /tmp/numbers.txt /tmp/small.txt /tmp/1kb.txt /tmp/4kb.txt
 rm -f /tmp/doc1.txt /tmp/test_binary /tmp/japanese.txt /tmp/config.ini /tmp/file0.txt
-rmdir "$MOUNT_POINT"
 
 echo "Fresh FAT32 test image ready: $IMAGE_PATH ($(ls -lh "$IMAGE_PATH" | awk '{print $5}'))"
 

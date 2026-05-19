@@ -5,8 +5,17 @@ set -eu
 cd "$(dirname "$0")" || exit 1
 
 DIST_DIR="dist"
-LIMINE_VERSION="${LIMINE_VERSION:-11.0.0}"
+LIMINE_VERSION="${LIMINE_VERSION:-12.3.0}"
 LIMINE_SRC_DIR="$DIST_DIR/limine-${LIMINE_VERSION}"
+LIMINE_BINARY_URL="${LIMINE_BINARY_URL:-https://github.com/Limine-Bootloader/Limine/releases/download/v${LIMINE_VERSION}/limine-binary.tar.xz}"
+case "$LIMINE_VERSION:$LIMINE_BINARY_URL" in
+    12.3.0:https://github.com/Limine-Bootloader/Limine/releases/download/v12.3.0/limine-binary.tar.xz)
+        LIMINE_BINARY_SHA256="${LIMINE_BINARY_SHA256:-67e11e0a72595e621cc39bfc1572c70149d71700eaeee7b9d0b32ba0effe07ac}"
+        ;;
+    *)
+        LIMINE_BINARY_SHA256="${LIMINE_BINARY_SHA256:-}"
+        ;;
+esac
 BOOT_IMAGE="${BOOT_IMAGE:-$DIST_DIR/limine-aarch64-boot.img}"
 KERNEL_ELF="${KERNEL_ELF:-../projects/aarch64-limine-full/target/aarch64-unknown-none-elf/debug/scarlet}"
 INITRAMFS_PATH="${INITRAMFS_PATH:-$DIST_DIR/initramfs-aarch64.cpio}"
@@ -30,8 +39,32 @@ require_command() {
 }
 
 ensure_limine_source() {
-    if [ -d "$LIMINE_SRC_DIR" ]; then
+    if [ -f "$LIMINE_SRC_DIR/BOOTAA64.EFI" ]; then
         return
+    fi
+
+    rm -rf "$LIMINE_SRC_DIR"
+
+    if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        archive="$DIST_DIR/limine-${LIMINE_VERSION}-binary.tar.xz"
+        if ! curl -L --fail --output "$archive" "$LIMINE_BINARY_URL"; then
+            rm -f "$archive"
+        else
+            if [ -n "$LIMINE_BINARY_SHA256" ]; then
+                if command -v sha256sum >/dev/null 2>&1; then
+                    printf '%s  %s\n' "$LIMINE_BINARY_SHA256" "$archive" | sha256sum -c -
+                elif command -v shasum >/dev/null 2>&1; then
+                    printf '%s  %s\n' "$LIMINE_BINARY_SHA256" "$archive" | shasum -a 256 -c -
+                else
+                    echo "Error: cannot verify $archive; sha256sum or shasum is required" >&2
+                    exit 1
+                fi
+            fi
+            mkdir -p "$LIMINE_SRC_DIR"
+            tar -xf "$archive" -C "$LIMINE_SRC_DIR" --strip-components=1
+            require_file "$LIMINE_SRC_DIR/BOOTAA64.EFI"
+            return
+        fi
     fi
 
     require_command git

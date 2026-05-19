@@ -71,7 +71,26 @@ if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.
 fi
 
 QEMU_DEBUG_ARGS=""
+QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
+QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
+QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
+QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
+QEMU_FRAMEBUFFER="${SCARLET_QEMU_FRAMEBUFFER_AARCH64:-virtio-gpu}"
+QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
+QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
+QEMU_NET="${SCARLET_QEMU_NET:-1}"
+QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
+
+case ",$QEMU_MACHINE," in
+    *,virtualization=*)
+        ;;
+    *)
+        if { [ "${SCARLET_QEMU_VIRTUALIZATION:-1}" = "1" ] || [ "${SCARLET_QEMU_VIRTUALIZATION:-}" = "true" ]; } && [ "$QEMU_ACCEL" != "hvf" ]; then
+            QEMU_MACHINE="${QEMU_MACHINE},virtualization=on"
+        fi
+        ;;
+esac
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -106,6 +125,11 @@ fi
 TEMP_OUTPUT=$(mktemp)
 
 find_efi_code() {
+    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_CODE.fd \
@@ -120,6 +144,11 @@ find_efi_code() {
 }
 
 find_efi_vars_template() {
+    # Environment variable takes priority (for Nix devShell etc.)
+    if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
+        printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
+        return 0
+    fi
     local candidate
     for candidate in \
         /usr/share/AAVMF/AAVMF_VARS.fd \
@@ -135,19 +164,21 @@ find_efi_vars_template() {
 
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
-EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.fd"
+EFI_VARS_PERSISTENT="${SCARLET_EFI_VARS_RUNTIME_ARM64:-$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.fd}"
 
 if [ -z "$EFI_CODE" ]; then
     echo "Error: AArch64 EFI firmware code image not found."
     exit 1
 fi
 
-if [ -z "$EFI_VARS_TEMPLATE" ]; then
+if [ -z "$EFI_VARS_TEMPLATE" ] && [ -z "${SCARLET_EFI_VARS_RUNTIME_ARM64:-}" ]; then
     echo "Error: AArch64 EFI vars template not found."
     exit 1
 fi
 
-if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
+if [ -n "${SCARLET_EFI_VARS_RUNTIME_ARM64:-}" ]; then
+    EFI_VARS_RUNTIME="$SCARLET_EFI_VARS_RUNTIME_ARM64"
+elif [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-}" = "true" ]; then
     EFI_VARS_RUNTIME="$EFI_VARS_PERSISTENT"
     if [ ! -f "$EFI_VARS_RUNTIME" ]; then
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
@@ -158,10 +189,37 @@ else
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
+QEMU_FRAMEBUFFER_ARGS=()
+case "$QEMU_FRAMEBUFFER" in
+    virtio-gpu)
+        QEMU_FRAMEBUFFER_ARGS=(-display vnc=:0 -device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
+    ramfb)
+        QEMU_FRAMEBUFFER_ARGS=(-device ramfb)
+        ;;
+    none)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_FRAMEBUFFER_AARCH64=$QEMU_FRAMEBUFFER"
+        exit 1
+        ;;
+esac
+
+QEMU_NET_ARGS=()
+if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
+    QEMU_NET_ARGS=(-netdev user,id=net0 -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3)
+fi
+
+QEMU_INPUT_ARGS=()
+if [ "$QEMU_INPUT" = "1" ] || [ "$QEMU_INPUT" = "true" ]; then
+    QEMU_INPUT_ARGS=(-device virtio-keyboard-device,bus=virtio-mmio-bus.4 -device virtio-mouse-device,bus=virtio-mmio-bus.5)
+fi
+
 qemu-system-aarch64 \
-    -machine virt,virtualization=on,gic-version=3,acpi=off \
-    -cpu max \
-    -m 8G \
+    -machine "$QEMU_MACHINE" \
+    -cpu "$QEMU_CPU" \
+    -accel "$QEMU_ACCEL" \
+    -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
     -nographic \
     -serial mon:stdio \
@@ -173,12 +231,9 @@ qemu-system-aarch64 \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
-    -netdev user,id=net0 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
-    -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
+    "${QEMU_FRAMEBUFFER_ARGS[@]}" \
+    "${QEMU_NET_ARGS[@]}" \
+    "${QEMU_INPUT_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
