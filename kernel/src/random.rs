@@ -232,6 +232,10 @@ impl CharDevice for RandomCharDevice {
         Err("Write not supported for random device")
     }
 
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("Write not supported for random device")
+    }
+
     fn can_read(&self) -> bool {
         // Check if we have any entropy sources available
         let manager = RandomManager::instance();

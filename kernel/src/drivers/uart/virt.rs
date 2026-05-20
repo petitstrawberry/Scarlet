@@ -1,8 +1,7 @@
 // UART driver for QEMU virt machine
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
-use core::fmt::Write;
-use core::{any::Any, fmt};
+use core::any::Any;
 use spin::{Mutex, RwLock};
 
 use crate::{
@@ -21,7 +20,6 @@ use crate::{
     driver_initcall,
     interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    traits::serial::Serial,
 };
 
 pub struct Uart {
@@ -30,6 +28,8 @@ pub struct Uart {
     interrupt_id: RwLock<Option<InterruptId>>,
     rx_buffer: Mutex<VecDeque<u8>>,
     event_emitter: Mutex<DeviceEventEmitter>,
+    // Serializes TX access across all callers (kernel _print, TTY write, echo).
+    tx_lock: Mutex<()>,
 }
 
 pub const RHR_OFFSET: usize = 0x00;
@@ -67,6 +67,7 @@ impl Uart {
             interrupt_id: RwLock::new(None),
             rx_buffer: Mutex::new(VecDeque::new()),
             event_emitter: Mutex::new(DeviceEventEmitter::new()),
+            tx_lock: Mutex::new(()),
         }
     }
 
@@ -140,44 +141,6 @@ impl Uart {
     }
 }
 
-impl Serial for Uart {
-    /// Writes a character to the UART. (blocking)
-    ///
-    /// This function will block until the UART is ready to accept the character.
-    ///
-    /// # Arguments
-    /// * `c` - The character to write to the UART
-    ///
-    /// # Returns
-    /// A `fmt::Result` indicating success or failure.
-    ///
-    fn put(&self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8); // Block until ready
-        Ok(())
-    }
-
-    /// Reads a character from the UART. (non-blocking)
-    ///
-    /// Returns `Some(char)` if a character is available, or `None` if not.
-    /// If interrupts are enabled, reads from the interrupt buffer.
-    /// Otherwise, falls back to polling mode.
-    ///
-    fn get(&self) -> Option<char> {
-        let mut buffer = self.rx_buffer.lock();
-        // Try to read from interrupt buffer
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte as char);
-        }
-
-        None
-    }
-
-    /// Get a mutable reference to Any for downcasting
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
 impl MemoryMappingOps for Uart {
     fn get_mapping_info(
         &self,
@@ -239,9 +202,24 @@ impl CharDevice for Uart {
         buffer.pop_front()
     }
 
+    /// Write a single byte. The byte itself is atomic under `tx_lock`,
+    /// but consecutive `write_byte` calls are NOT guaranteed to be atomic.
+    /// Use `write()` for multi-byte atomicity.
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        self.write_byte_internal(byte); // Block until ready
+        let _lock = self.tx_lock.lock();
+        self.write_byte_internal(byte);
         Ok(())
+    }
+
+    /// Write entire buffer atomically under `tx_lock`.
+    /// This is the primary API for multi-byte output; all bytes are written
+    /// without interleaving from other CPUs.
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let _lock = self.tx_lock.lock();
+        for &byte in buffer {
+            self.write_byte_internal(byte);
+        }
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -257,18 +235,6 @@ impl ControlOps for Uart {
     // UART devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
-    }
-}
-
-impl Write for Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if c == '\n' {
-                self.put('\r')?; // Convert newline to carriage return + newline
-            }
-            self.put(c)?;
-        }
-        Ok(())
     }
 }
 

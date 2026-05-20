@@ -354,22 +354,14 @@ pub fn puts(s: &str) -> usize {
 
 /// Print implementation for Scarlet
 pub fn _print(args: fmt::Arguments) {
-    use fmt::Write;
+    extern crate alloc;
+    use alloc::fmt::format as fmt_format;
 
-    let mut writer = StdoutWriter;
-    let _ = writer.write_fmt(args);
-}
+    static LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+    let _lock = LOCK.lock();
 
-/// A simple writer that outputs to stdout
-struct StdoutWriter;
-
-impl fmt::Write for StdoutWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        match stdout().write(s.as_bytes()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(fmt::Error),
-        }
-    }
+    let output = fmt_format(args);
+    let _ = stdout().write_all(output.as_bytes());
 }
 
 /// Macro for printing to stdout

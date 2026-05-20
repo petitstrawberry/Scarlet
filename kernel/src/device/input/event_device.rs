@@ -225,6 +225,10 @@ impl CharDevice for EventDevice {
         Err("Write not supported on input event device")
     }
 
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("Write not supported on input event device")
+    }
+
     fn can_read(&self) -> bool {
         self.has_events()
     }

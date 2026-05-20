@@ -75,10 +75,8 @@ pub fn _print(args: fmt::Arguments) {
     struct CharDeviceWriter<'a>(&'a dyn CharDevice);
     impl<'a> fmt::Write for CharDeviceWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            for byte in s.bytes() {
-                if self.0.write_byte(byte).is_err() {
-                    return Err(fmt::Error);
-                }
+            if self.0.write(s.as_bytes()).is_err() {
+                return Err(fmt::Error);
             }
             Ok(())
         }

@@ -1,8 +1,7 @@
 // PL011 UART driver for ARM platforms (QEMU virt, etc.)
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
-use core::fmt::Write;
-use core::{any::Any, fmt};
+use core::any::Any;
 use spin::{Mutex, RwLock};
 
 use crate::arch::early_putc;
@@ -23,7 +22,6 @@ use crate::{
     driver_initcall,
     interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    traits::serial::Serial,
 };
 
 // PL011 UART register offsets
@@ -62,6 +60,7 @@ pub struct Pl011Uart {
     interrupt_id: RwLock<Option<InterruptId>>,
     rx_buffer: Mutex<VecDeque<u8>>,
     event_emitter: Mutex<DeviceEventEmitter>,
+    tx_lock: Mutex<()>,
 }
 
 impl Pl011Uart {
@@ -71,6 +70,7 @@ impl Pl011Uart {
             interrupt_id: RwLock::new(None),
             rx_buffer: Mutex::new(VecDeque::new()),
             event_emitter: Mutex::new(DeviceEventEmitter::new()),
+            tx_lock: Mutex::new(()),
         }
     }
 
@@ -149,25 +149,6 @@ impl Pl011Uart {
     }
 }
 
-impl Serial for Pl011Uart {
-    fn put(&self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8);
-        Ok(())
-    }
-
-    fn get(&self) -> Option<char> {
-        let mut buffer = self.rx_buffer.lock();
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte as char);
-        }
-        None
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
 impl MemoryMappingOps for Pl011Uart {
     fn get_mapping_info(
         &self,
@@ -222,9 +203,22 @@ impl CharDevice for Pl011Uart {
         self.rx_buffer.lock().pop_front()
     }
 
+    /// Write a single byte. The byte itself is atomic under `tx_lock`,
+    /// but consecutive `write_byte` calls are NOT guaranteed to be atomic.
+    /// Use `write()` for multi-byte atomicity.
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let _lock = self.tx_lock.lock();
         self.write_byte_internal(byte);
         Ok(())
+    }
+
+    /// Write entire buffer atomically under `tx_lock`.
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let _lock = self.tx_lock.lock();
+        for &byte in buffer {
+            self.write_byte_internal(byte);
+        }
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -239,18 +233,6 @@ impl CharDevice for Pl011Uart {
 impl ControlOps for Pl011Uart {
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
-    }
-}
-
-impl Write for Pl011Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if c == '\n' {
-                self.put('\r')?;
-            }
-            self.put(c)?;
-        }
-        Ok(())
     }
 }
 

@@ -66,6 +66,10 @@ impl CharDevice for NullDevice {
         Ok(())
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        Ok(buffer.len())
+    }
+
     fn can_read(&self) -> bool {
         // Always readable (immediate EOF)
         true

@@ -83,6 +83,10 @@ impl CharDevice for KmsgDevice {
         Err("kmsg is read-only")
     }
 
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("kmsg is read-only")
+    }
+
     fn can_read(&self) -> bool {
         !crate::log::is_empty()
     }

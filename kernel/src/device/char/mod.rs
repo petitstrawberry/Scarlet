@@ -50,6 +50,14 @@ pub enum SeekFrom {
 /// This trait defines the interface for character devices.
 /// It provides methods for querying device information and handling character I/O operations.
 /// Uses internal mutability for thread-safe shared access.
+///
+/// # Atomicity contract
+///
+/// Implementors MUST guarantee that `write()` is atomic: the entire buffer
+/// is written without interleaving with writes from other CPUs/tasks.
+/// `write_byte()` is atomic for that single byte only; consecutive calls
+/// are NOT guaranteed to be atomic.  Callers that need multi-byte
+/// atomicity must use `write()`.
 pub trait CharDevice: Device {
     /// Read a single byte from the device
     ///
@@ -62,6 +70,9 @@ pub trait CharDevice: Device {
     fn read_byte(&self) -> Option<u8>;
 
     /// Write a single byte to the device
+    ///
+    /// The byte itself is atomic, but consecutive calls are NOT guaranteed
+    /// to be atomic — use `write()` for multi-byte atomicity.
     ///
     /// # Arguments
     ///
@@ -96,6 +107,10 @@ pub trait CharDevice: Device {
 
     /// Write multiple bytes to the device
     ///
+    /// Implementors MUST ensure the whole buffer is written without
+    /// interleaving from other writers (e.g. by holding a device-level
+    /// lock for the duration).
+    ///
     /// # Arguments
     ///
     /// * `buffer` - The buffer containing data to write
@@ -103,14 +118,7 @@ pub trait CharDevice: Device {
     /// # Returns
     ///
     /// Result containing the number of bytes written or an error
-    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let mut bytes_written = 0;
-        for &byte in buffer {
-            self.write_byte(byte)?;
-            bytes_written += 1;
-        }
-        Ok(bytes_written)
-    }
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str>;
 
     /// Check if the device is ready for reading
     fn can_read(&self) -> bool;
@@ -223,6 +231,13 @@ impl CharDevice for GenericCharDevice {
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         (self.write_fn)(byte)
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        for &byte in buffer {
+            (self.write_fn)(byte)?;
+        }
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {

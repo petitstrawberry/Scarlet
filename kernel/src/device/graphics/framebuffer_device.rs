@@ -350,6 +350,15 @@ impl CharDevice for FramebufferCharDevice {
         Err("write_byte is not supported - use write_at through DevFileObject instead")
     }
 
+    /// Write multiple bytes to the framebuffer
+    ///
+    /// # Returns
+    ///
+    /// Always returns an error to indicate unsupported operation
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("write is not supported - use write_at through DevFileObject instead")
+    }
+
     /// Check if the device is ready for reading
     ///
     /// # Returns

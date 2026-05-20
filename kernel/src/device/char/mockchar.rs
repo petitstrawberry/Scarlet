@@ -90,6 +90,11 @@ impl CharDevice for MockCharDevice {
         Ok(())
     }
 
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        self.write_buffer.lock().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
     fn can_read(&self) -> bool {
         *self.read_index.lock() < self.read_buffer.len()
     }

@@ -149,6 +149,8 @@ pub struct TtyDevice {
     // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
     nonblocking: AtomicBool,
     foreground_task_group_id: Mutex<Option<usize>>,
+    // Serializes write operations (Linux tty_struct::atomic_write_lock equivalent)
+    write_lock: Mutex<()>,
 }
 
 impl TtyDevice {
@@ -170,6 +172,7 @@ impl TtyDevice {
             esc_state: Mutex::new(0),
             nonblocking: AtomicBool::new(false),
             foreground_task_group_id: Mutex::new(None),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -797,10 +800,9 @@ impl TtyDevice {
 
     /// Echo character back to output.
     fn echo_char(&self, byte: u8) {
-        // Get actual UART device and output
+        let _lock = self.write_lock.lock();
         let device_manager = DeviceManager::get_manager();
         if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
-            // Use the new CharDevice API with internal mutability
             if let Some(char_device) = uart_device.as_char_device() {
                 let _ = char_device.write_byte(byte);
             }
@@ -1123,23 +1125,46 @@ impl CharDevice for TtyDevice {
         }
     }
 
-    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        // Forward to UART device with line ending conversion
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let _lock = self.write_lock.lock();
         let device_manager = DeviceManager::get_manager();
-        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
-            // Use the new CharDevice API with internal mutability
-            if let Some(char_device) = uart_device.as_char_device() {
-                // Handle line ending conversion for terminals
-                if byte == b'\n' {
-                    char_device.write_byte(b'\r')?;
-                    char_device.write_byte(b'\n')?;
-                } else {
-                    char_device.write_byte(byte)?;
-                }
-                return Ok(());
+        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
+            return Err("UART device not available");
+        };
+        let Some(char_device) = uart_device.as_char_device() else {
+            return Err("UART device not available");
+        };
+
+        let mut output = alloc::vec::Vec::with_capacity(buffer.len());
+        for &byte in buffer {
+            if byte == b'\n' {
+                output.push(b'\r');
+                output.push(b'\n');
+            } else {
+                output.push(byte);
             }
         }
-        Err("UART device not available")
+
+        char_device.write(&output)?;
+        Ok(buffer.len())
+    }
+
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let _lock = self.write_lock.lock();
+        let device_manager = DeviceManager::get_manager();
+        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
+            return Err("UART device not available");
+        };
+        let Some(char_device) = uart_device.as_char_device() else {
+            return Err("UART device not available");
+        };
+
+        if byte == b'\n' {
+            char_device.write(&[b'\r', b'\n'])?;
+        } else {
+            char_device.write(&[byte])?;
+        }
+        Ok(())
     }
 
     fn can_read(&self) -> bool {
