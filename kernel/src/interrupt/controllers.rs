@@ -302,6 +302,11 @@ impl InterruptControllers {
             if !self.cpu_to_timer_controller.contains_key(&cpu_id) {
                 self.cpu_to_timer_controller
                     .insert(cpu_id, controller_index);
+            } else {
+                crate::early_println!(
+                    "[interrupt] Timer controller already registered for CPU {}, keeping existing mapping",
+                    cpu_id
+                );
             }
         }
 
@@ -346,6 +351,11 @@ impl InterruptControllers {
             {
                 self.cpu_to_software_interrupt_controller
                     .insert(cpu_id, controller_index);
+            } else {
+                crate::early_println!(
+                    "[interrupt] Software interrupt controller already registered for CPU {}, keeping existing mapping",
+                    cpu_id
+                );
             }
         }
 
