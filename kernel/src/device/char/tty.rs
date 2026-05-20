@@ -253,6 +253,29 @@ impl TtyDevice {
         *self.foreground_task_group_id.lock()
     }
 
+    fn resolve_foreground_task_group_id(&self, user_task_group_id: usize) -> usize {
+        let Some(caller) = mytask() else {
+            return user_task_group_id;
+        };
+        let Some(global_task_id) = caller.get_namespace().resolve_global_id(user_task_group_id)
+        else {
+            return user_task_group_id;
+        };
+        crate::sched::scheduler::get_task_by_id(global_task_id)
+            .map(|task| task.get_task_group_id())
+            .unwrap_or(user_task_group_id)
+    }
+
+    fn user_visible_foreground_task_group_id(&self, task_group_id: usize) -> usize {
+        let Some(caller) = mytask() else {
+            return task_group_id;
+        };
+        caller
+            .get_namespace()
+            .resolve_local_id(task_group_id)
+            .unwrap_or(task_group_id)
+    }
+
     fn send_interrupt_to_foreground(&self) {
         use crate::ipc::event::{Event, EventPriority, ProcessControlType};
         use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, wake_task};
@@ -1240,11 +1263,12 @@ impl ControlOps for TtyDevice {
             }
             SCTL_TTY_GET_KBMODE => Ok(self.kb_mode.load(Ordering::Relaxed) as i32),
             SCTL_TTY_SET_FOREGROUND_GROUP => {
-                self.set_foreground_task_group_id(arg);
+                let task_group_id = self.resolve_foreground_task_group_id(arg);
+                self.set_foreground_task_group_id(task_group_id);
                 Ok(0)
             }
             SCTL_TTY_GET_FOREGROUND_GROUP => match self.get_foreground_task_group_id() {
-                Some(id) => Ok(id as i32),
+                Some(id) => Ok(self.user_visible_foreground_task_group_id(id) as i32),
                 None => Ok(-1),
             },
             _ => Err("Unsupported control command for TTY device"),
