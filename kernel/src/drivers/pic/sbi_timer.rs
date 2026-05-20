@@ -46,7 +46,7 @@ impl TimerController for SbiTimer {
 
     /// Check whether a timer interrupt is pending for a CPU.
     fn is_timer_pending(&self, cpu_id: CpuId) -> bool {
-        self.validate_cpu_id(cpu_id).is_ok() && false
+        self.validate_cpu_id(cpu_id).is_ok() && (read_sip() & (1 << 5)) != 0
     }
 
     /// Clear or acknowledge a timer interrupt for a CPU.
@@ -89,6 +89,20 @@ fn read_rdtime() -> u64 {
         );
     }
     time
+}
+
+fn read_sip() -> usize {
+    let sip: usize;
+    // SAFETY: sip is a supervisor CSR; reading it observes the current CPU's
+    // pending interrupt bits and has no memory side effects.
+    unsafe {
+        asm!(
+            "csrr {0}, sip",
+            out(reg) sip,
+            options(nostack, nomem)
+        );
+    }
+    sip
 }
 
 fn register_driver() {

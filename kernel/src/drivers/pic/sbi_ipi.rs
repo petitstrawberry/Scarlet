@@ -40,7 +40,7 @@ impl SoftwareInterruptController for SbiIpi {
 
     /// Check whether a software interrupt is pending for a CPU.
     fn is_software_interrupt_pending(&self, cpu_id: CpuId) -> bool {
-        self.validate_cpu_id(cpu_id).is_ok() && false
+        self.validate_cpu_id(cpu_id).is_ok() && (read_sip() & (1 << 1)) != 0
     }
 
     /// Clear a software interrupt for a CPU.
@@ -72,6 +72,20 @@ fn clear_ssip() {
             options(nostack)
         );
     }
+}
+
+fn read_sip() -> usize {
+    let sip: usize;
+    // SAFETY: sip is a supervisor CSR; reading it observes the current CPU's
+    // pending interrupt bits and has no memory side effects.
+    unsafe {
+        core::arch::asm!(
+            "csrr {0}, sip",
+            out(reg) sip,
+            options(nostack, nomem)
+        );
+    }
+    sip
 }
 
 fn register_driver() {

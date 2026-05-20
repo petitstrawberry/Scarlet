@@ -186,17 +186,7 @@ impl SoftwareInterruptController for Clint {
 
     /// Clear a software interrupt for a specific CPU
     fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
-        // self.validate_cpu_id(cpu_id)?;
-
-        // let addr = self.msip_addr(cpu_id);
-        // unsafe {
-        //     write_volatile(addr as *mut u32, 0);
-        // }
-
-        // TODO: Use SBI to clear software interrupt
-        // For now, just return Ok
-
-        Ok(())
+        self.disable_software_interrupt(cpu_id)
     }
 }
 

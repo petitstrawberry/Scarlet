@@ -299,8 +299,10 @@ impl InterruptControllers {
 
         // Map CPUs to this controller
         for &cpu_id in cpu_ids {
-            self.cpu_to_timer_controller
-                .insert(cpu_id, controller_index);
+            if !self.cpu_to_timer_controller.contains_key(&cpu_id) {
+                self.cpu_to_timer_controller
+                    .insert(cpu_id, controller_index);
+            }
         }
 
         controller_index
@@ -338,8 +340,13 @@ impl InterruptControllers {
         self.software_interrupt_controllers.push(controller);
 
         for &cpu_id in cpu_ids {
-            self.cpu_to_software_interrupt_controller
-                .insert(cpu_id, controller_index);
+            if !self
+                .cpu_to_software_interrupt_controller
+                .contains_key(&cpu_id)
+            {
+                self.cpu_to_software_interrupt_controller
+                    .insert(cpu_id, controller_index);
+            }
         }
 
         controller_index
