@@ -2,6 +2,7 @@
 //!
 //! This module defines the basic traits for local and external interrupt controllers.
 
+use crate::device::platform::resource::{PlatformDeviceResource, PlatformDeviceResourceType};
 use crate::interrupt::InterruptError;
 
 use super::{CpuId, InterruptId, InterruptResult, Priority};
@@ -99,6 +100,30 @@ pub trait ExternalInterruptController: Send + Sync {
 
     /// Get the number of CPUs supported
     fn max_cpus(&self) -> CpuId;
+
+    /// Translate a firmware-provided IRQ resource into this controller's interrupt ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - Platform IRQ resource discovered from firmware.
+    ///
+    /// # Returns
+    ///
+    /// The interrupt ID used by this controller.
+    fn translate_irq_resource(
+        &self,
+        resource: &PlatformDeviceResource,
+    ) -> InterruptResult<InterruptId> {
+        if resource.res_type != PlatformDeviceResourceType::IRQ {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        Ok(resource
+            .irq_metadata
+            .map_or(resource.start as InterruptId, |metadata| {
+                metadata.irq_number
+            }))
+    }
 
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
         let _ = (target_cpu_id, ipi_type);

@@ -403,7 +403,7 @@ impl VirtioInputDevice {
         self.write32_register(Register::QueueNotify, 0);
     }
 
-    /// Enable interrupts for this device
+    /// Enable device-side interrupt state after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: u32) -> Result<(), &'static str> {
         // Store the interrupt ID
         *self.interrupt_id.lock() = Some(interrupt_id);
@@ -415,11 +415,6 @@ impl VirtioInputDevice {
             // Process any pending events
             self.process_events();
         }
-
-        // Enable interrupt in PLIC for CPU 0
-        crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable interrupt in PLIC")?;
 
         Ok(())
     }

@@ -90,16 +90,11 @@ impl Uart {
         self.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
     }
 
-    /// Enable UART interrupts
+    /// Enable UART-side interrupts after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
         // Enable receive data available interrupt
         self.reg_write(IER_OFFSET, IER_RDA);
-
-        // Register interrupt with interrupt manager
-        crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -363,7 +358,12 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
-        let uart_interrupt_id = irq_resource.start as u32;
+        let uart_interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+            irq_resource,
+            uart.clone(),
+            crate::arch::get_cpu().get_cpuid() as u32,
+        )
+        .map_err(|_| "Failed to register UART interrupt")?;
         crate::early_println!("UART interrupt ID: {}", uart_interrupt_id);
 
         // Enable UART interrupts
@@ -372,15 +372,7 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             // Continue without interrupts - polling mode will work
         } else {
             crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
-
-            // Register interrupt handler
-            if let Err(e) = crate::interrupt::InterruptManager::global()
-                .register_interrupt_device(uart_interrupt_id, uart.clone())
-            {
-                crate::early_println!("Failed to register UART interrupt device: {}", e);
-            } else {
-                crate::early_println!("UART interrupt device registered");
-            }
+            crate::early_println!("UART interrupt device registered");
         }
     } else {
         crate::early_println!("No interrupt resource found for UART, using polling mode");

@@ -1019,18 +1019,16 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .iter()
                 .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
             {
-                let interrupt_id = irq_resource.start as u32;
+                let interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                )
+                .map_err(|_| "Failed to register net interrupt")?;
                 crate::early_println!("[Virtio] Net device interrupt ID: {}", interrupt_id);
 
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
                     crate::early_println!("[Virtio] Failed to enable net interrupts: {}", e);
-                } else if let Err(e) = crate::interrupt::InterruptManager::global()
-                    .register_interrupt_device(interrupt_id, dev.clone())
-                {
-                    crate::early_println!(
-                        "[Virtio] Failed to register net interrupt device: {}",
-                        e
-                    );
                 } else {
                     crate::early_println!("[Virtio] Net interrupt device registered");
                 }
@@ -1062,7 +1060,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .iter()
                 .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
             {
-                let interrupt_id = irq_resource.start as u32;
+                let interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+                    irq_resource,
+                    dev.clone(),
+                    crate::arch::get_cpu().get_cpuid() as u32,
+                )
+                .map_err(|_| "Failed to register input interrupt")?;
                 crate::early_println!("[Virtio] Input device interrupt ID: {}", interrupt_id);
 
                 // Enable interrupts
@@ -1074,17 +1077,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                         interrupt_id
                     );
 
-                    // Register interrupt handler
-                    if let Err(e) = crate::interrupt::InterruptManager::global()
-                        .register_interrupt_device(interrupt_id, dev.clone())
-                    {
-                        crate::early_println!(
-                            "[Virtio] Failed to register input interrupt device: {}",
-                            e
-                        );
-                    } else {
-                        crate::early_println!("[Virtio] Input interrupt device registered");
-                    }
+                    crate::early_println!("[Virtio] Input interrupt device registered");
                 }
             } else {
                 crate::early_println!("[Virtio] No interrupt resource found for input device");

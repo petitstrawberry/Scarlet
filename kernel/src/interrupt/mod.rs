@@ -8,6 +8,7 @@ use core::fmt;
 use hashbrown::HashMap;
 
 use crate::arch::{self, interrupt::enable_external_interrupts};
+use crate::device::platform::resource::PlatformDeviceResource;
 
 pub mod controllers;
 
@@ -21,6 +22,44 @@ pub type CpuId = u32;
 
 /// Priority level for interrupts
 pub type Priority = u32;
+
+/// Resolve a platform IRQ resource to the interrupt ID used by the active controller.
+///
+/// Device Tree and other firmware formats describe interrupts in controller-specific
+/// domains. Device drivers should not know those encodings; they should pass their
+/// `PlatformDeviceResource` here and use the returned `InterruptId` for enabling and
+/// registering handlers.
+///
+/// # Arguments
+///
+/// * `resource` - Platform IRQ resource discovered from firmware.
+///
+/// # Returns
+///
+/// The controller interrupt ID that should be enabled and registered.
+pub fn resolve_platform_irq(resource: &PlatformDeviceResource) -> InterruptResult<InterruptId> {
+    InterruptManager::global().resolve_platform_irq(resource)
+}
+
+/// Register an interrupt-capable device from a platform IRQ resource and enable
+/// the corresponding controller interrupt line.
+///
+/// # Arguments
+///
+/// * `resource` - Platform IRQ resource discovered from firmware.
+/// * `device` - Device that should receive interrupt callbacks.
+/// * `cpu_id` - CPU that should receive the interrupt.
+///
+/// # Returns
+///
+/// The resolved controller interrupt ID.
+pub fn register_and_enable_platform_irq_device(
+    resource: &PlatformDeviceResource,
+    device: Arc<dyn crate::device::events::InterruptCapableDevice>,
+    cpu_id: CpuId,
+) -> InterruptResult<InterruptId> {
+    InterruptManager::global().register_and_enable_platform_irq_device(resource, device, cpu_id)
+}
 
 /// Handler function type for external interrupts
 pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<()>;
@@ -92,6 +131,18 @@ impl InterruptManager {
                     e
                 );
             }
+        }
+    }
+
+    pub fn resolve_platform_irq(
+        &self,
+        resource: &PlatformDeviceResource,
+    ) -> InterruptResult<InterruptId> {
+        let controllers = self.controllers().lock();
+        if let Some(controller) = controllers.external_controller() {
+            controller.translate_irq_resource(resource)
+        } else {
+            Err(InterruptError::ControllerNotFound)
         }
     }
 
@@ -283,6 +334,27 @@ impl InterruptManager {
         Ok(())
     }
 
+    pub fn register_platform_interrupt_device(
+        &self,
+        resource: &PlatformDeviceResource,
+        device: Arc<dyn crate::device::events::InterruptCapableDevice>,
+    ) -> InterruptResult<InterruptId> {
+        let interrupt_id = self.resolve_platform_irq(resource)?;
+        self.register_interrupt_device(interrupt_id, device)?;
+        Ok(interrupt_id)
+    }
+
+    pub fn register_and_enable_platform_irq_device(
+        &self,
+        resource: &PlatformDeviceResource,
+        device: Arc<dyn crate::device::events::InterruptCapableDevice>,
+        cpu_id: CpuId,
+    ) -> InterruptResult<InterruptId> {
+        let interrupt_id = self.register_platform_interrupt_device(resource, device)?;
+        self.enable_external_interrupt(interrupt_id, cpu_id)?;
+        Ok(interrupt_id)
+    }
+
     pub fn complete_external_interrupt(
         &self,
         cpu_id: CpuId,
@@ -307,6 +379,16 @@ impl InterruptManager {
         } else {
             Err(InterruptError::ControllerNotFound)
         }
+    }
+
+    pub fn enable_platform_interrupt(
+        &self,
+        resource: &PlatformDeviceResource,
+        cpu_id: CpuId,
+    ) -> InterruptResult<InterruptId> {
+        let interrupt_id = self.resolve_platform_irq(resource)?;
+        self.enable_external_interrupt(interrupt_id, cpu_id)?;
+        Ok(interrupt_id)
     }
 
     pub fn disable_external_interrupt(

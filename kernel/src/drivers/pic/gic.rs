@@ -3,6 +3,7 @@
 //! The GIC is responsible for managing external interrupts from devices and
 //! routing them to different CPUs with priority support in AArch64 systems.
 
+use crate::device::platform::resource::PlatformDeviceResource;
 use crate::{
     arch::mmio,
     device::{
@@ -424,6 +425,21 @@ impl ExternalInterruptController for Gic {
 
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
+    }
+
+    fn translate_irq_resource(
+        &self,
+        resource: &PlatformDeviceResource,
+    ) -> InterruptResult<InterruptId> {
+        if resource.res_type != PlatformDeviceResourceType::IRQ {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        Ok(resource
+            .irq_metadata
+            .map_or(resource.start as InterruptId, |metadata| {
+                self.translate_interrupt(&metadata)
+            }))
     }
 
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {

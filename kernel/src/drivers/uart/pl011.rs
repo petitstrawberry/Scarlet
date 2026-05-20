@@ -100,17 +100,12 @@ impl Pl011Uart {
         self.reg_write(UARTCR, CR_UARTEN | CR_TXE | CR_RXE);
     }
 
-    /// Enable UART interrupts
+    /// Enable UART-side interrupts after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
 
         // Enable receive interrupt
         self.reg_write(UARTIMSC, IMSC_RXIM);
-
-        // Register interrupt with interrupt manager
-        crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
     }
@@ -354,17 +349,12 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
-        // Translate interrupt ID using metadata if available (for ARM GIC)
-        let uart_interrupt_id = if let Some(ref metadata) = irq_resource.irq_metadata {
-            // ARM GIC 3-cell format: translate type + number to actual IRQ
-            // Type 0 = SPI (Shared Peripheral Interrupt): base 32
-            // Type 1 = PPI (Private Peripheral Interrupt): base 16
-            let base = if metadata.irq_type == 0 { 32 } else { 16 };
-            base + metadata.irq_number
-        } else {
-            // No metadata: use raw interrupt number (RISC-V PLIC, etc.)
-            irq_resource.start as u32
-        };
+        let uart_interrupt_id = crate::interrupt::register_and_enable_platform_irq_device(
+            irq_resource,
+            uart.clone(),
+            crate::arch::get_cpu().get_cpuid() as u32,
+        )
+        .map_err(|_| "Failed to register PL011 interrupt")?;
 
         crate::early_println!("PL011 interrupt ID: {}", uart_interrupt_id);
 
@@ -372,14 +362,7 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             crate::early_println!("Failed to enable PL011 interrupts: {}", e);
         } else {
             crate::early_println!("PL011 interrupts enabled (ID: {})", uart_interrupt_id);
-
-            if let Err(e) = crate::interrupt::InterruptManager::global()
-                .register_interrupt_device(uart_interrupt_id, uart.clone())
-            {
-                crate::early_println!("Failed to register PL011 interrupt device: {}", e);
-            } else {
-                crate::early_println!("PL011 interrupt device registered");
-            }
+            crate::early_println!("PL011 interrupt device registered");
         }
     } else {
         crate::early_println!("No interrupt resource found for PL011, using polling mode");

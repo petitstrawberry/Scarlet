@@ -6,6 +6,7 @@
 //!
 //! The distributor / redistributor are still configured via MMIO during init.
 
+use crate::device::platform::resource::PlatformDeviceResource;
 use crate::{
     arch::mmio,
     device::{
@@ -445,6 +446,25 @@ impl ExternalInterruptController for GicV3 {
 
     fn max_cpus(&self) -> CpuId {
         self.max_cpus
+    }
+
+    fn translate_irq_resource(
+        &self,
+        resource: &PlatformDeviceResource,
+    ) -> InterruptResult<InterruptId> {
+        if resource.res_type != PlatformDeviceResourceType::IRQ {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
+        Ok(resource
+            .irq_metadata
+            .map_or(resource.start as InterruptId, |metadata| {
+                match metadata.irq_type {
+                    0 => 32 + metadata.irq_number,
+                    1 => 16 + metadata.irq_number,
+                    _ => metadata.irq_number,
+                }
+            }))
     }
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {

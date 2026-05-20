@@ -509,7 +509,7 @@ impl VirtioNetDevice {
         }
     }
 
-    /// Enable interrupts for this device
+    /// Enable device-side interrupt state after the controller line has been registered.
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         *self.interrupt_id.lock() = Some(interrupt_id);
 
@@ -517,10 +517,6 @@ impl VirtioNetDevice {
         if isr != 0 {
             self.write32_register(Register::InterruptAck, isr & 0x03);
         }
-
-        crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable interrupt in controller")?;
 
         Ok(())
     }
