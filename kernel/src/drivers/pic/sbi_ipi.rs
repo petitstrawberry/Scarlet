@@ -89,17 +89,9 @@ fn read_sip() -> usize {
 }
 
 fn register_driver() {
-    let mut controller = Box::new(SbiIpi {
+    let controller = Box::new(SbiIpi {
         max_cpus: crate::environment::MAX_NUM_CPUS as usize,
     });
-
-    if let Err(e) = controller.init(0) {
-        crate::early_println!(
-            "[interrupt] Failed to initialize SBI IPI for CPU {}: {}",
-            0,
-            e
-        );
-    }
 
     match crate::interrupt::InterruptManager::global()
         .register_software_interrupt_controller_for_range(

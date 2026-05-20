@@ -231,26 +231,16 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create CLINT controllers
-    let mut timer_controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
-    let mut software_controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
-
-    // Initialize CLINT (Currently only initializes for CPU 0)
-    if let Err(e) = TimerController::init(timer_controller.as_mut(), 0) {
-        crate::early_println!(
-            "[interrupt] Failed to initialize CLINT for CPU {}: {}",
-            0,
-            e
-        );
-        return Err("Failed to initialize CLINT");
-    }
-    if let Err(e) = SoftwareInterruptController::init(software_controller.as_mut(), 0) {
-        crate::early_println!(
-            "[interrupt] Failed to initialize CLINT software interrupt for CPU {}: {}",
-            0,
-            e
-        );
-        return Err("Failed to initialize CLINT software interrupt");
-    }
+    let timer_controller = Box::new(Clint::new(
+        base_addr,
+        crate::environment::MAX_NUM_CPUS as CpuId,
+        timebase_frequency_hz,
+    ));
+    let software_controller = Box::new(Clint::new(
+        base_addr,
+        crate::environment::MAX_NUM_CPUS as CpuId,
+        timebase_frequency_hz,
+    ));
 
     // Register with InterruptManager instead of DeviceManager
     match crate::interrupt::InterruptManager::global()

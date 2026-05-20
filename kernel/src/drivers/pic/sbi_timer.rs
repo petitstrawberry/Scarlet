@@ -114,18 +114,10 @@ fn register_driver() {
     let timebase_frequency_hz =
         crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
-    let mut controller = Box::new(SbiTimer {
+    let controller = Box::new(SbiTimer {
         max_cpus: crate::environment::MAX_NUM_CPUS as usize,
         timebase_frequency_hz,
     });
-
-    if let Err(e) = controller.init(0) {
-        crate::early_println!(
-            "[interrupt] Failed to initialize SBI timer for CPU {}: {}",
-            0,
-            e
-        );
-    }
 
     match crate::interrupt::InterruptManager::global().register_timer_controller_for_range(
         controller,
