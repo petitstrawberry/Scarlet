@@ -63,6 +63,7 @@ QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
+QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc}"
 
 case ",$QEMU_MACHINE," in
     *,virtualization=*)
@@ -138,13 +139,32 @@ else
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
+QEMU_DISPLAY_ARGS=()
+case "$QEMU_DISPLAY" in
+    vnc)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display vnc=:0)
+        ;;
+    cocoa)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display cocoa)
+        ;;
+    sdl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
+        ;;
+    none)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, or none)"
+        exit 1
+        ;;
+esac
+
 qemu-system-riscv64 \
     -machine "$QEMU_MACHINE" \
     -accel "$QEMU_ACCEL" \
     -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
-    -nographic \
-    -serial mon:stdio \
+    "${QEMU_DISPLAY_ARGS[@]}" \
     --no-reboot \
     -bios default \
     -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
@@ -154,7 +174,6 @@ qemu-system-riscv64 \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
-    -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \

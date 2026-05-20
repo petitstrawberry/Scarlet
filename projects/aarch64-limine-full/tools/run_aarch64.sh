@@ -76,6 +76,7 @@ QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
 QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
+QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc}"
 QEMU_FRAMEBUFFER="${SCARLET_QEMU_FRAMEBUFFER_AARCH64:-virtio-gpu}"
 QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
 QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
@@ -219,10 +220,30 @@ fi
 
 ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
 
+QEMU_DISPLAY_ARGS=()
+case "$QEMU_DISPLAY" in
+    vnc)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display vnc=:0)
+        ;;
+    cocoa)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display cocoa)
+        ;;
+    sdl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
+        ;;
+    none)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, or none)"
+        exit 1
+        ;;
+esac
+
 QEMU_FRAMEBUFFER_ARGS=()
 case "$QEMU_FRAMEBUFFER" in
     virtio-gpu)
-        QEMU_FRAMEBUFFER_ARGS=(-display vnc=:0 -device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
         ;;
     ramfb)
         QEMU_FRAMEBUFFER_ARGS=(-device ramfb)
@@ -251,8 +272,7 @@ qemu-system-aarch64 \
     -accel "$QEMU_ACCEL" \
     -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
-    -nographic \
-    -serial mon:stdio \
+    "${QEMU_DISPLAY_ARGS[@]}" \
     --no-reboot \
     -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$EFI_VARS_RUNTIME" \

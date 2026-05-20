@@ -84,6 +84,10 @@ QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
 QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
+QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-none}"
+QEMU_FRAMEBUFFER="${SCARLET_QEMU_FRAMEBUFFER_AARCH64:-none}"
+QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
+QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
 
 case ",$QEMU_MACHINE," in
     *,virtualization=*)
@@ -126,6 +130,42 @@ if [ ! -f "$ROOTFS_IMAGE" ]; then
 fi
 
 TEMP_OUTPUT=$(mktemp)
+
+QEMU_DISPLAY_ARGS=()
+case "$QEMU_DISPLAY" in
+    vnc)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display vnc=:0)
+        ;;
+    cocoa)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display cocoa)
+        ;;
+    sdl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
+        ;;
+    none)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, or none)"
+        exit 1
+        ;;
+esac
+
+QEMU_FRAMEBUFFER_ARGS=()
+case "$QEMU_FRAMEBUFFER" in
+    virtio-gpu)
+        QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
+    ramfb)
+        QEMU_FRAMEBUFFER_ARGS=(-device ramfb)
+        ;;
+    none)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_FRAMEBUFFER_AARCH64=$QEMU_FRAMEBUFFER"
+        exit 1
+        ;;
+esac
 
 find_efi_code() {
     if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
@@ -253,8 +293,7 @@ qemu-system-aarch64 \
     -accel "$QEMU_ACCEL" \
     -m "$QEMU_MEMORY" \
     -smp "$QEMU_SMP" \
-    -nographic \
-    -serial mon:stdio \
+    "${QEMU_DISPLAY_ARGS[@]}" \
     --no-reboot \
     -boot menu=off,splash-time=0,strict=on \
     -drive if=pflash,format=raw,unit=0,file="$EFI_CODE",readonly=on \
@@ -264,7 +303,8 @@ qemu-system-aarch64 \
     -device virtio-blk-pci,drive=boot,bus=pcie.0,bootindex=0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    -device virtio-rng-device,bus=virtio-mmio-bus.2 \
+    "${QEMU_FRAMEBUFFER_ARGS[@]}" \
+    -device virtio-rng-device,bus=virtio-mmio-bus.3 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
