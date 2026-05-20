@@ -12,7 +12,7 @@ use crate::{
     },
     driver_initcall,
     interrupt::{
-        controllers::{LocalInterruptController, LocalInterruptType},
+        controllers::{SoftwareInterruptController, TimerController},
         CpuId, InterruptError, InterruptResult,
     },
 };
@@ -85,104 +85,91 @@ impl Clint {
     }
 }
 
-impl LocalInterruptController for Clint {
+impl TimerController for Clint {
     /// Initialize the CLINT for a specific CPU
     fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
-
-        // Clear software interrupt
-        self.clear_software_interrupt(cpu_id)?;
-
-        // Set timer to maximum value (effectively disable)
         self.set_timer(cpu_id, u64::MAX)?;
-
         Ok(())
     }
 
-    /// Enable a specific local interrupt type for a CPU
-    fn enable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
-        self.validate_cpu_id(cpu_id)?;
-
-        match interrupt_type {
-            LocalInterruptType::Timer => {
-                // Timer interrupts are enabled by setting mtimecmp
-                // This is done via set_timer() method
-                Ok(())
-            }
-            LocalInterruptType::Software => {
-                // Software interrupts are enabled by setting MSIP
-                // This is done via send_software_interrupt() method
-                Ok(())
-            }
-            LocalInterruptType::External => {
-                // External interrupts are not managed by CLINT
-                Err(InterruptError::NotSupported)
-            }
-        }
+    /// Enable timer interrupts for a CPU
+    fn enable_timer(&self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)
     }
 
-    /// Disable a specific local interrupt type for a CPU
-    fn disable_interrupt(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> InterruptResult<()> {
-        self.validate_cpu_id(cpu_id)?;
-
-        match interrupt_type {
-            LocalInterruptType::Timer => {
-                // Disable timer by setting mtimecmp to maximum value
-                self.set_timer(cpu_id, u64::MAX)
-            }
-            LocalInterruptType::Software => {
-                let addr = self.msip_addr(cpu_id);
-                unsafe {
-                    write_volatile(addr as *mut u32, 0);
-                }
-
-                Ok(())
-            }
-            LocalInterruptType::External => {
-                // External interrupts are not managed by CLINT
-                Err(InterruptError::NotSupported)
-            }
-        }
+    /// Disable timer interrupts for a CPU
+    fn disable_timer(&self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.set_timer(cpu_id, u64::MAX)
     }
 
-    /// Check if a specific local interrupt type is pending for a CPU
-    fn is_pending(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> bool {
+    /// Check whether a timer interrupt is pending for a CPU
+    fn is_timer_pending(&self, cpu_id: CpuId) -> bool {
         if self.validate_cpu_id(cpu_id).is_err() {
             return false;
         }
 
-        match interrupt_type {
-            LocalInterruptType::Timer => {
-                let current_time = self.get_time();
-                let compare_time =
-                    unsafe { read_volatile(self.mtimecmp_addr(cpu_id) as *const u64) };
-                current_time >= compare_time
-            }
-            LocalInterruptType::Software => {
-                let msip = unsafe { read_volatile(self.msip_addr(cpu_id) as *const u32) };
-                (msip & 1) != 0
-            }
-            LocalInterruptType::External => false, // Not managed by CLINT
-        }
+        let current_time = self.get_time();
+        let compare_time = unsafe { read_volatile(self.mtimecmp_addr(cpu_id) as *const u64) };
+        current_time >= compare_time
     }
 
-    /// Clear a pending local interrupt for a CPU
-    fn clear_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()> {
+    /// Clear a pending timer interrupt for a CPU
+    fn clear_timer(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)?;
+        let current_time = self.get_time();
+        self.set_timer(cpu_id, current_time + 1000000)
+    }
+
+    /// Set timer interrupt for a specific CPU
+    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
 
-        match interrupt_type {
-            LocalInterruptType::Timer => {
-                // Clear timer interrupt by setting mtimecmp to future time
-                let current_time = self.get_time();
-                self.set_timer(cpu_id, current_time + 1000000) // 1M cycles in future
-            }
-            LocalInterruptType::Software => self.clear_software_interrupt(cpu_id),
-            LocalInterruptType::External => Err(InterruptError::NotSupported),
+        // Set the timer compare register to the specified time using SBI
+        crate::arch::riscv64::instruction::sbi::sbi_set_timer(time);
+
+        Ok(())
+    }
+
+    /// Get current timer value
+    fn get_time(&self) -> u64 {
+        unsafe { read_volatile(self.mtime_addr() as *const u64) }
+    }
+
+    fn get_timer_frequency_hz(&self) -> u64 {
+        self.timebase_frequency_hz
+    }
+}
+
+impl SoftwareInterruptController for Clint {
+    /// Initialize software interrupt state for a specific CPU
+    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.clear_software_interrupt(cpu_id)
+    }
+
+    /// Enable software interrupts for a CPU
+    fn enable_software_interrupt(&self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)
+    }
+
+    /// Disable software interrupts for a CPU
+    fn disable_software_interrupt(&self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)?;
+        let addr = self.msip_addr(cpu_id);
+        unsafe {
+            write_volatile(addr as *mut u32, 0);
         }
+        Ok(())
+    }
+
+    /// Check whether a software interrupt is pending for a CPU
+    fn is_software_interrupt_pending(&self, cpu_id: CpuId) -> bool {
+        if self.validate_cpu_id(cpu_id).is_err() {
+            return false;
+        }
+
+        let msip = unsafe { read_volatile(self.msip_addr(cpu_id) as *const u32) };
+        (msip & 1) != 0
     }
 
     /// Send a software interrupt to a specific CPU
@@ -210,25 +197,6 @@ impl LocalInterruptController for Clint {
         // For now, just return Ok
 
         Ok(())
-    }
-
-    /// Set timer interrupt for a specific CPU
-    fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
-        self.validate_cpu_id(cpu_id)?;
-
-        // Set the timer compare register to the specified time using SBI
-        crate::arch::riscv64::instruction::sbi::sbi_set_timer(time);
-
-        Ok(())
-    }
-
-    /// Get current timer value
-    fn get_time(&self) -> u64 {
-        unsafe { read_volatile(self.mtime_addr() as *const u64) }
-    }
-
-    fn get_timer_frequency_hz(&self) -> u64 {
-        self.timebase_frequency_hz
     }
 }
 
@@ -267,11 +235,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let timebase_frequency_hz =
         crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
-    // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
+    // Create CLINT controllers
+    let mut timer_controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
+    let mut software_controller = Box::new(Clint::new(base_addr, crate::environment::MAX_NUM_CPUS as CpuId, timebase_frequency_hz));
 
     // Initialize CLINT (Currently only initializes for CPU 0)
-    if let Err(e) = controller.init(0) {
+    if let Err(e) = TimerController::init(timer_controller.as_mut(), 0) {
         crate::early_println!(
             "[interrupt] Failed to initialize CLINT for CPU {}: {}",
             0,
@@ -279,10 +248,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         );
         return Err("Failed to initialize CLINT");
     }
+    if let Err(e) = SoftwareInterruptController::init(software_controller.as_mut(), 0) {
+        crate::early_println!(
+            "[interrupt] Failed to initialize CLINT software interrupt for CPU {}: {}",
+            0,
+            e
+        );
+        return Err("Failed to initialize CLINT software interrupt");
+    }
 
     // Register with InterruptManager instead of DeviceManager
     match crate::interrupt::InterruptManager::global()
-        .register_local_controller_for_range(controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
+        .register_timer_controller_for_range(timer_controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
     {
         Ok(_) => {
             crate::early_println!(
@@ -293,6 +270,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register CLINT: {}", e);
             return Err("Failed to register CLINT");
+        }
+    }
+    match crate::interrupt::InterruptManager::global()
+        .register_software_interrupt_controller_for_range(software_controller, 0..(crate::environment::MAX_NUM_CPUS as CpuId))
+    {
+        Ok(_) => {}
+        Err(e) => {
+            crate::early_println!("[interrupt] Failed to register CLINT software interrupt: {}", e);
+            return Err("Failed to register CLINT software interrupt");
         }
     }
 

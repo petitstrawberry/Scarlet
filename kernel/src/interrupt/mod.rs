@@ -113,10 +113,20 @@ impl InterruptManager {
 
         let mut controllers = self.controllers().lock();
 
-        if let Some(controller) = controllers.local_controller_mut_for_cpu(cpu_id) {
+        if let Some(controller) = controllers.timer_controller_mut_for_cpu(cpu_id) {
             if let Err(e) = controller.init(cpu_id) {
                 crate::early_println!(
-                    "[interrupt] AP {}: failed to init local controller: {}",
+                    "[interrupt] AP {}: failed to init timer controller: {}",
+                    cpu_id,
+                    e
+                );
+            }
+        }
+
+        if let Some(controller) = controllers.software_interrupt_controller_mut_for_cpu(cpu_id) {
+            if let Err(e) = controller.init(cpu_id) {
+                crate::early_println!(
+                    "[interrupt] AP {}: failed to init software interrupt controller: {}",
                     cpu_id,
                     e
                 );
@@ -201,10 +211,16 @@ impl InterruptManager {
         interrupt_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(cpu_id) {
-            controller.enable_interrupt(cpu_id, interrupt_type)
-        } else {
-            Err(InterruptError::ControllerNotFound)
+        match interrupt_type {
+            controllers::LocalInterruptType::Timer => controllers
+                .timer_controller_for_cpu(cpu_id)
+                .ok_or(InterruptError::ControllerNotFound)?
+                .enable_timer(cpu_id),
+            controllers::LocalInterruptType::Software => controllers
+                .software_interrupt_controller_for_cpu(cpu_id)
+                .ok_or(InterruptError::ControllerNotFound)?
+                .enable_software_interrupt(cpu_id),
+            controllers::LocalInterruptType::External => Err(InterruptError::NotSupported),
         }
     }
 
@@ -214,16 +230,22 @@ impl InterruptManager {
         interrupt_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(cpu_id) {
-            controller.disable_interrupt(cpu_id, interrupt_type)
-        } else {
-            Err(InterruptError::ControllerNotFound)
+        match interrupt_type {
+            controllers::LocalInterruptType::Timer => controllers
+                .timer_controller_for_cpu(cpu_id)
+                .ok_or(InterruptError::ControllerNotFound)?
+                .disable_timer(cpu_id),
+            controllers::LocalInterruptType::Software => controllers
+                .software_interrupt_controller_for_cpu(cpu_id)
+                .ok_or(InterruptError::ControllerNotFound)?
+                .disable_software_interrupt(cpu_id),
+            controllers::LocalInterruptType::External => Err(InterruptError::NotSupported),
         }
     }
 
     pub fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(target_cpu) {
+        if let Some(controller) = controllers.software_interrupt_controller_for_cpu(target_cpu) {
             controller.send_software_interrupt(target_cpu)
         } else {
             Err(InterruptError::ControllerNotFound)
@@ -232,7 +254,7 @@ impl InterruptManager {
 
     pub fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(cpu_id) {
+        if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             controller.set_timer(cpu_id, time)
         } else {
             Err(InterruptError::ControllerNotFound)
@@ -241,7 +263,7 @@ impl InterruptManager {
 
     pub fn get_time(&self, cpu_id: CpuId) -> InterruptResult<u64> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(cpu_id) {
+        if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             Ok(controller.get_time())
         } else {
             Err(InterruptError::ControllerNotFound)
@@ -250,7 +272,7 @@ impl InterruptManager {
 
     pub fn get_timer_frequency_hz(&self, cpu_id: CpuId) -> InterruptResult<u64> {
         let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.local_controller_for_cpu(cpu_id) {
+        if let Some(controller) = controllers.timer_controller_for_cpu(cpu_id) {
             Ok(controller.get_timer_frequency_hz())
         } else {
             Err(InterruptError::ControllerNotFound)
@@ -263,37 +285,53 @@ impl InterruptManager {
         interrupt_type: controllers::LocalInterruptType,
     ) -> bool {
         let controllers = self.controllers().lock();
-        controllers
-            .local_controller_for_cpu(cpu_id)
-            .map(|controller| controller.is_pending(cpu_id, interrupt_type))
-            .unwrap_or(false)
+        match interrupt_type {
+            controllers::LocalInterruptType::Timer => controllers
+                .timer_controller_for_cpu(cpu_id)
+                .map(|controller| controller.is_timer_pending(cpu_id))
+                .unwrap_or(false),
+            controllers::LocalInterruptType::Software => controllers
+                .software_interrupt_controller_for_cpu(cpu_id)
+                .map(|controller| controller.is_software_interrupt_pending(cpu_id))
+                .unwrap_or(false),
+            controllers::LocalInterruptType::External => false,
+        }
     }
 
-    pub fn register_local_controller(
+    pub fn register_timer_controller(
         &self,
-        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_ids: &[CpuId],
     ) -> InterruptResult<usize> {
         let mut controllers = self.controllers().lock();
-        Ok(controllers.register_local_controller(controller, cpu_ids))
+        Ok(controllers.register_timer_controller(controller, cpu_ids))
     }
 
-    pub fn register_local_controller_for_range(
+    pub fn register_timer_controller_for_range(
         &self,
-        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_range: core::ops::Range<CpuId>,
     ) -> InterruptResult<usize> {
         let mut controllers = self.controllers().lock();
-        Ok(controllers.register_local_controller_for_range(controller, cpu_range))
+        Ok(controllers.register_timer_controller_for_range(controller, cpu_range))
     }
 
-    pub fn register_local_controller_for_cpu(
+    pub fn register_timer_controller_for_cpu(
         &self,
-        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        controller: alloc::boxed::Box<dyn controllers::TimerController>,
         cpu_id: CpuId,
     ) -> InterruptResult<usize> {
         let mut controllers = self.controllers().lock();
-        Ok(controllers.register_local_controller_for_cpu(controller, cpu_id))
+        Ok(controllers.register_timer_controller_for_cpu(controller, cpu_id))
+    }
+
+    pub fn register_software_interrupt_controller_for_range(
+        &self,
+        controller: alloc::boxed::Box<dyn controllers::SoftwareInterruptController>,
+        cpu_range: core::ops::Range<CpuId>,
+    ) -> InterruptResult<usize> {
+        let mut controllers = self.controllers().lock();
+        Ok(controllers.register_software_interrupt_controller_for_range(controller, cpu_range))
     }
 
     pub fn register_external_controller(
