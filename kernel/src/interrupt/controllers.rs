@@ -8,52 +8,165 @@ use crate::interrupt::InterruptError;
 use super::{CpuId, InterruptId, InterruptResult, Priority};
 use alloc::boxed::Box;
 
-/// Trait for local interrupt controllers (like CLINT)
+/// Trait for per-CPU timer controllers.
 ///
-/// Local interrupt controllers manage CPU-local interrupts such as timer interrupts
-/// and software interrupts.
-pub trait LocalInterruptController: Send + Sync {
-    /// Initialize the local interrupt controller for a specific CPU
+/// Timer controllers manage the architectural or firmware-backed compare source
+/// that raises timer interrupts on a CPU.
+pub trait TimerController: Send + Sync {
+    /// Initialize the timer controller for a specific CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer state should be initialized.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error when the CPU is invalid or
+    /// the hardware cannot be initialized.
     fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Enable a specific local interrupt type for a CPU
-    fn enable_interrupt(
-        &self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()>;
+    /// Enable timer interrupts for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer interrupt source should be enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn enable_timer(&self, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Disable a specific local interrupt type for a CPU
-    fn disable_interrupt(
-        &self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()>;
+    /// Disable timer interrupts for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer interrupt source should be disabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn disable_timer(&self, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Check if a specific local interrupt type is pending for a CPU
-    fn is_pending(&self, cpu_id: CpuId, interrupt_type: LocalInterruptType) -> bool;
+    /// Check whether a timer interrupt is pending for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer pending state should be checked.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a timer interrupt is pending.
+    fn is_timer_pending(&self, cpu_id: CpuId) -> bool;
 
-    /// Clear a pending local interrupt for a CPU
-    fn clear_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_type: LocalInterruptType,
-    ) -> InterruptResult<()>;
+    /// Clear or acknowledge a timer interrupt for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer interrupt should be cleared.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn clear_timer(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()>;
-
-    /// Clear a software interrupt for a specific CPU
-    fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
-
-    /// Set timer interrupt for a specific CPU
+    /// Set the next timer compare value for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose timer compare should be programmed.
+    /// * `time` - Absolute timer counter value for the next interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn set_timer(&self, cpu_id: CpuId, time: u64) -> InterruptResult<()>;
 
-    /// Get current timer value
+    /// Get the current timer counter value.
+    ///
+    /// # Returns
+    ///
+    /// The current timer counter value.
     fn get_time(&self) -> u64;
 
-    /// Returns the timer clock frequency in Hz
+    /// Get the timer clock frequency.
+    ///
+    /// # Returns
+    ///
+    /// Timer frequency in Hz.
     fn get_timer_frequency_hz(&self) -> u64;
+}
+
+/// Trait for per-CPU software interrupt / IPI controllers.
+///
+/// Software interrupt controllers send and clear CPU-local reschedule-style
+/// interrupts. On RISC-V this is typically SBI IPI; on AArch64 SGIs are usually
+/// provided by the external interrupt controller.
+pub trait SoftwareInterruptController: Send + Sync {
+    /// Initialize software interrupt state for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose software interrupt state should be initialized.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn init(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
+
+    /// Enable software interrupts for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose software interrupt source should be enabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn enable_software_interrupt(&self, cpu_id: CpuId) -> InterruptResult<()>;
+
+    /// Disable software interrupts for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose software interrupt source should be disabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn disable_software_interrupt(&self, cpu_id: CpuId) -> InterruptResult<()>;
+
+    /// Check whether a software interrupt is pending for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose software interrupt pending state should be checked.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a software interrupt is pending.
+    fn is_software_interrupt_pending(&self, cpu_id: CpuId) -> bool;
+
+    /// Clear a software interrupt for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose software interrupt should be cleared.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()>;
+
+    /// Send a software interrupt to a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_cpu` - CPU that should receive the software interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
+    fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()>;
 }
 
 /// Trait for external interrupt controllers (like PLIC)
@@ -152,9 +265,11 @@ pub enum LocalInterruptType {
 /// and provides a unified interface for interrupt management.
 /// Supports multiple local interrupt controllers for different CPU groups.
 pub struct InterruptControllers {
-    local_controllers: alloc::vec::Vec<Box<dyn LocalInterruptController>>,
+    timer_controllers: alloc::vec::Vec<Box<dyn TimerController>>,
+    software_interrupt_controllers: alloc::vec::Vec<Box<dyn SoftwareInterruptController>>,
     external_controller: Option<Box<dyn ExternalInterruptController>>,
-    cpu_to_local_controller: alloc::collections::BTreeMap<CpuId, usize>, // CPU ID -> controller index
+    cpu_to_timer_controller: alloc::collections::BTreeMap<CpuId, usize>,
+    cpu_to_software_interrupt_controller: alloc::collections::BTreeMap<CpuId, usize>,
 }
 
 unsafe impl Send for InterruptControllers {}
@@ -164,50 +279,98 @@ impl InterruptControllers {
     /// Create a new interrupt controller registry
     pub fn new() -> Self {
         Self {
-            local_controllers: alloc::vec::Vec::new(),
+            timer_controllers: alloc::vec::Vec::new(),
+            software_interrupt_controllers: alloc::vec::Vec::new(),
             external_controller: None,
-            cpu_to_local_controller: alloc::collections::BTreeMap::new(),
+            cpu_to_timer_controller: alloc::collections::BTreeMap::new(),
+            cpu_to_software_interrupt_controller: alloc::collections::BTreeMap::new(),
         }
     }
 
-    /// Register a local interrupt controller for specific CPUs
+    /// Register a timer controller for specific CPUs
     /// Returns the controller index
-    pub fn register_local_controller(
+    pub fn register_timer_controller(
         &mut self,
-        controller: Box<dyn LocalInterruptController>,
+        controller: Box<dyn TimerController>,
         cpu_ids: &[CpuId],
     ) -> usize {
-        let controller_index = self.local_controllers.len();
-        self.local_controllers.push(controller);
+        let controller_index = self.timer_controllers.len();
+        self.timer_controllers.push(controller);
 
         // Map CPUs to this controller
         for &cpu_id in cpu_ids {
-            self.cpu_to_local_controller
-                .insert(cpu_id, controller_index);
+            if !self.cpu_to_timer_controller.contains_key(&cpu_id) {
+                self.cpu_to_timer_controller
+                    .insert(cpu_id, controller_index);
+            } else {
+                crate::early_println!(
+                    "[interrupt] Timer controller already registered for CPU {}, keeping existing mapping",
+                    cpu_id
+                );
+            }
         }
 
         controller_index
     }
 
-    /// Register a local interrupt controller for a single CPU
+    /// Register a timer controller for a single CPU
     /// Returns the controller index
-    pub fn register_local_controller_for_cpu(
+    pub fn register_timer_controller_for_cpu(
         &mut self,
-        controller: Box<dyn LocalInterruptController>,
+        controller: Box<dyn TimerController>,
         cpu_id: CpuId,
     ) -> usize {
-        self.register_local_controller(controller, &[cpu_id])
+        self.register_timer_controller(controller, &[cpu_id])
     }
 
-    /// Register a local interrupt controller for a CPU range (convenience function)
+    /// Register a timer controller for a CPU range (convenience function)
     /// Returns the controller index
-    pub fn register_local_controller_for_range(
+    pub fn register_timer_controller_for_range(
         &mut self,
-        controller: Box<dyn LocalInterruptController>,
+        controller: Box<dyn TimerController>,
         cpu_range: core::ops::Range<CpuId>,
     ) -> usize {
         let cpu_ids: alloc::vec::Vec<CpuId> = cpu_range.collect();
-        self.register_local_controller(controller, &cpu_ids)
+        self.register_timer_controller(controller, &cpu_ids)
+    }
+
+    /// Register a software interrupt controller for specific CPUs
+    /// Returns the controller index
+    pub fn register_software_interrupt_controller(
+        &mut self,
+        controller: Box<dyn SoftwareInterruptController>,
+        cpu_ids: &[CpuId],
+    ) -> usize {
+        let controller_index = self.software_interrupt_controllers.len();
+        self.software_interrupt_controllers.push(controller);
+
+        for &cpu_id in cpu_ids {
+            if !self
+                .cpu_to_software_interrupt_controller
+                .contains_key(&cpu_id)
+            {
+                self.cpu_to_software_interrupt_controller
+                    .insert(cpu_id, controller_index);
+            } else {
+                crate::early_println!(
+                    "[interrupt] Software interrupt controller already registered for CPU {}, keeping existing mapping",
+                    cpu_id
+                );
+            }
+        }
+
+        controller_index
+    }
+
+    /// Register a software interrupt controller for a CPU range
+    /// Returns the controller index
+    pub fn register_software_interrupt_controller_for_range(
+        &mut self,
+        controller: Box<dyn SoftwareInterruptController>,
+        cpu_range: core::ops::Range<CpuId>,
+    ) -> usize {
+        let cpu_ids: alloc::vec::Vec<CpuId> = cpu_range.collect();
+        self.register_software_interrupt_controller(controller, &cpu_ids)
     }
 
     /// Register an external interrupt controller
@@ -218,34 +381,42 @@ impl InterruptControllers {
         self.external_controller = Some(controller);
     }
 
-    /// Get a reference to the local interrupt controller for a specific CPU
-    pub fn local_controller_for_cpu(&self, cpu_id: CpuId) -> Option<&dyn LocalInterruptController> {
-        let controller_index = self.cpu_to_local_controller.get(&cpu_id)?;
-        self.local_controllers
+    /// Get a reference to the timer controller for a specific CPU
+    pub fn timer_controller_for_cpu(&self, cpu_id: CpuId) -> Option<&dyn TimerController> {
+        let controller_index = self.cpu_to_timer_controller.get(&cpu_id)?;
+        self.timer_controllers
             .get(*controller_index)
             .map(Box::as_ref)
     }
 
-    /// Get a reference to a specific local interrupt controller by index
-    pub fn local_controller(&self, index: usize) -> Option<&dyn LocalInterruptController> {
-        self.local_controllers.get(index).map(Box::as_ref)
-    }
-
-    /// Get a mutable reference to the local interrupt controller for a specific CPU
-    pub fn local_controller_mut_for_cpu(
+    /// Get a mutable reference to the timer controller for a specific CPU
+    pub fn timer_controller_mut_for_cpu(
         &mut self,
         cpu_id: CpuId,
-    ) -> Option<&mut Box<dyn LocalInterruptController>> {
-        let controller_index = self.cpu_to_local_controller.get(&cpu_id)?;
-        self.local_controllers.get_mut(*controller_index)
+    ) -> Option<&mut Box<dyn TimerController>> {
+        let controller_index = self.cpu_to_timer_controller.get(&cpu_id)?;
+        self.timer_controllers.get_mut(*controller_index)
     }
 
-    /// Get a mutable reference to a specific local interrupt controller by index
-    pub fn local_controller_mut(
+    /// Get a reference to the software interrupt controller for a specific CPU
+    pub fn software_interrupt_controller_for_cpu(
+        &self,
+        cpu_id: CpuId,
+    ) -> Option<&dyn SoftwareInterruptController> {
+        let controller_index = self.cpu_to_software_interrupt_controller.get(&cpu_id)?;
+        self.software_interrupt_controllers
+            .get(*controller_index)
+            .map(Box::as_ref)
+    }
+
+    /// Get a mutable reference to the software interrupt controller for a specific CPU
+    pub fn software_interrupt_controller_mut_for_cpu(
         &mut self,
-        index: usize,
-    ) -> Option<&mut Box<dyn LocalInterruptController>> {
-        self.local_controllers.get_mut(index)
+        cpu_id: CpuId,
+    ) -> Option<&mut Box<dyn SoftwareInterruptController>> {
+        let controller_index = self.cpu_to_software_interrupt_controller.get(&cpu_id)?;
+        self.software_interrupt_controllers
+            .get_mut(*controller_index)
     }
 
     /// Get a mutable reference to the external interrupt controller
@@ -260,8 +431,18 @@ impl InterruptControllers {
 
     /// Initialize all local controllers for their respective CPUs
     pub fn init_local_controllers(&mut self) -> InterruptResult<()> {
-        for (cpu_id, &controller_index) in &self.cpu_to_local_controller {
-            if let Some(controller) = self.local_controllers.get_mut(controller_index) {
+        for (cpu_id, &controller_index) in &self.cpu_to_timer_controller {
+            if let Some(controller) = self.timer_controllers.get_mut(controller_index) {
+                controller.init(*cpu_id)?;
+            } else {
+                return Err(InterruptError::ControllerNotFound);
+            }
+        }
+        for (cpu_id, &controller_index) in &self.cpu_to_software_interrupt_controller {
+            if let Some(controller) = self
+                .software_interrupt_controllers
+                .get_mut(controller_index)
+            {
                 controller.init(*cpu_id)?;
             } else {
                 return Err(InterruptError::ControllerNotFound);
@@ -291,12 +472,15 @@ impl InterruptControllers {
 
     /// Check if local controller is available for a specific CPU
     pub fn has_local_controller_for_cpu(&self, cpu_id: CpuId) -> bool {
-        self.cpu_to_local_controller.contains_key(&cpu_id)
+        self.cpu_to_timer_controller.contains_key(&cpu_id)
+            || self
+                .cpu_to_software_interrupt_controller
+                .contains_key(&cpu_id)
     }
 
     /// Check if any local controller is available
     pub fn has_local_controller(&self) -> bool {
-        !self.local_controllers.is_empty()
+        !self.timer_controllers.is_empty() || !self.software_interrupt_controllers.is_empty()
     }
 
     /// Check if external controller is available
@@ -306,12 +490,12 @@ impl InterruptControllers {
 
     /// Get the number of registered local controllers
     pub fn local_controller_count(&self) -> usize {
-        self.local_controllers.len()
+        self.timer_controllers.len() + self.software_interrupt_controllers.len()
     }
 
-    /// Get CPU IDs managed by a specific local controller
-    pub fn cpus_for_controller(&self, controller_index: usize) -> alloc::vec::Vec<CpuId> {
-        self.cpu_to_local_controller
+    /// Get CPU IDs managed by a specific timer controller
+    pub fn cpus_for_timer_controller(&self, controller_index: usize) -> alloc::vec::Vec<CpuId> {
+        self.cpu_to_timer_controller
             .iter()
             .filter_map(|(cpu_id, &index)| {
                 if index == controller_index {

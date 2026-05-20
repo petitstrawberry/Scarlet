@@ -498,7 +498,7 @@ pub fn disable_interrupt() {
 }
 
 pub fn send_reschedule_ipi(target_cpu: usize) {
-    instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
+    let _ = crate::interrupt::InterruptManager::global().send_software_interrupt(target_cpu as u32);
 }
 
 /// Full memory barrier for normal memory (RAM).
