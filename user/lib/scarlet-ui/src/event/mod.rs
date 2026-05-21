@@ -6,10 +6,10 @@ use alloc::vec::Vec;
 mod dispatcher;
 mod gesture;
 
-pub use dispatcher::{EventDispatcher, Phase, HitResult};
+pub use dispatcher::{EventDispatcher, HitResult, Phase};
 pub use gesture::{
-    Gesture, GestureRecognizer, TapGestureRecognizer, DragGestureRecognizer,
-    LongPressGestureRecognizer, GestureManager,
+    DragGestureRecognizer, Gesture, GestureManager, GestureRecognizer, LongPressGestureRecognizer,
+    TapGestureRecognizer,
 };
 
 /// UI Events
@@ -19,10 +19,10 @@ pub enum Event {
     Quit,
 
     /// Window resize event
-    Resize {
-        width: u32,
-        height: u32,
-    },
+    Resize { width: u32, height: u32 },
+
+    /// Screen size changed
+    ScreenSizeChanged { width: u32, height: u32 },
 
     /// Mouse event
     Mouse(MouseEvent),
@@ -40,10 +40,7 @@ pub enum Event {
     Lifecycle(LifecycleEvent),
 
     /// Custom event with user data
-    Custom {
-        event_type: u32,
-        data: Vec<u8>,
-    },
+    Custom { event_type: u32, data: Vec<u8> },
 
     /// Window control event (from Window titlebar buttons)
     Window(WindowEvent),
@@ -59,40 +56,20 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MouseEvent {
     /// Mouse moved
-    Moved {
-        x: i32,
-        y: i32,
-    },
+    Moved { x: i32, y: i32 },
     /// Mouse entered an element
-    Entered {
-        x: i32,
-        y: i32,
-    },
+    Entered { x: i32, y: i32 },
     /// Mouse exited an element
-    Exited {
-        x: i32,
-        y: i32,
-    },
+    Exited { x: i32, y: i32 },
 
     /// Mouse button pressed
-    ButtonPressed {
-        button: MouseButton,
-        x: i32,
-        y: i32,
-    },
+    ButtonPressed { button: MouseButton, x: i32, y: i32 },
 
     /// Mouse button released
-    ButtonReleased {
-        button: MouseButton,
-        x: i32,
-        y: i32,
-    },
+    ButtonReleased { button: MouseButton, x: i32, y: i32 },
 
     /// Mouse wheel scrolled
-    Wheel {
-        delta_x: i32,
-        delta_y: i32,
-    },
+    Wheel { delta_x: i32, delta_y: i32 },
 }
 
 /// Mouse button
@@ -107,19 +84,13 @@ pub enum MouseButton {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KeyEvent {
     /// Key pressed
-    Pressed {
-        keycode: KeyCode,
-    },
+    Pressed { keycode: KeyCode },
 
     /// Key released
-    Released {
-        keycode: KeyCode,
-    },
+    Released { keycode: KeyCode },
 
     /// Character received (Unicode)
-    Char {
-        c: char,
-    },
+    Char { c: char },
 }
 
 /// Key codes

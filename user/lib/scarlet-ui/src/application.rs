@@ -60,6 +60,15 @@ pub trait Application: View {
         // Default: do nothing
     }
 
+    /// Handle display size change event
+    ///
+    /// Called when the compositor reports a new physical screen size.
+    /// Default implementation does nothing.
+    fn on_screen_size_changed(&mut self, _width: u32, _height: u32) -> Option<Size> {
+        // Default: do nothing
+        None
+    }
+
     /// Register all State instances used by this Application
     ///
     /// This method is called during Application initialization to register
@@ -194,6 +203,22 @@ pub trait Application: View {
                             }
                         }
                     }
+                    Event::ScreenSizeChanged { width, height } => {
+                        let resize_to = self.on_screen_size_changed(width, height);
+                        if let Some(new_size) = resize_to {
+                            let new_width = new_size.width.max(1.0) as u32;
+                            let new_height = new_size.height.max(1.0) as u32;
+                            if platform_window.resize(new_width, new_height).is_ok() {
+                                pipeline.resize(new_size);
+                            }
+                        }
+                        if !presented_this_cycle && (resize_to.is_some() || pipeline.has_dirty()) {
+                            if let Some(buffer) = pipeline.render() {
+                                platform_window.present(buffer);
+                                presented_this_cycle = true;
+                            }
+                        }
+                    }
                     Event::MenuItemActivated {
                         window_id,
                         menu_item_id,
@@ -290,7 +315,9 @@ pub trait Application: View {
                             // Force redraw after active app changed (State updates trigger dirty flag)
                             if !presented_this_cycle && pipeline.has_dirty() {
                                 if crate::debug::is_enabled() {
-                                    println!("[Application] ActiveAppChanged triggered redraw, has_dirty=true");
+                                    println!(
+                                        "[Application] ActiveAppChanged triggered redraw, has_dirty=true"
+                                    );
                                 }
                                 if let Some(buffer) = pipeline.render() {
                                     platform_window.present(buffer);

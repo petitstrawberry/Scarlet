@@ -66,52 +66,6 @@ static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new
 /// Currently focused window ID
 static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
 
-#[derive(Debug, Clone, Copy, Default)]
-struct WindowSizeLimits {
-    min_width: u32,
-    min_height: u32,
-    max_width: u32,
-    max_height: u32,
-}
-
-impl WindowSizeLimits {
-    fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
-        let mut w = width.max(1);
-        let mut h = height.max(1);
-
-        if self.min_width != 0 {
-            w = w.max(self.min_width.max(1));
-        }
-        if self.min_height != 0 {
-            h = h.max(self.min_height.max(1));
-        }
-
-        let effective_max_width = if self.max_width == 0 {
-            0
-        } else if self.min_width != 0 {
-            self.max_width.max(self.min_width.max(1))
-        } else {
-            self.max_width.max(1)
-        };
-        let effective_max_height = if self.max_height == 0 {
-            0
-        } else if self.min_height != 0 {
-            self.max_height.max(self.min_height.max(1))
-        } else {
-            self.max_height.max(1)
-        };
-
-        if effective_max_width != 0 {
-            w = w.min(effective_max_width);
-        }
-        if effective_max_height != 0 {
-            h = h.min(effective_max_height);
-        }
-
-        (w, h)
-    }
-}
-
 #[derive(Debug)]
 enum FrameIoError {
     WouldBlock,
@@ -740,7 +694,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
-    let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
     let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
     // Track if this client is an extension client (e.g., wayland_bridge)
     let mut is_extension_client: bool = false;
@@ -1099,7 +1052,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // Unregister window from input routing
                 unregister_window(window_id);
 
-                window_size_limits.remove(&window_id);
                 window_resizable.remove(&window_id);
 
                 // Remove AppSession
@@ -1166,16 +1118,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id, window_id, min_width, min_height, max_width, max_height
                 );
 
-                window_size_limits.insert(
-                    window_id,
-                    WindowSizeLimits {
-                        min_width,
-                        min_height,
-                        max_width,
-                        max_height,
-                    },
-                );
-
                 push_ipc_event(IpcEvent::SetWindowSizeLimits {
                     window_id,
                     min_width,
@@ -1189,27 +1131,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
-                if !window_resizable.get(&window_id).copied().unwrap_or(true) {
-                    println!(
-                        "[ClientThread {}] ResizeWindow ignored: window_id={} {}x{} (resizable=false)",
-                        client_id, window_id, width, height
-                    );
-                    continue;
-                }
-
-                let (width, height) = match window_size_limits.get(&window_id) {
-                    Some(limits) => {
-                        let (w, h) = limits.clamp(width, height);
-                        if w != width || h != height {
-                            println!(
-                                "[ClientThread {}] ResizeWindow clamped: window_id={} {}x{} -> {}x{}",
-                                client_id, window_id, width, height, w, h
-                            );
-                        }
-                        (w, h)
-                    }
-                    None => (width.max(1), height.max(1)),
-                };
+                // `resizable=false` disables user/compositor-driven interactive
+                // resizing. The owning client must still be able to replace its
+                // backing buffer when the compositor sends WINDOW_CONFIGURE, for
+                // example after a display-size change.
+                let (width, height) = (width.max(1), height.max(1));
 
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
@@ -1706,7 +1632,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Also notify the compositor so orphaned windows don't stick around.
     for window_id in managed_windows.drain(..) {
         unregister_window(window_id);
-        window_size_limits.remove(&window_id);
         push_ipc_event(IpcEvent::DestroyWindow {
             client_id,
             window_id,

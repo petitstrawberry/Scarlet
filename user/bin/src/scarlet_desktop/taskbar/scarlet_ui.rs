@@ -140,6 +140,7 @@ const MENU_BAR_ITEM_PADDING: f32 = 8.0;
 const MENU_BAR_ITEM_SPACING: f32 = 2.0;
 const MENU_BAR_OUTER_PADDING: f32 = 8.0;
 const MENU_BAR_MAX_APP_LABEL: usize = 18;
+const TASKBAR_HEIGHT: u32 = 40;
 
 fn menu_bar_label(title: &str) -> String {
     if title.chars().count() <= MENU_BAR_MAX_APP_LABEL {
@@ -541,9 +542,19 @@ impl Application for TaskBarApp {
         self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
     }
 
-    fn on_resize(&mut self, width: u32, _height: u32) {
-        println!("[TaskBar] on_resize: width={}", width);
+    fn on_resize(&mut self, width: u32, height: u32) {
+        println!("[TaskBar] on_resize: width={}, height={}", width, height);
         self.screen_width.set(width as f32);
+        self.open_menu_index.set(None);
+        self.update_workarea_from_screen_query(width, height);
+    }
+
+    fn on_screen_size_changed(&mut self, width: u32, height: u32) -> Option<Size> {
+        println!("[TaskBar] on_screen_size_changed: {}x{}", width, height);
+        self.screen_width.set(width as f32);
+        self.open_menu_index.set(None);
+        self.update_workarea(width, height, TASKBAR_HEIGHT);
+        Some(Size::new(width as f32, TASKBAR_HEIGHT as f32))
     }
 
     fn body(&self) -> impl View {
@@ -562,7 +573,7 @@ impl Application for TaskBarApp {
         let mins = (uptime / 60) % 60;
         let secs = uptime % 60;
 
-        let bar_height = 40.0;
+        let bar_height = TASKBAR_HEIGHT as f32;
         let window_height = bar_height;
 
         Window::new("TaskBar",
@@ -607,12 +618,44 @@ impl Application for TaskBarApp {
 }
 
 impl TaskBarApp {
+    fn update_workarea(&self, screen_width: u32, screen_height: u32, bar_height: u32) {
+        let workarea_y = bar_height as i32;
+        let workarea_height = screen_height.saturating_sub(bar_height);
+        if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") {
+            let _ = conn.set_workarea(0, workarea_y, screen_width, workarea_height);
+        }
+        println!(
+            "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
+            workarea_y, screen_width, workarea_height
+        );
+    }
+
+    fn update_workarea_from_screen_query(&self, fallback_width: u32, bar_height: u32) {
+        if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") {
+            if let Ok((screen_width, screen_height)) = conn.get_screen_size() {
+                let workarea_y = bar_height as i32;
+                let workarea_height = screen_height.saturating_sub(bar_height);
+                let _ = conn.set_workarea(0, workarea_y, screen_width, workarea_height);
+                println!(
+                    "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
+                    workarea_y, screen_width, workarea_height
+                );
+                return;
+            }
+        }
+        println!(
+            "[TaskBar] Failed to query screen size for workarea update (fallback_width={}, bar_height={})",
+            fallback_width, bar_height
+        );
+    }
+
     fn start_background_tasks(&mut self) {
         // CPU/Memory simulation
         let cpu = self.cpu_usage.clone();
         let mem = self.memory_usage.clone();
         let open_menu_index = self.open_menu_index.clone();
         let popup_surface_id = self.popup_surface_id.clone();
+        let screen_width_popup = self.screen_width.clone();
         let menu_tree = self.menu_tree.clone();
         let active_window_id = self.active_window_id.clone();
         let open_menu_index_popup = open_menu_index.clone();
@@ -680,7 +723,9 @@ impl TaskBarApp {
                             needs_render = true;
 
                             let bar_height = 40;
-                            let popup_x = menu_bar_popup_x(&menu_tree_value.items, index);
+                            let screen_width = screen_width_popup.get().max(1.0);
+                            let popup_x = menu_bar_popup_x(&menu_tree_value.items, index)
+                                .min((screen_width - width as f32).max(0.0));
                             let _surface_id = match popup_surface_id {
                                 Some(id) => id,
                                 None => {
@@ -787,6 +832,16 @@ impl TaskBarApp {
                                 _ => {}
                             }
                         }
+                        sws::event::Event::ScreenSizeChanged { width, .. } => {
+                            screen_width_popup.set(width as f32);
+                            open_menu_index_popup.set(None);
+                            if let Some(surface_id) = popup_surface_id.take() {
+                                let _ = conn.destroy_surface(surface_id);
+                            }
+                            popup_surface_id_popup.set(None);
+                            popup_renderer = None;
+                            last_open_index = None;
+                        }
                         _ => {}
                     }
                 }
@@ -879,7 +934,7 @@ impl TaskBarApp {
 pub extern "C" fn main() {
     println!("[TaskBar] Starting ScarletUI TaskBar");
 
-    let bar_height: u32 = 40;
+    let bar_height: u32 = TASKBAR_HEIGHT;
 
     // Get screen size from SWS before creating the app
     let screen_width = match sws::Connection::connect("/tmp/sws.sock") {

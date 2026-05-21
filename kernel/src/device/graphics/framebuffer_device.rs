@@ -20,7 +20,9 @@ use core::any::Any;
 use spin::RwLock;
 
 use crate::device::{
-    Device, DeviceType, char::CharDevice, graphics::manager::FramebufferResource,
+    Device, DeviceType,
+    char::CharDevice,
+    graphics::{FramebufferConfig, manager::FramebufferResource},
     manager::DeviceManager,
 };
 use crate::object::capability::selectable::Selectable;
@@ -245,6 +247,12 @@ pub struct FramebufferCharDevice {
     device_manager_addr: Option<usize>,
 }
 
+struct CurrentFramebufferInfo {
+    config: FramebufferConfig,
+    physical_addr: usize,
+    size: usize,
+}
+
 impl FramebufferCharDevice {
     /// Create a new framebuffer character device
     ///
@@ -292,6 +300,33 @@ impl FramebufferCharDevice {
     /// Get the framebuffer name this device represents
     pub fn get_framebuffer_name(&self) -> &str {
         &self.fb_resource.logical_name
+    }
+
+    fn page_aligned_size(size: usize) -> usize {
+        (size + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1)
+    }
+
+    fn current_framebuffer_info(&self) -> Result<CurrentFramebufferInfo, &'static str> {
+        if let Some(device) = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+        {
+            if let Some(graphics_device) = device.as_graphics_device() {
+                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let size = Self::page_aligned_size(config.size());
+                return Ok(CurrentFramebufferInfo {
+                    config,
+                    physical_addr,
+                    size,
+                });
+            }
+        }
+
+        Ok(CurrentFramebufferInfo {
+            config: self.fb_resource.config.clone(),
+            physical_addr: self.fb_resource.physical_addr,
+            size: self.fb_resource.size,
+        })
     }
 }
 
@@ -365,8 +400,10 @@ impl CharDevice for FramebufferCharDevice {
     ///
     /// True if framebuffer is valid
     fn can_read(&self) -> bool {
-        let fb_resource = &self.fb_resource;
-        fb_resource.physical_addr != 0 && fb_resource.size > 0
+        match self.current_framebuffer_info() {
+            Ok(info) => info.physical_addr != 0 && info.size > 0,
+            Err(_) => false,
+        }
     }
 
     /// Check if the device is ready for writing
@@ -375,8 +412,10 @@ impl CharDevice for FramebufferCharDevice {
     ///
     /// True if framebuffer is valid
     fn can_write(&self) -> bool {
-        let fb_resource = &self.fb_resource;
-        fb_resource.physical_addr != 0 && fb_resource.size > 0
+        match self.current_framebuffer_info() {
+            Ok(info) => info.physical_addr != 0 && info.size > 0,
+            Err(_) => false,
+        }
     }
 
     /// Read data from a specific position in the framebuffer
@@ -390,15 +429,15 @@ impl CharDevice for FramebufferCharDevice {
     ///
     /// Result containing the number of bytes read or an error
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        let fb_resource = &self.fb_resource;
+        let info = self.current_framebuffer_info()?;
 
         // Check if framebuffer address is valid
-        if fb_resource.physical_addr == 0 {
+        if info.physical_addr == 0 {
             return Err("Invalid framebuffer address");
         }
 
         // Use logical framebuffer size for boundary checks
-        let logical_size = fb_resource.config.size();
+        let logical_size = info.config.size();
         let start_pos = position as usize;
         if start_pos >= logical_size {
             return Ok(0); // EOF
@@ -414,7 +453,7 @@ impl CharDevice for FramebufferCharDevice {
         // causes QEMU's HVF backend to abort (assert(isv)). Use byte-wise volatile
         // accesses to keep the trapped instruction decodable.
         unsafe {
-            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *const u8;
+            let fb_ptr = phys_to_virt(info.physical_addr) as *const u8;
             let src_ptr = fb_ptr.add(start_pos);
 
             for i in 0..to_read {
@@ -436,15 +475,15 @@ impl CharDevice for FramebufferCharDevice {
     ///
     /// Result containing the number of bytes written or an error
     fn write_at(&self, position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
-        let fb_resource = &self.fb_resource;
+        let info = self.current_framebuffer_info()?;
 
         // Check if framebuffer address is valid
-        if fb_resource.physical_addr == 0 {
+        if info.physical_addr == 0 {
             return Err("Invalid framebuffer address");
         }
 
         // Use logical framebuffer size for boundary checks
-        let logical_size = fb_resource.config.size();
+        let logical_size = info.config.size();
         let start_pos = position as usize;
         if start_pos >= logical_size {
             return Err("Position beyond framebuffer size");
@@ -456,7 +495,7 @@ impl CharDevice for FramebufferCharDevice {
         // Write data to framebuffer memory.
         // See note in read_at() about QEMU+HVF and ISV.
         unsafe {
-            let fb_ptr = phys_to_virt(fb_resource.physical_addr) as *mut u8;
+            let fb_ptr = phys_to_virt(info.physical_addr) as *mut u8;
             let dst_ptr = fb_ptr.add(start_pos);
 
             for i in 0..to_write {
@@ -498,7 +537,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
-        let fb_resource = &self.fb_resource;
+        let info = self.current_framebuffer_info()?;
 
         // VMM requires page-aligned physical mappings.
         if offset % crate::environment::PAGE_SIZE != 0 {
@@ -509,25 +548,25 @@ impl MemoryMappingOps for FramebufferCharDevice {
         }
 
         // Check if framebuffer supports memory mapping
-        if fb_resource.physical_addr == 0 || fb_resource.size == 0 {
+        if info.physical_addr == 0 || info.size == 0 {
             return Err("Invalid framebuffer configuration");
         }
-        if fb_resource.physical_addr % crate::environment::PAGE_SIZE != 0 {
+        if info.physical_addr % crate::environment::PAGE_SIZE != 0 {
             return Err("Framebuffer physical address must be page-aligned");
         }
 
         // Basic validation
         // fb_resource.size is the page-aligned physical size, safe for mmap
-        if offset >= fb_resource.size {
+        if offset >= info.size {
             return Err("Offset exceeds framebuffer size");
         }
 
-        let available_size = fb_resource.size - offset;
+        let available_size = info.size - offset;
         if length > available_size {
             return Err("Requested length exceeds available framebuffer size");
         }
 
-        let paddr = fb_resource.physical_addr + offset;
+        let paddr = info.physical_addr + offset;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
 
@@ -546,7 +585,10 @@ impl MemoryMappingOps for FramebufferCharDevice {
     }
 
     fn supports_mmap(&self) -> bool {
-        self.fb_resource.physical_addr != 0 && self.fb_resource.size > 0
+        match self.current_framebuffer_info() {
+            Ok(info) => info.physical_addr != 0 && info.size > 0,
+            Err(_) => false,
+        }
     }
 }
 
@@ -565,8 +607,14 @@ impl Selectable for FramebufferCharDevice {
 impl FramebufferCharDevice {
     /// Build a FbVarScreenInfo reflecting the current framebuffer configuration
     fn current_var_info(&self) -> FbVarScreenInfo {
-        let fb_resource = &self.fb_resource;
-        let config = &fb_resource.config;
+        let info = self
+            .current_framebuffer_info()
+            .unwrap_or_else(|_| CurrentFramebufferInfo {
+                config: self.fb_resource.config.clone(),
+                physical_addr: self.fb_resource.physical_addr,
+                size: self.fb_resource.size,
+            });
+        let config = &info.config;
 
         let mut var_info = FbVarScreenInfo::default();
         var_info.xres = config.width;
@@ -828,19 +876,19 @@ impl FramebufferCharDevice {
             arg
         };
 
-        let fb_resource = &self.fb_resource;
-        let config = &fb_resource.config;
+        let info = self.current_framebuffer_info()?;
+        let config = &info.config;
 
         // Create fixed screen info structure
         let mut fix_info = FbFixScreenInfo::default();
 
         // Set identification string
-        let fb_name = fb_resource.logical_name.as_bytes();
+        let fb_name = self.fb_resource.logical_name.as_bytes();
         let copy_len = fb_name.len().min(fix_info.id.len() - 1);
         fix_info.id[..copy_len].copy_from_slice(&fb_name[..copy_len]);
 
-        fix_info.smem_start = fb_resource.physical_addr;
-        fix_info.smem_len = fb_resource.size as u32;
+        fix_info.smem_start = info.physical_addr;
+        fix_info.smem_len = info.size as u32;
         fix_info.line_length = config.stride;
         fix_info.type_ = 0; // FB_TYPE_PACKED_PIXELS
         fix_info.visual = 2; // FB_VISUAL_TRUECOLOR
@@ -860,10 +908,10 @@ impl FramebufferCharDevice {
     /// For memory-mapped framebuffers, this typically involves ensuring
     /// CPU caches are flushed and any display controller updates are triggered.
     fn handle_flush(&self, _arg: usize) -> Result<i32, &'static str> {
-        let fb_resource = &self.fb_resource;
+        let info = self.current_framebuffer_info()?;
 
         // Check if framebuffer address is valid
-        if fb_resource.physical_addr == 0 {
+        if info.physical_addr == 0 {
             return Err("Invalid framebuffer address");
         }
 
@@ -889,21 +937,14 @@ impl FramebufferCharDevice {
         if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
             // Check if the device supports graphics operations
             if let Some(graphics_device) = device.as_graphics_device() {
+                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+
                 // Trigger a full framebuffer flush to ensure display is updated
-                let config = &self.fb_resource.config;
                 graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
 
                 // Verify that the framebuffer address is still valid
-                match graphics_device.get_framebuffer_address() {
-                    Ok(addr) => {
-                        if addr == 0 {
-                            return Err("Graphics device framebuffer address is null");
-                        }
-                        if addr != self.fb_resource.physical_addr {
-                            return Err("Graphics device framebuffer address mismatch");
-                        }
-                    }
-                    Err(e) => return Err(e),
+                if physical_addr == 0 {
+                    return Err("Graphics device framebuffer address is null");
                 }
             }
         }

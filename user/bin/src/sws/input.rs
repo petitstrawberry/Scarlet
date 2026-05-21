@@ -1,5 +1,6 @@
 //! Input event handling module
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::fs::File;
 use std::println;
 use std::sync::Mutex;
@@ -31,6 +32,14 @@ pub enum CompositorInputEvent {
 
 /// Global input event queue
 static INPUT_EVENT_QUEUE: Mutex<Vec<CompositorInputEvent>> = Mutex::new(Vec::new());
+static SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1);
+static SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1);
+
+/// Update the screen size used to scale absolute input devices.
+pub fn set_screen_size(width: u32, height: u32) {
+    SCREEN_WIDTH.store(width.max(1), Ordering::Relaxed);
+    SCREEN_HEIGHT.store(height.max(1), Ordering::Relaxed);
+}
 
 /// Add an input event to the global queue
 pub fn push_input_event(event: CompositorInputEvent) {
@@ -162,9 +171,10 @@ impl InputManager {
     /// Start input processing thread
     pub fn start_input_thread(screen_width: u32, screen_height: u32) -> Result<(), &'static str> {
         println!("[InputManager] Starting input thread...");
+        set_screen_size(screen_width, screen_height);
 
         thread::spawn(move || {
-            input_thread_main(screen_width, screen_height);
+            input_thread_main();
         });
 
         // Start keyboard thread if keyboard device is available
@@ -180,7 +190,7 @@ impl InputManager {
 }
 
 /// Input thread main function
-fn input_thread_main(screen_width: u32, screen_height: u32) {
+fn input_thread_main() {
     println!("[InputThread] Started");
 
     let mut input_manager = match InputManager::new() {
@@ -194,10 +204,10 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
     loop {
         match input_manager.read_event() {
             Ok(Some(event)) => {
-                process_mouse_event(&mut input_manager, event, screen_width, screen_height);
+                process_mouse_event(&mut input_manager, event);
 
                 while let Ok(Some(event)) = input_manager.try_read_event() {
-                    process_mouse_event(&mut input_manager, event, screen_width, screen_height);
+                    process_mouse_event(&mut input_manager, event);
                 }
 
                 thread::sleep(core::time::Duration::from_millis(16));
@@ -213,12 +223,7 @@ fn input_thread_main(screen_width: u32, screen_height: u32) {
     println!("[InputThread] Exited");
 }
 
-fn process_mouse_event(
-    input_manager: &mut InputManager,
-    event: InputEvent,
-    screen_width: u32,
-    screen_height: u32,
-) {
+fn process_mouse_event(input_manager: &mut InputManager, event: InputEvent) {
     match event.type_ {
         event_types::EV_REL => match event.code {
             rel_codes::REL_X => {
@@ -239,6 +244,8 @@ fn process_mouse_event(
             abs_codes::ABS_X => {
                 input_manager.abs_x = Some(event.value);
                 if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                    let screen_width = SCREEN_WIDTH.load(Ordering::Relaxed);
+                    let screen_height = SCREEN_HEIGHT.load(Ordering::Relaxed);
                     let screen_x = input_manager.scale_tablet_coord(x, screen_width);
                     let screen_y = input_manager.scale_tablet_coord(y, screen_height);
                     push_input_event(CompositorInputEvent::MouseAbsolute {
@@ -250,6 +257,8 @@ fn process_mouse_event(
             abs_codes::ABS_Y => {
                 input_manager.abs_y = Some(event.value);
                 if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                    let screen_width = SCREEN_WIDTH.load(Ordering::Relaxed);
+                    let screen_height = SCREEN_HEIGHT.load(Ordering::Relaxed);
                     let screen_x = input_manager.scale_tablet_coord(x, screen_width);
                     let screen_y = input_manager.scale_tablet_coord(y, screen_height);
                     push_input_event(CompositorInputEvent::MouseAbsolute {

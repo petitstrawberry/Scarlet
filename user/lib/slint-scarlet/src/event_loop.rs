@@ -177,6 +177,9 @@ impl EventLoop {
             SwsEvent::ActiveAppChanged { .. } => {
                 // Active app changed - not used in slint apps
             }
+            SwsEvent::ScreenSizeChanged { .. } => {
+                // SurfaceConfigure carries the per-window resize request.
+            }
             SwsEvent::MenuItemActivated { .. } => {
                 // Menu item activated - not used in slint apps
             }

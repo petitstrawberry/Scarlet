@@ -277,6 +277,105 @@ impl Compositor {
         Ok(())
     }
 
+    fn check_display_resize(&mut self) -> Result<bool, &'static str> {
+        let var_info = self
+            .framebuffer
+            .get_var_screen_info()
+            .map_err(|_| "Failed to get screen info")?;
+        let new_width = var_info.xres;
+        let new_height = var_info.yres;
+
+        if new_width == 0
+            || new_height == 0
+            || (new_width == self.screen_width && new_height == self.screen_height)
+        {
+            return Ok(false);
+        }
+
+        println!(
+            "[Compositor] Display resize: {}x{} -> {}x{}",
+            self.screen_width, self.screen_height, new_width, new_height
+        );
+
+        self.framebuffer
+            .refresh_mapping()
+            .map_err(|_| "Failed to refresh framebuffer mapping")?;
+
+        self.screen_width = new_width;
+        self.screen_height = new_height;
+        self.backbuffer_stride = new_width.saturating_mul(self.bytes_per_pixel);
+        let buffer_size = new_width
+            .saturating_mul(new_height)
+            .saturating_mul(self.bytes_per_pixel) as usize;
+        self.backbuffer.resize(buffer_size, 0);
+        super::input::set_screen_size(new_width, new_height);
+        self.cursor
+            .set_position(self.cursor.x, self.cursor.y, new_width, new_height);
+
+        let payload = sws_protocol::payload_screen_size(new_width, new_height);
+        super::ipc::broadcast_message_to_all_clients(
+            sws_protocol::server_msg::SCREEN_SIZE_CHANGED,
+            payload.to_vec(),
+        );
+
+        let windows: Vec<(u32, super::window::WindowType, u32)> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .map(|w| (w.id, w.window_type, w.height))
+            .collect();
+        let mut taskbar_height = 0;
+
+        for (window_id, window_type, height) in windows {
+            match window_type {
+                super::window::WindowType::Desktop => {
+                    println!(
+                        "[Compositor] Configuring DESKTOP window #{} to {}x{}",
+                        window_id, new_width, new_height
+                    );
+                    self.window_manager
+                        .resize_window_in_place(window_id, new_width, new_height);
+                    let payload =
+                        sws_protocol::payload_window_configure(window_id, new_width, new_height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                super::window::WindowType::Taskbar => {
+                    taskbar_height = taskbar_height.max(height);
+                    println!(
+                        "[Compositor] Configuring TASKBAR window #{} to {}x{}",
+                        window_id, new_width, height
+                    );
+                    self.window_manager
+                        .resize_window_in_place(window_id, new_width, height);
+                    let payload =
+                        sws_protocol::payload_window_configure(window_id, new_width, height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if taskbar_height != 0 {
+            let workarea_y = taskbar_height as i32;
+            let workarea_height = new_height.saturating_sub(taskbar_height);
+            self.workarea = Some((0, workarea_y, new_width, workarea_height));
+            self.window_manager
+                .set_workarea(0, workarea_y, new_width, workarea_height);
+        }
+
+        self.full_redraw_needed = true;
+        self.pending_damage = None;
+        Ok(true)
+    }
+
     fn dump_memory_layout(&self, reason: &str) {
         if !LOG_MEMORY_LAYOUT {
             return;
@@ -738,8 +837,27 @@ impl Compositor {
                 } else {
                     row_stride.saturating_mul(window.height as usize)
                 };
+                let available_len = buffer_size.saturating_sub(window.shm_offset);
+                let source_width = if row_stride >= 4 { row_stride / 4 } else { 0 };
+                let source_height = if row_stride != 0 {
+                    available_len / row_stride
+                } else {
+                    0
+                };
 
-                if wo + 4 <= buffer_size {
+                if local_x as usize >= source_width || local_y as usize >= source_height {
+                    (
+                        self.bg_color,
+                        std::format!(
+                            "window#{} SHM outside source local=({}, {}) source={}x{}",
+                            window.id,
+                            local_x,
+                            local_y,
+                            source_width,
+                            source_height
+                        ),
+                    )
+                } else if wo + 4 <= buffer_size {
                     unsafe {
                         let ptr = shm_addr as *const u8;
                         (
@@ -916,6 +1034,22 @@ impl Compositor {
         } else {
             0
         };
+        if row_stride == 0 || base_offset >= window_buffer.len() {
+            return;
+        }
+
+        let available_len = window_buffer.len().saturating_sub(base_offset);
+        let source_width = (row_stride / bytes_per_pixel as usize) as i32;
+        let source_height = (available_len / row_stride) as i32;
+        if source_width <= 0 || source_height <= 0 {
+            return;
+        }
+
+        x1 = x1.min(win_x0.saturating_add(source_width));
+        y1 = y1.min(win_y0.saturating_add(source_height));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
 
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
@@ -1411,6 +1545,10 @@ impl Compositor {
 
         loop {
             let mut needs_redraw = false;
+
+            if self.check_display_resize()? {
+                needs_redraw = true;
+            }
 
             // Process IPC events from global queue (non-blocking)
             let ipc_events = self.ipc_server.process_messages()?;

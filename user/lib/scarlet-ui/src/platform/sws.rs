@@ -2,15 +2,15 @@
 //!
 //! This implementation uses the sws-client library to create and manage windows.
 
-use crate::geometry::{Point, Size};
 use crate::buffer::Buffer;
-use crate::event::{Event, MouseButton, MouseEvent};
 use crate::error::Result;
+use crate::event::{Event, MouseButton, MouseEvent};
+use crate::geometry::{Point, Size};
 use crate::platform::PlatformWindow;
-use sws_client as sws;
-use sws::event::{abs_code, event_type, key_code, Event as SwsEvent};
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
+use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
+use sws_client as sws;
 
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
@@ -36,8 +36,21 @@ impl SWSPlatformWindow {
     }
 
     /// Create a new platform window with a specific window type
-    pub fn create_with_type(app_id: &str, title: &str, size: Size, window_type: u32) -> Result<Self> {
-        Self::create_with_type_and_menu_and_policies(app_id, title, size, window_type, "", true, window_type == sws_protocol::window_types::NORMAL)
+    pub fn create_with_type(
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+    ) -> Result<Self> {
+        Self::create_with_type_and_menu_and_policies(
+            app_id,
+            title,
+            size,
+            window_type,
+            "",
+            true,
+            window_type == sws_protocol::window_types::NORMAL,
+        )
     }
 
     /// Create a new platform window with a specific window type and initial menu titles
@@ -74,17 +87,19 @@ impl SWSPlatformWindow {
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
 
         // Create surface with type
-        let surface_id = conn.create_surface_with_type_and_policies(
-            app_id,
-            title,
-            menu_titles,
-            size.width as u32,
-            size.height as u32,
-            window_type,
-            true,
-            focus_on_create,
-            active_on_focus,
-        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+        let surface_id = conn
+            .create_surface_with_type_and_policies(
+                app_id,
+                title,
+                menu_titles,
+                size.width as u32,
+                size.height as u32,
+                window_type,
+                true,
+                focus_on_create,
+                active_on_focus,
+            )
+            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
@@ -130,9 +145,10 @@ impl SWSPlatformWindow {
     }
 
     fn sanitize_menu_titles(menu_titles: &str) -> &str {
-        if menu_titles.chars().any(|c| {
-            c.is_control() && c != '\n' && c != '\r' && c != '\t'
-        }) {
+        if menu_titles
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+        {
             ""
         } else {
             menu_titles
@@ -163,13 +179,9 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
 
         // Create surface
-        let surface_id = conn.create_surface(
-            app_id,
-            title,
-            "",
-            size.width as u32,
-            size.height as u32,
-        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+        let surface_id = conn
+            .create_surface(app_id, title, "", size.width as u32, size.height as u32)
+            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
@@ -217,16 +229,33 @@ impl PlatformWindow for SWSPlatformWindow {
         if let Some(surface) = self.conn.surface_mut(self.surface_id) {
             // Get the shared memory buffer
             surface.with_buffer(|shm_buf, width, height| {
-                // SWS shared memory is width * height * 4 bytes (BGRA u8 array)
                 let src_data = buffer.data(); // &[u8]
                 let shm_len = (width * height * 4) as usize;
-                let dst_data = unsafe {
-                    core::slice::from_raw_parts_mut(shm_buf.as_mut_ptr(), shm_len)
-                };
+                let dst_data =
+                    unsafe { core::slice::from_raw_parts_mut(shm_buf.as_mut_ptr(), shm_len) };
 
-                // Copy u8 bytes directly
-                let copy_len = src_data.len().min(shm_len);
-                dst_data[..copy_len].copy_from_slice(&src_data[..copy_len]);
+                dst_data.fill(0);
+
+                let src_width = buffer.width() as usize;
+                let src_height = buffer.height() as usize;
+                let dst_width = width as usize;
+                let dst_height = height as usize;
+                let copy_width = src_width.min(dst_width);
+                let copy_height = src_height.min(dst_height);
+                let copy_bytes = copy_width.saturating_mul(4);
+
+                for y in 0..copy_height {
+                    let src_offset = y.saturating_mul(src_width).saturating_mul(4);
+                    let dst_offset = y.saturating_mul(dst_width).saturating_mul(4);
+                    let src_end = src_offset.saturating_add(copy_bytes).min(src_data.len());
+                    let dst_end = dst_offset.saturating_add(copy_bytes).min(dst_data.len());
+                    if src_end <= src_offset || dst_end <= dst_offset {
+                        break;
+                    }
+                    let len = (src_end - src_offset).min(dst_end - dst_offset);
+                    dst_data[dst_offset..dst_offset + len]
+                        .copy_from_slice(&src_data[src_offset..src_offset + len]);
+                }
             });
         }
 
@@ -268,29 +297,34 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn close(&mut self) -> Result<()> {
         // Destroy the surface
-        self.conn.destroy_surface(self.surface_id)
+        self.conn
+            .destroy_surface(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)?;
 
         Ok(())
     }
 
     fn minimize(&mut self) -> Result<()> {
-        self.conn.minimize_window(self.surface_id)
+        self.conn
+            .minimize_window(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn maximize(&mut self) -> Result<()> {
-        self.conn.maximize_window(self.surface_id)
+        self.conn
+            .maximize_window(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn restore(&mut self) -> Result<()> {
-        self.conn.restore_window(self.surface_id)
+        self.conn
+            .restore_window(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn request_move(&mut self) -> Result<()> {
-        self.conn.request_move_window(self.surface_id)
+        self.conn
+            .request_move_window(self.surface_id)
             .map_err(|_| crate::error::Error::IoError)
     }
 
@@ -312,19 +346,22 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         // Position the popup
-        self.conn.move_window(popup_surface_id, position.x as i32, position.y as i32)
+        self.conn
+            .move_window(popup_surface_id, position.x as i32, position.y as i32)
             .map_err(|_| crate::error::Error::IoError)?;
 
         Ok(popup_surface_id)
     }
 
     fn destroy_popup(&mut self, surface_id: u32) -> Result<()> {
-        self.conn.destroy_surface(surface_id)
+        self.conn
+            .destroy_surface(surface_id)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
-        self.conn.set_workarea(x, y, width, height)
+        self.conn
+            .set_workarea(x, y, width, height)
             .map_err(|_| crate::error::Error::IoError)
     }
 
@@ -341,14 +378,16 @@ impl PlatformWindow for SWSPlatformWindow {
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
 
-        let surface_id = conn.create_surface_with_type(
-            app_id,
-            title,
-            "",
-            size.width as u32,
-            size.height as u32,
-            window_type,
-        ).map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+        let surface_id = conn
+            .create_surface_with_type(
+                app_id,
+                title,
+                "",
+                size.width as u32,
+                size.height as u32,
+                window_type,
+            )
+            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
@@ -363,17 +402,20 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
-        self.conn.move_window(self.surface_id, x, y)
+        self.conn
+            .move_window(self.surface_id, x, y)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<()> {
-        self.conn.set_window_type(surface_id, window_type)
+        self.conn
+            .set_window_type(surface_id, window_type)
             .map_err(|_| crate::error::Error::IoError)
     }
 
     fn get_screen_size(&mut self) -> Result<(u32, u32)> {
-        self.conn.get_screen_size()
+        self.conn
+            .get_screen_size()
             .map_err(|_| crate::error::Error::IoError)
     }
 
@@ -382,11 +424,14 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn set_resizable(&mut self, resizable: bool) -> Result<()> {
-        self.conn.set_window_resizable(self.surface_id, resizable)
+        self.conn
+            .set_window_resizable(self.surface_id, resizable)
             .map_err(|_| crate::error::Error::IoError)?;
 
         if resizable {
-            let _ = self.conn.set_window_size_limits(self.surface_id, sws::WindowSizeLimits::NONE);
+            let _ = self
+                .conn
+                .set_window_size_limits(self.surface_id, sws::WindowSizeLimits::NONE);
         } else {
             let limits = sws::WindowSizeLimits {
                 min_width: self.current_size.width.max(0.0) as u32,
@@ -559,6 +604,9 @@ impl SWSPlatformWindow {
                     }
                 }
             }
+            SwsEvent::ScreenSizeChanged { width, height } => {
+                self.push_event(Event::ScreenSizeChanged { width, height });
+            }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {
                     self.push_event(Event::Quit);
@@ -589,7 +637,12 @@ impl SWSPlatformWindow {
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
                 if debug {
-                    scarlet_std::println!("[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                    scarlet_std::println!(
+                        "[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}",
+                        window_id,
+                        app_name,
+                        menu_titles
+                    );
                 }
                 self.push_event(Event::Custom {
                     event_type: 0xF0C0F, // FocusChanged event type
@@ -621,7 +674,12 @@ impl SWSPlatformWindow {
                 // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
                 // and only when the active APPLICATION changes (same app, different window = no broadcast)
                 if debug {
-                    scarlet_std::println!("[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}", window_id, app_name, menu_titles);
+                    scarlet_std::println!(
+                        "[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
+                        window_id,
+                        app_name,
+                        menu_titles
+                    );
                 }
                 self.push_event(Event::Custom {
                     event_type: 0xF0C0A, // ActiveAppChanged event type

@@ -6,7 +6,7 @@
 //! The driver supports basic framebuffer operations and display management
 //! according to the VirtIO GPU specification.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 
 use crate::{
@@ -58,6 +58,7 @@ const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
 
 /// VirtIO GPU command header
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct VirtioGpuCtrlHdr {
     hdr_type: u32,
     flags: u32,
@@ -78,6 +79,7 @@ struct VirtioGpuRect {
 
 /// VirtIO GPU display info
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct VirtioGpuRespDisplayInfo {
     hdr: VirtioGpuCtrlHdr,
     pmodes: [VirtioGpuDisplayOne; VIRTIO_GPU_MAX_SCANOUTS],
@@ -155,7 +157,10 @@ pub struct VirtioGpuDeviceCore {
     shadow_framebuffer_addr: RwLock<Option<usize>>,
     framebuffer_alloc: RwLock<Option<ContiguousPages>>,
     shadow_framebuffer_alloc: RwLock<Option<ContiguousPages>>,
+    retired_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
+    retired_shadow_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
     resource_id: Mutex<u32>,
+    current_resource_id: RwLock<Option<u32>>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
     resources: Mutex<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
@@ -180,7 +185,10 @@ impl VirtioGpuDeviceCore {
             shadow_framebuffer_addr: RwLock::new(None),
             framebuffer_alloc: RwLock::new(None),
             shadow_framebuffer_alloc: RwLock::new(None),
+            retired_framebuffer_allocs: Mutex::new(Vec::new()),
+            retired_shadow_framebuffer_allocs: Mutex::new(Vec::new()),
             resource_id: Mutex::new(1),
+            current_resource_id: RwLock::new(None),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
         };
@@ -305,7 +313,7 @@ impl VirtioGpuDeviceCore {
     }
 
     /// Get display information from the device
-    fn get_display_info_internal(&mut self) -> Result<(), &'static str> {
+    fn get_display_info_internal(&self) -> Result<(), &'static str> {
         // Create get display info command
         let cmd = VirtioGpuCtrlHdr {
             hdr_type: VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
@@ -323,30 +331,43 @@ impl VirtioGpuDeviceCore {
         let mut resp_buffer = alloc::vec![0u8; core::mem::size_of::<VirtioGpuRespDisplayInfo>()];
         self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
 
-        // For now, create a default display configuration
-        let mut display_info = VirtioGpuRespDisplayInfo {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            pmodes: [VirtioGpuDisplayOne {
-                r: VirtioGpuRect {
-                    x: 0,
-                    y: 0,
-                    width: 1920,
-                    height: 1080,
-                },
-                enabled: 1,
-                flags: 0,
-            }; VIRTIO_GPU_MAX_SCANOUTS],
+        let mut display_info = unsafe {
+            core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuRespDisplayInfo)
         };
+        if display_info.hdr.hdr_type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
+            return Err("GET_DISPLAY_INFO returned unexpected response");
+        }
 
-        // Only enable the first display
-        for i in 1..VIRTIO_GPU_MAX_SCANOUTS {
-            display_info.pmodes[i].enabled = 0;
+        let primary = display_info.pmodes[0];
+        if primary.enabled == 0 || primary.r.width == 0 || primary.r.height == 0 {
+            if self.display_info.read().is_some() {
+                return Ok(());
+            }
+
+            display_info = VirtioGpuRespDisplayInfo {
+                hdr: VirtioGpuCtrlHdr {
+                    hdr_type: VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+                    flags: 0,
+                    fence_id: 0,
+                    ctx_id: 0,
+                    padding: 0,
+                },
+                pmodes: [VirtioGpuDisplayOne {
+                    r: VirtioGpuRect {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                    enabled: 1,
+                    flags: 0,
+                }; VIRTIO_GPU_MAX_SCANOUTS],
+            };
+
+            // Only enable the first display
+            for i in 1..VIRTIO_GPU_MAX_SCANOUTS {
+                display_info.pmodes[i].enabled = 0;
+            }
         }
 
         *self.display_info.write() = Some(display_info);
@@ -436,7 +457,10 @@ impl VirtioGpuDeviceCore {
         let fb_alloc =
             ContiguousPages::new(fb_pages).ok_or("Failed to allocate framebuffer memory")?;
         let fb_addr = fb_alloc.as_paddr();
-        self.framebuffer_alloc.write().replace(fb_alloc);
+        let shadow_alloc =
+            ContiguousPages::new(fb_pages).ok_or("Failed to allocate shadow framebuffer memory")?;
+        let shadow_addr = shadow_alloc.as_paddr();
+
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
         // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
@@ -457,16 +481,24 @@ impl VirtioGpuDeviceCore {
             resource_id,
         };
         self.send_control_command(&scanout_cmd)?;
+        unsafe {
+            let fb_virt = crate::vm::addr::phys_to_virt(fb_addr) as *mut u8;
+            ptr::write_bytes(fb_virt, 0, fb_size);
+        }
         {
             let mut resources = self.resources.lock();
             resources.insert(resource_id, (fb_addr, fb_size));
         }
+        if let Some(old_alloc) = self.framebuffer_alloc.write().replace(fb_alloc) {
+            self.retired_framebuffer_allocs.lock().push(old_alloc);
+        }
         *self.framebuffer_addr.write() = Some(fb_addr);
-        // Allocate shadow framebuffer
-        let shadow_alloc =
-            ContiguousPages::new(fb_pages).ok_or("Failed to allocate shadow framebuffer memory")?;
-        let shadow_addr = shadow_alloc.as_paddr();
-        self.shadow_framebuffer_alloc.write().replace(shadow_alloc);
+        *self.current_resource_id.write() = Some(resource_id);
+        if let Some(old_alloc) = self.shadow_framebuffer_alloc.write().replace(shadow_alloc) {
+            self.retired_shadow_framebuffer_allocs
+                .lock()
+                .push(old_alloc);
+        }
         // Initialize shadow framebuffer with the contents of the framebuffer
         let fb_size = fb_size as usize;
         unsafe {
@@ -475,6 +507,47 @@ impl VirtioGpuDeviceCore {
             ptr::copy_nonoverlapping(fb_virt, shadow_virt, fb_size);
         }
         *self.shadow_framebuffer_addr.write() = Some(shadow_addr);
+        Ok(())
+    }
+
+    fn poll_display_resize(&self) -> Result<(), &'static str> {
+        let old_mode = {
+            let display_info = self.display_info.read();
+            display_info
+                .as_ref()
+                .map(|info| (info.pmodes[0].r.width, info.pmodes[0].r.height))
+        };
+
+        let old_display_info = *self.display_info.read();
+        self.get_display_info_internal()?;
+
+        let new_mode = {
+            let display_info = self.display_info.read();
+            display_info
+                .as_ref()
+                .map(|info| (info.pmodes[0].r.width, info.pmodes[0].r.height))
+        };
+
+        if let (Some((old_width, old_height)), Some((new_width, new_height))) = (old_mode, new_mode)
+        {
+            if (old_width != new_width || old_height != new_height)
+                && new_width != 0
+                && new_height != 0
+            {
+                crate::early_println!(
+                    "[virtio-gpu] display resize: {}x{} -> {}x{}",
+                    old_width,
+                    old_height,
+                    new_width,
+                    new_height
+                );
+                if let Err(e) = self.setup_framebuffer() {
+                    *self.display_info.write() = old_display_info;
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -515,14 +588,10 @@ impl VirtioGpuDeviceCore {
         let _display_info = display_info.as_ref().ok_or("Device not initialized")?;
 
         // Get the resource ID from our tracked resources
-        let resource_id = {
-            let resources = self.resources.lock();
-            if let Some((_, _)) = resources.get(&1) {
-                1 // Use primary framebuffer resource
-            } else {
-                return Err("No framebuffer resource found");
-            }
-        };
+        let resource_id = self
+            .current_resource_id
+            .read()
+            .ok_or("No framebuffer resource found")?;
 
         // crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}",
         //     x, y, width, height, resource_id);
@@ -727,6 +796,13 @@ impl GraphicsDevice for VirtioGpuDevice {
         self.core.lock().get_framebuffer_address()
     }
 
+    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
+        let core = self.core.lock();
+        let config = core.get_framebuffer_config()?;
+        let physical_addr = core.get_framebuffer_address()?;
+        Ok((config, physical_addr))
+    }
+
     fn flush_framebuffer(
         &self,
         x: u32,
@@ -762,6 +838,7 @@ impl GraphicsDevice for VirtioGpuDevice {
 
         let handler: Arc<dyn TimerHandler> = Arc::new(FramebufferUpdateHandler {
             device: self.core.clone(),
+            last_resize_poll_tick: Mutex::new(0),
         });
 
         add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
@@ -776,11 +853,26 @@ impl GraphicsDevice for VirtioGpuDevice {
 
 struct FramebufferUpdateHandler {
     device: Arc<Mutex<VirtioGpuDeviceCore>>,
+    last_resize_poll_tick: Mutex<u64>,
 }
 
 impl FramebufferUpdateHandler {
     fn compare_and_flush(&self) {
-        let (_fb_addr, _shadow_addr, width, height, fb_size) = {
+        let now = get_tick();
+        let should_poll_resize = {
+            let mut last_poll = self.last_resize_poll_tick.lock();
+            if now.saturating_sub(*last_poll) >= ms_to_ticks(250) {
+                *last_poll = now;
+                true
+            } else {
+                false
+            }
+        };
+        if should_poll_resize {
+            let _ = self.device.lock().poll_display_resize();
+        }
+
+        let (_fb_addr, _shadow_addr, width, height) = {
             let core = self.device.lock();
             let fb_addr = match *core.framebuffer_addr.read() {
                 Some(addr) => addr,
@@ -797,8 +889,7 @@ impl FramebufferUpdateHandler {
             };
             let width = display_info.pmodes[0].r.width;
             let height = display_info.pmodes[0].r.height;
-            let fb_size = (width * height * 4) as usize;
-            (fb_addr, shadow_addr, width, height, fb_size)
+            (fb_addr, shadow_addr, width, height)
         };
         let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
 
