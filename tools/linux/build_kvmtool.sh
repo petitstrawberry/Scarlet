@@ -4,8 +4,7 @@ set -euo pipefail
 # Cross-compile kvmtool (lkvm-static) for RISC-V 64-bit or AArch64.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh or
-#     tools/linux/build_buildroot_aarch64.sh first)
+#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh first)
 #   - git
 #
 # Produces:
@@ -30,6 +29,25 @@ set -euo pipefail
 : "${KVMTOOL_DIR:=${WORKDIR}/kvmtool-${ARCH}}"
 : "${DTC_DIR:=${WORKDIR}/dtc-kvmtool-${ARCH}}"
 
+require_supported_host() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return
+    fi
+
+    cat >&2 <<EOF
+Linux ABI support tools are built with Linux-host tooling.
+Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
+
+Example:
+  ARCH=${ARCH} \\
+  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
+  WORKDIR="\$PWD/.scarlet/cache" \\
+  bash tools/linux/build_kvmtool.sh
+EOF
+    exit 1
+}
+
 case "${ARCH}" in
     riscv64)
         : "${BUILDROOT_DIR:=/opt/buildroot}"
@@ -49,9 +67,11 @@ case "${ARCH}" in
         ;;
 esac
 
+require_supported_host
+
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
+    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -59,7 +79,7 @@ toolchain_gcc="${BUILDROOT_DIR}/output/host/bin/${TOOLCHAIN_PREFIX}-gcc"
 
 if [[ ! -x "${toolchain_gcc}" ]]; then
     echo "Buildroot toolchain missing at ${toolchain_gcc}." >&2
-    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
+    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
     exit 1
 fi
 

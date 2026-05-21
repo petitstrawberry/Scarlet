@@ -142,7 +142,7 @@ fn copy_to_user_pagewise(
     while copied < src_len {
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, src_len - copied);
-        match vm_manager.translate_to_kva(cur_user) {
+        match vm_manager.translate_to_kva_for_write(cur_user) {
             Some(kva) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr().wrapping_add(copied),
@@ -1031,7 +1031,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Fast path: buffer fits within a single page
     let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
     if page_offset + count <= crate::environment::PAGE_SIZE {
-        let buf_ptr = match task.vm_manager.translate_to_kva(user_buf) {
+        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(user_buf) {
             Some(kva) => kva as *mut u8,
             None => {
                 trapframe.increment_pc_next(task);
@@ -1224,19 +1224,6 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
-        Some(ptr) => ptr as *mut u8,
-        None => {
-            trapframe.increment_pc_next(task);
-            return errno::to_result(errno::EFAULT);
-        }
-    };
-
-    if buf_ptr.is_null() {
-        trapframe.increment_pc_next(task);
-        return errno::to_result(errno::EFAULT);
-    }
-
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
@@ -1264,35 +1251,117 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-
     let nonblocking = abi
         .get_file_status_flags(fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
 
-    match file.read_at(position as u64, &mut buffer) {
-        Ok(n) => {
-            trapframe.increment_pc_next(task);
-            n
-        }
-        Err(StreamError::EndOfStream) => {
-            trapframe.increment_pc_next(task);
-            0
-        }
-        Err(StreamError::WouldBlock) => {
-            if nonblocking {
+    let page_offset = buf_addr & (crate::environment::PAGE_SIZE - 1);
+    if page_offset + count <= crate::environment::PAGE_SIZE {
+        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(buf_addr) {
+            Some(ptr) => ptr as *mut u8,
+            None => {
                 trapframe.increment_pc_next(task);
-                errno::to_result(errno::EAGAIN)
-            } else {
-                schedule(trapframe);
-                usize::MAX
+                return errno::to_result(errno::EFAULT);
+            }
+        };
+
+        if buf_ptr.is_null() {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EFAULT);
+        }
+
+        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+
+        match file.read_at(position as u64, &mut buffer) {
+            Ok(n) => {
+                trapframe.increment_pc_next(task);
+                n
+            }
+            Err(StreamError::EndOfStream) => {
+                trapframe.increment_pc_next(task);
+                0
+            }
+            Err(StreamError::WouldBlock) => {
+                if nonblocking {
+                    trapframe.increment_pc_next(task);
+                    errno::to_result(errno::EAGAIN)
+                } else {
+                    schedule(trapframe);
+                    usize::MAX
+                }
+            }
+            Err(err) => {
+                trapframe.increment_pc_next(task);
+                errno::to_result(stream_error_to_errno(err))
             }
         }
-        Err(err) => {
-            trapframe.increment_pc_next(task);
-            errno::to_result(stream_error_to_errno(err))
+    } else {
+        let mut total_read = 0usize;
+        let mut remaining = count;
+        let mut cur_user = buf_addr;
+
+        while remaining > 0 {
+            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
+            let buf_ptr = match task.vm_manager.translate_to_kva_for_write(cur_user) {
+                Some(ptr) => ptr as *mut u8,
+                None => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(errno::EFAULT);
+                    }
+                    break;
+                }
+            };
+
+            if buf_ptr.is_null() {
+                if total_read == 0 {
+                    trapframe.increment_pc_next(task);
+                    return errno::to_result(errno::EFAULT);
+                }
+                break;
+            }
+
+            let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, chunk_size) };
+
+            let n = match file.read_at(position as u64 + total_read as u64, &mut buffer) {
+                Ok(n) => n,
+                Err(StreamError::EndOfStream) => break,
+                Err(StreamError::WouldBlock) => {
+                    if nonblocking {
+                        if total_read > 0 {
+                            break;
+                        }
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(errno::EAGAIN);
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(stream_error_to_errno(err));
+                    }
+                    break;
+                }
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            total_read += n;
+            remaining -= n;
+            cur_user += n;
+            if n < chunk_size {
+                break;
+            }
         }
+
+        trapframe.increment_pc_next(task);
+        total_read
     }
 }
 
