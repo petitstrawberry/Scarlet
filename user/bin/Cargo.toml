@@ -82,6 +82,10 @@ name = "ping"
 path = "src/ping.rs"
 
 [[bin]]
+name = "pdfview"
+path = "src/pdfview.rs"
+
+[[bin]]
 name = "netcfg"
 path = "src/netcfg.rs"
 
