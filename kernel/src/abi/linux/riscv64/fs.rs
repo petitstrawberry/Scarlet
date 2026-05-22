@@ -656,6 +656,37 @@ enum OpenMode {
 /// Returns:
 /// - File descriptor on success
 /// - usize::MAX (Linux -1) on error
+fn map_linux_tty_path(path_str: &str) -> String {
+    if path_str == "/dev/tty" {
+        "/dev/tty0".to_string()
+    } else if let Some(rest) = path_str.strip_prefix("/dev/vc/") {
+        // Map /dev/vc/N -> /dev/ttyN
+        alloc::format!("/dev/tty{}", rest)
+    } else {
+        path_str.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tty_path_tests {
+    use super::map_linux_tty_path;
+
+    #[test_case]
+    fn map_dev_tty_to_tty0() {
+        assert_eq!(map_linux_tty_path("/dev/tty"), "/dev/tty0");
+    }
+
+    #[test_case]
+    fn keep_numbered_tty_path() {
+        assert_eq!(map_linux_tty_path("/dev/tty3"), "/dev/tty3");
+    }
+
+    #[test_case]
+    fn map_dev_vc_path_to_numbered_tty() {
+        assert_eq!(map_linux_tty_path("/dev/vc/2"), "/dev/tty2");
+    }
+}
+
 pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
@@ -718,22 +749,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // Open the file using VfsManager::open_relative
     // Apply a few Linux-compat path translations for devices
-    let mapped_path = if path_str == "/dev/tty" {
-        "/dev/tty0".to_string()
-    } else if let Some(rest) = path_str.strip_prefix("/dev/vc/") {
-        // Map /dev/vc/N -> /dev/ttyN; if ttyN doesn't exist, we may further alias below
-        alloc::format!("/dev/tty{}", rest)
-    } else if let Some(n) = path_str.strip_prefix("/dev/tty") {
-        // If requesting a numbered tty other than 0, alias to tty0 for minimal support
-        // This is a compatibility shim until multiple VTs are implemented
-        if n != "0" && n.chars().all(|c| c.is_ascii_digit()) {
-            "/dev/tty0".to_string()
-        } else {
-            path_str.clone()
-        }
-    } else {
-        path_str.clone()
-    };
+    let mapped_path = map_linux_tty_path(&path_str);
 
     // crate::println!("sys_openat: attempting to open '{}' with flags {:#o} (dirfd={})", mapped_path, flags, dirfd);
 

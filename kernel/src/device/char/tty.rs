@@ -59,6 +59,7 @@ use tty_ctl::*;
 
 // Provide a static capabilities slice for TTY devices
 static TTY_CAPS: [DeviceCapability; 1] = [DeviceCapability::Tty];
+const TTY_DEVICE_NAMES: [&str; 4] = ["tty0", "tty1", "tty2", "tty3"];
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -89,24 +90,27 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let uart_device_id =
         serial_device_id.ok_or("No Serial-capable char device found for TTY initialization")?;
 
-    // Create TTY device with the resolved UART device ID
-    let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
     let uart_device = device_manager
         .get_device(uart_device_id)
         .ok_or("UART device not found")?;
 
-    // Register TTY device as event listener for UART input events via capability
-    if let Some(ec) = uart_device.as_event_capable() {
-        let weak_tty = Arc::downgrade(&tty_device);
-        ec.register_event_listener(weak_tty);
-        crate::early_println!("TTY registered as UART event listener");
+    for tty_name in TTY_DEVICE_NAMES {
+        let tty_device = Arc::new(TtyDevice::new(tty_name, uart_device_id));
+
+        // Register TTY device as event listener for UART input events via capability
+        if let Some(ec) = uart_device.as_event_capable() {
+            let weak_tty = Arc::downgrade(&tty_device);
+            ec.register_event_listener(weak_tty);
+        }
+
+        let _tty_id = device_manager
+            .register_device_with_name(alloc::string::String::from(tty_name), tty_device);
     }
 
-    // Register TTY device with device manager under name tty0
-    let _tty_id =
-        device_manager.register_device_with_name(alloc::string::String::from("tty0"), tty_device);
-
-    crate::early_println!("TTY subsystem initialized successfully");
+    crate::early_println!(
+        "TTY subsystem initialized successfully ({} terminals)",
+        TTY_DEVICE_NAMES.len()
+    );
     Ok(())
 }
 
