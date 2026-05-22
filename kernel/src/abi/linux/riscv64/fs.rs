@@ -685,6 +685,21 @@ mod tty_path_tests {
     fn map_dev_vc_path_to_numbered_tty() {
         assert_eq!(map_linux_tty_path("/dev/vc/2"), "/dev/tty2");
     }
+
+    #[test_case]
+    fn keep_non_tty_device_path_unchanged() {
+        assert_eq!(map_linux_tty_path("/dev/null"), "/dev/null");
+    }
+
+    #[test_case]
+    fn keep_tty_path_with_suffix_unchanged() {
+        assert_eq!(map_linux_tty_path("/dev/tty3extra"), "/dev/tty3extra");
+    }
+
+    #[test_case]
+    fn map_empty_dev_vc_suffix_consistently() {
+        assert_eq!(map_linux_tty_path("/dev/vc/"), "/dev/tty");
+    }
 }
 
 pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {

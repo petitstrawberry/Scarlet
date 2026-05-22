@@ -94,17 +94,20 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
         .get_device(uart_device_id)
         .ok_or("UART device not found")?;
 
-    for tty_name in TTY_DEVICE_NAMES {
+    for (index, tty_name) in TTY_DEVICE_NAMES.iter().enumerate() {
         let tty_device = Arc::new(TtyDevice::new(tty_name, uart_device_id));
 
-        // Register TTY device as event listener for UART input events via capability
-        if let Some(ec) = uart_device.as_event_capable() {
+        // Route hardware UART input to the primary console only.
+        // Additional TTYs are reserved for non-UART frontends (GUI terminal/PTY-like use).
+        if index == 0
+            && let Some(ec) = uart_device.as_event_capable()
+        {
             let weak_tty = Arc::downgrade(&tty_device);
             ec.register_event_listener(weak_tty);
         }
 
         let _tty_id = device_manager
-            .register_device_with_name(alloc::string::String::from(tty_name), tty_device);
+            .register_device_with_name(alloc::string::String::from(*tty_name), tty_device);
     }
 
     crate::early_println!(
