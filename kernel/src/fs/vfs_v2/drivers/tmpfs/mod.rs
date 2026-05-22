@@ -1514,7 +1514,7 @@ impl MemoryMappingOps for TmpFileObject {
             .pin_or_load(self.cache_id(), page_index, |paddr| {
                 // SAFETY: paddr is a freshly-allocated page from the page cache.
                 unsafe {
-                    core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                    core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                 }
                 Ok(())
             })
@@ -1528,7 +1528,7 @@ impl MemoryMappingOps for TmpFileObject {
                 // SAFETY: paddr is a valid page-cache page; zero_start < PAGE_SIZE.
                 unsafe {
                     core::ptr::write_bytes(
-                        (pinned.paddr() as *mut u8).add(zero_start),
+                        (phys_to_virt(pinned.paddr()) as *mut u8).add(zero_start),
                         0,
                         PAGE_SIZE - zero_start,
                     );
@@ -1574,7 +1574,7 @@ impl FileObject for TmpFileObject {
             let pinned = PageCacheManager::global()
                 .pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
-                        core::ptr::write_bytes(paddr as *mut u8, 0, PAGE_SIZE);
+                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
                 })

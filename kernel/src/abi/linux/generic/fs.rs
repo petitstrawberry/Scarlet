@@ -142,7 +142,7 @@ fn copy_to_user_pagewise(
     while copied < src_len {
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, src_len - copied);
-        match vm_manager.translate_to_kva(cur_user) {
+        match vm_manager.translate_to_kva_for_write(cur_user) {
             Some(kva) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr().wrapping_add(copied),
@@ -1031,7 +1031,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Fast path: buffer fits within a single page
     let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
     if page_offset + count <= crate::environment::PAGE_SIZE {
-        let buf_ptr = match task.vm_manager.translate_to_kva(user_buf) {
+        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(user_buf) {
             Some(kva) => kva as *mut u8,
             None => {
                 trapframe.increment_pc_next(task);
@@ -1224,19 +1224,6 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
-        Some(ptr) => ptr as *mut u8,
-        None => {
-            trapframe.increment_pc_next(task);
-            return errno::to_result(errno::EFAULT);
-        }
-    };
-
-    if buf_ptr.is_null() {
-        trapframe.increment_pc_next(task);
-        return errno::to_result(errno::EFAULT);
-    }
-
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
@@ -1264,35 +1251,117 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-
     let nonblocking = abi
         .get_file_status_flags(fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
 
-    match file.read_at(position as u64, &mut buffer) {
-        Ok(n) => {
-            trapframe.increment_pc_next(task);
-            n
-        }
-        Err(StreamError::EndOfStream) => {
-            trapframe.increment_pc_next(task);
-            0
-        }
-        Err(StreamError::WouldBlock) => {
-            if nonblocking {
+    let page_offset = buf_addr & (crate::environment::PAGE_SIZE - 1);
+    if page_offset + count <= crate::environment::PAGE_SIZE {
+        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(buf_addr) {
+            Some(ptr) => ptr as *mut u8,
+            None => {
                 trapframe.increment_pc_next(task);
-                errno::to_result(errno::EAGAIN)
-            } else {
-                schedule(trapframe);
-                usize::MAX
+                return errno::to_result(errno::EFAULT);
+            }
+        };
+
+        if buf_ptr.is_null() {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EFAULT);
+        }
+
+        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+
+        match file.read_at(position as u64, &mut buffer) {
+            Ok(n) => {
+                trapframe.increment_pc_next(task);
+                n
+            }
+            Err(StreamError::EndOfStream) => {
+                trapframe.increment_pc_next(task);
+                0
+            }
+            Err(StreamError::WouldBlock) => {
+                if nonblocking {
+                    trapframe.increment_pc_next(task);
+                    errno::to_result(errno::EAGAIN)
+                } else {
+                    schedule(trapframe);
+                    usize::MAX
+                }
+            }
+            Err(err) => {
+                trapframe.increment_pc_next(task);
+                errno::to_result(stream_error_to_errno(err))
             }
         }
-        Err(err) => {
-            trapframe.increment_pc_next(task);
-            errno::to_result(stream_error_to_errno(err))
+    } else {
+        let mut total_read = 0usize;
+        let mut remaining = count;
+        let mut cur_user = buf_addr;
+
+        while remaining > 0 {
+            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
+            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
+            let buf_ptr = match task.vm_manager.translate_to_kva_for_write(cur_user) {
+                Some(ptr) => ptr as *mut u8,
+                None => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(errno::EFAULT);
+                    }
+                    break;
+                }
+            };
+
+            if buf_ptr.is_null() {
+                if total_read == 0 {
+                    trapframe.increment_pc_next(task);
+                    return errno::to_result(errno::EFAULT);
+                }
+                break;
+            }
+
+            let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, chunk_size) };
+
+            let n = match file.read_at(position as u64 + total_read as u64, &mut buffer) {
+                Ok(n) => n,
+                Err(StreamError::EndOfStream) => break,
+                Err(StreamError::WouldBlock) => {
+                    if nonblocking {
+                        if total_read > 0 {
+                            break;
+                        }
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(errno::EAGAIN);
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if total_read == 0 {
+                        trapframe.increment_pc_next(task);
+                        return errno::to_result(stream_error_to_errno(err));
+                    }
+                    break;
+                }
+            };
+
+            if n == 0 {
+                break;
+            }
+
+            total_read += n;
+            remaining -= n;
+            cur_user += n;
+            if n < chunk_size {
+                break;
+            }
         }
+
+        trapframe.increment_pc_next(task);
+        total_read
     }
 }
 
@@ -2729,6 +2798,16 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     errno::to_result(errno::ENOSYS)
 }
 
+pub fn sys_inotify_init1(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    trapframe.increment_pc_next(task);
+    errno::to_result(errno::ENOSYS)
+}
+
 /// Linux sys_flock - Apply or remove an advisory lock on an open file
 ///
 /// Apply or remove an advisory lock on the open file specified by fd.
@@ -3070,6 +3149,11 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     if length < 0 {
+        crate::println!(
+            "sys_ftruncate: invalid negative length fd={} len={}",
+            fd,
+            length
+        );
         return errno::to_result(errno::EINVAL);
     }
 
@@ -3084,45 +3168,58 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Some(shared_memory) = kernel_obj.as_shared_memory() {
-        if let Err(_err) = shared_memory.resize(length as usize) {
-            return errno::to_result(errno::EINVAL);
+        let old_size = shared_memory.size();
+        // crate::println!(
+        //     "sys_ftruncate: shared memory fd={} old_size={} len={}",
+        //     fd,
+        //     old_size,
+        //     length
+        // );
+        if let Err(err) = shared_memory.resize(length as usize) {
+            crate::println!(
+                "sys_ftruncate: shared memory resize failed fd={} old_size={} len={} err={}",
+                fd,
+                old_size,
+                length,
+                err
+            );
+            return errno::to_result(errno::ENOSPC);
         }
         return 0;
     }
 
     let file_obj = match kernel_obj.as_file() {
         Some(f) => f,
-        None => return errno::to_result(errno::EINVAL),
-    };
-
-    let mut is_shm = false;
-    let mut shm_path = None;
-    if let Some(vfs_obj) = file_obj
-        .as_any()
-        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
-    {
-        let path = vfs_obj.get_original_path();
-        if path.contains("wl_shm-") {
-            is_shm = true;
-            shm_path = Some(path);
-            crate::println!("sys_ftruncate: shm path='{}' len={}", path, length);
+        None => {
+            let kind = match kernel_obj {
+                crate::object::KernelObject::File(_) => "File",
+                crate::object::KernelObject::Pipe(_) => "Pipe",
+                crate::object::KernelObject::Counter(_) => "Counter",
+                crate::object::KernelObject::Timer(_) => "Timer",
+                crate::object::KernelObject::EventChannel(_) => "EventChannel",
+                crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
+                crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
+                #[cfg(feature = "network")]
+                crate::object::KernelObject::Socket(_) => "Socket",
+                #[cfg(feature = "hypervisor")]
+                crate::object::KernelObject::HypervisorVm(_) => "HypervisorVm",
+                #[cfg(feature = "hypervisor")]
+                crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
+            };
+            crate::println!(
+                "sys_ftruncate: fd={} kind={} is not truncatable len={}",
+                fd,
+                kind,
+                length
+            );
+            return errno::to_result(errno::EINVAL);
         }
-    }
+    };
 
     match file_obj.truncate(length as u64) {
         Ok(()) => 0,
         Err(err) => {
-            if is_shm {
-                if let Ok(meta) = file_obj.metadata() {
-                    crate::println!(
-                        "sys_ftruncate: shm truncate failed len={} file_type={:?} size={}",
-                        length,
-                        meta.file_type,
-                        meta.size
-                    );
-                }
-                crate::println!("sys_ftruncate: shm truncate error={:?}", err);
-            } else if length > 0 {
+            if length > 0 {
                 let kind = match kernel_obj {
                     crate::object::KernelObject::File(_) => "File",
                     crate::object::KernelObject::Pipe(_) => "Pipe",
@@ -3138,14 +3235,6 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     #[cfg(feature = "hypervisor")]
                     crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
                 };
-                crate::println!(
-                    "sys_ftruncate: fd={} kind={} path={:?} len={} err={:?}",
-                    fd,
-                    kind,
-                    shm_path,
-                    length,
-                    err
-                );
             }
             errno::to_result(errno::EIO)
         }
@@ -3918,7 +4007,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
 pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet};
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
     use crate::timer::ns_to_ticks;
 
     let task = match mytask() {
@@ -4118,36 +4207,62 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             } else if let Some(wait_idx) = first_selectable_index {
-                let pfd = &fds[wait_idx];
-                if pfd.fd >= 0 {
-                    let fd_usize = pfd.fd as usize;
-                    let abi_ref = &*abi;
-                    let task_ref: &crate::task::Task = &*task;
-                    if let Some(handle) = abi_ref.get_handle(fd_usize) {
-                        if let Some(kobj) = task_ref.handle_table.get(handle) {
-                            if let Some(sel) = kobj.as_selectable() {
-                                let want_read = (pfd.events & POLLIN) != 0;
-                                let want_write = (pfd.events & POLLOUT) != 0;
-                                let want_except = (pfd.events & POLLPRI) != 0;
-                                let _ = sel.wait_until_ready(
-                                    ReadyInterest {
-                                        read: want_read,
-                                        write: want_write,
-                                        except: want_except,
-                                    },
-                                    trapframe,
-                                    timeout_ticks,
-                                    0,
-                                );
+                use crate::timer::get_tick;
+
+                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                loop {
+                    let remaining_timeout = if let Some(deadline) = deadline {
+                        let now = get_tick();
+                        if now >= deadline {
+                            break;
+                        }
+                        Some(deadline.saturating_sub(now))
+                    } else {
+                        None
+                    };
+
+                    let mut wait_outcome = SelectWaitOutcome::Ready;
+                    let pfd = &fds[wait_idx];
+                    if pfd.fd >= 0 {
+                        let fd_usize = pfd.fd as usize;
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        if let Some(handle) = abi_ref.get_handle(fd_usize) {
+                            if let Some(kobj) = task_ref.handle_table.get(handle) {
+                                if let Some(sel) = kobj.as_selectable() {
+                                    let want_read = (pfd.events & POLLIN) != 0;
+                                    let want_write = (pfd.events & POLLOUT) != 0;
+                                    let want_except = (pfd.events & POLLPRI) != 0;
+                                    wait_outcome = sel.wait_until_ready(
+                                        ReadyInterest {
+                                            read: want_read,
+                                            write: want_write,
+                                            except: want_except,
+                                        },
+                                        trapframe,
+                                        remaining_timeout,
+                                        0,
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                let abi_ref = &*abi;
-                let task_ref: &crate::task::Task = &*task;
-                for pfd in fds.iter_mut() {
-                    let _ = eval_pfd(pfd, abi_ref, task_ref);
+                    any_ready = false;
+                    {
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        for pfd in fds.iter_mut() {
+                            let eval = eval_pfd(pfd, abi_ref, task_ref);
+                            if eval.ready {
+                                any_ready = true;
+                            }
+                        }
+                    }
+
+                    if any_ready || wait_outcome == SelectWaitOutcome::TimedOut {
+                        break;
+                    }
                 }
             }
         }

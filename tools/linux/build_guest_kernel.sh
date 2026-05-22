@@ -4,8 +4,7 @@ set -euo pipefail
 # Cross-compile a minimal Linux guest kernel for kvmtool.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh or
-#     tools/linux/build_buildroot_aarch64.sh first)
+#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh first)
 #   - git
 #
 # Produces:
@@ -27,6 +26,25 @@ set -euo pipefail
 : "${KERNEL_BRANCH:=v6.12}"
 
 : "${KERNEL_DIR:=${WORKDIR}/linux-guest-${ARCH}}"
+
+require_supported_host() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return
+    fi
+
+    cat >&2 <<EOF
+Linux guest artifacts are built with Linux-host tooling.
+Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
+
+Example:
+  ARCH=${ARCH} \\
+  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
+  WORKDIR="\$PWD/.scarlet/cache" \\
+  bash tools/linux/build_guest_kernel.sh
+EOF
+    exit 1
+}
 
 case "${ARCH}" in
     riscv64)
@@ -92,9 +110,11 @@ CONFIG_PRINTK=y
         ;;
 esac
 
+require_supported_host
+
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
+    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
     exit 1
 fi
 

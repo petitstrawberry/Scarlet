@@ -39,6 +39,8 @@ const LOG_RENDER_VALIDATION: bool = false;
 // Feature flag: Enable dirty rect optimization (false = always full redraw)
 // Disable this if you suspect partial redraw is causing rendering artifacts
 const ENABLE_DIRTY_RECT: bool = true;
+const MAX_PENDING_DAMAGE_RECTS: usize = 8;
+const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
@@ -53,7 +55,7 @@ pub struct Compositor {
     backbuffer: Vec<u8>,
     backbuffer_stride: u32,
     full_redraw_needed: bool,
-    pending_damage: Option<(i32, i32, u32, u32)>,
+    pending_damage: Vec<(i32, i32, u32, u32)>,
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
@@ -157,7 +159,7 @@ impl Compositor {
             backbuffer,
             backbuffer_stride,
             full_redraw_needed: true,
-            pending_damage: None,
+            pending_damage: Vec::new(),
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
@@ -275,6 +277,105 @@ impl Compositor {
         println!("[Compositor] Display initialized");
 
         Ok(())
+    }
+
+    fn check_display_resize(&mut self) -> Result<bool, &'static str> {
+        let var_info = self
+            .framebuffer
+            .get_var_screen_info()
+            .map_err(|_| "Failed to get screen info")?;
+        let new_width = var_info.xres;
+        let new_height = var_info.yres;
+
+        if new_width == 0
+            || new_height == 0
+            || (new_width == self.screen_width && new_height == self.screen_height)
+        {
+            return Ok(false);
+        }
+
+        println!(
+            "[Compositor] Display resize: {}x{} -> {}x{}",
+            self.screen_width, self.screen_height, new_width, new_height
+        );
+
+        self.framebuffer
+            .refresh_mapping()
+            .map_err(|_| "Failed to refresh framebuffer mapping")?;
+
+        self.screen_width = new_width;
+        self.screen_height = new_height;
+        self.backbuffer_stride = new_width.saturating_mul(self.bytes_per_pixel);
+        let buffer_size = new_width
+            .saturating_mul(new_height)
+            .saturating_mul(self.bytes_per_pixel) as usize;
+        self.backbuffer.resize(buffer_size, 0);
+        super::input::set_screen_size(new_width, new_height);
+        self.cursor
+            .set_position(self.cursor.x, self.cursor.y, new_width, new_height);
+
+        let payload = sws_protocol::payload_screen_size(new_width, new_height);
+        super::ipc::broadcast_message_to_all_clients(
+            sws_protocol::server_msg::SCREEN_SIZE_CHANGED,
+            payload.to_vec(),
+        );
+
+        let windows: Vec<(u32, super::window::WindowType, u32)> = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .map(|w| (w.id, w.window_type, w.height))
+            .collect();
+        let mut taskbar_height = 0;
+
+        for (window_id, window_type, height) in windows {
+            match window_type {
+                super::window::WindowType::Desktop => {
+                    println!(
+                        "[Compositor] Configuring DESKTOP window #{} to {}x{}",
+                        window_id, new_width, new_height
+                    );
+                    self.window_manager
+                        .resize_window_in_place(window_id, new_width, new_height);
+                    let payload =
+                        sws_protocol::payload_window_configure(window_id, new_width, new_height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                super::window::WindowType::Taskbar => {
+                    taskbar_height = taskbar_height.max(height);
+                    println!(
+                        "[Compositor] Configuring TASKBAR window #{} to {}x{}",
+                        window_id, new_width, height
+                    );
+                    self.window_manager
+                        .resize_window_in_place(window_id, new_width, height);
+                    let payload =
+                        sws_protocol::payload_window_configure(window_id, new_width, height);
+                    super::ipc::send_message_to_window(
+                        window_id,
+                        sws_protocol::server_msg::WINDOW_CONFIGURE,
+                        payload.to_vec(),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if taskbar_height != 0 {
+            let workarea_y = taskbar_height as i32;
+            let workarea_height = new_height.saturating_sub(taskbar_height);
+            self.workarea = Some((0, workarea_y, new_width, workarea_height));
+            self.window_manager
+                .set_workarea(0, workarea_y, new_width, workarea_height);
+        }
+
+        self.full_redraw_needed = true;
+        self.pending_damage.clear();
+        Ok(true)
     }
 
     fn dump_memory_layout(&self, reason: &str) {
@@ -484,6 +585,60 @@ impl Compositor {
         }
     }
 
+    fn rect_area(rect: (i32, i32, u32, u32)) -> u64 {
+        u64::from(rect.2).saturating_mul(u64::from(rect.3))
+    }
+
+    fn union_damage_rect(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {
+        let ax1 = (a.0 as i64).saturating_add(a.2 as i64);
+        let ay1 = (a.1 as i64).saturating_add(a.3 as i64);
+        let bx1 = (b.0 as i64).saturating_add(b.2 as i64);
+        let by1 = (b.1 as i64).saturating_add(b.3 as i64);
+        let x0 = core::cmp::min(a.0 as i64, b.0 as i64);
+        let y0 = core::cmp::min(a.1 as i64, b.1 as i64);
+        let x1 = core::cmp::max(ax1, bx1);
+        let y1 = core::cmp::max(ay1, by1);
+        (
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0).max(0) as u32,
+            (y1 - y0).max(0) as u32,
+        )
+    }
+
+    fn should_merge_damage(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
+        let union = Self::union_damage_rect(a, b);
+        let separate_area = Self::rect_area(a).saturating_add(Self::rect_area(b));
+        let union_area = Self::rect_area(union);
+        union_area <= separate_area.saturating_mul(DAMAGE_MERGE_AREA_FACTOR)
+    }
+
+    fn push_damage_rect(rects: &mut Vec<(i32, i32, u32, u32)>, rect: (i32, i32, u32, u32)) {
+        for existing in rects.iter_mut() {
+            if Self::should_merge_damage(*existing, rect) {
+                *existing = Self::union_damage_rect(*existing, rect);
+                return;
+            }
+        }
+
+        if rects.len() < MAX_PENDING_DAMAGE_RECTS {
+            rects.push(rect);
+            return;
+        }
+
+        let mut best_index = 0;
+        let mut best_extra_area = u64::MAX;
+        for (idx, existing) in rects.iter().enumerate() {
+            let union = Self::union_damage_rect(*existing, rect);
+            let extra_area = Self::rect_area(union).saturating_sub(Self::rect_area(*existing));
+            if extra_area < best_extra_area {
+                best_index = idx;
+                best_extra_area = extra_area;
+            }
+        }
+        rects[best_index] = Self::union_damage_rect(rects[best_index], rect);
+    }
+
     fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
         if !ENABLE_DIRTY_RECT {
             self.full_redraw_needed = true;
@@ -494,22 +649,7 @@ impl Compositor {
             return;
         };
 
-        self.pending_damage = match self.pending_damage {
-            None => Some((sx0, sy0, w, h)),
-            Some((px, py, pw, ph)) => {
-                let px1 = (px as i64).saturating_add(pw as i64);
-                let py1 = (py as i64).saturating_add(ph as i64);
-                let nx1 = (sx0 as i64).saturating_add(w as i64);
-                let ny1 = (sy0 as i64).saturating_add(h as i64);
-                let x0 = core::cmp::min(px as i64, sx0 as i64);
-                let y0 = core::cmp::min(py as i64, sy0 as i64);
-                let x1 = core::cmp::max(px1, nx1);
-                let y1 = core::cmp::max(py1, ny1);
-                let uw = (x1 - x0).max(0) as u32;
-                let uh = (y1 - y0).max(0) as u32;
-                Some((x0 as i32, y0 as i32, uw, uh))
-            }
-        };
+        Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
     }
 
     /// Mark a window's entire area as damaged and request full redraw
@@ -525,54 +665,34 @@ impl Compositor {
 
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
-        fn union_rect(
-            a: Option<(i32, i32, u32, u32)>,
-            b: Option<(i32, i32, u32, u32)>,
-        ) -> Option<(i32, i32, u32, u32)> {
-            match (a, b) {
-                (None, None) => None,
-                (Some(r), None) | (None, Some(r)) => Some(r),
-                (Some((ax, ay, aw, ah)), Some((bx, by, bw, bh))) => {
-                    if aw == 0 || ah == 0 {
-                        return Some((bx, by, bw, bh));
-                    }
-                    if bw == 0 || bh == 0 {
-                        return Some((ax, ay, aw, ah));
-                    }
-
-                    let ax1 = (ax as i64).saturating_add(aw as i64);
-                    let ay1 = (ay as i64).saturating_add(ah as i64);
-                    let bx1 = (bx as i64).saturating_add(bw as i64);
-                    let by1 = (by as i64).saturating_add(bh as i64);
-
-                    let x0 = core::cmp::min(ax as i64, bx as i64);
-                    let y0 = core::cmp::min(ay as i64, by as i64);
-                    let x1 = core::cmp::max(ax1, bx1);
-                    let y1 = core::cmp::max(ay1, by1);
-                    let w = (x1 - x0).max(0) as u32;
-                    let h = (y1 - y0).max(0) as u32;
-                    Some((x0 as i32, y0 as i32, w, h))
-                }
-            }
-        }
-
-        let dirty = if !ENABLE_DIRTY_RECT {
+        let dirty_rects = if !ENABLE_DIRTY_RECT {
             // Force full redraw when dirty rect optimization is disabled
             None
         } else if self.full_redraw_needed {
             None
         } else {
+            let mut rects = self.pending_damage.clone();
             let cursor_dirty = if self.cursor.needs_redraw() {
                 Some(self.cursor.get_dirty_region())
             } else {
                 None
             };
-            union_rect(self.pending_damage, cursor_dirty)
+            if let Some(rect) = cursor_dirty {
+                Self::push_damage_rect(&mut rects, rect);
+            }
+            Some(rects)
         };
 
-        // Always use framebuffer API for presentation.
-        // This avoids compositor-managed mmap and keeps correctness centralized.
-        self.composite_via_framebuffer(dirty)?;
+        match dirty_rects {
+            None => {
+                self.composite_via_framebuffer(None)?;
+            }
+            Some(rects) => {
+                for rect in rects {
+                    self.composite_via_framebuffer(Some(rect))?;
+                }
+            }
+        }
 
         // Flush to display
         self.framebuffer
@@ -580,7 +700,7 @@ impl Compositor {
             .map_err(|_| "Failed to flush framebuffer")?;
 
         self.full_redraw_needed = false;
-        self.pending_damage = None;
+        self.pending_damage.clear();
         Ok(())
     }
 
@@ -738,8 +858,27 @@ impl Compositor {
                 } else {
                     row_stride.saturating_mul(window.height as usize)
                 };
+                let available_len = buffer_size.saturating_sub(window.shm_offset);
+                let source_width = if row_stride >= 4 { row_stride / 4 } else { 0 };
+                let source_height = if row_stride != 0 {
+                    available_len / row_stride
+                } else {
+                    0
+                };
 
-                if wo + 4 <= buffer_size {
+                if local_x as usize >= source_width || local_y as usize >= source_height {
+                    (
+                        self.bg_color,
+                        std::format!(
+                            "window#{} SHM outside source local=({}, {}) source={}x{}",
+                            window.id,
+                            local_x,
+                            local_y,
+                            source_width,
+                            source_height
+                        ),
+                    )
+                } else if wo + 4 <= buffer_size {
                     unsafe {
                         let ptr = shm_addr as *const u8;
                         (
@@ -916,6 +1055,22 @@ impl Compositor {
         } else {
             0
         };
+        if row_stride == 0 || base_offset >= window_buffer.len() {
+            return;
+        }
+
+        let available_len = window_buffer.len().saturating_sub(base_offset);
+        let source_width = (row_stride / bytes_per_pixel as usize) as i32;
+        let source_height = (available_len / row_stride) as i32;
+        if source_width <= 0 || source_height <= 0 {
+            return;
+        }
+
+        x1 = x1.min(win_x0.saturating_add(source_width));
+        y1 = y1.min(win_y0.saturating_add(source_height));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
 
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
@@ -1412,6 +1567,10 @@ impl Compositor {
         loop {
             let mut needs_redraw = false;
 
+            if self.check_display_resize()? {
+                needs_redraw = true;
+            }
+
             // Process IPC events from global queue (non-blocking)
             let ipc_events = self.ipc_server.process_messages()?;
             // if !ipc_events.is_empty() {
@@ -1436,7 +1595,7 @@ impl Compositor {
             // Re-composite and present if needed
             if needs_redraw
                 || self.full_redraw_needed
-                || self.pending_damage.is_some()
+                || !self.pending_damage.is_empty()
                 || self.cursor.needs_redraw()
             {
                 if self.full_redraw_needed && is_sws_debug_enabled() {

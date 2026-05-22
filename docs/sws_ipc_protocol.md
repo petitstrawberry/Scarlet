@@ -167,6 +167,15 @@ Semantics:
 - The server **must** validate that `window_id` belongs to the requesting client and **must reject** the request if the window is not owned by that client.
 - For valid requests, the server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle.
 
+#### `GET_SCREEN_SIZE` (type = 10)
+
+Payload: empty.
+
+Semantics:
+
+- Request the current compositor display size in pixels.
+- The server responds with `SCREEN_SIZE`.
+
 #### `SET_WINDOW_SIZE_LIMITS` (type = 16)
 
 Payload (20 bytes):
@@ -386,6 +395,36 @@ Semantics:
 - Compositor requests the client to resize to the given dimensions.
 - This does not include a new SHM handle; clients should respond by issuing a `RESIZE_WINDOW` request.
 - Typically sent after interactive resize operations.
+
+#### `SCREEN_SIZE` (type = 16)
+
+Payload (8 bytes):
+
+| Offset | Size | Field    | Type |
+|--------|------|----------|------|
+| 0      | 4    | `width`  | u32  |
+| 4      | 4    | `height` | u32  |
+
+Semantics:
+
+- Sent in response to `GET_SCREEN_SIZE`.
+- Reports the current compositor display size in pixels.
+
+#### `SCREEN_SIZE_CHANGED` (type = 22)
+
+Payload (8 bytes):
+
+| Offset | Size | Field    | Type |
+|--------|------|----------|------|
+| 0      | 4    | `width`  | u32  |
+| 4      | 4    | `height` | u32  |
+
+Semantics:
+
+- Broadcast asynchronously to connected clients when the compositor display size changes.
+- This is a notification, not a response to `GET_SCREEN_SIZE`.
+- Clients that own full-screen or screen-edge surfaces, such as desktop and taskbar clients, should update their local layout and may also receive `WINDOW_CONFIGURE` for affected windows.
+- Clients with synchronous request/response code must tolerate this message arriving between a request and its expected response.
 
 #### `EXTENSION_REGISTERED` (type = 100)
 

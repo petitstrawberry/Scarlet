@@ -203,6 +203,7 @@ pub struct Framebuffer {
     file: File,
     /// Memory-mapped framebuffer buffer (address, size)
     mapped_buffer: Option<(usize, usize)>,
+    mapped_physical_addr: Option<usize>,
 }
 
 impl Framebuffer {
@@ -287,6 +288,7 @@ impl Framebuffer {
         let mut framebuffer = Self {
             file,
             mapped_buffer: None,
+            mapped_physical_addr: None,
         };
 
         // Attempt to set up memory mapping
@@ -320,6 +322,7 @@ impl Framebuffer {
         ) {
             Ok(mapped_addr) => {
                 self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
+                self.mapped_physical_addr = Some(fix_info.smem_start);
                 Ok(())
             }
             Err(e) => {
@@ -376,6 +379,36 @@ impl Framebuffer {
             .as_handle()
             .control(commands::FBIOPUT_VSCREENINFO, var_info as *const _ as usize)?;
         Ok(())
+    }
+
+    /// Refresh the framebuffer memory mapping if the kernel reports a new backing store.
+    ///
+    /// # Returns
+    /// Success or HandleError on failure
+    pub fn refresh_mapping(&mut self) -> HandleResult<()> {
+        let fix_info = self.get_fix_screen_info()?;
+        let new_size = fix_info.smem_len as usize;
+        let mapping_changed = match (self.mapped_buffer, self.mapped_physical_addr) {
+            (Some((_, mapped_size)), Some(mapped_phys)) => {
+                mapped_size != new_size || mapped_phys != fix_info.smem_start
+            }
+            (None, _) => true,
+            (_, None) => true,
+        };
+
+        if !mapping_changed {
+            return Ok(());
+        }
+
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
+            let _ = munmap(mapped_addr, mapped_size);
+        }
+        self.mapped_physical_addr = None;
+
+        match self.setup_mmap() {
+            Ok(()) => Ok(()),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Flush framebuffer to display
@@ -1027,5 +1060,6 @@ impl Drop for Framebuffer {
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
             let _ = munmap(mapped_addr, mapped_size);
         }
+        self.mapped_physical_addr = None;
     }
 }

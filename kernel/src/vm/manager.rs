@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::addr::phys_to_virt;
-use super::vmem::{MemoryArea, VirtualMemoryMap};
+use super::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
@@ -531,7 +531,16 @@ impl VirtualMemoryManager {
         let mut perms = memory_map.permissions;
 
         let page_paddr = if let Some(owner) = &memory_map.owner {
-            match owner.resolve_fault(&access, page_idx, memory_map.vm_start) {
+            let owner_access = if !memory_map.is_shared {
+                crate::object::capability::memory_mapping::AccessKind {
+                    op: AccessOp::Load,
+                    vaddr: access.vaddr,
+                    size: access.size,
+                }
+            } else {
+                access
+            };
+            match owner.resolve_fault(&owner_access, page_idx, memory_map.vm_start) {
                 Ok(res) => {
                     if res.is_tail {
                         perms &= !0x1;
@@ -727,6 +736,66 @@ impl VirtualMemoryManager {
 
     pub fn translate_to_kva(&self, vaddr: usize) -> Option<usize> {
         self.translate_to_phys(vaddr).map(phys_to_virt)
+    }
+
+    pub fn translate_to_kva_for_write(&self, vaddr: usize) -> Option<usize> {
+        self.translate_to_phys_with_access(vaddr, AccessOp::Store)
+            .map(phys_to_virt)
+    }
+
+    pub fn translate_to_phys_with_access(&self, vaddr: usize, op: AccessOp) -> Option<usize> {
+        let map = self.search_memory_map(vaddr)?;
+
+        match op {
+            AccessOp::Load => {
+                if !VirtualMemoryPermission::Read.contained_in(map.permissions) {
+                    return None;
+                }
+            }
+            AccessOp::Store => {
+                if !VirtualMemoryPermission::Write.contained_in(map.permissions) {
+                    return None;
+                }
+            }
+            AccessOp::Instruction => {
+                if !VirtualMemoryPermission::Execute.contained_in(map.permissions) {
+                    return None;
+                }
+            }
+        }
+
+        if let Some(owner) = &map.owner {
+            if op == AccessOp::Store && !map.is_shared {
+                let access = crate::object::capability::memory_mapping::AccessKind {
+                    op,
+                    vaddr,
+                    size: Some(1),
+                };
+                self.lazy_map_page_with(access).ok()?;
+                return self.translate_to_phys(vaddr);
+            }
+
+            let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+            let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
+            let access = crate::object::capability::memory_mapping::AccessKind {
+                op,
+                vaddr,
+                size: Some(1),
+            };
+            if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
+                return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)));
+            }
+            if map.pmarea.start != 0 {
+                return Some(map.pmarea.start + (vaddr - map.vmarea.start));
+            }
+            return None;
+        }
+
+        if map.pmarea.start != 0 {
+            Some(map.pmarea.start + (vaddr - map.vmarea.start))
+        } else {
+            None
+        }
     }
 
     pub fn translate_to_phys(&self, vaddr: usize) -> Option<usize> {

@@ -4,8 +4,7 @@ set -euo pipefail
 # Build a bootable KVM guest image: guest kernel + guest initramfs.
 #
 # Prerequisites:
-#   - Buildroot built (run tools/linux/build_buildroot.sh or
-#     tools/linux/build_buildroot_aarch64.sh first)
+#   - Buildroot built (run tools/linux/build_buildroot.sh first)
 #   - Buildroot toolchain available (for guest kernel cross-compilation)
 #
 # Produces:
@@ -27,6 +26,25 @@ set -euo pipefail
 : "${KERNEL_BRANCH:=v6.12}"
 
 : "${KERNEL_DIR:=${WORKDIR}/linux-guest-${ARCH}}"
+
+require_supported_host() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return
+    fi
+
+    cat >&2 <<EOF
+Linux guest artifacts are built with Linux-host tooling.
+Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
+
+Example:
+  ARCH=${ARCH} \\
+  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
+  WORKDIR="\$PWD/.scarlet/cache" \\
+  bash tools/linux/build_guest_image.sh
+EOF
+    exit 1
+}
 
 case "${ARCH}" in
     riscv64)
@@ -92,9 +110,11 @@ CONFIG_PRINTK=y
         ;;
 esac
 
+require_supported_host
+
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
+    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -144,7 +164,7 @@ echo "==> Building guest initramfs..."
 
 ROOTFS_TAR="${PREBUILT_DIR}/${ARCH}/rootfs.tar"
 if [[ ! -f "${ROOTFS_TAR}" ]]; then
-    echo "ERROR: ${ROOTFS_TAR} not found. Run tools/linux/build_buildroot.sh or build_buildroot_aarch64.sh first." >&2
+    echo "ERROR: ${ROOTFS_TAR} not found. Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
     exit 1
 fi
 

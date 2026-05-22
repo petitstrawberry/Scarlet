@@ -3,10 +3,10 @@
 //! EventDispatcher implements hit testing and event routing through
 //! the element tree with three-phase event dispatching.
 
-use alloc::vec::Vec;
 use crate::element::{Element, ElementId, ElementTree};
-use crate::geometry::{Point, Rect};
 use crate::event::Event;
+use crate::geometry::{Point, Rect};
+use alloc::vec::Vec;
 
 /// Event dispatch phase
 ///
@@ -118,28 +118,19 @@ impl EventDispatcher {
                 self.handle_resize(element_tree, *width, *height);
                 false
             }
-            Event::Mouse(mouse_event) => {
-                self.dispatch_mouse(element_tree, mouse_event)
-            }
-            Event::Keyboard(key_event) => {
-                self.dispatch_keyboard(element_tree, key_event)
-            }
-            Event::Focus(focus_event) => {
-                self.dispatch_focus(element_tree, focus_event)
-            }
+            Event::ScreenSizeChanged { .. } => false,
+            Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
+            Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
+            Event::Focus(focus_event) => self.dispatch_focus(element_tree, focus_event),
             Event::Lifecycle(lifecycle_event) => {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
-            Event::Window(_window_event) => {
-                false
-            }
+            Event::Window(_window_event) => false,
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
                 false
             }
-            Event::MenuItemActivated { .. } => {
-                false
-            }
+            Event::MenuItemActivated { .. } => false,
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false
@@ -161,7 +152,11 @@ impl EventDispatcher {
     }
 
     /// Dispatch a mouse event with three-phase event handling
-    fn dispatch_mouse(&mut self, element_tree: &mut ElementTree, event: &crate::event::MouseEvent) -> bool {
+    fn dispatch_mouse(
+        &mut self,
+        element_tree: &mut ElementTree,
+        event: &crate::event::MouseEvent,
+    ) -> bool {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
         let mut path = if matches!(event, crate::event::MouseEvent::Moved { .. })
@@ -180,7 +175,9 @@ impl EventDispatcher {
                     path = Some(captured_path);
                     self.update_captured_point_from_path(element_tree);
                 } else if let Some(captured_point) = self.captured_point {
-                    if let Some(captured_path) = self.hit_test_with_path_ids(element_tree, captured_point) {
+                    if let Some(captured_path) =
+                        self.hit_test_with_path_ids(element_tree, captured_point)
+                    {
                         self.captured_id = captured_path.last().copied();
                         self.captured_path = captured_path.clone();
                         path = Some(captured_path);
@@ -192,7 +189,9 @@ impl EventDispatcher {
                     self.captured_path.clear();
                 }
             } else if let Some(captured_point) = self.captured_point {
-                if let Some(captured_path) = self.hit_test_with_path_ids(element_tree, captured_point) {
+                if let Some(captured_path) =
+                    self.hit_test_with_path_ids(element_tree, captured_point)
+                {
                     self.captured_id = captured_path.last().copied();
                     self.captured_path = captured_path.clone();
                     path = Some(captured_path);
@@ -248,8 +247,9 @@ impl EventDispatcher {
                         );
                     }
                     if let Some(old_id) = self.hovered_id {
-                        let old_origin = Self::path_origin_from_ids(element_tree, &self.hovered_path)
-                            .unwrap_or(Point::ZERO);
+                        let old_origin =
+                            Self::path_origin_from_ids(element_tree, &self.hovered_path)
+                                .unwrap_or(Point::ZERO);
                         if let Some(old_element) = element_tree.find_element_mut(old_id) {
                             let _ = old_element.handle_event(
                                 &Event::Mouse(Self::localize_mouse_event(
@@ -277,7 +277,11 @@ impl EventDispatcher {
                 }
             }
 
-            if let crate::event::MouseEvent::ButtonPressed { button: crate::event::MouseButton::Left, .. } = event {
+            if let crate::event::MouseEvent::ButtonPressed {
+                button: crate::event::MouseButton::Left,
+                ..
+            } = event
+            {
                 self.left_button_down = true;
                 self.captured_id = Some(target_id);
                 self.captured_path = path.clone();
@@ -290,10 +294,8 @@ impl EventDispatcher {
             // 2.1 Capture Phase: root → target (excluding target)
             for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
                 if let Some(element) = element_tree.find_element_mut(*id) {
-                    let localized = Event::Mouse(Self::localize_mouse_event(
-                        event,
-                        path_origins[index],
-                    ));
+                    let localized =
+                        Event::Mouse(Self::localize_mouse_event(event, path_origins[index]));
                     if element.handle_event(&localized, Phase::Capture) {
                         if let Some(window_event) = element.take_window_action() {
                             self.emitted_events.push(Event::Window(window_event));
@@ -343,7 +345,11 @@ impl EventDispatcher {
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[EventDispatcher] mouse handled={}", handled);
             }
-            if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+            if let crate::event::MouseEvent::ButtonReleased {
+                button: crate::event::MouseButton::Left,
+                ..
+            } = event
+            {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
@@ -368,7 +374,11 @@ impl EventDispatcher {
                 self.hovered_id = None;
                 self.hovered_path.clear();
             }
-            if let crate::event::MouseEvent::ButtonReleased { button: crate::event::MouseButton::Left, .. } = event {
+            if let crate::event::MouseEvent::ButtonReleased {
+                button: crate::event::MouseButton::Left,
+                ..
+            } = event
+            {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
@@ -379,7 +389,11 @@ impl EventDispatcher {
     }
 
     /// Dispatch a keyboard event
-    fn dispatch_keyboard(&mut self, element_tree: &mut ElementTree, event: &crate::event::KeyEvent) -> bool {
+    fn dispatch_keyboard(
+        &mut self,
+        element_tree: &mut ElementTree,
+        event: &crate::event::KeyEvent,
+    ) -> bool {
         // Keyboard events typically go to the focused element
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
@@ -390,7 +404,11 @@ impl EventDispatcher {
     }
 
     /// Dispatch a focus event
-    fn dispatch_focus(&mut self, element_tree: &mut ElementTree, event: &crate::event::FocusEvent) -> bool {
+    fn dispatch_focus(
+        &mut self,
+        element_tree: &mut ElementTree,
+        event: &crate::event::FocusEvent,
+    ) -> bool {
         // Focus events are sent to the element gaining or losing focus
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
@@ -401,7 +419,11 @@ impl EventDispatcher {
     }
 
     /// Dispatch a lifecycle event
-    fn dispatch_lifecycle(&mut self, element_tree: &mut ElementTree, event: &crate::event::LifecycleEvent) -> bool {
+    fn dispatch_lifecycle(
+        &mut self,
+        element_tree: &mut ElementTree,
+        event: &crate::event::LifecycleEvent,
+    ) -> bool {
         // Lifecycle events are sent to elements during mount/unmount
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
@@ -412,22 +434,36 @@ impl EventDispatcher {
     }
 
     /// Hit test to find the element at a point
-    pub fn hit_test<'a>(&'a self, element_tree: &'a ElementTree, point: Point) -> Option<&'a dyn Element> {
+    pub fn hit_test<'a>(
+        &'a self,
+        element_tree: &'a ElementTree,
+        point: Point,
+    ) -> Option<&'a dyn Element> {
         let root = element_tree.root()?;
-        self.hit_test_recursive(root, point).map(|(target, _)| target)
+        self.hit_test_recursive(root, point)
+            .map(|(target, _)| target)
     }
 
     /// Hit test to find the element at a point with the path from root
     ///
     /// This returns a HitResult containing both the target and the full path,
     /// which is necessary for three-phase event dispatching.
-    pub fn hit_test_with_path<'a>(&'a self, element_tree: &'a ElementTree, point: Point) -> Option<HitResult<'a>> {
+    pub fn hit_test_with_path<'a>(
+        &'a self,
+        element_tree: &'a ElementTree,
+        point: Point,
+    ) -> Option<HitResult<'a>> {
         let root = element_tree.root()?;
-        self.hit_test_recursive(root, point).map(|(target, path)| HitResult::new(target, path))
+        self.hit_test_recursive(root, point)
+            .map(|(target, path)| HitResult::new(target, path))
     }
 
     /// Recursive hit test implementation that returns target and path
-    fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: Point) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
+    fn hit_test_recursive<'a>(
+        &'a self,
+        element: &'a dyn Element,
+        point: Point,
+    ) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
         let local_point = Point {
             x: point.x - element.position().x,
             y: point.y - element.position().y,
@@ -489,11 +525,26 @@ impl EventDispatcher {
     /// Extract point from a mouse event
     fn extract_point_from_mouse(&self, event: &crate::event::MouseEvent) -> Point {
         match event {
-            crate::event::MouseEvent::Moved { x, y } => Point { x: *x as f32, y: *y as f32 },
-            crate::event::MouseEvent::Entered { x, y } => Point { x: *x as f32, y: *y as f32 },
-            crate::event::MouseEvent::Exited { x, y } => Point { x: *x as f32, y: *y as f32 },
-            crate::event::MouseEvent::ButtonPressed { x, y, .. } => Point { x: *x as f32, y: *y as f32 },
-            crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point { x: *x as f32, y: *y as f32 },
+            crate::event::MouseEvent::Moved { x, y } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
+            crate::event::MouseEvent::Entered { x, y } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
+            crate::event::MouseEvent::Exited { x, y } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
+            crate::event::MouseEvent::ButtonPressed { x, y, .. } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
+            crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
             crate::event::MouseEvent::Wheel { .. } => Point::ZERO,
         }
     }
@@ -533,7 +584,12 @@ impl EventDispatcher {
             y: parent_origin.y + target_pos.y,
         };
         let size = target.bounds().size;
-        let rect = Rect::from_xywh(absolute_origin.x, absolute_origin.y, size.width, size.height);
+        let rect = Rect::from_xywh(
+            absolute_origin.x,
+            absolute_origin.y,
+            size.width,
+            size.height,
+        );
         if rect.contains(point) {
             return Some(self.hovered_path.clone());
         }
@@ -601,7 +657,10 @@ impl EventDispatcher {
         Some(acc)
     }
 
-    fn localize_mouse_event(event: &crate::event::MouseEvent, origin: Point) -> crate::event::MouseEvent {
+    fn localize_mouse_event(
+        event: &crate::event::MouseEvent,
+        origin: Point,
+    ) -> crate::event::MouseEvent {
         match *event {
             crate::event::MouseEvent::Moved { x, y } => crate::event::MouseEvent::Moved {
                 x: x - origin.x as i32,

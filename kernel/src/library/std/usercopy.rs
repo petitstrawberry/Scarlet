@@ -61,7 +61,7 @@ pub fn copy_to_user(
         let chunk_len = core::cmp::min(src.len() - copied, PAGE_SIZE - page_off);
         let kaddr = task
             .vm_manager
-            .translate_to_kva(current_vaddr)
+            .translate_to_kva_for_write(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         unsafe {

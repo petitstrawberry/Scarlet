@@ -83,6 +83,7 @@ pub mod server_msg {
     pub const ACTIVE_APP: u32 = 19; // Response to GET_ACTIVE_APP
     pub const MENU_ITEM_ACTIVATED: u32 = 20; // Menu item activation for a window
     pub const ACTIVE_APP_CHANGED: u32 = 21; // Broadcast when active application changes (normal windows only)
+    pub const SCREEN_SIZE_CHANGED: u32 = 22; // Broadcast when the display size changes
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -394,6 +395,11 @@ pub enum ServerMessage {
     },
     /// Response to GET_SCREEN_SIZE request
     ScreenSize {
+        width: u32,
+        height: u32,
+    },
+    /// Display size changed asynchronously.
+    ScreenSizeChanged {
         width: u32,
         height: u32,
     },
@@ -1033,6 +1039,14 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             Ok(ServerMessage::ScreenSize { width, height })
+        }
+        server_msg::SCREEN_SIZE_CHANGED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ServerMessage::ScreenSizeChanged { width, height })
         }
         server_msg::WINDOW_LIST => {
             // Window list payload is variable length, just validate it's not empty

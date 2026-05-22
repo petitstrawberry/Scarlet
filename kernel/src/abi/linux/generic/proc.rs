@@ -505,11 +505,59 @@ pub fn sys_geteuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0 // Return 0 for the root user (EUID 0)
 }
 
+pub fn sys_getresuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let ruid_ptr = trapframe.get_arg(0);
+    let euid_ptr = trapframe.get_arg(1);
+    let suid_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    for ptr in [ruid_ptr, euid_ptr, suid_ptr] {
+        if ptr == 0 {
+            continue;
+        }
+
+        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
+            return errno::to_result(errno::EFAULT);
+        };
+        unsafe {
+            core::ptr::write(kva as *mut u32, 0);
+        }
+    }
+
+    0
+}
+
 pub fn sys_getgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
     0 // Return 0 for the root group (GID 0)
+}
+
+pub fn sys_getresgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let rgid_ptr = trapframe.get_arg(0);
+    let egid_ptr = trapframe.get_arg(1);
+    let sgid_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    for ptr in [rgid_ptr, egid_ptr, sgid_ptr] {
+        if ptr == 0 {
+            continue;
+        }
+
+        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
+            return errno::to_result(errno::EFAULT);
+        };
+        unsafe {
+            core::ptr::write(kva as *mut u32, 0);
+        }
+    }
+
+    0
 }
 
 pub fn sys_getegid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -1271,10 +1319,11 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         }
     };
 
-    // crate::early_println!(
-    //     "[sys_memfd_create] Created memfd: fd={}, handle={}",
+    // crate::println!(
+    //     "sys_memfd_create: fd={} handle={} flags={:#x}",
     //     fd,
-    //     handle
+    //     handle,
+    //     flags
     // );
 
     fd

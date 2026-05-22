@@ -1,77 +1,111 @@
 # Linux Userspace Artifacts
 
-This document explains how to rebuild the Buildroot-generated root filesystem and optional Linux user-space binaries (`green`, `fbdoom`, `kvmtool`) that power Scarlet's partial Linux ABI support inside the development container.
+This document explains how to rebuild the Buildroot-generated root filesystem
+and optional Linux user-space binaries (`zathura`, `green`, `fbdoom`, and
+`kvmtool`) that power Scarlet's partial Linux ABI support.
 
-## Prerequisites
+## Host Requirements
 
-- Run inside the `scarlet-dev` container (see [`README.md`](../../../README.md) for entering the environment).
-- Buildroot sources must already be unpacked under `/opt/buildroot` (handled automatically by the Dockerfile).
+Buildroot artifact generation is Linux-host work. Run these scripts in
+`scarlet-dev`, a Linux VM, or a Linux Nix shell. macOS can still build Scarlet
+itself, but the Buildroot host tools and generated toolchains are not supported
+from macOS.
+
+The helper scripts keep the Docker-compatible defaults, but every important path
+can be injected:
+
+- `BUILDROOT_DIR` - Buildroot checkout/build tree.
+- `PREBUILT_DIR` - artifact staging directory.
+- `WORKDIR` - checkout/build directory for optional user programs.
+- `MAKE_JOBS` - parallelism for Buildroot.
 
 ## Building Buildroot
 
-Use the helper script to build the root filesystem:
+For RISC-V 64:
 
 ```bash
 bash tools/linux/build_buildroot.sh
 ```
 
-The script performs:
+For AArch64:
 
-- `make -j $(nproc)` inside `/opt/buildroot`.
-- Packaging of the resulting `rootfs.tar` into `/opt/prebuilt/linux-riscv64.tar`.
-- Regeneration of the `linux-riscv64/` directory under `output/images`.
+```bash
+ARCH=aarch64 bash tools/linux/build_buildroot.sh
+```
 
-If either `/opt/buildroot` or `rootfs.tar` is missing the script prints an error and exits.
+Repository-local paths are useful outside the Docker image:
+
+```bash
+BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+ARCH=aarch64 bash tools/linux/build_buildroot.sh
+```
+
+The resulting tarball is staged as
+`$PREBUILT_DIR/{riscv64,aarch64}/rootfs.tar`.
+
+The AArch64 Buildroot configuration enables the libraries needed by the Wayland
+PDF viewer: Wayland client support, Cairo, GLib/GObject, GTK 3, and Poppler
+GLib. The X keyboard data used by GTK/libxkbcommon is installed by
+`build_user_programs.sh` and deployed as shared runtime data.
 
 ## Building Optional User Programs
 
 With the Buildroot toolchain ready, build the auxiliary binaries:
 
 ```bash
+ARCH=aarch64 \
+BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+WORKDIR="$PWD/.scarlet/cache" \
 bash tools/linux/build_user_programs.sh
 ```
 
 This script:
 
-- Verifies the presence of the Buildroot cross toolchain (`output/host/bin/riscv64-buildroot-linux-musl-gcc`).
-- Clones or updates the required repositories (`green`, `fbdoom`, `kvmtool` + `dtc`).
-- Builds each project using the Buildroot toolchain.
-- Installs the resulting binaries and any required libraries into `/opt/prebuilt/bin` and `/opt/prebuilt/lib`.
+- Verifies the Buildroot cross toolchain and `pkg-config` wrapper.
+- Clones or updates `green`, `fbdoom`, and `kvmtool`/`dtc` where applicable.
+- Builds the zathura PDF viewer stack on AArch64: girara, zathura, and
+  zathura-pdf-poppler.
+- Installs binaries into `$PREBUILT_DIR/$ARCH/bin`, libraries into
+  `$PREBUILT_DIR/$ARCH/lib`, and shared data into `$PREBUILT_DIR/$ARCH/share`.
 
-If the toolchain is missing, run `tools/linux/build_buildroot.sh` first.
-
-Note: `kvmtool` (lkvm) is only built for `riscv64`. It is skipped for `aarch64`.
+`kvmtool` is only built for `riscv64`. It is skipped for `aarch64`.
 
 ## Building the KVM Guest Image
 
-To create a bootable guest image for nested virtualization via Scarlet's built-in hypervisor:
+To create a bootable guest image for nested virtualization via Scarlet's
+built-in hypervisor:
 
 ```bash
+ARCH=aarch64 \
+BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
 bash tools/linux/build_guest_image.sh
 ```
 
-This script:
-
-- Cross-compiles a minimal Linux guest kernel with KVM guest support enabled.
-- Creates a compressed cpio initramfs from the Buildroot rootfs.
-- Places both artifacts in `/opt/prebuilt/bin/` (`guest-Image`, `guest-initramfs.cpio.gz`).
-
-The guest image is deployed alongside other prebuilt binaries by `deploy_rootfs.sh`.
-
-## Customisation Tips
-
-- Override directories via environment variables when needed:
-  - `BUILDROOT_DIR`, `PREBUILT_DIR`, `WORKDIR` etc. are respected by both scripts.
-- Both scripts exit on the first error (`set -euo pipefail`) so failures are surfaced early.
+This cross-compiles a minimal Linux guest kernel, creates a compressed cpio
+initramfs from the Buildroot rootfs, and stages `guest-Image` plus
+`guest-initramfs.cpio.gz` under `$PREBUILT_DIR/$ARCH/bin`.
 
 ## Common Workflow
 
-1. `bash tools/linux/build_buildroot.sh`
-2. `bash tools/linux/build_user_programs.sh`
-3. (Optional) `bash tools/linux/build_guest_image.sh`
+For AArch64 with repository-local artifacts:
 
-This matches the behaviour previously baked into the Docker image while keeping the image slim.
+```bash
+export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
+export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
+export WORKDIR="$PWD/.scarlet/cache"
+
+ARCH=aarch64 bash tools/linux/build_buildroot.sh
+ARCH=aarch64 bash tools/linux/build_user_programs.sh
+ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
+```
+
+For RISC-V 64, use `buildroot-riscv64` as the local Buildroot directory and run
+`ARCH=riscv64 bash tools/linux/build_buildroot.sh` or omit `ARCH`.
 
 ## Deployment
 
-After building artifacts, they must be deployed to the Scarlet root filesystem. See [Linux Rootfs Deployment](deployment.md) for details.
+After building artifacts, deploy them to the Scarlet root filesystem. See
+[Linux Rootfs Deployment](deployment.md) for details.

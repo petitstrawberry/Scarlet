@@ -29,6 +29,8 @@ pub enum Event {
         width: u32,
         height: u32,
     },
+    /// Display size changed.
+    ScreenSizeChanged { width: u32, height: u32 },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
     /// Focus changed to a different window

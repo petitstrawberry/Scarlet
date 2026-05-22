@@ -87,7 +87,7 @@ PPID = 9
 
 # 🚧 In Progress: Linux ABI Integration
 # We are expanding this capability to include Linux binaries (via BusyBox):
-(scarlet)$ scarlet_cat /etc/passwd | /system/linux-riscv64/bin/busybox grep "root" | xv6_wc -l
+(scarlet)$ scarlet_cat /etc/passwd | /scarlet/system/linux-riscv64/bin/busybox grep "root" | xv6_wc -l
 ```
 
 This interoperability is possible because all ABIs share the same underlying kernel objects (VFS, pipes, task structures). The goal is a seamless environment where you can use the best tool for the job, regardless of which OS it was originally written for.

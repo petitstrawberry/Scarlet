@@ -51,6 +51,26 @@ fn merge_damage(
     (x0 as i32, y0 as i32, w, h)
 }
 
+fn damage_area(width: u32, height: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(height))
+}
+
+fn should_merge_damage(
+    ax: i32,
+    ay: i32,
+    aw: u32,
+    ah: u32,
+    bx: i32,
+    by: i32,
+    bw: u32,
+    bh: u32,
+) -> bool {
+    let (_, _, union_w, union_h) = merge_damage(ax, ay, aw, ah, bx, by, bw, bh);
+    let separate_area = damage_area(aw, ah).saturating_add(damage_area(bw, bh));
+    let union_area = damage_area(union_w, union_h);
+    union_area <= separate_area.saturating_mul(2)
+}
+
 /// Application session information
 #[derive(Debug, Clone)]
 struct AppSession {
@@ -65,52 +85,6 @@ static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new
 
 /// Currently focused window ID
 static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
-
-#[derive(Debug, Clone, Copy, Default)]
-struct WindowSizeLimits {
-    min_width: u32,
-    min_height: u32,
-    max_width: u32,
-    max_height: u32,
-}
-
-impl WindowSizeLimits {
-    fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
-        let mut w = width.max(1);
-        let mut h = height.max(1);
-
-        if self.min_width != 0 {
-            w = w.max(self.min_width.max(1));
-        }
-        if self.min_height != 0 {
-            h = h.max(self.min_height.max(1));
-        }
-
-        let effective_max_width = if self.max_width == 0 {
-            0
-        } else if self.min_width != 0 {
-            self.max_width.max(self.min_width.max(1))
-        } else {
-            self.max_width.max(1)
-        };
-        let effective_max_height = if self.max_height == 0 {
-            0
-        } else if self.min_height != 0 {
-            self.max_height.max(self.min_height.max(1))
-        } else {
-            self.max_height.max(1)
-        };
-
-        if effective_max_width != 0 {
-            w = w.min(effective_max_width);
-        }
-        if effective_max_height != 0 {
-            h = h.min(effective_max_height);
-        }
-
-        (w, h)
-    }
-}
 
 #[derive(Debug)]
 enum FrameIoError {
@@ -266,6 +240,48 @@ pub struct PendingInputEvent {
     pub value: i32,
 }
 
+fn is_pointer_motion_packet(events: &[PendingInputEvent], start: usize) -> bool {
+    events.len() >= start + 3
+        && events[start].type_ == super::input::event_types::EV_ABS
+        && events[start].code == super::input::abs_codes::ABS_X
+        && events[start + 1].type_ == super::input::event_types::EV_ABS
+        && events[start + 1].code == super::input::abs_codes::ABS_Y
+        && events[start + 2].type_ == super::input::event_types::EV_SYN
+}
+
+fn coalesce_tail_pointer_motion(events: &mut Vec<PendingInputEvent>) {
+    loop {
+        let len = events.len();
+        if len < 6 {
+            return;
+        }
+
+        let previous_start = len - 6;
+        let latest_start = len - 3;
+        if !is_pointer_motion_packet(events, previous_start)
+            || !is_pointer_motion_packet(events, latest_start)
+        {
+            return;
+        }
+
+        let latest_x = events[latest_start].clone();
+        let latest_y = events[latest_start + 1].clone();
+        let latest_syn = events[latest_start + 2].clone();
+        events.truncate(previous_start);
+        events.push(latest_x);
+        events.push(latest_y);
+        events.push(latest_syn);
+    }
+}
+
+fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: PendingInputEvent) {
+    let should_coalesce = event.type_ == super::input::event_types::EV_SYN;
+    events.push(event);
+    if should_coalesce {
+        coalesce_tail_pointer_motion(events);
+    }
+}
+
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
 
@@ -311,6 +327,18 @@ pub fn push_ipc_event(event: IpcEvent) {
             } = existing
             {
                 if *existing_window == window_id {
+                    if !should_merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    ) {
+                        continue;
+                    }
                     let (nx, ny, nw, nh) = merge_damage(
                         *existing_x,
                         *existing_y,
@@ -379,12 +407,15 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
     if let Some(events) = pending.get_mut(&window_id) {
-        events.push(PendingInputEvent {
-            time,
-            type_,
-            code,
-            value,
-        });
+        push_input_event_coalesced(
+            events,
+            PendingInputEvent {
+                time,
+                type_,
+                code,
+                value,
+            },
+        );
     }
 }
 
@@ -408,12 +439,15 @@ pub fn send_extension_input_event(
     let events = pending
         .entry((extension_id, external_client_id))
         .or_insert_with(Vec::new);
-    events.push(PendingInputEvent {
-        time,
-        type_,
-        code,
-        value,
-    });
+    push_input_event_coalesced(
+        events,
+        PendingInputEvent {
+            time,
+            type_,
+            code,
+            value,
+        },
+    );
 }
 
 /// Get and clear pending extension input events for a specific extension client
@@ -740,7 +774,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
-    let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
     let mut window_resizable: BTreeMap<u32, bool> = BTreeMap::new();
     // Track if this client is an extension client (e.g., wayland_bridge)
     let mut is_extension_client: bool = false;
@@ -1099,7 +1132,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // Unregister window from input routing
                 unregister_window(window_id);
 
-                window_size_limits.remove(&window_id);
                 window_resizable.remove(&window_id);
 
                 // Remove AppSession
@@ -1166,16 +1198,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id, window_id, min_width, min_height, max_width, max_height
                 );
 
-                window_size_limits.insert(
-                    window_id,
-                    WindowSizeLimits {
-                        min_width,
-                        min_height,
-                        max_width,
-                        max_height,
-                    },
-                );
-
                 push_ipc_event(IpcEvent::SetWindowSizeLimits {
                     window_id,
                     min_width,
@@ -1189,27 +1211,11 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 width,
                 height,
             }) => {
-                if !window_resizable.get(&window_id).copied().unwrap_or(true) {
-                    println!(
-                        "[ClientThread {}] ResizeWindow ignored: window_id={} {}x{} (resizable=false)",
-                        client_id, window_id, width, height
-                    );
-                    continue;
-                }
-
-                let (width, height) = match window_size_limits.get(&window_id) {
-                    Some(limits) => {
-                        let (w, h) = limits.clamp(width, height);
-                        if w != width || h != height {
-                            println!(
-                                "[ClientThread {}] ResizeWindow clamped: window_id={} {}x{} -> {}x{}",
-                                client_id, window_id, width, height, w, h
-                            );
-                        }
-                        (w, h)
-                    }
-                    None => (width.max(1), height.max(1)),
-                };
+                // `resizable=false` disables user/compositor-driven interactive
+                // resizing. The owning client must still be able to replace its
+                // backing buffer when the compositor sends WINDOW_CONFIGURE, for
+                // example after a display-size change.
+                let (width, height) = (width.max(1), height.max(1));
 
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
@@ -1706,7 +1712,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Also notify the compositor so orphaned windows don't stick around.
     for window_id in managed_windows.drain(..) {
         unregister_window(window_id);
-        window_size_limits.remove(&window_id);
         push_ipc_event(IpcEvent::DestroyWindow {
             client_id,
             window_id,

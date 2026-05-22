@@ -65,6 +65,8 @@ pub enum ExceptionClass {
     /// Trapped FP/SIMD access (typically because CPACR_EL1.FPEN traps EL0).
     FpSimdAccess = 0x07,
     SvcAarch64 = 0x15,
+    /// Trapped SVE access (typically because CPACR_EL1.ZEN traps EL0).
+    SveAccess = 0x19,
     InstructionAbortLowerEl = 0x20,
     InstructionAbortSameEl = 0x21,
     DataAbortLowerEl = 0x24,
@@ -79,6 +81,7 @@ impl From<u64> for ExceptionClass {
             0x00 => ExceptionClass::Unknown,
             0x07 => ExceptionClass::FpSimdAccess,
             0x15 => ExceptionClass::SvcAarch64,
+            0x19 => ExceptionClass::SveAccess,
             0x20 => ExceptionClass::InstructionAbortLowerEl,
             0x21 => ExceptionClass::InstructionAbortSameEl,
             0x24 => ExceptionClass::DataAbortLowerEl,
@@ -125,6 +128,24 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
             print_trap_info(trapframe, esr);
             panic!("FP/SIMD is disabled by build config or DTB");
+        }
+
+        ExceptionClass::SveAccess => {
+            if !handle_sve_access_trap(trapframe) {
+                let instr_at_elr = read_user_instruction(trapframe.elr as usize);
+                let instr_before_elr =
+                    read_user_instruction((trapframe.elr as usize).wrapping_sub(4));
+                print_trap_info(trapframe, esr);
+                crate::println!(
+                    "[trap] unsupported SVE access trap at ELR={:#x}; instr@ELR={:?} instr@ELR-4={:?}; SVE context is not implemented",
+                    trapframe.elr,
+                    instr_at_elr,
+                    instr_before_elr,
+                );
+                loop {
+                    unsafe { asm!("wfi") }
+                }
+            }
         }
 
         // SVC from AArch64 user mode (syscall)
@@ -196,6 +217,41 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         }
     }
+}
+
+/// Handle a trapped SVE instruction without enabling general SVE execution.
+///
+/// Scarlet does not currently save/restore SVE Z/P/FFR state. Enabling SVE for
+/// EL0 would therefore corrupt task state across context switches. Some AArch64
+/// libgcc unwinder paths still use `CNTD Xt` to query the vector granule count,
+/// so emulate that scalar query narrowly and leave all other SVE instructions
+/// unsupported.
+fn handle_sve_access_trap(trapframe: &mut Trapframe) -> bool {
+    let instr_addr = trapframe.elr as usize;
+    let instr = match read_user_instruction(instr_addr) {
+        Some(instr) => instr,
+        None => return false,
+    };
+
+    // CNTD Xt is encoded as 0x04e0e3e0 | Rt for the all-pattern variant used by
+    // libgcc's AArch64 unwinder. Return the architectural minimum SVE vector
+    // length expressed in doublewords: 128 bits / 64 bits = 2.
+    if instr & 0xffff_ffe0 == 0x04e0_e3e0 {
+        let rt = (instr & 0x1f) as usize;
+        if rt < trapframe.regs.reg.len() {
+            trapframe.regs.reg[rt] = 2;
+        }
+        trapframe.elr = trapframe.elr.wrapping_add(4);
+        return true;
+    }
+
+    false
+}
+
+fn read_user_instruction(instr_addr: usize) -> Option<u32> {
+    let task = current_task(get_cpu().get_cpuid()).unwrap();
+    let instr_kva = task.vm_manager.translate_to_kva(instr_addr)?;
+    Some(unsafe { core::ptr::read_unaligned(instr_kva as *const u32) })
 }
 
 /// Handle instruction page fault (like RISC-V cause 12)

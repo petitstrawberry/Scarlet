@@ -279,8 +279,22 @@ pub mod callback_event {
     pub const DONE: u16 = 0;
 }
 
-/// wl_data_device_manager opcodes (events from server)
-pub mod data_device_manager_event {
-    // No standard events for this protocol
-    // Advertised as placeholder for GTK3 compatibility
+/// wl_data_device_manager opcodes (requests from client)
+pub mod data_device_manager_request {
+    pub const CREATE_DATA_SOURCE: u16 = 0;
+    pub const GET_DATA_DEVICE: u16 = 1;
+}
+
+/// wl_data_source opcodes (requests from client)
+pub mod data_source_request {
+    pub const OFFER: u16 = 0;
+    pub const DESTROY: u16 = 1;
+    pub const SET_ACTIONS: u16 = 2;
+}
+
+/// wl_data_device opcodes (requests from client)
+pub mod data_device_request {
+    pub const START_DRAG: u16 = 0;
+    pub const SET_SELECTION: u16 = 1;
+    pub const RELEASE: u16 = 2;
 }

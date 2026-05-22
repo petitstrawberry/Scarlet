@@ -1,10 +1,10 @@
 //! Connection management for SWS client
 
+use crate::TransientFlags;
+use crate::WindowSizeLimits;
 use crate::error::Error;
 use crate::event::{Event, InputEvent};
 use crate::surface::Surface;
-use crate::TransientFlags;
-use crate::WindowSizeLimits;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
 use scarlet_std::println;
@@ -259,16 +259,47 @@ impl Connection {
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
     /// Default window type is NORMAL (0).
-    pub fn create_surface(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32) -> Result<u32, Error> {
-        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, 0, true)
+    pub fn create_surface(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<u32, Error> {
+        self.create_surface_with_type_and_resizable(
+            app_id,
+            app_name,
+            menu_titles,
+            width,
+            height,
+            0,
+            true,
+        )
     }
 
     /// Create a new surface (window) with specific window type
     ///
     /// This sends a CreateWindow request and waits for the response.
     /// The returned Surface can be drawn to immediately.
-    pub fn create_surface_with_type(&mut self, app_id: &str, app_name: &str, menu_titles: &str, width: u32, height: u32, window_type: u32) -> Result<u32, Error> {
-        self.create_surface_with_type_and_resizable(app_id, app_name, menu_titles, width, height, window_type, true)
+    pub fn create_surface_with_type(
+        &mut self,
+        app_id: &str,
+        app_name: &str,
+        menu_titles: &str,
+        width: u32,
+        height: u32,
+        window_type: u32,
+    ) -> Result<u32, Error> {
+        self.create_surface_with_type_and_resizable(
+            app_id,
+            app_name,
+            menu_titles,
+            width,
+            height,
+            window_type,
+            true,
+        )
     }
 
     /// Create a new surface (window) with specific window type and resizable flag
@@ -339,8 +370,8 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let msg_type =
-            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+            .map_err(|_| Error::ReceiveFailed)?;
 
         let response = protocol::parse_server_message(msg_type, &self.read_payload)
             .map_err(|_| Error::InvalidResponse)?;
@@ -359,8 +390,7 @@ impl Connection {
             .recv_handle()
             .map_err(|_| Error::ShmHandleFailed)?;
 
-        let shm =
-            SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
 
         // Restore non-blocking mode
         self.socket
@@ -414,8 +444,8 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let msg_type =
-            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+            .map_err(|_| Error::ReceiveFailed)?;
 
         let response = protocol::parse_server_message(msg_type, &self.read_payload)
             .map_err(|_| Error::InvalidResponse)?;
@@ -433,8 +463,7 @@ impl Connection {
             .recv_handle()
             .map_err(|_| Error::ShmHandleFailed)?;
 
-        let shm =
-            SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
 
         self.socket
             .set_nonblocking(true)
@@ -496,11 +525,7 @@ impl Connection {
         }
 
         let payload = protocol::payload_set_window_size_limits(
-            surface_id,
-            min_width,
-            min_height,
-            max_width,
-            max_height,
+            surface_id, min_width, min_height, max_width, max_height,
         );
         write_frame(
             &mut self.socket,
@@ -530,11 +555,7 @@ impl Connection {
     }
 
     /// Notify the server that a menu item was activated for a window.
-    pub fn activate_menu_item(
-        &mut self,
-        window_id: u32,
-        menu_item_id: &str,
-    ) -> Result<(), Error> {
+    pub fn activate_menu_item(&mut self, window_id: u32, menu_item_id: &str) -> Result<(), Error> {
         let payload = protocol::payload_activate_menu_item(window_id, menu_item_id.as_bytes());
         write_frame(
             &mut self.socket,
@@ -558,7 +579,10 @@ impl Connection {
     ///
     /// This notifies the server that the surface buffer has been updated.
     pub fn commit(&mut self, surface_id: u32) -> Result<(), Error> {
-        let surface = self.surfaces.get_mut(&surface_id).ok_or(Error::SurfaceNotFound)?;
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(Error::SurfaceNotFound)?;
 
         if surface.is_dirty() {
             let payload = protocol::payload_update_buffer(
@@ -584,8 +608,18 @@ impl Connection {
     /// Commit a specific region of the surface to the server
     ///
     /// This is more efficient than `commit()` when only a small region changed.
-    pub fn commit_region(&mut self, surface_id: u32, x: u32, y: u32, width: u32, height: u32) -> Result<(), Error> {
-        let surface = self.surfaces.get_mut(&surface_id).ok_or(Error::SurfaceNotFound)?;
+    pub fn commit_region(
+        &mut self,
+        surface_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Error> {
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(Error::SurfaceNotFound)?;
 
         // Clamp region to surface bounds
         let sw = surface.width();
@@ -599,7 +633,8 @@ impl Connection {
             return Ok(());
         }
 
-        let payload = protocol::payload_update_buffer(surface_id, x as i32, y as i32, width, height);
+        let payload =
+            protocol::payload_update_buffer(surface_id, x as i32, y as i32, width, height);
         write_frame(
             &mut self.socket,
             protocol::client_msg::UPDATE_BUFFER,
@@ -634,8 +669,12 @@ impl Connection {
     /// Set the window position (absolute) for this surface.
     pub fn move_window(&mut self, surface_id: u32, x: i32, y: i32) -> Result<(), Error> {
         let payload = protocol::payload_move_window(surface_id, x, y);
-        write_frame(&mut self.socket, protocol::client_msg::MOVE_WINDOW, &payload)
-            .map_err(|_| Error::SendFailed)
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::MOVE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
     }
 
     /// Set (or clear) the logical parent of a window.
@@ -867,31 +906,52 @@ impl Connection {
         }
 
         let payload = protocol::payload_resize_window(surface_id, width, height);
-        write_frame(&mut self.socket, protocol::client_msg::RESIZE_WINDOW, &payload)
-            .map_err(|_| Error::SendFailed)?;
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::RESIZE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
 
         // Block until we receive WINDOW_RESIZED + SHM handle.
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let msg_type =
-            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
-        let response = protocol::parse_server_message(msg_type, &self.read_payload)
-            .map_err(|_| Error::InvalidResponse)?;
+        let (window_id, _shm_size, new_w, new_h) = loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
 
-        let (window_id, _shm_size, new_w, new_h) = match response {
-            ServerMessage::WindowResized {
-                window_id,
-                shm_size,
-                width,
-                height,
-            } => (window_id, shm_size, width, height),
-            _ => {
-                self.socket
-                    .set_nonblocking(true)
-                    .map_err(|_| Error::SocketConfig)?;
-                return Err(Error::InvalidResponse);
+            match response {
+                ServerMessage::WindowResized {
+                    window_id,
+                    shm_size,
+                    width,
+                    height,
+                } => break (window_id, shm_size, width, height),
+                ServerMessage::ScreenSizeChanged { width, height } => {
+                    self.pending_events
+                        .push(Event::ScreenSizeChanged { width, height });
+                }
+                ServerMessage::WindowConfigure {
+                    window_id,
+                    width,
+                    height,
+                } => {
+                    self.pending_events.push(Event::SurfaceConfigure {
+                        surface_id: window_id,
+                        width,
+                        height,
+                    });
+                }
+                _ => {
+                    self.socket
+                        .set_nonblocking(true)
+                        .map_err(|_| Error::SocketConfig)?;
+                    return Err(Error::InvalidResponse);
+                }
             }
         };
 
@@ -935,7 +995,10 @@ impl Connection {
         }
 
         loop {
-            match self.frame_reader.poll(&mut self.socket, &mut self.read_payload) {
+            match self
+                .frame_reader
+                .poll(&mut self.socket, &mut self.read_payload)
+            {
                 Ok(Some(msg_type)) => {
                     if let Ok(msg) = protocol::parse_server_message(msg_type, &self.read_payload) {
                         match msg {
@@ -957,8 +1020,9 @@ impl Connection {
                             }
                             ServerMessage::WindowDestroyed { window_id } => {
                                 self.surfaces.remove(&window_id);
-                                self.pending_events
-                                    .push(Event::SurfaceDestroyed { surface_id: window_id });
+                                self.pending_events.push(Event::SurfaceDestroyed {
+                                    surface_id: window_id,
+                                });
                                 count += 1;
                             }
                             ServerMessage::WindowResized { window_id, .. } => {
@@ -978,6 +1042,11 @@ impl Connection {
                                 });
                                 count += 1;
                             }
+                            ServerMessage::ScreenSizeChanged { width, height } => {
+                                self.pending_events
+                                    .push(Event::ScreenSizeChanged { width, height });
+                                count += 1;
+                            }
                             ServerMessage::Error { code } => {
                                 self.pending_events.push(Event::Error { code });
                                 count += 1;
@@ -994,10 +1063,19 @@ impl Connection {
                                 menu_titles_len,
                             } => {
                                 // Convert fixed-size buffers to String
-                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
-                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
-                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
-                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                                let app_id_str =
+                                    String::from_utf8_lossy(&app_id[..app_id_len as usize])
+                                        .into_owned();
+                                let app_name_str =
+                                    String::from_utf8_lossy(&app_name[..app_name_len as usize])
+                                        .into_owned();
+                                let title_str =
+                                    String::from_utf8_lossy(&title[..title_len as usize])
+                                        .into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(
+                                    &menu_titles[..menu_titles_len as usize],
+                                )
+                                .into_owned();
                                 self.pending_events.push(Event::FocusChanged {
                                     window_id,
                                     app_id: app_id_str,
@@ -1019,10 +1097,19 @@ impl Connection {
                                 menu_titles_len,
                             } => {
                                 // Convert fixed-size buffers to String
-                                let app_id_str = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
-                                let app_name_str = String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
-                                let title_str = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
-                                let menu_titles_str = String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                                let app_id_str =
+                                    String::from_utf8_lossy(&app_id[..app_id_len as usize])
+                                        .into_owned();
+                                let app_name_str =
+                                    String::from_utf8_lossy(&app_name[..app_name_len as usize])
+                                        .into_owned();
+                                let title_str =
+                                    String::from_utf8_lossy(&title[..title_len as usize])
+                                        .into_owned();
+                                let menu_titles_str = String::from_utf8_lossy(
+                                    &menu_titles[..menu_titles_len as usize],
+                                )
+                                .into_owned();
                                 self.pending_events.push(Event::ActiveAppChanged {
                                     window_id,
                                     app_id: app_id_str,
@@ -1104,22 +1191,27 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        // Wait for SCREEN_SIZE response
-        let msg_type =
-            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
-        let response = protocol::parse_server_message(msg_type, &self.read_payload)
-            .map_err(|_| Error::InvalidResponse)?;
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
 
-        match response {
-            ServerMessage::ScreenSize { width, height } => {
-                // Restore non-blocking mode
-                let _ = self.socket.set_nonblocking(true);
-                Ok((width, height))
-            }
-            _ => {
-                // Restore non-blocking mode
-                let _ = self.socket.set_nonblocking(true);
-                Err(Error::InvalidResponse)
+            match response {
+                ServerMessage::ScreenSize { width, height } => {
+                    // Restore non-blocking mode
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok((width, height));
+                }
+                ServerMessage::ScreenSizeChanged { width, height } => {
+                    self.pending_events
+                        .push(Event::ScreenSizeChanged { width, height });
+                }
+                _ => {
+                    // Restore non-blocking mode
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
             }
         }
     }
@@ -1138,8 +1230,8 @@ impl Connection {
             .map_err(|_| Error::SocketConfig)?;
 
         // Wait for WINDOW_LIST response
-        let msg_type =
-            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+            .map_err(|_| Error::ReceiveFailed)?;
 
         let response = protocol::parse_server_message(msg_type, &self.read_payload)
             .map_err(|_| Error::InvalidResponse)?;

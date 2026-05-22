@@ -21,7 +21,7 @@ export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
 export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
 export WORKDIR="$PWD/.scarlet/cache"
 
-bash tools/linux/build_buildroot_aarch64.sh
+ARCH=aarch64 bash tools/linux/build_buildroot.sh
 ARCH=aarch64 bash tools/linux/build_guest_image.sh
 projects/aarch64-limine-microvm/tools/prepare_prebuilt.sh
 
@@ -40,8 +40,9 @@ cargo run --manifest-path cargo-scarlet/Cargo.toml -- run \
   --release
 ```
 
-`build_buildroot_aarch64.sh` builds the AArch64 Buildroot toolchain and rootfs
-tarball under `$BUILDROOT_DIR` and `$PREBUILT_DIR/aarch64`.
+`ARCH=aarch64 bash tools/linux/build_buildroot.sh` builds the AArch64 Buildroot
+toolchain and rootfs tarball under `$BUILDROOT_DIR` and
+`$PREBUILT_DIR/aarch64`.
 
 `build_guest_image.sh` builds the guest Linux kernel and initramfs into
 `$PREBUILT_DIR/aarch64/bin`.
@@ -61,8 +62,10 @@ there without rebuilding Buildroot.
 
 The Linux helper scripts still default to `/opt/buildroot-aarch64` and
 `/opt/prebuilt` for compatibility with the existing Docker workflow. For local
-Nix/macOS development, prefer the repository-local environment variables shown
-above.
+development, prefer the repository-local environment variables shown above.
+Buildroot artifact generation is Linux-host work: run it in `scarlet-dev`, a
+Linux VM, or a Linux Nix shell. macOS can build Scarlet itself, but these
+Buildroot/userland artifact scripts intentionally stop there with guidance.
 
 The top-level `cargo make image-aarch64-microvm` and
 `cargo make run-aarch64-microvm` tasks remain compatibility shortcuts, but new

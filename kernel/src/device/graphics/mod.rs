@@ -145,6 +145,18 @@ pub trait GraphicsDevice: Device {
     /// Get framebuffer memory address
     fn get_framebuffer_address(&self) -> Result<usize, &'static str>;
 
+    /// Get framebuffer configuration and memory address as one snapshot.
+    ///
+    /// # Returns
+    ///
+    /// Current framebuffer configuration and physical memory address, or an error
+    /// if the framebuffer is not initialized.
+    fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
+        let config = self.get_framebuffer_config()?;
+        let physical_addr = self.get_framebuffer_address()?;
+        Ok((config, physical_addr))
+    }
+
     /// Flush framebuffer region to display
     fn flush_framebuffer(
         &self,
