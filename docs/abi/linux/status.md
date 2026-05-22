@@ -1,17 +1,19 @@
 # Linux ABI Support Status
 
-Scarlet includes an early Linux ABI layer focused on running selected RISC-V 64-bit userland binaries. This note captures the current scope, known gaps, and the recommended way to exercise the demo.
+Scarlet includes an early Linux ABI layer focused on running selected
+Buildroot-based userlands. This note captures the current scope, known gaps,
+and the recommended way to exercise the demo.
 
 ## Summary
 
-- **Architecture**: RISC-V 64-bit userland built via Buildroot
+- **Architectures**: RISC-V 64-bit and AArch64 userlands built via Buildroot
 - **Kernel interface**: Direct syscall translation layer into Scarlet kernel primitives
 - **State**: Partial – intended for demos and experimentation rather than production workloads
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
 ## System Call Support Matrix
 
-The following system calls are currently handled by the Linux ABI module (`linux-riscv64`).
+The following system calls are currently handled by the Linux ABI module.
 
 ### File System & I/O
 | Syscall | Status | Notes |
@@ -107,9 +109,11 @@ While basic file operations work, the current implementation has significant dev
 ## What Works Today
 
 - Buildroot root filesystem generation (via `tools/linux/build_buildroot.sh`)
-- Toolchain exports (under `/opt/buildroot/output/host`) for building userspace
-- Demo binaries `green` and `fbdoom` built with the Buildroot toolchain
-- Process launch, basic file I/O, and framebuffer output through Scarlet-managed devices
+- Toolchain exports from Buildroot for building userspace
+- Demo binaries `green`, `fbdoom`, and the Linux zathura PDF viewer built with
+  the Buildroot toolchain
+- Process launch, basic file I/O, framebuffer output, and Wayland bridge clients
+  through Scarlet-managed devices
 
 Refer to [userspace-artifacts.md](userspace-artifacts.md) for the exact build steps, and [demo.md](demo.md) for execution instructions.
 

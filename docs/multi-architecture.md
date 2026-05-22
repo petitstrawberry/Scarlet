@@ -71,9 +71,14 @@ bash tools/linux/build_buildroot.sh
 ARCH=aarch64 bash tools/linux/build_buildroot.sh
 ```
 
+Buildroot/userland artifact generation runs on Linux hosts. This can be
+`scarlet-dev`, a Linux VM, or a Linux Nix shell; macOS host execution is stopped
+with guidance by the helper scripts.
+
 ### Building User Programs
 
-Cross-compiled programs (like `green`, `fbdoom`) for Linux:
+Cross-compiled programs (like `zathura`, `green`, and `fbdoom`) for
+Linux:
 
 ```bash
 # RISC-V
