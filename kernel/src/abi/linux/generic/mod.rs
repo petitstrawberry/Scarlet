@@ -359,6 +359,7 @@ syscall_table! {
     Dup = 23 => fs::sys_dup,
     Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
+    InotifyInit1 = 26 => fs::sys_inotify_init1,
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,

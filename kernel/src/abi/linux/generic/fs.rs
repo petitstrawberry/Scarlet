@@ -2798,6 +2798,16 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     errno::to_result(errno::ENOSYS)
 }
 
+pub fn sys_inotify_init1(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    trapframe.increment_pc_next(task);
+    errno::to_result(errno::ENOSYS)
+}
+
 /// Linux sys_flock - Apply or remove an advisory lock on an open file
 ///
 /// Apply or remove an advisory lock on the open file specified by fd.
@@ -3139,6 +3149,11 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     if length < 0 {
+        crate::println!(
+            "sys_ftruncate: invalid negative length fd={} len={}",
+            fd,
+            length
+        );
         return errno::to_result(errno::EINVAL);
     }
 
@@ -3153,15 +3168,52 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Some(shared_memory) = kernel_obj.as_shared_memory() {
-        if let Err(_err) = shared_memory.resize(length as usize) {
-            return errno::to_result(errno::EINVAL);
+        let old_size = shared_memory.size();
+        crate::println!(
+            "sys_ftruncate: shared memory fd={} old_size={} len={}",
+            fd,
+            old_size,
+            length
+        );
+        if let Err(err) = shared_memory.resize(length as usize) {
+            crate::println!(
+                "sys_ftruncate: shared memory resize failed fd={} old_size={} len={} err={}",
+                fd,
+                old_size,
+                length,
+                err
+            );
+            return errno::to_result(errno::ENOSPC);
         }
         return 0;
     }
 
     let file_obj = match kernel_obj.as_file() {
         Some(f) => f,
-        None => return errno::to_result(errno::EINVAL),
+        None => {
+            let kind = match kernel_obj {
+                crate::object::KernelObject::File(_) => "File",
+                crate::object::KernelObject::Pipe(_) => "Pipe",
+                crate::object::KernelObject::Counter(_) => "Counter",
+                crate::object::KernelObject::Timer(_) => "Timer",
+                crate::object::KernelObject::EventChannel(_) => "EventChannel",
+                crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
+                crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
+                #[cfg(feature = "network")]
+                crate::object::KernelObject::Socket(_) => "Socket",
+                #[cfg(feature = "hypervisor")]
+                crate::object::KernelObject::HypervisorVm(_) => "HypervisorVm",
+                #[cfg(feature = "hypervisor")]
+                crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
+            };
+            crate::println!(
+                "sys_ftruncate: fd={} kind={} is not truncatable len={}",
+                fd,
+                kind,
+                length
+            );
+            return errno::to_result(errno::EINVAL);
+        }
     };
 
     let mut is_shm = false;
