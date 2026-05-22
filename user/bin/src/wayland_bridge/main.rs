@@ -246,6 +246,11 @@ struct WaylandBridge {
     /// Pointer position (surface-local, in pixels)
     pointer_x: i32,
     pointer_y: i32,
+    /// Pending pointer events waiting for the SWS EV_SYN packet boundary
+    pending_pointer_messages: Vec<WaylandMessage>,
+    pending_pointer_motion: bool,
+    pending_pointer_time: u32,
+    pending_pointer_id: Option<u32>,
     /// Current cursor surface (if set via wl_pointer.set_cursor)
     cursor_surface_id: Option<u32>,
     /// Track pointer left button state for xdg_toplevel.move timing
@@ -296,6 +301,10 @@ impl WaylandBridge {
             update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
             pointer_y: 0,
+            pending_pointer_messages: Vec::new(),
+            pending_pointer_motion: false,
+            pending_pointer_time: 0,
+            pending_pointer_id: None,
             cursor_surface_id: None,
             left_button_down: false,
             last_left_button_serial: None,
@@ -387,6 +396,43 @@ impl WaylandBridge {
         queue.extend(messages);
     }
 
+    fn queue_pending_pointer_motion(&mut self) {
+        if !self.pending_pointer_motion {
+            return;
+        }
+
+        if let Some(pointer_id) = self.focused_pointer {
+            let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
+            msg.add_arg(WaylandArg::Uint(self.pending_pointer_time));
+            msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
+            msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+            self.pending_pointer_messages.push(msg);
+            self.pending_pointer_id = Some(pointer_id);
+        }
+
+        self.pending_pointer_motion = false;
+    }
+
+    fn flush_pending_pointer_messages(&mut self) {
+        self.queue_pending_pointer_motion();
+
+        if self.pending_pointer_messages.is_empty() {
+            self.pending_pointer_id = None;
+            return;
+        }
+
+        if let Some(pointer_id) = self.pending_pointer_id
+            && self.pointer_frame_supported(pointer_id)
+        {
+            self.pending_pointer_messages
+                .push(WaylandMessage::new(pointer_id, input::pointer_event::FRAME));
+        }
+
+        let messages = core::mem::take(&mut self.pending_pointer_messages);
+        self.pending_pointer_id = None;
+        self.queue_input_messages(messages);
+    }
+
     fn pointer_frame_supported(&self, pointer_id: u32) -> bool {
         let seat_id = match self.input_manager.pointer_seat_id(pointer_id) {
             Some(id) => id,
@@ -452,6 +498,7 @@ impl WaylandBridge {
         const EV_KEY: u16 = 0x01;
         const EV_REL: u16 = 0x02;
         const EV_ABS: u16 = 0x03;
+        const EV_SYN: u16 = 0x00;
         const REL_X: u16 = 0x00;
         const REL_Y: u16 = 0x01;
         const ABS_X: u16 = 0x00;
@@ -464,10 +511,6 @@ impl WaylandBridge {
             self.queue_focus_events(surface_id);
         }
 
-        let mut messages = Vec::new();
-        let mut pointer_event_sent = false;
-        let mut pointer_event_id: Option<u32> = None;
-
         match type_ {
             EV_REL => {
                 if code == REL_X {
@@ -475,15 +518,9 @@ impl WaylandBridge {
                 } else if code == REL_Y {
                     self.pointer_y = self.pointer_y.saturating_add(value);
                 }
-                if let Some(pointer_id) = self.focused_pointer {
-                    let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
-                    msg.add_arg(WaylandArg::Uint(time as u32));
-                    msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
-                    msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
-                    messages.push(msg);
-                    pointer_event_sent = true;
-                    pointer_event_id = Some(pointer_id);
-                }
+                self.pending_pointer_motion = true;
+                self.pending_pointer_time = time as u32;
+                self.pending_pointer_id = self.focused_pointer;
             }
             EV_ABS => {
                 if code == ABS_X {
@@ -491,15 +528,9 @@ impl WaylandBridge {
                 } else if code == ABS_Y {
                     self.pointer_y = value;
                 }
-                if let Some(pointer_id) = self.focused_pointer {
-                    let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
-                    msg.add_arg(WaylandArg::Uint(time as u32));
-                    msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
-                    msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
-                    messages.push(msg);
-                    pointer_event_sent = true;
-                    pointer_event_id = Some(pointer_id);
-                }
+                self.pending_pointer_motion = true;
+                self.pending_pointer_time = time as u32;
+                self.pending_pointer_id = self.focused_pointer;
             }
             EV_KEY => {
                 if (BTN_MOUSE_MIN..=BTN_MOUSE_MAX).contains(&code) {
@@ -507,6 +538,7 @@ impl WaylandBridge {
                         self.left_button_down = value != 0;
                     }
                     if let Some(pointer_id) = self.focused_pointer {
+                        self.queue_pending_pointer_motion();
                         let serial = self.allocate_serial();
                         if code == BTN_LEFT && value != 0 {
                             self.last_left_button_serial = Some(serial);
@@ -521,9 +553,8 @@ impl WaylandBridge {
                         } else {
                             input::pointer_button_state::RELEASED
                         }));
-                        messages.push(msg);
-                        pointer_event_sent = true;
-                        pointer_event_id = Some(pointer_id);
+                        self.pending_pointer_messages.push(msg);
+                        self.pending_pointer_id = Some(pointer_id);
                     }
                 } else if let Some(keyboard_id) = self.focused_keyboard {
                     let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEY);
@@ -531,21 +562,14 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Uint(time as u32));
                     msg.add_arg(WaylandArg::Uint(code as u32));
                     msg.add_arg(WaylandArg::Uint(value as u32));
+                    let mut messages = Vec::new();
                     messages.push(msg);
+                    self.queue_input_messages(messages);
                 }
             }
+            EV_SYN => self.flush_pending_pointer_messages(),
             _ => {}
         }
-
-        if pointer_event_sent
-            && let Some(pointer_id) = pointer_event_id
-            && self.pointer_frame_supported(pointer_id)
-        {
-            let frame_msg = WaylandMessage::new(pointer_id, input::pointer_event::FRAME);
-            messages.push(frame_msg);
-        }
-
-        self.queue_input_messages(messages);
     }
 
     fn poll_sws_messages(&mut self) -> Result<(), &'static str> {
@@ -1504,6 +1528,17 @@ impl WaylandBridge {
                     let header = MessageHeader::from_bytes(&header_array);
 
                     let msg_size = header.size() as usize;
+                    if msg_size < MessageHeader::SIZE || msg_size % 4 != 0 {
+                        bridge_log!(
+                            "[Bridge] Invalid Wayland message header at offset {}: object_id={} opcode={} size={} bytes={:02x?}",
+                            offset,
+                            header.object_id,
+                            header.opcode(),
+                            msg_size,
+                            header_bytes
+                        );
+                        return Err("Invalid Wayland message header");
+                    }
                     if offset + msg_size > buffer.len() {
                         if is_debug_enabled() {
                             bridge_log!("[Bridge] Incomplete message, waiting for more data");
@@ -1585,13 +1620,30 @@ impl WaylandBridge {
             let had_input_events = !input_events.is_empty();
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
-                // Always log input events for debugging
-                // bridge_log!(
-                //     "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes",
-                //     input_msg.header.object_id,
-                //     input_msg.header.opcode(),
-                //     msg_bytes.len()
-                // );
+                let should_log_input = match self.objects.get(&input_msg.header.object_id) {
+                    Some(interface) if interface == "wl_pointer" => matches!(
+                        input_msg.header.opcode(),
+                        input::pointer_event::ENTER
+                            | input::pointer_event::LEAVE
+                            | input::pointer_event::MOTION
+                            | input::pointer_event::BUTTON
+                            | input::pointer_event::FRAME
+                    ),
+                    Some(interface) if interface == "wl_keyboard" => matches!(
+                        input_msg.header.opcode(),
+                        input::keyboard_event::ENTER | input::keyboard_event::LEAVE
+                    ),
+                    _ => input_msg.header.object_id == 0,
+                };
+                if should_log_input {
+                    bridge_log!(
+                        "[Bridge] Forwarding input event: obj={} opcode={} size={} bytes={:02x?}",
+                        input_msg.header.object_id,
+                        input_msg.header.opcode(),
+                        msg_bytes.len(),
+                        &msg_bytes[..msg_bytes.len().min(32)]
+                    );
+                }
                 if let Err(e) = client.write(&msg_bytes) {
                     bridge_log!("[Bridge] Failed to forward input event: {:?}", e);
                 }
@@ -1639,6 +1691,9 @@ impl WaylandBridge {
             "wl_pointer" => self.handle_pointer_message(object_id, opcode, payload),
             "wl_keyboard" => self.handle_keyboard_message(object_id, opcode, payload),
             "wl_output" => self.handle_output_message(object_id, opcode, payload),
+            "wl_data_device_manager" => self.handle_data_device_manager_message(opcode, payload),
+            "wl_data_device" => self.handle_data_device_message(object_id, opcode, payload),
+            "wl_data_source" => self.handle_data_source_message(object_id, opcode, payload),
             "wl_region" => self.handle_region_message(object_id, opcode, payload),
             "xdg_wm_base" => self.handle_xdg_wm_base_message(opcode, payload),
             "xdg_surface" => self.handle_xdg_surface_message(object_id, opcode, payload),
@@ -2713,6 +2768,83 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         bridge_log!("[Bridge] wl_keyboard opcode: {}", opcode);
         // Keyboard events are sent from SWS, not received from client
+        Ok(Vec::new())
+    }
+
+    /// Handle wl_data_device_manager messages.
+    ///
+    /// GTK binds this global even when the application does not actively use
+    /// clipboard or drag-and-drop.  Scarlet does not provide selection data yet,
+    /// but registering the requested objects keeps later no-op requests from
+    /// being dropped as unknown object IDs.
+    fn handle_data_device_manager_message(
+        &mut self,
+        opcode: u16,
+        payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
+        match opcode {
+            protocol::data_device_manager_request::CREATE_DATA_SOURCE => {
+                bridge_log!("[Bridge] wl_data_device_manager.create_data_source");
+                if let Some(source_id) = Self::parse_u32(payload, 0) {
+                    self.add_object(source_id, String::from("wl_data_source"));
+                }
+                Ok(Vec::new())
+            }
+            protocol::data_device_manager_request::GET_DATA_DEVICE => {
+                bridge_log!("[Bridge] wl_data_device_manager.get_data_device");
+                if let Some(device_id) = Self::parse_u32(payload, 0) {
+                    self.add_object(device_id, String::from("wl_data_device"));
+                }
+                Ok(Vec::new())
+            }
+            _ => {
+                bridge_log!("[Bridge] Unknown wl_data_device_manager opcode: {}", opcode);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn handle_data_device_message(
+        &mut self,
+        data_device_id: u32,
+        opcode: u16,
+        _payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
+        match opcode {
+            protocol::data_device_request::RELEASE => {
+                bridge_log!("[Bridge] wl_data_device.release");
+                self.objects.remove(&data_device_id);
+            }
+            protocol::data_device_request::START_DRAG => {
+                bridge_log!("[Bridge] wl_data_device.start_drag (ignored)");
+            }
+            protocol::data_device_request::SET_SELECTION => {
+                bridge_log!("[Bridge] wl_data_device.set_selection (ignored)");
+            }
+            _ => bridge_log!("[Bridge] Unknown wl_data_device opcode: {}", opcode),
+        }
+        Ok(Vec::new())
+    }
+
+    fn handle_data_source_message(
+        &mut self,
+        data_source_id: u32,
+        opcode: u16,
+        _payload: &[u8],
+    ) -> Result<Vec<WaylandMessage>, &'static str> {
+        match opcode {
+            protocol::data_source_request::DESTROY => {
+                bridge_log!("[Bridge] wl_data_source.destroy");
+                self.objects.remove(&data_source_id);
+            }
+            protocol::data_source_request::OFFER => {
+                bridge_log!("[Bridge] wl_data_source.offer (ignored)");
+            }
+            protocol::data_source_request::SET_ACTIONS => {
+                bridge_log!("[Bridge] wl_data_source.set_actions (ignored)");
+            }
+            _ => bridge_log!("[Bridge] Unknown wl_data_source opcode: {}", opcode),
+        }
         Ok(Vec::new())
     }
 
