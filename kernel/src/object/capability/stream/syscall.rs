@@ -4,6 +4,7 @@
 //! with StreamOps capability (read/write operations).
 
 use crate::arch::Trapframe;
+use crate::library::std::usercopy::copy_from_user;
 use crate::task::mytask;
 
 /// System call for reading from a KernelObject with StreamOps capability
@@ -80,10 +81,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    let buf_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX, // Invalid buffer pointer
-    };
+    let buf_vaddr = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
@@ -101,9 +99,14 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform write operation
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-    match stream.write(buffer) {
+    // Copy from user space before writing so buffers crossing page boundaries
+    // are handled correctly.
+    let mut buffer = alloc::vec![0u8; count];
+    if copy_from_user(task, buf_vaddr, &mut buffer).is_err() {
+        return usize::MAX;
+    }
+
+    match stream.write(&buffer) {
         Ok(bytes_written) => bytes_written,
         Err(_) => usize::MAX, // Write error
     }

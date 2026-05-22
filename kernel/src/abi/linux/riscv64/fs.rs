@@ -3887,7 +3887,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 ///
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
 pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet};
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
     use crate::timer::ns_to_ticks;
 
     let task = match mytask() {
@@ -4168,36 +4168,64 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                     }
                 }
             } else if let Some(wait_idx) = first_selectable_index {
-                let pfd = &fds[wait_idx];
-                if pfd.fd >= 0 {
-                    let fd_usize = pfd.fd as usize;
-                    let abi_ref = &*abi;
-                    let task_ref: &crate::task::Task = &*task;
-                    if let Some(handle) = abi_ref.get_handle(fd_usize) {
-                        if let Some(kobj) = task_ref.handle_table.get(handle) {
-                            if let Some(sel) = kobj.as_selectable() {
-                                let want_read = (pfd.events & POLLIN) != 0;
-                                let want_write = (pfd.events & POLLOUT) != 0;
-                                let want_except = (pfd.events & POLLPRI) != 0;
-                                let _ = sel.wait_until_ready(
-                                    ReadyInterest {
-                                        read: want_read,
-                                        write: want_write,
-                                        except: want_except,
-                                    },
-                                    trapframe,
-                                    timeout_ticks,
-                                    0,
-                                );
+                use crate::timer::get_tick;
+
+                let deadline = timeout_ticks.map(|ticks| get_tick().saturating_add(ticks));
+                loop {
+                    let remaining_timeout = if let Some(deadline) = deadline {
+                        let now = get_tick();
+                        if now >= deadline {
+                            break;
+                        }
+                        Some(deadline.saturating_sub(now))
+                    } else {
+                        None
+                    };
+
+                    let mut wait_outcome = SelectWaitOutcome::Ready;
+                    let pfd = &fds[wait_idx];
+                    if pfd.fd >= 0 {
+                        let fd_usize = pfd.fd as usize;
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        if let Some(handle) = abi_ref.get_handle(fd_usize) {
+                            if let Some(kobj) = task_ref.handle_table.get(handle) {
+                                if let Some(sel) = kobj.as_selectable() {
+                                    let want_read = (pfd.events & POLLIN) != 0;
+                                    let want_write = (pfd.events & POLLOUT) != 0;
+                                    let want_except = (pfd.events & POLLPRI) != 0;
+                                    wait_outcome = sel.wait_until_ready(
+                                        ReadyInterest {
+                                            read: want_read,
+                                            write: want_write,
+                                            except: want_except,
+                                        },
+                                        trapframe,
+                                        remaining_timeout,
+                                        0,
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                let abi_ref = &*abi;
-                let task_ref: &crate::task::Task = &*task;
-                for pfd in fds.iter_mut() {
-                    let _ = eval_pfd(pfd, abi_ref, task_ref);
+                    any_ready = false;
+                    ready_count = 0;
+                    {
+                        let abi_ref = &*abi;
+                        let task_ref: &crate::task::Task = &*task;
+                        for pfd in fds.iter_mut() {
+                            let eval = eval_pfd(pfd, abi_ref, task_ref);
+                            if eval.ready {
+                                any_ready = true;
+                                ready_count += 1;
+                            }
+                        }
+                    }
+
+                    if any_ready || wait_outcome == SelectWaitOutcome::TimedOut {
+                        break;
+                    }
                 }
             }
         }

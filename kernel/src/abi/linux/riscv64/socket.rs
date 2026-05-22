@@ -8,6 +8,7 @@ use crate::{
     network::{
         NetworkManager, SocketDomain, SocketError, SocketProtocol, SocketType, local::LocalSocket,
     },
+    library::std::usercopy::{copy_from_user, copy_to_user},
     object::KernelObject,
     object::capability::selectable::Selectable,
     sched::scheduler::get_scheduler,
@@ -1156,25 +1157,17 @@ pub fn sys_sendmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             continue;
         }
 
-        let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-            Some(addr) => addr as *const u8,
-            None => {
-                crate::early_println!(
-                    "[linux socket] sendmsg bad buf ptr {:x}",
-                    iovec.iov_base as usize
-                );
-                return errno::to_result(errno::EFAULT);
-            }
-        };
-
-        if buf_addr.is_null() {
-            crate::early_println!("[linux socket] sendmsg null buf ptr");
+        let mut buffer = Vec::new();
+        buffer.resize(iovec.iov_len, 0);
+        if copy_from_user(task, iovec.iov_base as usize, &mut buffer).is_err() {
+            crate::early_println!(
+                "[linux socket] sendmsg bad buf ptr {:x}",
+                iovec.iov_base as usize
+            );
             return errno::to_result(errno::EFAULT);
         }
 
-        let buffer = unsafe { core::slice::from_raw_parts(buf_addr, iovec.iov_len) };
-
-        match stream.write(buffer) {
+        match stream.write(&buffer) {
             Ok(n) => {
                 total_written = total_written.saturating_add(n);
                 if n < iovec.iov_len {
@@ -1390,19 +1383,17 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 continue;
             }
 
-            let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-                Some(addr) => addr as *mut u8,
-                None => return errno::to_result(errno::EFAULT),
-            };
-
-            if buf_addr.is_null() {
-                return errno::to_result(errno::EFAULT);
-            }
-
             let remaining = data.len() - data_offset;
             let to_copy = remaining.min(iovec.iov_len);
-            let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, to_copy) };
-            buffer.copy_from_slice(&data[data_offset..data_offset + to_copy]);
+            if copy_to_user(
+                task,
+                iovec.iov_base as usize,
+                &data[data_offset..data_offset + to_copy],
+            )
+            .is_err()
+            {
+                return errno::to_result(errno::EFAULT);
+            }
             data_offset += to_copy;
             total_read += to_copy;
         }
@@ -1413,21 +1404,14 @@ pub fn sys_recvmsg(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
                 continue;
             }
 
-            let buf_addr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-                Some(addr) => addr as *mut u8,
-                None => {
-                    return errno::to_result(errno::EFAULT);
-                }
-            };
+            let mut buffer = Vec::new();
+            buffer.resize(iovec.iov_len, 0);
 
-            if buf_addr.is_null() {
-                return errno::to_result(errno::EFAULT);
-            }
-
-            let buffer = unsafe { core::slice::from_raw_parts_mut(buf_addr, iovec.iov_len) };
-
-            match stream.read(buffer) {
+            match stream.read(&mut buffer) {
                 Ok(n) => {
+                    if copy_to_user(task, iovec.iov_base as usize, &buffer[..n]).is_err() {
+                        return errno::to_result(errno::EFAULT);
+                    }
                     total_read = total_read.saturating_add(n);
                     if n < iovec.iov_len {
                         break;

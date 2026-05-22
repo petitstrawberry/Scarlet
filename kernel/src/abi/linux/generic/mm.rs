@@ -518,6 +518,17 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
+pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    trapframe.increment_pc_next(task);
+
+    to_result(errno::ENOSYS)
+}
+
 /// Handle mmap for a KVM vCPU fd — maps the shared kvm_run page.
 #[cfg(feature = "hypervisor")]
 fn handle_kvm_vcpu_mmap(
