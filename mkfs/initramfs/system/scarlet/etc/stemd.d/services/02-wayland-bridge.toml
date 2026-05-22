@@ -1,0 +1,6 @@
+# Stem Daemon Configuration File
+
+[service.wayland-bridge]
+exec = "/bin/wayland_bridge"
+depends = ["sws"]
+order = 02

@@ -51,6 +51,26 @@ fn merge_damage(
     (x0 as i32, y0 as i32, w, h)
 }
 
+fn damage_area(width: u32, height: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(height))
+}
+
+fn should_merge_damage(
+    ax: i32,
+    ay: i32,
+    aw: u32,
+    ah: u32,
+    bx: i32,
+    by: i32,
+    bw: u32,
+    bh: u32,
+) -> bool {
+    let (_, _, union_w, union_h) = merge_damage(ax, ay, aw, ah, bx, by, bw, bh);
+    let separate_area = damage_area(aw, ah).saturating_add(damage_area(bw, bh));
+    let union_area = damage_area(union_w, union_h);
+    union_area <= separate_area.saturating_mul(2)
+}
+
 /// Application session information
 #[derive(Debug, Clone)]
 struct AppSession {
@@ -307,6 +327,18 @@ pub fn push_ipc_event(event: IpcEvent) {
             } = existing
             {
                 if *existing_window == window_id {
+                    if !should_merge_damage(
+                        *existing_x,
+                        *existing_y,
+                        *existing_w,
+                        *existing_h,
+                        damage_x,
+                        damage_y,
+                        damage_width,
+                        damage_height,
+                    ) {
+                        continue;
+                    }
                     let (nx, ny, nw, nh) = merge_damage(
                         *existing_x,
                         *existing_y,

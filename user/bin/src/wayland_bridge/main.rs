@@ -43,6 +43,9 @@ use surface::SurfaceManager;
 use sws_protocol as protocol_sws;
 use xdg_shell::XdgShellManager;
 
+const MAX_PENDING_DAMAGE_RECTS: usize = 8;
+const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
+
 /// Log level for the Wayland bridge
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LogLevel {
@@ -184,10 +187,7 @@ struct WindowShmInfo {
 
 struct PendingDamage {
     surface_id: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+    rects: Vec<(u32, u32, u32, u32)>,
 }
 
 /// Wayland Bridge Server
@@ -1002,58 +1002,87 @@ impl WaylandBridge {
             .entry(window_id)
             .or_insert(PendingDamage {
                 surface_id,
-                x,
-                y,
-                width,
-                height,
+                rects: Vec::new(),
             });
 
         if entry.surface_id != surface_id {
             entry.surface_id = surface_id;
-            entry.x = x;
-            entry.y = y;
-            entry.width = width;
-            entry.height = height;
-            return;
+            entry.rects.clear();
         }
 
         if was_empty {
             self.flush_deferred = true;
         }
 
-        let right_existing = entry.x.saturating_add(entry.width);
-        let right_new = x.saturating_add(width);
-        let bottom_existing = entry.y.saturating_add(entry.height);
-        let bottom_new = y.saturating_add(height);
-
-        let new_x = entry.x.min(x);
-        let new_y = entry.y.min(y);
-        let new_right = right_existing.max(right_new);
-        let new_bottom = bottom_existing.max(bottom_new);
-
-        entry.x = new_x;
-        entry.y = new_y;
-        entry.width = new_right.saturating_sub(new_x);
-        entry.height = new_bottom.saturating_sub(new_y);
+        Self::push_damage_rect(&mut entry.rects, (x, y, width, height));
     }
 
-    fn compute_damage_rect(
+    fn rect_area(rect: (u32, u32, u32, u32)) -> u64 {
+        u64::from(rect.2).saturating_mul(u64::from(rect.3))
+    }
+
+    fn union_damage_rect(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+        let ax1 = a.0.saturating_add(a.2);
+        let ay1 = a.1.saturating_add(a.3);
+        let bx1 = b.0.saturating_add(b.2);
+        let by1 = b.1.saturating_add(b.3);
+        let x0 = a.0.min(b.0);
+        let y0 = a.1.min(b.1);
+        let x1 = ax1.max(bx1);
+        let y1 = ay1.max(by1);
+        (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+
+    fn should_merge_damage(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> bool {
+        let union = Self::union_damage_rect(a, b);
+        let separate_area = Self::rect_area(a).saturating_add(Self::rect_area(b));
+        let union_area = Self::rect_area(union);
+        union_area <= separate_area.saturating_mul(DAMAGE_MERGE_AREA_FACTOR)
+    }
+
+    fn push_damage_rect(rects: &mut Vec<(u32, u32, u32, u32)>, rect: (u32, u32, u32, u32)) {
+        if rect.2 == 0 || rect.3 == 0 {
+            return;
+        }
+
+        for existing in rects.iter_mut() {
+            if Self::should_merge_damage(*existing, rect) {
+                *existing = Self::union_damage_rect(*existing, rect);
+                return;
+            }
+        }
+
+        if rects.len() < MAX_PENDING_DAMAGE_RECTS {
+            rects.push(rect);
+            return;
+        }
+
+        let mut best_index = 0;
+        let mut best_extra_area = u64::MAX;
+        for (idx, existing) in rects.iter().enumerate() {
+            let union = Self::union_damage_rect(*existing, rect);
+            let extra_area = Self::rect_area(union).saturating_sub(Self::rect_area(*existing));
+            if extra_area < best_extra_area {
+                best_index = idx;
+                best_extra_area = extra_area;
+            }
+        }
+        rects[best_index] = Self::union_damage_rect(rects[best_index], rect);
+    }
+
+    fn compute_damage_rects(
         damage: &[(i32, i32, i32, i32)],
         surface_width: u32,
         surface_height: u32,
-    ) -> (u32, u32, u32, u32) {
+    ) -> Vec<(u32, u32, u32, u32)> {
         if surface_width == 0 || surface_height == 0 {
-            return (0, 0, 0, 0);
+            return Vec::new();
         }
         if damage.is_empty() {
-            return (0, 0, surface_width, surface_height);
+            return Vec::from([(0, 0, surface_width, surface_height)]);
         }
 
-        let mut x0 = i32::MAX;
-        let mut y0 = i32::MAX;
-        let mut x1 = i32::MIN;
-        let mut y1 = i32::MIN;
-
+        let mut rects = Vec::new();
         for &(dx, dy, dw, dh) in damage {
             if dw <= 0 || dh <= 0 {
                 continue;
@@ -1071,17 +1100,18 @@ impl WaylandBridge {
             if cx1 <= cx0 || cy1 <= cy0 {
                 continue;
             }
-            x0 = x0.min(cx0);
-            y0 = y0.min(cy0);
-            x1 = x1.max(cx1);
-            y1 = y1.max(cy1);
+            Self::push_damage_rect(
+                &mut rects,
+                (
+                    cx0 as u32,
+                    cy0 as u32,
+                    (cx1 - cx0) as u32,
+                    (cy1 - cy0) as u32,
+                ),
+            );
         }
 
-        if x1 <= x0 || y1 <= y0 {
-            return (0, 0, surface_width, surface_height);
-        }
-
-        (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+        rects
     }
 
     fn flush_pending_updates(&mut self) -> Result<bool, &'static str> {
@@ -1096,25 +1126,27 @@ impl WaylandBridge {
             let Some(pending) = self.pending_damage.remove(&window_id) else {
                 continue;
             };
-            if is_debug_enabled() {
-                bridge_log!(
-                    "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
+            for (x, y, width, height) in &pending.rects {
+                if is_debug_enabled() {
+                    bridge_log!(
+                        "[Bridge] Updating SWS window {} with damage [{},{} {}x{}]",
+                        window_id,
+                        x,
+                        y,
+                        width,
+                        height
+                    );
+                }
+                self.send_extension_update_buffer(
+                    pending.surface_id,
                     window_id,
-                    pending.x,
-                    pending.y,
-                    pending.width,
-                    pending.height
-                );
+                    *x,
+                    *y,
+                    *width,
+                    *height,
+                )?;
+                sent_any = true;
             }
-            self.send_extension_update_buffer(
-                pending.surface_id,
-                window_id,
-                pending.x,
-                pending.y,
-                pending.width,
-                pending.height,
-            )?;
-            sent_any = true;
 
             if let Some(callbacks) = self.pending_frame_callbacks.remove(&pending.surface_id) {
                 let mut callback_msgs = Vec::new();
@@ -2091,7 +2123,7 @@ impl WaylandBridge {
                 let mut should_update = false;
                 let mut buffer_present = false;
                 let mut surface_size = (0u32, 0u32);
-                let mut damage_rect = (0u32, 0u32, 0u32, 0u32);
+                let mut damage_rects = Vec::new();
                 let mut callback_serial = None;
                 let serial_for_callback = self.allocate_serial();
                 let mut configure_msgs = Vec::new();
@@ -2109,8 +2141,8 @@ impl WaylandBridge {
                     );
                     buffer_present = surface.buffer_id.is_some();
                     surface_size = (surface.width.max(1), surface.height.max(1));
-                    damage_rect =
-                        Self::compute_damage_rect(&surface.damage, surface.width, surface.height);
+                    damage_rects =
+                        Self::compute_damage_rects(&surface.damage, surface.width, surface.height);
                     surface.commit();
                     let current_buffer = surface.buffer_id;
                     if let Some(prev_buffer) = surface.swap_committed_buffer(current_buffer)
@@ -2172,14 +2204,13 @@ impl WaylandBridge {
                             surface_size.1,
                         );
                     }
-                    if self.surface_to_window.contains_key(&surface_id)
-                        && damage_rect.2 != 0
-                        && damage_rect.3 != 0
-                    {
-                        match self.update_sws_window(surface_id, damage_rect) {
-                            Ok(()) => defer_callback_until_update = true,
-                            Err(e) => {
-                                bridge_log!("[Bridge] Failed to update SWS window: {}", e);
+                    if self.surface_to_window.contains_key(&surface_id) {
+                        for damage_rect in damage_rects {
+                            match self.update_sws_window(surface_id, damage_rect) {
+                                Ok(()) => defer_callback_until_update = true,
+                                Err(e) => {
+                                    bridge_log!("[Bridge] Failed to update SWS window: {}", e);
+                                }
                             }
                         }
                     }
