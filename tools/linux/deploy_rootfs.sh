@@ -34,12 +34,24 @@ echo "Deploying prebuilt Linux rootfs for ${ARCH}"
 echo "Extracting $TAR_SRC -> $DEST_DIR"
 tar -xf "$TAR_SRC" -C "$DEST_DIR"
 
+PREBUILT_ROOT_DIR="${PREBUILT_DIR}/${ARCH}/root"
+if [ -d "$PREBUILT_ROOT_DIR" ]; then
+  echo "Deploying prebuilt root overlay: $PREBUILT_ROOT_DIR -> $DEST_DIR"
+  rsync -a "$PREBUILT_ROOT_DIR/" "$DEST_DIR/"
+fi
+
 if [ -n "${TARGET_UID:-}" ] || [ -n "${TARGET_GID:-}" ]; then
   OWNER_UID=${TARGET_UID:-0}
   OWNER_GID=${TARGET_GID:-0}
   echo "Applying ownership: $OWNER_UID:$OWNER_GID -> $DEST_DIR"
   chown -R "$OWNER_UID":"$OWNER_GID" "$DEST_DIR"
 fi
+
+mkdir -p \
+  "$DEST_DIR/root/.cache/gtk-3.0/compose" \
+  "$DEST_DIR/root/.config/gtk-3.0" \
+  "$DEST_DIR/root/.local/share/zathura"
+
 # Deploy any prebuilt binaries from ${PREBUILT_DIR}/${ARCH}/bin -> rootfs /usr/bin
 PREBUILT_BIN_DIR="${PREBUILT_DIR}/${ARCH}/bin"
 TARGET_BIN_DIR="$DEST_DIR/usr/bin"
@@ -74,6 +86,21 @@ if [ -d "$PREBUILT_LIB_DIR" ]; then
   fi
 else
   echo "No prebuilt lib directory at $PREBUILT_LIB_DIR (skipping)"
+fi
+
+# Deploy any prebuilt shared data into the rootfs's /usr/share
+PREBUILT_SHARE_DIR="${PREBUILT_DIR}/${ARCH}/share"
+if [ -d "$PREBUILT_SHARE_DIR" ]; then
+  echo "Deploying prebuilt share tree: $PREBUILT_SHARE_DIR -> $DEST_DIR/usr/share/"
+  mkdir -p "$DEST_DIR/usr/share"
+  rsync -a "$PREBUILT_SHARE_DIR/" "$DEST_DIR/usr/share/"
+  if [ -n "${TARGET_UID:-}" ] || [ -n "${TARGET_GID:-}" ]; then
+    OWNER_UID=${TARGET_UID:-0}
+    OWNER_GID=${TARGET_GID:-0}
+    chown -R "$OWNER_UID":"$OWNER_GID" "$DEST_DIR/usr/share"
+  fi
+else
+  echo "No prebuilt share directory at $PREBUILT_SHARE_DIR (skipping)"
 fi
 
 echo "Deployed: $DEST_DIR"
