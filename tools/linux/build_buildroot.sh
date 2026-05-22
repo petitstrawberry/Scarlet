@@ -124,7 +124,7 @@ configure_common_linux_userland() {
     utils/config --enable BR2_PACKAGE_GUMBO_PARSER
     utils/config --enable BR2_PACKAGE_HICOLOR_ICON_THEME
     utils/config --enable BR2_PACKAGE_JBIG2DEC
-    utils/config --disable BR2_PACKAGE_JSON_GLIB
+    utils/config --enable BR2_PACKAGE_JSON_GLIB
     utils/config --enable BR2_PACKAGE_JPEG
     utils/config --disable BR2_PACKAGE_JPEG_TURBO
     utils/config --enable BR2_PACKAGE_LCMS2
@@ -183,7 +183,7 @@ configure_common_linux_userland() {
     utils/config --enable BR2_PACKAGE_SEATD_BUILTIN
     utils/config --enable BR2_PACKAGE_SHARED_MIME_INFO
     utils/config --enable BR2_PACKAGE_SL
-    utils/config --disable BR2_PACKAGE_SQLITE
+    utils/config --enable BR2_PACKAGE_SQLITE
     utils/config --enable BR2_PACKAGE_TIFF
     utils/config --enable BR2_PACKAGE_TIFF_CCITT
     utils/config --enable BR2_PACKAGE_TIFF_JPEG

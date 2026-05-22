@@ -22,6 +22,7 @@ Date: 2026-05-22
   - translate Scarlet-visible file paths;
   - select the `linux-aarch64` ABI;
   - set the Linux viewer environment;
+  - start zathura in a minimal GUI mode;
   - `execve` `/scarlet/system/linux-aarch64/usr/bin/zathura`.
 
 ## Current Facts
@@ -115,6 +116,54 @@ Date: 2026-05-22
   now copies the full user buffer with `copy_from_user`; Linux `sys_recvmsg`
   now copies stream data and atomic handle+data payloads back to user iovecs
   with `copy_to_user`.
+- After input delivery worked, pointer movement was still very expensive:
+  SWS emitted `ABS_X`, `ABS_Y`, and `EV_SYN` for every mouse position, queued
+  every packet, and the bridge converted every queued packet into Wayland
+  motion/frame traffic. SWS now coalesces only adjacent tail pointer-motion
+  packets in its pending input queues, preserving all non-motion boundaries
+  such as button, key, enter, and leave events. The bridge also batches the
+  already-drained Wayland input messages into one stream write per loop instead
+  of one write per Wayland event.
+- Runtime logs then showed a separate repaint loop: GTK repeatedly requested a
+  new `wl_surface.frame`, attached a new SHM buffer, committed, and immediately
+  received `wl_callback.done`. The bridge now delays frame callback completion
+  until the queued SWS window-buffer update is flushed, so the callback acts as
+  a frame pacing point instead of an immediate repaint trigger.
+- GTK compatibility is still partial. `weston-simple-shm`, `gtk3-icon-browser`,
+  and parts of `gtk3-widget-factory` can run, but complex GTK UI can still lose
+  click handling while hover continues. The strongest current hypothesis is
+  missing Wayland popup/grab coverage (`xdg_surface.get_popup`,
+  `xdg_wm_base.create_positioner`, and `xdg_popup.grab`). For the immediate PDF
+  viewer goal, do not switch to image conversion; keep the GUI viewer path and
+  make zathura avoid optional UI/database/cache surfaces as much as possible.
+- `pdfview` now creates `/tmp/pdfview-zathura-{config,data,cache}` and launches
+  zathura with:
+  - `--config-dir=/tmp/pdfview-zathura-config`
+  - `--data-dir=/tmp/pdfview-zathura-data`
+  - `--cache-dir=/tmp/pdfview-zathura-cache`
+  - `--mode=presentation`
+  This keeps the first target as a real GUI zathura window while avoiding the
+  default `/root/.local/share/zathura` database path and reducing the chance of
+  exercising popup-heavy UI.
+- `--plugins-dir=/usr/lib/zathura` was removed again because zathura appends it
+  to the built-in default plugin directory rather than replacing the default,
+  causing the PDF plugin to load twice and report
+  `filetype already registered: application/pdf`.
+- `pdfview` also writes `/tmp/pdfview-zathura-config/zathurarc` with
+  `set database null` so zathura does not enter the bookmark/history sqlite
+  path while the Linux ABI still lacks complete filesystem-stat coverage.
+- The next AArch64 run failed before GTK startup because the dynamic linker
+  could not find `libjson-glib-1.0.so.0` and `libsqlite3.so.0`. That was a
+  Buildroot rootfs/package mismatch: girara/zathura were built against
+  json-glib and sqlite, while `build_buildroot.sh` explicitly disabled both
+  packages. AArch64 Buildroot now enables `BR2_PACKAGE_JSON_GLIB` and
+  `BR2_PACKAGE_SQLITE`; the rootfs image was regenerated with both libraries.
+- GTK also emits multiple thin damage rectangles for some redraws, for example
+  one right-edge strip and one bottom-edge strip. The bridge and SWS used to
+  collapse those into a single bounding rectangle, turning roughly 6.5 KiBpx of
+  real damage into a roughly 310 KiBpx update. Both bridge-side pending damage
+  and SWS compositor dirty damage now keep a bounded list of rectangles and
+  merge only when the union area is close to the separate areas.
 
 ## Latest Runtime Result
 

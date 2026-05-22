@@ -12,7 +12,7 @@ extern crate scarlet_std as std;
 use std::string::{String, ToString};
 use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_abi_with_flags};
 use std::vec::Vec;
-use std::{format, println};
+use std::{format, fs, println};
 
 #[cfg(target_arch = "riscv64")]
 const VIEWER_PATH: &str = "/scarlet/system/linux-riscv64/usr/bin/zathura";
@@ -32,6 +32,16 @@ const LINUX_SYSTEM_PREFIX: &str = "/system/linux-aarch64";
 fn print_usage() {
     println!("usage: pdfview [zathura-options] <file.pdf>");
     println!("       requires {}", VIEWER_PATH);
+}
+
+fn prepare_runtime_dirs() {
+    let _ = fs::create_directory("/tmp/pdfview-zathura-config");
+    let _ = fs::create_directory("/tmp/pdfview-zathura-data");
+    let _ = fs::create_directory("/tmp/pdfview-zathura-cache");
+
+    if let Ok(mut file) = fs::File::create("/tmp/pdfview-zathura-config/zathurarc") {
+        let _ = file.write(b"set database null\n");
+    }
 }
 
 fn linux_visible_path(path: &str) -> String {
@@ -72,6 +82,10 @@ fn main() -> i32 {
 
     let mut viewer_args: Vec<String> = Vec::new();
     viewer_args.push(String::from("/usr/bin/zathura"));
+    viewer_args.push(String::from("--config-dir=/tmp/pdfview-zathura-config"));
+    viewer_args.push(String::from("--data-dir=/tmp/pdfview-zathura-data"));
+    viewer_args.push(String::from("--cache-dir=/tmp/pdfview-zathura-cache"));
+    viewer_args.push(String::from("--mode=presentation"));
 
     let mut saw_pdf_path = false;
     for arg in args.iter().skip(1) {
@@ -89,6 +103,8 @@ fn main() -> i32 {
     }
 
     let argv: Vec<&str> = viewer_args.iter().map(|arg| arg.as_str()).collect();
+    prepare_runtime_dirs();
+
     let envp = [
         "LD_LIBRARY_PATH=/usr/lib:/lib",
         "PATH=/bin:/usr/bin",
@@ -100,7 +116,6 @@ fn main() -> i32 {
         "WAYLAND_DISPLAY=wayland-0",
         "XDG_RUNTIME_DIR=/tmp",
         "XDG_DATA_DIRS=/usr/share",
-        "ZATHURA_PLUGIN_PATH=/usr/lib/zathura",
     ];
 
     let result = execve_abi_with_flags(
