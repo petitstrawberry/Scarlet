@@ -3169,12 +3169,12 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     if let Some(shared_memory) = kernel_obj.as_shared_memory() {
         let old_size = shared_memory.size();
-        crate::println!(
-            "sys_ftruncate: shared memory fd={} old_size={} len={}",
-            fd,
-            old_size,
-            length
-        );
+        // crate::println!(
+        //     "sys_ftruncate: shared memory fd={} old_size={} len={}",
+        //     fd,
+        //     old_size,
+        //     length
+        // );
         if let Err(err) = shared_memory.resize(length as usize) {
             crate::println!(
                 "sys_ftruncate: shared memory resize failed fd={} old_size={} len={} err={}",
@@ -3216,34 +3216,10 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let mut is_shm = false;
-    let mut shm_path = None;
-    if let Some(vfs_obj) = file_obj
-        .as_any()
-        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
-    {
-        let path = vfs_obj.get_original_path();
-        if path.contains("wl_shm-") {
-            is_shm = true;
-            shm_path = Some(path);
-            crate::println!("sys_ftruncate: shm path='{}' len={}", path, length);
-        }
-    }
-
     match file_obj.truncate(length as u64) {
         Ok(()) => 0,
         Err(err) => {
-            if is_shm {
-                if let Ok(meta) = file_obj.metadata() {
-                    crate::println!(
-                        "sys_ftruncate: shm truncate failed len={} file_type={:?} size={}",
-                        length,
-                        meta.file_type,
-                        meta.size
-                    );
-                }
-                crate::println!("sys_ftruncate: shm truncate error={:?}", err);
-            } else if length > 0 {
+            if length > 0 {
                 let kind = match kernel_obj {
                     crate::object::KernelObject::File(_) => "File",
                     crate::object::KernelObject::Pipe(_) => "Pipe",
@@ -3259,14 +3235,6 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     #[cfg(feature = "hypervisor")]
                     crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
                 };
-                crate::println!(
-                    "sys_ftruncate: fd={} kind={} path={:?} len={} err={:?}",
-                    fd,
-                    kind,
-                    shm_path,
-                    length,
-                    err
-                );
             }
             errno::to_result(errno::EIO)
         }

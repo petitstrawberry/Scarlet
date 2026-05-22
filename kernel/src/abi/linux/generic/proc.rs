@@ -1319,12 +1319,12 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         }
     };
 
-    crate::println!(
-        "sys_memfd_create: fd={} handle={} flags={:#x}",
-        fd,
-        handle,
-        flags
-    );
+    // crate::println!(
+    //     "sys_memfd_create: fd={} handle={} flags={:#x}",
+    //     fd,
+    //     handle,
+    //     flags
+    // );
 
     fd
 }

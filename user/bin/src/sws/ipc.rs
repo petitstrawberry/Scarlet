@@ -220,6 +220,48 @@ pub struct PendingInputEvent {
     pub value: i32,
 }
 
+fn is_pointer_motion_packet(events: &[PendingInputEvent], start: usize) -> bool {
+    events.len() >= start + 3
+        && events[start].type_ == super::input::event_types::EV_ABS
+        && events[start].code == super::input::abs_codes::ABS_X
+        && events[start + 1].type_ == super::input::event_types::EV_ABS
+        && events[start + 1].code == super::input::abs_codes::ABS_Y
+        && events[start + 2].type_ == super::input::event_types::EV_SYN
+}
+
+fn coalesce_tail_pointer_motion(events: &mut Vec<PendingInputEvent>) {
+    loop {
+        let len = events.len();
+        if len < 6 {
+            return;
+        }
+
+        let previous_start = len - 6;
+        let latest_start = len - 3;
+        if !is_pointer_motion_packet(events, previous_start)
+            || !is_pointer_motion_packet(events, latest_start)
+        {
+            return;
+        }
+
+        let latest_x = events[latest_start].clone();
+        let latest_y = events[latest_start + 1].clone();
+        let latest_syn = events[latest_start + 2].clone();
+        events.truncate(previous_start);
+        events.push(latest_x);
+        events.push(latest_y);
+        events.push(latest_syn);
+    }
+}
+
+fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: PendingInputEvent) {
+    let should_coalesce = event.type_ == super::input::event_types::EV_SYN;
+    events.push(event);
+    if should_coalesce {
+        coalesce_tail_pointer_motion(events);
+    }
+}
+
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
 
@@ -333,12 +375,15 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
     if let Some(events) = pending.get_mut(&window_id) {
-        events.push(PendingInputEvent {
-            time,
-            type_,
-            code,
-            value,
-        });
+        push_input_event_coalesced(
+            events,
+            PendingInputEvent {
+                time,
+                type_,
+                code,
+                value,
+            },
+        );
     }
 }
 
@@ -362,12 +407,15 @@ pub fn send_extension_input_event(
     let events = pending
         .entry((extension_id, external_client_id))
         .or_insert_with(Vec::new);
-    events.push(PendingInputEvent {
-        time,
-        type_,
-        code,
-        value,
-    });
+    push_input_event_coalesced(
+        events,
+        PendingInputEvent {
+            time,
+            type_,
+            code,
+            value,
+        },
+    );
 }
 
 /// Get and clear pending extension input events for a specific extension client

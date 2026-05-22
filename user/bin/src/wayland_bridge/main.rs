@@ -239,6 +239,8 @@ struct WaylandBridge {
     sws_pending: Vec<protocol_sws::ServerMessage>,
     /// Coalesced SWS updates waiting to be sent per window
     pending_damage: BTreeMap<u32, PendingDamage>,
+    /// Frame callbacks waiting for the next SWS update flush per surface
+    pending_frame_callbacks: BTreeMap<u32, Vec<(u32, u32)>>,
     /// Whether a coalescing delay is pending before the next flush
     flush_deferred: bool,
     /// Minimum interval between EXTENSION_UPDATE_BUFFER flushes
@@ -297,6 +299,7 @@ impl WaylandBridge {
             sws_rx_buffer: Vec::new(),
             sws_pending: Vec::new(),
             pending_damage: BTreeMap::new(),
+            pending_frame_callbacks: BTreeMap::new(),
             flush_deferred: false,
             update_flush_interval: Duration::from_millis(16),
             pointer_x: 0,
@@ -1113,6 +1116,16 @@ impl WaylandBridge {
             )?;
             sent_any = true;
 
+            if let Some(callbacks) = self.pending_frame_callbacks.remove(&pending.surface_id) {
+                let mut callback_msgs = Vec::new();
+                for (callback_id, time) in callbacks {
+                    let mut msg = WaylandMessage::new(callback_id, protocol::callback_event::DONE);
+                    msg.add_arg(WaylandArg::Uint(time));
+                    callback_msgs.push(msg);
+                }
+                self.queue_input_messages(callback_msgs);
+            }
+
             if let Some(surface) = self.surface_manager.get_surface_mut(pending.surface_id)
                 && !surface.pending_release.is_empty()
             {
@@ -1618,6 +1631,7 @@ impl WaylandBridge {
                 input_events.extend(queue.drain(..));
             }
             let had_input_events = !input_events.is_empty();
+            let mut encoded_input_events = Vec::new();
             for input_msg in input_events {
                 let msg_bytes = input_msg.encode();
                 let should_log_input = match self.objects.get(&input_msg.header.object_id) {
@@ -1644,8 +1658,20 @@ impl WaylandBridge {
                         &msg_bytes[..msg_bytes.len().min(32)]
                     );
                 }
-                if let Err(e) = client.write(&msg_bytes) {
-                    bridge_log!("[Bridge] Failed to forward input event: {:?}", e);
+                encoded_input_events.extend_from_slice(&msg_bytes);
+            }
+            let mut bytes_written = 0;
+            while bytes_written < encoded_input_events.len() {
+                match client.write(&encoded_input_events[bytes_written..]) {
+                    Ok(0) => {
+                        bridge_log!("[Bridge] Failed to forward input events: short write");
+                        break;
+                    }
+                    Ok(n) => bytes_written += n,
+                    Err(e) => {
+                        bridge_log!("[Bridge] Failed to forward input events: {:?}", e);
+                        break;
+                    }
                 }
             }
 
@@ -2070,6 +2096,7 @@ impl WaylandBridge {
                 let serial_for_callback = self.allocate_serial();
                 let mut configure_msgs = Vec::new();
                 let mut configure_state = None;
+                let mut defer_callback_until_update = false;
 
                 if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                     if let Some(cb_id) = surface.take_pending_callback() {
@@ -2146,9 +2173,15 @@ impl WaylandBridge {
                         );
                     }
                     if self.surface_to_window.contains_key(&surface_id)
-                        && let Err(e) = self.update_sws_window(surface_id, damage_rect)
+                        && damage_rect.2 != 0
+                        && damage_rect.3 != 0
                     {
-                        bridge_log!("[Bridge] Failed to update SWS window: {}", e);
+                        match self.update_sws_window(surface_id, damage_rect) {
+                            Ok(()) => defer_callback_until_update = true,
+                            Err(e) => {
+                                bridge_log!("[Bridge] Failed to update SWS window: {}", e);
+                            }
+                        }
                     }
                     if self.focused_surface.is_none() {
                         self.queue_focus_events(surface_id);
@@ -2156,9 +2189,16 @@ impl WaylandBridge {
                 }
 
                 if let Some((cb_id, time)) = callback_serial {
-                    let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
-                    msg.add_arg(WaylandArg::Uint(time));
-                    callback_msg = Some(msg);
+                    if defer_callback_until_update {
+                        self.pending_frame_callbacks
+                            .entry(surface_id)
+                            .or_insert_with(Vec::new)
+                            .push((cb_id, time));
+                    } else {
+                        let mut msg = WaylandMessage::new(cb_id, protocol::callback_event::DONE);
+                        msg.add_arg(WaylandArg::Uint(time));
+                        callback_msg = Some(msg);
+                    }
                 }
 
                 let mut msgs = Vec::new();

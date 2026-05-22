@@ -3065,20 +3065,6 @@ pub fn sys_ftruncate(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let mut is_shm = false;
-    let mut shm_path = None;
-    if let Some(vfs_obj) = file_obj
-        .as_any()
-        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
-    {
-        let path = vfs_obj.get_original_path();
-        if path.contains("wl_shm-") {
-            is_shm = true;
-            shm_path = Some(path);
-            crate::println!("sys_ftruncate: shm path='{}' len={}", path, length);
-        }
-    }
-
     match file_obj.truncate(length as u64) {
         Ok(()) => 0,
         Err(err) => {
