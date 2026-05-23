@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::{
     boxed::Box,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 use core::{cell::UnsafeCell, sync::atomic};
@@ -47,8 +47,10 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
+
+pub mod job_control;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -408,8 +410,28 @@ pub struct Task {
     parent_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
-    /// Task Group ID - for job control and signal delivery (e.g., pipeline members)
+    /// Process Group ID (PGID) - identifies the process group for job control
+    /// and signal delivery. Historically named `task_group_id`; both
+    /// `get_task_group_id`/`set_task_group_id` and the newer
+    /// `get_process_group_id`/`set_process_group_id` accessors operate on this
+    /// same atomic. The legacy name will be removed once all call sites are
+    /// migrated (see `docs/tty_pty_design.md`, phase tracker).
     task_group_id: AtomicUsize,
+    /// Session ID (SID) - identifies the session this task belongs to.
+    ///
+    /// All members of a session share a (possibly absent) controlling
+    /// terminal. A session leader is the task whose `id == session_id` and
+    /// which has `is_session_leader == true` (created by `setsid()`). On a
+    /// freshly created task, the session ID is initialised to the task's own
+    /// global ID by `set_id()` so that root tasks have a well-defined
+    /// session even before `setsid()` is called.
+    session_id: AtomicUsize,
+    /// Whether this task is the leader of its session.
+    is_session_leader: AtomicBool,
+    /// Weak reference to the controlling terminal, if any. A weak reference
+    /// is used to break the ownership cycle (the TTY's foreground-PGID logic
+    /// references tasks by ID, and tasks reference the TTY here).
+    controlling_tty: RwLock<Option<Weak<crate::device::char::tty::TtyDevice>>>,
     pub max_stack_size: usize,
     pub max_data_size: usize,
     pub max_text_size: usize,
@@ -587,6 +609,9 @@ impl Task {
             parent_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
+            session_id: AtomicUsize::new(0),
+            is_session_leader: AtomicBool::new(false),
+            controlling_tty: RwLock::new(None),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
@@ -674,14 +699,115 @@ impl Task {
         if self.task_group_id.load(Ordering::SeqCst) == 0 {
             self.task_group_id.store(id, Ordering::SeqCst);
         }
+        if self.session_id.load(Ordering::SeqCst) == 0 {
+            // Default: a freshly created root task is its own session.
+            // A child task that inherits a non-zero session_id from its
+            // parent (set explicitly in clone_task) will skip this branch.
+            self.session_id.store(id, Ordering::SeqCst);
+        }
     }
 
-    pub fn get_task_group_id(&self) -> usize {
+    /// Get the process group ID (PGID).
+    ///
+    /// The PGID identifies the process group used for job control and
+    /// terminal signal delivery. This is the modern name for the value
+    /// previously exposed as the "task group ID".
+    ///
+    /// # Returns
+    /// The PGID of this task (a global task ID).
+    pub fn get_process_group_id(&self) -> usize {
         self.task_group_id.load(Ordering::SeqCst)
     }
 
+    /// Set the process group ID (PGID) for this task.
+    ///
+    /// Callers must ensure the new `pgid` is a valid global task ID belonging
+    /// to the same session and namespace as this task. Use
+    /// `task::job_control::setpgid` for the higher-level checked operation.
+    ///
+    /// # Arguments
+    /// * `pgid` - The global task ID to use as the new PGID.
+    pub fn set_process_group_id(&self, pgid: usize) {
+        self.task_group_id.store(pgid, Ordering::SeqCst);
+    }
+
+    /// Get the legacy "task group ID" alias of the process group ID.
+    ///
+    /// New code should call [`get_process_group_id`](Self::get_process_group_id)
+    /// instead. This accessor is retained for backward compatibility while
+    /// callers are migrated.
+    pub fn get_task_group_id(&self) -> usize {
+        self.get_process_group_id()
+    }
+
+    /// Set the legacy "task group ID" alias of the process group ID.
+    ///
+    /// New code should call [`set_process_group_id`](Self::set_process_group_id)
+    /// or the higher-level `task::job_control::setpgid` instead.
     pub fn set_task_group_id(&self, task_group_id: usize) {
-        self.task_group_id.store(task_group_id, Ordering::SeqCst);
+        self.set_process_group_id(task_group_id);
+    }
+
+    /// Get the session ID (SID) of this task.
+    ///
+    /// All tasks belonging to the same session share the same SID. The
+    /// session leader is the task whose `id == session_id` and which has
+    /// `is_session_leader()` returning true.
+    ///
+    /// # Returns
+    /// The SID of this task (a global task ID).
+    pub fn get_session_id(&self) -> usize {
+        self.session_id.load(Ordering::SeqCst)
+    }
+
+    /// Set the session ID (SID) for this task.
+    ///
+    /// This is a low-level setter; use `task::job_control::setsid` for the
+    /// checked operation that also clears the controlling terminal and
+    /// updates the PGID atomically.
+    ///
+    /// # Arguments
+    /// * `sid` - The global task ID to use as the new SID.
+    pub fn set_session_id(&self, sid: usize) {
+        self.session_id.store(sid, Ordering::SeqCst);
+    }
+
+    /// Return whether this task is the leader of its session.
+    pub fn is_session_leader(&self) -> bool {
+        self.is_session_leader.load(Ordering::SeqCst)
+    }
+
+    /// Mark or unmark this task as a session leader.
+    pub fn set_session_leader(&self, leader: bool) {
+        self.is_session_leader.store(leader, Ordering::SeqCst);
+    }
+
+    /// Get the controlling terminal of this task, if any.
+    ///
+    /// Returns the strong reference upgraded from the stored `Weak`. The
+    /// result is `None` either because the task has no controlling terminal
+    /// (e.g. it called `setsid` and has not yet acquired one), or because
+    /// the TTY has been dropped (e.g. UART hangup / PTY master close).
+    pub fn get_controlling_tty(&self) -> Option<Arc<crate::device::char::tty::TtyDevice>> {
+        self.controlling_tty.read().as_ref().and_then(Weak::upgrade)
+    }
+
+    /// Install a controlling terminal for this task.
+    ///
+    /// A weak reference is stored so that closing the TTY does not require
+    /// every member task to drop it. The corresponding session-level
+    /// bookkeeping (propagating to other session members) is the
+    /// responsibility of `task::job_control::set_controlling_tty`.
+    ///
+    /// # Arguments
+    /// * `tty` - The TTY device to make this task's controlling terminal.
+    pub fn set_controlling_tty_raw(&self, tty: &Arc<crate::device::char::tty::TtyDevice>) {
+        *self.controlling_tty.write() = Some(Arc::downgrade(tty));
+    }
+
+    /// Clear this task's controlling terminal reference.
+    pub fn clear_controlling_tty_raw(&self) {
+        *self.controlling_tty.write() = None;
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
@@ -1561,6 +1687,26 @@ impl Task {
             // Thread: share parent's thread group ID
             child.thread_group_id = self.thread_group_id;
         } // else: new task group, thread_group_id will be set to child's ID in set_id()
+
+        // Session/job-control inheritance (Phase 1, see docs/tty_pty_design.md):
+        //
+        // * Session ID is always inherited from the parent. The child can
+        //   later call `setsid()` to detach into a new session.
+        // * Controlling terminal is inherited (as a `Weak` clone). It does
+        //   not survive past a subsequent `setsid()`.
+        // * Process group ID: in this transitional phase we keep the
+        //   pre-existing Scarlet behaviour of leaving the child's PGID at 0
+        //   so that `set_id()` assigns the child its own ID as PGID. This
+        //   preserves backward compatibility with the current shell, which
+        //   uses `SCTL_TTY_SET_FOREGROUND_GROUP` with the child's PID. A
+        //   later phase will switch to PGID inheritance once the shell
+        //   adopts explicit `setpgid`.
+        child
+            .session_id
+            .store(self.session_id.load(Ordering::SeqCst), Ordering::SeqCst);
+        // The child is never the leader of an inherited session.
+        child.is_session_leader.store(false, Ordering::SeqCst);
+        *child.controlling_tty.write() = self.controlling_tty.read().clone();
 
         Ok(child)
     }
