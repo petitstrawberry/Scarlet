@@ -443,6 +443,10 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Set when a process-control stop should be observable by waitpid.
+    process_control_stopped: AtomicBool,
+    /// Set after the current process-control stop has been reported once.
+    process_control_stop_reported: AtomicBool,
     /// Program break (already thread-safe)
     pub brk: Arc<AtomicUsize>,
 
@@ -616,6 +620,8 @@ impl Task {
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            process_control_stopped: AtomicBool::new(false),
+            process_control_stop_reported: AtomicBool::new(false),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
             // RwLock fields
             name: RwLock::new(name),
@@ -878,6 +884,30 @@ impl Task {
     ///
     pub fn get_state(&self) -> TaskState {
         self.state.load(Ordering::SeqCst)
+    }
+
+    /// Mark this task as stopped by a process-control event.
+    pub fn mark_process_control_stopped(&self) {
+        self.process_control_stopped.store(true, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Clear process-control stopped state after a continue event.
+    pub fn clear_process_control_stopped(&self) {
+        self.process_control_stopped.store(false, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Return whether this task has an unreported process-control stop.
+    pub fn take_process_control_stop_report(&self) -> bool {
+        if !self.process_control_stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.process_control_stop_reported
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// Get the size of the task.
@@ -1700,6 +1730,7 @@ impl Task {
         if self.handle_table.is_sole_owner() {
             self.handle_table.close_all();
         }
+        self.clear_process_control_stopped();
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
@@ -2379,6 +2410,21 @@ mod tests {
         assert_eq!(task.get_process_group_id(), task_id);
         assert!(task.is_session_leader());
         assert!(task.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_process_control_stop_report_latches_once() {
+        let mut task = super::new_user_task("StopReportTask".to_string(), 0);
+        task.init();
+
+        assert!(!task.take_process_control_stop_report());
+
+        task.mark_process_control_stopped();
+        assert!(task.take_process_control_stop_report());
+        assert!(!task.take_process_control_stop_report());
+
+        task.clear_process_control_stopped();
+        assert!(!task.take_process_control_stop_report());
     }
 
     #[test_case]

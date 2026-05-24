@@ -598,16 +598,25 @@ pub fn execve_abi_with_flags(
     res as i32
 }
 
-/// Waits for a child process to exit.
+/// Return immediately from [`waitpid`] if no matching child changed state.
+pub const WAIT_NOHANG: i32 = 0x1;
+
+/// Report children stopped by Scarlet process-control events.
+pub const WAIT_STOPPED: i32 = 0x2;
+
+/// Status returned when a child is stopped by a Scarlet process-control event.
+pub const WAIT_STOPPED_STATUS: i32 = 0x7f;
+
+/// Waits for a child process to exit or, with [`WAIT_STOPPED`], stop.
 ///
 /// # Arguments
 /// * `pid` - Process ID of the child process to wait for. If -1, wait for any child process.
-/// * `options` - Options for the waitpid syscall. (Currently not implemented and always ignored.)
+/// * `options` - Bitmask of `WAIT_*` options.
 ///
 /// # Return Value
 /// (pid, status)
-/// - pid: The process ID of the child process that exited.
-/// - status: The exit status of the child process.
+/// - pid: The process ID of the child process that changed state.
+/// - status: The exit status, or a Scarlet-native stopped status.
 ///
 pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
     let mut status: i32 = 0;

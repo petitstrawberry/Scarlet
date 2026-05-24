@@ -10,7 +10,7 @@ use std::{
     ipc::{ProcessControl, send_process_control_to_group},
     print, println,
     string::String,
-    task::{execve, exit, fork, pipe, waitpid},
+    task::{WAIT_NOHANG, WAIT_STOPPED, WAIT_STOPPED_STATUS, execve, exit, fork, pipe, waitpid},
     tty::{KeyboardMode, ReadPolicy, Terminal},
     vec::Vec,
 };
@@ -44,7 +44,7 @@ fn init_jobs() {
 }
 
 /// Add a job to the job list
-fn add_job(pid: i32, process_group_id: i32, command: String) -> usize {
+fn add_job(pid: i32, process_group_id: i32, command: String, is_running: bool) -> usize {
     println!(
         "DEBUG: add_job called with pid={}, pgid={}, command={}",
         pid, process_group_id, command
@@ -67,7 +67,7 @@ fn add_job(pid: i32, process_group_id: i32, command: String) -> usize {
                     pid,
                     process_group_id,
                     command,
-                    is_running: true,
+                    is_running,
                 });
                 println!("DEBUG: Job added successfully at index {}", i);
                 return job_id;
@@ -87,7 +87,7 @@ fn cleanup_jobs() {
         for i in 0..MAX_JOBS {
             if let Some(job) = &(*jobs_ptr)[i] {
                 // Check if the process is still running using waitpid with WNOHANG (0x1)
-                let (wait_pid, _status) = waitpid(job.pid, 1);
+                let (wait_pid, _status) = waitpid(job.pid, WAIT_NOHANG);
                 if wait_pid == job.pid {
                     println!("\n[{}] Done: {}", job.job_id, job.command);
                     (*jobs_ptr)[i] = None; // Remove from list
@@ -314,7 +314,7 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
         pid => {
             join_child_process_group(pid, pid);
             set_foreground_group(pid as usize);
-            let (_, status) = waitpid(pid, 0);
+            let (_, status) = waitpid(pid, WAIT_STOPPED);
             set_foreground_group(current_process_group_or_pid());
             status
         }
@@ -433,6 +433,10 @@ fn join_child_process_group(pid: i32, process_group_id: i32) {
     if pid > 0 && process_group_id > 0 {
         let _ = std::task::set_process_group(Some(pid as u32), Some(process_group_id as u32));
     }
+}
+
+fn wait_status_is_stopped(status: i32) -> bool {
+    status == WAIT_STOPPED_STATUS
 }
 
 /// Execute a single command from the new Command struct
@@ -582,7 +586,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 println!("DEBUG: Parent process, about to add job");
                 let cmd_str = cmd.args.join(" ");
                 println!("DEBUG: Command string created: {}", cmd_str);
-                let job_id = add_job(pid, pid, cmd_str);
+                let job_id = add_job(pid, pid, cmd_str, true);
                 println!("[{}] {} &", job_id, pid);
                 println!("DEBUG: Job added, about to restore raw mode");
                 // Restore raw mode for shell after background job starts
@@ -593,11 +597,16 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             } else {
                 // Set foreground group to child so Ctrl+C targets it
                 set_foreground_group(pid as usize);
-                let (_, status) = waitpid(pid, 0);
+                let (_, status) = waitpid(pid, WAIT_STOPPED);
                 // Restore foreground group to shell
                 set_foreground_group(current_process_group_or_pid());
                 // Restore raw mode for shell after foreground command completes
                 restore_raw_mode();
+                if wait_status_is_stopped(status) {
+                    let cmd_str = cmd.args.join(" ");
+                    let job_id = add_job(pid, pid, cmd_str, false);
+                    println!("[{}] Stopped {}", job_id, pid);
+                }
                 status
             }
         }
@@ -715,7 +724,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
             .collect::<Vec<_>>()
             .join(" | ");
 
-        let job_id = add_job(pids[0], pids[0], cmd_str);
+        let job_id = add_job(pids[0], pids[0], cmd_str, true);
         println!("[{}] {} &", job_id, pids[0]);
         // Restore raw mode for shell after background job starts
         restore_raw_mode();
@@ -725,10 +734,14 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
     // Wait for all children
     let mut last_status = 0;
+    let mut stopped = false;
     // Set foreground group to first child in pipeline
     set_foreground_group(pids[0] as usize);
-    for pid in pids {
-        let (_, status) = waitpid(pid, 0);
+    for pid in pids.iter().copied() {
+        let (_, status) = waitpid(pid, WAIT_STOPPED);
+        if wait_status_is_stopped(status) {
+            stopped = true;
+        }
         last_status = status;
     }
     // Restore foreground group to shell
@@ -736,6 +749,17 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
     // Restore raw mode for shell after pipeline completes
     restore_raw_mode();
+
+    if stopped {
+        let cmd_str = pipeline
+            .commands
+            .iter()
+            .map(|c| c.args.join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let job_id = add_job(pids[0], pids[0], cmd_str, false);
+        println!("[{}] Stopped {}", job_id, pids[0]);
+    }
 
     last_status
 }
@@ -995,9 +1019,18 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                             Some(job_copy.process_group_id as u32),
                             ProcessControl::Continue,
                         );
-                        let (_, status) = waitpid(job_copy.pid, 0);
+                        let (_, status) = waitpid(job_copy.pid, WAIT_STOPPED);
                         set_foreground_group(current_process_group_or_pid());
                         restore_raw_mode();
+                        if wait_status_is_stopped(status) {
+                            let job_id = add_job(
+                                job_copy.pid,
+                                job_copy.process_group_id,
+                                job_copy.command,
+                                false,
+                            );
+                            println!("[{}] Stopped {}", job_id, job_copy.pid);
+                        }
                         return Some(status);
                     }
                 }

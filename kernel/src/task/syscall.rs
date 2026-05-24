@@ -30,7 +30,7 @@ use crate::sched::scheduler::{
     schedule,
 };
 use crate::task::{
-    CloneFlags, CloneFlagsDef, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+    CloneFlags, CloneFlagsDef, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
 };
 use crate::timer::ns_to_ticks;
 
@@ -414,12 +414,36 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 
     // WNOHANG flag (0x1): Return immediately if no child has exited
     let wnohang = (options & 0x1) != 0;
+    // WUNTRACED-like native flag (0x2): report process-control stops.
+    let report_stopped = (options & 0x2) != 0;
+    const PROCESS_CONTROL_STOP_STATUS: i32 = 0x7f;
 
     // Loop until a child exits or an error occurs
     loop {
         if pid == -1 {
             // Wait for any child process
             for child_pid in task.get_children().clone() {
+                if report_stopped
+                    && let Some(child_task) = crate::sched::scheduler::get_task_by_id(child_pid)
+                    && child_task.get_state() != TaskState::Zombie
+                    && child_task.take_process_control_stop_report()
+                {
+                    if status_ptr != core::ptr::null_mut() {
+                        let status_ptr = task
+                            .vm_manager
+                            .translate_to_kva(status_ptr as usize)
+                            .unwrap() as *mut i32;
+                        unsafe {
+                            *status_ptr = PROCESS_CONTROL_STOP_STATUS;
+                        }
+                    }
+                    trapframe.increment_pc_next(task);
+                    if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
+                        return local;
+                    }
+                    continue;
+                }
+
                 match task.wait(child_pid) {
                     Ok(status) => {
                         // Child has exited, return the status
@@ -477,6 +501,25 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 return usize::MAX;
             }
         };
+
+        if report_stopped
+            && task.get_children().contains(&target_global)
+            && let Some(child_task) = crate::sched::scheduler::get_task_by_id(target_global)
+            && child_task.get_state() != TaskState::Zombie
+            && child_task.take_process_control_stop_report()
+        {
+            if status_ptr != core::ptr::null_mut() {
+                let status_ptr = task
+                    .vm_manager
+                    .translate_to_kva(status_ptr as usize)
+                    .unwrap() as *mut i32;
+                unsafe {
+                    *status_ptr = PROCESS_CONTROL_STOP_STATUS;
+                }
+            }
+            trapframe.increment_pc_next(task);
+            return pid as usize;
+        }
 
         match task.wait(target_global) {
             Ok(status) => {

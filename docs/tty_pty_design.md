@@ -184,7 +184,10 @@ at their boundary. For example, the Linux ABI maps `TerminalStop` to `SIGTSTP`,
 Current Phase 6 shell wiring uses that same Event path: child commands are
 placed into their own PGID, foreground execution switches the TTY foreground
 PGID to the child group, and `fg`/`bg` resume jobs with
-`ProcessControlType::Continue` addressed to the stored PGID.
+`ProcessControlType::Continue` addressed to the stored PGID. Scarlet native
+`waitpid` accepts `WAIT_STOPPED` to report process-control stops without
+consuming the child, allowing the shell to return a stopped foreground command
+to its job table.
 
 ## Scarlet Control Opcode Mapping
 
