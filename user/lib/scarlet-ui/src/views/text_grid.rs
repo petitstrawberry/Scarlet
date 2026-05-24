@@ -10,7 +10,7 @@ use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
 use crate::geometry::{Point, Size};
-use crate::graphics;
+use crate::graphics::{self, FontStack};
 use crate::state::State;
 use crate::view::View;
 
@@ -25,8 +25,16 @@ pub struct TextGridCell {
     pub background: Color,
     /// Whether the cell should be drawn in bold style.
     pub bold: bool,
+    /// Whether the foreground should be rendered with faint intensity.
+    pub faint: bool,
+    /// Whether the cell should be rendered in italic style.
+    pub italic: bool,
+    /// Whether the cell should draw an underline.
+    pub underline: bool,
     /// Whether foreground and background should be swapped.
     pub inverse: bool,
+    /// Whether the cell should draw a strike-through line.
+    pub strikethrough: bool,
 }
 
 impl TextGridCell {
@@ -47,7 +55,11 @@ impl TextGridCell {
             foreground,
             background,
             bold: false,
+            faint: false,
+            italic: false,
+            underline: false,
             inverse: false,
+            strikethrough: false,
         }
     }
 
@@ -70,6 +82,14 @@ impl Default for TextGridCell {
     fn default() -> Self {
         Self::blank(Color::WHITE, Color::BLACK)
     }
+}
+
+fn dim_color(color: Color) -> Color {
+    Color::rgba_f32(color.r * 0.55, color.g * 0.55, color.b * 0.55, color.a)
+}
+
+fn font_stack_id(font_stack: Option<&FontStack>) -> Option<usize> {
+    font_stack.map(FontStack::cache_id)
 }
 
 /// Fixed-size text grid contents.
@@ -293,6 +313,7 @@ pub struct TextGrid {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    font_stack: Option<FontStack>,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
 }
@@ -313,6 +334,7 @@ impl TextGrid {
             cell_width: 9.0,
             cell_height: 18.0,
             font_size: 16.0,
+            font_stack: None,
             cursor: None,
             cursor_color: Color::rgba_f32(1.0, 1.0, 1.0, 0.65),
         }
@@ -345,6 +367,23 @@ impl TextGrid {
     /// Updated view.
     pub fn font_size(mut self, font_size: f32) -> Self {
         self.font_size = font_size.max(1.0);
+        self
+    }
+
+    /// Set a view-local font stack.
+    ///
+    /// When unset, [`TextGrid`] uses the system-wide ScarletUI default font
+    /// stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `font_stack` - Font stack to use for this grid.
+    ///
+    /// # Returns
+    ///
+    /// Updated view.
+    pub fn font_stack(mut self, font_stack: FontStack) -> Self {
+        self.font_stack = Some(font_stack);
         self
     }
 
@@ -395,6 +434,7 @@ impl View for TextGrid {
                 self.cell_width,
                 self.cell_height,
                 self.font_size,
+                self.font_stack.clone(),
                 self.cursor,
                 self.cursor_color,
             ),
@@ -416,6 +456,7 @@ pub struct TextGridRenderObject {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    font_stack: Option<FontStack>,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
     size: Size,
@@ -433,6 +474,7 @@ impl TextGridRenderObject {
     /// * `cell_width` - Cell width in pixels.
     /// * `cell_height` - Cell height in pixels.
     /// * `font_size` - Font size in pixels.
+    /// * `font_stack` - Optional view-local font stack.
     /// * `cursor` - Optional cursor.
     /// * `cursor_color` - Cursor overlay color.
     ///
@@ -444,6 +486,7 @@ impl TextGridRenderObject {
         cell_width: f32,
         cell_height: f32,
         font_size: f32,
+        font_stack: Option<FontStack>,
         cursor: Option<TextGridCursor>,
         cursor_color: Color,
     ) -> Self {
@@ -452,6 +495,7 @@ impl TextGridRenderObject {
             cell_width: cell_width.max(1.0),
             cell_height: cell_height.max(1.0),
             font_size: font_size.max(1.0),
+            font_stack,
             cursor,
             cursor_color,
             size: Size::ZERO,
@@ -493,11 +537,14 @@ impl TextGridRenderObject {
 
         let w = libm::ceilf(self.cell_width) as u32;
         let h = libm::ceilf(self.cell_height) as u32;
-        let (foreground, background) = if cell.inverse {
+        let (mut foreground, background) = if cell.inverse {
             (cell.background, cell.foreground)
         } else {
             (cell.foreground, cell.background)
         };
+        if cell.faint {
+            foreground = dim_color(foreground);
+        }
 
         canvas.fill_rect(x, y, w, h, background);
 
@@ -505,22 +552,54 @@ impl TextGridRenderObject {
             let mut encoded = [0u8; 4];
             let text = cell.ch.encode_utf8(&mut encoded);
             let baseline_adjust = ((self.cell_height - self.font_size) / 2.0).max(0.0);
-            canvas.draw_text_sized(
-                x,
-                y + libm::floorf(baseline_adjust) as i32,
-                text,
-                foreground,
-                self.font_size,
-            );
-            if cell.bold {
+            if let Some(font_stack) = &self.font_stack {
+                canvas.draw_text_sized_with_font_stack(
+                    x,
+                    y + libm::floorf(baseline_adjust) as i32,
+                    text,
+                    foreground,
+                    self.font_size,
+                    font_stack,
+                );
+            } else {
                 canvas.draw_text_sized(
-                    x + 1,
+                    x,
                     y + libm::floorf(baseline_adjust) as i32,
                     text,
                     foreground,
                     self.font_size,
                 );
             }
+            if cell.bold {
+                if let Some(font_stack) = &self.font_stack {
+                    canvas.draw_text_sized_with_font_stack(
+                        x + 1,
+                        y + libm::floorf(baseline_adjust) as i32,
+                        text,
+                        foreground,
+                        self.font_size,
+                        font_stack,
+                    );
+                } else {
+                    canvas.draw_text_sized(
+                        x + 1,
+                        y + libm::floorf(baseline_adjust) as i32,
+                        text,
+                        foreground,
+                        self.font_size,
+                    );
+                }
+            }
+        }
+        let line_thickness = (libm::ceilf(self.font_size / 12.0) as u32).max(1);
+        if cell.underline {
+            let line_y = y
+                + h.saturating_sub(line_thickness).saturating_sub(1) as i32;
+            canvas.fill_rect(x, line_y.max(y), w, line_thickness, foreground);
+        }
+        if cell.strikethrough {
+            let line_y = y + (h / 2) as i32;
+            canvas.fill_rect(x, line_y, w, line_thickness, foreground);
         }
     }
 
@@ -717,6 +796,11 @@ impl ElementRenderObject for TextGridRenderObject {
             self.cell_width = text_grid.cell_width;
             self.cell_height = text_grid.cell_height;
             self.font_size = text_grid.font_size;
+            self.full_repaint = true;
+            changed = true;
+        }
+        if font_stack_id(self.font_stack.as_ref()) != font_stack_id(text_grid.font_stack.as_ref()) {
+            self.font_stack = text_grid.font_stack.clone();
             self.full_repaint = true;
             changed = true;
         }

@@ -1,4 +1,4 @@
-//! Scarlet Terminal - GUI terminal emulator backed by a PTY.
+//! Terminal - GUI terminal emulator backed by a PTY.
 
 #![no_std]
 #![no_main]
@@ -97,7 +97,7 @@ impl TerminalApp {
         let (columns, rows) = grid_dimensions(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, metrics);
         let screen = Arc::new(Mutex::new(VtScreen::new(columns, rows)));
         let mut grid = screen.lock().view_grid();
-        grid.write_text(0, 0, "Starting Scarlet Terminal...", foreground, background);
+        grid.write_text(0, 0, "Starting Terminal...", foreground, background);
         Self {
             grid: State::new(StateId::new(0), grid),
             cursor: State::new(StateId::new(1), TextGridCursor::new(0, 1)),
@@ -127,7 +127,7 @@ impl TerminalApp {
         } = match PtyPair::open() {
             Ok(pair) => pair,
             Err(error) => {
-                println!("[scarlet_terminal] PtyPair::open failed: {}", error);
+                println!("[terminal] PtyPair::open failed: {}", error);
                 self.set_status("PTY open failed");
                 return;
             }
@@ -137,17 +137,14 @@ impl TerminalApp {
         let (width, height) = *self.window_size.lock();
         let (columns, rows) = grid_dimensions(width, height, metrics);
         if let Err(error) = master.set_winsize(columns as u16, rows as u16) {
-            println!("[scarlet_terminal] set_winsize failed: {}", error);
+            println!("[terminal] set_winsize failed: {}", error);
         }
 
         let master_handle = master.as_file().as_raw();
         let writer = match master.as_file().clone_handle().and_then(File::from_handle) {
             Ok(file) => file,
             Err(error) => {
-                println!(
-                    "[scarlet_terminal] failed to duplicate PTY master: {:?}",
-                    error
-                );
+                println!("[terminal] failed to duplicate PTY master: {:?}", error);
                 self.set_status("PTY duplicate failed");
                 return;
             }
@@ -162,7 +159,7 @@ impl TerminalApp {
         }
         self.child_task.set(shell_pid as u32);
         println!(
-            "[scarlet_terminal] opened {} and started shell pid={}",
+            "[terminal] opened {} and started shell pid={}",
             slave_path, shell_pid
         );
 
@@ -243,7 +240,7 @@ impl Application for TerminalApp {
         let window_size = self.window_size.clone();
         let metrics = self.metrics.get();
         Window::new(
-            "Scarlet Terminal",
+            "Terminal",
             TextGrid::new(self.grid.clone())
                 .cell_size(metrics.cell_width, metrics.cell_height)
                 .font_size(metrics.font_size)
@@ -310,7 +307,7 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
                     break;
                 }
             }
-            println!("[scarlet_terminal] failed to exec shell");
+            println!("[terminal] failed to exec shell");
             exit(127);
         }
         pid => pid,
@@ -346,7 +343,7 @@ fn duplicate_to_stdio(source: &Handle, raw_handle: i32) {
         Ok(handle) => {
             if handle.as_raw() != raw_handle {
                 println!(
-                    "[scarlet_terminal] warning: duplicated handle {}, expected {}",
+                    "[terminal] warning: duplicated handle {}, expected {}",
                     handle.as_raw(),
                     raw_handle
                 );
@@ -355,7 +352,7 @@ fn duplicate_to_stdio(source: &Handle, raw_handle: i32) {
         }
         Err(error) => {
             println!(
-                "[scarlet_terminal] failed to duplicate stdio handle {}: {:?}",
+                "[terminal] failed to duplicate stdio handle {}: {:?}",
                 raw_handle, error
             );
         }
@@ -390,7 +387,7 @@ fn start_reader_thread(
         loop {
             match master.read(&mut buffer) {
                 Ok(0) => {
-                    println!("[scarlet_terminal] PTY closed; exiting");
+                    println!("[terminal] PTY closed; exiting");
                     exit(0);
                 }
                 Ok(count) => {
@@ -400,7 +397,7 @@ fn start_reader_thread(
                     cursor.set(screen.cursor());
                 }
                 Err(error) => {
-                    println!("[scarlet_terminal] PTY read failed: {}", error);
+                    println!("[terminal] PTY read failed: {}", error);
                     exit(1);
                 }
             }
@@ -528,20 +525,20 @@ fn write_bytes(writer: &Arc<Mutex<Option<File>>>, bytes: &[u8]) {
     if let Some(file) = guard.as_mut() {
         let _ = file.write_all(bytes);
     } else {
-        println!("[scarlet_terminal] pty writer is not ready");
+        println!("[terminal] pty writer is not ready");
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
-    println!("[scarlet_terminal] Starting");
+    println!("[terminal] Starting");
     let mut app = TerminalApp::new();
     let result = app.run();
     app.finish_child_task();
     match result {
         Ok(()) => 0,
         Err(error) => {
-            println!("[scarlet_terminal] Application error: {}", error);
+            println!("[terminal] Application error: {}", error);
             1
         }
     }

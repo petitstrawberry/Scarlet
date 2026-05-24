@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::handle::Handle;
 use std::{
     format,
@@ -853,9 +853,8 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
 /// Interactive shell mode (enhanced version with line editing and history)
 fn interactive_shell() -> i32 {
+    print_motd();
     println!("Scarlet Shell (Enhanced Interactive Mode)");
-    println!("Features: cursor movement, command history, pipes, background jobs");
-    println!("Tip: After starting a background job, press Enter to see the prompt");
 
     // Initialize job list
     init_jobs();
@@ -940,6 +939,40 @@ fn interactive_shell() -> i32 {
         let _ = history.save_to_file(&history_file);
         0
     }
+}
+
+fn print_motd() {
+    if !terminal_supports_motd() {
+        return;
+    }
+
+    for path in ["/system/scarlet/etc/motd", "/etc/motd"] {
+        let Ok(mut file) = File::open(path) else {
+            continue;
+        };
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 512];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read_len) => bytes.extend_from_slice(&buffer[..read_len]),
+                Err(_) => return,
+            }
+        }
+
+        if let Ok(text) = core::str::from_utf8(&bytes) {
+            print!("{}", text);
+        }
+        return;
+    }
+}
+
+fn terminal_supports_motd() -> bool {
+    let Some(term) = std::env::var("TERM") else {
+        return false;
+    };
+    term.contains("xterm") || term.contains("screen") || term.contains("tmux")
 }
 
 /// Expand environment variables in a string

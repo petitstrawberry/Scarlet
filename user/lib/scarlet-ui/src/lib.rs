@@ -88,7 +88,11 @@ pub use views::navigation::Icon;
 pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip, OnKey};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
-pub use graphics::{Canvas, measure_text_sized, set_default_font};
+pub use graphics::{
+    Canvas, FontStack, add_default_font_fallback, clear_default_font_fallbacks,
+    default_font_stack, measure_text_sized, measure_text_sized_with_font_stack, set_default_font,
+    set_default_font_stack,
+};
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 
 // Macros are exported at root via #[macro_export]
@@ -110,6 +114,10 @@ pub mod prelude {
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
     pub use crate::views::modifiers::{Padding, Frame, Background, Clip, OnKey};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+    pub use crate::graphics::{
+        FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
+        measure_text_sized_with_font_stack, set_default_font_stack,
+    };
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:
     // use scarlet_ui_macros::View;

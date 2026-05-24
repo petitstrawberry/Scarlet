@@ -147,8 +147,8 @@ name = "scarlet_desktop_taskbar"
 path = "src/scarlet_desktop/taskbar/scarlet_ui.rs"
 
 [[bin]]
-name = "scarlet_terminal"
-path = "src/scarlet_terminal/main.rs"
+name = "terminal"
+path = "src/terminal/main.rs"
 
 [[bin]]
 name = "ui-demo"
@@ -201,6 +201,10 @@ path = "src/ps.rs"
 [[bin]]
 name = "pty_smoke"
 path = "src/pty_smoke.rs"
+
+[[bin]]
+name = "ansi_banner"
+path = "src/ansi_banner.rs"
 
 [[bin]]
 name = "top"
