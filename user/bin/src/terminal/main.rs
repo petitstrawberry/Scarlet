@@ -9,8 +9,10 @@ extern crate scarlet_std as std;
 mod vt;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::any::Any;
 use core::f32;
 use core::time::Duration;
@@ -29,7 +31,7 @@ use std::task::{
     EXECVE_FORCE_ABI_REBUILD, WAIT_NOHANG, create_session, execve_with_flags, exit, fork,
     process_group_id, waitpid,
 };
-use std::{println, thread};
+use std::{format, println, thread};
 use vt::VtScreen;
 
 const DEFAULT_WINDOW_WIDTH: u32 = 900;
@@ -41,7 +43,7 @@ const MIN_FONT_SIZE: f32 = 10.0;
 const MAX_FONT_SIZE: f32 = 28.0;
 const WINDOW_HORIZONTAL_DECORATION: f32 = 4.0;
 const WINDOW_VERTICAL_DECORATION: f32 = 34.0;
-const SHELL_ENV: [&str; 1] = ["TERM=xterm-256color"];
+const TERM_ENV: &str = "TERM=xterm-256color";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalMetrics {
@@ -292,9 +294,11 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
                 "/scarlet/system/scarlet/bin/sh",
                 "/old_root/bin/sh",
             ];
+            let env_strings = shell_environment();
+            let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
             for path in candidates {
                 let argv = [path];
-                let rc = execve_with_flags(path, &argv, &SHELL_ENV, EXECVE_FORCE_ABI_REBUILD);
+                let rc = execve_with_flags(path, &argv, &env_refs, EXECVE_FORCE_ABI_REBUILD);
                 if rc == 0 {
                     break;
                 }
@@ -304,6 +308,26 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
         }
         pid => pid,
     }
+}
+
+fn shell_environment() -> Vec<String> {
+    let mut env = Vec::new();
+    let mut has_term = false;
+
+    for (key, value) in std::env::vars() {
+        if key == "TERM" {
+            has_term = true;
+            env.push(String::from(TERM_ENV));
+        } else {
+            env.push(format!("{key}={value}"));
+        }
+    }
+
+    if !has_term {
+        env.push(String::from(TERM_ENV));
+    }
+
+    env
 }
 
 fn close_inherited_handle(raw_handle: i32) {

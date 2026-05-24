@@ -35,6 +35,8 @@ mod protocol;
 use desktop::{load_desktop_files, lookup_app};
 use protocol::cmd;
 
+const DEFAULT_APP_ENV: [&str; 3] = ["USER=root", "HOME=/root", "SHELL=/bin/sh"];
+
 fn try_attach_stdio_to_path(path: &str) {
     // Best-effort: rebind stdio handles (0/1/2) to the given path.
     // Follow the same approach as `sh`: close 0/1/2 then `duplicate()` so that
@@ -535,9 +537,8 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
 
             let path = parts[0];
             let argv: Vec<&str> = parts.to_vec();
-            let envp: Vec<&str> = Vec::new();
 
-            if std::task::execve(path, &argv, &envp) != 0 {
+            if std::task::execve(path, &argv, &DEFAULT_APP_ENV) != 0 {
                 println!("stemd: Failed to execve {}", path);
                 exit(-1);
             }
@@ -698,9 +699,8 @@ fn launch_app_by_id(app_id: &str) -> Result<i32, &'static str> {
 
             let path = parts[0];
             let argv: Vec<&str> = parts.to_vec();
-            let envp: Vec<&str> = Vec::new();
 
-            if std::task::execve(path, &argv, &envp) != 0 {
+            if std::task::execve(path, &argv, &DEFAULT_APP_ENV) != 0 {
                 println!("stemd: Failed to execve {}", path);
                 exit(-1);
             }
