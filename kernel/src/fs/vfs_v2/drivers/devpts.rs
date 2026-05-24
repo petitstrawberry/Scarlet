@@ -827,7 +827,12 @@ fn parse_pty_number(name: &str) -> Result<usize, FileSystemError> {
     Ok(value)
 }
 
-fn register_driver() {
+/// Register the DevPTS filesystem driver.
+///
+/// This is exposed so DevFS can force DevPTS availability for `/dev/pts`
+/// mount setups, while the normal driver initcall path still registers it
+/// during boot.
+pub fn register_driver() {
     let fs_driver_manager = get_fs_driver_manager();
     fs_driver_manager.register_driver(Box::new(DevPtsFSDriver));
 }
@@ -887,5 +892,26 @@ mod tests {
         let mut master_buffer = [0u8; 5];
         assert_eq!(master.read(&mut master_buffer).unwrap(), 5);
         assert_eq!(&master_buffer, b"out\r\n");
+    }
+
+    #[test_case]
+    fn test_devpts_mount_readdir_crosses_mountpoint() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/dev").unwrap();
+        vfs.mount(crate::fs::vfs_v2::drivers::devfs::DevFS::new(), "/dev", 0)
+            .unwrap();
+        vfs.mount(DevPtsFS::new(), "/dev/pts", 0).unwrap();
+
+        let entries = vfs.readdir("/dev/pts").unwrap();
+        assert!(
+            entries.iter().any(|entry| entry.name == "ptmx"),
+            "mounted devpts root should expose ptmx"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "." && entry.file_id == ROOT_ID),
+            "readdir should cross into devpts root rather than devfs mountpoint"
+        );
     }
 }

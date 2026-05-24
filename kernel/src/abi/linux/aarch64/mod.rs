@@ -470,6 +470,15 @@ impl AbiModule for LinuxAarch64Abi {
                 return Err("Failed to bind mount /dev for Linux");
             }
         }
+        if base_vfs.resolve_path("/dev/pts/ptmx").is_ok() {
+            let _ = create_dir_if_not_exists(target_vfs, "/dev/pts");
+            if target_vfs
+                .bind_mount_from(base_vfs, "/dev/pts", "/dev/pts")
+                .is_err()
+            {
+                crate::println!("Failed to bind mount /dev/pts for Linux");
+            }
+        }
 
         match create_dir_if_not_exists(target_vfs, "/tmp") {
             Ok(()) => {}

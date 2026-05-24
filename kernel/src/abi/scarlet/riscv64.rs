@@ -1061,6 +1061,15 @@ impl AbiModule for ScarletAbi {
                 return Err("Failed to bind mount /dev for Scarlet");
             }
         }
+        if base_vfs.resolve_path("/dev/pts/ptmx").is_ok() {
+            let _ = create_dir_if_not_exists(target_vfs, "/dev/pts");
+            match target_vfs.bind_mount_from(base_vfs, "/dev/pts", "/dev/pts") {
+                Ok(()) => {}
+                Err(e) => {
+                    crate::println!("Failed to bind mount /dev/pts for Scarlet: {}", e.message);
+                }
+            }
+        }
 
         // Bind moutt /tmp for temporary files
         match create_dir_if_not_exists(target_vfs, "/tmp") {

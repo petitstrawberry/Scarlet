@@ -1068,6 +1068,7 @@ impl FileSystemDriver for DevFSDriver {
 fn register_driver() {
     let fs_driver_manager = get_fs_driver_manager();
     fs_driver_manager.register_driver(Box::new(DevFSDriver));
+    super::devpts::register_driver();
 }
 
 driver_initcall!(register_driver);
