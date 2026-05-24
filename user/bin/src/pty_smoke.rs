@@ -26,7 +26,11 @@ fn main() -> i32 {
     println!("pty_smoke: opened {}", slave_path);
 
     match master.is_slave_locked() {
-        Ok(locked) => println!("pty_smoke: slave locked={}", locked),
+        Ok(false) => println!("pty_smoke: slave locked=false"),
+        Ok(true) => {
+            println!("pty_smoke: slave unexpectedly locked");
+            return 1;
+        }
         Err(error) => {
             println!("pty_smoke: lock query failed: {}", error);
             return 1;
@@ -47,6 +51,13 @@ fn main() -> i32 {
         }
     };
     print_bytes("pty_smoke: slave read", &buffer[..slave_count]);
+    if !expect_bytes(
+        "pty_smoke: slave read",
+        &buffer[..slave_count],
+        b"hello from master\n",
+    ) {
+        return 1;
+    }
 
     if let Err(error) = slave.write(b"hello from slave\n") {
         println!("pty_smoke: slave write failed: {}", error);
@@ -61,6 +72,13 @@ fn main() -> i32 {
         }
     };
     print_bytes("pty_smoke: master read", &buffer[..master_count]);
+    if !expect_bytes(
+        "pty_smoke: master read",
+        &buffer[..master_count],
+        b"hello from master\r\nhello from slave\r\n",
+    ) {
+        return 1;
+    }
 
     println!("pty_smoke: ok");
     0
@@ -71,4 +89,14 @@ fn print_bytes(label: &str, bytes: &[u8]) {
         Ok(text) => println!("{}: {:?}", label, text),
         Err(_) => println!("{}: {} bytes", label, bytes.len()),
     }
+}
+
+fn expect_bytes(label: &str, actual: &[u8], expected: &[u8]) -> bool {
+    if actual == expected {
+        return true;
+    }
+
+    print_bytes(label, actual);
+    print_bytes("pty_smoke: expected", expected);
+    false
 }
