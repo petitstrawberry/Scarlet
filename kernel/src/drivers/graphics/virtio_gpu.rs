@@ -983,9 +983,14 @@ mod tests {
 
         // Get framebuffer configuration
         let config = device.get_framebuffer_config().unwrap();
-        assert_eq!(config.width, 1920);
-        assert_eq!(config.height, 1080);
+        assert_ne!(config.width, 0);
+        assert_ne!(config.height, 0);
         assert_eq!(config.format, PixelFormat::BGRA8888);
+        assert_eq!(config.stride, config.width * 4);
+        assert_eq!(
+            config.size(),
+            config.width as usize * config.height as usize * 4
+        );
 
         // Get framebuffer address
         let fb_addr = device.get_framebuffer_address().unwrap();

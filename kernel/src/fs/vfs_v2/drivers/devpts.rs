@@ -919,6 +919,8 @@ driver_initcall!(register_driver);
 
 #[cfg(test)]
 mod tests {
+    use crate::device::char::TtyControl;
+
     use super::*;
 
     #[test_case]
@@ -1006,6 +1008,8 @@ mod tests {
 
         let slave_node = devpts.lookup(&root, &number.to_string()).unwrap();
         let slave = devpts.open(&slave_node, 0).unwrap();
+        let slave_devpts = slave.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        slave_devpts.tty_device().unwrap().set_echo(false);
 
         master.write(b"hello\n").unwrap();
         let mut slave_buffer = [0u8; 6];
