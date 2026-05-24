@@ -203,6 +203,10 @@ name = "pty_smoke"
 path = "src/pty_smoke.rs"
 
 [[bin]]
+name = "ansi_banner"
+path = "src/ansi_banner.rs"
+
+[[bin]]
 name = "top"
 path = "src/top.rs"
 
