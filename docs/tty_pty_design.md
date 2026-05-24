@@ -187,7 +187,9 @@ PGID to the child group, and `fg`/`bg` resume jobs with
 `ProcessControlType::Continue` addressed to the stored PGID. Scarlet native
 `waitpid` accepts `WAIT_STOPPED` to report process-control stops without
 consuming the child, allowing the shell to return a stopped foreground command
-to its job table.
+to its job table. Pipeline components execute directly in their pipeline child
+processes after pipe setup instead of forking a second command process, so the
+shell waits on the same PIDs that form the pipeline PGID.
 
 ## Scarlet Control Opcode Mapping
 

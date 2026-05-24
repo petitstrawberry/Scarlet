@@ -439,6 +439,95 @@ fn wait_status_is_stopped(status: i32) -> bool {
     status == WAIT_STOPPED_STATUS
 }
 
+fn is_builtin_command(program: &str) -> bool {
+    matches!(
+        program,
+        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." | "jobs" | "fg" | "bg"
+    )
+}
+
+fn apply_child_redirects(cmd: &Command) -> Result<(), i32> {
+    for (rtype, filename) in &cmd.redirects {
+        match rtype {
+            RedirectType::Input => match std::fs::File::open(filename.as_str()) {
+                Ok(file) => {
+                    if let Ok(stdin) = unsafe { Handle::from_raw(0) } {
+                        let _ = stdin.close();
+                    }
+                    match file.into_handle().duplicate() {
+                        Ok(new_h) => std::mem::forget(new_h),
+                        Err(_) => return Err(1),
+                    }
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return Err(1);
+                }
+            },
+            RedirectType::Output | RedirectType::Append => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true);
+                if *rtype == RedirectType::Append {
+                    opts.append(true);
+                } else {
+                    opts.truncate(true);
+                }
+
+                match opts.open(filename.as_str()) {
+                    Ok(file) => {
+                        if let Ok(stdout) = unsafe { Handle::from_raw(1) } {
+                            let _ = stdout.close();
+                        }
+                        match file.into_handle().duplicate() {
+                            Ok(new_h) => std::mem::forget(new_h),
+                            Err(_) => return Err(1),
+                        }
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return Err(1);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn exec_command_in_current_process(cmd: &Command) -> ! {
+    if let Err(code) = apply_child_redirects(cmd) {
+        exit(code);
+    }
+
+    if is_builtin_command(&cmd.program) {
+        if let Some(code) = handle_builtin_command(&cmd.program, &cmd.args) {
+            exit(code);
+        }
+        exit(0);
+    }
+
+    let executable_path = match find_executable_in_path(&cmd.program) {
+        Some(path) => path,
+        None => {
+            println!("sh: {}: command not found", cmd.program);
+            exit(127);
+        }
+    };
+
+    let arg_refs: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
+    let env_vars = std::env::vars();
+    let env_strings: Vec<String> = env_vars
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+
+    if execve(&executable_path, &arg_refs, &env_refs) != 0 {
+        println!("sh: {}: execution failed", executable_path);
+    }
+    exit(126);
+}
+
 /// Execute a single command from the new Command struct
 fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
     let program = &cmd.program;
@@ -490,10 +579,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
     }
 
     // Check if it's a built-in command
-    let is_builtin = match program.as_str() {
-        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." => true,
-        _ => false,
-    };
+    let is_builtin = is_builtin_command(program);
 
     // If builtin with no redirects, run directly
     if is_builtin && stdin_handle.is_none() && stdout_handle.is_none() {
@@ -622,11 +708,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         let cmd = &pipeline.commands[0];
 
         // Check if it's a built-in command
-        let is_builtin = match cmd.program.as_str() {
-            "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." | "jobs"
-            | "fg" | "bg" => true,
-            _ => false,
-        };
+        let is_builtin = is_builtin_command(&cmd.program);
 
         // Built-in commands cannot be run in background
         if is_builtin && pipeline.is_background {
@@ -667,6 +749,11 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         match fork() {
             0 => {
                 // Child process
+                if let Some(process_group_id) = pids.first().copied() {
+                    let _ = std::task::set_process_group(None, Some(process_group_id as u32));
+                } else {
+                    make_child_process_group_leader();
+                }
 
                 // Set up stdin from previous pipe
                 if i > 0 {
@@ -690,9 +777,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
                 // The handles will be automatically closed when the child process exits
                 // or they go out of scope
 
-                // Execute the command (never background for pipeline components)
-                let exit_code = execute_single_command(cmd, false);
-                exit(exit_code);
+                exec_command_in_current_process(cmd);
             }
             -1 => {
                 println!("sh: fork failed");
