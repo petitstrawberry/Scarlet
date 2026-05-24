@@ -135,6 +135,7 @@ impl TerminalApp {
             println!("[scarlet_terminal] set_winsize failed: {}", error);
         }
 
+        let master_handle = master.as_file().as_raw();
         let writer = match master.as_file().clone_handle().and_then(File::from_handle) {
             Ok(file) => file,
             Err(error) => {
@@ -146,9 +147,10 @@ impl TerminalApp {
                 return;
             }
         };
+        let writer_handle = writer.as_raw();
         *self.master_writer.lock() = Some(writer);
 
-        let shell_pid = spawn_shell(slave);
+        let shell_pid = spawn_shell(slave, master_handle, writer_handle);
         if shell_pid < 0 {
             self.set_status("Failed to start shell");
             return;
@@ -239,9 +241,11 @@ impl Application for TerminalApp {
     }
 }
 
-fn spawn_shell(slave: PtySlave) -> i32 {
+fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_handle: i32) -> i32 {
     match fork() {
         0 => {
+            close_inherited_handle(inherited_master_handle);
+            close_inherited_handle(inherited_writer_handle);
             let _ = create_session();
             setup_child_stdio(slave);
             let candidates = [
@@ -263,6 +267,14 @@ fn spawn_shell(slave: PtySlave) -> i32 {
     }
 }
 
+fn close_inherited_handle(raw_handle: i32) {
+    if raw_handle >= 0
+        && let Ok(handle) = unsafe { Handle::from_raw(raw_handle) }
+    {
+        drop(handle);
+    }
+}
+
 fn setup_child_stdio(slave: PtySlave) {
     let slave_handle = slave.into_file().into_handle();
     let terminal = std::tty::Terminal::from_handle(&slave_handle);
@@ -275,26 +287,26 @@ fn setup_child_stdio(slave: PtySlave) {
     duplicate_to_stdio(&slave_handle, 2);
 }
 
-fn duplicate_to_stdio(source: &Handle, raw_fd: i32) {
-    if let Ok(handle) = unsafe { Handle::from_raw(raw_fd) } {
+fn duplicate_to_stdio(source: &Handle, raw_handle: i32) {
+    if let Ok(handle) = unsafe { Handle::from_raw(raw_handle) } {
         let _ = handle.close();
     }
 
     match source.duplicate() {
         Ok(handle) => {
-            if handle.as_raw() != raw_fd {
+            if handle.as_raw() != raw_handle {
                 println!(
-                    "[scarlet_terminal] warning: duplicated fd {}, expected {}",
+                    "[scarlet_terminal] warning: duplicated handle {}, expected {}",
                     handle.as_raw(),
-                    raw_fd
+                    raw_handle
                 );
             }
             core::mem::forget(handle);
         }
         Err(error) => {
             println!(
-                "[scarlet_terminal] failed to duplicate stdio fd {}: {:?}",
-                raw_fd, error
+                "[scarlet_terminal] failed to duplicate stdio handle {}: {:?}",
+                raw_handle, error
             );
         }
     }

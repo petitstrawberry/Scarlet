@@ -12,6 +12,8 @@ enum ParserState {
     Escape,
     Csi,
     Ss3,
+    Osc,
+    OscEscape,
 }
 
 /// Terminal screen state backed by a fixed text grid.
@@ -25,11 +27,13 @@ pub struct VtScreen {
     cursor_row: usize,
     saved_cursor_column: usize,
     saved_cursor_row: usize,
+    cursor_visible: bool,
     foreground: Color,
     background: Color,
     bold: bool,
     inverse: bool,
     parser_state: ParserState,
+    csi_private: bool,
     csi_params: [usize; 8],
     csi_count: usize,
     csi_value: Option<usize>,
@@ -59,11 +63,13 @@ impl VtScreen {
             cursor_row: 0,
             saved_cursor_column: 0,
             saved_cursor_row: 0,
+            cursor_visible: true,
             foreground,
             background,
             bold: false,
             inverse: false,
             parser_state: ParserState::Ground,
+            csi_private: false,
             csi_params: [0; 8],
             csi_count: 0,
             csi_value: None,
@@ -118,7 +124,11 @@ impl VtScreen {
                 visible: false,
             };
         }
-        TextGridCursor::new(self.cursor_column, self.cursor_row)
+        TextGridCursor {
+            column: self.cursor_column,
+            row: self.cursor_row,
+            visible: self.cursor_visible,
+        }
     }
 
     /// Scroll the display view through the saved scrollback.
@@ -178,6 +188,8 @@ impl VtScreen {
             ParserState::Escape => self.feed_escape(byte),
             ParserState::Csi => self.feed_csi(byte),
             ParserState::Ss3 => self.feed_ss3(byte),
+            ParserState::Osc => self.feed_osc(byte),
+            ParserState::OscEscape => self.feed_osc_escape(byte),
         }
     }
 
@@ -201,6 +213,9 @@ impl VtScreen {
             }
             b'O' => {
                 self.parser_state = ParserState::Ss3;
+            }
+            b']' => {
+                self.parser_state = ParserState::Osc;
             }
             b'7' | b's' => {
                 self.save_cursor();
@@ -232,6 +247,22 @@ impl VtScreen {
         self.parser_state = ParserState::Ground;
     }
 
+    fn feed_osc(&mut self, byte: u8) {
+        match byte {
+            0x07 => self.parser_state = ParserState::Ground,
+            0x1b => self.parser_state = ParserState::OscEscape,
+            _ => {}
+        }
+    }
+
+    fn feed_osc_escape(&mut self, byte: u8) {
+        self.parser_state = if byte == b'\\' {
+            ParserState::Ground
+        } else {
+            ParserState::Osc
+        };
+    }
+
     fn feed_csi(&mut self, byte: u8) {
         match byte {
             b'0'..=b'9' => {
@@ -244,7 +275,7 @@ impl VtScreen {
                 );
             }
             b';' => self.push_csi_value(),
-            b'?' => {}
+            b'?' => self.csi_private = true,
             final_byte => {
                 self.push_csi_value();
                 self.handle_csi_final(final_byte);
@@ -254,6 +285,7 @@ impl VtScreen {
     }
 
     fn reset_csi(&mut self) {
+        self.csi_private = false;
         self.csi_params = [0; 8];
         self.csi_count = 0;
         self.csi_value = None;
@@ -311,8 +343,16 @@ impl VtScreen {
             b'T' => self.scroll_down(self.param(0, 1)),
             b's' => self.save_cursor(),
             b'u' => self.restore_cursor(),
+            b'h' => self.set_mode(true),
+            b'l' => self.set_mode(false),
             b'm' => self.apply_sgr(),
             _ => {}
+        }
+    }
+
+    fn set_mode(&mut self, enabled: bool) {
+        if self.csi_private && self.param(0, 0) == 25 {
+            self.cursor_visible = enabled;
         }
     }
 

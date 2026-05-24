@@ -2297,7 +2297,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use crate::sched::scheduler::{add_task, get_task_by_id, reset};
-    use crate::task::CloneFlags;
+    use crate::task::{CloneFlags, CloneFlagsDef};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
     #[test_case]
@@ -2393,6 +2393,42 @@ mod tests {
         assert_eq!(child.get_task_group_id(), parent.get_process_group_id());
         assert!(!child.is_session_leader());
         assert!(child.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_fork_clone_becomes_new_thread_group_leader() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child.thread_group_id, 0);
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), child_id);
+    }
+
+    #[test_case]
+    fn test_thread_clone_inherits_thread_group() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let child = parent.clone_task(flags).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
     }
 
     #[test_case]
