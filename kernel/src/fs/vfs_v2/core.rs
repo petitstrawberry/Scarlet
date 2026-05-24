@@ -430,6 +430,15 @@ impl VfsFileObject {
         &self.original_path
     }
 
+    /// Get the filesystem-specific file object wrapped by this VFS object.
+    ///
+    /// # Returns
+    ///
+    /// Shared reference to the inner file object.
+    pub fn inner(&self) -> &Arc<dyn FileObject> {
+        &self.inner
+    }
+
     /// Enable downcasting for VfsFileObject detection
     pub fn as_any(&self) -> &dyn Any {
         self

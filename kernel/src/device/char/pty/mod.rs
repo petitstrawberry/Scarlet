@@ -1,15 +1,18 @@
 //! Pseudo-terminal pair core.
 //!
 //! This module provides the architecture-independent PTY data path used by the
-//! future `/dev/ptmx` and `devpts` layers. It intentionally does not register
-//! `/dev/ptmx` yet; open-time pair allocation needs VFS/devfs integration so
-//! each file descriptor gets its own master endpoint.
+//! `/dev/ptmx` and `devpts` layers. It intentionally keeps allocation and
+//! namespace policy outside the char-device core so each filesystem open can
+//! create an independent master endpoint.
 
 use alloc::{
     collections::VecDeque,
     sync::{Arc, Weak},
 };
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use spin::Mutex;
 
 use crate::{
@@ -96,6 +99,7 @@ impl TtyBackend for PtySlaveBackend {
 pub struct PtyPair {
     master: Arc<PtyMasterDevice>,
     slave: Arc<TtyDevice>,
+    slave_locked: AtomicBool,
 }
 
 impl PtyPair {
@@ -120,7 +124,11 @@ impl PtyPair {
             slave: Arc::downgrade(&slave),
         });
 
-        Self { master, slave }
+        Self {
+            master,
+            slave,
+            slave_locked: AtomicBool::new(true),
+        }
     }
 
     /// Return the PTY number associated with this pair.
@@ -148,6 +156,24 @@ impl PtyPair {
     /// Shared slave TTY endpoint for this PTY pair.
     pub fn slave(&self) -> Arc<TtyDevice> {
         self.slave.clone()
+    }
+
+    /// Return whether the slave endpoint is locked.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `/dev/pts/N` should reject opens until unlocked.
+    pub fn is_slave_locked(&self) -> bool {
+        self.slave_locked.load(Ordering::Relaxed)
+    }
+
+    /// Set the slave endpoint lock state.
+    ///
+    /// # Arguments
+    ///
+    /// * `locked` - New lock state for the slave endpoint.
+    pub fn set_slave_locked(&self, locked: bool) {
+        self.slave_locked.store(locked, Ordering::Relaxed);
     }
 }
 

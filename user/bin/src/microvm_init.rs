@@ -16,7 +16,9 @@ static mut STDERR: Option<Handle> = None;
 
 fn setup_devfs() -> Result<(), &'static str> {
     let _ = create_directory("/dev");
-    mount("devfs", "/dev", "devfs", 0, None).map_err(|_| "failed to mount devfs")
+    mount("devfs", "/dev", "devfs", 0, None).map_err(|_| "failed to mount devfs")?;
+    let _ = mount("devpts", "/dev/pts", "devpts", 0, None);
+    Ok(())
 }
 
 fn setup_stdio() -> Result<(), &'static str> {

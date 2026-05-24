@@ -22,6 +22,7 @@ tty_ldisc / N_TTY
 
 tty_driver
       -> device::char::tty::driver::TtyDriver
+      -> current transition: device::char::tty::TtyBackend
 
 hardware or virtual endpoint
       -> UART CharDevice, PTY slave driver, future console backends
@@ -78,6 +79,16 @@ writes bypass input processing and become master-readable output. Window size
 is stored on the pair and reflected through both sides; `TIOCSWINSZ` must send
 `ProcessControlType::WindowChange` to the slave TTY foreground PGID. The Linux
 ABI projects that event to `SIGWINCH`.
+
+Current Phase 4 foundation:
+
+- `device::char::pty::PtyPair` owns the master/slave data path.
+- `fs::vfs_v2::drivers::devpts::DevPtsFS` owns PTY number allocation and
+  publishes `ptmx` plus active numeric slave entries.
+- `devfs` exposes a stable `/dev/pts` mount point; Linux `/dev/ptmx` is mapped
+  to `/dev/pts/ptmx` until a real devfs symlink/device node exists.
+- Slave endpoints start locked and are unlocked through `TIOCSPTLCK`, matching
+  the Unix98 `grantpt`/`unlockpt` flow at the ioctl layer.
 
 ## Ownership Model
 
@@ -182,8 +193,8 @@ Linux-only ioctls covered or planned for the job-control and PTY phases:
 
 - covered now: `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGSID`
 - covered now: `TIOCEXCL`, `TIOCNXCL`, `TIOCSTI`
+- covered now: `TIOCGPTN`, `TIOCSPTLCK`, `TIOCGPTLCK`
 - `TIOCPKT`
-- `TIOCGPTN`, `TIOCSPTLCK`
 
 ## Merge Plan
 

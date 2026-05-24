@@ -13,7 +13,8 @@ use crate::device::char::tty::{
 };
 use crate::{
     device::{DeviceCapability, manager::DeviceManager},
-    fs::FileType,
+    fs::vfs_v2::drivers::devpts::DevPtsFileObject,
+    fs::{FileType, vfs_v2::VfsFileObject},
     object::KernelObject,
     task::mytask,
 };
@@ -53,6 +54,9 @@ pub const TIOCNOTTY: u32 = 0x5422; // Detach from controlling terminal
 pub const FIONREAD: u32 = 0x541B; // Get input queue length
 pub const TIOCINQ: u32 = FIONREAD; // Alias for FIONREAD
 pub const TIOCGSID: u32 = 0x5429; // Get session ID owning this terminal
+pub const TIOCGPTN: u32 = 0x8004_5430; // Get PTY slave number
+pub const TIOCSPTLCK: u32 = 0x4004_5431; // Lock/unlock PTY slave
+pub const TIOCGPTLCK: u32 = 0x8004_5439; // Get PTY slave lock state
 
 /// Linux keyboard mode values (subset)
 pub const K_RAW: u32 = 0x00;
@@ -129,6 +133,26 @@ pub fn handle_ioctl(
 
     const LOG_TTY_IOCTL: bool = false;
     match request {
+        TIOCGPTN => {
+            let devpts = devpts_file_object(kernel_object).ok_or(())?;
+            let number = devpts.pty_number().ok_or(())?;
+            write_user_i32(arg, number as i32)?;
+            Ok(Some(0))
+        }
+        TIOCSPTLCK => {
+            let devpts = devpts_file_object(kernel_object).ok_or(())?;
+            let locked = read_user_i32(arg)? != 0;
+            if !devpts.set_pty_slave_locked(locked) {
+                return Err(());
+            }
+            Ok(Some(0))
+        }
+        TIOCGPTLCK => {
+            let devpts = devpts_file_object(kernel_object).ok_or(())?;
+            let locked = devpts.pty_slave_locked().ok_or(())?;
+            write_user_i32(arg, if locked { 1 } else { 0 })?;
+            Ok(Some(0))
+        }
         KDGKBTYPE => {
             // Always return KB_101
             let task = mytask().ok_or(())?;
@@ -857,6 +881,11 @@ fn is_tty_kernel_object(kernel_object: &KernelObject) -> bool {
 fn tty_shared_device_from_object(
     kernel_object: &KernelObject,
 ) -> Option<Arc<dyn crate::device::Device>> {
+    if let Some(tty) = devpts_file_object(kernel_object).and_then(|file| file.tty_device()) {
+        let dev: Arc<dyn crate::device::Device> = tty;
+        return Some(dev);
+    }
+
     let file_obj = kernel_object.as_file()?;
     let metadata = file_obj.metadata().ok()?;
     let FileType::CharDevice(info) = metadata.file_type else {
@@ -872,6 +901,16 @@ fn tty_shared_device_from_object(
     } else {
         None
     }
+}
+
+fn devpts_file_object(kernel_object: &KernelObject) -> Option<&DevPtsFileObject> {
+    let file_obj = kernel_object.as_file()?;
+    if let Some(devpts) = file_obj.as_any().downcast_ref::<DevPtsFileObject>() {
+        return Some(devpts);
+    }
+
+    let vfs_file = file_obj.as_any().downcast_ref::<VfsFileObject>()?;
+    vfs_file.inner().as_any().downcast_ref::<DevPtsFileObject>()
 }
 
 fn is_tty_object(kernel_object: &KernelObject) -> bool {
@@ -891,6 +930,15 @@ fn write_user_i32(vaddr: usize, value: i32) -> Result<(), ()> {
             *(paddr as *mut i32) = value;
         }
         Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn read_user_i32(vaddr: usize) -> Result<i32, ()> {
+    let task = mytask().ok_or(())?;
+    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+        Ok(unsafe { *(paddr as *const i32) })
     } else {
         Err(())
     }

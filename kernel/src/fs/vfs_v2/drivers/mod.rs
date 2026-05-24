@@ -11,6 +11,7 @@
 //! - **overlayfs**: Union/overlay filesystem combining multiple layers
 //! - **initramfs**: Helper module for mounting initramfs during boot
 //! - **devfs**: Device filesystem that automatically exposes all registered devices
+//! - **devpts**: Pseudo-terminal filesystem for Unix98 PTY allocation
 //! - **fat32**: FAT32 filesystem driver for block devices
 //! - **ext2**: ext2 filesystem driver for block devices
 //!
@@ -30,6 +31,7 @@
 
 pub mod cpiofs;
 pub mod devfs;
+pub mod devpts;
 pub mod ext2;
 pub mod fat32;
 pub mod initramfs;

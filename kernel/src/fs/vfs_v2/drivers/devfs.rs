@@ -49,6 +49,8 @@ use crate::{
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
+const DEVPTS_MOUNT_NODE_ID: u64 = u64::MAX - 1;
+
 /// DevFS - Device filesystem implementation
 ///
 /// This filesystem automatically exposes all devices registered in the global
@@ -116,6 +118,15 @@ impl DevFS {
 
         // Clear existing devices (for dynamic updates)
         root.clear_children();
+
+        let pts_node = Arc::new(DevNode::new_directory_with_id(
+            "pts".to_string(),
+            DEVPTS_MOUNT_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            pts_node.set_filesystem(fs_ref);
+        }
+        root.add_child("pts".to_string(), pts_node)?;
 
         // Get all devices that were registered with explicit names
         let named_devices = device_manager.get_named_devices();
@@ -300,10 +311,14 @@ impl Clone for DevNode {
 impl DevNode {
     /// Create a new directory node
     pub fn new_directory(name: String) -> Self {
+        Self::new_directory_with_id(name, 0)
+    }
+
+    fn new_directory_with_id(name: String, file_id: u64) -> Self {
         Self {
             name,
             file_type: FileType::Directory,
-            file_id: 0, // Root directory ID
+            file_id,
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
             #[cfg(test)]

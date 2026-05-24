@@ -97,6 +97,7 @@ fn setup_devfs() -> Result<(), &'static str> {
 
     // Mount devfs at /dev
     if mount("devfs", "/dev", "devfs", 0, None).is_ok() {
+        let _ = mount("devpts", "/dev/pts", "devpts", 0, None);
         Ok(())
     } else {
         Err("Failed to mount devfs")

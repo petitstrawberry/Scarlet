@@ -728,7 +728,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Open the file using VfsManager::open_relative
     // Apply a few Linux-compat path translations for devices
-    let mapped_path = if path_str == "/dev/tty" {
+    let mapped_path = if path_str == "/dev/ptmx" {
+        "/dev/pts/ptmx".to_string()
+    } else if path_str == "/dev/tty" {
         if task.get_controlling_tty().is_none() {
             return errno::to_result(errno::ENXIO);
         }
