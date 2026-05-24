@@ -1712,7 +1712,9 @@ impl Task {
         if flags.is_set(CloneFlagsDef::Thread) {
             // Thread: share parent's thread group ID
             child.thread_group_id = self.thread_group_id;
-        } // else: new task group, thread_group_id will be set to child's ID in set_id()
+        } else {
+            child.thread_group_id = 0;
+        }
 
         Ok(child)
     }
