@@ -49,7 +49,7 @@ use crate::{
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
-const DEVPTS_MOUNT_NODE_ID: u64 = u64::MAX - 1;
+const DEVPTS_MOUNT_NODE_ID: u64 = 1024;
 
 /// DevFS - Device filesystem implementation
 ///
