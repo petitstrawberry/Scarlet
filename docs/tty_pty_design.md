@@ -167,6 +167,7 @@ and job-control state.
 | `SCTL_TTY_SET_CRNL_INPUT` / `GET_CRNL_INPUT` | `TCSETS` / `TCGETS`, `ICRNL` | `termios.c_iflag` |
 | `SCTL_TTY_SET_OUTPUT_POSTPROCESS` / `GET_OUTPUT_POSTPROCESS` | `TCSETS` / `TCGETS`, `OPOST` | `termios.c_oflag` |
 | TTY internal `tostop_enabled` | `TCSETS` / `TCGETS`, `TOSTOP` | `termios.c_lflag` |
+| TTY internal control chars | `VINTR`, `VQUIT`, `VERASE`, `VEOF`, `VSUSP` | `termios.c_cc` |
 | `SCTL_TTY_SET_READ_POLICY` / `GET_READ_POLICY` | `VMIN` / `VTIME` | `termios.c_cc` |
 | `SCTL_TTY_SET_WINSIZE` / `GET_WINSIZE` | `TIOCSWINSZ` / `TIOCGWINSZ` | TTY winsize |
 | `SCTL_TTY_SET_KBMODE` / `GET_KBMODE` | `KDSKBMODE` / `KDGKBMODE` | console keyboard mode |

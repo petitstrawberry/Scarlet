@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 
 use crate::device::char::tty::{
-    TtyDevice,
+    TerminalControlChars, TtyDevice,
     tty_ctl::{
         SCTL_TTY_GET_KBMODE, SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_KBMODE, SCTL_TTY_SET_WINSIZE,
     },
@@ -89,9 +89,13 @@ struct LinuxTermios {
 }
 
 // Common termios cc index constants (asm-generic)
+const VINTR: usize = 0;
+const VQUIT: usize = 1;
+const VERASE: usize = 2;
 const VEOF: usize = 4;
 const VTIME: usize = 5;
 const VMIN: usize = 6;
+const VSUSP: usize = 10;
 const IFLAG_ICRNL: u32 = 0x0000_0100;
 const OFLAG_OPOST: u32 = 0x0000_0001;
 const LFLAG_ISIG: u32 = 0x0000_0001;
@@ -178,16 +182,30 @@ pub fn handle_ioctl(
                     if let Some(value) = with_tty_device(kernel_object, |tty| tty.is_tostop_enabled()) {
                         tostop = value;
                     }
+                    let control_chars =
+                        with_tty_device(kernel_object, |tty| tty.get_control_chars()).unwrap_or(
+                            TerminalControlChars {
+                                interrupt: 0x03,
+                                quit: 0x1C,
+                                erase: 0x7F,
+                                eof: 0x04,
+                                suspend: 0x1A,
+                            },
+                        );
                     if icrnl { t.c_iflag |= IFLAG_ICRNL; }
                     if opost { t.c_oflag |= OFLAG_OPOST; }
                     if isig { t.c_lflag |= LFLAG_ISIG; }
                     if canonical { t.c_lflag |= LFLAG_ICANON; }
                     if echo { t.c_lflag |= LFLAG_ECHO; }
                     if tostop { t.c_lflag |= LFLAG_TOSTOP; }
+                    t.c_cc[VINTR] = control_chars.interrupt;
+                    t.c_cc[VQUIT] = control_chars.quit;
+                    t.c_cc[VERASE] = control_chars.erase;
+                    t.c_cc[VEOF] = control_chars.eof;
+                    t.c_cc[VSUSP] = control_chars.suspend;
                     t.c_cc[VMIN] = core::cmp::min(min_ready as usize, 255) as u8;
                     let vtime_tenths = core::cmp::min(((timeout_ms as u32 + 99) / 100) as usize, 255) as u8;
                     t.c_cc[VTIME] = vtime_tenths;
-                    t.c_cc[VEOF] = 0x04; // Ctrl-D
                     let task = mytask().ok_or(())?;
                     let vaddr = arg as usize;
                     if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
@@ -209,6 +227,13 @@ pub fn handle_ioctl(
                         let vmin = t.c_cc[VMIN] as u16;
                         let vtime_tenths = t.c_cc[VTIME] as u16;
                         let timeout_ms: u16 = vtime_tenths.saturating_mul(100);
+                        let control_chars = TerminalControlChars {
+                            interrupt: t.c_cc[VINTR],
+                            quit: t.c_cc[VQUIT],
+                            erase: t.c_cc[VERASE],
+                            eof: t.c_cc[VEOF],
+                            suspend: t.c_cc[VSUSP],
+                        };
                         if let Some(control_ops) = kernel_object.as_control() {
                             let prev_canonical = control_ops.control(SCTL_TTY_GET_CANONICAL, 0).unwrap_or(-1) != 0;
                             let prev_echo = control_ops.control(SCTL_TTY_GET_ECHO, 0).unwrap_or(-1) != 0;
@@ -225,6 +250,8 @@ pub fn handle_ioctl(
                             }
                         }
                         let _ = with_tty_device(kernel_object, |tty| tty.set_tostop(tostop_new));
+                        let _ =
+                            with_tty_device(kernel_object, |tty| tty.set_control_chars(control_chars));
                         if request == TCSETSF {
                             if let Some(control_ops) = kernel_object.as_control() {
                                 let _ = control_ops.control(SCTL_TTY_FLUSH_INPUT, 0);

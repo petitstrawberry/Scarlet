@@ -20,7 +20,7 @@ use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use spin::Mutex;
 
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
@@ -71,6 +71,27 @@ use tty_ctl::*;
 
 // Provide a static capabilities slice for TTY devices
 static TTY_CAPS: [DeviceCapability; 1] = [DeviceCapability::Tty];
+
+const DEFAULT_INTERRUPT_CHAR: u8 = 0x03; // Ctrl-C
+const DEFAULT_QUIT_CHAR: u8 = 0x1C; // Ctrl-\
+const DEFAULT_ERASE_CHAR: u8 = 0x7F; // DEL
+const DEFAULT_EOF_CHAR: u8 = 0x04; // Ctrl-D
+const DEFAULT_SUSPEND_CHAR: u8 = 0x1A; // Ctrl-Z
+
+/// Terminal-generated control characters used by the line discipline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalControlChars {
+    /// Interrupt character, delivered as a process-control interrupt event.
+    pub interrupt: u8,
+    /// Quit character, delivered as a process-control quit event.
+    pub quit: u8,
+    /// Erase character used by canonical input editing.
+    pub erase: u8,
+    /// End-of-file character used to complete a canonical input record.
+    pub eof: u8,
+    /// Suspend character, delivered as a terminal-stop process-control event.
+    pub suspend: u8,
+}
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -146,6 +167,12 @@ pub struct TtyDevice {
     signal_chars_enabled: AtomicBool,
     crnl_input_enabled: AtomicBool,
     output_postprocess_enabled: AtomicBool,
+    canonical_eof_ready: AtomicBool,
+    interrupt_char: AtomicU8,
+    quit_char: AtomicU8,
+    erase_char: AtomicU8,
+    eof_char: AtomicU8,
+    suspend_char: AtomicU8,
     tostop_enabled: AtomicBool,
 
     // Neutral read policy: minimum bytes to return and optional timeout (ms)
@@ -186,6 +213,12 @@ impl TtyDevice {
             signal_chars_enabled: AtomicBool::new(true),
             crnl_input_enabled: AtomicBool::new(true),
             output_postprocess_enabled: AtomicBool::new(true),
+            canonical_eof_ready: AtomicBool::new(false),
+            interrupt_char: AtomicU8::new(DEFAULT_INTERRUPT_CHAR),
+            quit_char: AtomicU8::new(DEFAULT_QUIT_CHAR),
+            erase_char: AtomicU8::new(DEFAULT_ERASE_CHAR),
+            eof_char: AtomicU8::new(DEFAULT_EOF_CHAR),
+            suspend_char: AtomicU8::new(DEFAULT_SUSPEND_CHAR),
             tostop_enabled: AtomicBool::new(false),
             read_min_ready_bytes: AtomicU16::new(1),
             read_timeout_ms: AtomicU16::new(0),
@@ -270,6 +303,30 @@ impl TtyDevice {
 
     pub fn is_output_postprocess_enabled(&self) -> bool {
         self.output_postprocess_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Set terminal-generated control characters.
+    ///
+    /// A zero byte disables the corresponding special meaning, matching the
+    /// Linux ABI adapter's current `_POSIX_VDISABLE` behavior.
+    pub fn set_control_chars(&self, chars: TerminalControlChars) {
+        self.interrupt_char
+            .store(chars.interrupt, Ordering::Relaxed);
+        self.quit_char.store(chars.quit, Ordering::Relaxed);
+        self.erase_char.store(chars.erase, Ordering::Relaxed);
+        self.eof_char.store(chars.eof, Ordering::Relaxed);
+        self.suspend_char.store(chars.suspend, Ordering::Relaxed);
+    }
+
+    /// Return the current terminal-generated control characters.
+    pub fn get_control_chars(&self) -> TerminalControlChars {
+        TerminalControlChars {
+            interrupt: self.interrupt_char.load(Ordering::Relaxed),
+            quit: self.quit_char.load(Ordering::Relaxed),
+            erase: self.erase_char.load(Ordering::Relaxed),
+            eof: self.eof_char.load(Ordering::Relaxed),
+            suspend: self.suspend_char.load(Ordering::Relaxed),
+        }
     }
 
     /// Block until the TTY input buffer becomes non-empty.
@@ -436,7 +493,8 @@ impl TtyDevice {
     pub fn is_read_ready_for_select(&self) -> bool {
         if self.canonical_mode.load(Ordering::Relaxed) {
             let g = self.input_buffer.lock();
-            return g.iter().any(|&b| b == b'\n');
+            return self.canonical_eof_ready.load(Ordering::Relaxed)
+                || g.iter().any(|&b| b == b'\n');
         }
 
         let min_ready = self.read_min_ready_bytes.load(Ordering::Relaxed) as usize;
@@ -489,14 +547,15 @@ impl TtyDevice {
             byte = b'\n';
         }
 
+        let control_chars = self.get_control_chars();
+
         if self.signal_chars_enabled.load(Ordering::Relaxed)
             && self.kb_mode.load(Ordering::Relaxed) == 0
         {
             match byte {
-                0x03 => {
+                b if control_chars.interrupt != 0 && b == control_chars.interrupt => {
                     if self.echo_enabled.load(Ordering::Relaxed) {
-                        self.echo_char('^' as u8);
-                        self.echo_char('C' as u8);
+                        self.echo_control_char(control_chars.interrupt);
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
@@ -505,10 +564,9 @@ impl TtyDevice {
                     );
                     return;
                 }
-                0x1C => {
+                b if control_chars.quit != 0 && b == control_chars.quit => {
                     if self.echo_enabled.load(Ordering::Relaxed) {
-                        self.echo_char('^' as u8);
-                        self.echo_char('\\' as u8);
+                        self.echo_control_char(control_chars.quit);
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
@@ -517,10 +575,9 @@ impl TtyDevice {
                     );
                     return;
                 }
-                0x1A => {
+                b if control_chars.suspend != 0 && b == control_chars.suspend => {
                     if self.echo_enabled.load(Ordering::Relaxed) {
-                        self.echo_char('^' as u8);
-                        self.echo_char('Z' as u8);
+                        self.echo_control_char(control_chars.suspend);
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
@@ -536,8 +593,22 @@ impl TtyDevice {
         // Canonical mode processing
         if self.canonical_mode.load(Ordering::Relaxed) {
             match byte {
+                b if control_chars.eof != 0 && b == control_chars.eof => {
+                    self.canonical_eof_ready.store(true, Ordering::Relaxed);
+                    self.input_waker.wake_all();
+                }
                 // Backspace/DEL
-                0x08 | 0x7F => {
+                0x08 | 0x7F
+                    if control_chars.erase == DEFAULT_ERASE_CHAR || control_chars.erase == 0x08 =>
+                {
+                    let mut input_buffer = self.input_buffer.lock();
+                    if input_buffer.pop_back().is_some()
+                        && self.echo_enabled.load(Ordering::Relaxed)
+                    {
+                        self.echo_backspace();
+                    }
+                }
+                b if control_chars.erase != 0 && b == control_chars.erase => {
                     let mut input_buffer = self.input_buffer.lock();
                     if input_buffer.pop_back().is_some()
                         && self.echo_enabled.load(Ordering::Relaxed)
@@ -994,6 +1065,15 @@ impl TtyDevice {
         self.echo_char(b' ');
         self.echo_char(0x08);
     }
+
+    fn echo_control_char(&self, byte: u8) {
+        self.echo_char(b'^');
+        self.echo_char(match byte {
+            0x00..=0x1F => byte + 0x40,
+            0x7F => b'?',
+            _ => byte,
+        });
+    }
 }
 
 impl Selectable for TtyDevice {
@@ -1196,15 +1276,32 @@ impl CharDevice for TtyDevice {
         // Canonical mode: block until a full line (ending with '\n') is available
         if canonical {
             loop {
-                // If a newline exists, copy out a line chunk
-                {
-                    let has_newline = {
-                        let g = self.input_buffer.lock();
-                        g.iter().any(|&b| b == b'\n')
-                    };
-                    if has_newline {
-                        return copy_out(buffer, true);
+                // If a newline exists, copy out a line chunk. EOF completes the
+                // current record without appending a byte; with an empty record
+                // this returns 0.
+                let (has_newline, has_eof) = {
+                    let g = self.input_buffer.lock();
+                    (
+                        g.iter().any(|&b| b == b'\n'),
+                        self.canonical_eof_ready.load(Ordering::Relaxed),
+                    )
+                };
+                if has_newline {
+                    return copy_out(buffer, true);
+                }
+                if has_eof {
+                    self.canonical_eof_ready.store(false, Ordering::Relaxed);
+                    let mut bytes = 0;
+                    let mut guard = self.input_buffer.lock();
+                    while bytes < buffer.len() {
+                        if let Some(b) = guard.pop_front() {
+                            buffer[bytes] = b;
+                            bytes += 1;
+                        } else {
+                            break;
+                        }
                     }
+                    return bytes;
                 }
                 // Wait for more input
                 if self.nonblocking.load(Ordering::Relaxed) {
@@ -1461,6 +1558,7 @@ impl ControlOps for TtyDevice {
             SCTL_TTY_FLUSH_INPUT => {
                 let mut g = self.input_buffer.lock();
                 g.clear();
+                self.canonical_eof_ready.store(false, Ordering::Relaxed);
                 Ok(0)
             }
             SCTL_TTY_SET_DEBUG => {
@@ -1530,5 +1628,34 @@ mod tests {
         let mut buffer = [0u8; 1];
         assert_eq!(tty.read(&mut buffer), 1);
         assert_eq!(buffer[0], 0x03);
+    }
+
+    #[test_case]
+    fn test_tty_configurable_erase_char() {
+        let tty = test_tty();
+        let mut chars = tty.get_control_chars();
+        chars.erase = b'#';
+        tty.set_control_chars(chars);
+
+        tty.handle_input_byte(b'a');
+        tty.handle_input_byte(b'#');
+        tty.handle_input_byte(b'b');
+        tty.handle_input_byte(b'\n');
+
+        let mut buffer = [0u8; 2];
+        assert_eq!(tty.read(&mut buffer), 2);
+        assert_eq!(&buffer, b"b\n");
+    }
+
+    #[test_case]
+    fn test_tty_canonical_eof_completes_pending_input() {
+        let tty = test_tty();
+
+        tty.handle_input_byte(b'a');
+        tty.handle_input_byte(tty.get_control_chars().eof);
+
+        let mut buffer = [0u8; 1];
+        assert_eq!(tty.read(&mut buffer), 1);
+        assert_eq!(buffer[0], b'a');
     }
 }
