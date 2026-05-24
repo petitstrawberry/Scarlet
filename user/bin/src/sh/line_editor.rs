@@ -11,19 +11,12 @@
 extern crate scarlet_std as std;
 
 use std::handle::Handle;
-use std::{print, string::String, vec::Vec};
-
-// TTY control opcodes (from kernel investigation)
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_FLUSH_INPUT: u32 = 0x5354_0009;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-
-// Keyboard modes
-const KB_XLATE: usize = 0; // Translated mode (ASCII)
-const KB_MEDIUMRAW: usize = 1; // Linux keycodes (1 byte)
-const KB_RAW: usize = 2; // Raw scan codes
+use std::{
+    print,
+    string::String,
+    tty::{KeyboardMode, ReadPolicy, Terminal},
+    vec::Vec,
+};
 
 // Linux keycodes for special keys (from TTY device)
 const KEY_UP: u32 = 103;
@@ -51,7 +44,10 @@ pub struct LineEditor {
     prompt: String,
     raw_mode_enabled: bool,
     stdin_handle: Option<Handle>,
-    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [)
+    saved_signal_chars_enabled: Option<bool>,
+    rendered_cells: usize,
+    rendered_cursor_cell: usize,
+    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [, 4=got ESC O)
     esc_state: u8,
 }
 
@@ -64,6 +60,9 @@ impl LineEditor {
             prompt: String::from(prompt),
             raw_mode_enabled: false,
             stdin_handle: None,
+            saved_signal_chars_enabled: None,
+            rendered_cells: 0,
+            rendered_cursor_cell: 0,
             esc_state: 0,
         }
     }
@@ -77,52 +76,42 @@ impl LineEditor {
         }
 
         if let Some(ref handle) = self.stdin_handle {
-            // Set canonical mode (opposite of raw mode)
-            let canonical_value = if enabled { 0 } else { 1 };
-            if handle
-                .control(SCTL_TTY_SET_CANONICAL, canonical_value)
+            let terminal = Terminal::from_handle(handle);
+
+            if terminal.set_canonical(!enabled).is_err() {
+                return Err(());
+            }
+            if terminal.set_echo(!enabled).is_err() {
+                return Err(());
+            }
+            if enabled && self.saved_signal_chars_enabled.is_none() {
+                self.saved_signal_chars_enabled = terminal.signal_chars_enabled().ok();
+            }
+            let signal_chars_enabled = if enabled {
+                false
+            } else {
+                self.saved_signal_chars_enabled.take().unwrap_or(true)
+            };
+            if terminal
+                .set_signal_chars_enabled(signal_chars_enabled)
                 .is_err()
             {
                 return Err(());
             }
 
-            // Set echo (off in raw mode, on in canonical mode)
-            let echo_value = if enabled { 0 } else { 1 };
-            if handle.control(SCTL_TTY_SET_ECHO, echo_value).is_err() {
-                return Err(());
-            }
-
-            // Set keyboard mode
-            // 0=XLATE (ASCII passthrough), 1=MEDIUMRAW (Linux keycodes), 2=RAW (scan codes)
             // Use XLATE mode so all ASCII characters (including symbols) pass through
-            if handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE).is_err() {
+            if terminal.set_keyboard_mode(KeyboardMode::Xlate).is_err() {
                 print!("DEBUG: Failed to set keyboard mode!\n");
                 return Err(());
             }
 
-            // Set read policy for raw mode
-            // Format: ((timeout_ms as u32) << 16) | (min_ready_bytes as u32)
-            if enabled {
-                // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
+            if terminal.set_read_policy(ReadPolicy::new(1, 0)).is_err() {
+                if enabled {
                     print!("DEBUG: Failed to set read policy!\n");
-                    return Err(());
                 }
-                // Raw mode enabled successfully
-            } else {
-                // Canonical mode: restore default policy
-                // min=1, timeout=0 is reasonable for canonical too
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
-                    return Err(());
-                }
+                return Err(());
+            }
+            if !enabled {
                 print!("DEBUG: Canonical mode restored\n");
             }
 
@@ -141,6 +130,8 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
             let c = std::io::get_char();
@@ -189,6 +180,8 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
             let c = std::io::get_char();
@@ -279,6 +272,39 @@ impl LineEditor {
                 self.esc_state = 2;
                 return EditorAction::Continue;
             }
+            (1, b'O') => {
+                // ESC O - SS3 sequence
+                self.esc_state = 4;
+                return EditorAction::Continue;
+            }
+            (4, b'A') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryPrev;
+            }
+            (4, b'B') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryNext;
+            }
+            (4, b'C') => {
+                self.esc_state = 0;
+                self.move_cursor_right();
+                return EditorAction::Continue;
+            }
+            (4, b'D') => {
+                self.esc_state = 0;
+                self.move_cursor_left();
+                return EditorAction::Continue;
+            }
+            (4, b'H') => {
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (4, b'F') => {
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
             (2, b'A') => {
                 // ESC [ A - Up arrow
                 self.esc_state = 0;
@@ -313,15 +339,32 @@ impl LineEditor {
                 self.move_cursor_end();
                 return EditorAction::Continue;
             }
-            (2, b'3') => {
-                // ESC [ 3 - might be Delete (ESC [ 3 ~)
-                self.esc_state = 3;
+            (2, b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8') => {
+                // ESC [ n - might be Home/End/Delete (ESC [ n ~)
+                self.esc_state = byte as u8;
                 return EditorAction::Continue;
             }
-            (3, b'~') => {
+            (b'1', b'~') | (b'7', b'~') => {
+                // ESC [ 1 ~ / ESC [ 7 ~ - Home
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (b'4', b'~') | (b'8', b'~') => {
+                // ESC [ 4 ~ / ESC [ 8 ~ - End
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
+            (b'3', b'~') => {
                 // ESC [ 3 ~ - Delete
                 self.esc_state = 0;
                 self.delete_char();
+                return EditorAction::Continue;
+            }
+            (b'2', b'~') | (b'5', b'~') | (b'6', b'~') => {
+                // ESC [ 2 ~/5~/6~ - Insert/PageUp/PageDown. Consume for now.
+                self.esc_state = 0;
                 return EditorAction::Continue;
             }
             _ if self.esc_state != 0 => {
@@ -360,23 +403,8 @@ impl LineEditor {
     /// Insert a character at the cursor position
     fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.cursor, c);
-
-        // In raw mode, manually output the character and everything after it
-        // Print from current cursor position to end
-        for i in self.cursor..self.buffer.len() {
-            print!("{}", self.buffer[i]);
-        }
-
-        // If we inserted in the middle, move cursor back to correct position
-        let chars_after = self.buffer.len() - self.cursor - 1;
-        if chars_after > 0 {
-            // Move cursor left by the number of characters we printed after insertion
-            for _ in 0..chars_after {
-                print!("\x1b[D");
-            }
-        }
-
         self.cursor += 1;
+        self.redraw_line();
     }
 
     /// Delete character before cursor (backspace)
@@ -384,21 +412,7 @@ impl LineEditor {
         if self.cursor > 0 {
             self.buffer.remove(self.cursor - 1);
             self.cursor -= 1;
-
-            // Move cursor left
-            print!("\x1b[D");
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -406,18 +420,7 @@ impl LineEditor {
     fn delete_char(&mut self) {
         if self.cursor < self.buffer.len() {
             self.buffer.remove(self.cursor);
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -425,8 +428,7 @@ impl LineEditor {
     fn move_cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
-            // ANSI escape: move cursor left
-            print!("\x1b[D");
+            self.redraw_line();
         }
     }
 
@@ -434,24 +436,23 @@ impl LineEditor {
     fn move_cursor_right(&mut self) {
         if self.cursor < self.buffer.len() {
             self.cursor += 1;
-            // ANSI escape: move cursor right
-            print!("\x1b[C");
+            self.redraw_line();
         }
     }
 
     /// Move cursor to beginning of line
     fn move_cursor_home(&mut self) {
-        while self.cursor > 0 {
-            self.cursor -= 1;
-            print!("\x1b[D");
+        if self.cursor > 0 {
+            self.cursor = 0;
+            self.redraw_line();
         }
     }
 
     /// Move cursor to end of line
     fn move_cursor_end(&mut self) {
-        while self.cursor < self.buffer.len() {
-            self.cursor += 1;
-            print!("\x1b[C");
+        if self.cursor < self.buffer.len() {
+            self.cursor = self.buffer.len();
+            self.redraw_line();
         }
     }
 
@@ -473,22 +474,60 @@ impl LineEditor {
     }
 
     /// Redraw the entire line
-    fn redraw_line(&self) {
-        // Move to beginning of line
+    fn redraw_line(&mut self) {
+        let columns = self.terminal_columns();
+        let previous_rows = rendered_rows(self.rendered_cells, columns);
+        let current_row = self.rendered_cursor_cell / columns;
+        if current_row > 0 {
+            print!("\x1b[{}A", current_row);
+        }
+        print!("\r");
+        for row in 0..previous_rows {
+            print!("\x1b[2K");
+            if row + 1 < previous_rows {
+                print!("\x1b[B\r");
+            }
+        }
+        if previous_rows > 1 {
+            print!("\x1b[{}A", previous_rows - 1);
+        }
         print!("\r");
 
-        // Print prompt and buffer
         print!("{}", self.prompt);
         for c in &self.buffer {
             print!("{}", c);
         }
 
-        // Clear to end of line
-        print!("\x1b[K");
+        let total_cells = self.prompt_cells() + self.buffer.len();
+        let current_rows = rendered_rows(total_cells, columns);
+        if current_rows > 1 {
+            print!("\x1b[{}A", current_rows - 1);
+        }
+        print!("\r");
+        let cursor_cell = self.prompt_cells() + self.cursor;
+        let cursor_row = cursor_cell / columns;
+        let cursor_col = cursor_cell % columns;
+        if cursor_row > 0 {
+            print!("\x1b[{}B", cursor_row);
+        }
+        if cursor_col > 0 {
+            print!("\x1b[{}C", cursor_col);
+        }
+        self.rendered_cells = total_cells;
+        self.rendered_cursor_cell = cursor_cell;
+    }
 
-        // Move cursor to correct position
-        let cursor_col = self.prompt.len() + self.cursor;
-        print!("\r\x1b[{}G", cursor_col + 1);
+    fn prompt_cells(&self) -> usize {
+        self.prompt.chars().count()
+    }
+
+    fn terminal_columns(&self) -> usize {
+        self.stdin_handle
+            .as_ref()
+            .and_then(|handle| Terminal::from_handle(handle).winsize().ok())
+            .map(|size| size.columns as usize)
+            .filter(|columns| *columns > 0)
+            .unwrap_or(80)
     }
 
     /// Handle tab completion
@@ -670,6 +709,8 @@ impl LineEditor {
             for c in &self.buffer {
                 print!("{}", c);
             }
+            self.rendered_cells = self.prompt_cells() + self.buffer.len();
+            self.rendered_cursor_cell = self.rendered_cells;
         }
     }
 
@@ -709,6 +750,11 @@ impl LineEditor {
     pub fn buffer_content(&self) -> String {
         self.buffer.iter().collect()
     }
+}
+
+fn rendered_rows(cells: usize, columns: usize) -> usize {
+    let columns = columns.max(1);
+    cells / columns + 1
 }
 
 impl Drop for LineEditor {

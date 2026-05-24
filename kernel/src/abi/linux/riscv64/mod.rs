@@ -1,10 +1,10 @@
 use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use crate::abi::linux::generic::{self, LinuxThreadState};
+use crate::abi::linux::generic;
 use crate::{
     abi::AbiModule,
-    arch::{self, IntRegisters, Trapframe},
+    arch::{self, IntRegisters},
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
@@ -80,51 +80,12 @@ impl AbiModule for LinuxRiscv64Abi {
         event: crate::ipc::Event,
         target_task_id: u32,
     ) -> Result<(), &'static str> {
-        if let Some(signal) = generic::signal::handle_event_to_signal(&event) {
-            let target_task = crate::sched::scheduler::get_task_by_id(target_task_id as usize)
-                .ok_or("Target task not found")?;
-
-            let action = {
-                let signal_state = self.0.signal_state.lock();
-                signal_state.get_handler(signal)
-            };
-
-            match action {
-                generic::signal::SignalAction::Custom(handler_addr) => {
-                    let trapframe = target_task.get_trapframe();
-                    signal::setup_signal_handler(trapframe, handler_addr, signal);
-                }
-                generic::signal::SignalAction::Ignore => {}
-                generic::signal::SignalAction::ForceTerminate => {
-                    let exit_code = 128 + (signal as i32);
-                    target_task.exit(exit_code);
-                }
-                generic::signal::SignalAction::Terminate => {
-                    let exit_code = 128 + (signal as i32);
-                    target_task.exit(exit_code);
-                }
-                generic::signal::SignalAction::Stop => {
-                    target_task.set_state(crate::task::TaskState::Blocked(
-                        crate::task::BlockedType::Interruptible,
-                    ));
-                    crate::sched::scheduler::mark_blocked(target_task.get_id());
-                    crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
-                }
-                generic::signal::SignalAction::Continue => {
-                    let current_state = target_task.get_state();
-                    if matches!(current_state, crate::task::TaskState::Blocked(_)) {
-                        target_task.set_state(crate::task::TaskState::Ready);
-                        crate::sched::scheduler::unmark_blocked(target_task.get_id());
-                        crate::sched::scheduler::push_ready_task(
-                            crate::arch::get_cpu().get_cpuid(),
-                            target_task.get_id(),
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        generic::signal::handle_event_for_task(
+            &self.0,
+            &event,
+            target_task_id,
+            signal::setup_signal_handler,
+        )
     }
 
     fn on_task_cloned(
@@ -470,6 +431,15 @@ impl AbiModule for LinuxRiscv64Abi {
             Ok(()) => {}
             Err(_e) => {
                 return Err("Failed to bind mount /dev for Linux");
+            }
+        }
+        if base_vfs.resolve_path("/dev/pts/ptmx").is_ok() {
+            let _ = create_dir_if_not_exists(target_vfs, "/dev/pts");
+            if target_vfs
+                .bind_mount_from(base_vfs, "/dev/pts", "/dev/pts")
+                .is_err()
+            {
+                crate::println!("Failed to bind mount /dev/pts for Linux");
             }
         }
 

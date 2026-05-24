@@ -729,6 +729,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Open the file using VfsManager::open_relative
     // Apply a few Linux-compat path translations for devices
     let mapped_path = if path_str == "/dev/tty" {
+        if task.get_controlling_tty().is_none() {
+            return errno::to_result(errno::ENXIO);
+        }
         "/dev/tty0".to_string()
     } else if let Some(rest) = path_str.strip_prefix("/dev/vc/") {
         // Map /dev/vc/N -> /dev/ttyN; if ttyN doesn't exist, we may further alias below
@@ -846,6 +849,12 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if (flags & O_APPEND) != 0 {
             let _ = file_obj.seek(SeekFrom::End(0));
         }
+    }
+    if crate::abi::linux::device::tty::check_open_allowed(&kernel_obj).is_err() {
+        return errno::to_result(errno::EBUSY);
+    }
+    if (flags & O_NOCTTY) == 0 {
+        crate::abi::linux::device::tty::try_auto_acquire_controlling_tty(&kernel_obj);
     }
 
     // Register the file with the task using HandleTable
@@ -2385,20 +2394,20 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    if let Some(caps) = caps {
-        // TTY translation
-        if caps.iter().any(|c| *c == DeviceCapability::Tty) {
-            match crate::abi::linux::device::tty::handle_ioctl(request, arg, &kernel_object) {
-                Ok(Some(ret)) => return ret,
-                Ok(None) => {
-                    // Do NOT pass through unknown TTY ioctls to device-specific control.
-                    // Return ENOTTY to match Linux behavior and avoid accidental derefs.
-                    return errno::to_result(errno::ENOTTY);
-                }
-                Err(_) => return errno::to_result(errno::ENOTTY),
+    let device_is_tty = caps
+        .map(|caps| caps.iter().any(|c| *c == DeviceCapability::Tty))
+        .unwrap_or(false);
+    if device_is_tty || crate::abi::linux::device::tty::is_tty_ioctl_target(request, &kernel_object)
+    {
+        match crate::abi::linux::device::tty::handle_ioctl(request, arg, &kernel_object) {
+            Ok(Some(ret)) => return ret,
+            Ok(None) => {
+                // Do NOT pass through unknown TTY ioctls to device-specific control.
+                // Return ENOTTY to match Linux behavior and avoid accidental derefs.
+                return errno::to_result(errno::ENOTTY);
             }
+            Err(_) => return errno::to_result(errno::ENOTTY),
         }
-        // Future: match on other capabilities here
     }
 
     // Default path: pass-through to ControlOps if available

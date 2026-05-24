@@ -105,11 +105,13 @@ pub mod io;
 pub mod ipc;
 pub mod network;
 pub mod poll;
+pub mod pty;
 pub mod socket;
 pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod thread;
+pub mod tty;
 
 // Re-export LocalKey type for convenience
 // Note: thread_local! macro is automatically exported at crate root by #[macro_export]

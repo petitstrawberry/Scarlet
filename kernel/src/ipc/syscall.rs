@@ -6,7 +6,8 @@
 use crate::{
     arch::Trapframe,
     ipc::event::{
-        Event, EventContent, EventManager, EventPayload, EventPriority, ProcessControlType,
+        Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        ProcessControlType,
     },
     ipc::pipe::UnidirectionalPipe,
     ipc::shared_memory::SharedMemory,
@@ -298,7 +299,10 @@ pub fn sys_event_handler_register(trapframe: &mut Trapframe) -> usize {
 ///
 /// Arguments:
 /// - target_tid: u32
-/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,1000+=User(kind-1000))
+/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,
+///   6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,
+///   11=TerminalStop,12=TerminalInput,13=TerminalOutput,14=WindowChange,
+///   1000+=Custom("user", kind-1000))
 /// - reliable: u32 (0/1)
 /// - priority: u32 (1=Low,2=Normal,3=High,4=Critical)
 pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
@@ -306,7 +310,7 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    let target = trapframe.get_arg(0) as u32;
+    let target_id = trapframe.get_arg(0);
     let kind = trapframe.get_arg(1) as u32;
     let reliable = trapframe.get_arg(2) as u32 != 0;
     let prio_raw = trapframe.get_arg(3) as u32;
@@ -318,6 +322,11 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
         4 => EventPriority::Critical,
         _ => EventPriority::Normal,
     };
+
+    let Some(target) = task.get_namespace().resolve_global_id(target_id) else {
+        return usize::MAX;
+    };
+    let target = target as u32;
 
     let event = if kind >= 1000 {
         Event::direct_custom(
@@ -341,10 +350,92 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
             8 => ProcessControlType::PipeBroken,
             9 => ProcessControlType::Alarm,
             10 => ProcessControlType::IoReady,
+            11 => ProcessControlType::TerminalStop,
+            12 => ProcessControlType::TerminalInput,
+            13 => ProcessControlType::TerminalOutput,
+            14 => ProcessControlType::WindowChange,
             _ => ProcessControlType::Terminate,
         };
         Event::direct_process_control(target, ptype, priority, reliable)
     };
+
+    let mgr = EventManager::get_manager();
+    match mgr.send_event(event) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Send a process-control event to a process group.
+///
+/// Arguments:
+/// - group_id: Namespace-local process group ID. 0 means the caller's group.
+/// - kind: Process-control event kind.
+/// - reliable: Non-zero requests reliable delivery.
+/// - priority: 1=low, 2=normal, 3=high, 4=critical.
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_event_send_group(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    let group_id = trapframe.get_arg(0);
+    let kind = trapframe.get_arg(1) as u32;
+    let reliable = trapframe.get_arg(2) as u32 != 0;
+    let prio_raw = trapframe.get_arg(3) as u32;
+    trapframe.increment_pc_next(task);
+
+    let priority = match prio_raw {
+        1 => EventPriority::Low,
+        3 => EventPriority::High,
+        4 => EventPriority::Critical,
+        _ => EventPriority::Normal,
+    };
+
+    let ptype = match kind {
+        0 => ProcessControlType::Terminate,
+        1 => ProcessControlType::Kill,
+        2 => ProcessControlType::Stop,
+        3 => ProcessControlType::Continue,
+        4 => ProcessControlType::Interrupt,
+        5 => ProcessControlType::Quit,
+        6 => ProcessControlType::Hangup,
+        7 => ProcessControlType::ChildExit,
+        8 => ProcessControlType::PipeBroken,
+        9 => ProcessControlType::Alarm,
+        10 => ProcessControlType::IoReady,
+        11 => ProcessControlType::TerminalStop,
+        12 => ProcessControlType::TerminalInput,
+        13 => ProcessControlType::TerminalOutput,
+        14 => ProcessControlType::WindowChange,
+        _ => return usize::MAX,
+    };
+
+    let global_group_id = if group_id == 0 {
+        task.get_process_group_id()
+    } else {
+        let Some(global_task_id) = task.get_namespace().resolve_global_id(group_id) else {
+            return usize::MAX;
+        };
+        let Some(group_leader) = crate::sched::scheduler::get_task_by_id(global_task_id) else {
+            return usize::MAX;
+        };
+        if group_leader.get_process_group_id() != global_task_id {
+            return usize::MAX;
+        }
+        global_task_id
+    };
+
+    let event = Event::group(
+        GroupTarget::TaskGroup(global_group_id as u32),
+        EventContent::ProcessControl(ptype),
+        priority,
+        reliable,
+        EventPayload::Empty,
+    );
 
     let mgr = EventManager::get_manager();
     match mgr.send_event(event) {
@@ -940,6 +1031,11 @@ fn subtype_to_process_control(subtype: u32) -> ProcessControlType {
         8 => ProcessControlType::PipeBroken,
         9 => ProcessControlType::Alarm,
         10 => ProcessControlType::IoReady,
-        n => ProcessControlType::User(n - 11),
+        11 => ProcessControlType::TerminalStop,
+        12 => ProcessControlType::TerminalInput,
+        13 => ProcessControlType::TerminalOutput,
+        14 => ProcessControlType::WindowChange,
+        n if n >= 256 => ProcessControlType::User(n - 256),
+        n => ProcessControlType::User(n - 15),
     }
 }

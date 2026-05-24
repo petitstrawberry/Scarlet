@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::{
     boxed::Box,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 use core::{cell::UnsafeCell, sync::atomic};
@@ -19,6 +19,7 @@ use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, scarlet::ScarletAbi};
+use crate::device::char::tty::TtyDevice;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
@@ -47,7 +48,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
 
 /// Lock type used for the architecture kernel context.
@@ -408,8 +409,20 @@ pub struct Task {
     parent_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
-    /// Task Group ID - for job control and signal delivery (e.g., pipeline members)
+    /// Legacy task group ID mirror.
+    ///
+    /// New job-control code should use `process_group_id`; this field is kept
+    /// during the migration so older Scarlet-private controls continue to see
+    /// the same value.
     task_group_id: AtomicUsize,
+    /// POSIX session ID (SID), stored as a global task ID.
+    session_id: AtomicUsize,
+    /// POSIX process group ID (PGID), stored as a global task ID.
+    process_group_id: AtomicUsize,
+    /// Controlling terminal for this task, if any.
+    controlling_tty: RwLock<Option<Weak<TtyDevice>>>,
+    /// Whether this task is the leader of its POSIX session.
+    is_session_leader: AtomicBool,
     pub max_stack_size: usize,
     pub max_data_size: usize,
     pub max_text_size: usize,
@@ -430,6 +443,10 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Set when a process-control stop should be observable by waitpid.
+    process_control_stopped: AtomicBool,
+    /// Set after the current process-control stop has been reported once.
+    process_control_stop_reported: AtomicBool,
     /// Program break (already thread-safe)
     pub brk: Arc<AtomicUsize>,
 
@@ -587,6 +604,10 @@ impl Task {
             parent_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
+            session_id: AtomicUsize::new(0),
+            process_group_id: AtomicUsize::new(0),
+            controlling_tty: RwLock::new(None),
+            is_session_leader: AtomicBool::new(false),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
@@ -599,6 +620,8 @@ impl Task {
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            process_control_stopped: AtomicBool::new(false),
+            process_control_stop_reported: AtomicBool::new(false),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
             // RwLock fields
             name: RwLock::new(name),
@@ -674,14 +697,109 @@ impl Task {
         if self.task_group_id.load(Ordering::SeqCst) == 0 {
             self.task_group_id.store(id, Ordering::SeqCst);
         }
+        if self.process_group_id.load(Ordering::SeqCst) == 0 {
+            self.process_group_id.store(id, Ordering::SeqCst);
+        }
+        if self.session_id.load(Ordering::SeqCst) == 0 {
+            self.session_id.store(id, Ordering::SeqCst);
+            self.is_session_leader.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn get_task_group_id(&self) -> usize {
-        self.task_group_id.load(Ordering::SeqCst)
+        self.get_process_group_id()
     }
 
     pub fn set_task_group_id(&self, task_group_id: usize) {
+        self.set_process_group_id(task_group_id);
+    }
+
+    /// Get the POSIX process group ID (PGID).
+    ///
+    /// # Returns
+    /// The global task ID that names this task's process group.
+    pub fn get_process_group_id(&self) -> usize {
+        let pgid = self.process_group_id.load(Ordering::SeqCst);
+        if pgid == 0 {
+            self.task_group_id.load(Ordering::SeqCst)
+        } else {
+            pgid
+        }
+    }
+
+    /// Set the POSIX process group ID (PGID).
+    ///
+    /// # Arguments
+    /// * `task_group_id` - Global task ID that names the target process group.
+    pub fn set_process_group_id(&self, task_group_id: usize) {
+        self.process_group_id.store(task_group_id, Ordering::SeqCst);
         self.task_group_id.store(task_group_id, Ordering::SeqCst);
+    }
+
+    /// Get the POSIX session ID (SID).
+    ///
+    /// # Returns
+    /// The global task ID that names this task's session.
+    pub fn get_session_id(&self) -> usize {
+        self.session_id.load(Ordering::SeqCst)
+    }
+
+    /// Set the POSIX session ID (SID).
+    ///
+    /// # Arguments
+    /// * `session_id` - Global task ID that names the session.
+    pub fn set_session_id(&self, session_id: usize) {
+        self.session_id.store(session_id, Ordering::SeqCst);
+        self.is_session_leader
+            .store(session_id == self.id && self.id != 0, Ordering::SeqCst);
+    }
+
+    /// Returns true if this task is a POSIX session leader.
+    pub fn is_session_leader(&self) -> bool {
+        self.is_session_leader.load(Ordering::SeqCst)
+    }
+
+    /// Create a new POSIX session led by this task.
+    ///
+    /// This implements the kernel-side part of `setsid(2)`: the caller must
+    /// not already be a process group leader, and on success SID and PGID both
+    /// become the caller's task ID while the controlling terminal is dropped.
+    ///
+    /// # Returns
+    /// The new global SID on success.
+    pub fn create_session(&self) -> Result<usize, &'static str> {
+        let id = self.get_id();
+        if self.get_process_group_id() == id {
+            return Err("process group leader cannot create a new session");
+        }
+
+        self.session_id.store(id, Ordering::SeqCst);
+        self.set_process_group_id(id);
+        *self.controlling_tty.write() = None;
+        self.is_session_leader.store(true, Ordering::SeqCst);
+        Ok(id)
+    }
+
+    /// Set the task's controlling terminal.
+    ///
+    /// # Arguments
+    /// * `tty` - Weak reference to the controlling terminal, or `None` to
+    ///   detach from any controlling terminal.
+    pub fn set_controlling_tty(&self, tty: Option<Weak<TtyDevice>>) {
+        *self.controlling_tty.write() = tty;
+    }
+
+    /// Get the task's controlling terminal, if it is still alive.
+    ///
+    /// # Returns
+    /// Strong reference to the controlling TTY, or `None`.
+    pub fn get_controlling_tty(&self) -> Option<Arc<TtyDevice>> {
+        self.controlling_tty.read().as_ref().and_then(Weak::upgrade)
+    }
+
+    /// Detach the task from its controlling terminal.
+    pub fn clear_controlling_tty(&self) {
+        *self.controlling_tty.write() = None;
     }
 
     /// Set the namespace ID (used by TaskPool during task addition)
@@ -766,6 +884,30 @@ impl Task {
     ///
     pub fn get_state(&self) -> TaskState {
         self.state.load(Ordering::SeqCst)
+    }
+
+    /// Mark this task as stopped by a process-control event.
+    pub fn mark_process_control_stopped(&self) {
+        self.process_control_stopped.store(true, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Clear process-control stopped state after a continue event.
+    pub fn clear_process_control_stopped(&self) {
+        self.process_control_stopped.store(false, Ordering::SeqCst);
+        self.process_control_stop_reported
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Return whether this task has an unreported process-control stop.
+    pub fn take_process_control_stop_report(&self) -> bool {
+        if !self.process_control_stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.process_control_stop_reported
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// Get the size of the task.
@@ -1505,6 +1647,16 @@ impl Task {
             child.brk = Arc::new(AtomicUsize::new(parent_brk));
         }
 
+        // POSIX job-control identity.  A fork/clone inherits SID, PGID, and
+        // controlling TTY.  Session leadership itself is not inherited because
+        // the child will receive a distinct task ID when it is registered.
+        child
+            .session_id
+            .store(self.get_session_id(), Ordering::SeqCst);
+        child.set_process_group_id(self.get_process_group_id());
+        *child.controlling_tty.write() = self.controlling_tty.read().clone();
+        child.is_session_leader.store(false, Ordering::SeqCst);
+
         // Copy scheduling and event handling state
         child
             .time_slice
@@ -1560,7 +1712,9 @@ impl Task {
         if flags.is_set(CloneFlagsDef::Thread) {
             // Thread: share parent's thread group ID
             child.thread_group_id = self.thread_group_id;
-        } // else: new task group, thread_group_id will be set to child's ID in set_id()
+        } else {
+            child.thread_group_id = 0;
+        }
 
         Ok(child)
     }
@@ -1578,6 +1732,7 @@ impl Task {
         if self.handle_table.is_sole_owner() {
             self.handle_table.close_all();
         }
+        self.clear_process_control_stopped();
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
@@ -2142,7 +2297,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use crate::sched::scheduler::{add_task, get_task_by_id, reset};
-    use crate::task::CloneFlags;
+    use crate::task::{CloneFlags, CloneFlagsDef};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
     #[test_case]
@@ -2202,6 +2357,112 @@ mod tests {
             assert!(parent_task.remove_child(child_id));
             assert!(!parent_task.get_children().contains(&child_id));
         }
+    }
+
+    #[test_case]
+    fn test_task_session_and_process_group_defaults() {
+        reset();
+
+        let mut task = super::new_user_task("SessionDefaults".to_string(), 0);
+        task.init();
+        let task_id = add_task(task, 0);
+
+        let task = get_task_by_id(task_id).unwrap();
+        assert_eq!(task.get_session_id(), task_id);
+        assert_eq!(task.get_process_group_id(), task_id);
+        assert_eq!(task.get_task_group_id(), task_id);
+        assert!(task.is_session_leader());
+        assert!(task.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_clone_inherits_session_and_process_group() {
+        reset();
+
+        let mut parent = super::new_user_task("SessionParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        let child_id = add_task(child, 0);
+
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_session_id(), parent.get_session_id());
+        assert_eq!(child.get_process_group_id(), parent.get_process_group_id());
+        assert_eq!(child.get_task_group_id(), parent.get_process_group_id());
+        assert!(!child.is_session_leader());
+        assert!(child.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_fork_clone_becomes_new_thread_group_leader() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child.thread_group_id, 0);
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), child_id);
+    }
+
+    #[test_case]
+    fn test_thread_clone_inherits_thread_group() {
+        reset();
+
+        let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let child = parent.clone_task(flags).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+
+        let child_id = add_task(child, 0);
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn test_create_session_requires_non_process_group_leader() {
+        reset();
+
+        let mut task = super::new_user_task("SetsidTask".to_string(), 0);
+        task.init();
+        let task_id = add_task(task, 0);
+
+        let task = get_task_by_id(task_id).unwrap();
+        assert!(task.create_session().is_err());
+
+        task.set_process_group_id(task_id + 1);
+        assert_eq!(task.create_session(), Ok(task_id));
+        assert_eq!(task.get_session_id(), task_id);
+        assert_eq!(task.get_process_group_id(), task_id);
+        assert!(task.is_session_leader());
+        assert!(task.get_controlling_tty().is_none());
+    }
+
+    #[test_case]
+    fn test_process_control_stop_report_latches_once() {
+        let mut task = super::new_user_task("StopReportTask".to_string(), 0);
+        task.init();
+
+        assert!(!task.take_process_control_stop_report());
+
+        task.mark_process_control_stopped();
+        assert!(task.take_process_control_stop_report());
+        assert!(!task.take_process_control_stop_report());
+
+        task.clear_process_control_stopped();
+        assert!(!task.take_process_control_stop_report());
     }
 
     #[test_case]

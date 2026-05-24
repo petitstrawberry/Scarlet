@@ -18,9 +18,9 @@ use crate::sync::waker::Waker;
 use crate::task::mytask;
 use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use spin::Mutex;
 
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
@@ -50,15 +50,143 @@ pub mod tty_ctl {
     pub const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
     /// Get keyboard mode (0=XLATE, 1=MEDIUMRAW, 2=RAW)
     pub const SCTL_TTY_GET_KBMODE: u32 = 0x5354_000D;
-    /// Set foreground task group ID (arg = task_group_id)
+    /// Set foreground process group ID (arg = namespace-local PGID).
     pub const SCTL_TTY_SET_FOREGROUND_GROUP: u32 = 0x5354_000E;
-    /// Get foreground task group ID (ret = task_group_id, or -1 if none)
+    /// Get foreground process group ID (ret = namespace-local PGID, or -1 if none).
     pub const SCTL_TTY_GET_FOREGROUND_GROUP: u32 = 0x5354_000F;
+    /// Enable/disable terminal-generated process-control events.
+    pub const SCTL_TTY_SET_SIGNAL_CHARS: u32 = 0x5354_0010;
+    /// Get terminal-generated process-control event state (ret=0/1).
+    pub const SCTL_TTY_GET_SIGNAL_CHARS: u32 = 0x5354_0011;
+    /// Enable/disable carriage-return to newline input mapping.
+    pub const SCTL_TTY_SET_CRNL_INPUT: u32 = 0x5354_0012;
+    /// Get carriage-return to newline input mapping state (ret=0/1).
+    pub const SCTL_TTY_GET_CRNL_INPUT: u32 = 0x5354_0013;
+    /// Enable/disable output post-processing.
+    pub const SCTL_TTY_SET_OUTPUT_POSTPROCESS: u32 = 0x5354_0014;
+    /// Get output post-processing state (ret=0/1).
+    pub const SCTL_TTY_GET_OUTPUT_POSTPROCESS: u32 = 0x5354_0015;
+    /// Enable/disable implementation-defined extended line editing.
+    pub const SCTL_TTY_SET_EXTENDED_INPUT: u32 = 0x5354_0016;
+    /// Get extended line editing state (ret=0/1).
+    pub const SCTL_TTY_GET_EXTENDED_INPUT: u32 = 0x5354_0017;
+    /// Acquire this terminal as the caller's controlling terminal.
+    pub const SCTL_TTY_ACQUIRE_CONTROLLING: u32 = 0x5354_0018;
+    /// Detach this terminal from the caller as controlling terminal.
+    pub const SCTL_TTY_DETACH_CONTROLLING: u32 = 0x5354_0019;
 }
 use tty_ctl::*;
 
 // Provide a static capabilities slice for TTY devices
 static TTY_CAPS: [DeviceCapability; 1] = [DeviceCapability::Tty];
+
+const DEFAULT_INTERRUPT_CHAR: u8 = 0x03; // Ctrl-C
+const DEFAULT_QUIT_CHAR: u8 = 0x1C; // Ctrl-\
+const DEFAULT_ERASE_CHAR: u8 = 0x7F; // DEL
+const DEFAULT_EOF_CHAR: u8 = 0x04; // Ctrl-D
+const DEFAULT_SUSPEND_CHAR: u8 = 0x1A; // Ctrl-Z
+const DEFAULT_LITERAL_NEXT_CHAR: u8 = 0x16; // Ctrl-V
+
+/// Terminal-generated control characters used by the line discipline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalControlChars {
+    /// Interrupt character, delivered as a process-control interrupt event.
+    pub interrupt: u8,
+    /// Quit character, delivered as a process-control quit event.
+    pub quit: u8,
+    /// Erase character used by canonical input editing.
+    pub erase: u8,
+    /// End-of-file character used to complete a canonical input record.
+    pub eof: u8,
+    /// Suspend character, delivered as a terminal-stop process-control event.
+    pub suspend: u8,
+    /// Literal-next character used by extended canonical input editing.
+    pub literal_next: u8,
+}
+
+/// Lower endpoint used by the TTY core for device output.
+///
+/// UART-backed console TTYs and future PTY slave TTYs both provide this
+/// neutral byte-stream sink. Input still enters through the line discipline via
+/// `inject_input_byte`.
+pub trait TtyBackend: Send + Sync {
+    /// Write bytes to the lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Bytes after TTY output processing.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes accepted by the lower endpoint.
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str>;
+
+    /// Write one byte to the lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `byte` - Byte after TTY output processing.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        self.write(&[byte]).map(|_| ())
+    }
+
+    /// Returns whether the lower endpoint can accept output.
+    ///
+    /// # Returns
+    ///
+    /// `true` when output can be written.
+    fn can_write(&self) -> bool;
+}
+
+struct DeviceTtyBackend {
+    device_id: usize,
+}
+
+impl DeviceTtyBackend {
+    fn new(device_id: usize) -> Self {
+        Self { device_id }
+    }
+
+    fn char_device(&self) -> Option<alloc::sync::Arc<dyn Device>> {
+        DeviceManager::get_manager().get_device(self.device_id)
+    }
+}
+
+impl TtyBackend for DeviceTtyBackend {
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let Some(device) = self.char_device() else {
+            return Err("TTY backend device not available");
+        };
+        let Some(char_device) = device.as_char_device() else {
+            return Err("TTY backend device is not a character device");
+        };
+        char_device.write(buffer)
+    }
+
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let Some(device) = self.char_device() else {
+            return Err("TTY backend device not available");
+        };
+        let Some(char_device) = device.as_char_device() else {
+            return Err("TTY backend device is not a character device");
+        };
+        char_device.write_byte(byte)
+    }
+
+    fn can_write(&self) -> bool {
+        let Some(device) = self.char_device() else {
+            return false;
+        };
+        device
+            .as_char_device()
+            .map(|char_device| char_device.can_write())
+            .unwrap_or(false)
+    }
+}
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -91,6 +219,7 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
 
     // Create TTY device with the resolved UART device ID
     let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
+    tty_device.set_self_ref(Arc::downgrade(&tty_device));
     let uart_device = device_manager
         .get_device(uart_device_id)
         .ok_or("UART device not found")?;
@@ -118,7 +247,8 @@ late_initcall!(init_tty_subsystem);
 /// echo, and basic terminal I/O operations.
 pub struct TtyDevice {
     name: &'static str,
-    uart_device_id: usize,
+    backend: Arc<dyn TtyBackend>,
+    self_ref: spin::RwLock<Weak<TtyDevice>>,
 
     // Input buffer for line discipline
     input_buffer: Arc<Mutex<VecDeque<u8>>>,
@@ -129,6 +259,19 @@ pub struct TtyDevice {
     // Line discipline flags (OS/ABI-neutral)
     canonical_mode: AtomicBool,
     echo_enabled: AtomicBool,
+    signal_chars_enabled: AtomicBool,
+    crnl_input_enabled: AtomicBool,
+    output_postprocess_enabled: AtomicBool,
+    extended_input_enabled: AtomicBool,
+    canonical_eof_ready: AtomicBool,
+    literal_next_pending: AtomicBool,
+    interrupt_char: AtomicU8,
+    quit_char: AtomicU8,
+    erase_char: AtomicU8,
+    eof_char: AtomicU8,
+    suspend_char: AtomicU8,
+    literal_next_char: AtomicU8,
+    tostop_enabled: AtomicBool,
 
     // Neutral read policy: minimum bytes to return and optional timeout (ms)
     read_min_ready_bytes: AtomicU16,
@@ -148,20 +291,60 @@ pub struct TtyDevice {
     esc_state: Mutex<u8>,
     // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
     nonblocking: AtomicBool,
+    exclusive: AtomicBool,
     foreground_task_group_id: Mutex<Option<usize>>,
+    controlling_session_id: Mutex<Option<usize>>,
     // Serializes write operations (Linux tty_struct::atomic_write_lock equivalent)
     write_lock: Mutex<()>,
 }
 
 impl TtyDevice {
+    /// Create a TTY backed by an existing character device.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static device name reported by the TTY.
+    /// * `uart_device_id` - DeviceManager ID for the lower serial endpoint.
+    ///
+    /// # Returns
+    ///
+    /// A new TTY device with default line discipline settings.
     pub fn new(name: &'static str, uart_device_id: usize) -> Self {
+        Self::new_with_backend(name, Arc::new(DeviceTtyBackend::new(uart_device_id)))
+    }
+
+    /// Create a TTY backed by a custom lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static device name reported by the TTY.
+    /// * `backend` - Lower endpoint used for TTY output.
+    ///
+    /// # Returns
+    ///
+    /// A new TTY device with default line discipline settings.
+    pub fn new_with_backend(name: &'static str, backend: Arc<dyn TtyBackend>) -> Self {
         Self {
             name,
-            uart_device_id,
+            backend,
+            self_ref: spin::RwLock::new(Weak::new()),
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: AtomicBool::new(true),
             echo_enabled: AtomicBool::new(true),
+            signal_chars_enabled: AtomicBool::new(true),
+            crnl_input_enabled: AtomicBool::new(true),
+            output_postprocess_enabled: AtomicBool::new(true),
+            extended_input_enabled: AtomicBool::new(true),
+            canonical_eof_ready: AtomicBool::new(false),
+            literal_next_pending: AtomicBool::new(false),
+            interrupt_char: AtomicU8::new(DEFAULT_INTERRUPT_CHAR),
+            quit_char: AtomicU8::new(DEFAULT_QUIT_CHAR),
+            erase_char: AtomicU8::new(DEFAULT_ERASE_CHAR),
+            eof_char: AtomicU8::new(DEFAULT_EOF_CHAR),
+            suspend_char: AtomicU8::new(DEFAULT_SUSPEND_CHAR),
+            literal_next_char: AtomicU8::new(DEFAULT_LITERAL_NEXT_CHAR),
+            tostop_enabled: AtomicBool::new(false),
             read_min_ready_bytes: AtomicU16::new(1),
             read_timeout_ms: AtomicU16::new(0),
             winsize_cols: Mutex::new(80),
@@ -171,8 +354,170 @@ impl TtyDevice {
             kb_mode: core::sync::atomic::AtomicU8::new(0),
             esc_state: Mutex::new(0),
             nonblocking: AtomicBool::new(false),
+            exclusive: AtomicBool::new(false),
             foreground_task_group_id: Mutex::new(None),
+            controlling_session_id: Mutex::new(None),
             write_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn set_self_ref(&self, weak: Weak<TtyDevice>) {
+        *self.self_ref.write() = weak;
+    }
+
+    pub fn weak_self(&self) -> Option<Weak<TtyDevice>> {
+        let weak = self.self_ref.read().clone();
+        weak.upgrade().map(|_| weak)
+    }
+
+    pub fn set_controlling_session_id(&self, session_id: usize) {
+        *self.controlling_session_id.lock() = Some(session_id);
+    }
+
+    pub fn get_controlling_session_id(&self) -> Option<usize> {
+        *self.controlling_session_id.lock()
+    }
+
+    pub fn clear_controlling_session_id(&self, session_id: usize) {
+        let mut guard = self.controlling_session_id.lock();
+        if *guard == Some(session_id) {
+            *guard = None;
+        }
+    }
+
+    pub fn acquire_as_controlling_tty(&self, force: bool) -> Result<(), &'static str> {
+        let task = mytask().ok_or("no current task")?;
+
+        if let Some(current_tty) = task.get_controlling_tty()
+            && let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade())
+            && Arc::ptr_eq(&current_tty, &this_tty)
+        {
+            return Ok(());
+        }
+
+        if task.get_controlling_tty().is_some() || !task.is_session_leader() {
+            return Err("task cannot acquire controlling terminal");
+        }
+
+        let session_id = task.get_session_id();
+        if let Some(owner_session_id) = self.get_controlling_session_id()
+            && owner_session_id != session_id
+            && !force
+        {
+            return Err("terminal already controlled by another session");
+        }
+
+        let weak = self
+            .weak_self()
+            .ok_or("terminal self reference unavailable")?;
+        task.set_controlling_tty(Some(weak));
+        self.set_controlling_session_id(session_id);
+        if self.get_foreground_task_group_id().is_none() {
+            self.set_foreground_task_group_id(task.get_process_group_id());
+        }
+        Ok(())
+    }
+
+    pub fn detach_controlling_tty(&self) -> Result<(), &'static str> {
+        let task = mytask().ok_or("no current task")?;
+        let Some(current_tty) = task.get_controlling_tty() else {
+            return Ok(());
+        };
+        let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade()) else {
+            return Err("terminal self reference unavailable");
+        };
+        if !Arc::ptr_eq(&current_tty, &this_tty) {
+            return Err("terminal is not caller's controlling terminal");
+        }
+
+        task.clear_controlling_tty();
+        if task.is_session_leader() {
+            self.clear_controlling_session_id(task.get_session_id());
+        }
+        Ok(())
+    }
+
+    pub fn set_exclusive(&self, enabled: bool) {
+        self.exclusive.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive.load(Ordering::Relaxed)
+    }
+
+    pub fn inject_input_byte(&self, byte: u8) {
+        self.handle_input_byte(byte);
+    }
+
+    pub fn set_tostop(&self, enabled: bool) {
+        self.tostop_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_tostop_enabled(&self) -> bool {
+        self.tostop_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_signal_chars_enabled(&self, enabled: bool) {
+        self.signal_chars_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_signal_chars_enabled(&self) -> bool {
+        self.signal_chars_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_crnl_input_enabled(&self, enabled: bool) {
+        self.crnl_input_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_crnl_input_enabled(&self) -> bool {
+        self.crnl_input_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_output_postprocess_enabled(&self, enabled: bool) {
+        self.output_postprocess_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_output_postprocess_enabled(&self) -> bool {
+        self.output_postprocess_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_extended_input_enabled(&self, enabled: bool) {
+        self.extended_input_enabled
+            .store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.literal_next_pending.store(false, Ordering::Relaxed);
+        }
+    }
+
+    pub fn is_extended_input_enabled(&self) -> bool {
+        self.extended_input_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Set terminal-generated control characters.
+    ///
+    /// A zero byte disables the corresponding special meaning, matching the
+    /// Linux ABI adapter's current `_POSIX_VDISABLE` behavior.
+    pub fn set_control_chars(&self, chars: TerminalControlChars) {
+        self.interrupt_char
+            .store(chars.interrupt, Ordering::Relaxed);
+        self.quit_char.store(chars.quit, Ordering::Relaxed);
+        self.erase_char.store(chars.erase, Ordering::Relaxed);
+        self.eof_char.store(chars.eof, Ordering::Relaxed);
+        self.suspend_char.store(chars.suspend, Ordering::Relaxed);
+        self.literal_next_char
+            .store(chars.literal_next, Ordering::Relaxed);
+    }
+
+    /// Return the current terminal-generated control characters.
+    pub fn get_control_chars(&self) -> TerminalControlChars {
+        TerminalControlChars {
+            interrupt: self.interrupt_char.load(Ordering::Relaxed),
+            quit: self.quit_char.load(Ordering::Relaxed),
+            erase: self.erase_char.load(Ordering::Relaxed),
+            eof: self.eof_char.load(Ordering::Relaxed),
+            suspend: self.suspend_char.load(Ordering::Relaxed),
+            literal_next: self.literal_next_char.load(Ordering::Relaxed),
         }
     }
 
@@ -262,7 +607,7 @@ impl TtyDevice {
             return user_task_group_id;
         };
         crate::sched::scheduler::get_task_by_id(global_task_id)
-            .map(|task| task.get_task_group_id())
+            .map(|task| task.get_process_group_id())
             .unwrap_or(user_task_group_id)
     }
 
@@ -276,37 +621,61 @@ impl TtyDevice {
             .unwrap_or(task_group_id)
     }
 
-    fn send_interrupt_to_foreground(&self) {
-        use crate::ipc::event::{Event, EventPriority, ProcessControlType};
-        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, wake_task};
-        use crate::task::{BlockedType, TaskState};
+    fn send_process_control_to_foreground(&self, ptype: crate::ipc::event::ProcessControlType) {
+        use crate::ipc::event::{
+            Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        };
 
-        if let Some(task_group_id) = self.get_foreground_task_group_id() {
-            let task_ids = get_all_task_ids();
+        let Some(process_group_id) = self.get_foreground_task_group_id() else {
+            return;
+        };
 
-            let mut tasks_to_wake = alloc::vec::Vec::new();
+        let event = Event::group(
+            GroupTarget::TaskGroup(process_group_id as u32),
+            EventContent::ProcessControl(ptype),
+            EventPriority::High,
+            true,
+            EventPayload::Empty,
+        );
+        let _ = EventManager::get_manager().send_event(event);
+    }
 
-            for task_id in task_ids {
-                if let Some(task) = get_task_by_id(task_id) {
-                    if task.get_task_group_id() == task_group_id {
-                        let event = Event::direct_process_control(
-                            task_id as u32,
-                            ProcessControlType::Interrupt,
-                            EventPriority::High,
-                            true,
-                        );
-                        task.event_queue.lock().enqueue(event);
+    fn send_process_control_to_current_group(&self, ptype: crate::ipc::event::ProcessControlType) {
+        use crate::ipc::event::{
+            Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        };
 
-                        if task.get_state() == TaskState::Blocked(BlockedType::Interruptible) {
-                            tasks_to_wake.push(task_id);
-                        }
-                    }
-                }
-            }
+        let Some(task) = mytask() else {
+            return;
+        };
 
-            for task_id in tasks_to_wake {
-                wake_task(task_id);
-            }
+        let event = Event::group(
+            GroupTarget::TaskGroup(task.get_process_group_id() as u32),
+            EventContent::ProcessControl(ptype),
+            EventPriority::High,
+            true,
+            EventPayload::Empty,
+        );
+        let _ = EventManager::get_manager().send_event(event);
+    }
+
+    fn is_current_process_group_background(&self) -> bool {
+        let Some(task) = mytask() else {
+            return false;
+        };
+        let Some(controlling_tty) = task.get_controlling_tty() else {
+            return false;
+        };
+        let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade()) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&controlling_tty, &this_tty) {
+            return false;
+        }
+
+        match self.get_foreground_task_group_id() {
+            Some(foreground_pgid) => foreground_pgid != task.get_process_group_id(),
+            None => false,
         }
     }
 
@@ -316,7 +685,8 @@ impl TtyDevice {
     pub fn is_read_ready_for_select(&self) -> bool {
         if self.canonical_mode.load(Ordering::Relaxed) {
             let g = self.input_buffer.lock();
-            return g.iter().any(|&b| b == b'\n');
+            return self.canonical_eof_ready.load(Ordering::Relaxed)
+                || g.iter().any(|&b| b == b'\n');
         }
 
         let min_ready = self.read_min_ready_bytes.load(Ordering::Relaxed) as usize;
@@ -351,7 +721,7 @@ impl TtyDevice {
     /// Handle input byte from UART device.
     ///
     /// This method processes incoming bytes and applies line discipline.
-    fn handle_input_byte(&self, byte: u8) {
+    fn handle_input_byte(&self, mut byte: u8) {
         if self.debug_enabled.load(Ordering::Relaxed) {
             crate::println!(
                 "[TTY] RX byte=0x{:02x} '{}' canonical={} size={}",
@@ -365,11 +735,83 @@ impl TtyDevice {
                 self.input_buffer.lock().len()
             );
         }
+        if self.crnl_input_enabled.load(Ordering::Relaxed) && byte == b'\r' {
+            byte = b'\n';
+        }
+
+        let control_chars = self.get_control_chars();
+        if self.literal_next_pending.swap(false, Ordering::Relaxed) {
+            if self.echo_enabled.load(Ordering::Relaxed) {
+                self.echo_char(byte);
+            }
+            let wake = !self.canonical_mode.load(Ordering::Relaxed) || byte == b'\n';
+            let mut input_buffer = self.input_buffer.lock();
+            input_buffer.push_back(byte);
+            drop(input_buffer);
+            if wake {
+                self.input_waker.wake_all();
+            }
+            return;
+        }
+
+        if self.signal_chars_enabled.load(Ordering::Relaxed)
+            && self.kb_mode.load(Ordering::Relaxed) == 0
+        {
+            match byte {
+                b if control_chars.interrupt != 0 && b == control_chars.interrupt => {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
+                        self.echo_control_char(control_chars.interrupt);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::Interrupt,
+                    );
+                    return;
+                }
+                b if control_chars.quit != 0 && b == control_chars.quit => {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
+                        self.echo_control_char(control_chars.quit);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::Quit,
+                    );
+                    return;
+                }
+                b if control_chars.suspend != 0 && b == control_chars.suspend => {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
+                        self.echo_control_char(control_chars.suspend);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::TerminalStop,
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Canonical mode processing
         if self.canonical_mode.load(Ordering::Relaxed) {
             match byte {
+                b if self.extended_input_enabled.load(Ordering::Relaxed)
+                    && control_chars.literal_next != 0
+                    && b == control_chars.literal_next =>
+                {
+                    self.literal_next_pending.store(true, Ordering::Relaxed);
+                }
+                b if control_chars.eof != 0 && b == control_chars.eof => {
+                    self.canonical_eof_ready.store(true, Ordering::Relaxed);
+                    self.input_waker.wake_all();
+                }
                 // Backspace/DEL
-                0x08 | 0x7F => {
+                0x08 | 0x7F
+                    if control_chars.erase == DEFAULT_ERASE_CHAR || control_chars.erase == 0x08 =>
+                {
                     let mut input_buffer = self.input_buffer.lock();
                     if input_buffer.pop_back().is_some()
                         && self.echo_enabled.load(Ordering::Relaxed)
@@ -377,8 +819,16 @@ impl TtyDevice {
                         self.echo_backspace();
                     }
                 }
-                // Enter/Line feed
-                b'\r' | b'\n' => {
+                b if control_chars.erase != 0 && b == control_chars.erase => {
+                    let mut input_buffer = self.input_buffer.lock();
+                    if input_buffer.pop_back().is_some()
+                        && self.echo_enabled.load(Ordering::Relaxed)
+                    {
+                        self.echo_backspace();
+                    }
+                }
+                // Line feed
+                b'\n' => {
                     if self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_char(b'\r');
                         self.echo_char(b'\n');
@@ -387,19 +837,6 @@ impl TtyDevice {
                     input_buffer.push_back(b'\n');
                     drop(input_buffer);
                     self.input_waker.wake_all();
-                }
-                0x03 => {
-                    if self.echo_enabled.load(Ordering::Relaxed) {
-                        self.echo_char('^' as u8);
-                        self.echo_char('C' as u8);
-                        self.echo_char('\r' as u8);
-                        self.echo_char('\n' as u8);
-                    }
-                    self.send_interrupt_to_foreground();
-                }
-                // Ctrl-Z (SUB) placeholder
-                0x1A => {
-                    // No job-control semantics in device layer
                 }
                 // Regular characters
                 byte => {
@@ -824,12 +1261,7 @@ impl TtyDevice {
     /// Echo character back to output.
     fn echo_char(&self, byte: u8) {
         let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
-            if let Some(char_device) = uart_device.as_char_device() {
-                let _ = char_device.write_byte(byte);
-            }
-        }
+        let _ = self.backend.write_byte(byte);
     }
 
     /// Echo backspace sequence.
@@ -838,6 +1270,15 @@ impl TtyDevice {
         self.echo_char(0x08);
         self.echo_char(b' ');
         self.echo_char(0x08);
+    }
+
+    fn echo_control_char(&self, byte: u8) {
+        self.echo_char(b'^');
+        self.echo_char(match byte {
+            0x00..=0x1F => byte + 0x40,
+            0x7F => b'?',
+            _ => byte,
+        });
     }
 }
 
@@ -911,8 +1352,20 @@ impl TtyControl for TtyDevice {
     }
 
     fn set_winsize(&self, cols: u16, rows: u16) {
-        *self.winsize_cols.lock() = cols;
-        *self.winsize_rows.lock() = rows;
+        let changed = {
+            let mut current_cols = self.winsize_cols.lock();
+            let mut current_rows = self.winsize_rows.lock();
+            let changed = *current_cols != cols || *current_rows != rows;
+            *current_cols = cols;
+            *current_rows = rows;
+            changed
+        };
+
+        if changed {
+            self.send_process_control_to_foreground(
+                crate::ipc::event::ProcessControlType::WindowChange,
+            );
+        }
     }
     fn get_winsize(&self) -> (u16, u16) {
         (*self.winsize_cols.lock(), *self.winsize_rows.lock())
@@ -984,6 +1437,12 @@ impl CharDevice for TtyDevice {
         if buffer.is_empty() {
             return 0;
         }
+        if self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalInput,
+            );
+            return 0;
+        }
 
         // Fast path: non-blocking immediate return if policy requires 0 and no data
         let min_ready = self.read_min_ready_bytes.load(Ordering::Relaxed) as usize;
@@ -1023,15 +1482,32 @@ impl CharDevice for TtyDevice {
         // Canonical mode: block until a full line (ending with '\n') is available
         if canonical {
             loop {
-                // If a newline exists, copy out a line chunk
-                {
-                    let has_newline = {
-                        let g = self.input_buffer.lock();
-                        g.iter().any(|&b| b == b'\n')
-                    };
-                    if has_newline {
-                        return copy_out(buffer, true);
+                // If a newline exists, copy out a line chunk. EOF completes the
+                // current record without appending a byte; with an empty record
+                // this returns 0.
+                let (has_newline, has_eof) = {
+                    let g = self.input_buffer.lock();
+                    (
+                        g.iter().any(|&b| b == b'\n'),
+                        self.canonical_eof_ready.load(Ordering::Relaxed),
+                    )
+                };
+                if has_newline {
+                    return copy_out(buffer, true);
+                }
+                if has_eof {
+                    self.canonical_eof_ready.store(false, Ordering::Relaxed);
+                    let mut bytes = 0;
+                    let mut guard = self.input_buffer.lock();
+                    while bytes < buffer.len() {
+                        if let Some(b) = guard.pop_front() {
+                            buffer[bytes] = b;
+                            bytes += 1;
+                        } else {
+                            break;
+                        }
                     }
+                    return bytes;
                 }
                 // Wait for more input
                 if self.nonblocking.load(Ordering::Relaxed) {
@@ -1125,6 +1601,13 @@ impl CharDevice for TtyDevice {
         }
     }
     fn read_byte(&self) -> Option<u8> {
+        if self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalInput,
+            );
+            return None;
+        }
+
         // Loop until data becomes available
         loop {
             let mut input_buffer = self.input_buffer.lock();
@@ -1149,43 +1632,46 @@ impl CharDevice for TtyDevice {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
-            return Err("UART device not available");
-        };
-        let Some(char_device) = uart_device.as_char_device() else {
-            return Err("UART device not available");
-        };
-
-        let mut output = alloc::vec::Vec::with_capacity(buffer.len());
-        for &byte in buffer {
-            if byte == b'\n' {
-                output.push(b'\r');
-                output.push(b'\n');
-            } else {
-                output.push(byte);
-            }
+        if self.is_tostop_enabled() && self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalOutput,
+            );
+            return Err("Background TTY write stopped");
         }
 
-        char_device.write(&output)?;
+        let _lock = self.write_lock.lock();
+
+        if self.output_postprocess_enabled.load(Ordering::Relaxed) {
+            let mut output = alloc::vec::Vec::with_capacity(buffer.len());
+            for &byte in buffer {
+                if byte == b'\n' {
+                    output.push(b'\r');
+                    output.push(b'\n');
+                } else {
+                    output.push(byte);
+                }
+            }
+            self.backend.write(&output)?;
+        } else {
+            self.backend.write(buffer)?;
+        }
         Ok(buffer.len())
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
-            return Err("UART device not available");
-        };
-        let Some(char_device) = uart_device.as_char_device() else {
-            return Err("UART device not available");
-        };
+        if self.is_tostop_enabled() && self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalOutput,
+            );
+            return Err("Background TTY write stopped");
+        }
 
-        if byte == b'\n' {
-            char_device.write(&[b'\r', b'\n'])?;
+        let _lock = self.write_lock.lock();
+
+        if self.output_postprocess_enabled.load(Ordering::Relaxed) && byte == b'\n' {
+            self.backend.write(&[b'\r', b'\n'])?;
         } else {
-            char_device.write(&[byte])?;
+            self.backend.write_byte(byte)?;
         }
         Ok(())
     }
@@ -1196,14 +1682,7 @@ impl CharDevice for TtyDevice {
     }
 
     fn can_write(&self) -> bool {
-        // Check if backend char device is available and writable
-        let device_manager = DeviceManager::get_manager();
-        if let Some(dev) = device_manager.get_device(self.uart_device_id) {
-            if let Some(cdev) = dev.as_char_device() {
-                return cdev.can_write();
-            }
-        }
-        false
+        self.backend.can_write()
     }
 }
 
@@ -1221,6 +1700,26 @@ impl ControlOps for TtyDevice {
                 Ok(0)
             }
             SCTL_TTY_GET_CANONICAL => Ok(self.is_canonical() as i32),
+            SCTL_TTY_SET_SIGNAL_CHARS => {
+                self.set_signal_chars_enabled(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_SIGNAL_CHARS => Ok(self.is_signal_chars_enabled() as i32),
+            SCTL_TTY_SET_CRNL_INPUT => {
+                self.set_crnl_input_enabled(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_CRNL_INPUT => Ok(self.is_crnl_input_enabled() as i32),
+            SCTL_TTY_SET_OUTPUT_POSTPROCESS => {
+                self.set_output_postprocess_enabled(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_OUTPUT_POSTPROCESS => Ok(self.is_output_postprocess_enabled() as i32),
+            SCTL_TTY_SET_EXTENDED_INPUT => {
+                self.set_extended_input_enabled(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_EXTENDED_INPUT => Ok(self.is_extended_input_enabled() as i32),
             SCTL_TTY_SET_WINSIZE => {
                 let cols = ((arg >> 16) & 0xFFFF) as u16;
                 let rows = (arg & 0xFFFF) as u16;
@@ -1249,6 +1748,8 @@ impl ControlOps for TtyDevice {
             SCTL_TTY_FLUSH_INPUT => {
                 let mut g = self.input_buffer.lock();
                 g.clear();
+                self.canonical_eof_ready.store(false, Ordering::Relaxed);
+                self.literal_next_pending.store(false, Ordering::Relaxed);
                 Ok(0)
             }
             SCTL_TTY_SET_DEBUG => {
@@ -1271,7 +1772,104 @@ impl ControlOps for TtyDevice {
                 Some(id) => Ok(self.user_visible_foreground_task_group_id(id) as i32),
                 None => Ok(-1),
             },
+            SCTL_TTY_ACQUIRE_CONTROLLING => {
+                self.acquire_as_controlling_tty(arg != 0)?;
+                Ok(0)
+            }
+            SCTL_TTY_DETACH_CONTROLLING => {
+                self.detach_controlling_tty()?;
+                Ok(0)
+            }
             _ => Err("Unsupported control command for TTY device"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_tty() -> TtyDevice {
+        let tty = TtyDevice::new("test_tty", 0);
+        tty.set_echo(false);
+        tty
+    }
+
+    #[test_case]
+    fn test_tty_icrnl_maps_carriage_return_to_newline() {
+        let tty = test_tty();
+        tty.handle_input_byte(b'\r');
+
+        let mut buffer = [0u8; 1];
+        assert_eq!(tty.read(&mut buffer), 1);
+        assert_eq!(buffer[0], b'\n');
+    }
+
+    #[test_case]
+    fn test_tty_crnl_input_can_be_disabled() {
+        let tty = test_tty();
+        tty.set_canonical(false);
+        tty.set_crnl_input_enabled(false);
+        tty.handle_input_byte(b'\r');
+
+        let mut buffer = [0u8; 1];
+        assert_eq!(tty.read(&mut buffer), 1);
+        assert_eq!(buffer[0], b'\r');
+    }
+
+    #[test_case]
+    fn test_tty_signal_chars_can_be_disabled() {
+        let tty = test_tty();
+        tty.set_canonical(false);
+        tty.set_signal_chars_enabled(false);
+        tty.handle_input_byte(0x03);
+
+        let mut buffer = [0u8; 1];
+        assert_eq!(tty.read(&mut buffer), 1);
+        assert_eq!(buffer[0], 0x03);
+    }
+
+    #[test_case]
+    fn test_tty_configurable_erase_char() {
+        let tty = test_tty();
+        let mut chars = tty.get_control_chars();
+        chars.erase = b'#';
+        tty.set_control_chars(chars);
+
+        tty.handle_input_byte(b'a');
+        tty.handle_input_byte(b'#');
+        tty.handle_input_byte(b'b');
+        tty.handle_input_byte(b'\n');
+
+        let mut buffer = [0u8; 2];
+        assert_eq!(tty.read(&mut buffer), 2);
+        assert_eq!(&buffer, b"b\n");
+    }
+
+    #[test_case]
+    fn test_tty_canonical_eof_completes_pending_input() {
+        let tty = test_tty();
+
+        tty.handle_input_byte(b'a');
+        tty.handle_input_byte(tty.get_control_chars().eof);
+
+        let mut buffer = [0u8; 1];
+        assert_eq!(tty.read(&mut buffer), 1);
+        assert_eq!(buffer[0], b'a');
+    }
+
+    #[test_case]
+    fn test_tty_literal_next_quotes_signal_char() {
+        let tty = test_tty();
+        let chars = tty.get_control_chars();
+
+        tty.handle_input_byte(chars.literal_next);
+        tty.handle_input_byte(chars.interrupt);
+        tty.handle_input_byte(b'\n');
+
+        let mut buffer = [0u8; 2];
+        assert_eq!(tty.read(&mut buffer), 2);
+        assert_eq!(buffer[0], chars.interrupt);
+        assert_eq!(buffer[1], b'\n');
     }
 }

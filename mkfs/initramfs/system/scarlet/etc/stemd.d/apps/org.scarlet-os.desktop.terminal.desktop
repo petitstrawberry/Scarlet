@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Terminal
-Exec=/bin/scarlet_desktop_terminal
+Exec=/bin/scarlet_terminal
 Icon=utilities-terminal
 Type=Application
 Terminal=false

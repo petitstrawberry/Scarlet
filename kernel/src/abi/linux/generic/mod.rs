@@ -416,6 +416,8 @@ syscall_table! {
     GetResGid = 150 => proc::sys_getresgid,
     SetPgid = 154 => proc::sys_setpgid,
     GetPgid = 155 => proc::sys_getpgid,
+    GetSid = 156 => proc::sys_getsid,
+    SetSid = 157 => proc::sys_setsid,
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
     Prctl = 167 => proc::sys_prctl,

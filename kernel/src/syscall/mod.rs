@@ -26,6 +26,8 @@
 //! ### Process Management (1-99)
 //! - Exit (1), Clone (2), Execve (3), ExecveABI (4), Waitpid (5)
 //! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
+//! - Session/Process Groups: CreateSession (26), GetSessionId (27),
+//!   GetProcessGroupId (28), SetProcessGroup (29)
 //! - Basic I/O: Putchar (16), Getchar (17)
 //! - ABI Zone: RegisterAbiZone (90), UnregisterAbiZone (91)
 //! - Namespace: CreateNamespace (92) - Smart syscall for task/VFS isolation
@@ -49,7 +51,6 @@
 //! - Pipe (600)
 //! - Event Channels: Subscribe (610), Unsubscribe (611), Publish (612)
 //! - Shared Memory: Create (620)
-//! - Process Groups: not yet implemented
 //!
 //! ### Memory Mapping Operations (700-799)
 //! - MemoryMap (700), MemoryUnmap (701)
@@ -85,8 +86,8 @@ use crate::fs::vfs_v2::syscall::{
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
     sys_event_handler_unregister_native, sys_event_mask, sys_event_publish, sys_event_return,
-    sys_event_send_direct, sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
-    sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
+    sys_event_send_direct, sys_event_send_group, sys_event_subscribe, sys_event_unsubscribe,
+    sys_pipe, sys_shared_memory_create, sys_shared_memory_resize, sys_socket_recv_handle,
     sys_socket_recv_handle_and_data, sys_socket_send_handle, sys_socket_send_handle_and_data,
 };
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
@@ -107,10 +108,12 @@ use crate::object::handle::syscall::{
     sys_handle_set_role,
 };
 use crate::task::syscall::{
-    sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_exit_group,
+    sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
+    sys_exit, sys_exit_group, sys_get_process_group_id, sys_get_session_id,
     sys_get_task_info_count, sys_get_task_info_list, sys_get_tls, sys_getchar, sys_getpid,
-    sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_tid_address, sys_set_tls,
-    sys_shutdown, sys_sleep, sys_unregister_abi_zone, sys_waitpid, sys_yield,
+    sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_process_group,
+    sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_unregister_abi_zone,
+    sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -187,6 +190,10 @@ syscall_table! {
     // Process information
     GetTaskInfoCount = 24 => sys_get_task_info_count, // Number of tasks
     GetTaskInfoList = 25 => sys_get_task_info_list,   // TaskInfo snapshots
+    CreateSession = 26 => sys_create_session,
+    GetSessionId = 27 => sys_get_session_id,
+    GetProcessGroupId = 28 => sys_get_process_group_id,
+    SetProcessGroup = 29 => sys_set_process_group,
     // TLS (Thread Local Storage) Management
     SetTls = 30 => sys_set_tls,
     GetTls = 31 => sys_get_tls,
@@ -245,6 +252,7 @@ syscall_table! {
     EventPublish = 613 => sys_event_publish,                   // Publish event to channel (ABI use)
     EventHandlerRegister = 614 => sys_event_handler_register,  // Register event filter (ABI use)
     EventSendDirect = 615 => sys_event_send_direct,            // Send direct event to task (ABI use)
+    EventSendGroup = 616 => sys_event_send_group,              // Send process-control event to process group
 
     // Shared Memory
     SharedMemoryCreate = 620 => sys_shared_memory_create,      // Create shared memory region

@@ -49,6 +49,9 @@ use crate::{
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
+const DEVPTS_MOUNT_NODE_ID: u64 = 1024;
+const PTMX_SYMLINK_NODE_ID: u64 = 1025;
+
 /// DevFS - Device filesystem implementation
 ///
 /// This filesystem automatically exposes all devices registered in the global
@@ -116,6 +119,25 @@ impl DevFS {
 
         // Clear existing devices (for dynamic updates)
         root.clear_children();
+
+        let pts_node = Arc::new(DevNode::new_directory_with_id(
+            "pts".to_string(),
+            DEVPTS_MOUNT_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            pts_node.set_filesystem(fs_ref);
+        }
+        root.add_child("pts".to_string(), pts_node)?;
+
+        let ptmx_node = Arc::new(DevNode::new_symlink(
+            "ptmx".to_string(),
+            "pts/ptmx".to_string(),
+            PTMX_SYMLINK_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            ptmx_node.set_filesystem(fs_ref);
+        }
+        root.add_child("ptmx".to_string(), ptmx_node)?;
 
         // Get all devices that were registered with explicit names
         let named_devices = device_manager.get_named_devices();
@@ -300,10 +322,14 @@ impl Clone for DevNode {
 impl DevNode {
     /// Create a new directory node
     pub fn new_directory(name: String) -> Self {
+        Self::new_directory_with_id(name, 0)
+    }
+
+    fn new_directory_with_id(name: String, file_id: u64) -> Self {
         Self {
             name,
             file_type: FileType::Directory,
-            file_id: 0, // Root directory ID
+            file_id,
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
             #[cfg(test)]
@@ -316,6 +342,19 @@ impl DevNode {
         Self {
             name,
             file_type,
+            file_id,
+            children: RwLock::new(BTreeMap::new()),
+            filesystem: RwLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: RwLock::new(None),
+        }
+    }
+
+    /// Create a symbolic link node.
+    fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        Self {
+            name,
+            file_type: FileType::SymbolicLink(target),
             file_id,
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
@@ -459,6 +498,16 @@ impl VfsNode for DevNode {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        match &self.file_type {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link",
+            )),
+        }
     }
 }
 
@@ -1053,6 +1102,7 @@ impl FileSystemDriver for DevFSDriver {
 fn register_driver() {
     let fs_driver_manager = get_fs_driver_manager();
     fs_driver_manager.register_driver(Box::new(DevFSDriver));
+    super::devpts::register_driver();
 }
 
 driver_initcall!(register_driver);
@@ -1077,6 +1127,19 @@ mod tests {
 
         let metadata = root.metadata().unwrap();
         assert_eq!(metadata.file_type, FileType::Directory);
+    }
+
+    #[test_case]
+    fn test_devfs_ptmx_relative_symlink() {
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+
+        let ptmx = devfs.lookup(&root, &"ptmx".to_string()).unwrap();
+        assert_eq!(
+            ptmx.metadata().unwrap().file_type,
+            FileType::SymbolicLink("pts/ptmx".to_string())
+        );
+        assert_eq!(ptmx.read_link().unwrap(), "pts/ptmx");
     }
 
     #[test_case]

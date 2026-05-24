@@ -190,6 +190,80 @@ pub fn getppid() -> u32 {
     syscall0(Syscall::Getppid) as u32
 }
 
+/// Errors returned by native session/process-group operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskControlError {
+    /// The requested task or process group is not visible in this namespace.
+    NotFound,
+    /// The requested relationship or state transition is not permitted.
+    PermissionDenied,
+}
+
+fn task_control_result(value: usize) -> Result<usize, TaskControlError> {
+    if value == usize::MAX {
+        Err(TaskControlError::PermissionDenied)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Create a new session for the current task.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success.
+pub fn create_session() -> Result<u32, TaskControlError> {
+    task_control_result(syscall0(Syscall::CreateSession)).map(|id| id as u32)
+}
+
+/// Return the session ID for a task.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success.
+pub fn session_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    task_control_result(syscall1(Syscall::GetSessionId, pid)).map(|id| id as u32)
+}
+
+/// Return the process group ID for a task.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+///
+/// # Returns
+///
+/// Namespace-local process group ID on success.
+pub fn process_group_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    task_control_result(syscall1(Syscall::GetProcessGroupId, pid)).map(|id| id as u32)
+}
+
+/// Set a task's process group.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+/// * `process_group_id` - Namespace-local process group ID. `None` makes the
+///   target task become a process-group leader.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+pub fn set_process_group(
+    pid: Option<u32>,
+    process_group_id: Option<u32>,
+) -> Result<(), TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    let process_group_id = process_group_id.unwrap_or(0) as usize;
+    task_control_result(syscall2(Syscall::SetProcessGroup, pid, process_group_id)).map(|_| ())
+}
+
 /// Executes a program, replacing the current process image.
 ///
 /// # Arguments
@@ -524,16 +598,25 @@ pub fn execve_abi_with_flags(
     res as i32
 }
 
-/// Waits for a child process to exit.
+/// Return immediately from [`waitpid`] if no matching child changed state.
+pub const WAIT_NOHANG: i32 = 0x1;
+
+/// Report children stopped by Scarlet process-control events.
+pub const WAIT_STOPPED: i32 = 0x2;
+
+/// Status returned when a child is stopped by a Scarlet process-control event.
+pub const WAIT_STOPPED_STATUS: i32 = 0x7f;
+
+/// Waits for a child process to exit or, with [`WAIT_STOPPED`], stop.
 ///
 /// # Arguments
 /// * `pid` - Process ID of the child process to wait for. If -1, wait for any child process.
-/// * `options` - Options for the waitpid syscall. (Currently not implemented and always ignored.)
+/// * `options` - Bitmask of `WAIT_*` options.
 ///
 /// # Return Value
 /// (pid, status)
-/// - pid: The process ID of the child process that exited.
-/// - status: The exit status of the child process.
+/// - pid: The process ID of the child process that changed state.
+/// - status: The exit status, or a Scarlet-native stopped status.
 ///
 pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
     let mut status: i32 = 0;
