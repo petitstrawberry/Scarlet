@@ -195,6 +195,10 @@ name = "ps"
 path = "src/ps.rs"
 
 [[bin]]
+name = "pty_smoke"
+path = "src/pty_smoke.rs"
+
+[[bin]]
 name = "top"
 path = "src/top.rs"
 

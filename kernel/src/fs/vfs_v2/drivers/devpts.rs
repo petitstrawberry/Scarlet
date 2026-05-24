@@ -37,6 +37,16 @@ use crate::{
 
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
+/// Scarlet-private control opcodes for PTY master endpoints.
+pub mod pty_ctl {
+    /// Return the PTY slave number for a master endpoint.
+    pub const SCTL_PTY_GET_NUMBER: u32 = 0x5350_0001;
+    /// Set the slave lock state for a master endpoint. `arg != 0` means locked.
+    pub const SCTL_PTY_SET_LOCKED: u32 = 0x5350_0002;
+    /// Return the slave lock state for a master endpoint.
+    pub const SCTL_PTY_GET_LOCKED: u32 = 0x5350_0003;
+}
+
 const ROOT_ID: u64 = 1;
 const PTMX_ID: u64 = 2;
 const SLAVE_ID_BASE: u64 = 1024;
@@ -526,6 +536,28 @@ impl StreamOps for DevPtsFileObject {
 
 impl ControlOps for DevPtsFileObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            pty_ctl::SCTL_PTY_GET_NUMBER => {
+                return self
+                    .pty_number()
+                    .map(|number| number as i32)
+                    .ok_or("PTY number is only available on master endpoints");
+            }
+            pty_ctl::SCTL_PTY_SET_LOCKED => {
+                if self.set_pty_slave_locked(arg != 0) {
+                    return Ok(0);
+                }
+                return Err("PTY slave lock is only available on master endpoints");
+            }
+            pty_ctl::SCTL_PTY_GET_LOCKED => {
+                return self
+                    .pty_slave_locked()
+                    .map(|locked| locked as i32)
+                    .ok_or("PTY slave lock is only available on master endpoints");
+            }
+            _ => {}
+        }
+
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.control(command, arg),
             DevPtsEndpoint::Slave(slave) => slave.control(command, arg),
@@ -533,10 +565,16 @@ impl ControlOps for DevPtsFileObject {
     }
 
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
-        match &self.endpoint {
+        let mut commands = match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.supported_control_commands(),
             DevPtsEndpoint::Slave(slave) => slave.supported_control_commands(),
+        };
+        if matches!(self.endpoint, DevPtsEndpoint::Master(_)) {
+            commands.push((pty_ctl::SCTL_PTY_GET_NUMBER, "Get PTY slave number"));
+            commands.push((pty_ctl::SCTL_PTY_SET_LOCKED, "Set PTY slave lock state"));
+            commands.push((pty_ctl::SCTL_PTY_GET_LOCKED, "Get PTY slave lock state"));
         }
+        commands
     }
 }
 
@@ -868,6 +906,20 @@ mod tests {
         assert!(devpts.open(&slave, 0).is_err());
         assert!(master_devpts.set_pty_slave_locked(false));
         assert!(devpts.open(&slave, 0).is_ok());
+    }
+
+    #[test_case]
+    fn test_devpts_master_native_controls() {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let master = devpts.open(&ptmx, 0).unwrap();
+
+        let number = master.control(pty_ctl::SCTL_PTY_GET_NUMBER, 0).unwrap();
+        assert_eq!(number, 0);
+        assert_eq!(master.control(pty_ctl::SCTL_PTY_GET_LOCKED, 0).unwrap(), 1);
+        assert_eq!(master.control(pty_ctl::SCTL_PTY_SET_LOCKED, 0).unwrap(), 0);
+        assert_eq!(master.control(pty_ctl::SCTL_PTY_GET_LOCKED, 0).unwrap(), 0);
     }
 
     #[test_case]
