@@ -4,6 +4,7 @@
 extern crate scarlet_std as std;
 
 use std::{
+    fs::File,
     io::{Read, Write},
     println,
     pty::PtyPair,
@@ -96,8 +97,56 @@ fn main() -> i32 {
         return 1;
     }
 
+    let original_slave_path = slave_path.clone();
+    drop(slave);
+    drop(master);
+
+    if devpts_has_entry(&original_slave_path) {
+        println!(
+            "pty_smoke: released slave still visible: {}",
+            original_slave_path
+        );
+        return 1;
+    }
+    println!("pty_smoke: released {} disappeared", original_slave_path);
+
+    let recycled = match PtyPair::open() {
+        Ok(opened) => opened,
+        Err(error) => {
+            println!("pty_smoke: second PtyPair::open failed: {}", error);
+            return 1;
+        }
+    };
+    if recycled.slave_path != original_slave_path {
+        println!(
+            "pty_smoke: expected recycled path {}, got {}",
+            original_slave_path, recycled.slave_path
+        );
+        return 1;
+    }
+    println!("pty_smoke: recycled {}", recycled.slave_path);
+
     println!("pty_smoke: ok");
     0
+}
+
+fn devpts_has_entry(path: &str) -> bool {
+    let Some(name) = path.rsplit('/').next() else {
+        return false;
+    };
+    let Ok(mut dir) = File::open("/dev/pts") else {
+        return false;
+    };
+    loop {
+        match dir.read_dir() {
+            Ok(Some(entry)) => {
+                if entry.name_str() == name {
+                    return true;
+                }
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
 }
 
 fn print_bytes(label: &str, bytes: &[u8]) {

@@ -923,6 +923,38 @@ mod tests {
     }
 
     #[test_case]
+    fn test_devpts_master_drop_releases_slave_node() {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let master = devpts.open(&ptmx, 0).unwrap();
+        let number = master
+            .as_any()
+            .downcast_ref::<DevPtsFileObject>()
+            .unwrap()
+            .pty_number()
+            .unwrap();
+
+        assert!(devpts.lookup(&root, &number.to_string()).is_ok());
+        drop(master);
+        assert!(devpts.lookup(&root, &number.to_string()).is_err());
+    }
+
+    #[test_case]
+    fn test_devpts_reuses_released_number() {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+
+        let first = devpts.open(&ptmx, 0).unwrap();
+        assert_eq!(first.control(pty_ctl::SCTL_PTY_GET_NUMBER, 0).unwrap(), 0);
+        drop(first);
+
+        let second = devpts.open(&ptmx, 0).unwrap();
+        assert_eq!(second.control(pty_ctl::SCTL_PTY_GET_NUMBER, 0).unwrap(), 0);
+    }
+
+    #[test_case]
     fn test_devpts_master_slave_io() {
         let devpts = DevPtsFS::new();
         let root = devpts.root_node();
