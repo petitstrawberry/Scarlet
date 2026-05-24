@@ -325,7 +325,10 @@ fn reap_children_nonblocking(context: &str) {
             continue;
         }
         if remove_running_app_by_pid(pid) {
-            println!("stemd: [{}] Reaped app PID={} status={}", context, pid, status);
+            println!(
+                "stemd: [{}] Reaped app PID={} status={}",
+                context, pid, status
+            );
             continue;
         }
         println!(

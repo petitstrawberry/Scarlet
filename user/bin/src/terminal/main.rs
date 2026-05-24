@@ -144,10 +144,7 @@ impl TerminalApp {
         let writer = match master.as_file().clone_handle().and_then(File::from_handle) {
             Ok(file) => file,
             Err(error) => {
-                println!(
-                    "[terminal] failed to duplicate PTY master: {:?}",
-                    error
-                );
+                println!("[terminal] failed to duplicate PTY master: {:?}", error);
                 self.set_status("PTY duplicate failed");
                 return;
             }
