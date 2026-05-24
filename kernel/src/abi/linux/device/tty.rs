@@ -34,6 +34,8 @@ pub const TCGETS: u32 = 0x5401; // Get termios
 pub const TCSETS: u32 = 0x5402; // Set termios (no wait)
 pub const TCSETSW: u32 = 0x5403; // Set termios (drain output)
 pub const TCSETSF: u32 = 0x5404; // Set termios (drain and flush)
+pub const TIOCGPGRP: u32 = 0x540F; // Get foreground process group
+pub const TIOCSPGRP: u32 = 0x5410; // Set foreground process group
 
 /// Linux keyboard mode values (subset)
 pub const K_RAW: u32 = 0x00;
@@ -88,8 +90,9 @@ pub fn handle_ioctl(
     kernel_object: &KernelObject,
 ) -> Result<Option<usize>, ()> {
     use crate::device::char::tty::tty_ctl::{
-        SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_ECHO, SCTL_TTY_GET_READ_POLICY,
-        SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_ECHO, SCTL_TTY_SET_READ_POLICY,
+        SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_ECHO, SCTL_TTY_GET_FOREGROUND_GROUP,
+        SCTL_TTY_GET_READ_POLICY, SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_ECHO,
+        SCTL_TTY_SET_FOREGROUND_GROUP, SCTL_TTY_SET_READ_POLICY,
     };
 
     const LOG_TTY_IOCTL: bool = false;
@@ -183,6 +186,43 @@ pub fn handle_ioctl(
                         Ok(Some(0))
                     } else { Err(()) }
                 }
+            }
+        }
+        TIOCGPGRP => {
+            let Some(control_ops) = kernel_object.as_control() else {
+                return Err(());
+            };
+            let foreground_pgid = control_ops
+                .control(SCTL_TTY_GET_FOREGROUND_GROUP, 0)
+                .map_err(|_| ())?;
+
+            let task = mytask().ok_or(())?;
+            let vaddr = arg as usize;
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe { *(paddr as *mut i32) = foreground_pgid; }
+                Ok(Some(0))
+            } else {
+                Ok(Some((-14_isize) as usize))
+            }
+        }
+        TIOCSPGRP => {
+            let Some(control_ops) = kernel_object.as_control() else {
+                return Err(());
+            };
+
+            let task = mytask().ok_or(())?;
+            let vaddr = arg as usize;
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+                let pgid = unsafe { *(paddr as *const i32) };
+                if pgid <= 0 {
+                    return Err(());
+                }
+                control_ops
+                    .control(SCTL_TTY_SET_FOREGROUND_GROUP, pgid as usize)
+                    .map_err(|_| ())?;
+                Ok(Some(0))
+            } else {
+                Ok(Some((-14_isize) as usize))
             }
         }
         // Virtual terminal: get current VT state

@@ -392,18 +392,117 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 }
 
 pub fn sys_setpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
-    let _pgid = trapframe.get_arg(1);
-    trapframe.increment_pc_next(task);
-    0 // Always succeed
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    let pgid = trapframe.get_arg(1);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return errno::to_result(errno::ESRCH),
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return errno::to_result(errno::ESRCH);
+    };
+
+    // This first cut supports the Linux-permitted cases needed by shells:
+    // the caller may change itself or one of its direct children before exec.
+    if target.get_id() != caller.get_id() && target.get_parent_id() != Some(caller.get_id()) {
+        return errno::to_result(errno::EPERM);
+    }
+    if target.get_session_id() != caller.get_session_id() || target.is_session_leader() {
+        return errno::to_result(errno::EPERM);
+    }
+
+    let new_pgid = if pgid == 0 {
+        target.get_id()
+    } else {
+        match namespace.resolve_global_id(pgid) {
+            Some(id) => id,
+            None => return errno::to_result(errno::ESRCH),
+        }
+    };
+
+    if new_pgid != target.get_id() {
+        let Some(group_leader) = get_task_by_id(new_pgid) else {
+            return errno::to_result(errno::EPERM);
+        };
+        if group_leader.get_process_group_id() != new_pgid
+            || group_leader.get_session_id() != target.get_session_id()
+        {
+            return errno::to_result(errno::EPERM);
+        }
+    }
+
+    target.set_process_group_id(new_pgid);
+    0
 }
 
 pub fn sys_getpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return errno::to_result(errno::ESRCH),
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return errno::to_result(errno::ESRCH);
+    };
+
+    namespace
+        .resolve_local_id(target.get_process_group_id())
+        .unwrap_or(target.get_process_group_id())
+}
+
+pub fn sys_getsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return errno::to_result(errno::ESRCH),
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return errno::to_result(errno::ESRCH);
+    };
+
+    namespace
+        .resolve_local_id(target.get_session_id())
+        .unwrap_or(target.get_session_id())
+}
+
+pub fn sys_setsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
     trapframe.increment_pc_next(task);
-    task.get_id() // Return current task ID as process group ID
+
+    match task.create_session() {
+        Ok(session_id) => task
+            .get_namespace()
+            .resolve_local_id(session_id)
+            .unwrap_or(session_id),
+        Err(_) => errno::to_result(errno::EPERM),
+    }
 }
 
 pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {

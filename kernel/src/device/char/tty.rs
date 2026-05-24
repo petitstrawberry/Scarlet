@@ -50,9 +50,9 @@ pub mod tty_ctl {
     pub const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
     /// Get keyboard mode (0=XLATE, 1=MEDIUMRAW, 2=RAW)
     pub const SCTL_TTY_GET_KBMODE: u32 = 0x5354_000D;
-    /// Set foreground task group ID (arg = task_group_id)
+    /// Set foreground process group ID (arg = namespace-local PGID).
     pub const SCTL_TTY_SET_FOREGROUND_GROUP: u32 = 0x5354_000E;
-    /// Get foreground task group ID (ret = task_group_id, or -1 if none)
+    /// Get foreground process group ID (ret = namespace-local PGID, or -1 if none).
     pub const SCTL_TTY_GET_FOREGROUND_GROUP: u32 = 0x5354_000F;
 }
 use tty_ctl::*;
@@ -262,7 +262,7 @@ impl TtyDevice {
             return user_task_group_id;
         };
         crate::sched::scheduler::get_task_by_id(global_task_id)
-            .map(|task| task.get_task_group_id())
+            .map(|task| task.get_process_group_id())
             .unwrap_or(user_task_group_id)
     }
 
@@ -288,7 +288,7 @@ impl TtyDevice {
 
             for task_id in task_ids {
                 if let Some(task) = get_task_by_id(task_id) {
-                    if task.get_task_group_id() == task_group_id {
+                    if task.get_process_group_id() == task_group_id {
                         let event = Event::direct_process_control(
                             task_id as u32,
                             ProcessControlType::Interrupt,
