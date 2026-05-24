@@ -13,6 +13,7 @@ mod toggle;
 mod slider;
 mod progress;
 mod canvas;
+mod text_grid;
 pub mod modifiers;
 pub mod containers;
 pub mod menu;
@@ -30,6 +31,9 @@ pub use toggle::{Toggle, ToggleRenderObject};
 pub use slider::{Slider, SliderRenderObject};
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
+pub use text_grid::{
+    TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
+};
 pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
 pub use navigation::{NavigationView, NavigationLink};
 
@@ -40,6 +44,7 @@ pub use modifiers::{
     Background, BackgroundRenderObject,
     SetSize, SizeRenderObject,
     AlignmentFrame, AlignmentRenderObject,
+    OnKey, OnKeyRenderObject,
 };
 
 // Re-export containers for convenience

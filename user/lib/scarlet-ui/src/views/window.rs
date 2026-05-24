@@ -500,6 +500,15 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        if !matches!(event, crate::event::Event::Mouse(_)) {
+            for child in self.children.iter_mut() {
+                if child.handle_event(event, phase) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // Only handle mouse events in target phase
         if phase != crate::event::Phase::Target {
             return false;

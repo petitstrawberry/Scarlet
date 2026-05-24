@@ -33,6 +33,8 @@ pub(crate) const SCTL_TTY_SET_OUTPUT_POSTPROCESS: u32 = 0x5354_0014;
 pub(crate) const SCTL_TTY_GET_OUTPUT_POSTPROCESS: u32 = 0x5354_0015;
 pub(crate) const SCTL_TTY_SET_EXTENDED_INPUT: u32 = 0x5354_0016;
 pub(crate) const SCTL_TTY_GET_EXTENDED_INPUT: u32 = 0x5354_0017;
+pub(crate) const SCTL_TTY_ACQUIRE_CONTROLLING: u32 = 0x5354_0018;
+pub(crate) const SCTL_TTY_DETACH_CONTROLLING: u32 = 0x5354_0019;
 
 /// Terminal window size in character cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +448,21 @@ impl<'a> Terminal<'a> {
     pub fn set_foreground_group(&self, process_group_id: usize) -> Result<()> {
         self.control(SCTL_TTY_SET_FOREGROUND_GROUP, process_group_id)
             .map(|_| ())
+    }
+
+    /// Acquire this terminal as the current task's controlling terminal.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - Whether to replace a different owning session.
+    pub fn acquire_as_controlling(&self, force: bool) -> Result<()> {
+        self.control(SCTL_TTY_ACQUIRE_CONTROLLING, force as usize)
+            .map(|_| ())
+    }
+
+    /// Detach this terminal from the current task as controlling terminal.
+    pub fn detach_controlling(&self) -> Result<()> {
+        self.control(SCTL_TTY_DETACH_CONTROLLING, 0).map(|_| ())
     }
 
     fn get_bool(&self, command: u32) -> Result<bool> {

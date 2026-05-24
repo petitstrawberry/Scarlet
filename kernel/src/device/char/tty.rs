@@ -70,6 +70,10 @@ pub mod tty_ctl {
     pub const SCTL_TTY_SET_EXTENDED_INPUT: u32 = 0x5354_0016;
     /// Get extended line editing state (ret=0/1).
     pub const SCTL_TTY_GET_EXTENDED_INPUT: u32 = 0x5354_0017;
+    /// Acquire this terminal as the caller's controlling terminal.
+    pub const SCTL_TTY_ACQUIRE_CONTROLLING: u32 = 0x5354_0018;
+    /// Detach this terminal from the caller as controlling terminal.
+    pub const SCTL_TTY_DETACH_CONTROLLING: u32 = 0x5354_0019;
 }
 use tty_ctl::*;
 
@@ -379,6 +383,58 @@ impl TtyDevice {
         if *guard == Some(session_id) {
             *guard = None;
         }
+    }
+
+    pub fn acquire_as_controlling_tty(&self, force: bool) -> Result<(), &'static str> {
+        let task = mytask().ok_or("no current task")?;
+
+        if let Some(current_tty) = task.get_controlling_tty()
+            && let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade())
+            && Arc::ptr_eq(&current_tty, &this_tty)
+        {
+            return Ok(());
+        }
+
+        if task.get_controlling_tty().is_some() || !task.is_session_leader() {
+            return Err("task cannot acquire controlling terminal");
+        }
+
+        let session_id = task.get_session_id();
+        if let Some(owner_session_id) = self.get_controlling_session_id()
+            && owner_session_id != session_id
+            && !force
+        {
+            return Err("terminal already controlled by another session");
+        }
+
+        let weak = self
+            .weak_self()
+            .ok_or("terminal self reference unavailable")?;
+        task.set_controlling_tty(Some(weak));
+        self.set_controlling_session_id(session_id);
+        if self.get_foreground_task_group_id().is_none() {
+            self.set_foreground_task_group_id(task.get_process_group_id());
+        }
+        Ok(())
+    }
+
+    pub fn detach_controlling_tty(&self) -> Result<(), &'static str> {
+        let task = mytask().ok_or("no current task")?;
+        let Some(current_tty) = task.get_controlling_tty() else {
+            return Ok(());
+        };
+        let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade()) else {
+            return Err("terminal self reference unavailable");
+        };
+        if !Arc::ptr_eq(&current_tty, &this_tty) {
+            return Err("terminal is not caller's controlling terminal");
+        }
+
+        task.clear_controlling_tty();
+        if task.is_session_leader() {
+            self.clear_controlling_session_id(task.get_session_id());
+        }
+        Ok(())
     }
 
     pub fn set_exclusive(&self, enabled: bool) {
@@ -1716,6 +1772,14 @@ impl ControlOps for TtyDevice {
                 Some(id) => Ok(self.user_visible_foreground_task_group_id(id) as i32),
                 None => Ok(-1),
             },
+            SCTL_TTY_ACQUIRE_CONTROLLING => {
+                self.acquire_as_controlling_tty(arg != 0)?;
+                Ok(0)
+            }
+            SCTL_TTY_DETACH_CONTROLLING => {
+                self.detach_controlling_tty()?;
+                Ok(0)
+            }
             _ => Err("Unsupported control command for TTY device"),
         }
     }

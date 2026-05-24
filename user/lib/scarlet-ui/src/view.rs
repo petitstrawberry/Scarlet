@@ -203,6 +203,20 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnExit::new(self, callback)
     }
 
+    /// Add a keyboard handler to this view
+    ///
+    /// # Arguments
+    /// * `callback` - Function to call for keyboard events. Return `true` to consume the event.
+    fn on_key<F: Fn(crate::event::KeyEvent) -> bool + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnKey<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnKey::new(self, callback)
+    }
+
     /// Clip this view to its bounds
     fn clip(self) -> crate::views::modifiers::Clip<Self>
     where

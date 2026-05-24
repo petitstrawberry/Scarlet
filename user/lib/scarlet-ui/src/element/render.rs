@@ -355,6 +355,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
+        if let Event::Keyboard(key_event) = _event {
+            if (_phase == Phase::Target || _phase == Phase::Bubble)
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::modifiers::OnKeyRenderObject>()
+            {
+                return render_object.invoke_on_key(*key_event);
+            }
+            return false;
+        }
+
         let Event::Mouse(mouse_event) = _event else {
             return false;
         };

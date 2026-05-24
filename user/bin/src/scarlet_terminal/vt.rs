@@ -1,0 +1,380 @@
+//! Minimal VT screen model for Scarlet Terminal.
+
+use scarlet_ui::{Color, TextGridBuffer, TextGridCell, TextGridCursor};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParserState {
+    Ground,
+    Escape,
+    Csi,
+}
+
+/// Terminal screen state backed by a fixed text grid.
+pub struct VtScreen {
+    grid: TextGridBuffer,
+    columns: usize,
+    rows: usize,
+    cursor_column: usize,
+    cursor_row: usize,
+    foreground: Color,
+    background: Color,
+    bold: bool,
+    inverse: bool,
+    parser_state: ParserState,
+    csi_params: [usize; 8],
+    csi_count: usize,
+    csi_value: Option<usize>,
+}
+
+impl VtScreen {
+    /// Create a terminal screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `columns` - Number of text columns.
+    /// * `rows` - Number of text rows.
+    ///
+    /// # Returns
+    ///
+    /// A new [`VtScreen`].
+    pub fn new(columns: usize, rows: usize) -> Self {
+        let foreground = Color::rgb(230, 232, 235);
+        let background = Color::rgb(12, 14, 18);
+        Self {
+            grid: TextGridBuffer::new(columns, rows, TextGridCell::blank(foreground, background)),
+            columns,
+            rows,
+            cursor_column: 0,
+            cursor_row: 0,
+            foreground,
+            background,
+            bold: false,
+            inverse: false,
+            parser_state: ParserState::Ground,
+            csi_params: [0; 8],
+            csi_count: 0,
+            csi_value: None,
+        }
+    }
+
+    /// Return the grid buffer.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed text grid.
+    pub fn grid(&self) -> &TextGridBuffer {
+        &self.grid
+    }
+
+    /// Return the current cursor.
+    ///
+    /// # Returns
+    ///
+    /// Cursor position suitable for [`scarlet_ui::TextGrid`].
+    pub fn cursor(&self) -> TextGridCursor {
+        TextGridCursor::new(self.cursor_column, self.cursor_row)
+    }
+
+    /// Feed bytes from a PTY master into the screen model.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Bytes read from the PTY master.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.feed_byte(byte);
+        }
+    }
+
+    fn feed_byte(&mut self, byte: u8) {
+        match self.parser_state {
+            ParserState::Ground => self.feed_ground(byte),
+            ParserState::Escape => self.feed_escape(byte),
+            ParserState::Csi => self.feed_csi(byte),
+        }
+    }
+
+    fn feed_ground(&mut self, byte: u8) {
+        match byte {
+            0x08 => self.backspace(),
+            b'\t' => self.tab(),
+            b'\r' => self.cursor_column = 0,
+            b'\n' => self.line_feed(),
+            0x1b => self.parser_state = ParserState::Escape,
+            0x20..=0x7e => self.put_char(byte as char),
+            _ => {}
+        }
+    }
+
+    fn feed_escape(&mut self, byte: u8) {
+        match byte {
+            b'[' => {
+                self.reset_csi();
+                self.parser_state = ParserState::Csi;
+            }
+            b'c' => {
+                self.clear_all();
+                self.reset_attributes();
+                self.parser_state = ParserState::Ground;
+            }
+            _ => self.parser_state = ParserState::Ground,
+        }
+    }
+
+    fn feed_csi(&mut self, byte: u8) {
+        match byte {
+            b'0'..=b'9' => {
+                let digit = (byte - b'0') as usize;
+                self.csi_value = Some(
+                    self.csi_value
+                        .unwrap_or(0)
+                        .saturating_mul(10)
+                        .saturating_add(digit),
+                );
+            }
+            b';' => self.push_csi_value(),
+            b'?' => {}
+            final_byte => {
+                self.push_csi_value();
+                self.handle_csi_final(final_byte);
+                self.parser_state = ParserState::Ground;
+            }
+        }
+    }
+
+    fn reset_csi(&mut self) {
+        self.csi_params = [0; 8];
+        self.csi_count = 0;
+        self.csi_value = None;
+    }
+
+    fn push_csi_value(&mut self) {
+        if self.csi_count >= self.csi_params.len() {
+            self.csi_value = None;
+            return;
+        }
+        self.csi_params[self.csi_count] = self.csi_value.unwrap_or(0);
+        self.csi_count += 1;
+        self.csi_value = None;
+    }
+
+    fn param(&self, index: usize, default: usize) -> usize {
+        if index < self.csi_count && self.csi_params[index] != 0 {
+            self.csi_params[index]
+        } else {
+            default
+        }
+    }
+
+    fn handle_csi_final(&mut self, final_byte: u8) {
+        match final_byte {
+            b'A' => self.move_cursor_up(self.param(0, 1)),
+            b'B' => self.move_cursor_down(self.param(0, 1)),
+            b'C' => self.move_cursor_right(self.param(0, 1)),
+            b'D' => self.move_cursor_left(self.param(0, 1)),
+            b'H' | b'f' => {
+                let row = self.param(0, 1).saturating_sub(1);
+                let column = self.param(1, 1).saturating_sub(1);
+                self.set_cursor(column, row);
+            }
+            b'J' => self.erase_display(self.param(0, 0)),
+            b'K' => self.erase_line(self.param(0, 0)),
+            b'S' => self.scroll_up(self.param(0, 1)),
+            b'T' => self.scroll_down(self.param(0, 1)),
+            b'm' => self.apply_sgr(),
+            _ => {}
+        }
+    }
+
+    fn put_char(&mut self, ch: char) {
+        if self.cursor_row >= self.rows {
+            self.scroll_up(1);
+            self.cursor_row = self.rows.saturating_sub(1);
+        }
+
+        let mut cell = TextGridCell::new(ch, self.foreground, self.background);
+        cell.bold = self.bold;
+        cell.inverse = self.inverse;
+        let _ = self
+            .grid
+            .set_cell(self.cursor_column, self.cursor_row, cell);
+
+        self.cursor_column += 1;
+        if self.cursor_column >= self.columns {
+            self.cursor_column = 0;
+            self.line_feed();
+        }
+    }
+
+    fn line_feed(&mut self) {
+        if self.cursor_row + 1 >= self.rows {
+            self.scroll_up(1);
+        } else {
+            self.cursor_row += 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_column > 0 {
+            self.cursor_column -= 1;
+        }
+    }
+
+    fn tab(&mut self) {
+        let next = ((self.cursor_column / 8) + 1).saturating_mul(8);
+        self.cursor_column = next.min(self.columns.saturating_sub(1));
+    }
+
+    fn set_cursor(&mut self, column: usize, row: usize) {
+        self.cursor_column = column.min(self.columns.saturating_sub(1));
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+    }
+
+    fn move_cursor_up(&mut self, count: usize) {
+        self.cursor_row = self.cursor_row.saturating_sub(count);
+    }
+
+    fn move_cursor_down(&mut self, count: usize) {
+        self.cursor_row = self
+            .cursor_row
+            .saturating_add(count)
+            .min(self.rows.saturating_sub(1));
+    }
+
+    fn move_cursor_right(&mut self, count: usize) {
+        self.cursor_column = self
+            .cursor_column
+            .saturating_add(count)
+            .min(self.columns.saturating_sub(1));
+    }
+
+    fn move_cursor_left(&mut self, count: usize) {
+        self.cursor_column = self.cursor_column.saturating_sub(count);
+    }
+
+    fn erase_display(&mut self, mode: usize) {
+        match mode {
+            0 => {
+                self.erase_line(0);
+                for row in self.cursor_row.saturating_add(1)..self.rows {
+                    self.clear_row(row);
+                }
+            }
+            1 => {
+                for row in 0..self.cursor_row {
+                    self.clear_row(row);
+                }
+                self.erase_line(1);
+            }
+            2 | 3 => self.clear_all(),
+            _ => {}
+        }
+    }
+
+    fn erase_line(&mut self, mode: usize) {
+        match mode {
+            0 => self.clear_range(self.cursor_column, self.cursor_row, self.columns),
+            1 => self.clear_range(0, self.cursor_row, self.cursor_column.saturating_add(1)),
+            2 => self.clear_row(self.cursor_row),
+            _ => {}
+        }
+    }
+
+    fn clear_all(&mut self) {
+        let blank = self.blank_cell();
+        self.grid.clear(blank);
+        self.cursor_column = 0;
+        self.cursor_row = 0;
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        self.clear_range(0, row, self.columns);
+    }
+
+    fn clear_range(&mut self, start_column: usize, row: usize, end_column: usize) {
+        let blank = self.blank_cell();
+        for column in start_column.min(self.columns)..end_column.min(self.columns) {
+            let _ = self.grid.set_cell(column, row, blank);
+        }
+    }
+
+    fn scroll_up(&mut self, count: usize) {
+        let count = count.min(self.rows);
+        if count == 0 {
+            return;
+        }
+        for row in 0..self.rows.saturating_sub(count) {
+            for column in 0..self.columns {
+                if let Some(cell) = self.grid.cell(column, row + count) {
+                    let _ = self.grid.set_cell(column, row, cell);
+                }
+            }
+        }
+        for row in self.rows.saturating_sub(count)..self.rows {
+            self.clear_row(row);
+        }
+    }
+
+    fn scroll_down(&mut self, count: usize) {
+        let count = count.min(self.rows);
+        if count == 0 {
+            return;
+        }
+        for row in (count..self.rows).rev() {
+            for column in 0..self.columns {
+                if let Some(cell) = self.grid.cell(column, row - count) {
+                    let _ = self.grid.set_cell(column, row, cell);
+                }
+            }
+        }
+        for row in 0..count {
+            self.clear_row(row);
+        }
+    }
+
+    fn apply_sgr(&mut self) {
+        if self.csi_count == 0 {
+            self.reset_attributes();
+            return;
+        }
+
+        for index in 0..self.csi_count {
+            match self.csi_params[index] {
+                0 => self.reset_attributes(),
+                1 => self.bold = true,
+                22 => self.bold = false,
+                7 => self.inverse = true,
+                27 => self.inverse = false,
+                30..=37 => self.foreground = ansi_color(self.csi_params[index] - 30),
+                39 => self.foreground = Color::rgb(230, 232, 235),
+                40..=47 => self.background = ansi_color(self.csi_params[index] - 40),
+                49 => self.background = Color::rgb(12, 14, 18),
+                _ => {}
+            }
+        }
+    }
+
+    fn reset_attributes(&mut self) {
+        self.foreground = Color::rgb(230, 232, 235);
+        self.background = Color::rgb(12, 14, 18);
+        self.bold = false;
+        self.inverse = false;
+    }
+
+    fn blank_cell(&self) -> TextGridCell {
+        TextGridCell::blank(self.foreground, self.background)
+    }
+}
+
+fn ansi_color(index: usize) -> Color {
+    match index {
+        0 => Color::rgb(0, 0, 0),
+        1 => Color::rgb(205, 49, 49),
+        2 => Color::rgb(13, 188, 121),
+        3 => Color::rgb(229, 229, 16),
+        4 => Color::rgb(36, 114, 200),
+        5 => Color::rgb(188, 63, 188),
+        6 => Color::rgb(17, 168, 205),
+        _ => Color::rgb(229, 229, 229),
+    }
+}

@@ -1,10 +1,11 @@
 //! Event modifier views
 //!
-//! Provides on_click, on_hover, on_exit modifiers for any view.
+//! Provides event modifiers for any view.
 
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
+use crate::event::KeyEvent;
 use crate::geometry::Size;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -311,5 +312,141 @@ impl ElementRenderObject for OnExitRenderObject {
 
     fn render(&mut self) {
         // Modifier doesn't directly render
+    }
+}
+
+/// Keyboard event modifier - adds a key handler to any view.
+#[derive(Clone)]
+pub struct OnKey<V: View, F: Clone + 'static> {
+    inner: V,
+    callback: F,
+}
+
+impl<V: View, F: Fn(KeyEvent) -> bool + Clone + 'static> OnKey<V, F> {
+    /// Create a new OnKey modifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Wrapped view.
+    /// * `callback` - Function called for keyboard events.
+    ///
+    /// # Returns
+    ///
+    /// A new [`OnKey`] modifier.
+    pub fn new(inner: V, callback: F) -> Self {
+        Self { inner, callback }
+    }
+
+    /// Get the inner view.
+    pub fn inner(&self) -> &V {
+        &self.inner
+    }
+
+    /// Get the callback.
+    pub fn callback(&self) -> &F {
+        &self.callback
+    }
+}
+
+impl<V: View + Clone, F: Fn(KeyEvent) -> bool + Clone + 'static> View for OnKey<V, F> {
+    fn create_element(&self) -> Box<dyn Element> {
+        let mut render_object = OnKeyRenderObject::new();
+        render_object.set_callback(Box::new(self.callback.clone()));
+
+        Box::new(RenderElement::with_children(
+            self.clone(),
+            render_object,
+            vec![self.inner.create_element()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
+        self.inner.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Render object for [`OnKey`].
+pub struct OnKeyRenderObject {
+    callback: Option<Box<dyn Fn(KeyEvent) -> bool>>,
+    size: Size,
+}
+
+impl OnKeyRenderObject {
+    /// Create an empty key modifier render object.
+    pub fn new() -> Self {
+        Self {
+            callback: None,
+            size: Size::ZERO,
+        }
+    }
+
+    /// Set the key callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function called for keyboard events.
+    pub fn set_callback(&mut self, callback: Box<dyn Fn(KeyEvent) -> bool>) {
+        self.callback = Some(callback);
+    }
+
+    /// Invoke the key callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Keyboard event.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the event was consumed.
+    pub fn invoke_on_key(&self, event: KeyEvent) -> bool {
+        self.callback
+            .as_ref()
+            .map(|callback| callback(event))
+            .unwrap_or(false)
+    }
+}
+
+impl ElementRenderObject for OnKeyRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        Size::ZERO
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        if let Some(child) = children.first_mut() {
+            let size = child.layout(constraints);
+            self.size = size;
+            size
+        } else {
+            self.size = Size::ZERO;
+            Size::ZERO
+        }
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.x < self.size.width && point.y >= 0.0 && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn render(&mut self) {
+        // Modifier doesn't directly render.
     }
 }

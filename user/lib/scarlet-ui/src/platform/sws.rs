@@ -4,10 +4,9 @@
 
 use crate::buffer::Buffer;
 use crate::error::Result;
-use crate::event::{Event, MouseButton, MouseEvent};
+use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
 use crate::geometry::{Point, Size};
 use crate::platform::PlatformWindow;
-use alloc::string::String;
 use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
@@ -169,6 +168,92 @@ impl SWSPlatformWindow {
             }
         }
         self.pending_events.push(event);
+    }
+
+    fn map_key_code(code: u16) -> KeyCode {
+        match code {
+            key_code::KEY_ESC => KeyCode::Escape,
+            key_code::KEY_ENTER => KeyCode::Enter,
+            key_code::KEY_TAB => KeyCode::Tab,
+            key_code::KEY_BACKSPACE => KeyCode::Backspace,
+            key_code::KEY_SPACE => KeyCode::Space,
+            key_code::KEY_LEFT => KeyCode::Left,
+            key_code::KEY_RIGHT => KeyCode::Right,
+            key_code::KEY_UP => KeyCode::Up,
+            key_code::KEY_DOWN => KeyCode::Down,
+            key_code::KEY_HOME => KeyCode::Home,
+            key_code::KEY_END => KeyCode::End,
+            key_code::KEY_PAGEUP => KeyCode::PageUp,
+            key_code::KEY_PAGEDOWN => KeyCode::PageDown,
+            key_code::KEY_INSERT => KeyCode::Insert,
+            key_code::KEY_DELETE => KeyCode::Delete,
+            key_code::KEY_F1 => KeyCode::F(1),
+            key_code::KEY_F2 => KeyCode::F(2),
+            key_code::KEY_F3 => KeyCode::F(3),
+            key_code::KEY_F4 => KeyCode::F(4),
+            key_code::KEY_F5 => KeyCode::F(5),
+            key_code::KEY_F6 => KeyCode::F(6),
+            key_code::KEY_F7 => KeyCode::F(7),
+            key_code::KEY_F8 => KeyCode::F(8),
+            key_code::KEY_F9 => KeyCode::F(9),
+            key_code::KEY_F10 => KeyCode::F(10),
+            key_code::KEY_F11 => KeyCode::F(11),
+            key_code::KEY_F12 => KeyCode::F(12),
+            _ => Self::map_key_char(code).map_or(KeyCode::Unknown, KeyCode::Char),
+        }
+    }
+
+    fn map_key_char(code: u16) -> Option<char> {
+        match code {
+            key_code::KEY_1 => Some('1'),
+            key_code::KEY_2 => Some('2'),
+            key_code::KEY_3 => Some('3'),
+            key_code::KEY_4 => Some('4'),
+            key_code::KEY_5 => Some('5'),
+            key_code::KEY_6 => Some('6'),
+            key_code::KEY_7 => Some('7'),
+            key_code::KEY_8 => Some('8'),
+            key_code::KEY_9 => Some('9'),
+            key_code::KEY_0 => Some('0'),
+            key_code::KEY_Q => Some('q'),
+            key_code::KEY_W => Some('w'),
+            key_code::KEY_E => Some('e'),
+            key_code::KEY_R => Some('r'),
+            key_code::KEY_T => Some('t'),
+            key_code::KEY_Y => Some('y'),
+            key_code::KEY_U => Some('u'),
+            key_code::KEY_I => Some('i'),
+            key_code::KEY_O => Some('o'),
+            key_code::KEY_P => Some('p'),
+            key_code::KEY_A => Some('a'),
+            key_code::KEY_S => Some('s'),
+            key_code::KEY_D => Some('d'),
+            key_code::KEY_F => Some('f'),
+            key_code::KEY_G => Some('g'),
+            key_code::KEY_H => Some('h'),
+            key_code::KEY_J => Some('j'),
+            key_code::KEY_K => Some('k'),
+            key_code::KEY_L => Some('l'),
+            key_code::KEY_Z => Some('z'),
+            key_code::KEY_X => Some('x'),
+            key_code::KEY_C => Some('c'),
+            key_code::KEY_V => Some('v'),
+            key_code::KEY_B => Some('b'),
+            key_code::KEY_N => Some('n'),
+            key_code::KEY_M => Some('m'),
+            key_code::KEY_COMMA => Some(','),
+            key_code::KEY_DOT => Some('.'),
+            key_code::KEY_SLASH => Some('/'),
+            key_code::KEY_SEMICOLON => Some(';'),
+            key_code::KEY_APOSTROPHE => Some('\''),
+            key_code::KEY_LEFTBRACE => Some('['),
+            key_code::KEY_RIGHTBRACE => Some(']'),
+            key_code::KEY_BACKSLASH => Some('\\'),
+            key_code::KEY_MINUS => Some('-'),
+            key_code::KEY_EQUAL => Some('='),
+            key_code::KEY_SPACE => Some(' '),
+            _ => None,
+        }
     }
 }
 
@@ -583,6 +668,19 @@ impl SWSPlatformWindow {
                                     self.pointer_y
                                 );
                             }
+                        }
+                    }
+                    (event_type::EV_KEY, code) => {
+                        let mapped = Self::map_key_code(code);
+                        if input.value != 0 {
+                            self.push_event(Event::Keyboard(KeyEvent::Pressed { keycode: mapped }));
+                            if let Some(c) = Self::map_key_char(code) {
+                                self.push_event(Event::Keyboard(KeyEvent::Char { c }));
+                            }
+                        } else {
+                            self.push_event(Event::Keyboard(KeyEvent::Released {
+                                keycode: mapped,
+                            }));
                         }
                     }
                     _ => {}
