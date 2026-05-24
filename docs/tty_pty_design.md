@@ -163,12 +163,15 @@ and job-control state.
 | --- | --- | --- |
 | `SCTL_TTY_SET_ECHO` / `GET_ECHO` | `TCSETS` / `TCGETS`, `ECHO` | `termios.c_lflag` |
 | `SCTL_TTY_SET_CANONICAL` / `GET_CANONICAL` | `TCSETS` / `TCGETS`, `ICANON` | `termios.c_lflag` |
+| `SCTL_TTY_SET_SIGNAL_CHARS` / `GET_SIGNAL_CHARS` | `TCSETS` / `TCGETS`, `ISIG` | `termios.c_lflag` |
+| `SCTL_TTY_SET_CRNL_INPUT` / `GET_CRNL_INPUT` | `TCSETS` / `TCGETS`, `ICRNL` | `termios.c_iflag` |
+| `SCTL_TTY_SET_OUTPUT_POSTPROCESS` / `GET_OUTPUT_POSTPROCESS` | `TCSETS` / `TCGETS`, `OPOST` | `termios.c_oflag` |
 | TTY internal `tostop_enabled` | `TCSETS` / `TCGETS`, `TOSTOP` | `termios.c_lflag` |
 | `SCTL_TTY_SET_READ_POLICY` / `GET_READ_POLICY` | `VMIN` / `VTIME` | `termios.c_cc` |
 | `SCTL_TTY_SET_WINSIZE` / `GET_WINSIZE` | `TIOCSWINSZ` / `TIOCGWINSZ` | TTY winsize |
 | `SCTL_TTY_SET_KBMODE` / `GET_KBMODE` | `KDSKBMODE` / `KDGKBMODE` | console keyboard mode |
 | `SCTL_TTY_SET_FOREGROUND_GROUP` / `GET_FOREGROUND_GROUP` | `TIOCSPGRP` / `TIOCGPGRP` | foreground PGID |
-| `SCTL_TTY_FLUSH_INPUT` | `TCSETSF`, future `TCFLSH` | ldisc input queue |
+| `SCTL_TTY_FLUSH_INPUT` | `TCSETSF`, `TCFLSH` | ldisc input queue |
 | `SCTL_TTY_SET_DEBUG` / `GET_DEBUG` | Scarlet-only | diagnostics |
 
 Linux-only ioctls covered or planned for the job-control and PTY phases:

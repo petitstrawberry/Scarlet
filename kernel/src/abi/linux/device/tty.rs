@@ -39,6 +39,7 @@ pub const TCGETS: u32 = 0x5401; // Get termios
 pub const TCSETS: u32 = 0x5402; // Set termios (no wait)
 pub const TCSETSW: u32 = 0x5403; // Set termios (drain output)
 pub const TCSETSF: u32 = 0x5404; // Set termios (drain and flush)
+pub const TCFLSH: u32 = 0x540B; // Flush queued input/output
 pub const TIOCEXCL: u32 = 0x540C; // Set exclusive mode
 pub const TIOCNXCL: u32 = 0x540D; // Clear exclusive mode
 pub const TIOCSCTTY: u32 = 0x540E; // Set controlling terminal
@@ -91,6 +92,9 @@ struct LinuxTermios {
 const VEOF: usize = 4;
 const VTIME: usize = 5;
 const VMIN: usize = 6;
+const IFLAG_ICRNL: u32 = 0x0000_0100;
+const OFLAG_OPOST: u32 = 0x0000_0001;
+const LFLAG_ISIG: u32 = 0x0000_0001;
 const LFLAG_ICANON: u32 = 0x0000_0002;
 const LFLAG_ECHO: u32 = 0x0000_0008;
 const LFLAG_TOSTOP: u32 = 0x0000_0100;
@@ -104,9 +108,11 @@ pub fn handle_ioctl(
     kernel_object: &KernelObject,
 ) -> Result<Option<usize>, ()> {
     use crate::device::char::tty::tty_ctl::{
-        SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_ECHO, SCTL_TTY_GET_FOREGROUND_GROUP,
-        SCTL_TTY_GET_READ_POLICY, SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_ECHO,
-        SCTL_TTY_SET_READ_POLICY,
+        SCTL_TTY_FLUSH_INPUT, SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_CRNL_INPUT, SCTL_TTY_GET_ECHO,
+        SCTL_TTY_GET_FOREGROUND_GROUP, SCTL_TTY_GET_OUTPUT_POSTPROCESS, SCTL_TTY_GET_READ_POLICY,
+        SCTL_TTY_GET_SIGNAL_CHARS, SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_CRNL_INPUT,
+        SCTL_TTY_SET_ECHO, SCTL_TTY_SET_OUTPUT_POSTPROCESS, SCTL_TTY_SET_READ_POLICY,
+        SCTL_TTY_SET_SIGNAL_CHARS,
     };
 
     const LOG_TTY_IOCTL: bool = false;
@@ -151,12 +157,18 @@ pub fn handle_ioctl(
                     };
                     let mut canonical = false;
                     let mut echo = true;
+                    let mut isig = true;
+                    let mut icrnl = true;
+                    let mut opost = true;
                     let mut tostop = false;
                     let mut min_ready: u16 = 1;
                     let mut timeout_ms: u16 = 0;
                     if let Some(control_ops) = kernel_object.as_control() {
                         if let Ok(val) = control_ops.control(SCTL_TTY_GET_CANONICAL, 0) { canonical = val != 0; }
                         if let Ok(val) = control_ops.control(SCTL_TTY_GET_ECHO, 0) { echo = val != 0; }
+                        if let Ok(val) = control_ops.control(SCTL_TTY_GET_SIGNAL_CHARS, 0) { isig = val != 0; }
+                        if let Ok(val) = control_ops.control(SCTL_TTY_GET_CRNL_INPUT, 0) { icrnl = val != 0; }
+                        if let Ok(val) = control_ops.control(SCTL_TTY_GET_OUTPUT_POSTPROCESS, 0) { opost = val != 0; }
                         if let Ok(packed) = control_ops.control(SCTL_TTY_GET_READ_POLICY, 0) {
                             let packed_u = packed as u32;
                             min_ready = (packed_u & 0xFFFF) as u16;
@@ -166,6 +178,9 @@ pub fn handle_ioctl(
                     if let Some(value) = with_tty_device(kernel_object, |tty| tty.is_tostop_enabled()) {
                         tostop = value;
                     }
+                    if icrnl { t.c_iflag |= IFLAG_ICRNL; }
+                    if opost { t.c_oflag |= OFLAG_OPOST; }
+                    if isig { t.c_lflag |= LFLAG_ISIG; }
                     if canonical { t.c_lflag |= LFLAG_ICANON; }
                     if echo { t.c_lflag |= LFLAG_ECHO; }
                     if tostop { t.c_lflag |= LFLAG_TOSTOP; }
@@ -185,6 +200,9 @@ pub fn handle_ioctl(
                     let vaddr = arg as usize;
                     if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                         let t = unsafe { core::ptr::read(paddr as *const LinuxTermios) };
+                        let icrnl_new = (t.c_iflag & IFLAG_ICRNL) != 0;
+                        let opost_new = (t.c_oflag & OFLAG_OPOST) != 0;
+                        let isig_new = (t.c_lflag & LFLAG_ISIG) != 0;
                         let canonical_new = (t.c_lflag & LFLAG_ICANON) != 0;
                         let echo_new = (t.c_lflag & LFLAG_ECHO) != 0;
                         let tostop_new = (t.c_lflag & LFLAG_TOSTOP) != 0;
@@ -194,8 +212,11 @@ pub fn handle_ioctl(
                         if let Some(control_ops) = kernel_object.as_control() {
                             let prev_canonical = control_ops.control(SCTL_TTY_GET_CANONICAL, 0).unwrap_or(-1) != 0;
                             let prev_echo = control_ops.control(SCTL_TTY_GET_ECHO, 0).unwrap_or(-1) != 0;
+                            let _ = control_ops.control(SCTL_TTY_SET_SIGNAL_CHARS, if isig_new { 1 } else { 0 });
                             let _ = control_ops.control(SCTL_TTY_SET_CANONICAL, if canonical_new { 1 } else { 0 });
                             let _ = control_ops.control(SCTL_TTY_SET_ECHO, if echo_new { 1 } else { 0 });
+                            let _ = control_ops.control(SCTL_TTY_SET_CRNL_INPUT, if icrnl_new { 1 } else { 0 });
+                            let _ = control_ops.control(SCTL_TTY_SET_OUTPUT_POSTPROCESS, if opost_new { 1 } else { 0 });
                             let packed = ((timeout_ms as u32) << 16) | (vmin as u32);
                             let _ = control_ops.control(SCTL_TTY_SET_READ_POLICY, packed as usize);
                             if LOG_TTY_IOCTL && (prev_canonical != canonical_new || prev_echo != echo_new) {
@@ -204,9 +225,29 @@ pub fn handle_ioctl(
                             }
                         }
                         let _ = with_tty_device(kernel_object, |tty| tty.set_tostop(tostop_new));
+                        if request == TCSETSF {
+                            if let Some(control_ops) = kernel_object.as_control() {
+                                let _ = control_ops.control(SCTL_TTY_FLUSH_INPUT, 0);
+                            }
+                        }
                         Ok(Some(0))
                     } else { Err(()) }
                 }
+            }
+        }
+        TCFLSH => {
+            let Some(control_ops) = kernel_object.as_control() else {
+                return Err(());
+            };
+            match arg {
+                0 | 2 => {
+                    control_ops
+                        .control(SCTL_TTY_FLUSH_INPUT, 0)
+                        .map_err(|_| ())?;
+                    Ok(Some(0))
+                }
+                1 => Ok(Some(0)),
+                _ => Err(()),
             }
         }
         TIOCGPGRP => {
