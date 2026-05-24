@@ -314,4 +314,5 @@ mod tests;
 #[cfg(test)]
 pub mod mockchar;
 
+pub mod pty;
 pub mod tty;

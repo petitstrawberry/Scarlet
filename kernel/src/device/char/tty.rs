@@ -100,6 +100,90 @@ pub struct TerminalControlChars {
     pub literal_next: u8,
 }
 
+/// Lower endpoint used by the TTY core for device output.
+///
+/// UART-backed console TTYs and future PTY slave TTYs both provide this
+/// neutral byte-stream sink. Input still enters through the line discipline via
+/// `inject_input_byte`.
+pub trait TtyBackend: Send + Sync {
+    /// Write bytes to the lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Bytes after TTY output processing.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes accepted by the lower endpoint.
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str>;
+
+    /// Write one byte to the lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `byte` - Byte after TTY output processing.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        self.write(&[byte]).map(|_| ())
+    }
+
+    /// Returns whether the lower endpoint can accept output.
+    ///
+    /// # Returns
+    ///
+    /// `true` when output can be written.
+    fn can_write(&self) -> bool;
+}
+
+struct DeviceTtyBackend {
+    device_id: usize,
+}
+
+impl DeviceTtyBackend {
+    fn new(device_id: usize) -> Self {
+        Self { device_id }
+    }
+
+    fn char_device(&self) -> Option<alloc::sync::Arc<dyn Device>> {
+        DeviceManager::get_manager().get_device(self.device_id)
+    }
+}
+
+impl TtyBackend for DeviceTtyBackend {
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let Some(device) = self.char_device() else {
+            return Err("TTY backend device not available");
+        };
+        let Some(char_device) = device.as_char_device() else {
+            return Err("TTY backend device is not a character device");
+        };
+        char_device.write(buffer)
+    }
+
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let Some(device) = self.char_device() else {
+            return Err("TTY backend device not available");
+        };
+        let Some(char_device) = device.as_char_device() else {
+            return Err("TTY backend device is not a character device");
+        };
+        char_device.write_byte(byte)
+    }
+
+    fn can_write(&self) -> bool {
+        let Some(device) = self.char_device() else {
+            return false;
+        };
+        device
+            .as_char_device()
+            .map(|char_device| char_device.can_write())
+            .unwrap_or(false)
+    }
+}
+
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
     let result = try_init_tty_subsystem();
@@ -159,7 +243,7 @@ late_initcall!(init_tty_subsystem);
 /// echo, and basic terminal I/O operations.
 pub struct TtyDevice {
     name: &'static str,
-    uart_device_id: usize,
+    backend: Arc<dyn TtyBackend>,
     self_ref: spin::RwLock<Weak<TtyDevice>>,
 
     // Input buffer for line discipline
@@ -211,10 +295,34 @@ pub struct TtyDevice {
 }
 
 impl TtyDevice {
+    /// Create a TTY backed by an existing character device.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static device name reported by the TTY.
+    /// * `uart_device_id` - DeviceManager ID for the lower serial endpoint.
+    ///
+    /// # Returns
+    ///
+    /// A new TTY device with default line discipline settings.
     pub fn new(name: &'static str, uart_device_id: usize) -> Self {
+        Self::new_with_backend(name, Arc::new(DeviceTtyBackend::new(uart_device_id)))
+    }
+
+    /// Create a TTY backed by a custom lower endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static device name reported by the TTY.
+    /// * `backend` - Lower endpoint used for TTY output.
+    ///
+    /// # Returns
+    ///
+    /// A new TTY device with default line discipline settings.
+    pub fn new_with_backend(name: &'static str, backend: Arc<dyn TtyBackend>) -> Self {
         Self {
             name,
-            uart_device_id,
+            backend,
             self_ref: spin::RwLock::new(Weak::new()),
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
@@ -1097,12 +1205,7 @@ impl TtyDevice {
     /// Echo character back to output.
     fn echo_char(&self, byte: u8) {
         let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
-            if let Some(char_device) = uart_device.as_char_device() {
-                let _ = char_device.write_byte(byte);
-            }
-        }
+        let _ = self.backend.write_byte(byte);
     }
 
     /// Echo backspace sequence.
@@ -1481,13 +1584,6 @@ impl CharDevice for TtyDevice {
         }
 
         let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
-            return Err("UART device not available");
-        };
-        let Some(char_device) = uart_device.as_char_device() else {
-            return Err("UART device not available");
-        };
 
         if self.output_postprocess_enabled.load(Ordering::Relaxed) {
             let mut output = alloc::vec::Vec::with_capacity(buffer.len());
@@ -1499,9 +1595,9 @@ impl CharDevice for TtyDevice {
                     output.push(byte);
                 }
             }
-            char_device.write(&output)?;
+            self.backend.write(&output)?;
         } else {
-            char_device.write(buffer)?;
+            self.backend.write(buffer)?;
         }
         Ok(buffer.len())
     }
@@ -1515,18 +1611,11 @@ impl CharDevice for TtyDevice {
         }
 
         let _lock = self.write_lock.lock();
-        let device_manager = DeviceManager::get_manager();
-        let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
-            return Err("UART device not available");
-        };
-        let Some(char_device) = uart_device.as_char_device() else {
-            return Err("UART device not available");
-        };
 
         if self.output_postprocess_enabled.load(Ordering::Relaxed) && byte == b'\n' {
-            char_device.write(&[b'\r', b'\n'])?;
+            self.backend.write(&[b'\r', b'\n'])?;
         } else {
-            char_device.write(&[byte])?;
+            self.backend.write_byte(byte)?;
         }
         Ok(())
     }
@@ -1537,14 +1626,7 @@ impl CharDevice for TtyDevice {
     }
 
     fn can_write(&self) -> bool {
-        // Check if backend char device is available and writable
-        let device_manager = DeviceManager::get_manager();
-        if let Some(dev) = device_manager.get_device(self.uart_device_id) {
-            if let Some(cdev) = dev.as_char_device() {
-                return cdev.can_write();
-            }
-        }
-        false
+        self.backend.can_write()
     }
 }
 
