@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use scarlet_ui::{Color, TextGridBuffer, TextGridCell, TextGridCursor};
 
 const SCROLLBACK_LIMIT: usize = 2000;
+const CSI_PARAM_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParserState {
@@ -34,7 +35,7 @@ pub struct VtScreen {
     inverse: bool,
     parser_state: ParserState,
     csi_private: bool,
-    csi_params: [usize; 8],
+    csi_params: [usize; CSI_PARAM_LIMIT],
     csi_count: usize,
     csi_value: Option<usize>,
 }
@@ -51,8 +52,8 @@ impl VtScreen {
     ///
     /// A new [`VtScreen`].
     pub fn new(columns: usize, rows: usize) -> Self {
-        let foreground = Color::rgb(230, 232, 235);
-        let background = Color::rgb(12, 14, 18);
+        let foreground = default_foreground();
+        let background = default_background();
         Self {
             grid: TextGridBuffer::new(columns, rows, TextGridCell::blank(foreground, background)),
             scrollback: Vec::new(),
@@ -70,7 +71,7 @@ impl VtScreen {
             inverse: false,
             parser_state: ParserState::Ground,
             csi_private: false,
-            csi_params: [0; 8],
+            csi_params: [0; CSI_PARAM_LIMIT],
             csi_count: 0,
             csi_value: None,
         }
@@ -86,8 +87,8 @@ impl VtScreen {
             return self.grid.clone();
         }
 
-        let foreground = Color::rgb(230, 232, 235);
-        let background = Color::rgb(12, 14, 18);
+        let foreground = default_foreground();
+        let background = default_background();
         let blank = TextGridCell::blank(foreground, background);
         let mut view = TextGridBuffer::new(self.columns, self.rows, blank);
         let total_lines = self.scrollback.len().saturating_add(self.rows);
@@ -286,7 +287,7 @@ impl VtScreen {
 
     fn reset_csi(&mut self) {
         self.csi_private = false;
-        self.csi_params = [0; 8];
+        self.csi_params = [0; CSI_PARAM_LIMIT];
         self.csi_count = 0;
         self.csi_value = None;
     }
@@ -534,25 +535,45 @@ impl VtScreen {
             return;
         }
 
-        for index in 0..self.csi_count {
+        let mut index = 0;
+        while index < self.csi_count {
             match self.csi_params[index] {
                 0 => self.reset_attributes(),
                 1 => self.bold = true,
-                22 => self.bold = false,
+                21 | 22 => self.bold = false,
                 7 => self.inverse = true,
                 27 => self.inverse = false,
                 30..=37 => self.foreground = ansi_color(self.csi_params[index] - 30),
-                39 => self.foreground = Color::rgb(230, 232, 235),
+                38 => {
+                    if let Some((color, consumed)) =
+                        sgr_extended_color(&self.csi_params, self.csi_count, index)
+                    {
+                        self.foreground = color;
+                        index = index.saturating_add(consumed);
+                    }
+                }
+                39 => self.foreground = default_foreground(),
                 40..=47 => self.background = ansi_color(self.csi_params[index] - 40),
-                49 => self.background = Color::rgb(12, 14, 18),
+                48 => {
+                    if let Some((color, consumed)) =
+                        sgr_extended_color(&self.csi_params, self.csi_count, index)
+                    {
+                        self.background = color;
+                        index = index.saturating_add(consumed);
+                    }
+                }
+                49 => self.background = default_background(),
+                90..=97 => self.foreground = bright_ansi_color(self.csi_params[index] - 90),
+                100..=107 => self.background = bright_ansi_color(self.csi_params[index] - 100),
                 _ => {}
             }
+            index += 1;
         }
     }
 
     fn reset_attributes(&mut self) {
-        self.foreground = Color::rgb(230, 232, 235);
-        self.background = Color::rgb(12, 14, 18);
+        self.foreground = default_foreground();
+        self.background = default_background();
         self.bold = false;
         self.inverse = false;
     }
@@ -594,4 +615,85 @@ fn ansi_color(index: usize) -> Color {
         6 => Color::rgb(17, 168, 205),
         _ => Color::rgb(229, 229, 229),
     }
+}
+
+fn bright_ansi_color(index: usize) -> Color {
+    match index {
+        0 => Color::rgb(102, 102, 102),
+        1 => Color::rgb(241, 76, 76),
+        2 => Color::rgb(35, 209, 139),
+        3 => Color::rgb(245, 245, 67),
+        4 => Color::rgb(59, 142, 234),
+        5 => Color::rgb(214, 112, 214),
+        6 => Color::rgb(41, 184, 219),
+        _ => Color::rgb(255, 255, 255),
+    }
+}
+
+fn sgr_extended_color(
+    params: &[usize; CSI_PARAM_LIMIT],
+    count: usize,
+    index: usize,
+) -> Option<(Color, usize)> {
+    if index + 1 >= count {
+        return None;
+    }
+    let mode = *params.get(index + 1)?;
+    match mode {
+        5 => {
+            if index + 2 >= count {
+                return None;
+            }
+            let color_index = *params.get(index + 2)?;
+            Some((ansi_256_color(color_index), 2))
+        }
+        2 => {
+            if index + 4 >= count {
+                return None;
+            }
+            let red = (*params.get(index + 2)?).min(255) as u8;
+            let green = (*params.get(index + 3)?).min(255) as u8;
+            let blue = (*params.get(index + 4)?).min(255) as u8;
+            Some((Color::rgb(red, green, blue), 4))
+        }
+        _ => None,
+    }
+}
+
+fn ansi_256_color(index: usize) -> Color {
+    match index {
+        0..=7 => ansi_color(index),
+        8..=15 => bright_ansi_color(index - 8),
+        16..=231 => {
+            let n = index - 16;
+            let red = color_cube_component(n / 36);
+            let green = color_cube_component((n / 6) % 6);
+            let blue = color_cube_component(n % 6);
+            Color::rgb(red, green, blue)
+        }
+        232..=255 => {
+            let level = 8 + ((index - 232) * 10);
+            Color::rgb(level as u8, level as u8, level as u8)
+        }
+        _ => default_foreground(),
+    }
+}
+
+fn color_cube_component(value: usize) -> u8 {
+    match value {
+        0 => 0,
+        1 => 95,
+        2 => 135,
+        3 => 175,
+        4 => 215,
+        _ => 255,
+    }
+}
+
+fn default_foreground() -> Color {
+    Color::rgb(230, 232, 235)
+}
+
+fn default_background() -> Color {
+    Color::rgb(12, 14, 18)
 }
