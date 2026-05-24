@@ -32,7 +32,11 @@ pub struct VtScreen {
     foreground: Color,
     background: Color,
     bold: bool,
+    faint: bool,
+    italic: bool,
+    underline: bool,
     inverse: bool,
+    strikethrough: bool,
     parser_state: ParserState,
     csi_private: bool,
     csi_params: [usize; CSI_PARAM_LIMIT],
@@ -68,7 +72,11 @@ impl VtScreen {
             foreground,
             background,
             bold: false,
+            faint: false,
+            italic: false,
+            underline: false,
             inverse: false,
+            strikethrough: false,
             parser_state: ParserState::Ground,
             csi_private: false,
             csi_params: [0; CSI_PARAM_LIMIT],
@@ -365,7 +373,11 @@ impl VtScreen {
 
         let mut cell = TextGridCell::new(ch, self.foreground, self.background);
         cell.bold = self.bold;
+        cell.faint = self.faint;
+        cell.italic = self.italic;
+        cell.underline = self.underline;
         cell.inverse = self.inverse;
+        cell.strikethrough = self.strikethrough;
         let _ = self
             .grid
             .set_cell(self.cursor_column, self.cursor_row, cell);
@@ -540,9 +552,19 @@ impl VtScreen {
             match self.csi_params[index] {
                 0 => self.reset_attributes(),
                 1 => self.bold = true,
-                21 | 22 => self.bold = false,
+                2 => self.faint = true,
+                3 => self.italic = true,
+                4 => self.underline = true,
                 7 => self.inverse = true,
+                9 => self.strikethrough = true,
+                21 | 22 => {
+                    self.bold = false;
+                    self.faint = false;
+                }
+                23 => self.italic = false,
+                24 => self.underline = false,
                 27 => self.inverse = false,
+                29 => self.strikethrough = false,
                 30..=37 => self.foreground = ansi_color(self.csi_params[index] - 30),
                 38 => {
                     if let Some((color, consumed)) =
@@ -575,7 +597,11 @@ impl VtScreen {
         self.foreground = default_foreground();
         self.background = default_background();
         self.bold = false;
+        self.faint = false;
+        self.italic = false;
+        self.underline = false;
         self.inverse = false;
+        self.strikethrough = false;
     }
 
     fn blank_cell(&self) -> TextGridCell {

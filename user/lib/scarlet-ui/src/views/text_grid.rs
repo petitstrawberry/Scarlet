@@ -25,8 +25,16 @@ pub struct TextGridCell {
     pub background: Color,
     /// Whether the cell should be drawn in bold style.
     pub bold: bool,
+    /// Whether the foreground should be rendered with faint intensity.
+    pub faint: bool,
+    /// Whether the cell should be rendered in italic style.
+    pub italic: bool,
+    /// Whether the cell should draw an underline.
+    pub underline: bool,
     /// Whether foreground and background should be swapped.
     pub inverse: bool,
+    /// Whether the cell should draw a strike-through line.
+    pub strikethrough: bool,
 }
 
 impl TextGridCell {
@@ -47,7 +55,11 @@ impl TextGridCell {
             foreground,
             background,
             bold: false,
+            faint: false,
+            italic: false,
+            underline: false,
             inverse: false,
+            strikethrough: false,
         }
     }
 
@@ -70,6 +82,10 @@ impl Default for TextGridCell {
     fn default() -> Self {
         Self::blank(Color::WHITE, Color::BLACK)
     }
+}
+
+fn dim_color(color: Color) -> Color {
+    Color::rgba_f32(color.r * 0.55, color.g * 0.55, color.b * 0.55, color.a)
 }
 
 /// Fixed-size text grid contents.
@@ -493,11 +509,14 @@ impl TextGridRenderObject {
 
         let w = libm::ceilf(self.cell_width) as u32;
         let h = libm::ceilf(self.cell_height) as u32;
-        let (foreground, background) = if cell.inverse {
+        let (mut foreground, background) = if cell.inverse {
             (cell.background, cell.foreground)
         } else {
             (cell.foreground, cell.background)
         };
+        if cell.faint {
+            foreground = dim_color(foreground);
+        }
 
         canvas.fill_rect(x, y, w, h, background);
 
@@ -521,6 +540,16 @@ impl TextGridRenderObject {
                     self.font_size,
                 );
             }
+        }
+        let line_thickness = (libm::ceilf(self.font_size / 12.0) as u32).max(1);
+        if cell.underline {
+            let line_y = y
+                + h.saturating_sub(line_thickness).saturating_sub(1) as i32;
+            canvas.fill_rect(x, line_y.max(y), w, line_thickness, foreground);
+        }
+        if cell.strikethrough {
+            let line_y = y + (h / 2) as i32;
+            canvas.fill_rect(x, line_y, w, line_thickness, foreground);
         }
     }
 
