@@ -128,6 +128,14 @@ Current Phase 1 state:
 - `TtyDevice` stores its controlling SID and a weak self-reference so Linux
   `TIOCSCTTY`, `TIOCNOTTY`, and `TIOCGSID` can operate without adding a
   separate signal/session subsystem.
+- Scarlet native user space exposes the same model through
+  `std::task::create_session`, `session_id`, `process_group_id`, and
+  `set_process_group`. These are Scarlet-native wrappers over the Task model,
+  not POSIX ABI entry points.
+- Scarlet native user space can deliver job-control operations through
+  `std::ipc::send_process_control_to_group`, which sends
+  `EventContent::ProcessControl` to a PGID without introducing POSIX signal
+  names into the native ABI.
 
 `setsid(2)` sets `SID = PGID = current task ID`, clears the controlling TTY,
 and marks the caller as a session leader. `setpgid(2)` is constrained to the
@@ -172,6 +180,11 @@ kernel-neutral representation is the existing Event path:
 at their boundary. For example, the Linux ABI maps `TerminalStop` to `SIGTSTP`,
 `TerminalInput` to `SIGTTIN`, `TerminalOutput` to `SIGTTOU`, and
 `WindowChange` to `SIGWINCH`.
+
+Current Phase 6 shell wiring uses that same Event path: child commands are
+placed into their own PGID, foreground execution switches the TTY foreground
+PGID to the child group, and `fg`/`bg` resume jobs with
+`ProcessControlType::Continue` addressed to the stored PGID.
 
 ## Scarlet Control Opcode Mapping
 

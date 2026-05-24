@@ -190,6 +190,80 @@ pub fn getppid() -> u32 {
     syscall0(Syscall::Getppid) as u32
 }
 
+/// Errors returned by native session/process-group operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskControlError {
+    /// The requested task or process group is not visible in this namespace.
+    NotFound,
+    /// The requested relationship or state transition is not permitted.
+    PermissionDenied,
+}
+
+fn task_control_result(value: usize) -> Result<usize, TaskControlError> {
+    if value == usize::MAX {
+        Err(TaskControlError::PermissionDenied)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Create a new session for the current task.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success.
+pub fn create_session() -> Result<u32, TaskControlError> {
+    task_control_result(syscall0(Syscall::CreateSession)).map(|id| id as u32)
+}
+
+/// Return the session ID for a task.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success.
+pub fn session_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    task_control_result(syscall1(Syscall::GetSessionId, pid)).map(|id| id as u32)
+}
+
+/// Return the process group ID for a task.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+///
+/// # Returns
+///
+/// Namespace-local process group ID on success.
+pub fn process_group_id(pid: Option<u32>) -> Result<u32, TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    task_control_result(syscall1(Syscall::GetProcessGroupId, pid)).map(|id| id as u32)
+}
+
+/// Set a task's process group.
+///
+/// # Arguments
+///
+/// * `pid` - Namespace-local task ID. `None` means the current task.
+/// * `process_group_id` - Namespace-local process group ID. `None` makes the
+///   target task become a process-group leader.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+pub fn set_process_group(
+    pid: Option<u32>,
+    process_group_id: Option<u32>,
+) -> Result<(), TaskControlError> {
+    let pid = pid.unwrap_or(0) as usize;
+    let process_group_id = process_group_id.unwrap_or(0) as usize;
+    task_control_result(syscall2(Syscall::SetProcessGroup, pid, process_group_id)).map(|_| ())
+}
+
 /// Executes a program, replacing the current process image.
 ///
 /// # Arguments

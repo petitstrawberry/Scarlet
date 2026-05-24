@@ -5,11 +5,13 @@ extern crate scarlet_std as std;
 
 use std::fs::OpenOptions;
 use std::handle::Handle;
-use std::io::Read;
 use std::{
-    format, print, println,
+    format,
+    ipc::{ProcessControl, send_process_control_to_group},
+    print, println,
     string::String,
     task::{execve, exit, fork, pipe, waitpid},
+    tty::{KeyboardMode, ReadPolicy, Terminal},
     vec::Vec,
 };
 
@@ -25,6 +27,7 @@ use parser::{Command, Pipeline, RedirectType};
 struct Job {
     job_id: usize,
     pid: i32,
+    process_group_id: i32,
     command: String,
     is_running: bool,
 }
@@ -41,10 +44,10 @@ fn init_jobs() {
 }
 
 /// Add a job to the job list
-fn add_job(pid: i32, command: String) -> usize {
+fn add_job(pid: i32, process_group_id: i32, command: String) -> usize {
     println!(
-        "DEBUG: add_job called with pid={}, command={}",
-        pid, command
+        "DEBUG: add_job called with pid={}, pgid={}, command={}",
+        pid, process_group_id, command
     );
     unsafe {
         let next_id_ptr = core::ptr::addr_of_mut!(NEXT_JOB_ID);
@@ -62,6 +65,7 @@ fn add_job(pid: i32, command: String) -> usize {
                 (*jobs_ptr)[i] = Some(Job {
                     job_id,
                     pid,
+                    process_group_id,
                     command,
                     is_running: true,
                 });
@@ -286,6 +290,8 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
 
     match fork() {
         0 => {
+            make_child_process_group_leader();
+
             // Convert args to &[&str] for execve
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -306,9 +312,10 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             1
         }
         pid => {
+            join_child_process_group(pid, pid);
             set_foreground_group(pid as usize);
             let (_, status) = waitpid(pid, 0);
-            set_foreground_group(std::task::getpid() as usize);
+            set_foreground_group(current_process_group_or_pid());
             status
         }
     }
@@ -385,19 +392,12 @@ fn execute_script_content(content: &str) -> i32 {
     last_exit_code
 }
 
-// TTY control opcodes
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-const SCTL_TTY_SET_FOREGROUND_GROUP: u32 = 0x5354_000E;
-const KB_XLATE: usize = 0;
-
 /// Restore TTY to canonical mode before executing external commands
 fn restore_canonical_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 1); // canonical mode
-        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 1); // echo enabled
+        let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_canonical(true);
+        let _ = terminal.set_echo(true);
         core::mem::forget(stdin_handle); // Don't close stdin
     }
 }
@@ -405,19 +405,33 @@ fn restore_canonical_mode() {
 /// Restore TTY to raw mode after external command finishes
 fn restore_raw_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
-        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
-        let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
-        let read_policy = 1; // min=1, timeout=0
-        let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
+        let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_canonical(false);
+        let _ = terminal.set_echo(false);
+        let _ = terminal.set_keyboard_mode(KeyboardMode::Xlate);
+        let _ = terminal.set_read_policy(ReadPolicy::new(1, 0));
         core::mem::forget(stdin_handle); // Don't close stdin
     }
 }
 
 fn set_foreground_group(task_group_id: usize) {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_FOREGROUND_GROUP, task_group_id);
+        let _ = Terminal::from_handle(&stdin_handle).set_foreground_group(task_group_id);
         core::mem::forget(stdin_handle);
+    }
+}
+
+fn current_process_group_or_pid() -> usize {
+    std::task::process_group_id(None).unwrap_or_else(|_| std::task::getpid()) as usize
+}
+
+fn make_child_process_group_leader() {
+    let _ = std::task::set_process_group(None, None);
+}
+
+fn join_child_process_group(pid: i32, process_group_id: i32) {
+    if pid > 0 && process_group_id > 0 {
+        let _ = std::task::set_process_group(Some(pid as u32), Some(process_group_id as u32));
     }
 }
 
@@ -504,6 +518,8 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
 
     match fork() {
         0 => {
+            make_child_process_group_leader();
+
             // Child: apply redirects and execute
             // For stdin: close handle 0, then dup to get handle 0
             if let Some(h) = stdin_handle {
@@ -560,12 +576,13 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             1
         }
         pid => {
+            join_child_process_group(pid, pid);
             // Parent: wait for child or add to job list if background
             if is_background {
                 println!("DEBUG: Parent process, about to add job");
                 let cmd_str = cmd.args.join(" ");
                 println!("DEBUG: Command string created: {}", cmd_str);
-                let job_id = add_job(pid, cmd_str);
+                let job_id = add_job(pid, pid, cmd_str);
                 println!("[{}] {} &", job_id, pid);
                 println!("DEBUG: Job added, about to restore raw mode");
                 // Restore raw mode for shell after background job starts
@@ -578,7 +595,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 set_foreground_group(pid as usize);
                 let (_, status) = waitpid(pid, 0);
                 // Restore foreground group to shell
-                set_foreground_group(std::task::getpid() as usize);
+                set_foreground_group(current_process_group_or_pid());
                 // Restore raw mode for shell after foreground command completes
                 restore_raw_mode();
                 status
@@ -675,6 +692,8 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
             }
             pid => {
                 // Parent process
+                let process_group_id = pids.first().copied().unwrap_or(pid);
+                join_child_process_group(pid, process_group_id);
                 pids.push(pid);
             }
         }
@@ -696,7 +715,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
             .collect::<Vec<_>>()
             .join(" | ");
 
-        let job_id = add_job(pids[0], cmd_str);
+        let job_id = add_job(pids[0], pids[0], cmd_str);
         println!("[{}] {} &", job_id, pids[0]);
         // Restore raw mode for shell after background job starts
         restore_raw_mode();
@@ -713,7 +732,7 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         last_status = status;
     }
     // Restore foreground group to shell
-    set_foreground_group(std::task::getpid() as usize);
+    set_foreground_group(current_process_group_or_pid());
 
     // Restore raw mode for shell after pipeline completes
     restore_raw_mode();
@@ -731,7 +750,8 @@ fn interactive_shell() -> i32 {
     init_jobs();
 
     // Set shell as foreground group on the TTY
-    set_foreground_group(std::task::getpid() as usize);
+    let _ = std::task::set_process_group(None, None);
+    set_foreground_group(current_process_group_or_pid());
 
     // Try to execute .shrc on startup
     execute_shrc();
@@ -969,7 +989,15 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                         let job_copy = job.clone();
                         (*jobs_ptr)[i] = None; // Remove from list
                         println!("{}", job_copy.command);
+                        restore_canonical_mode();
+                        set_foreground_group(job_copy.process_group_id as usize);
+                        let _ = send_process_control_to_group(
+                            Some(job_copy.process_group_id as u32),
+                            ProcessControl::Continue,
+                        );
                         let (_, status) = waitpid(job_copy.pid, 0);
+                        set_foreground_group(current_process_group_or_pid());
+                        restore_raw_mode();
                         return Some(status);
                     }
                 }
@@ -978,9 +1006,42 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             }
         }
         "bg" => {
-            // Resume a stopped job in background (simplified - just show message)
-            println!("bg: not fully implemented (no job control signals yet)");
-            Some(0)
+            cleanup_jobs();
+            let job_id = if args.len() > 1 {
+                match args[1].trim_start_matches('%').parse::<usize>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        println!("bg: invalid job id");
+                        return Some(1);
+                    }
+                }
+            } else {
+                let jobs = get_jobs();
+                if jobs.is_empty() {
+                    println!("bg: no current job");
+                    return Some(1);
+                }
+                jobs.last().unwrap().job_id
+            };
+
+            unsafe {
+                let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
+                for i in 0..MAX_JOBS {
+                    if let Some(job) = &mut (*jobs_ptr)[i]
+                        && job.job_id == job_id
+                    {
+                        let _ = send_process_control_to_group(
+                            Some(job.process_group_id as u32),
+                            ProcessControl::Continue,
+                        );
+                        job.is_running = true;
+                        println!("[{}] {} &", job.job_id, job.command);
+                        return Some(0);
+                    }
+                }
+                println!("bg: {}: no such job", job_id);
+                Some(1)
+            }
         }
         "exit" => {
             let exit_code = if args.len() > 1 {

@@ -26,6 +26,10 @@ pub enum Syscall {
     // Process information
     GetTaskInfoCount = 24, // Number of tasks
     GetTaskInfoList = 25,  // TaskInfo snapshots
+    CreateSession = 26,
+    GetSessionId = 27,
+    GetProcessGroupId = 28,
+    SetProcessGroup = 29,
 
     // TLS (Thread Local Storage) Management
     SetTls = 30,
@@ -75,7 +79,9 @@ pub enum Syscall {
     FsPivotRoot = 502,
 
     // === IPC Operations ===
-    Pipe = 600, // Create pipe handles
+    Pipe = 600,            // Create pipe handles
+    EventSendDirect = 615, // Send process-control event to a task
+    EventSendGroup = 616,  // Send process-control event to a process group
 
     // Shared Memory
     SharedMemoryCreate = 620, // Create shared memory region

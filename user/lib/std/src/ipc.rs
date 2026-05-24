@@ -135,7 +135,136 @@ pub mod process_control {
     pub const PIPE_BROKEN: u32 = 8;
     pub const ALARM: u32 = 9;
     pub const IO_READY: u32 = 10;
-    pub const USER_START: u32 = 11;
+    pub const TERMINAL_STOP: u32 = 11;
+    pub const TERMINAL_INPUT: u32 = 12;
+    pub const TERMINAL_OUTPUT: u32 = 13;
+    pub const WINDOW_CHANGE: u32 = 14;
+    pub const USER_START: u32 = 256;
+}
+
+/// Native process-control events.
+///
+/// These values are Scarlet Event subtypes, not POSIX signal numbers.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessControl {
+    Terminate = 0,
+    Kill = 1,
+    Stop = 2,
+    Continue = 3,
+    Interrupt = 4,
+    Quit = 5,
+    Hangup = 6,
+    ChildExit = 7,
+    PipeBroken = 8,
+    Alarm = 9,
+    IoReady = 10,
+    TerminalStop = 11,
+    TerminalInput = 12,
+    TerminalOutput = 13,
+    WindowChange = 14,
+}
+
+/// Event delivery priority.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventPriority {
+    Low = 1,
+    Normal = 2,
+    High = 3,
+    Critical = 4,
+}
+
+/// Send a process-control event directly to a task.
+///
+/// # Arguments
+///
+/// * `task_id` - Namespace-local task ID.
+/// * `control` - Process-control event to deliver.
+pub fn send_process_control(task_id: u32, control: ProcessControl) -> EventResult<()> {
+    send_process_control_with_priority(task_id, control, EventPriority::High, true)
+}
+
+/// Send a process-control event directly to a task with delivery options.
+///
+/// # Arguments
+///
+/// * `task_id` - Namespace-local task ID.
+/// * `control` - Process-control event to deliver.
+/// * `priority` - Event delivery priority.
+/// * `reliable` - Whether the kernel should use reliable delivery.
+pub fn send_process_control_with_priority(
+    task_id: u32,
+    control: ProcessControl,
+    priority: EventPriority,
+    reliable: bool,
+) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall4};
+
+    let result = syscall4(
+        Syscall::EventSendDirect,
+        task_id as usize,
+        control as usize,
+        reliable as usize,
+        priority as usize,
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Send a process-control event to a process group.
+///
+/// # Arguments
+///
+/// * `process_group_id` - Namespace-local process group ID. `None` targets the
+///   caller's process group.
+/// * `control` - Process-control event to deliver.
+pub fn send_process_control_to_group(
+    process_group_id: Option<u32>,
+    control: ProcessControl,
+) -> EventResult<()> {
+    send_process_control_to_group_with_priority(
+        process_group_id,
+        control,
+        EventPriority::High,
+        true,
+    )
+}
+
+/// Send a process-control event to a process group with delivery options.
+///
+/// # Arguments
+///
+/// * `process_group_id` - Namespace-local process group ID. `None` targets the
+///   caller's process group.
+/// * `control` - Process-control event to deliver.
+/// * `priority` - Event delivery priority.
+/// * `reliable` - Whether the kernel should use reliable delivery.
+pub fn send_process_control_to_group_with_priority(
+    process_group_id: Option<u32>,
+    control: ProcessControl,
+    priority: EventPriority,
+    reliable: bool,
+) -> EventResult<()> {
+    use crate::syscall::{Syscall, syscall4};
+
+    let result = syscall4(
+        Syscall::EventSendGroup,
+        process_group_id.unwrap_or(0) as usize,
+        control as usize,
+        reliable as usize,
+        priority as usize,
+    );
+
+    if result == usize::MAX {
+        Err(EventError::SyscallFailed)
+    } else {
+        Ok(())
+    }
 }
 
 /// Event mask operations

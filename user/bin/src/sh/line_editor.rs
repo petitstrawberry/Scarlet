@@ -11,19 +11,12 @@
 extern crate scarlet_std as std;
 
 use std::handle::Handle;
-use std::{print, string::String, vec::Vec};
-
-// TTY control opcodes (from kernel investigation)
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_FLUSH_INPUT: u32 = 0x5354_0009;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-
-// Keyboard modes
-const KB_XLATE: usize = 0; // Translated mode (ASCII)
-const KB_MEDIUMRAW: usize = 1; // Linux keycodes (1 byte)
-const KB_RAW: usize = 2; // Raw scan codes
+use std::{
+    print,
+    string::String,
+    tty::{KeyboardMode, ReadPolicy, Terminal},
+    vec::Vec,
+};
 
 // Linux keycodes for special keys (from TTY device)
 const KEY_UP: u32 = 103;
@@ -77,52 +70,28 @@ impl LineEditor {
         }
 
         if let Some(ref handle) = self.stdin_handle {
-            // Set canonical mode (opposite of raw mode)
-            let canonical_value = if enabled { 0 } else { 1 };
-            if handle
-                .control(SCTL_TTY_SET_CANONICAL, canonical_value)
-                .is_err()
-            {
+            let terminal = Terminal::from_handle(handle);
+
+            if terminal.set_canonical(!enabled).is_err() {
+                return Err(());
+            }
+            if terminal.set_echo(!enabled).is_err() {
                 return Err(());
             }
 
-            // Set echo (off in raw mode, on in canonical mode)
-            let echo_value = if enabled { 0 } else { 1 };
-            if handle.control(SCTL_TTY_SET_ECHO, echo_value).is_err() {
-                return Err(());
-            }
-
-            // Set keyboard mode
-            // 0=XLATE (ASCII passthrough), 1=MEDIUMRAW (Linux keycodes), 2=RAW (scan codes)
             // Use XLATE mode so all ASCII characters (including symbols) pass through
-            if handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE).is_err() {
+            if terminal.set_keyboard_mode(KeyboardMode::Xlate).is_err() {
                 print!("DEBUG: Failed to set keyboard mode!\n");
                 return Err(());
             }
 
-            // Set read policy for raw mode
-            // Format: ((timeout_ms as u32) << 16) | (min_ready_bytes as u32)
-            if enabled {
-                // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
+            if terminal.set_read_policy(ReadPolicy::new(1, 0)).is_err() {
+                if enabled {
                     print!("DEBUG: Failed to set read policy!\n");
-                    return Err(());
                 }
-                // Raw mode enabled successfully
-            } else {
-                // Canonical mode: restore default policy
-                // min=1, timeout=0 is reasonable for canonical too
-                let read_policy = 1;
-                if handle
-                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
-                    .is_err()
-                {
-                    return Err(());
-                }
+                return Err(());
+            }
+            if !enabled {
                 print!("DEBUG: Canonical mode restored\n");
             }
 

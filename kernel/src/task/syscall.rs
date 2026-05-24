@@ -547,6 +547,156 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Create a new session for the current task.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success, or `usize::MAX` on failure.
+pub fn sys_create_session(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    match task.create_session() {
+        Ok(session_id) => task
+            .get_namespace()
+            .resolve_local_id(session_id)
+            .unwrap_or(session_id),
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Return a task's session ID.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Namespace-local task ID, or 0 for current task.
+///
+/// # Returns
+///
+/// Namespace-local session ID on success, or `usize::MAX` on failure.
+pub fn sys_get_session_id(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return usize::MAX,
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return usize::MAX;
+    };
+
+    namespace
+        .resolve_local_id(target.get_session_id())
+        .unwrap_or(target.get_session_id())
+}
+
+/// Return a task's process group ID.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Namespace-local task ID, or 0 for current task.
+///
+/// # Returns
+///
+/// Namespace-local process group ID on success, or `usize::MAX` on failure.
+pub fn sys_get_process_group_id(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return usize::MAX,
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return usize::MAX;
+    };
+
+    namespace
+        .resolve_local_id(target.get_process_group_id())
+        .unwrap_or(target.get_process_group_id())
+}
+
+/// Set a task's process group.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Namespace-local task ID, or 0 for current task.
+/// * `trapframe.get_arg(1)` - Namespace-local process group ID, or 0 to use
+///   the target task ID as its process group.
+///
+/// # Returns
+///
+/// 0 on success, or `usize::MAX` on failure.
+pub fn sys_set_process_group(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = trapframe.get_arg(0);
+    let pgid = trapframe.get_arg(1);
+    trapframe.increment_pc_next(caller);
+
+    let namespace = caller.get_namespace();
+    let target_global_id = if pid == 0 {
+        caller.get_id()
+    } else {
+        match namespace.resolve_global_id(pid) {
+            Some(id) => id,
+            None => return usize::MAX,
+        }
+    };
+
+    let Some(target) = get_task_by_id(target_global_id) else {
+        return usize::MAX;
+    };
+
+    if target.get_id() != caller.get_id() && target.get_parent_id() != Some(caller.get_id()) {
+        return usize::MAX;
+    }
+    if target.get_session_id() != caller.get_session_id() || target.is_session_leader() {
+        return usize::MAX;
+    }
+
+    let new_pgid = if pgid == 0 {
+        target.get_id()
+    } else {
+        match namespace.resolve_global_id(pgid) {
+            Some(id) => id,
+            None => return usize::MAX,
+        }
+    };
+
+    if new_pgid != target.get_id() {
+        let Some(group_leader) = get_task_by_id(new_pgid) else {
+            return usize::MAX;
+        };
+        if group_leader.get_process_group_id() != new_pgid
+            || group_leader.get_session_id() != target.get_session_id()
+        {
+            return usize::MAX;
+        }
+    }
+
+    target.set_process_group_id(new_pgid);
+    0
+}
+
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     let nanosecs = trapframe.get_arg(0) as u64;
     let task = mytask().unwrap();

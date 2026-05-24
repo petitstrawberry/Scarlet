@@ -4,21 +4,15 @@ use alloc::sync::Arc;
 use core::time::Duration;
 use scarlet_std::handle::Handle;
 use scarlet_std::hypervisor::Vcpu;
-use scarlet_std::io::Read;
 use scarlet_std::sync::Mutex;
 use scarlet_std::thread;
+use scarlet_std::tty::{KeyboardMode, ReadPolicy, Terminal};
 
 use crate::devices::uart::Ns16550a;
 
 pub const TIMER_IRQ_TYPE: usize = 1;
 pub const EXTERNAL_IRQ_TYPE: usize = 2;
 const TIMEBASE_FREQ: u64 = 10_000_000;
-
-const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
-const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
-const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
-const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
-const KB_XLATE: usize = 0;
 
 pub struct TimerState {
     next_timer: Option<u64>,
@@ -68,10 +62,11 @@ pub fn start_uart_thread(uart: Arc<Ns16550a>, vcpu: Arc<Vcpu>) {
 
 fn set_raw_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
-        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0);
-        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0);
-        let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE);
-        let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, 1);
+        let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_canonical(false);
+        let _ = terminal.set_echo(false);
+        let _ = terminal.set_keyboard_mode(KeyboardMode::Xlate);
+        let _ = terminal.set_read_policy(ReadPolicy::new(1, 0));
         core::mem::forget(stdin_handle);
     }
 }
