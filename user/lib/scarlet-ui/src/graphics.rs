@@ -15,6 +15,7 @@ use scarlet_std::{println, sync::Mutex, fs::File};
 struct GlyphKey {
     codepoint: u32,
     size_px: u16,
+    font_slot: u8,
 }
 
 /// Rasterized glyph mask
@@ -130,10 +131,12 @@ fn ceil_i32(v: f32) -> i32 {
 fn glyph_cache_get_or_rasterize(
     scaled: &PxScaleFont<&FontRef<'static>>,
     ch: char,
+    font_slot: u8,
 ) -> Option<(i32, i32, u32, u32, *const u8)> {
     let key = GlyphKey {
         codepoint: ch as u32,
         size_px: scaled.scale.y as u16,
+        font_slot,
     };
 
     let mut cache = GLYPH_CACHE.lock();
@@ -203,24 +206,73 @@ fn glyph_cache_get_or_rasterize(
 }
 
 const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
+const FALLBACK_FONT_PATHS: &[&str] = &["/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"];
 
 #[derive(Clone)]
 struct DefaultFontState {
     font: Option<FontRef<'static>>,
+    fallback_fonts: Vec<FontRef<'static>>,
     load_attempted: bool,
 }
 
 static DEFAULT_FONT: Mutex<DefaultFontState> = Mutex::new(DefaultFontState {
     font: None,
+    fallback_fonts: Vec::new(),
     load_attempted: false,
 });
 
+fn clear_text_caches() {
+    let mut glyph_cache = GLYPH_CACHE.lock();
+    glyph_cache.entries.clear();
+    glyph_cache.next_evict = 0;
+    TEXT_METRICS_CACHE.lock().entries.clear();
+}
+
 /// Set the default UI font
+///
+/// # Arguments
+///
+/// * `font_bytes` - Font bytes with static lifetime.
+///
+/// # Returns
+///
+/// `Ok(())` when the font was accepted.
 pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(font);
+    drop(state);
+    clear_text_caches();
     Ok(())
+}
+
+/// Add a fallback UI font.
+///
+/// Fallback fonts are consulted when the primary default font has no glyph for
+/// a character. Later UI settings can use this API to make fonts configurable.
+///
+/// # Arguments
+///
+/// * `font_bytes` - Fallback font bytes with static lifetime.
+///
+/// # Returns
+///
+/// `Ok(())` when the font was accepted.
+pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
+    let font = FontRef::try_from_slice(font_bytes)?;
+    DEFAULT_FONT.lock().fallback_fonts.push(font);
+    clear_text_caches();
+    Ok(())
+}
+
+/// Clear all fallback UI fonts.
+///
+/// # Returns
+///
+/// Nothing.
+pub fn clear_default_font_fallbacks() {
+    DEFAULT_FONT.lock().fallback_fonts.clear();
+    clear_text_caches();
 }
 
 fn set_default_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
@@ -228,7 +280,39 @@ fn set_default_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
     set_default_font(leaked)
 }
 
-fn load_default_font_from_rootfs_once() {
+fn add_fallback_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
+    let leaked: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
+    add_default_font_fallback(leaked)
+}
+
+fn read_font_file(path: &str) -> Option<Vec<u8>> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            if crate::debug::is_enabled() {
+                println!("[scarlet-ui] Failed to open font '{}': {:?}", path, e);
+            }
+            return None;
+        }
+    };
+
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return None,
+        };
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+
+    Some(bytes)
+}
+
+fn load_fonts_from_rootfs_once() {
     let should_try = {
         let mut state = DEFAULT_FONT.lock();
         if state.font.is_some() || state.load_attempted {
@@ -243,39 +327,39 @@ fn load_default_font_from_rootfs_once() {
         return;
     }
 
-    let mut file = match File::open(DEFAULT_FONT_PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            if crate::debug::is_enabled() {
-                println!(
-                    "[scarlet-ui] Failed to open default font '{}': {:?}",
-                    DEFAULT_FONT_PATH,
-                    e
-                );
-            }
-            return;
-        }
-    };
-
-    let mut bytes = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = match file.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => return,
-        };
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
+    if let Some(bytes) = read_font_file(DEFAULT_FONT_PATH) {
+        let _ = set_default_font_owned(bytes);
     }
-
-    let _ = set_default_font_owned(bytes);
+    for path in FALLBACK_FONT_PATHS {
+        if let Some(bytes) = read_font_file(path) {
+            let _ = add_fallback_font_owned(bytes);
+        }
+    }
 }
 
-fn default_font() -> Option<FontRef<'static>> {
-    load_default_font_from_rootfs_once();
-    DEFAULT_FONT.lock().font.clone()
+fn loaded_fonts() -> Option<(FontRef<'static>, Vec<FontRef<'static>>)> {
+    load_fonts_from_rootfs_once();
+    let state = DEFAULT_FONT.lock();
+    state
+        .font
+        .clone()
+        .map(|font| (font, state.fallback_fonts.clone()))
+}
+
+fn select_font_for_char(
+    ch: char,
+    primary: &FontRef<'static>,
+    fallbacks: &[FontRef<'static>],
+) -> (FontRef<'static>, u8) {
+    if primary.glyph_id(ch).0 != 0 {
+        return (primary.clone(), 0);
+    }
+    for (index, font) in fallbacks.iter().enumerate() {
+        if font.glyph_id(ch).0 != 0 {
+            return (font.clone(), index.saturating_add(1) as u8);
+        }
+    }
+    (primary.clone(), 0)
 }
 
 /// Measure text using the global default vector font
@@ -283,7 +367,7 @@ fn default_font() -> Option<FontRef<'static>> {
 /// Returns `(width, height)` in pixels
 pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
     TEXT_METRICS_CACHE.lock().get_or_compute(text, font_size_px, || {
-        if let Some(font) = default_font() {
+        if let Some((font, fallbacks)) = loaded_fonts() {
             let scale = PxScale::from(font_size_px);
             let scaled = font.as_scaled(scale);
 
@@ -300,8 +384,10 @@ pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
                     lines = lines.saturating_add(1);
                     continue;
                 }
-                let glyph_id = scaled.glyph_id(ch);
-                line_w += scaled.h_advance(glyph_id);
+                let selected = select_font_for_char(ch, &font, &fallbacks).0;
+                let selected_scaled = selected.as_scaled(scale);
+                let glyph_id = selected_scaled.glyph_id(ch);
+                line_w += selected_scaled.h_advance(glyph_id);
             }
 
             if line_w > max_line_w {
@@ -449,25 +535,29 @@ impl<'a> Canvas<'a> {
     ///
     /// `x,y` is the **top-left** of the text line
     pub fn draw_text_sized(&mut self, x: i32, y: i32, text: &str, color: Color, font_size_px: f32) {
-        let Some(font) = default_font() else {
+        let Some((font, fallbacks)) = loaded_fonts() else {
             return;
         };
 
         let scale = PxScale::from(font_size_px);
-        let scaled = font.as_scaled(scale);
+        let base_scaled = font.as_scaled(scale);
 
         let mut caret_x = x as f32;
-        let mut caret_y = y as f32 + scaled.ascent();
+        let mut caret_y = y as f32 + base_scaled.ascent();
 
         for ch in text.chars() {
             if ch == '\n' {
                 caret_x = x as f32;
-                caret_y += scaled.height() + scaled.line_gap();
+                caret_y += base_scaled.height() + base_scaled.line_gap();
                 continue;
             }
 
+            let (selected_font, font_slot) = select_font_for_char(ch, &font, &fallbacks);
+            let scaled = selected_font.as_scaled(scale);
             let glyph_id = scaled.glyph_id(ch);
-            if let Some((ox, oy, w, h, ptr)) = glyph_cache_get_or_rasterize(&scaled, ch) {
+            if let Some((ox, oy, w, h, ptr)) =
+                glyph_cache_get_or_rasterize(&scaled, ch, font_slot)
+            {
                 let base_x = caret_x as i32;
                 let base_y = caret_y as i32;
                 let mask = unsafe { core::slice::from_raw_parts(ptr, (w as usize) * (h as usize)) };
