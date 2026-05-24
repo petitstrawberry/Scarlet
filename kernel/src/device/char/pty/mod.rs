@@ -13,7 +13,7 @@ use alloc::{
 };
 use core::{
     any::Any,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use spin::Mutex;
 
@@ -39,6 +39,7 @@ use crate::{
 struct PtyCore {
     master_input: Mutex<VecDeque<u8>>,
     master_waker: Waker,
+    slave_open_count: AtomicUsize,
 }
 
 impl PtyCore {
@@ -46,6 +47,7 @@ impl PtyCore {
         Self {
             master_input: Mutex::new(VecDeque::new()),
             master_waker: Waker::new_interruptible("pty_master_input"),
+            slave_open_count: AtomicUsize::new(0),
         }
     }
 
@@ -77,6 +79,38 @@ impl PtyCore {
 
     fn master_input_len(&self) -> usize {
         self.master_input.lock().len()
+    }
+
+    fn open_slave(&self) {
+        self.slave_open_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn close_slave(&self) {
+        let mut current = self.slave_open_count.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return;
+            }
+            let next = current - 1;
+            match self.slave_open_count.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if next == 0 {
+                        self.master_waker.wake_all();
+                    }
+                    return;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn has_slave_open(&self) -> bool {
+        self.slave_open_count.load(Ordering::Acquire) != 0
     }
 }
 
@@ -180,6 +214,16 @@ impl PtyPair {
     pub fn set_slave_locked(&self, locked: bool) {
         self.slave_locked.store(locked, Ordering::Relaxed);
     }
+
+    /// Mark a slave endpoint file object as open.
+    pub fn open_slave_endpoint(&self) {
+        self.master.core.open_slave();
+    }
+
+    /// Mark a slave endpoint file object as closed.
+    pub fn close_slave_endpoint(&self) {
+        self.master.core.close_slave();
+    }
 }
 
 /// PTY master endpoint.
@@ -266,7 +310,7 @@ impl CharDevice for PtyMasterDevice {
             if count != 0 {
                 return count;
             }
-            if self.slave.strong_count() == 0 {
+            if !self.core.has_slave_open() {
                 return 0;
             }
             if let Some(task) = crate::task::mytask() {
@@ -288,7 +332,7 @@ impl CharDevice for PtyMasterDevice {
     }
 
     fn can_read(&self) -> bool {
-        self.core.master_input_len() != 0
+        self.core.master_input_len() != 0 || !self.core.has_slave_open()
     }
 
     fn can_write(&self) -> bool {

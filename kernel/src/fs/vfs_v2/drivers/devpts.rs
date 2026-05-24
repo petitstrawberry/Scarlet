@@ -446,6 +446,7 @@ impl DevPtsFileObject {
     }
 
     fn new_slave(node: Arc<DevPtsNode>, pair: Arc<PtyPair>) -> Self {
+        pair.open_slave_endpoint();
         Self {
             node,
             endpoint: DevPtsEndpoint::Slave(pair.slave()),
@@ -543,6 +544,9 @@ impl DevPtsFileObject {
 
 impl Drop for DevPtsFileObject {
     fn drop(&mut self) {
+        if matches!(self.endpoint, DevPtsEndpoint::Slave(_)) {
+            self.pair.close_slave_endpoint();
+        }
         if let Some((state, number)) = &self.release {
             state.release_pair(*number);
         }

@@ -1,6 +1,10 @@
 //! Minimal VT screen model for Scarlet Terminal.
 
+use alloc::vec::Vec;
+
 use scarlet_ui::{Color, TextGridBuffer, TextGridCell, TextGridCursor};
+
+const SCROLLBACK_LIMIT: usize = 2000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParserState {
@@ -13,6 +17,8 @@ enum ParserState {
 /// Terminal screen state backed by a fixed text grid.
 pub struct VtScreen {
     grid: TextGridBuffer,
+    scrollback: Vec<Vec<TextGridCell>>,
+    scrollback_offset: usize,
     columns: usize,
     rows: usize,
     cursor_column: usize,
@@ -45,6 +51,8 @@ impl VtScreen {
         let background = Color::rgb(12, 14, 18);
         Self {
             grid: TextGridBuffer::new(columns, rows, TextGridCell::blank(foreground, background)),
+            scrollback: Vec::new(),
+            scrollback_offset: 0,
             columns,
             rows,
             cursor_column: 0,
@@ -62,13 +70,39 @@ impl VtScreen {
         }
     }
 
-    /// Return the grid buffer.
+    /// Return a display grid with scrollback applied.
     ///
     /// # Returns
     ///
-    /// Borrowed text grid.
-    pub fn grid(&self) -> &TextGridBuffer {
-        &self.grid
+    /// Visible text grid.
+    pub fn view_grid(&self) -> TextGridBuffer {
+        if self.scrollback_offset == 0 {
+            return self.grid.clone();
+        }
+
+        let foreground = Color::rgb(230, 232, 235);
+        let background = Color::rgb(12, 14, 18);
+        let blank = TextGridCell::blank(foreground, background);
+        let mut view = TextGridBuffer::new(self.columns, self.rows, blank);
+        let total_lines = self.scrollback.len().saturating_add(self.rows);
+        let end = total_lines.saturating_sub(self.scrollback_offset);
+        let start = end.saturating_sub(self.rows);
+
+        for target_row in 0..self.rows {
+            let source_line = start + target_row;
+            if source_line < self.scrollback.len() {
+                copy_line_to_grid(&self.scrollback[source_line], &mut view, target_row);
+            } else {
+                let source_row = source_line.saturating_sub(self.scrollback.len());
+                for column in 0..self.columns {
+                    if let Some(cell) = self.grid.cell(column, source_row) {
+                        let _ = view.set_cell(column, target_row, cell);
+                    }
+                }
+            }
+        }
+
+        view
     }
 
     /// Return the current cursor.
@@ -77,7 +111,30 @@ impl VtScreen {
     ///
     /// Cursor position suitable for [`scarlet_ui::TextGrid`].
     pub fn cursor(&self) -> TextGridCursor {
+        if self.scrollback_offset > 0 {
+            return TextGridCursor {
+                column: self.cursor_column,
+                row: self.cursor_row,
+                visible: false,
+            };
+        }
         TextGridCursor::new(self.cursor_column, self.cursor_row)
+    }
+
+    /// Scroll the display view through the saved scrollback.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - Positive values scroll up into history; negative values scroll down.
+    pub fn scroll_view(&mut self, lines: isize) {
+        if lines > 0 {
+            self.scrollback_offset = self
+                .scrollback_offset
+                .saturating_add(lines as usize)
+                .min(self.scrollback.len());
+        } else if lines < 0 {
+            self.scrollback_offset = self.scrollback_offset.saturating_sub((-lines) as usize);
+        }
     }
 
     /// Resize the terminal screen.
@@ -93,6 +150,7 @@ impl VtScreen {
             return;
         }
 
+        self.scrollback_offset = 0;
         self.grid.resize(columns, rows, self.blank_cell());
         self.columns = columns;
         self.rows = rows;
@@ -108,6 +166,7 @@ impl VtScreen {
     ///
     /// * `bytes` - Bytes read from the PTY master.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.scrollback_offset = 0;
         for &byte in bytes {
             self.feed_byte(byte);
         }
@@ -397,6 +456,9 @@ impl VtScreen {
         if count == 0 {
             return;
         }
+        for row in 0..count {
+            self.push_scrollback_row(row);
+        }
         for row in 0..self.rows.saturating_sub(count) {
             for column in 0..self.columns {
                 if let Some(cell) = self.grid.cell(column, row + count) {
@@ -457,6 +519,27 @@ impl VtScreen {
 
     fn blank_cell(&self) -> TextGridCell {
         TextGridCell::blank(self.foreground, self.background)
+    }
+
+    fn push_scrollback_row(&mut self, row: usize) {
+        let mut line = Vec::new();
+        for column in 0..self.columns {
+            line.push(
+                self.grid
+                    .cell(column, row)
+                    .unwrap_or_else(|| self.blank_cell()),
+            );
+        }
+        self.scrollback.push(line);
+        if self.scrollback.len() > SCROLLBACK_LIMIT {
+            self.scrollback.remove(0);
+        }
+    }
+}
+
+fn copy_line_to_grid(line: &[TextGridCell], grid: &mut TextGridBuffer, row: usize) {
+    for (column, cell) in line.iter().copied().enumerate().take(grid.columns()) {
+        let _ = grid.set_cell(column, row, cell);
     }
 }
 
