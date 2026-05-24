@@ -167,17 +167,9 @@ pub fn handle_ioctl(
         // Minimal termios support with Scarlet TTY mapping (canonical + read policy)
         TCGETS | TCSETS | TCSETSW | TCSETSF => {
             if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] termios op {:#06x}", request); }
-            // Validate the FD is a char device with TTY capability
-            let is_tty = if let Some(file_obj) = kernel_object.as_file() {
-                if let Ok(metadata) = file_obj.metadata() {
-                    if let FileType::CharDevice(info) = metadata.file_type {
-                        if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
-                            dev.capabilities().iter().any(|c| *c == DeviceCapability::Tty)
-                        } else { false }
-                    } else { false }
-                } else { false }
-            } else { false };
-            if !is_tty { return Err(()); }
+            if !is_tty_or_pty_kernel_object(kernel_object) {
+                return Err(());
+            }
 
             match request {
                 TCGETS => {
