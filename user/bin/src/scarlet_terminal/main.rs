@@ -34,6 +34,15 @@ const ROWS: usize = 32;
 const CELL_WIDTH: f32 = 9.0;
 const CELL_HEIGHT: f32 = 18.0;
 const FONT_SIZE: f32 = 16.0;
+const SHELL_ENV: [&str; 7] = [
+    "HOME=/system/scarlet/root",
+    "PWD=/",
+    "SHELL=/system/scarlet/bin/sh",
+    "TERM=xterm-256color",
+    "PATH=/system/scarlet/bin:/bin:/scarlet/system/scarlet/bin:/scarlet/system/linux-aarch64/bin:/scarlet/system/linux-aarch64/usr/bin:/old_root/system/scarlet/bin",
+    "XDG_RUNTIME_DIR=/tmp",
+    "WAYLAND_DISPLAY=wayland-0",
+];
 
 #[derive(Clone)]
 struct TerminalApp {
@@ -173,7 +182,7 @@ fn spawn_shell(slave: PtySlave) -> i32 {
             ];
             for path in candidates {
                 let argv = [path];
-                let rc = execve_with_flags(path, &argv, &[], EXECVE_FORCE_ABI_REBUILD);
+                let rc = execve_with_flags(path, &argv, &SHELL_ENV, EXECVE_FORCE_ABI_REBUILD);
                 if rc == 0 {
                     break;
                 }
@@ -289,6 +298,8 @@ fn write_bytes(writer: &Arc<Mutex<Option<File>>>, bytes: &[u8]) {
     let mut guard = writer.lock();
     if let Some(file) = guard.as_mut() {
         let _ = file.write_all(bytes);
+    } else {
+        println!("[scarlet_terminal] pty writer is not ready");
     }
 }
 

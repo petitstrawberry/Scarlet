@@ -11,6 +11,13 @@ use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
 
+const KEY_LEFTCTRL: u16 = 0x1d;
+const KEY_LEFTSHIFT: u16 = 0x2a;
+const KEY_RIGHTSHIFT: u16 = 0x36;
+const KEY_LEFTALT: u16 = 0x38;
+const KEY_RIGHTCTRL: u16 = 0x61;
+const KEY_RIGHTALT: u16 = 0x64;
+
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
     conn: sws::Connection,
@@ -21,6 +28,12 @@ pub struct SWSPlatformWindow {
     pointer_x: i32,
     pointer_y: i32,
     pending_move: bool,
+    left_shift_pressed: bool,
+    right_shift_pressed: bool,
+    left_control_pressed: bool,
+    right_control_pressed: bool,
+    left_alt_pressed: bool,
+    right_alt_pressed: bool,
 }
 
 impl SWSPlatformWindow {
@@ -109,6 +122,12 @@ impl SWSPlatformWindow {
             pointer_x: 0,
             pointer_y: 0,
             pending_move: false,
+            left_shift_pressed: false,
+            right_shift_pressed: false,
+            left_control_pressed: false,
+            right_control_pressed: false,
+            left_alt_pressed: false,
+            right_alt_pressed: false,
         })
     }
 
@@ -255,6 +274,96 @@ impl SWSPlatformWindow {
             _ => None,
         }
     }
+
+    fn is_modifier_key(code: u16) -> bool {
+        matches!(
+            code,
+            KEY_LEFTSHIFT
+                | KEY_RIGHTSHIFT
+                | KEY_LEFTCTRL
+                | KEY_RIGHTCTRL
+                | KEY_LEFTALT
+                | KEY_RIGHTALT
+        )
+    }
+
+    fn update_modifier_state(&mut self, code: u16, pressed: bool) {
+        match code {
+            KEY_LEFTSHIFT => self.left_shift_pressed = pressed,
+            KEY_RIGHTSHIFT => self.right_shift_pressed = pressed,
+            KEY_LEFTCTRL => self.left_control_pressed = pressed,
+            KEY_RIGHTCTRL => self.right_control_pressed = pressed,
+            KEY_LEFTALT => self.left_alt_pressed = pressed,
+            KEY_RIGHTALT => self.right_alt_pressed = pressed,
+            _ => {}
+        }
+    }
+
+    fn reset_transient_modifiers(&mut self) {
+        self.left_shift_pressed = false;
+        self.right_shift_pressed = false;
+        self.left_control_pressed = false;
+        self.right_control_pressed = false;
+        self.left_alt_pressed = false;
+        self.right_alt_pressed = false;
+    }
+
+    fn shift_pressed(&self) -> bool {
+        self.left_shift_pressed || self.right_shift_pressed
+    }
+
+    fn control_pressed(&self) -> bool {
+        self.left_control_pressed || self.right_control_pressed
+    }
+
+    fn map_key_char_with_modifiers(&self, code: u16) -> Option<char> {
+        let base = Self::map_key_char(code)?;
+        if self.control_pressed() {
+            return match base {
+                'a'..='z' => Some((base as u8 - b'a' + 1) as char),
+                '[' => Some(0x1b as char),
+                '\\' => Some(0x1c as char),
+                ']' => Some(0x1d as char),
+                '-' | '_' => Some(0x1f as char),
+                _ => None,
+            };
+        }
+
+        if base.is_ascii_lowercase() {
+            if self.shift_pressed() {
+                return Some(base.to_ascii_uppercase());
+            }
+            return Some(base);
+        }
+
+        if self.shift_pressed() {
+            return match base {
+                '1' => Some('!'),
+                '2' => Some('@'),
+                '3' => Some('#'),
+                '4' => Some('$'),
+                '5' => Some('%'),
+                '6' => Some('^'),
+                '7' => Some('&'),
+                '8' => Some('*'),
+                '9' => Some('('),
+                '0' => Some(')'),
+                '-' => Some('_'),
+                '=' => Some('+'),
+                '[' => Some('{'),
+                ']' => Some('}'),
+                '\\' => Some('|'),
+                ';' => Some(':'),
+                '\'' => Some('"'),
+                ',' => Some('<'),
+                '.' => Some('>'),
+                '/' => Some('?'),
+                _ => Some(base),
+            };
+        }
+
+        Some(base)
+    }
 }
 
 impl PlatformWindow for SWSPlatformWindow {
@@ -277,6 +386,12 @@ impl PlatformWindow for SWSPlatformWindow {
             pointer_x: 0,
             pointer_y: 0,
             pending_move: false,
+            left_shift_pressed: false,
+            right_shift_pressed: false,
+            left_control_pressed: false,
+            right_control_pressed: false,
+            left_alt_pressed: false,
+            right_alt_pressed: false,
         })
     }
 
@@ -483,6 +598,12 @@ impl PlatformWindow for SWSPlatformWindow {
             pointer_x: 0,
             pointer_y: 0,
             pending_move: false,
+            left_shift_pressed: false,
+            right_shift_pressed: false,
+            left_control_pressed: false,
+            right_control_pressed: false,
+            left_alt_pressed: false,
+            right_alt_pressed: false,
         })
     }
 
@@ -545,7 +666,23 @@ impl SWSPlatformWindow {
         }
         match ev {
             SwsEvent::Input(input) => {
+                if debug && input.type_ == event_type::EV_KEY {
+                    scarlet_std::println!(
+                        "[SWSPlatformWindow] raw key: input_surface={} window_surface={} code={} value={}",
+                        input.surface_id,
+                        self.surface_id,
+                        input.code,
+                        input.value
+                    );
+                }
                 if input.surface_id != self.surface_id {
+                    if debug && input.type_ == event_type::EV_KEY {
+                        scarlet_std::println!(
+                            "[SWSPlatformWindow] ignored key for another surface: input_surface={} window_surface={}",
+                            input.surface_id,
+                            self.surface_id
+                        );
+                    }
                     return;
                 }
 
@@ -671,10 +808,25 @@ impl SWSPlatformWindow {
                         }
                     }
                     (event_type::EV_KEY, code) => {
+                        let pressed = input.value != 0;
+                        if Self::is_modifier_key(code) {
+                            self.update_modifier_state(code, pressed);
+                            return;
+                        }
                         let mapped = Self::map_key_code(code);
-                        if input.value != 0 {
+                        let mapped_char = self.map_key_char_with_modifiers(code);
+                        if debug {
+                            scarlet_std::println!(
+                                "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
+                                code,
+                                input.value,
+                                mapped,
+                                mapped_char
+                            );
+                        }
+                        if pressed {
                             self.push_event(Event::Keyboard(KeyEvent::Pressed { keycode: mapped }));
-                            if let Some(c) = Self::map_key_char(code) {
+                            if let Some(c) = mapped_char {
                                 self.push_event(Event::Keyboard(KeyEvent::Char { c }));
                             }
                         } else {
@@ -732,6 +884,9 @@ impl SWSPlatformWindow {
                 menu_titles,
             } => {
                 let menu_titles = Self::sanitize_menu_titles(&menu_titles);
+                if window_id != self.surface_id {
+                    self.reset_transient_modifiers();
+                }
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
                 if debug {

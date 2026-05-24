@@ -69,6 +69,8 @@ pub struct EventDispatcher {
     captured_path: Vec<ElementId>,
     captured_point: Option<Point>,
     left_button_down: bool,
+    focused_id: Option<ElementId>,
+    focused_path: Vec<ElementId>,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
 }
@@ -84,6 +86,8 @@ impl EventDispatcher {
             captured_path: Vec::new(),
             captured_point: None,
             left_button_down: false,
+            focused_id: None,
+            focused_path: Vec::new(),
             emitted_events: Vec::new(),
         }
     }
@@ -278,14 +282,21 @@ impl EventDispatcher {
             }
 
             if let crate::event::MouseEvent::ButtonPressed {
-                button: crate::event::MouseButton::Left,
                 ..
             } = event
             {
-                self.left_button_down = true;
-                self.captured_id = Some(target_id);
-                self.captured_path = path.clone();
-                self.captured_point = Some(point);
+                self.focused_id = Some(target_id);
+                self.focused_path = path.clone();
+                if let crate::event::MouseEvent::ButtonPressed {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                } = event
+                {
+                    self.left_button_down = true;
+                    self.captured_id = Some(target_id);
+                    self.captured_path = path.clone();
+                    self.captured_point = Some(point);
+                }
             }
 
             // 2. Three-phase dispatch
@@ -394,13 +405,74 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::KeyEvent,
     ) -> bool {
-        // Keyboard events typically go to the focused element
-        // For now, send to the root with Target phase
-        if let Some(root) = element_tree.root_mut() {
-            root.handle_event(&Event::Keyboard(event.clone()), Phase::Target)
-        } else {
-            false
+        let path = self
+            .focused_id
+            .and_then(|focused_id| element_tree.find_path_ids(focused_id))
+            .or_else(|| {
+                if self.focused_path.is_empty() {
+                    None
+                } else {
+                    Some(self.focused_path.clone())
+                }
+            })
+            .or_else(|| {
+                if self.hovered_path.is_empty() {
+                    None
+                } else {
+                    Some(self.hovered_path.clone())
+                }
+            })
+            .or_else(|| element_tree.root().map(|root| alloc::vec![root.id()]));
+
+        let Some(path) = path else {
+            return false;
+        };
+        let Some(target_id) = path.last().copied() else {
+            return false;
+        };
+
+        if crate::debug::is_enabled() {
+            scarlet_std::println!(
+                "[EventDispatcher] keyboard: {:?} target_id={:?} path_len={}",
+                event,
+                target_id,
+                path.len()
+            );
         }
+
+        let keyboard_event = Event::Keyboard(*event);
+        let mut handled = false;
+
+        for id in path.iter().take(path.len().saturating_sub(1)) {
+            if let Some(element) = element_tree.find_element_mut(*id) {
+                if element.handle_event(&keyboard_event, Phase::Capture) {
+                    handled = true;
+                    break;
+                }
+            }
+        }
+
+        if !handled {
+            if let Some(target) = element_tree.find_element_mut(target_id) {
+                handled = target.handle_event(&keyboard_event, Phase::Target);
+            }
+        }
+
+        if !handled {
+            for id in path.iter().rev().skip(1) {
+                if let Some(element) = element_tree.find_element_mut(*id) {
+                    if element.handle_event(&keyboard_event, Phase::Bubble) {
+                        handled = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[EventDispatcher] keyboard handled={}", handled);
+        }
+        handled
     }
 
     /// Dispatch a focus event

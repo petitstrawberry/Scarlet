@@ -44,7 +44,8 @@ pub struct LineEditor {
     prompt: String,
     raw_mode_enabled: bool,
     stdin_handle: Option<Handle>,
-    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [)
+    saved_signal_chars_enabled: Option<bool>,
+    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [, 4=got ESC O)
     esc_state: u8,
 }
 
@@ -57,6 +58,7 @@ impl LineEditor {
             prompt: String::from(prompt),
             raw_mode_enabled: false,
             stdin_handle: None,
+            saved_signal_chars_enabled: None,
             esc_state: 0,
         }
     }
@@ -76,6 +78,20 @@ impl LineEditor {
                 return Err(());
             }
             if terminal.set_echo(!enabled).is_err() {
+                return Err(());
+            }
+            if enabled && self.saved_signal_chars_enabled.is_none() {
+                self.saved_signal_chars_enabled = terminal.signal_chars_enabled().ok();
+            }
+            let signal_chars_enabled = if enabled {
+                false
+            } else {
+                self.saved_signal_chars_enabled.take().unwrap_or(true)
+            };
+            if terminal
+                .set_signal_chars_enabled(signal_chars_enabled)
+                .is_err()
+            {
                 return Err(());
             }
 
@@ -248,6 +264,39 @@ impl LineEditor {
                 self.esc_state = 2;
                 return EditorAction::Continue;
             }
+            (1, b'O') => {
+                // ESC O - SS3 sequence
+                self.esc_state = 4;
+                return EditorAction::Continue;
+            }
+            (4, b'A') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryPrev;
+            }
+            (4, b'B') => {
+                self.esc_state = 0;
+                return EditorAction::HistoryNext;
+            }
+            (4, b'C') => {
+                self.esc_state = 0;
+                self.move_cursor_right();
+                return EditorAction::Continue;
+            }
+            (4, b'D') => {
+                self.esc_state = 0;
+                self.move_cursor_left();
+                return EditorAction::Continue;
+            }
+            (4, b'H') => {
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (4, b'F') => {
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
             (2, b'A') => {
                 // ESC [ A - Up arrow
                 self.esc_state = 0;
@@ -282,15 +331,32 @@ impl LineEditor {
                 self.move_cursor_end();
                 return EditorAction::Continue;
             }
-            (2, b'3') => {
-                // ESC [ 3 - might be Delete (ESC [ 3 ~)
-                self.esc_state = 3;
+            (2, b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8') => {
+                // ESC [ n - might be Home/End/Delete (ESC [ n ~)
+                self.esc_state = byte as u8;
                 return EditorAction::Continue;
             }
-            (3, b'~') => {
+            (b'1', b'~') | (b'7', b'~') => {
+                // ESC [ 1 ~ / ESC [ 7 ~ - Home
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (b'4', b'~') | (b'8', b'~') => {
+                // ESC [ 4 ~ / ESC [ 8 ~ - End
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
+            (b'3', b'~') => {
                 // ESC [ 3 ~ - Delete
                 self.esc_state = 0;
                 self.delete_char();
+                return EditorAction::Continue;
+            }
+            (b'2', b'~') | (b'5', b'~') | (b'6', b'~') => {
+                // ESC [ 2 ~/5~/6~ - Insert/PageUp/PageDown. Consume for now.
+                self.esc_state = 0;
                 return EditorAction::Continue;
             }
             _ if self.esc_state != 0 => {
@@ -443,21 +509,18 @@ impl LineEditor {
 
     /// Redraw the entire line
     fn redraw_line(&self) {
-        // Move to beginning of line
-        print!("\r");
-
-        // Print prompt and buffer
+        // Clear and redraw the physical line, then move back to the logical cursor.
+        print!("\r\x1b[2K");
         print!("{}", self.prompt);
         for c in &self.buffer {
             print!("{}", c);
         }
 
-        // Clear to end of line
-        print!("\x1b[K");
-
-        // Move cursor to correct position
         let cursor_col = self.prompt.len() + self.cursor;
-        print!("\r\x1b[{}G", cursor_col + 1);
+        print!("\r");
+        if cursor_col > 0 {
+            print!("\x1b[{}C", cursor_col);
+        }
     }
 
     /// Handle tab completion

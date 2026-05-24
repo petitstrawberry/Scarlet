@@ -257,7 +257,26 @@ impl CharDevice for PtyMasterDevice {
     }
 
     fn read(&self, buffer: &mut [u8]) -> usize {
-        self.core.pop_master_input(buffer)
+        if buffer.is_empty() {
+            return 0;
+        }
+
+        loop {
+            let count = self.core.pop_master_input(buffer);
+            if count != 0 {
+                return count;
+            }
+            if self.slave.strong_count() == 0 {
+                return 0;
+            }
+            if let Some(task) = crate::task::mytask() {
+                self.core
+                    .master_waker
+                    .wait(task.get_id(), task.get_trapframe());
+            } else {
+                return 0;
+            }
+        }
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {

@@ -403,10 +403,22 @@ impl OnKeyRenderObject {
     ///
     /// `true` when the event was consumed.
     pub fn invoke_on_key(&self, event: KeyEvent) -> bool {
-        self.callback
+        if crate::debug::is_enabled() {
+            scarlet_std::println!(
+                "[OnKeyRenderObject] invoke: event={:?} has_callback={}",
+                event,
+                self.callback.is_some()
+            );
+        }
+        let handled = self
+            .callback
             .as_ref()
             .map(|callback| callback(event))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if crate::debug::is_enabled() {
+            scarlet_std::println!("[OnKeyRenderObject] handled={}", handled);
+        }
+        handled
     }
 }
 

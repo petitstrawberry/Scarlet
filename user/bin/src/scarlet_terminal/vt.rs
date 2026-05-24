@@ -7,6 +7,7 @@ enum ParserState {
     Ground,
     Escape,
     Csi,
+    Ss3,
 }
 
 /// Terminal screen state backed by a fixed text grid.
@@ -16,6 +17,8 @@ pub struct VtScreen {
     rows: usize,
     cursor_column: usize,
     cursor_row: usize,
+    saved_cursor_column: usize,
+    saved_cursor_row: usize,
     foreground: Color,
     background: Color,
     bold: bool,
@@ -46,6 +49,8 @@ impl VtScreen {
             rows,
             cursor_column: 0,
             cursor_row: 0,
+            saved_cursor_column: 0,
+            saved_cursor_row: 0,
             foreground,
             background,
             bold: false,
@@ -91,6 +96,7 @@ impl VtScreen {
             ParserState::Ground => self.feed_ground(byte),
             ParserState::Escape => self.feed_escape(byte),
             ParserState::Csi => self.feed_csi(byte),
+            ParserState::Ss3 => self.feed_ss3(byte),
         }
     }
 
@@ -112,6 +118,17 @@ impl VtScreen {
                 self.reset_csi();
                 self.parser_state = ParserState::Csi;
             }
+            b'O' => {
+                self.parser_state = ParserState::Ss3;
+            }
+            b'7' | b's' => {
+                self.save_cursor();
+                self.parser_state = ParserState::Ground;
+            }
+            b'8' | b'u' => {
+                self.restore_cursor();
+                self.parser_state = ParserState::Ground;
+            }
             b'c' => {
                 self.clear_all();
                 self.reset_attributes();
@@ -119,6 +136,19 @@ impl VtScreen {
             }
             _ => self.parser_state = ParserState::Ground,
         }
+    }
+
+    fn feed_ss3(&mut self, byte: u8) {
+        match byte {
+            b'A' => self.move_cursor_up(1),
+            b'B' => self.move_cursor_down(1),
+            b'C' => self.move_cursor_right(1),
+            b'D' => self.move_cursor_left(1),
+            b'H' => self.set_cursor_column(0),
+            b'F' => self.set_cursor_column(self.columns.saturating_sub(1)),
+            _ => {}
+        }
+        self.parser_state = ParserState::Ground;
     }
 
     fn feed_csi(&mut self, byte: u8) {
@@ -172,15 +202,34 @@ impl VtScreen {
             b'B' => self.move_cursor_down(self.param(0, 1)),
             b'C' => self.move_cursor_right(self.param(0, 1)),
             b'D' => self.move_cursor_left(self.param(0, 1)),
+            b'E' => {
+                self.move_cursor_down(self.param(0, 1));
+                self.cursor_column = 0;
+            }
+            b'F' => {
+                self.move_cursor_up(self.param(0, 1));
+                self.cursor_column = 0;
+            }
+            b'G' | b'`' => {
+                let column = self.param(0, 1).saturating_sub(1);
+                self.set_cursor_column(column);
+            }
             b'H' | b'f' => {
                 let row = self.param(0, 1).saturating_sub(1);
                 let column = self.param(1, 1).saturating_sub(1);
                 self.set_cursor(column, row);
             }
+            b'd' => {
+                let row = self.param(0, 1).saturating_sub(1);
+                self.set_cursor_row(row);
+            }
             b'J' => self.erase_display(self.param(0, 0)),
             b'K' => self.erase_line(self.param(0, 0)),
+            b'X' => self.erase_chars(self.param(0, 1)),
             b'S' => self.scroll_up(self.param(0, 1)),
             b'T' => self.scroll_down(self.param(0, 1)),
+            b's' => self.save_cursor(),
+            b'u' => self.restore_cursor(),
             b'm' => self.apply_sgr(),
             _ => {}
         }
@@ -226,8 +275,26 @@ impl VtScreen {
     }
 
     fn set_cursor(&mut self, column: usize, row: usize) {
+        self.set_cursor_column(column);
+        self.set_cursor_row(row);
+    }
+
+    fn set_cursor_column(&mut self, column: usize) {
         self.cursor_column = column.min(self.columns.saturating_sub(1));
+    }
+
+    fn set_cursor_row(&mut self, row: usize) {
         self.cursor_row = row.min(self.rows.saturating_sub(1));
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor_column = self.cursor_column;
+        self.saved_cursor_row = self.cursor_row;
+    }
+
+    fn restore_cursor(&mut self) {
+        self.cursor_column = self.saved_cursor_column.min(self.columns.saturating_sub(1));
+        self.cursor_row = self.saved_cursor_row.min(self.rows.saturating_sub(1));
     }
 
     fn move_cursor_up(&mut self, count: usize) {
@@ -278,6 +345,11 @@ impl VtScreen {
             2 => self.clear_row(self.cursor_row),
             _ => {}
         }
+    }
+
+    fn erase_chars(&mut self, count: usize) {
+        let end = self.cursor_column.saturating_add(count);
+        self.clear_range(self.cursor_column, self.cursor_row, end);
     }
 
     fn clear_all(&mut self) {

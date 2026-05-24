@@ -364,6 +364,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             {
                 return render_object.invoke_on_key(*key_event);
             }
+            for child in self.children.iter_mut() {
+                if child.handle_event(_event, _phase) {
+                    return true;
+                }
+            }
             return false;
         }
 
