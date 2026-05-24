@@ -398,6 +398,7 @@ fn restore_canonical_mode() {
         let terminal = Terminal::from_handle(&stdin_handle);
         let _ = terminal.set_canonical(true);
         let _ = terminal.set_echo(true);
+        let _ = terminal.set_signal_chars_enabled(true);
         core::mem::forget(stdin_handle); // Don't close stdin
     }
 }
@@ -408,6 +409,7 @@ fn restore_raw_mode() {
         let terminal = Terminal::from_handle(&stdin_handle);
         let _ = terminal.set_canonical(false);
         let _ = terminal.set_echo(false);
+        let _ = terminal.set_signal_chars_enabled(false);
         let _ = terminal.set_keyboard_mode(KeyboardMode::Xlate);
         let _ = terminal.set_read_policy(ReadPolicy::new(1, 0));
         core::mem::forget(stdin_handle); // Don't close stdin

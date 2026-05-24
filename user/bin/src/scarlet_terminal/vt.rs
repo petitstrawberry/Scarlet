@@ -80,6 +80,28 @@ impl VtScreen {
         TextGridCursor::new(self.cursor_column, self.cursor_row)
     }
 
+    /// Resize the terminal screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `columns` - New number of columns.
+    /// * `rows` - New number of rows.
+    pub fn resize(&mut self, columns: usize, rows: usize) {
+        let columns = columns.max(1);
+        let rows = rows.max(1);
+        if self.columns == columns && self.rows == rows {
+            return;
+        }
+
+        self.grid.resize(columns, rows, self.blank_cell());
+        self.columns = columns;
+        self.rows = rows;
+        self.cursor_column = self.cursor_column.min(self.columns.saturating_sub(1));
+        self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
+        self.saved_cursor_column = self.saved_cursor_column.min(self.columns.saturating_sub(1));
+        self.saved_cursor_row = self.saved_cursor_row.min(self.rows.saturating_sub(1));
+    }
+
     /// Feed bytes from a PTY master into the screen model.
     ///
     /// # Arguments

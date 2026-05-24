@@ -481,12 +481,16 @@ impl TextGridRenderObject {
 
         let column = index % columns;
         let row = index / columns;
+        let x = libm::floorf(column as f32 * self.cell_width) as i32;
+        let y = libm::floorf(row as f32 * self.cell_height) as i32;
+        if x >= canvas.width() as i32 || y >= canvas.height() as i32 {
+            return;
+        }
+
         let Some(cell) = self.grid.cells().get(index).copied() else {
             return;
         };
 
-        let x = libm::floorf(column as f32 * self.cell_width) as i32;
-        let y = libm::floorf(row as f32 * self.cell_height) as i32;
         let w = libm::ceilf(self.cell_width) as u32;
         let h = libm::ceilf(self.cell_height) as u32;
         let (foreground, background) = if cell.inverse {
@@ -520,6 +524,60 @@ impl TextGridRenderObject {
         }
     }
 
+    fn background_color(&self) -> Color {
+        let Some(cell) = self.grid.cells().first().copied() else {
+            return Color::BLACK;
+        };
+        if cell.inverse {
+            cell.foreground
+        } else {
+            cell.background
+        }
+    }
+
+    fn grid_pixel_width(&self) -> u32 {
+        libm::ceilf(self.grid.columns() as f32 * self.cell_width).max(0.0) as u32
+    }
+
+    fn grid_pixel_height(&self) -> u32 {
+        libm::ceilf(self.grid.rows() as f32 * self.cell_height).max(0.0) as u32
+    }
+
+    fn repaint_remainder(&self, canvas: &mut graphics::Canvas<'_>, width: u32, height: u32) {
+        let background = self.background_color();
+        let grid_width = self.grid_pixel_width().min(width);
+        let grid_height = self.grid_pixel_height().min(height);
+
+        if grid_width < width {
+            canvas.fill_rect(
+                grid_width as i32,
+                0,
+                width - grid_width,
+                height,
+                background,
+            );
+        }
+        if grid_height < height {
+            canvas.fill_rect(
+                0,
+                grid_height as i32,
+                grid_width,
+                height - grid_height,
+                background,
+            );
+        }
+    }
+
+    fn visible_columns(&self, width: u32) -> usize {
+        let columns = libm::ceilf(width as f32 / self.cell_width).max(0.0) as usize;
+        columns.min(self.grid.columns())
+    }
+
+    fn visible_rows(&self, height: u32) -> usize {
+        let rows = libm::ceilf(height as f32 / self.cell_height).max(0.0) as usize;
+        rows.min(self.grid.rows())
+    }
+
     fn repaint_cursor(&self, canvas: &mut graphics::Canvas<'_>) {
         let Some(cursor) = self.cursor else {
             return;
@@ -530,6 +588,10 @@ impl TextGridRenderObject {
 
         let x = libm::floorf(cursor.column as f32 * self.cell_width) as i32;
         let y = libm::floorf(cursor.row as f32 * self.cell_height) as i32;
+        if x >= canvas.width() as i32 || y >= canvas.height() as i32 {
+            return;
+        }
+
         let w = libm::ceilf(self.cell_width).max(1.0) as u32;
         let h = libm::ceilf(self.cell_height).max(1.0) as u32;
         let cursor_height = (h / 5).max(2);
@@ -597,9 +659,15 @@ impl ElementRenderObject for TextGridRenderObject {
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
             if self.full_repaint {
-                canvas.fill_rect(0, 0, width, height, Color::BLACK);
-                for index in 0..self.grid.cells().len() {
-                    self.repaint_cell(&mut canvas, index);
+                canvas.fill_rect(0, 0, width, height, self.background_color());
+                let visible_columns = self.visible_columns(width);
+                let visible_rows = self.visible_rows(height);
+                let columns = self.grid.columns();
+                for row in 0..visible_rows {
+                    let row_start = row.saturating_mul(columns);
+                    for column in 0..visible_columns {
+                        self.repaint_cell(&mut canvas, row_start + column);
+                    }
                 }
                 self.full_repaint = false;
                 self.dirty_cells.clear();
@@ -611,6 +679,7 @@ impl ElementRenderObject for TextGridRenderObject {
                     self.repaint_cell(&mut canvas, index);
                 }
             }
+            self.repaint_remainder(&mut canvas, width, height);
             self.repaint_cursor(&mut canvas);
         }
 

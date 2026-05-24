@@ -345,6 +345,24 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Return the canvas width.
+    ///
+    /// # Returns
+    ///
+    /// Width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the canvas height.
+    ///
+    /// # Returns
+    ///
+    /// Height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
     /// Draw a single pixel
     pub fn put_pixel(&mut self, x: i32, y: i32, color: Color) {
         if x < 0 || x >= self.width as i32 || y < 0 || y >= self.height as i32 {

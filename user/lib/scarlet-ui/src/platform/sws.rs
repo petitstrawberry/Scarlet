@@ -813,8 +813,12 @@ impl SWSPlatformWindow {
                             self.update_modifier_state(code, pressed);
                             return;
                         }
-                        let mapped = Self::map_key_code(code);
                         let mapped_char = self.map_key_char_with_modifiers(code);
+                        let mapped = if mapped_char.is_some_and(|c| c.is_control()) {
+                            mapped_char.map_or(KeyCode::Unknown, KeyCode::Char)
+                        } else {
+                            Self::map_key_code(code)
+                        };
                         if debug {
                             scarlet_std::println!(
                                 "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
@@ -826,7 +830,9 @@ impl SWSPlatformWindow {
                         }
                         if pressed {
                             self.push_event(Event::Keyboard(KeyEvent::Pressed { keycode: mapped }));
-                            if let Some(c) = mapped_char {
+                            if let Some(c) = mapped_char
+                                && !c.is_control()
+                            {
                                 self.push_event(Event::Keyboard(KeyEvent::Char { c }));
                             }
                         } else {

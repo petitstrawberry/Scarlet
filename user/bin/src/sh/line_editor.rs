@@ -45,6 +45,8 @@ pub struct LineEditor {
     raw_mode_enabled: bool,
     stdin_handle: Option<Handle>,
     saved_signal_chars_enabled: Option<bool>,
+    rendered_cells: usize,
+    rendered_cursor_cell: usize,
     // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [, 4=got ESC O)
     esc_state: u8,
 }
@@ -59,6 +61,8 @@ impl LineEditor {
             raw_mode_enabled: false,
             stdin_handle: None,
             saved_signal_chars_enabled: None,
+            rendered_cells: 0,
+            rendered_cursor_cell: 0,
             esc_state: 0,
         }
     }
@@ -126,6 +130,8 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
             let c = std::io::get_char();
@@ -174,6 +180,8 @@ impl LineEditor {
 
         // Display prompt
         print!("{}", self.prompt);
+        self.rendered_cells = self.prompt_cells();
+        self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
             let c = std::io::get_char();
@@ -395,23 +403,8 @@ impl LineEditor {
     /// Insert a character at the cursor position
     fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.cursor, c);
-
-        // In raw mode, manually output the character and everything after it
-        // Print from current cursor position to end
-        for i in self.cursor..self.buffer.len() {
-            print!("{}", self.buffer[i]);
-        }
-
-        // If we inserted in the middle, move cursor back to correct position
-        let chars_after = self.buffer.len() - self.cursor - 1;
-        if chars_after > 0 {
-            // Move cursor left by the number of characters we printed after insertion
-            for _ in 0..chars_after {
-                print!("\x1b[D");
-            }
-        }
-
         self.cursor += 1;
+        self.redraw_line();
     }
 
     /// Delete character before cursor (backspace)
@@ -419,21 +412,7 @@ impl LineEditor {
         if self.cursor > 0 {
             self.buffer.remove(self.cursor - 1);
             self.cursor -= 1;
-
-            // Move cursor left
-            print!("\x1b[D");
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -441,18 +420,7 @@ impl LineEditor {
     fn delete_char(&mut self) {
         if self.cursor < self.buffer.len() {
             self.buffer.remove(self.cursor);
-
-            // Print remaining characters and clear to end
-            for i in self.cursor..self.buffer.len() {
-                print!("{}", self.buffer[i]);
-            }
-            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
-
-            // Move cursor back to correct position
-            let chars_after = self.buffer.len() - self.cursor;
-            for _ in 0..=chars_after {
-                print!("\x1b[D");
-            }
+            self.redraw_line();
         }
     }
 
@@ -460,8 +428,7 @@ impl LineEditor {
     fn move_cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
-            // ANSI escape: move cursor left
-            print!("\x1b[D");
+            self.redraw_line();
         }
     }
 
@@ -469,24 +436,23 @@ impl LineEditor {
     fn move_cursor_right(&mut self) {
         if self.cursor < self.buffer.len() {
             self.cursor += 1;
-            // ANSI escape: move cursor right
-            print!("\x1b[C");
+            self.redraw_line();
         }
     }
 
     /// Move cursor to beginning of line
     fn move_cursor_home(&mut self) {
-        while self.cursor > 0 {
-            self.cursor -= 1;
-            print!("\x1b[D");
+        if self.cursor > 0 {
+            self.cursor = 0;
+            self.redraw_line();
         }
     }
 
     /// Move cursor to end of line
     fn move_cursor_end(&mut self) {
-        while self.cursor < self.buffer.len() {
-            self.cursor += 1;
-            print!("\x1b[C");
+        if self.cursor < self.buffer.len() {
+            self.cursor = self.buffer.len();
+            self.redraw_line();
         }
     }
 
@@ -508,19 +474,60 @@ impl LineEditor {
     }
 
     /// Redraw the entire line
-    fn redraw_line(&self) {
-        // Clear and redraw the physical line, then move back to the logical cursor.
-        print!("\r\x1b[2K");
+    fn redraw_line(&mut self) {
+        let columns = self.terminal_columns();
+        let previous_rows = rendered_rows(self.rendered_cells, columns);
+        let current_row = self.rendered_cursor_cell / columns;
+        if current_row > 0 {
+            print!("\x1b[{}A", current_row);
+        }
+        print!("\r");
+        for row in 0..previous_rows {
+            print!("\x1b[2K");
+            if row + 1 < previous_rows {
+                print!("\x1b[B\r");
+            }
+        }
+        if previous_rows > 1 {
+            print!("\x1b[{}A", previous_rows - 1);
+        }
+        print!("\r");
+
         print!("{}", self.prompt);
         for c in &self.buffer {
             print!("{}", c);
         }
 
-        let cursor_col = self.prompt.len() + self.cursor;
+        let total_cells = self.prompt_cells() + self.buffer.len();
+        let current_rows = rendered_rows(total_cells, columns);
+        if current_rows > 1 {
+            print!("\x1b[{}A", current_rows - 1);
+        }
         print!("\r");
+        let cursor_cell = self.prompt_cells() + self.cursor;
+        let cursor_row = cursor_cell / columns;
+        let cursor_col = cursor_cell % columns;
+        if cursor_row > 0 {
+            print!("\x1b[{}B", cursor_row);
+        }
         if cursor_col > 0 {
             print!("\x1b[{}C", cursor_col);
         }
+        self.rendered_cells = total_cells;
+        self.rendered_cursor_cell = cursor_cell;
+    }
+
+    fn prompt_cells(&self) -> usize {
+        self.prompt.chars().count()
+    }
+
+    fn terminal_columns(&self) -> usize {
+        self.stdin_handle
+            .as_ref()
+            .and_then(|handle| Terminal::from_handle(handle).winsize().ok())
+            .map(|size| size.columns as usize)
+            .filter(|columns| *columns > 0)
+            .unwrap_or(80)
     }
 
     /// Handle tab completion
@@ -702,6 +709,8 @@ impl LineEditor {
             for c in &self.buffer {
                 print!("{}", c);
             }
+            self.rendered_cells = self.prompt_cells() + self.buffer.len();
+            self.rendered_cursor_cell = self.rendered_cells;
         }
     }
 
@@ -741,6 +750,11 @@ impl LineEditor {
     pub fn buffer_content(&self) -> String {
         self.buffer.iter().collect()
     }
+}
+
+fn rendered_rows(cells: usize, columns: usize) -> usize {
+    let columns = columns.max(1);
+    cells / columns + 1
 }
 
 impl Drop for LineEditor {

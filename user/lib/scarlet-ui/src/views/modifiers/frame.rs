@@ -189,7 +189,7 @@ impl FrameRenderObject {
         let width = if let Some(w) = self.width {
             if w.is_finite() {
                 w
-            } else if constraints.is_tight_width() {
+            } else if constraints.max_width.is_finite() {
                 constraints.max_width
             } else {
                 child_size.width.clamp(min_w, max_w)
@@ -201,7 +201,7 @@ impl FrameRenderObject {
         let height = if let Some(h) = self.height {
             if h.is_finite() {
                 h
-            } else if constraints.is_tight_height() {
+            } else if constraints.max_height.is_finite() {
                 constraints.max_height
             } else {
                 child_size.height.clamp(min_h, max_h)
@@ -268,13 +268,17 @@ impl ElementRenderObject for FrameRenderObject {
     ) -> Size {
         let (min_w, max_w) = match self.width {
             Some(w) if w.is_finite() => (w, w),
-            Some(_) if constraints.is_tight_width() => (constraints.max_width, constraints.max_width),
+            Some(_) if constraints.max_width.is_finite() => {
+                (constraints.max_width, constraints.max_width)
+            }
             Some(_) => (constraints.min_width, constraints.max_width),
             None => (constraints.min_width, constraints.max_width),
         };
         let (min_h, max_h) = match self.height {
             Some(h) if h.is_finite() => (h, h),
-            Some(_) if constraints.is_tight_height() => (constraints.max_height, constraints.max_height),
+            Some(_) if constraints.max_height.is_finite() => {
+                (constraints.max_height, constraints.max_height)
+            }
             Some(_) => (constraints.min_height, constraints.max_height),
             None => (constraints.min_height, constraints.max_height),
         };

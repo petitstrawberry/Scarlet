@@ -34,6 +34,8 @@ const ROWS: usize = 32;
 const CELL_WIDTH: f32 = 9.0;
 const CELL_HEIGHT: f32 = 18.0;
 const FONT_SIZE: f32 = 16.0;
+const WINDOW_HORIZONTAL_DECORATION: f32 = 4.0;
+const WINDOW_VERTICAL_DECORATION: f32 = 34.0;
 const SHELL_ENV: [&str; 7] = [
     "HOME=/system/scarlet/root",
     "PWD=/",
@@ -48,6 +50,7 @@ const SHELL_ENV: [&str; 7] = [
 struct TerminalApp {
     grid: State<TextGridBuffer>,
     cursor: State<TextGridCursor>,
+    screen: Arc<Mutex<VtScreen>>,
     master_writer: Arc<Mutex<Option<File>>>,
 }
 
@@ -55,12 +58,13 @@ impl TerminalApp {
     fn new() -> Self {
         let foreground = Color::rgb(230, 232, 235);
         let background = Color::rgb(12, 14, 18);
-        let mut grid =
-            TextGridBuffer::new(COLUMNS, ROWS, TextGridCell::blank(foreground, background));
+        let screen = Arc::new(Mutex::new(VtScreen::new(COLUMNS, ROWS)));
+        let mut grid = screen.lock().grid().clone();
         grid.write_text(0, 0, "Starting Scarlet Terminal...", foreground, background);
         Self {
             grid: State::new(StateId::new(0), grid),
             cursor: State::new(StateId::new(1), TextGridCursor::new(0, 1)),
+            screen,
             master_writer: Arc::new(Mutex::new(None)),
         }
     }
@@ -116,7 +120,12 @@ impl TerminalApp {
             slave_path, shell_pid
         );
 
-        start_reader_thread(master, self.grid.clone(), self.cursor.clone());
+        start_reader_thread(
+            master,
+            self.screen.clone(),
+            self.grid.clone(),
+            self.cursor.clone(),
+        );
     }
 }
 
@@ -156,12 +165,20 @@ impl Application for TerminalApp {
     }
 
     fn on_resize(&mut self, width: u32, height: u32) {
-        let columns = (width as f32 / CELL_WIDTH).max(1.0) as u16;
-        let rows = (height as f32 / CELL_HEIGHT).max(1.0) as u16;
+        let content_width = (width as f32 - WINDOW_HORIZONTAL_DECORATION).max(CELL_WIDTH);
+        let content_height = (height as f32 - WINDOW_VERTICAL_DECORATION).max(CELL_HEIGHT);
+        let columns = (content_width / CELL_WIDTH).max(1.0) as usize;
+        let rows = (content_height / CELL_HEIGHT).max(1.0) as usize;
+        {
+            let mut screen = self.screen.lock();
+            screen.resize(columns, rows);
+            self.grid.set(screen.grid().clone());
+            self.cursor.set(screen.cursor());
+        }
         let mut guard = self.master_writer.lock();
         if let Some(master) = guard.as_mut() {
             let _ = std::tty::Terminal::from_file(master)
-                .set_winsize(std::tty::WindowSize::new(columns, rows));
+                .set_winsize(std::tty::WindowSize::new(columns as u16, rows as u16));
         }
     }
 
@@ -233,19 +250,23 @@ fn duplicate_to_stdio(source: &Handle, raw_fd: i32) {
 
 fn start_reader_thread(
     mut master: PtyMaster,
+    screen: Arc<Mutex<VtScreen>>,
     grid: State<TextGridBuffer>,
     cursor: State<TextGridCursor>,
 ) {
     thread::spawn(move || {
-        let mut screen = VtScreen::new(COLUMNS, ROWS);
-        grid.set(screen.grid().clone());
-        cursor.set(screen.cursor());
+        {
+            let screen = screen.lock();
+            grid.set(screen.grid().clone());
+            cursor.set(screen.cursor());
+        }
 
         let mut buffer = [0u8; 512];
         loop {
             match master.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
+                    let mut screen = screen.lock();
                     screen.feed(&buffer[..count]);
                     grid.set(screen.grid().clone());
                     cursor.set(screen.cursor());
@@ -268,6 +289,10 @@ fn write_key_event(writer: &Arc<Mutex<Option<File>>>, event: KeyEvent) -> bool {
         }
         KeyEvent::Pressed { keycode } => {
             match keycode {
+                KeyCode::Char(c) if c.is_control() => {
+                    let mut encoded = [0u8; 4];
+                    write_bytes(writer, c.encode_utf8(&mut encoded).as_bytes());
+                }
                 KeyCode::Enter => write_bytes(writer, b"\r"),
                 KeyCode::Tab => write_bytes(writer, b"\t"),
                 KeyCode::Backspace => write_bytes(writer, &[0x7f]),
