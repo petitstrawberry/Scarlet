@@ -18,7 +18,7 @@ use crate::sync::waker::Waker;
 use crate::task::mytask;
 use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use spin::Mutex;
@@ -91,6 +91,7 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
 
     // Create TTY device with the resolved UART device ID
     let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
+    tty_device.set_self_ref(Arc::downgrade(&tty_device));
     let uart_device = device_manager
         .get_device(uart_device_id)
         .ok_or("UART device not found")?;
@@ -119,6 +120,7 @@ late_initcall!(init_tty_subsystem);
 pub struct TtyDevice {
     name: &'static str,
     uart_device_id: usize,
+    self_ref: spin::RwLock<Weak<TtyDevice>>,
 
     // Input buffer for line discipline
     input_buffer: Arc<Mutex<VecDeque<u8>>>,
@@ -129,6 +131,7 @@ pub struct TtyDevice {
     // Line discipline flags (OS/ABI-neutral)
     canonical_mode: AtomicBool,
     echo_enabled: AtomicBool,
+    tostop_enabled: AtomicBool,
 
     // Neutral read policy: minimum bytes to return and optional timeout (ms)
     read_min_ready_bytes: AtomicU16,
@@ -148,7 +151,9 @@ pub struct TtyDevice {
     esc_state: Mutex<u8>,
     // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
     nonblocking: AtomicBool,
+    exclusive: AtomicBool,
     foreground_task_group_id: Mutex<Option<usize>>,
+    controlling_session_id: Mutex<Option<usize>>,
     // Serializes write operations (Linux tty_struct::atomic_write_lock equivalent)
     write_lock: Mutex<()>,
 }
@@ -158,10 +163,12 @@ impl TtyDevice {
         Self {
             name,
             uart_device_id,
+            self_ref: spin::RwLock::new(Weak::new()),
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: AtomicBool::new(true),
             echo_enabled: AtomicBool::new(true),
+            tostop_enabled: AtomicBool::new(false),
             read_min_ready_bytes: AtomicU16::new(1),
             read_timeout_ms: AtomicU16::new(0),
             winsize_cols: Mutex::new(80),
@@ -171,9 +178,55 @@ impl TtyDevice {
             kb_mode: core::sync::atomic::AtomicU8::new(0),
             esc_state: Mutex::new(0),
             nonblocking: AtomicBool::new(false),
+            exclusive: AtomicBool::new(false),
             foreground_task_group_id: Mutex::new(None),
+            controlling_session_id: Mutex::new(None),
             write_lock: Mutex::new(()),
         }
+    }
+
+    pub fn set_self_ref(&self, weak: Weak<TtyDevice>) {
+        *self.self_ref.write() = weak;
+    }
+
+    pub fn weak_self(&self) -> Option<Weak<TtyDevice>> {
+        let weak = self.self_ref.read().clone();
+        weak.upgrade().map(|_| weak)
+    }
+
+    pub fn set_controlling_session_id(&self, session_id: usize) {
+        *self.controlling_session_id.lock() = Some(session_id);
+    }
+
+    pub fn get_controlling_session_id(&self) -> Option<usize> {
+        *self.controlling_session_id.lock()
+    }
+
+    pub fn clear_controlling_session_id(&self, session_id: usize) {
+        let mut guard = self.controlling_session_id.lock();
+        if *guard == Some(session_id) {
+            *guard = None;
+        }
+    }
+
+    pub fn set_exclusive(&self, enabled: bool) {
+        self.exclusive.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive.load(Ordering::Relaxed)
+    }
+
+    pub fn inject_input_byte(&self, byte: u8) {
+        self.handle_input_byte(byte);
+    }
+
+    pub fn set_tostop(&self, enabled: bool) {
+        self.tostop_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_tostop_enabled(&self) -> bool {
+        self.tostop_enabled.load(Ordering::Relaxed)
     }
 
     /// Block until the TTY input buffer becomes non-empty.
@@ -293,6 +346,45 @@ impl TtyDevice {
             EventPayload::Empty,
         );
         let _ = EventManager::get_manager().send_event(event);
+    }
+
+    fn send_process_control_to_current_group(&self, ptype: crate::ipc::event::ProcessControlType) {
+        use crate::ipc::event::{
+            Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        };
+
+        let Some(task) = mytask() else {
+            return;
+        };
+
+        let event = Event::group(
+            GroupTarget::TaskGroup(task.get_process_group_id() as u32),
+            EventContent::ProcessControl(ptype),
+            EventPriority::High,
+            true,
+            EventPayload::Empty,
+        );
+        let _ = EventManager::get_manager().send_event(event);
+    }
+
+    fn is_current_process_group_background(&self) -> bool {
+        let Some(task) = mytask() else {
+            return false;
+        };
+        let Some(controlling_tty) = task.get_controlling_tty() else {
+            return false;
+        };
+        let Some(this_tty) = self.weak_self().and_then(|weak| weak.upgrade()) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&controlling_tty, &this_tty) {
+            return false;
+        }
+
+        match self.get_foreground_task_group_id() {
+            Some(foreground_pgid) => foreground_pgid != task.get_process_group_id(),
+            None => false,
+        }
     }
 
     /// Read readiness for select/poll semantics.
@@ -916,8 +1008,20 @@ impl TtyControl for TtyDevice {
     }
 
     fn set_winsize(&self, cols: u16, rows: u16) {
-        *self.winsize_cols.lock() = cols;
-        *self.winsize_rows.lock() = rows;
+        let changed = {
+            let mut current_cols = self.winsize_cols.lock();
+            let mut current_rows = self.winsize_rows.lock();
+            let changed = *current_cols != cols || *current_rows != rows;
+            *current_cols = cols;
+            *current_rows = rows;
+            changed
+        };
+
+        if changed {
+            self.send_process_control_to_foreground(
+                crate::ipc::event::ProcessControlType::WindowChange,
+            );
+        }
     }
     fn get_winsize(&self) -> (u16, u16) {
         (*self.winsize_cols.lock(), *self.winsize_rows.lock())
@@ -987,6 +1091,12 @@ impl Device for TtyDevice {
 impl CharDevice for TtyDevice {
     fn read(&self, buffer: &mut [u8]) -> usize {
         if buffer.is_empty() {
+            return 0;
+        }
+        if self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalInput,
+            );
             return 0;
         }
 
@@ -1130,6 +1240,13 @@ impl CharDevice for TtyDevice {
         }
     }
     fn read_byte(&self) -> Option<u8> {
+        if self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalInput,
+            );
+            return None;
+        }
+
         // Loop until data becomes available
         loop {
             let mut input_buffer = self.input_buffer.lock();
@@ -1154,6 +1271,13 @@ impl CharDevice for TtyDevice {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        if self.is_tostop_enabled() && self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalOutput,
+            );
+            return Err("Background TTY write stopped");
+        }
+
         let _lock = self.write_lock.lock();
         let device_manager = DeviceManager::get_manager();
         let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {
@@ -1178,6 +1302,13 @@ impl CharDevice for TtyDevice {
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        if self.is_tostop_enabled() && self.is_current_process_group_background() {
+            self.send_process_control_to_current_group(
+                crate::ipc::event::ProcessControlType::TerminalOutput,
+            );
+            return Err("Background TTY write stopped");
+        }
+
         let _lock = self.write_lock.lock();
         let device_manager = DeviceManager::get_manager();
         let Some(uart_device) = device_manager.get_device(self.uart_device_id) else {

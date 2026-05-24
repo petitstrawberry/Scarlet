@@ -729,6 +729,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Open the file using VfsManager::open_relative
     // Apply a few Linux-compat path translations for devices
     let mapped_path = if path_str == "/dev/tty" {
+        if task.get_controlling_tty().is_none() {
+            return errno::to_result(errno::ENXIO);
+        }
         "/dev/tty0".to_string()
     } else if let Some(rest) = path_str.strip_prefix("/dev/vc/") {
         // Map /dev/vc/N -> /dev/ttyN; if ttyN doesn't exist, we may further alias below
@@ -846,6 +849,12 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if (flags & O_APPEND) != 0 {
             let _ = file_obj.seek(SeekFrom::End(0));
         }
+    }
+    if crate::abi::linux::device::tty::check_open_allowed(&kernel_obj).is_err() {
+        return errno::to_result(errno::EBUSY);
+    }
+    if (flags & O_NOCTTY) == 0 {
+        crate::abi::linux::device::tty::try_auto_acquire_controlling_tty(&kernel_obj);
     }
 
     // Register the file with the task using HandleTable

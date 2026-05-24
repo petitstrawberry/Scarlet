@@ -3,8 +3,13 @@
 //! This module maps Linux ioctls (e.g., termios/keyboard subset) onto Scarlet
 //! TTY control ops exposed via ControlOps on Device-backed file objects.
 
-use crate::device::char::tty::tty_ctl::{
-    SCTL_TTY_GET_KBMODE, SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_KBMODE, SCTL_TTY_SET_WINSIZE,
+use alloc::sync::Arc;
+
+use crate::device::char::tty::{
+    TtyDevice,
+    tty_ctl::{
+        SCTL_TTY_GET_KBMODE, SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_KBMODE, SCTL_TTY_SET_WINSIZE,
+    },
 };
 use crate::{
     device::{DeviceCapability, manager::DeviceManager},
@@ -34,8 +39,14 @@ pub const TCGETS: u32 = 0x5401; // Get termios
 pub const TCSETS: u32 = 0x5402; // Set termios (no wait)
 pub const TCSETSW: u32 = 0x5403; // Set termios (drain output)
 pub const TCSETSF: u32 = 0x5404; // Set termios (drain and flush)
+pub const TIOCEXCL: u32 = 0x540C; // Set exclusive mode
+pub const TIOCNXCL: u32 = 0x540D; // Clear exclusive mode
+pub const TIOCSCTTY: u32 = 0x540E; // Set controlling terminal
 pub const TIOCGPGRP: u32 = 0x540F; // Get foreground process group
 pub const TIOCSPGRP: u32 = 0x5410; // Set foreground process group
+pub const TIOCSTI: u32 = 0x5412; // Simulate terminal input
+pub const TIOCNOTTY: u32 = 0x5422; // Detach from controlling terminal
+pub const TIOCGSID: u32 = 0x5429; // Get session ID owning this terminal
 
 /// Linux keyboard mode values (subset)
 pub const K_RAW: u32 = 0x00;
@@ -80,6 +91,9 @@ struct LinuxTermios {
 const VEOF: usize = 4;
 const VTIME: usize = 5;
 const VMIN: usize = 6;
+const LFLAG_ICANON: u32 = 0x0000_0002;
+const LFLAG_ECHO: u32 = 0x0000_0008;
+const LFLAG_TOSTOP: u32 = 0x0000_0100;
 
 /// Handle Linux TTY-related ioctls for a given kernel object representing an
 /// open file descriptor. Returns Ok(Some(ret)) if handled, Ok(None) if not
@@ -92,7 +106,7 @@ pub fn handle_ioctl(
     use crate::device::char::tty::tty_ctl::{
         SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_ECHO, SCTL_TTY_GET_FOREGROUND_GROUP,
         SCTL_TTY_GET_READ_POLICY, SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_ECHO,
-        SCTL_TTY_SET_FOREGROUND_GROUP, SCTL_TTY_SET_READ_POLICY,
+        SCTL_TTY_SET_READ_POLICY,
     };
 
     const LOG_TTY_IOCTL: bool = false;
@@ -137,6 +151,7 @@ pub fn handle_ioctl(
                     };
                     let mut canonical = false;
                     let mut echo = true;
+                    let mut tostop = false;
                     let mut min_ready: u16 = 1;
                     let mut timeout_ms: u16 = 0;
                     if let Some(control_ops) = kernel_object.as_control() {
@@ -148,8 +163,12 @@ pub fn handle_ioctl(
                             timeout_ms = ((packed_u >> 16) & 0xFFFF) as u16;
                         }
                     }
-                    if canonical { t.c_lflag |= 0x0000_0002; }
-                    if echo { t.c_lflag |= 0x0000_0008; }
+                    if let Some(value) = with_tty_device(kernel_object, |tty| tty.is_tostop_enabled()) {
+                        tostop = value;
+                    }
+                    if canonical { t.c_lflag |= LFLAG_ICANON; }
+                    if echo { t.c_lflag |= LFLAG_ECHO; }
+                    if tostop { t.c_lflag |= LFLAG_TOSTOP; }
                     t.c_cc[VMIN] = core::cmp::min(min_ready as usize, 255) as u8;
                     let vtime_tenths = core::cmp::min(((timeout_ms as u32 + 99) / 100) as usize, 255) as u8;
                     t.c_cc[VTIME] = vtime_tenths;
@@ -166,8 +185,9 @@ pub fn handle_ioctl(
                     let vaddr = arg as usize;
                     if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
                         let t = unsafe { core::ptr::read(paddr as *const LinuxTermios) };
-                        let canonical_new = (t.c_lflag & 0x0000_0002) != 0;
-                        let echo_new = (t.c_lflag & 0x0000_0008) != 0;
+                        let canonical_new = (t.c_lflag & LFLAG_ICANON) != 0;
+                        let echo_new = (t.c_lflag & LFLAG_ECHO) != 0;
+                        let tostop_new = (t.c_lflag & LFLAG_TOSTOP) != 0;
                         let vmin = t.c_cc[VMIN] as u16;
                         let vtime_tenths = t.c_cc[VTIME] as u16;
                         let timeout_ms: u16 = vtime_tenths.saturating_mul(100);
@@ -183,6 +203,7 @@ pub fn handle_ioctl(
                                     canonical_new, echo_new, vmin, timeout_ms);
                             }
                         }
+                        let _ = with_tty_device(kernel_object, |tty| tty.set_tostop(tostop_new));
                         Ok(Some(0))
                     } else { Err(()) }
                 }
@@ -206,10 +227,6 @@ pub fn handle_ioctl(
             }
         }
         TIOCSPGRP => {
-            let Some(control_ops) = kernel_object.as_control() else {
-                return Err(());
-            };
-
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
             if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
@@ -217,9 +234,84 @@ pub fn handle_ioctl(
                 if pgid <= 0 {
                     return Err(());
                 }
-                control_ops
-                    .control(SCTL_TTY_SET_FOREGROUND_GROUP, pgid as usize)
-                    .map_err(|_| ())?;
+                let global_pgid =
+                    resolve_foreground_pgid_for_task(&task, pgid as usize).ok_or(())?;
+                with_tty_device(kernel_object, |tty| {
+                    if !task_controls_tty(&task, tty) {
+                        return Err(());
+                    }
+                    if tty.get_controlling_session_id() != Some(task.get_session_id()) {
+                        return Err(());
+                    }
+                    tty.set_foreground_task_group_id(global_pgid);
+                    Ok(())
+                })
+                .ok_or(())??;
+                Ok(Some(0))
+            } else {
+                Ok(Some((-14_isize) as usize))
+            }
+        }
+        TIOCEXCL => {
+            with_tty_device(kernel_object, |tty| tty.set_exclusive(true)).ok_or(())?;
+            Ok(Some(0))
+        }
+        TIOCNXCL => {
+            with_tty_device(kernel_object, |tty| tty.set_exclusive(false)).ok_or(())?;
+            Ok(Some(0))
+        }
+        TIOCSCTTY => {
+            let force = arg != 0;
+            acquire_controlling_tty(kernel_object, force)?;
+            Ok(Some(0))
+        }
+        TIOCSTI => {
+            let task = mytask().ok_or(())?;
+            let vaddr = arg as usize;
+            let byte = if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe { *(paddr as *const u8) }
+            } else {
+                return Ok(Some((-14_isize) as usize));
+            };
+            with_tty_device(kernel_object, |tty| tty.inject_input_byte(byte)).ok_or(())?;
+            Ok(Some(0))
+        }
+        TIOCNOTTY => {
+            let task = mytask().ok_or(())?;
+            with_tty_device(kernel_object, |tty| {
+                let Some(current_tty) = task.get_controlling_tty() else {
+                    return Err(());
+                };
+
+                let this_tty = tty.weak_self().and_then(|weak| weak.upgrade()).ok_or(())?;
+                if !Arc::ptr_eq(&current_tty, &this_tty) {
+                    return Err(());
+                }
+
+                task.clear_controlling_tty();
+                if task.is_session_leader() {
+                    tty.clear_controlling_session_id(task.get_session_id());
+                }
+                Ok(())
+            })
+            .ok_or(())??;
+            Ok(Some(0))
+        }
+        TIOCGSID => {
+            let task = mytask().ok_or(())?;
+            let session_id = with_tty_device(kernel_object, |tty| tty.get_controlling_session_id())
+                .flatten()
+                .ok_or(())?;
+            let visible_session_id = task
+                .get_namespace()
+                .resolve_local_id(session_id)
+                .unwrap_or(session_id);
+
+            let vaddr = arg as usize;
+            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+                unsafe {
+                    *(paddr as *mut i32) = visible_session_id as i32;
+                }
                 Ok(Some(0))
             } else {
                 Ok(Some((-14_isize) as usize))
@@ -651,17 +743,92 @@ pub fn handle_ioctl(
 }
 
 fn is_tty_kernel_object(kernel_object: &KernelObject) -> bool {
-    if let Some(file_obj) = kernel_object.as_file() {
-        if let Ok(metadata) = file_obj.metadata() {
-            if let FileType::CharDevice(info) = metadata.file_type {
-                if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
-                    return dev
-                        .capabilities()
-                        .iter()
-                        .any(|c| *c == DeviceCapability::Tty);
-                }
+    tty_shared_device_from_object(kernel_object).is_some()
+}
+
+fn tty_shared_device_from_object(
+    kernel_object: &KernelObject,
+) -> Option<Arc<dyn crate::device::Device>> {
+    let file_obj = kernel_object.as_file()?;
+    let metadata = file_obj.metadata().ok()?;
+    let FileType::CharDevice(info) = metadata.file_type else {
+        return None;
+    };
+    let dev = DeviceManager::get_manager().get_device(info.device_id)?;
+    if dev
+        .capabilities()
+        .iter()
+        .any(|c| *c == DeviceCapability::Tty)
+    {
+        Some(dev)
+    } else {
+        None
+    }
+}
+
+fn with_tty_device<R>(kernel_object: &KernelObject, f: impl FnOnce(&TtyDevice) -> R) -> Option<R> {
+    let dev = tty_shared_device_from_object(kernel_object)?;
+    let tty = dev.as_any().downcast_ref::<TtyDevice>()?;
+    Some(f(tty))
+}
+
+fn task_controls_tty(task: &crate::task::Task, tty: &TtyDevice) -> bool {
+    let Some(current_tty) = task.get_controlling_tty() else {
+        return false;
+    };
+    let Some(this_tty) = tty.weak_self().and_then(|weak| weak.upgrade()) else {
+        return false;
+    };
+    Arc::ptr_eq(&current_tty, &this_tty)
+}
+
+fn resolve_foreground_pgid_for_task(task: &crate::task::Task, user_pgid: usize) -> Option<usize> {
+    let global_task_id = task.get_namespace().resolve_global_id(user_pgid)?;
+    let group_leader = crate::sched::scheduler::get_task_by_id(global_task_id)?;
+    if group_leader.get_process_group_id() != global_task_id {
+        return None;
+    }
+    if group_leader.get_session_id() != task.get_session_id() {
+        return None;
+    }
+    Some(global_task_id)
+}
+
+pub fn try_auto_acquire_controlling_tty(kernel_object: &KernelObject) {
+    let _ = acquire_controlling_tty(kernel_object, false);
+}
+
+pub fn check_open_allowed(kernel_object: &KernelObject) -> Result<(), ()> {
+    with_tty_device(kernel_object, |tty| {
+        if tty.is_exclusive() { Err(()) } else { Ok(()) }
+    })
+    .unwrap_or(Ok(()))
+}
+
+fn acquire_controlling_tty(kernel_object: &KernelObject, force: bool) -> Result<(), ()> {
+    let task = mytask().ok_or(())?;
+    with_tty_device(kernel_object, |tty| {
+        if task_controls_tty(&task, tty) {
+            return Ok(());
+        }
+        if task.get_controlling_tty().is_some() || !task.is_session_leader() {
+            return Err(());
+        }
+
+        let session_id = task.get_session_id();
+        if let Some(owner_session_id) = tty.get_controlling_session_id() {
+            if owner_session_id != session_id && !force {
+                return Err(());
             }
         }
-    }
-    false
+
+        let weak = tty.weak_self().ok_or(())?;
+        task.set_controlling_tty(Some(weak));
+        tty.set_controlling_session_id(session_id);
+        if tty.get_foreground_task_group_id().is_none() {
+            tty.set_foreground_task_group_id(task.get_process_group_id());
+        }
+        Ok(())
+    })
+    .ok_or(())?
 }

@@ -106,11 +106,24 @@ Current Phase 1 state:
   controls.
 - `Task::controlling_tty` is a `Weak<TtyDevice>` to avoid cycles.
 - `Task::is_session_leader` records session leadership explicitly.
+- `TtyDevice` stores its controlling SID and a weak self-reference so Linux
+  `TIOCSCTTY`, `TIOCNOTTY`, and `TIOCGSID` can operate without adding a
+  separate signal/session subsystem.
 
 `setsid(2)` sets `SID = PGID = current task ID`, clears the controlling TTY,
 and marks the caller as a session leader. `setpgid(2)` is constrained to the
 caller or its direct child, the same session, and a target process group in the
 same session.
+
+Opening a concrete TTY such as `/dev/tty0` without `O_NOCTTY` attempts to
+acquire it as the caller's controlling terminal when the caller is a session
+leader and has no controlling TTY. `/dev/tty` is treated as the caller's
+controlling terminal and fails with `ENXIO` when none is attached. A terminal
+put into `TIOCEXCL` mode rejects later opens with `EBUSY` until `TIOCNXCL`
+clears the exclusive flag.
+
+`TIOCSPGRP` is accepted only on the caller's controlling TTY, and the target
+PGID must name a process group leader in the caller's session.
 
 ## Job-Control State Machine
 
@@ -150,6 +163,7 @@ and job-control state.
 | --- | --- | --- |
 | `SCTL_TTY_SET_ECHO` / `GET_ECHO` | `TCSETS` / `TCGETS`, `ECHO` | `termios.c_lflag` |
 | `SCTL_TTY_SET_CANONICAL` / `GET_CANONICAL` | `TCSETS` / `TCGETS`, `ICANON` | `termios.c_lflag` |
+| TTY internal `tostop_enabled` | `TCSETS` / `TCGETS`, `TOSTOP` | `termios.c_lflag` |
 | `SCTL_TTY_SET_READ_POLICY` / `GET_READ_POLICY` | `VMIN` / `VTIME` | `termios.c_cc` |
 | `SCTL_TTY_SET_WINSIZE` / `GET_WINSIZE` | `TIOCSWINSZ` / `TIOCGWINSZ` | TTY winsize |
 | `SCTL_TTY_SET_KBMODE` / `GET_KBMODE` | `KDSKBMODE` / `KDGKBMODE` | console keyboard mode |
@@ -157,12 +171,11 @@ and job-control state.
 | `SCTL_TTY_FLUSH_INPUT` | `TCSETSF`, future `TCFLSH` | ldisc input queue |
 | `SCTL_TTY_SET_DEBUG` / `GET_DEBUG` | Scarlet-only | diagnostics |
 
-Linux-only ioctls planned for the job-control and PTY phases:
+Linux-only ioctls covered or planned for the job-control and PTY phases:
 
-- `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGSID`
-- `TIOCEXCL`, `TIOCNXCL`
+- covered now: `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGSID`
+- covered now: `TIOCEXCL`, `TIOCNXCL`, `TIOCSTI`
 - `TIOCPKT`
-- `TIOCSTI`
 - `TIOCGPTN`, `TIOCSPTLCK`
 
 ## Merge Plan

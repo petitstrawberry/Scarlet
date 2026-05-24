@@ -575,6 +575,70 @@ pub fn handle_event_to_signal(event: &Event) -> Option<LinuxSignal> {
     }
 }
 
+/// Handle an incoming Scarlet event as a Linux signal for a target task.
+///
+/// # Arguments
+///
+/// * `abi` - Linux ABI state that owns the signal handler table
+/// * `event` - Scarlet event to translate
+/// * `target_task_id` - Kernel task ID that receives the event
+/// * `setup_signal_handler` - Architecture-specific signal-frame setup callback
+///
+/// # Returns
+///
+/// `Ok(())` when the event was handled or ignored, otherwise an error if the
+/// target task could not be found.
+pub fn handle_event_for_task(
+    abi: &LinuxAbi,
+    event: &Event,
+    target_task_id: u32,
+    setup_signal_handler: fn(&mut Trapframe, usize, LinuxSignal),
+) -> Result<(), &'static str> {
+    let Some(signal) = handle_event_to_signal(event) else {
+        return Ok(());
+    };
+
+    let target_task = crate::sched::scheduler::get_task_by_id(target_task_id as usize)
+        .ok_or("Target task not found")?;
+
+    let action = {
+        let signal_state = abi.signal_state.lock();
+        signal_state.get_handler(signal)
+    };
+
+    match action {
+        SignalAction::Custom(handler_addr) => {
+            let trapframe = target_task.get_trapframe();
+            setup_signal_handler(trapframe, handler_addr, signal);
+        }
+        SignalAction::Ignore => {}
+        SignalAction::ForceTerminate | SignalAction::Terminate => {
+            let exit_code = 128 + (signal as i32);
+            target_task.exit(exit_code);
+        }
+        SignalAction::Stop => {
+            target_task.set_state(crate::task::TaskState::Blocked(
+                crate::task::BlockedType::Interruptible,
+            ));
+            crate::sched::scheduler::mark_blocked(target_task.get_id());
+            crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
+        }
+        SignalAction::Continue => {
+            let current_state = target_task.get_state();
+            if matches!(current_state, crate::task::TaskState::Blocked(_)) {
+                target_task.set_state(crate::task::TaskState::Ready);
+                crate::sched::scheduler::unmark_blocked(target_task.get_id());
+                crate::sched::scheduler::push_ready_task(
+                    crate::arch::get_cpu().get_cpuid(),
+                    target_task.get_id(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Deliver a signal to a task's signal state
 pub fn deliver_signal_to_task(abi: &LinuxAbi, signal: LinuxSignal) {
     // Add signal to pending if it's not already pending
@@ -590,12 +654,12 @@ pub fn get_next_pending_signal(abi: &LinuxAbi) -> Option<LinuxSignal> {
     signal_state.next_deliverable_signal()
 }
 
-/// Process pending signals and dispatch to arch-specific handler.
+/// Process pending signals and dispatch to the supplied handler-frame setup.
 /// Returns true if execution should be interrupted.
-/// Arch modules must provide `arch_setup_signal_handler`.
-pub fn process_pending_signals_with_state(
+pub fn process_pending_signals_with_setup(
     signal_state: &mut SignalState,
     trapframe: &mut Trapframe,
+    setup_signal_handler: fn(&mut Trapframe, usize, LinuxSignal),
 ) -> bool {
     if let Some(signal) = signal_state.next_deliverable_signal() {
         let action = signal_state.get_handler(signal);
@@ -621,7 +685,7 @@ pub fn process_pending_signals_with_state(
                     signal as u32,
                     handler_addr
                 );
-                arch_setup_signal_handler(trapframe, handler_addr, signal);
+                setup_signal_handler(trapframe, handler_addr, signal);
                 true
             }
         }
@@ -630,17 +694,16 @@ pub fn process_pending_signals_with_state(
     }
 }
 
-/// Arch-specific signal handler setup. Must be implemented by each arch module.
-pub fn arch_setup_signal_handler(
-    _trapframe: &mut Trapframe,
-    _handler_addr: usize,
-    _signal: LinuxSignal,
-) {
-    // Default: no-op. Arch modules should override via cfg.
-    #[cfg(target_arch = "riscv64")]
-    crate::abi::linux::riscv64::signal::setup_signal_handler(_trapframe, _handler_addr, _signal);
-    #[cfg(target_arch = "aarch64")]
-    crate::abi::linux::aarch64::signal::setup_signal_handler(_trapframe, _handler_addr, _signal);
+/// Process pending signals without installing a custom handler frame.
+///
+/// Arch-specific ABI modules should prefer `process_pending_signals_with_setup`
+/// and pass their own signal-frame builder. This fallback exists for generic
+/// callers that only need default actions.
+pub fn process_pending_signals_with_state(
+    signal_state: &mut SignalState,
+    trapframe: &mut Trapframe,
+) -> bool {
+    process_pending_signals_with_setup(signal_state, trapframe, |_trapframe, _handler, _signal| {})
 }
 
 /// Handle fatal signals that should terminate immediately
