@@ -276,38 +276,23 @@ impl TtyDevice {
             .unwrap_or(task_group_id)
     }
 
-    fn send_interrupt_to_foreground(&self) {
-        use crate::ipc::event::{Event, EventPriority, ProcessControlType};
-        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, wake_task};
-        use crate::task::{BlockedType, TaskState};
+    fn send_process_control_to_foreground(&self, ptype: crate::ipc::event::ProcessControlType) {
+        use crate::ipc::event::{
+            Event, EventContent, EventManager, EventPayload, EventPriority, GroupTarget,
+        };
 
-        if let Some(task_group_id) = self.get_foreground_task_group_id() {
-            let task_ids = get_all_task_ids();
+        let Some(process_group_id) = self.get_foreground_task_group_id() else {
+            return;
+        };
 
-            let mut tasks_to_wake = alloc::vec::Vec::new();
-
-            for task_id in task_ids {
-                if let Some(task) = get_task_by_id(task_id) {
-                    if task.get_process_group_id() == task_group_id {
-                        let event = Event::direct_process_control(
-                            task_id as u32,
-                            ProcessControlType::Interrupt,
-                            EventPriority::High,
-                            true,
-                        );
-                        task.event_queue.lock().enqueue(event);
-
-                        if task.get_state() == TaskState::Blocked(BlockedType::Interruptible) {
-                            tasks_to_wake.push(task_id);
-                        }
-                    }
-                }
-            }
-
-            for task_id in tasks_to_wake {
-                wake_task(task_id);
-            }
-        }
+        let event = Event::group(
+            GroupTarget::TaskGroup(process_group_id as u32),
+            EventContent::ProcessControl(ptype),
+            EventPriority::High,
+            true,
+            EventPayload::Empty,
+        );
+        let _ = EventManager::get_manager().send_event(event);
     }
 
     /// Read readiness for select/poll semantics.
@@ -395,11 +380,31 @@ impl TtyDevice {
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
-                    self.send_interrupt_to_foreground();
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::Interrupt,
+                    );
                 }
-                // Ctrl-Z (SUB) placeholder
+                0x1C => {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
+                        self.echo_char('^' as u8);
+                        self.echo_char('\\' as u8);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::Quit,
+                    );
+                }
                 0x1A => {
-                    // No job-control semantics in device layer
+                    if self.echo_enabled.load(Ordering::Relaxed) {
+                        self.echo_char('^' as u8);
+                        self.echo_char('Z' as u8);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    self.send_process_control_to_foreground(
+                        crate::ipc::event::ProcessControlType::TerminalStop,
+                    );
                 }
                 // Regular characters
                 byte => {

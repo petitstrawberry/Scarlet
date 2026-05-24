@@ -11,7 +11,7 @@ right.
 
 ```text
 process/session/job control
-  task_struct::signal/session/pgrp/tty
+  task_struct::session/pgrp/tty + EventContent::ProcessControl
       -> Task::{session_id, process_group_id, controlling_tty}
 
 tty_struct
@@ -76,7 +76,8 @@ Master writes inject bytes into the slave TTY input path, so canonical mode,
 echo, ISIG, ICRNL, and future UTF-8 handling are applied exactly once. Slave
 writes bypass input processing and become master-readable output. Window size
 is stored on the pair and reflected through both sides; `TIOCSWINSZ` must send
-`SIGWINCH` to the slave TTY foreground PGID.
+`ProcessControlType::WindowChange` to the slave TTY foreground PGID. The Linux
+ABI projects that event to `SIGWINCH`.
 
 ## Ownership Model
 
@@ -90,7 +91,7 @@ Session (SID = leader task ID)
 
 Process group (PGID = leader task ID)
   is the unit for foreground/background terminal access
-  is the target for terminal-generated job-control signals
+  is the target for terminal-generated process-control events
 
 Task/thread group
   inherits SID, PGID, and controlling TTY across fork/clone
@@ -115,27 +116,30 @@ same session.
 
 ```text
 keyboard input in foreground tty
-  Ctrl-C  -> SIGINT  -> foreground PGID
-  Ctrl-\  -> SIGQUIT -> foreground PGID
-  Ctrl-Z  -> SIGTSTP -> foreground PGID
+  Ctrl-C  -> ProcessControlType::Interrupt    -> foreground PGID
+  Ctrl-\  -> ProcessControlType::Quit         -> foreground PGID
+  Ctrl-Z  -> ProcessControlType::TerminalStop -> foreground PGID
 
 background read from controlling tty
-  -> SIGTTIN to caller PGID, unless ignored/blocked
+  -> ProcessControlType::TerminalInput to caller PGID, unless ignored/blocked
 
 background write with TOSTOP
-  -> SIGTTOU to caller PGID, unless ignored/blocked
+  -> ProcessControlType::TerminalOutput to caller PGID, unless ignored/blocked
 
-SIGTSTP/SIGTTIN/SIGTTOU default
+TerminalStop/TerminalInput/TerminalOutput default
   Running -> Stopped
 
-SIGCONT default
+Continue default
   Stopped -> Ready
 ```
 
-Signal delivery should be centralized in `kernel/src/task/signal/` (or the
-existing Linux generic signal module until that split lands). TTY code should
-call a PGID-level helper instead of scanning tasks itself once that helper
-exists.
+Scarlet does not add a separate POSIX signal subsystem in kernel core. The
+kernel-neutral representation is the existing Event path:
+`EventContent::ProcessControl(ProcessControlType)`, delivered with
+`EventDelivery::Group(GroupTarget::TaskGroup(pgid))`. ABI layers translate only
+at their boundary. For example, the Linux ABI maps `TerminalStop` to `SIGTSTP`,
+`TerminalInput` to `SIGTTIN`, `TerminalOutput` to `SIGTTOU`, and
+`WindowChange` to `SIGWINCH`.
 
 ## Scarlet Control Opcode Mapping
 
@@ -165,8 +169,8 @@ Linux-only ioctls planned for the job-control and PTY phases:
 
 1. Land the task SID/PGID/control-tty model and Linux `setsid`,
    `setpgid`, `getsid`, `getpgid`.
-2. Move signal numbers and default actions into a kernel-neutral signal module,
-   then make TTY input deliver to PGIDs through that module.
+2. Extend `ProcessControlType` for terminal job-control events and make TTY
+   input deliver to foreground PGIDs through `EventManager`.
 3. Split `tty.rs` into the target module structure and move termios constants
    to a single shared definition.
 4. Add PTY pair, `/dev/ptmx`, and `devpts`.

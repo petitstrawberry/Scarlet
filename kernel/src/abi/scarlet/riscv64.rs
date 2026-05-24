@@ -51,7 +51,7 @@ pub struct EventHandlerEntry {
 #[derive(Debug, Clone, Default)]
 pub struct EventMask {
     /// Blocked event content types (ProcessControl types)
-    pub blocked_process_control: u32,
+    pub blocked_process_control: u64,
     /// Blocked notification types
     pub blocked_notifications: u64,
     /// Blocked custom event namespaces
@@ -81,48 +81,14 @@ impl EventMask {
 
     /// Block a specific ProcessControlType
     pub fn block_process_control(&mut self, ptype: ProcessControlType) {
-        let bit = match ptype {
-            ProcessControlType::Terminate => 0,
-            ProcessControlType::Kill => 1,
-            ProcessControlType::Stop => 2,
-            ProcessControlType::Continue => 3,
-            ProcessControlType::Interrupt => 4,
-            ProcessControlType::Quit => 5,
-            ProcessControlType::Hangup => 6,
-            ProcessControlType::ChildExit => 7,
-            ProcessControlType::PipeBroken => 8,
-            ProcessControlType::Alarm => 9,
-            ProcessControlType::IoReady => 10,
-            ProcessControlType::User(n) => {
-                // Constrain user signals to 0-20 to avoid collisions
-                // User signals beyond 20 are treated as 20
-                11 + n.min(20)
-            }
-        };
-        self.blocked_process_control |= 1 << bit;
+        let bit = Self::process_control_bit(ptype);
+        self.blocked_process_control |= 1u64 << bit;
     }
 
     /// Unblock a specific ProcessControlType
     pub fn unblock_process_control(&mut self, ptype: ProcessControlType) {
-        let bit = match ptype {
-            ProcessControlType::Terminate => 0,
-            ProcessControlType::Kill => 1,
-            ProcessControlType::Stop => 2,
-            ProcessControlType::Continue => 3,
-            ProcessControlType::Interrupt => 4,
-            ProcessControlType::Quit => 5,
-            ProcessControlType::Hangup => 6,
-            ProcessControlType::ChildExit => 7,
-            ProcessControlType::PipeBroken => 8,
-            ProcessControlType::Alarm => 9,
-            ProcessControlType::IoReady => 10,
-            ProcessControlType::User(n) => {
-                // Constrain user signals to 0-20 to avoid collisions
-                // User signals beyond 20 are treated as 20
-                11 + n.min(20)
-            }
-        };
-        self.blocked_process_control &= !(1 << bit);
+        let bit = Self::process_control_bit(ptype);
+        self.blocked_process_control &= !(1u64 << bit);
     }
 
     /// Check if a ProcessControlType is blocked
@@ -130,25 +96,33 @@ impl EventMask {
         if self.block_all {
             return true;
         }
-        let bit = match ptype {
+        let bit = Self::process_control_bit(ptype);
+        (self.blocked_process_control & (1u64 << bit)) != 0
+    }
+
+    fn process_control_bit(ptype: ProcessControlType) -> u32 {
+        match ptype {
             ProcessControlType::Terminate => 0,
             ProcessControlType::Kill => 1,
             ProcessControlType::Stop => 2,
             ProcessControlType::Continue => 3,
             ProcessControlType::Interrupt => 4,
             ProcessControlType::Quit => 5,
-            ProcessControlType::Hangup => 6,
-            ProcessControlType::ChildExit => 7,
-            ProcessControlType::PipeBroken => 8,
-            ProcessControlType::Alarm => 9,
-            ProcessControlType::IoReady => 10,
+            ProcessControlType::TerminalStop => 6,
+            ProcessControlType::TerminalInput => 7,
+            ProcessControlType::TerminalOutput => 8,
+            ProcessControlType::WindowChange => 9,
+            ProcessControlType::Hangup => 10,
+            ProcessControlType::ChildExit => 11,
+            ProcessControlType::PipeBroken => 12,
+            ProcessControlType::Alarm => 13,
+            ProcessControlType::IoReady => 14,
             ProcessControlType::User(n) => {
                 // Constrain user signals to 0-20 to avoid collisions
                 // User signals beyond 20 are treated as 20
-                11 + n.min(20)
+                15 + n.min(20)
             }
-        };
-        (self.blocked_process_control & (1 << bit)) != 0
+        }
     }
 
     /// Check if an event content is blocked
@@ -333,17 +307,21 @@ impl ScarletAbi {
         task: &crate::task::Task,
     ) -> Result<(), &'static str> {
         match ptype {
-            ProcessControlType::Terminate | ProcessControlType::Kill => {
+            ProcessControlType::Terminate | ProcessControlType::Kill | ProcessControlType::Quit => {
                 // Exit the task with appropriate status
                 let exit_code = match ptype {
                     ProcessControlType::Kill => 128 + 9,       // SIGKILL-like
                     ProcessControlType::Terminate => 128 + 15, // SIGTERM-like
+                    ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
                 task.exit(exit_code);
                 Ok(())
             }
-            ProcessControlType::Stop => {
+            ProcessControlType::Stop
+            | ProcessControlType::TerminalStop
+            | ProcessControlType::TerminalInput
+            | ProcessControlType::TerminalOutput => {
                 task.set_state(crate::task::TaskState::Blocked(
                     crate::task::BlockedType::Interruptible,
                 ));
@@ -478,6 +456,10 @@ impl ScarletAbi {
                     ProcessControlType::PipeBroken => 8,
                     ProcessControlType::Alarm => 9,
                     ProcessControlType::IoReady => 10,
+                    ProcessControlType::TerminalStop => 11,
+                    ProcessControlType::TerminalInput => 12,
+                    ProcessControlType::TerminalOutput => 13,
+                    ProcessControlType::WindowChange => 14,
                     ProcessControlType::User(id) => 256 + *id as usize,
                 };
                 (0usize, sub)

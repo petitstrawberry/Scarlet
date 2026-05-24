@@ -106,19 +106,23 @@ pub enum EventContent {
 /// different operating systems (Linux signals, Windows events, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessControlType {
-    Terminate,  // Graceful termination
-    Kill,       // Force termination
-    Stop,       // Suspend execution
-    Continue,   // Resume execution
-    Interrupt,  // User interrupt (Ctrl+C)
-    Quit,       // Quit with core dump
-    Hangup,     // Terminal hangup
-    ChildExit,  // Child process exited
-    PipeBroken, // Broken pipe
-    Alarm,      // Timer alarm
-    IoReady,    // I/O ready
-    User(u32),  // User-defined control signal (0-65535)
-                // Add more as needed
+    Terminate,      // Graceful termination
+    Kill,           // Force termination
+    Stop,           // Suspend execution
+    Continue,       // Resume execution
+    Interrupt,      // User interrupt (Ctrl+C)
+    Quit,           // Quit with core dump
+    TerminalStop,   // Interactive terminal stop (Ctrl+Z)
+    TerminalInput,  // Background terminal read
+    TerminalOutput, // Background terminal write
+    WindowChange,   // Terminal window size changed
+    Hangup,         // Terminal hangup
+    ChildExit,      // Child process exited
+    PipeBroken,     // Broken pipe
+    Alarm,          // Timer alarm
+    IoReady,        // I/O ready
+    User(u32),      // User-defined control signal (0-65535)
+                    // Add more as needed
 }
 
 /// Message categories (for structured communication)
@@ -280,6 +284,11 @@ impl EventFilter {
                                         ProcessControlType::Stop => 3,
                                         ProcessControlType::Continue => 4,
                                         ProcessControlType::Interrupt => 7,
+                                        ProcessControlType::Quit => 8,
+                                        ProcessControlType::TerminalStop => 9,
+                                        ProcessControlType::TerminalInput => 10,
+                                        ProcessControlType::TerminalOutput => 11,
+                                        ProcessControlType::WindowChange => 12,
                                         _ => 0,
                                     };
                                     type_id == *content_id
@@ -992,19 +1001,35 @@ impl EventManager {
     ) -> Result<(), EventError> {
         match group_target {
             GroupTarget::TaskGroup(group_id) => {
+                let mut targets = alloc::vec::Vec::new();
+
                 let groups = self.groups.lock();
                 if let Some(members) = groups.get(group_id) {
-                    let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
-                    drop(groups);
-                    for &task_id in &targets {
-                        if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
-                            self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                    targets.extend(members.iter().copied());
+                }
+                drop(groups);
+
+                for task_id in crate::sched::scheduler::get_all_task_ids() {
+                    if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
+                        if task.get_process_group_id() == *group_id as usize {
+                            let task_id = task_id as u32;
+                            if !targets.contains(&task_id) {
+                                targets.push(task_id);
+                            }
                         }
                     }
-                    Ok(())
-                } else {
-                    Err(EventError::GroupNotFound)
                 }
+
+                if targets.is_empty() {
+                    return Err(EventError::GroupNotFound);
+                }
+
+                for &task_id in &targets {
+                    if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
+                        self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                    }
+                }
+                Ok(())
             }
             GroupTarget::AllTasks => {
                 let all_ids: alloc::vec::Vec<u32> = crate::sched::scheduler::get_all_task_ids()
@@ -1098,7 +1123,16 @@ impl EventManager {
                 return Err(EventError::BufferFull);
             }
             // Enqueue the event since it passed filtering and buffer check
+            let should_wake = matches!(event.content, EventContent::ProcessControl(_))
+                && matches!(
+                    task.get_state(),
+                    crate::task::TaskState::Blocked(crate::task::BlockedType::Interruptible)
+                );
             queue.enqueue(event);
+            drop(queue);
+            if should_wake {
+                crate::sched::scheduler::wake_task(task_id as usize);
+            }
             Ok(())
         } else {
             Err(EventError::TargetNotFound)
@@ -1920,6 +1954,10 @@ mod tests {
             ProcessControlType::Continue,
             ProcessControlType::Interrupt,
             ProcessControlType::Quit,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+            ProcessControlType::WindowChange,
             ProcessControlType::Hangup,
             ProcessControlType::ChildExit,
             ProcessControlType::User(0),
@@ -2032,6 +2070,10 @@ mod tests {
             ProcessControlType::Continue,
             ProcessControlType::Interrupt,
             ProcessControlType::Quit,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+            ProcessControlType::WindowChange,
             ProcessControlType::Hangup,
             ProcessControlType::User(0),
             ProcessControlType::PipeBroken,

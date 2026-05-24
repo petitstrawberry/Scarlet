@@ -298,7 +298,10 @@ pub fn sys_event_handler_register(trapframe: &mut Trapframe) -> usize {
 ///
 /// Arguments:
 /// - target_tid: u32
-/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,1000+=User(kind-1000))
+/// - kind: u32 (0=Terminate,1=Kill,2=Stop,3=Continue,4=Interrupt,5=Quit,
+///   6=Hangup,7=ChildExit,8=PipeBroken,9=Alarm,10=IoReady,
+///   11=TerminalStop,12=TerminalInput,13=TerminalOutput,14=WindowChange,
+///   1000+=Custom("user", kind-1000))
 /// - reliable: u32 (0/1)
 /// - priority: u32 (1=Low,2=Normal,3=High,4=Critical)
 pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
@@ -341,6 +344,10 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
             8 => ProcessControlType::PipeBroken,
             9 => ProcessControlType::Alarm,
             10 => ProcessControlType::IoReady,
+            11 => ProcessControlType::TerminalStop,
+            12 => ProcessControlType::TerminalInput,
+            13 => ProcessControlType::TerminalOutput,
+            14 => ProcessControlType::WindowChange,
             _ => ProcessControlType::Terminate,
         };
         Event::direct_process_control(target, ptype, priority, reliable)
@@ -940,6 +947,11 @@ fn subtype_to_process_control(subtype: u32) -> ProcessControlType {
         8 => ProcessControlType::PipeBroken,
         9 => ProcessControlType::Alarm,
         10 => ProcessControlType::IoReady,
-        n => ProcessControlType::User(n - 11),
+        11 => ProcessControlType::TerminalStop,
+        12 => ProcessControlType::TerminalInput,
+        13 => ProcessControlType::TerminalOutput,
+        14 => ProcessControlType::WindowChange,
+        n if n >= 256 => ProcessControlType::User(n - 256),
+        n => ProcessControlType::User(n - 15),
     }
 }
