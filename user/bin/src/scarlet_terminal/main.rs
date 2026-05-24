@@ -29,7 +29,7 @@ use std::task::{
     EXECVE_FORCE_ABI_REBUILD, WAIT_NOHANG, create_session, execve_with_flags, exit, fork,
     process_group_id, waitpid,
 };
-use std::{print, println, thread};
+use std::{println, thread};
 use vt::VtScreen;
 
 const DEFAULT_WINDOW_WIDTH: u32 = 900;
@@ -298,7 +298,6 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
             close_inherited_handle(inherited_writer_handle);
             let _ = create_session();
             setup_child_stdio(slave);
-            print_startup_banner();
             let candidates = [
                 "/bin/sh",
                 "/scarlet/system/scarlet/bin/sh",
@@ -316,19 +315,6 @@ fn spawn_shell(slave: PtySlave, inherited_master_handle: i32, inherited_writer_h
         }
         pid => pid,
     }
-}
-
-fn print_startup_banner() {
-    print!(
-        "\r\n\
-\x1b[1;38;2;255;43;31m ███████╗  ██████╗  █████╗  ██████╗  ██╗      ███████╗ ████████╗\r\n\
-\x1b[1;38;2;244;28;45m ██╔════╝ ██╔════╝ ██╔══██╗ ██╔══██╗ ██║      ██╔════╝ ╚══██╔══╝\r\n\
-\x1b[1;38;2;220;18;54m ███████╗ ██║      ███████║ ██████╔╝ ██║      █████╗      ██║\r\n\
-\x1b[1;38;2;184;16;54m ╚════██║ ██║      ██╔══██║ ██╔══██╗ ██║      ██╔══╝      ██║\r\n\
-\x1b[1;38;2;220;30;48m ███████║ ╚██████╗ ██║  ██║ ██║  ██║ ███████╗ ███████╗    ██║\r\n\
-\x1b[1;38;2;255;82;78m ╚══════╝  ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚══════╝ ╚══════╝    ╚═╝\x1b[0m\r\n\
-\r\n"
-    );
 }
 
 fn close_inherited_handle(raw_handle: i32) {
