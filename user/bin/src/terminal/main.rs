@@ -41,15 +41,7 @@ const MIN_FONT_SIZE: f32 = 10.0;
 const MAX_FONT_SIZE: f32 = 28.0;
 const WINDOW_HORIZONTAL_DECORATION: f32 = 4.0;
 const WINDOW_VERTICAL_DECORATION: f32 = 34.0;
-const SHELL_ENV: [&str; 7] = [
-    "HOME=/system/scarlet/root",
-    "PWD=/",
-    "SHELL=/system/scarlet/bin/sh",
-    "TERM=xterm-256color",
-    "PATH=/system/scarlet/bin:/bin:/scarlet/system/scarlet/bin:/scarlet/system/linux-aarch64/bin:/scarlet/system/linux-aarch64/usr/bin:/old_root/system/scarlet/bin",
-    "XDG_RUNTIME_DIR=/tmp",
-    "WAYLAND_DISPLAY=wayland-0",
-];
+const SHELL_ENV: [&str; 1] = ["TERM=xterm-256color"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalMetrics {

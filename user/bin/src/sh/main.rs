@@ -45,23 +45,23 @@ fn init_jobs() {
 
 /// Add a job to the job list
 fn add_job(pid: i32, process_group_id: i32, command: String, is_running: bool) -> usize {
-    println!(
-        "DEBUG: add_job called with pid={}, pgid={}, command={}",
-        pid, process_group_id, command
-    );
+    // println!(
+    //     "DEBUG: add_job called with pid={}, pgid={}, command={}",
+    //     pid, process_group_id, command
+    // );
     unsafe {
         let next_id_ptr = core::ptr::addr_of_mut!(NEXT_JOB_ID);
         let job_id = *next_id_ptr;
         *next_id_ptr += 1;
-        println!("DEBUG: job_id={}", job_id);
+        // println!("DEBUG: job_id={}", job_id);
 
         let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
-        println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
+        // println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
 
         // Find an empty slot
         for i in 0..MAX_JOBS {
             if (*jobs_ptr)[i].is_none() {
-                println!("DEBUG: Found empty slot at index {}", i);
+                // println!("DEBUG: Found empty slot at index {}", i);
                 (*jobs_ptr)[i] = Some(Job {
                     job_id,
                     pid,
@@ -69,12 +69,12 @@ fn add_job(pid: i32, process_group_id: i32, command: String, is_running: bool) -
                     command,
                     is_running,
                 });
-                println!("DEBUG: Job added successfully at index {}", i);
+                // println!("DEBUG: Job added successfully at index {}", i);
                 return job_id;
             }
         }
 
-        println!("DEBUG: No empty slot found, job list full!");
+        // println!("DEBUG: No empty slot found, job list full!");
         job_id
     }
 }
@@ -268,12 +268,12 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
     }
 
     // DEBUG: show what we're about to run and any redirections
-    crate::println!(
-        "sh: execute_command: program='{}' args={:?} redirs_count={}",
-        program,
-        cleaned_args,
-        redirs.len()
-    );
+    // crate::println!(
+    //     "sh: execute_command: program='{}' args={:?} redirs_count={}",
+    //     program,
+    //     cleaned_args,
+    //     redirs.len()
+    // );
 
     // First check if it's a built-in command
     if let Some(exit_code) = handle_builtin_command(program, args) {
@@ -546,7 +546,7 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 opts.write(true).create(true).truncate(true);
                 match opts.open(filename.as_str()) {
                     Ok(f) => {
-                        println!("DEBUG: Opened {} for output redirection", filename);
+                        // println!("DEBUG: Opened {} for output redirection", filename);
                         stdout_handle = Some(f.into_handle());
                     }
                     Err(_) => {
@@ -622,14 +622,14 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 // Duplicate the input file handle - should get assigned to handle 0
                 if let Ok(new_h) = h.duplicate() {
                     // If not handle 0, we have a problem, but continue anyway
-                    println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
+                    // println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
                     std::mem::forget(new_h);
                 }
                 std::mem::forget(h); // Don't close the original
             }
             // For stdout: close handle 1, then dup to get handle 1
             if let Some(h) = stdout_handle {
-                println!("DEBUG: Closing stdout and duplicating file");
+                // println!("DEBUG: Closing stdout and duplicating file");
                 // Close stdout (handle 1)
                 if let Ok(h) = unsafe { Handle::from_raw(1) } {
                     let _ = h.close();
@@ -637,11 +637,11 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 // Duplicate the output file handle - should get assigned to handle 1
                 match h.duplicate() {
                     Ok(new_h) => {
-                        println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
+                        // println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
                         std::mem::forget(new_h);
                     }
                     Err(_) => {
-                        println!("DEBUG: Failed to duplicate stdout handle!");
+                        // println!("DEBUG: Failed to duplicate stdout handle!");
                     }
                 }
                 std::mem::forget(h); // Don't close the original
@@ -671,15 +671,15 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             join_child_process_group(pid, pid);
             // Parent: wait for child or add to job list if background
             if is_background {
-                println!("DEBUG: Parent process, about to add job");
+                // println!("DEBUG: Parent process, about to add job");
                 let cmd_str = cmd.args.join(" ");
-                println!("DEBUG: Command string created: {}", cmd_str);
+                // println!("DEBUG: Command string created: {}", cmd_str);
                 let job_id = add_job(pid, pid, cmd_str, true);
                 println!("[{}] {} &", job_id, pid);
-                println!("DEBUG: Job added, about to restore raw mode");
+                // println!("DEBUG: Job added, about to restore raw mode");
                 // Restore raw mode for shell after background job starts
                 restore_raw_mode();
-                println!("DEBUG: Raw mode restored");
+                // println!("DEBUG: Raw mode restored");
                 // Return immediately to shell prompt
                 0
             } else {
@@ -1389,13 +1389,13 @@ fn execute_shrc() {
     // Add standard paths
     shrc_paths.push(String::from("/.shrc"));
     shrc_paths.push(String::from("/etc/shrc"));
+    shrc_paths.push(String::from("/system/scarlet/etc/shrc"));
     shrc_paths.push(String::from("./.shrc"));
 
     for shrc_path in &shrc_paths {
         // Check if file exists by trying to open it
         match std::fs::File::open(shrc_path) {
             Ok(_) => {
-                println!("Loading {}", shrc_path);
                 let exit_code = execute_script(shrc_path);
                 if exit_code != 0 {
                     println!("Warning: {} exited with code {}", shrc_path, exit_code);
