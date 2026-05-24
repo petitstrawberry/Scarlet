@@ -118,6 +118,13 @@ struct MenuEntryPayload {
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     vec![
         TaskMenuEntry::Item(TaskMenuItem {
+            id: String::from("system_terminal"),
+            title: String::from("Terminal"),
+            enabled: true,
+            shortcut: None,
+            children: Vec::new(),
+        }),
+        TaskMenuEntry::Item(TaskMenuItem {
             id: String::from("system_settings"),
             title: String::from("Settings"),
             enabled: true,
@@ -133,6 +140,29 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
             children: Vec::new(),
         }),
     ]
+}
+
+fn launch_app(app_id: &[u8]) {
+    send_launch_command(0x01, app_id);
+}
+
+fn launch_new_app(app_id: &[u8]) {
+    send_launch_command(0x05, app_id);
+}
+
+fn send_launch_command(command: u8, app_id: &[u8]) {
+    if let Ok(mut stream) = std::socket::Socket::new()
+        && stream.connect("/tmp/stemd.sock").is_ok()
+    {
+        let exec_path = b"";
+        let mut msg = alloc::vec::Vec::new();
+        msg.push(command);
+        msg.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
+        msg.extend_from_slice(app_id);
+        msg.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
+        msg.extend_from_slice(exec_path);
+        let _ = stream.write(&msg);
+    }
 }
 
 const MENU_BAR_FONT_SIZE: f32 = 16.0;
@@ -409,21 +439,12 @@ fn build_menu_items(
                 content = content.callback(move || {
                     open_state.set(None);
                     // Handle system menu items
+                    if item_id == "system_terminal" {
+                        launch_new_app(b"org.scarlet-os.desktop.terminal");
+                        return;
+                    }
                     if item_id == "system_settings" {
-                        // Launch Settings via stemd
-                        if let Ok(mut stream) = std::socket::Socket::new()
-                            && stream.connect("/tmp/stemd.sock").is_ok()
-                        {
-                            let app_id = b"org.scarlet-os.desktop.settings";
-                            let exec_path = b"";
-                            let mut msg = alloc::vec::Vec::new();
-                            msg.push(0x01); // LAUNCH_OR_FOCUS command
-                            msg.extend_from_slice(&(app_id.len() as u32).to_le_bytes());
-                            msg.extend_from_slice(app_id);
-                            msg.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
-                            msg.extend_from_slice(exec_path);
-                            let _ = stream.write(&msg);
-                        }
+                        launch_app(b"org.scarlet-os.desktop.settings");
                         return;
                     }
                     if item_id == "system_quit" {

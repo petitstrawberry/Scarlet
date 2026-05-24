@@ -8,7 +8,7 @@ use std::{print, println};
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!();
-    println!("\x1b[1;38;2;255;255;255;48;2;39;74;110m Scarlet Terminal \x1b[0m");
+    println!("\x1b[1;38;2;255;255;255;48;2;39;74;110m Terminal \x1b[0m");
     println!(
         "\x1b[38;5;39mcolor\x1b[0m  \
          \x1b[1mBold\x1b[0m  \

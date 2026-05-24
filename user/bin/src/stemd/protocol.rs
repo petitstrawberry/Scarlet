@@ -21,6 +21,9 @@
 //!   - exec_path_bytes (variable)
 //! - If exec_path is empty, stemd will look up the app from registered .desktop files
 //! - Response: "OK: Launched or focused\n" or "ERROR: <message>\n"
+//!
+//! ### LAUNCH (0x05)
+//! Same payload as LAUNCH_OR_FOCUS, but always starts a new process.
 
 use std::vec::Vec;
 
@@ -31,6 +34,7 @@ pub mod cmd {
     pub const REGISTER_APP: u8 = 0x02;
     pub const UNREGISTER_APP: u8 = 0x03;
     pub const SHUTDOWN: u8 = 0x04;
+    pub const LAUNCH: u8 = 0x05;
 }
 
 /// Build LAUNCH_OR_FOCUS command payload

@@ -22,7 +22,7 @@ use std::{
     socket::Socket,
     string::{String, ToString},
     sync::Mutex,
-    task::{exit, fork, waitpid},
+    task::{WAIT_NOHANG, exit, fork, waitpid},
     thread, vec,
     vec::Vec,
 };
@@ -311,6 +311,30 @@ fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
         .map(|pos| services.remove(pos))
 }
 
+fn reap_children_nonblocking(context: &str) {
+    loop {
+        let (pid, status) = waitpid(-1, WAIT_NOHANG);
+        if pid <= 0 {
+            break;
+        }
+        if let Some(service) = remove_running_service_by_pid(pid) {
+            println!(
+                "stemd: [{}] Reaped service PID={} status={} name={} exec={}",
+                context, pid, status, service.name, service.exec_path
+            );
+            continue;
+        }
+        if remove_running_app_by_pid(pid) {
+            println!("stemd: [{}] Reaped app PID={} status={}", context, pid, status);
+            continue;
+        }
+        println!(
+            "stemd: [{}] Reaped unknown child PID={} status={}",
+            context, pid, status
+        );
+    }
+}
+
 /// Focus a window by app_id
 /// This queries SWS for the window list and tries to find a window matching the app_id
 fn focus_window_by_app_id(app_id: &str) -> Result<(), &'static str> {
@@ -445,10 +469,30 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
 
         if let Err(e) = focus_window_by_app_id(app_id) {
             println!("stemd: Failed to focus window: {}", e);
-            // Even if focusing fails, don't launch a new instance
-            return Err(e);
+            let (wait_pid, wait_status) = waitpid(app.pid, WAIT_NOHANG);
+            if wait_pid > 0 {
+                println!(
+                    "stemd: Reaped stale app PID={} status={} app_id={}",
+                    wait_pid, wait_status, app_id
+                );
+                remove_running_app_by_pid(wait_pid);
+            } else if wait_pid < 0 {
+                println!(
+                    "stemd: Removing stale app entry PID={} app_id={}",
+                    app.pid, app_id
+                );
+                remove_running_app_by_pid(app.pid);
+            } else {
+                return Err(e);
+            }
+        } else {
+            println!("stemd: Successfully focused window");
+            return Ok(());
         }
-        println!("stemd: Successfully focused window");
+    }
+
+    if focus_window_by_app_id(app_id).is_ok() {
+        println!("stemd: Found existing window for '{}'", app_id);
         return Ok(());
     }
 
@@ -892,6 +936,8 @@ fn ipc_thread() {
     loop {
         match server.accept() {
             Ok(client) => {
+                reap_children_nonblocking("ipc");
+
                 let stream = match client.as_stream() {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -901,9 +947,9 @@ fn ipc_thread() {
                 let mut buffer = [0u8; 1024];
                 match stream.read(&mut buffer) {
                     Ok(n) if n > 0 => {
-                        // Check if this is a binary command (LAUNCH_OR_FOCUS)
-                        if buffer[0] == cmd::LAUNCH_OR_FOCUS {
-                            // Parse LAUNCH_OR_FOCUS command
+                        // Check if this is a binary launch command.
+                        if buffer[0] == cmd::LAUNCH_OR_FOCUS || buffer[0] == cmd::LAUNCH {
+                            // Parse launch command.
                             // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
                             if n >= 9 {
                                 let app_id_len = u32::from_le_bytes([
@@ -931,9 +977,16 @@ fn ipc_thread() {
 
                                         match (app_id, exec_path) {
                                             (Ok(app_id), Ok(exec_path)) => {
+                                                let launch_only = buffer[0] == cmd::LAUNCH;
                                                 println!(
-                                                    "stemd: LAUNCH_OR_FOCUS app_id={} exec={}",
-                                                    app_id, exec_path
+                                                    "stemd: {} app_id={} exec={}",
+                                                    if launch_only {
+                                                        "LAUNCH"
+                                                    } else {
+                                                        "LAUNCH_OR_FOCUS"
+                                                    },
+                                                    app_id,
+                                                    exec_path
                                                 );
 
                                                 let exec_path_arg = if exec_path.is_empty() {
@@ -942,7 +995,14 @@ fn ipc_thread() {
                                                     Some(exec_path)
                                                 };
 
-                                                let response =
+                                                let response = if launch_only {
+                                                    match launch_app_by_id(app_id) {
+                                                        Ok(_) => "OK: Launched\n".as_bytes(),
+                                                        Err(_) => {
+                                                            "ERROR: Failed to launch\n".as_bytes()
+                                                        }
+                                                    }
+                                                } else {
                                                     match launch_or_focus(app_id, exec_path_arg) {
                                                         Ok(()) => {
                                                             "OK: Launched or focused\n".as_bytes()
@@ -966,7 +1026,8 @@ fn ipc_thread() {
                                                             "ERROR: Failed to launch or focus\n"
                                                                 .as_bytes()
                                                         }
-                                                    };
+                                                    }
+                                                };
 
                                                 let _ = stream.write(response);
                                             }
@@ -1029,6 +1090,8 @@ fn ipc_thread() {
                     }
                     _ => {}
                 }
+
+                reap_children_nonblocking("ipc");
             }
             Err(_) => {
                 thread::sleep(core::time::Duration::from_millis(100));

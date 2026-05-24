@@ -1,4 +1,4 @@
-//! Minimal VT screen model for Scarlet Terminal.
+//! Minimal VT screen model for Terminal.
 
 use alloc::vec::Vec;
 
