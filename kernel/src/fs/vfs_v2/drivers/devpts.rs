@@ -966,4 +966,22 @@ mod tests {
             "readdir should cross into devpts root rather than devfs mountpoint"
         );
     }
+
+    #[test_case]
+    fn test_dev_ptmx_relative_symlink_opens_devpts_ptmx() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/dev").unwrap();
+        vfs.mount(crate::fs::vfs_v2::drivers::devfs::DevFS::new(), "/dev", 0)
+            .unwrap();
+        vfs.mount(DevPtsFS::new(), "/dev/pts", 0).unwrap();
+
+        let master = vfs.open("/dev/ptmx", 0).unwrap();
+        let master_file = master.as_file().unwrap();
+        assert_eq!(
+            master_file
+                .control(pty_ctl::SCTL_PTY_GET_NUMBER, 0)
+                .unwrap(),
+            0
+        );
+    }
 }

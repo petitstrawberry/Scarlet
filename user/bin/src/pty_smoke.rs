@@ -37,6 +37,22 @@ fn main() -> i32 {
         }
     }
 
+    if let Err(error) = master.set_winsize(100, 40) {
+        println!("pty_smoke: set winsize failed: {}", error);
+        return 1;
+    }
+    match master.winsize() {
+        Ok((100, 40)) => println!("pty_smoke: winsize=100x40"),
+        Ok((cols, rows)) => {
+            println!("pty_smoke: unexpected winsize={}x{}", cols, rows);
+            return 1;
+        }
+        Err(error) => {
+            println!("pty_smoke: get winsize failed: {}", error);
+            return 1;
+        }
+    }
+
     if let Err(error) = master.write(b"hello from master\n") {
         println!("pty_smoke: master write failed: {}", error);
         return 1;

@@ -496,6 +496,34 @@ impl MountTree {
         resolve_mount: bool,
         options: &PathResolutionOptions,
     ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_from_internal_with_depth(
+            base_entry,
+            base_mount,
+            path,
+            resolve_mount,
+            options,
+            0,
+        )
+    }
+
+    fn resolve_path_from_internal_with_depth(
+        &self,
+        base_entry: &VfsEntryRef,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+        resolve_mount: bool,
+        options: &PathResolutionOptions,
+        symlink_depth: u32,
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        const MAX_SYMLINK_DEPTH: u32 = 32;
+
+        if symlink_depth > MAX_SYMLINK_DEPTH {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidPath,
+                "Too many symbolic links",
+            ));
+        }
+
         if path.is_empty() {
             return Ok((base_entry.clone(), base_mount.clone()));
         } else if path == "/" {
@@ -553,8 +581,41 @@ impl MountTree {
                 };
 
                 if should_follow_symlinks {
-                    // Use normal component resolution (which follows symlinks)
-                    current_entry = self.resolve_component(current_entry, &component)?;
+                    let next_entry =
+                        self.resolve_component_no_symlink(current_entry.clone(), &component)?;
+                    if next_entry.node().is_symlink()? {
+                        let link_target = next_entry
+                            .node()
+                            .read_link()
+                            .map_err(|e| vfs_error(e.kind, &e.message))?;
+                        let resolved = if link_target.starts_with('/') {
+                            let (root_entry, root_mount) = {
+                                let root_mount = self.root_mount.read();
+                                (root_mount.root.clone(), root_mount.clone())
+                            };
+                            self.resolve_path_from_internal_with_depth(
+                                &root_entry,
+                                &root_mount,
+                                &link_target,
+                                false,
+                                &PathResolutionOptions { no_follow: false },
+                                symlink_depth + 1,
+                            )?
+                        } else {
+                            self.resolve_path_from_internal_with_depth(
+                                &current_entry,
+                                &current_mount,
+                                &link_target,
+                                false,
+                                &PathResolutionOptions { no_follow: false },
+                                symlink_depth + 1,
+                            )?
+                        };
+                        current_entry = resolved.0;
+                        current_mount = resolved.1;
+                    } else {
+                        current_entry = next_entry;
+                    }
                 } else {
                     // Don't follow symlinks - use direct filesystem lookup
                     current_entry = self.resolve_component_no_symlink(current_entry, &component)?;

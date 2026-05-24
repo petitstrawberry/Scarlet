@@ -13,6 +13,8 @@ const O_NOCTTY: usize = 0x100;
 const SCTL_PTY_GET_NUMBER: u32 = 0x5350_0001;
 const SCTL_PTY_SET_LOCKED: u32 = 0x5350_0002;
 const SCTL_PTY_GET_LOCKED: u32 = 0x5350_0003;
+const SCTL_TTY_SET_WINSIZE: u32 = 0x5354_0005;
+const SCTL_TTY_GET_WINSIZE: u32 = 0x5354_0006;
 
 /// PTY master endpoint.
 pub struct PtyMaster {
@@ -20,14 +22,14 @@ pub struct PtyMaster {
 }
 
 impl PtyMaster {
-    /// Open the DevPTS `ptmx` node and return a PTY master.
+    /// Open `/dev/ptmx` and return a PTY master.
     ///
     /// # Returns
     ///
     /// PTY master endpoint on success.
     pub fn open() -> Result<Self> {
         Ok(Self {
-            file: File::open_with_flags("/dev/pts/ptmx", O_RDWR | O_NOCTTY)?,
+            file: File::open_with_flags("/dev/ptmx", O_RDWR | O_NOCTTY)?,
         })
     }
 
@@ -75,6 +77,27 @@ impl PtyMaster {
             .write(true)
             .open(path.as_str())?;
         Ok(PtySlave { file })
+    }
+
+    /// Set the terminal window size for the connected slave TTY.
+    ///
+    /// # Arguments
+    ///
+    /// * `cols` - Terminal columns.
+    /// * `rows` - Terminal rows.
+    pub fn set_winsize(&self, cols: u16, rows: u16) -> Result<()> {
+        let packed = ((cols as usize) << 16) | rows as usize;
+        self.control(SCTL_TTY_SET_WINSIZE, packed).map(|_| ())
+    }
+
+    /// Return the terminal window size of the connected slave TTY.
+    ///
+    /// # Returns
+    ///
+    /// `(columns, rows)` for the connected slave TTY.
+    pub fn winsize(&self) -> Result<(u16, u16)> {
+        let packed = self.control(SCTL_TTY_GET_WINSIZE, 0)? as u32;
+        Ok(((packed >> 16) as u16, (packed & 0xFFFF) as u16))
     }
 
     /// Borrow the underlying file.

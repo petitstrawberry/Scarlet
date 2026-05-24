@@ -50,6 +50,7 @@ use crate::{
 use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperations, VfsNode};
 
 const DEVPTS_MOUNT_NODE_ID: u64 = 1024;
+const PTMX_SYMLINK_NODE_ID: u64 = 1025;
 
 /// DevFS - Device filesystem implementation
 ///
@@ -127,6 +128,16 @@ impl DevFS {
             pts_node.set_filesystem(fs_ref);
         }
         root.add_child("pts".to_string(), pts_node)?;
+
+        let ptmx_node = Arc::new(DevNode::new_symlink(
+            "ptmx".to_string(),
+            "pts/ptmx".to_string(),
+            PTMX_SYMLINK_NODE_ID,
+        ));
+        if let Some(fs_ref) = root.filesystem() {
+            ptmx_node.set_filesystem(fs_ref);
+        }
+        root.add_child("ptmx".to_string(), ptmx_node)?;
 
         // Get all devices that were registered with explicit names
         let named_devices = device_manager.get_named_devices();
@@ -339,6 +350,19 @@ impl DevNode {
         }
     }
 
+    /// Create a symbolic link node.
+    fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        Self {
+            name,
+            file_type: FileType::SymbolicLink(target),
+            file_id,
+            children: RwLock::new(BTreeMap::new()),
+            filesystem: RwLock::new(None),
+            #[cfg(test)]
+            device_manager_addr: RwLock::new(None),
+        }
+    }
+
     /// Set filesystem reference
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
         *self.filesystem.write() = Some(fs);
@@ -474,6 +498,16 @@ impl VfsNode for DevNode {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        match &self.file_type {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link",
+            )),
+        }
     }
 }
 
@@ -1093,6 +1127,19 @@ mod tests {
 
         let metadata = root.metadata().unwrap();
         assert_eq!(metadata.file_type, FileType::Directory);
+    }
+
+    #[test_case]
+    fn test_devfs_ptmx_relative_symlink() {
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+
+        let ptmx = devfs.lookup(&root, &"ptmx".to_string()).unwrap();
+        assert_eq!(
+            ptmx.metadata().unwrap().file_type,
+            FileType::SymbolicLink("pts/ptmx".to_string())
+        );
+        assert_eq!(ptmx.read_link().unwrap(), "pts/ptmx");
     }
 
     #[test_case]

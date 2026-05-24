@@ -8,6 +8,8 @@
 use alloc::{
     collections::VecDeque,
     sync::{Arc, Weak},
+    vec,
+    vec::Vec,
 };
 use core::{
     any::Any,
@@ -21,7 +23,10 @@ use crate::{
         Device, DeviceCapability, DeviceType,
         char::{
             CharDevice,
-            tty::{TtyBackend, TtyDevice},
+            tty::{
+                TtyBackend, TtyDevice,
+                tty_ctl::{SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_WINSIZE},
+            },
         },
     },
     object::capability::{
@@ -292,8 +297,18 @@ impl Selectable for PtyMasterDevice {
 }
 
 impl ControlOps for PtyMasterDevice {
-    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
-        Err("Unsupported control command for PTY master")
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            SCTL_TTY_SET_WINSIZE | SCTL_TTY_GET_WINSIZE => self.slave()?.control(command, arg),
+            _ => Err("Unsupported control command for PTY master"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        vec![
+            (SCTL_TTY_SET_WINSIZE, "Set PTY slave terminal window size"),
+            (SCTL_TTY_GET_WINSIZE, "Get PTY slave terminal window size"),
+        ]
     }
 }
 
@@ -317,7 +332,10 @@ impl MemoryMappingOps for PtyMasterDevice {
 
 #[cfg(test)]
 mod tests {
-    use crate::device::char::{CharDevice, TtyControl};
+    use crate::device::char::{
+        CharDevice, TtyControl,
+        tty::tty_ctl::{SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_WINSIZE},
+    };
 
     use super::*;
 
@@ -342,5 +360,24 @@ mod tests {
         let mut buffer = [0u8; 5];
         assert_eq!(pair.master().read(&mut buffer), 5);
         assert_eq!(&buffer, b"out\r\n");
+    }
+
+    #[test_case]
+    fn test_pty_master_winsize_controls_slave_tty() {
+        let pair = PtyPair::new(5);
+        let packed = (100 << 16) | 40;
+
+        assert_eq!(
+            pair.master().control(SCTL_TTY_SET_WINSIZE, packed).unwrap(),
+            0
+        );
+        assert_eq!(
+            pair.master().control(SCTL_TTY_GET_WINSIZE, 0).unwrap(),
+            packed as i32
+        );
+        assert_eq!(
+            pair.slave().control(SCTL_TTY_GET_WINSIZE, 0).unwrap(),
+            packed as i32
+        );
     }
 }

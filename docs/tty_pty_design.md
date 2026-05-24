@@ -85,14 +85,15 @@ Current Phase 4 foundation:
 - `device::char::pty::PtyPair` owns the master/slave data path.
 - `fs::vfs_v2::drivers::devpts::DevPtsFS` owns PTY number allocation and
   publishes `ptmx` plus active numeric slave entries.
-- `devfs` exposes a stable `/dev/pts` mount point; Linux `/dev/ptmx` is mapped
-  to `/dev/pts/ptmx` until a real devfs symlink/device node exists.
+- `devfs` exposes a stable `/dev/pts` mount point and a `/dev/ptmx` symlink
+  whose target is relative (`pts/ptmx`), so it stays within the mounted `/dev`
+  view instead of baking in a global absolute path.
 - Slave endpoints start locked and are unlocked through `TIOCSPTLCK`, matching
   the Unix98 PTY slave-lock flow at the ioctl layer.
 - Scarlet native user space uses `scarlet_std::pty::{PtyMaster, PtySlave,
-  PtyPair}`. `PtyMaster::open()` currently opens `/dev/pts/ptmx` directly and
-  its methods call Scarlet-private `SCTL_PTY_*` controls rather than adding
-  Linux ioctl or POSIX wrapper names to the native ABI.
+  PtyPair}`. `PtyMaster::open()` opens `/dev/ptmx` and its methods call
+  Scarlet-private `SCTL_PTY_*`/`SCTL_TTY_*` controls rather than adding Linux
+  ioctl or POSIX wrapper names to the native ABI.
 - `user/bin/pty_smoke` is a small manual integration check for opening a PTY and
   verifying basic master/slave I/O.
 
@@ -196,6 +197,12 @@ and job-control state.
 | `SCTL_TTY_SET_DEBUG` / `GET_DEBUG` | Scarlet-only | diagnostics |
 | `SCTL_PTY_GET_NUMBER` | `TIOCGPTN` | PTY master pair number |
 | `SCTL_PTY_SET_LOCKED` / `GET_LOCKED` | `TIOCSPTLCK` / `TIOCGPTLCK` | PTY slave lock state |
+
+PTY master endpoints forward `SCTL_TTY_SET_WINSIZE` and
+`SCTL_TTY_GET_WINSIZE` to their connected slave TTY. This keeps native
+`PtyMaster::set_winsize` and Linux `TIOCSWINSZ` on the master endpoint on the
+same code path as direct slave TTY updates, including
+`ProcessControlType::WindowChange` delivery through the existing Event path.
 
 Linux-only ioctls covered or planned for the job-control and PTY phases:
 
