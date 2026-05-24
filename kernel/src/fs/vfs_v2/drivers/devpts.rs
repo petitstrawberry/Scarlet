@@ -165,6 +165,12 @@ impl FileSystemOperations for DevPtsFS {
                         "PTY slave is locked",
                     ));
                 }
+                if pair.slave().is_exclusive() {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::PermissionDenied,
+                        "PTY slave is exclusive",
+                    ));
+                }
                 Ok(Arc::new(DevPtsFileObject::new_slave(devpts_node, pair)))
             }
         }
@@ -501,6 +507,36 @@ impl DevPtsFileObject {
         match &self.endpoint {
             DevPtsEndpoint::Slave(tty) => Some(tty.clone()),
             DevPtsEndpoint::Master(_) => None,
+        }
+    }
+
+    /// Return the connected slave TTY for either endpoint.
+    ///
+    /// # Returns
+    ///
+    /// The slave TTY for master and slave endpoints.
+    pub fn connected_tty_device(&self) -> Arc<TtyDevice> {
+        self.pair.slave()
+    }
+
+    /// Return whether this object is a PTY master endpoint.
+    ///
+    /// # Returns
+    ///
+    /// `true` for master endpoints.
+    pub fn is_master_endpoint(&self) -> bool {
+        matches!(self.endpoint, DevPtsEndpoint::Master(_))
+    }
+
+    /// Return queued input length for this endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Bytes available to read from the endpoint.
+    pub fn input_len(&self) -> usize {
+        match &self.endpoint {
+            DevPtsEndpoint::Master(master) => master.input_len(),
+            DevPtsEndpoint::Slave(slave) => slave.input_len(),
         }
     }
 }
@@ -976,6 +1012,27 @@ mod tests {
         let mut master_buffer = [0u8; 5];
         assert_eq!(master.read(&mut master_buffer).unwrap(), 5);
         assert_eq!(&master_buffer, b"out\r\n");
+    }
+
+    #[test_case]
+    fn test_devpts_slave_exclusive_rejects_new_open() {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let master = devpts.open(&ptmx, 0).unwrap();
+        let master_devpts = master.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        let number = master_devpts.pty_number().unwrap();
+        assert!(master_devpts.set_pty_slave_locked(false));
+
+        let slave_node = devpts.lookup(&root, &number.to_string()).unwrap();
+        let slave = devpts.open(&slave_node, 0).unwrap();
+        let slave_devpts = slave.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        let tty = slave_devpts.tty_device().unwrap();
+
+        tty.set_exclusive(true);
+        assert!(devpts.open(&slave_node, 0).is_err());
+        tty.set_exclusive(false);
+        assert!(devpts.open(&slave_node, 0).is_ok());
     }
 
     #[test_case]

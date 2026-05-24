@@ -336,12 +336,16 @@ pub fn handle_ioctl(
             }
         }
         TIOCINQ => {
-            let queued = with_tty_device(kernel_object, |tty| tty.input_len()).ok_or(())?;
+            let queued = if let Some(devpts) = devpts_file_object(kernel_object) {
+                devpts.input_len()
+            } else {
+                with_tty_device(kernel_object, |tty| tty.input_len()).ok_or(())?
+            };
             write_user_i32(arg, queued as i32)?;
             Ok(Some(0))
         }
         TIOCOUTQ => {
-            if !is_tty_object(kernel_object) {
+            if !is_tty_or_pty_kernel_object(kernel_object) {
                 return Err(());
             }
             write_user_i32(arg, 0)?;
@@ -598,7 +602,7 @@ pub fn handle_ioctl(
         // Get window size (rows/cols). Fall back to 80x25 if unavailable.
         TIOCGWINSZ => {
             if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] TIOCGWINSZ"); }
-            if !is_tty_kernel_object(kernel_object) { return Err(()); }
+            if !is_tty_or_pty_kernel_object(kernel_object) { return Err(()); }
 
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
@@ -628,7 +632,7 @@ pub fn handle_ioctl(
         // Set window size from Linux winsize structure.
         TIOCSWINSZ => {
             if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] TIOCSWINSZ"); }
-            if !is_tty_kernel_object(kernel_object) { return Err(()); }
+            if !is_tty_or_pty_kernel_object(kernel_object) { return Err(()); }
 
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
@@ -874,8 +878,33 @@ pub fn handle_ioctl(
     }
 }
 
+/// Return whether this object should be routed through Linux TTY ioctl
+/// translation even when it is not registered in DeviceManager as a TTY.
+///
+/// # Arguments
+///
+/// * `request` - Linux ioctl request number.
+/// * `kernel_object` - Open file object receiving the ioctl.
+///
+/// # Returns
+///
+/// `true` when the ioctl is a known TTY/PTTY operation for this object.
+pub fn is_tty_ioctl_target(request: u32, kernel_object: &KernelObject) -> bool {
+    match request {
+        TIOCGPTN | TIOCSPTLCK | TIOCGPTLCK => devpts_file_object(kernel_object)
+            .map(|devpts| devpts.is_master_endpoint())
+            .unwrap_or(false),
+        TIOCGWINSZ | TIOCSWINSZ | TIOCINQ | TIOCOUTQ => is_tty_or_pty_kernel_object(kernel_object),
+        _ => is_tty_kernel_object(kernel_object),
+    }
+}
+
 fn is_tty_kernel_object(kernel_object: &KernelObject) -> bool {
     tty_shared_device_from_object(kernel_object).is_some()
+}
+
+fn is_tty_or_pty_kernel_object(kernel_object: &KernelObject) -> bool {
+    tty_or_pty_shared_device_from_object(kernel_object).is_some()
 }
 
 fn tty_shared_device_from_object(
@@ -901,6 +930,17 @@ fn tty_shared_device_from_object(
     } else {
         None
     }
+}
+
+fn tty_or_pty_shared_device_from_object(
+    kernel_object: &KernelObject,
+) -> Option<Arc<dyn crate::device::Device>> {
+    if let Some(devpts) = devpts_file_object(kernel_object) {
+        let dev: Arc<dyn crate::device::Device> = devpts.connected_tty_device();
+        return Some(dev);
+    }
+
+    tty_shared_device_from_object(kernel_object)
 }
 
 fn devpts_file_object(kernel_object: &KernelObject) -> Option<&DevPtsFileObject> {
@@ -1003,4 +1043,61 @@ fn acquire_controlling_tty(kernel_object: &KernelObject, force: bool) -> Result<
         Ok(())
     })
     .ok_or(())?
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+
+    use crate::{
+        fs::vfs_v2::{
+            FileSystemOperations,
+            drivers::devpts::{DevPtsFS, DevPtsFileObject},
+        },
+        object::KernelObject,
+    };
+
+    use super::*;
+
+    fn devpts_master_slave_objects() -> (KernelObject, KernelObject) {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let master = devpts.open(&ptmx, 0).unwrap();
+        let master_devpts = master.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        let number = master_devpts.pty_number().unwrap();
+        assert!(master_devpts.set_pty_slave_locked(false));
+
+        let slave_node = devpts.lookup(&root, &number.to_string()).unwrap();
+        let slave = devpts.open(&slave_node, 0).unwrap();
+
+        (KernelObject::File(master), KernelObject::File(slave))
+    }
+
+    #[test_case]
+    fn test_devpts_master_tty_ioctl_routing_is_limited() {
+        let (master, _slave) = devpts_master_slave_objects();
+
+        assert!(is_tty_ioctl_target(TIOCGPTN, &master));
+        assert!(is_tty_ioctl_target(TIOCSPTLCK, &master));
+        assert!(is_tty_ioctl_target(TIOCGPTLCK, &master));
+        assert!(is_tty_ioctl_target(TIOCGWINSZ, &master));
+        assert!(is_tty_ioctl_target(TIOCSWINSZ, &master));
+        assert!(is_tty_ioctl_target(TIOCINQ, &master));
+        assert!(is_tty_ioctl_target(TIOCOUTQ, &master));
+        assert!(!is_tty_ioctl_target(TIOCSCTTY, &master));
+        assert!(!is_tty_ioctl_target(TIOCSPGRP, &master));
+    }
+
+    #[test_case]
+    fn test_devpts_slave_routes_as_tty_not_pty_master() {
+        let (_master, slave) = devpts_master_slave_objects();
+
+        assert!(!is_tty_ioctl_target(TIOCGPTN, &slave));
+        assert!(!is_tty_ioctl_target(TIOCSPTLCK, &slave));
+        assert!(!is_tty_ioctl_target(TIOCGPTLCK, &slave));
+        assert!(is_tty_ioctl_target(TIOCSCTTY, &slave));
+        assert!(is_tty_ioctl_target(TIOCSPGRP, &slave));
+        assert!(is_tty_ioctl_target(TIOCGWINSZ, &slave));
+    }
 }

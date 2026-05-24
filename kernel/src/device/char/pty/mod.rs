@@ -202,6 +202,15 @@ impl PtyMasterDevice {
         self.number
     }
 
+    /// Return queued bytes available for master reads.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes currently buffered from slave output.
+    pub fn input_len(&self) -> usize {
+        self.core.master_input_len()
+    }
+
     fn slave(&self) -> Result<Arc<TtyDevice>, &'static str> {
         self.slave.upgrade().ok_or("PTY slave is closed")
     }

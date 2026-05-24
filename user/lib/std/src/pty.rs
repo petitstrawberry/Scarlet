@@ -5,6 +5,7 @@ use crate::{
     fs::{File, OpenOptions},
     io::{Error, ErrorKind, Read, Result, Write},
     string::String,
+    tty::{Terminal, WindowSize},
 };
 
 const O_RDWR: usize = 0x2;
@@ -13,8 +14,6 @@ const O_NOCTTY: usize = 0x100;
 const SCTL_PTY_GET_NUMBER: u32 = 0x5350_0001;
 const SCTL_PTY_SET_LOCKED: u32 = 0x5350_0002;
 const SCTL_PTY_GET_LOCKED: u32 = 0x5350_0003;
-const SCTL_TTY_SET_WINSIZE: u32 = 0x5354_0005;
-const SCTL_TTY_GET_WINSIZE: u32 = 0x5354_0006;
 
 /// PTY master endpoint.
 pub struct PtyMaster {
@@ -86,8 +85,7 @@ impl PtyMaster {
     /// * `cols` - Terminal columns.
     /// * `rows` - Terminal rows.
     pub fn set_winsize(&self, cols: u16, rows: u16) -> Result<()> {
-        let packed = ((cols as usize) << 16) | rows as usize;
-        self.control(SCTL_TTY_SET_WINSIZE, packed).map(|_| ())
+        Terminal::from_file(&self.file).set_winsize(WindowSize::new(cols, rows))
     }
 
     /// Return the terminal window size of the connected slave TTY.
@@ -96,8 +94,8 @@ impl PtyMaster {
     ///
     /// `(columns, rows)` for the connected slave TTY.
     pub fn winsize(&self) -> Result<(u16, u16)> {
-        let packed = self.control(SCTL_TTY_GET_WINSIZE, 0)? as u32;
-        Ok(((packed >> 16) as u16, (packed & 0xFFFF) as u16))
+        let size = Terminal::from_file(&self.file).winsize()?;
+        Ok((size.columns, size.rows))
     }
 
     /// Borrow the underlying file.

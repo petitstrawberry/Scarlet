@@ -91,9 +91,10 @@ Current Phase 4 foundation:
 - Slave endpoints start locked and are unlocked through `TIOCSPTLCK`, matching
   the Unix98 PTY slave-lock flow at the ioctl layer.
 - Scarlet native user space uses `scarlet_std::pty::{PtyMaster, PtySlave,
-  PtyPair}`. `PtyMaster::open()` opens `/dev/ptmx` and its methods call
-  Scarlet-private `SCTL_PTY_*`/`SCTL_TTY_*` controls rather than adding Linux
-  ioctl or POSIX wrapper names to the native ABI.
+  PtyPair}` and `scarlet_std::tty::Terminal`. `PtyMaster::open()` opens
+  `/dev/ptmx`; PTY-specific operations use Scarlet-private `SCTL_PTY_*`
+  controls, and terminal operations go through the typed `Terminal` wrapper
+  rather than adding Linux ioctl or POSIX wrapper names to the native ABI.
 - `user/bin/pty_smoke` is a small manual integration check for opening a PTY and
   verifying basic master/slave I/O.
 
@@ -209,6 +210,8 @@ Linux-only ioctls covered or planned for the job-control and PTY phases:
 - covered now: `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGSID`
 - covered now: `TIOCEXCL`, `TIOCNXCL`, `TIOCSTI`
 - covered now: `TIOCGPTN`, `TIOCSPTLCK`, `TIOCGPTLCK`
+- covered now: PTY master/slave routing for `TIOCGWINSZ`, `TIOCSWINSZ`,
+  `TIOCINQ`/`FIONREAD`, `TIOCOUTQ`
 - `TIOCPKT`
 
 ## Merge Plan
