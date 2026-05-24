@@ -13,6 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use core::any::Any;
 use core::f32;
+use core::time::Duration;
 
 use scarlet_ui::{
     Application, Color, ComponentElement, Element, KeyCode, KeyEvent, Size, State, StateId,
@@ -21,10 +22,12 @@ use scarlet_ui::{
 use std::fs::File;
 use std::handle::Handle;
 use std::io::Read;
+use std::ipc::{ProcessControl, send_process_control};
 use std::pty::{PtyMaster, PtyPair, PtySlave};
 use std::sync::Mutex;
 use std::task::{
-    EXECVE_FORCE_ABI_REBUILD, create_session, execve_with_flags, exit, fork, process_group_id,
+    EXECVE_FORCE_ABI_REBUILD, WAIT_NOHANG, create_session, execve_with_flags, exit, fork,
+    process_group_id, waitpid,
 };
 use std::{println, thread};
 use vt::VtScreen;
@@ -83,6 +86,7 @@ struct TerminalApp {
     screen: Arc<Mutex<VtScreen>>,
     master_writer: Arc<Mutex<Option<File>>>,
     window_size: Arc<Mutex<(u32, u32)>>,
+    child_task: Arc<OwnedChildTask>,
 }
 
 impl TerminalApp {
@@ -101,6 +105,7 @@ impl TerminalApp {
             screen,
             master_writer: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))),
+            child_task: Arc::new(OwnedChildTask::new()),
         }
     }
 
@@ -155,6 +160,7 @@ impl TerminalApp {
             self.set_status("Failed to start shell");
             return;
         }
+        self.child_task.set(shell_pid as u32);
         println!(
             "[scarlet_terminal] opened {} and started shell pid={}",
             slave_path, shell_pid
@@ -166,6 +172,50 @@ impl TerminalApp {
             self.grid.clone(),
             self.cursor.clone(),
         );
+    }
+
+    fn finish_child_task(&self) {
+        self.child_task.finish();
+    }
+}
+
+struct OwnedChildTask {
+    pid: Mutex<Option<u32>>,
+}
+
+impl OwnedChildTask {
+    fn new() -> Self {
+        Self {
+            pid: Mutex::new(None),
+        }
+    }
+
+    fn set(&self, pid: u32) {
+        *self.pid.lock() = Some(pid);
+    }
+
+    fn finish(&self) {
+        let Some(pid) = self.pid.lock().take() else {
+            return;
+        };
+
+        if reap_child_task(pid, 8) {
+            return;
+        }
+
+        let _ = send_process_control(pid, ProcessControl::Terminate);
+        if reap_child_task(pid, 16) {
+            return;
+        }
+
+        let _ = send_process_control(pid, ProcessControl::Kill);
+        let _ = reap_child_task(pid, 8);
+    }
+}
+
+impl Drop for OwnedChildTask {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -310,6 +360,17 @@ fn duplicate_to_stdio(source: &Handle, raw_handle: i32) {
             );
         }
     }
+}
+
+fn reap_child_task(pid: u32, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        let (changed_pid, _) = waitpid(pid as i32, WAIT_NOHANG);
+        if changed_pid == pid as i32 || changed_pid < 0 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
 }
 
 fn start_reader_thread(
@@ -475,7 +536,9 @@ fn write_bytes(writer: &Arc<Mutex<Option<File>>>, bytes: &[u8]) {
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_terminal] Starting");
     let mut app = TerminalApp::new();
-    match app.run() {
+    let result = app.run();
+    app.finish_child_task();
+    match result {
         Ok(()) => 0,
         Err(error) => {
             println!("[scarlet_terminal] Application error: {}", error);
