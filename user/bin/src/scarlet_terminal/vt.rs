@@ -42,6 +42,8 @@ pub struct VtScreen {
     csi_params: [usize; CSI_PARAM_LIMIT],
     csi_count: usize,
     csi_value: Option<usize>,
+    utf8_codepoint: u32,
+    utf8_remaining: u8,
 }
 
 impl VtScreen {
@@ -82,6 +84,8 @@ impl VtScreen {
             csi_params: [0; CSI_PARAM_LIMIT],
             csi_count: 0,
             csi_value: None,
+            utf8_codepoint: 0,
+            utf8_remaining: 0,
         }
     }
 
@@ -204,14 +208,78 @@ impl VtScreen {
 
     fn feed_ground(&mut self, byte: u8) {
         match byte {
-            0x08 => self.backspace(),
-            b'\t' => self.tab(),
-            b'\r' => self.cursor_column = 0,
-            b'\n' => self.line_feed(),
-            0x1b => self.parser_state = ParserState::Escape,
+            0x08 => {
+                self.reset_utf8();
+                self.backspace();
+            }
+            b'\t' => {
+                self.reset_utf8();
+                self.tab();
+            }
+            b'\r' => {
+                self.reset_utf8();
+                self.cursor_column = 0;
+            }
+            b'\n' => {
+                self.reset_utf8();
+                self.line_feed();
+            }
+            0x1b => {
+                self.reset_utf8();
+                self.parser_state = ParserState::Escape;
+            }
             0x20..=0x7e => self.put_char(byte as char),
-            _ => {}
+            0x80..=0xff => self.feed_utf8(byte),
+            _ => self.reset_utf8(),
         }
+    }
+
+    fn feed_utf8(&mut self, byte: u8) {
+        if self.utf8_remaining == 0 {
+            match byte {
+                0xc2..=0xdf => {
+                    self.utf8_codepoint = (byte & 0x1f) as u32;
+                    self.utf8_remaining = 1;
+                }
+                0xe0..=0xef => {
+                    self.utf8_codepoint = (byte & 0x0f) as u32;
+                    self.utf8_remaining = 2;
+                }
+                0xf0..=0xf4 => {
+                    self.utf8_codepoint = (byte & 0x07) as u32;
+                    self.utf8_remaining = 3;
+                }
+                _ => self.put_replacement_char(),
+            }
+            return;
+        }
+
+        if !(0x80..=0xbf).contains(&byte) {
+            self.put_replacement_char();
+            self.feed_ground(byte);
+            return;
+        }
+
+        self.utf8_codepoint = (self.utf8_codepoint << 6) | ((byte & 0x3f) as u32);
+        self.utf8_remaining -= 1;
+        if self.utf8_remaining == 0 {
+            if let Some(ch) = core::char::from_u32(self.utf8_codepoint) {
+                self.put_char(ch);
+            } else {
+                self.put_replacement_char();
+            }
+            self.utf8_codepoint = 0;
+        }
+    }
+
+    fn reset_utf8(&mut self) {
+        self.utf8_codepoint = 0;
+        self.utf8_remaining = 0;
+    }
+
+    fn put_replacement_char(&mut self) {
+        self.reset_utf8();
+        self.put_char('\u{fffd}');
     }
 
     fn feed_escape(&mut self, byte: u8) {
