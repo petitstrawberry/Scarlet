@@ -66,6 +66,10 @@ pub mod tty_ctl {
     pub const SCTL_TTY_SET_OUTPUT_POSTPROCESS: u32 = 0x5354_0014;
     /// Get output post-processing state (ret=0/1).
     pub const SCTL_TTY_GET_OUTPUT_POSTPROCESS: u32 = 0x5354_0015;
+    /// Enable/disable implementation-defined extended line editing.
+    pub const SCTL_TTY_SET_EXTENDED_INPUT: u32 = 0x5354_0016;
+    /// Get extended line editing state (ret=0/1).
+    pub const SCTL_TTY_GET_EXTENDED_INPUT: u32 = 0x5354_0017;
 }
 use tty_ctl::*;
 
@@ -77,6 +81,7 @@ const DEFAULT_QUIT_CHAR: u8 = 0x1C; // Ctrl-\
 const DEFAULT_ERASE_CHAR: u8 = 0x7F; // DEL
 const DEFAULT_EOF_CHAR: u8 = 0x04; // Ctrl-D
 const DEFAULT_SUSPEND_CHAR: u8 = 0x1A; // Ctrl-Z
+const DEFAULT_LITERAL_NEXT_CHAR: u8 = 0x16; // Ctrl-V
 
 /// Terminal-generated control characters used by the line discipline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +96,8 @@ pub struct TerminalControlChars {
     pub eof: u8,
     /// Suspend character, delivered as a terminal-stop process-control event.
     pub suspend: u8,
+    /// Literal-next character used by extended canonical input editing.
+    pub literal_next: u8,
 }
 
 /// TTY subsystem initialization
@@ -167,12 +174,15 @@ pub struct TtyDevice {
     signal_chars_enabled: AtomicBool,
     crnl_input_enabled: AtomicBool,
     output_postprocess_enabled: AtomicBool,
+    extended_input_enabled: AtomicBool,
     canonical_eof_ready: AtomicBool,
+    literal_next_pending: AtomicBool,
     interrupt_char: AtomicU8,
     quit_char: AtomicU8,
     erase_char: AtomicU8,
     eof_char: AtomicU8,
     suspend_char: AtomicU8,
+    literal_next_char: AtomicU8,
     tostop_enabled: AtomicBool,
 
     // Neutral read policy: minimum bytes to return and optional timeout (ms)
@@ -213,12 +223,15 @@ impl TtyDevice {
             signal_chars_enabled: AtomicBool::new(true),
             crnl_input_enabled: AtomicBool::new(true),
             output_postprocess_enabled: AtomicBool::new(true),
+            extended_input_enabled: AtomicBool::new(true),
             canonical_eof_ready: AtomicBool::new(false),
+            literal_next_pending: AtomicBool::new(false),
             interrupt_char: AtomicU8::new(DEFAULT_INTERRUPT_CHAR),
             quit_char: AtomicU8::new(DEFAULT_QUIT_CHAR),
             erase_char: AtomicU8::new(DEFAULT_ERASE_CHAR),
             eof_char: AtomicU8::new(DEFAULT_EOF_CHAR),
             suspend_char: AtomicU8::new(DEFAULT_SUSPEND_CHAR),
+            literal_next_char: AtomicU8::new(DEFAULT_LITERAL_NEXT_CHAR),
             tostop_enabled: AtomicBool::new(false),
             read_min_ready_bytes: AtomicU16::new(1),
             read_timeout_ms: AtomicU16::new(0),
@@ -305,6 +318,18 @@ impl TtyDevice {
         self.output_postprocess_enabled.load(Ordering::Relaxed)
     }
 
+    pub fn set_extended_input_enabled(&self, enabled: bool) {
+        self.extended_input_enabled
+            .store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.literal_next_pending.store(false, Ordering::Relaxed);
+        }
+    }
+
+    pub fn is_extended_input_enabled(&self) -> bool {
+        self.extended_input_enabled.load(Ordering::Relaxed)
+    }
+
     /// Set terminal-generated control characters.
     ///
     /// A zero byte disables the corresponding special meaning, matching the
@@ -316,6 +341,8 @@ impl TtyDevice {
         self.erase_char.store(chars.erase, Ordering::Relaxed);
         self.eof_char.store(chars.eof, Ordering::Relaxed);
         self.suspend_char.store(chars.suspend, Ordering::Relaxed);
+        self.literal_next_char
+            .store(chars.literal_next, Ordering::Relaxed);
     }
 
     /// Return the current terminal-generated control characters.
@@ -326,6 +353,7 @@ impl TtyDevice {
             erase: self.erase_char.load(Ordering::Relaxed),
             eof: self.eof_char.load(Ordering::Relaxed),
             suspend: self.suspend_char.load(Ordering::Relaxed),
+            literal_next: self.literal_next_char.load(Ordering::Relaxed),
         }
     }
 
@@ -548,6 +576,19 @@ impl TtyDevice {
         }
 
         let control_chars = self.get_control_chars();
+        if self.literal_next_pending.swap(false, Ordering::Relaxed) {
+            if self.echo_enabled.load(Ordering::Relaxed) {
+                self.echo_char(byte);
+            }
+            let wake = !self.canonical_mode.load(Ordering::Relaxed) || byte == b'\n';
+            let mut input_buffer = self.input_buffer.lock();
+            input_buffer.push_back(byte);
+            drop(input_buffer);
+            if wake {
+                self.input_waker.wake_all();
+            }
+            return;
+        }
 
         if self.signal_chars_enabled.load(Ordering::Relaxed)
             && self.kb_mode.load(Ordering::Relaxed) == 0
@@ -593,6 +634,12 @@ impl TtyDevice {
         // Canonical mode processing
         if self.canonical_mode.load(Ordering::Relaxed) {
             match byte {
+                b if self.extended_input_enabled.load(Ordering::Relaxed)
+                    && control_chars.literal_next != 0
+                    && b == control_chars.literal_next =>
+                {
+                    self.literal_next_pending.store(true, Ordering::Relaxed);
+                }
                 b if control_chars.eof != 0 && b == control_chars.eof => {
                     self.canonical_eof_ready.store(true, Ordering::Relaxed);
                     self.input_waker.wake_all();
@@ -1530,6 +1577,11 @@ impl ControlOps for TtyDevice {
                 Ok(0)
             }
             SCTL_TTY_GET_OUTPUT_POSTPROCESS => Ok(self.is_output_postprocess_enabled() as i32),
+            SCTL_TTY_SET_EXTENDED_INPUT => {
+                self.set_extended_input_enabled(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_EXTENDED_INPUT => Ok(self.is_extended_input_enabled() as i32),
             SCTL_TTY_SET_WINSIZE => {
                 let cols = ((arg >> 16) & 0xFFFF) as u16;
                 let rows = (arg & 0xFFFF) as u16;
@@ -1559,6 +1611,7 @@ impl ControlOps for TtyDevice {
                 let mut g = self.input_buffer.lock();
                 g.clear();
                 self.canonical_eof_ready.store(false, Ordering::Relaxed);
+                self.literal_next_pending.store(false, Ordering::Relaxed);
                 Ok(0)
             }
             SCTL_TTY_SET_DEBUG => {
@@ -1657,5 +1710,20 @@ mod tests {
         let mut buffer = [0u8; 1];
         assert_eq!(tty.read(&mut buffer), 1);
         assert_eq!(buffer[0], b'a');
+    }
+
+    #[test_case]
+    fn test_tty_literal_next_quotes_signal_char() {
+        let tty = test_tty();
+        let chars = tty.get_control_chars();
+
+        tty.handle_input_byte(chars.literal_next);
+        tty.handle_input_byte(chars.interrupt);
+        tty.handle_input_byte(b'\n');
+
+        let mut buffer = [0u8; 2];
+        assert_eq!(tty.read(&mut buffer), 2);
+        assert_eq!(buffer[0], chars.interrupt);
+        assert_eq!(buffer[1], b'\n');
     }
 }

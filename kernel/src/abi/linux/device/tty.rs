@@ -39,14 +39,19 @@ pub const TCGETS: u32 = 0x5401; // Get termios
 pub const TCSETS: u32 = 0x5402; // Set termios (no wait)
 pub const TCSETSW: u32 = 0x5403; // Set termios (drain output)
 pub const TCSETSF: u32 = 0x5404; // Set termios (drain and flush)
+pub const TCSBRK: u32 = 0x5409; // Send break (accepted as no-op)
+pub const TCXONC: u32 = 0x540A; // Software flow control (accepted as no-op)
 pub const TCFLSH: u32 = 0x540B; // Flush queued input/output
 pub const TIOCEXCL: u32 = 0x540C; // Set exclusive mode
 pub const TIOCNXCL: u32 = 0x540D; // Clear exclusive mode
 pub const TIOCSCTTY: u32 = 0x540E; // Set controlling terminal
 pub const TIOCGPGRP: u32 = 0x540F; // Get foreground process group
 pub const TIOCSPGRP: u32 = 0x5410; // Set foreground process group
+pub const TIOCOUTQ: u32 = 0x5411; // Get output queue length
 pub const TIOCSTI: u32 = 0x5412; // Simulate terminal input
 pub const TIOCNOTTY: u32 = 0x5422; // Detach from controlling terminal
+pub const FIONREAD: u32 = 0x541B; // Get input queue length
+pub const TIOCINQ: u32 = FIONREAD; // Alias for FIONREAD
 pub const TIOCGSID: u32 = 0x5429; // Get session ID owning this terminal
 
 /// Linux keyboard mode values (subset)
@@ -96,12 +101,14 @@ const VEOF: usize = 4;
 const VTIME: usize = 5;
 const VMIN: usize = 6;
 const VSUSP: usize = 10;
+const VLNEXT: usize = 15;
 const IFLAG_ICRNL: u32 = 0x0000_0100;
 const OFLAG_OPOST: u32 = 0x0000_0001;
 const LFLAG_ISIG: u32 = 0x0000_0001;
 const LFLAG_ICANON: u32 = 0x0000_0002;
 const LFLAG_ECHO: u32 = 0x0000_0008;
 const LFLAG_TOSTOP: u32 = 0x0000_0100;
+const LFLAG_IEXTEN: u32 = 0x0000_8000;
 
 /// Handle Linux TTY-related ioctls for a given kernel object representing an
 /// open file descriptor. Returns Ok(Some(ret)) if handled, Ok(None) if not
@@ -113,9 +120,10 @@ pub fn handle_ioctl(
 ) -> Result<Option<usize>, ()> {
     use crate::device::char::tty::tty_ctl::{
         SCTL_TTY_FLUSH_INPUT, SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_CRNL_INPUT, SCTL_TTY_GET_ECHO,
-        SCTL_TTY_GET_FOREGROUND_GROUP, SCTL_TTY_GET_OUTPUT_POSTPROCESS, SCTL_TTY_GET_READ_POLICY,
-        SCTL_TTY_GET_SIGNAL_CHARS, SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_CRNL_INPUT,
-        SCTL_TTY_SET_ECHO, SCTL_TTY_SET_OUTPUT_POSTPROCESS, SCTL_TTY_SET_READ_POLICY,
+        SCTL_TTY_GET_EXTENDED_INPUT, SCTL_TTY_GET_FOREGROUND_GROUP,
+        SCTL_TTY_GET_OUTPUT_POSTPROCESS, SCTL_TTY_GET_READ_POLICY, SCTL_TTY_GET_SIGNAL_CHARS,
+        SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_CRNL_INPUT, SCTL_TTY_SET_ECHO,
+        SCTL_TTY_SET_EXTENDED_INPUT, SCTL_TTY_SET_OUTPUT_POSTPROCESS, SCTL_TTY_SET_READ_POLICY,
         SCTL_TTY_SET_SIGNAL_CHARS,
     };
 
@@ -164,6 +172,7 @@ pub fn handle_ioctl(
                     let mut isig = true;
                     let mut icrnl = true;
                     let mut opost = true;
+                    let mut iexten = true;
                     let mut tostop = false;
                     let mut min_ready: u16 = 1;
                     let mut timeout_ms: u16 = 0;
@@ -173,6 +182,7 @@ pub fn handle_ioctl(
                         if let Ok(val) = control_ops.control(SCTL_TTY_GET_SIGNAL_CHARS, 0) { isig = val != 0; }
                         if let Ok(val) = control_ops.control(SCTL_TTY_GET_CRNL_INPUT, 0) { icrnl = val != 0; }
                         if let Ok(val) = control_ops.control(SCTL_TTY_GET_OUTPUT_POSTPROCESS, 0) { opost = val != 0; }
+                        if let Ok(val) = control_ops.control(SCTL_TTY_GET_EXTENDED_INPUT, 0) { iexten = val != 0; }
                         if let Ok(packed) = control_ops.control(SCTL_TTY_GET_READ_POLICY, 0) {
                             let packed_u = packed as u32;
                             min_ready = (packed_u & 0xFFFF) as u16;
@@ -190,6 +200,7 @@ pub fn handle_ioctl(
                                 erase: 0x7F,
                                 eof: 0x04,
                                 suspend: 0x1A,
+                                literal_next: 0x16,
                             },
                         );
                     if icrnl { t.c_iflag |= IFLAG_ICRNL; }
@@ -198,11 +209,13 @@ pub fn handle_ioctl(
                     if canonical { t.c_lflag |= LFLAG_ICANON; }
                     if echo { t.c_lflag |= LFLAG_ECHO; }
                     if tostop { t.c_lflag |= LFLAG_TOSTOP; }
+                    if iexten { t.c_lflag |= LFLAG_IEXTEN; }
                     t.c_cc[VINTR] = control_chars.interrupt;
                     t.c_cc[VQUIT] = control_chars.quit;
                     t.c_cc[VERASE] = control_chars.erase;
                     t.c_cc[VEOF] = control_chars.eof;
                     t.c_cc[VSUSP] = control_chars.suspend;
+                    t.c_cc[VLNEXT] = control_chars.literal_next;
                     t.c_cc[VMIN] = core::cmp::min(min_ready as usize, 255) as u8;
                     let vtime_tenths = core::cmp::min(((timeout_ms as u32 + 99) / 100) as usize, 255) as u8;
                     t.c_cc[VTIME] = vtime_tenths;
@@ -224,6 +237,7 @@ pub fn handle_ioctl(
                         let canonical_new = (t.c_lflag & LFLAG_ICANON) != 0;
                         let echo_new = (t.c_lflag & LFLAG_ECHO) != 0;
                         let tostop_new = (t.c_lflag & LFLAG_TOSTOP) != 0;
+                        let iexten_new = (t.c_lflag & LFLAG_IEXTEN) != 0;
                         let vmin = t.c_cc[VMIN] as u16;
                         let vtime_tenths = t.c_cc[VTIME] as u16;
                         let timeout_ms: u16 = vtime_tenths.saturating_mul(100);
@@ -233,6 +247,7 @@ pub fn handle_ioctl(
                             erase: t.c_cc[VERASE],
                             eof: t.c_cc[VEOF],
                             suspend: t.c_cc[VSUSP],
+                            literal_next: t.c_cc[VLNEXT],
                         };
                         if let Some(control_ops) = kernel_object.as_control() {
                             let prev_canonical = control_ops.control(SCTL_TTY_GET_CANONICAL, 0).unwrap_or(-1) != 0;
@@ -242,6 +257,7 @@ pub fn handle_ioctl(
                             let _ = control_ops.control(SCTL_TTY_SET_ECHO, if echo_new { 1 } else { 0 });
                             let _ = control_ops.control(SCTL_TTY_SET_CRNL_INPUT, if icrnl_new { 1 } else { 0 });
                             let _ = control_ops.control(SCTL_TTY_SET_OUTPUT_POSTPROCESS, if opost_new { 1 } else { 0 });
+                            let _ = control_ops.control(SCTL_TTY_SET_EXTENDED_INPUT, if iexten_new { 1 } else { 0 });
                             let packed = ((timeout_ms as u32) << 16) | (vmin as u32);
                             let _ = control_ops.control(SCTL_TTY_SET_READ_POLICY, packed as usize);
                             if LOG_TTY_IOCTL && (prev_canonical != canonical_new || prev_echo != echo_new) {
@@ -277,6 +293,36 @@ pub fn handle_ioctl(
                 _ => Err(()),
             }
         }
+        TCSBRK => {
+            // Scarlet TTY currently has no queued output drain or hardware break
+            // operation. Accept the ioctl so portable terminal setup code can
+            // continue.
+            if !is_tty_object(kernel_object) {
+                return Err(());
+            }
+            Ok(Some(0))
+        }
+        TCXONC => {
+            if !is_tty_object(kernel_object) {
+                return Err(());
+            }
+            match arg {
+                0..=3 => Ok(Some(0)),
+                _ => Err(()),
+            }
+        }
+        TIOCINQ => {
+            let queued = with_tty_device(kernel_object, |tty| tty.input_len()).ok_or(())?;
+            write_user_i32(arg, queued as i32)?;
+            Ok(Some(0))
+        }
+        TIOCOUTQ => {
+            if !is_tty_object(kernel_object) {
+                return Err(());
+            }
+            write_user_i32(arg, 0)?;
+            Ok(Some(0))
+        }
         TIOCGPGRP => {
             let Some(control_ops) = kernel_object.as_control() else {
                 return Err(());
@@ -285,14 +331,8 @@ pub fn handle_ioctl(
                 .control(SCTL_TTY_GET_FOREGROUND_GROUP, 0)
                 .map_err(|_| ())?;
 
-            let task = mytask().ok_or(())?;
-            let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-                unsafe { *(paddr as *mut i32) = foreground_pgid; }
-                Ok(Some(0))
-            } else {
-                Ok(Some((-14_isize) as usize))
-            }
+            write_user_i32(arg, foreground_pgid)?;
+            Ok(Some(0))
         }
         TIOCSPGRP => {
             let task = mytask().ok_or(())?;
@@ -834,10 +874,26 @@ fn tty_shared_device_from_object(
     }
 }
 
+fn is_tty_object(kernel_object: &KernelObject) -> bool {
+    tty_shared_device_from_object(kernel_object).is_some()
+}
+
 fn with_tty_device<R>(kernel_object: &KernelObject, f: impl FnOnce(&TtyDevice) -> R) -> Option<R> {
     let dev = tty_shared_device_from_object(kernel_object)?;
     let tty = dev.as_any().downcast_ref::<TtyDevice>()?;
     Some(f(tty))
+}
+
+fn write_user_i32(vaddr: usize, value: i32) -> Result<(), ()> {
+    let task = mytask().ok_or(())?;
+    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
+        unsafe {
+            *(paddr as *mut i32) = value;
+        }
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 fn task_controls_tty(task: &crate::task::Task, tty: &TtyDevice) -> bool {

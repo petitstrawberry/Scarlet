@@ -166,13 +166,16 @@ and job-control state.
 | `SCTL_TTY_SET_SIGNAL_CHARS` / `GET_SIGNAL_CHARS` | `TCSETS` / `TCGETS`, `ISIG` | `termios.c_lflag` |
 | `SCTL_TTY_SET_CRNL_INPUT` / `GET_CRNL_INPUT` | `TCSETS` / `TCGETS`, `ICRNL` | `termios.c_iflag` |
 | `SCTL_TTY_SET_OUTPUT_POSTPROCESS` / `GET_OUTPUT_POSTPROCESS` | `TCSETS` / `TCGETS`, `OPOST` | `termios.c_oflag` |
+| `SCTL_TTY_SET_EXTENDED_INPUT` / `GET_EXTENDED_INPUT` | `TCSETS` / `TCGETS`, `IEXTEN` | `termios.c_lflag` |
 | TTY internal `tostop_enabled` | `TCSETS` / `TCGETS`, `TOSTOP` | `termios.c_lflag` |
-| TTY internal control chars | `VINTR`, `VQUIT`, `VERASE`, `VEOF`, `VSUSP` | `termios.c_cc` |
+| TTY internal control chars | `VINTR`, `VQUIT`, `VERASE`, `VEOF`, `VSUSP`, `VLNEXT` | `termios.c_cc` |
 | `SCTL_TTY_SET_READ_POLICY` / `GET_READ_POLICY` | `VMIN` / `VTIME` | `termios.c_cc` |
 | `SCTL_TTY_SET_WINSIZE` / `GET_WINSIZE` | `TIOCSWINSZ` / `TIOCGWINSZ` | TTY winsize |
 | `SCTL_TTY_SET_KBMODE` / `GET_KBMODE` | `KDSKBMODE` / `KDGKBMODE` | console keyboard mode |
 | `SCTL_TTY_SET_FOREGROUND_GROUP` / `GET_FOREGROUND_GROUP` | `TIOCSPGRP` / `TIOCGPGRP` | foreground PGID |
 | `SCTL_TTY_FLUSH_INPUT` | `TCSETSF`, `TCFLSH` | ldisc input queue |
+| TTY input/output queue queries | `TIOCINQ` / `FIONREAD`, `TIOCOUTQ` | ldisc queue lengths |
+| TTY drain/flow no-op compatibility | `TCSBRK`, `TCXONC` | current TTY endpoint |
 | `SCTL_TTY_SET_DEBUG` / `GET_DEBUG` | Scarlet-only | diagnostics |
 
 Linux-only ioctls covered or planned for the job-control and PTY phases:
