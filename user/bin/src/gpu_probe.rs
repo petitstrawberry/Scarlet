@@ -8,6 +8,24 @@ extern crate scarlet_std as std;
 use gpu::Gpu;
 use std::println;
 
+fn probe_capset(gpu: &Gpu, index: u32) {
+    match gpu.capset_info(index) {
+        Ok(info) => {
+            println!(
+                "  capset[{}]: id={} max_version={} max_size={}",
+                index, info.id, info.max_version, info.max_size
+            );
+            if info.max_size != 0 {
+                match gpu.read_capset(info.id, info.max_version, info.max_size as usize) {
+                    Ok(bytes) => println!("    read {} bytes", bytes.len()),
+                    Err(e) => println!("    read failed: {:?}", e),
+                }
+            }
+        }
+        Err(e) => println!("  capset[{}] failed: {:?}", index, e),
+    }
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let gpu = match Gpu::open("/dev/gpu0") {
@@ -32,21 +50,12 @@ fn main() -> i32 {
     println!("  virgl: {}", capabilities.supports_virgl());
 
     for index in 0..capabilities.capset_count {
-        match gpu.capset_info(index) {
-            Ok(info) => {
-                println!(
-                    "  capset[{}]: id={} max_version={} max_size={}",
-                    index, info.id, info.max_version, info.max_size
-                );
-                if info.max_size != 0 {
-                    match gpu.read_capset(info.id, info.max_version, info.max_size as usize) {
-                        Ok(bytes) => println!("    read {} bytes", bytes.len()),
-                        Err(e) => println!("    read failed: {:?}", e),
-                    }
-                }
-            }
-            Err(e) => println!("  capset[{}] failed: {:?}", index, e),
-        }
+        probe_capset(&gpu, index);
+    }
+
+    if capabilities.supports_virgl() && capabilities.capset_count == 0 {
+        println!("  capset config is empty; probing capset[0]");
+        probe_capset(&gpu, 0);
     }
 
     if capabilities.supports_virgl() {
