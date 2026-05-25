@@ -383,15 +383,15 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `target_task_id` - ID of the task that should receive the event
     ///
     /// # Returns
-    /// * `Ok(())` if the event was successfully handled
+    /// * `Ok(outcome)` describing how event processing should proceed
     /// * `Err(message)` if event delivery failed
     fn handle_event(
         &mut self,
         _event: crate::ipc::Event,
         _target_task_id: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         // Default implementation: ignore events
-        Ok(())
+        Ok(EventProcessOutcome::Continue)
     }
 
     /// Set the TLS (Thread Local Storage) pointer for this task
@@ -537,6 +537,21 @@ macro_rules! register_abi {
     ($ty:ty) => {
         $crate::abi::AbiRegistry::register::<$ty>();
     };
+}
+
+/// Result of processing one queued event for a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventProcessOutcome {
+    /// The event was handled in kernel space; event processing may continue.
+    Continue,
+    /// The event is still pending because it is masked.
+    Pending,
+    /// A userspace handler frame has been armed; return to userspace immediately.
+    UserHandlerArmed,
+    /// The task state changed so the scheduler must pick another task.
+    NeedReschedule,
+    /// The task exited and must not be returned to userspace.
+    Exited,
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {

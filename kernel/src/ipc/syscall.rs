@@ -989,8 +989,8 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
                             return Err("Invalid event_kind");
                         }
                     }
-                    // Process any pending events that are now unblocked
-                    let _ = scarlet_abi.process_pending_events(_task);
+                    // Pending events are delivered by the common user-return hook after
+                    // syscall return-value finalization.
                 }
                 2 => {
                     // Set all (block all)
@@ -999,7 +999,8 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
                 3 => {
                     // Clear all (unblock all)
                     scarlet_abi.event_mask.unblock_all();
-                    let _ = scarlet_abi.process_pending_events(_task);
+                    // Pending events are delivered by the common user-return hook after
+                    // syscall return-value finalization.
                 }
                 _ => return Err("Invalid operation"),
             }
@@ -1032,7 +1033,7 @@ pub fn sys_event_return(trapframe: &mut Trapframe) -> usize {
     };
 
     match crate::abi::scarlet::ScarletAbi::event_return(trapframe, &task) {
-        Ok(()) => 0,
+        Ok(()) => trapframe.get_arg(0),
         Err(_) => usize::MAX,
     }
 }

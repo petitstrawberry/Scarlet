@@ -3,6 +3,7 @@
 //! Implements POSIX signals with Linux-compatible semantics, integrated with Scarlet's
 //! event system for cross-ABI signal delivery.
 
+use crate::abi::EventProcessOutcome;
 use crate::abi::linux::generic::LinuxAbi;
 use crate::abi::linux::generic::errno;
 use crate::arch::Trapframe;
@@ -586,16 +587,16 @@ pub fn handle_event_to_signal(event: &Event) -> Option<LinuxSignal> {
 ///
 /// # Returns
 ///
-/// `Ok(())` when the event was handled or ignored, otherwise an error if the
-/// target task could not be found.
+/// `Ok(outcome)` describing how event processing should proceed, otherwise an
+/// error if the target task could not be found.
 pub fn handle_event_for_task(
     abi: &LinuxAbi,
     event: &Event,
     target_task_id: u32,
     setup_signal_handler: fn(&mut Trapframe, usize, LinuxSignal),
-) -> Result<(), &'static str> {
+) -> Result<EventProcessOutcome, &'static str> {
     let Some(signal) = handle_event_to_signal(event) else {
-        return Ok(());
+        return Ok(EventProcessOutcome::Continue);
     };
 
     let target_task = crate::sched::scheduler::get_task_by_id(target_task_id as usize)
@@ -606,15 +607,17 @@ pub fn handle_event_for_task(
         signal_state.get_handler(signal)
     };
 
-    match action {
+    let outcome = match action {
         SignalAction::Custom(handler_addr) => {
             let trapframe = target_task.get_trapframe();
             setup_signal_handler(trapframe, handler_addr, signal);
+            EventProcessOutcome::UserHandlerArmed
         }
-        SignalAction::Ignore => {}
+        SignalAction::Ignore => EventProcessOutcome::Continue,
         SignalAction::ForceTerminate | SignalAction::Terminate => {
             let exit_code = 128 + (signal as i32);
             target_task.exit_group(exit_code);
+            EventProcessOutcome::Exited
         }
         SignalAction::Stop => {
             target_task.set_state(crate::task::TaskState::Blocked(
@@ -622,6 +625,7 @@ pub fn handle_event_for_task(
             ));
             crate::sched::scheduler::mark_blocked(target_task.get_id());
             crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
+            EventProcessOutcome::NeedReschedule
         }
         SignalAction::Continue => {
             let current_state = target_task.get_state();
@@ -633,10 +637,11 @@ pub fn handle_event_for_task(
                     target_task.get_id(),
                 );
             }
+            EventProcessOutcome::Continue
         }
-    }
+    };
 
-    Ok(())
+    Ok(outcome)
 }
 
 /// Deliver a signal to a task's signal state

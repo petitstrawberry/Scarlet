@@ -29,11 +29,14 @@ use crate::{
     vm::setup_user_stack,
 };
 
-use crate::abi::AbiModule;
+use crate::abi::{AbiModule, EventProcessOutcome};
 
 /// Maximum number of pending events that can be queued
 /// When this limit is reached, oldest events are dropped
 const MAX_PENDING_EVENTS: usize = 1024;
+
+/// Size of the user-visible `EventInfo` passed to Scarlet event handlers.
+const EVENT_INFO_SIZE: usize = 40;
 
 /// Event handler function pointer type (user-space address)
 pub type EventHandler = usize;
@@ -257,7 +260,7 @@ impl ScarletAbi {
         &mut self,
         event: Event,
         task: &crate::task::Task,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         // Check if event is blocked by mask
         if self.event_mask.is_blocked(&event.content) {
             // Store in pending queue for later delivery when unblocked
@@ -270,7 +273,7 @@ impl ScarletAbi {
                 );
             }
             self.pending_events.push(event);
-            return Ok(());
+            return Ok(EventProcessOutcome::Pending);
         }
 
         // Process the event immediately
@@ -278,7 +281,11 @@ impl ScarletAbi {
     }
 
     /// Process a single event
-    fn process_event(&self, event: Event, task: &crate::task::Task) -> Result<(), &'static str> {
+    fn process_event(
+        &self,
+        event: Event,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
         match &event.content {
             EventContent::ProcessControl(ptype) => self.handle_process_control_event(*ptype, task),
             EventContent::Message { .. } => {
@@ -286,7 +293,7 @@ impl ScarletAbi {
                 if let Some(handler) = self.get_event_handler(&event.content) {
                     self.invoke_user_handler(handler, event, task)
                 } else {
-                    Ok(()) // No handler, ignore
+                    Ok(EventProcessOutcome::Continue) // No handler, ignore
                 }
             }
             EventContent::Notification(ntype) => self.handle_notification_event(*ntype, task),
@@ -294,7 +301,7 @@ impl ScarletAbi {
                 if let Some(handler) = self.get_event_handler(&event.content) {
                     self.invoke_user_handler(handler, event, task)
                 } else {
-                    Ok(())
+                    Ok(EventProcessOutcome::Continue)
                 }
             }
         }
@@ -305,7 +312,7 @@ impl ScarletAbi {
         &self,
         ptype: ProcessControlType,
         task: &crate::task::Task,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         match ptype {
             ProcessControlType::Terminate | ProcessControlType::Kill | ProcessControlType::Quit => {
                 // Exit the task with appropriate status
@@ -316,7 +323,7 @@ impl ScarletAbi {
                     _ => 1,
                 };
                 task.exit_group(exit_code);
-                Ok(())
+                Ok(EventProcessOutcome::Exited)
             }
             ProcessControlType::Stop
             | ProcessControlType::TerminalStop
@@ -332,7 +339,7 @@ impl ScarletAbi {
                 if let Some(parent_id) = task.get_parent_id() {
                     crate::task::wake_parent_waiters(parent_id);
                 }
-                Ok(())
+                Ok(EventProcessOutcome::NeedReschedule)
             }
             ProcessControlType::Continue => {
                 task.clear_process_control_stopped();
@@ -345,7 +352,7 @@ impl ScarletAbi {
                         task.get_id(),
                     );
                 }
-                Ok(())
+                Ok(EventProcessOutcome::Continue)
             }
             ProcessControlType::Interrupt => {
                 // Call handler if registered, otherwise default action
@@ -364,7 +371,7 @@ impl ScarletAbi {
                 } else {
                     // Default: terminate with SIGINT-like exit code
                     task.exit_group(128 + 2);
-                    Ok(())
+                    Ok(EventProcessOutcome::Exited)
                 }
             }
             _ => {
@@ -382,7 +389,7 @@ impl ScarletAbi {
                         task,
                     )
                 } else {
-                    Ok(())
+                    Ok(EventProcessOutcome::Continue)
                 }
             }
         }
@@ -393,7 +400,7 @@ impl ScarletAbi {
         &self,
         ntype: crate::ipc::event::NotificationType,
         task: &crate::task::Task,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         // Check if there's a handler registered
         if let Some(handler) = self.get_event_handler(&EventContent::Notification(ntype)) {
             self.invoke_user_handler(
@@ -413,7 +420,7 @@ impl ScarletAbi {
                 }
                 _ => {}
             }
-            Ok(())
+            Ok(EventProcessOutcome::Continue)
         }
     }
 
@@ -426,6 +433,7 @@ impl ScarletAbi {
     ///
     /// ```text
     /// +--------------------------+  <- original SP
+    /// |   EventInfo              |  (40 bytes)
     /// |   saved sp (8 bytes)     |
     /// |   saved elr (8 bytes)    |
     /// |   saved regs[0..30]      |  (31 × 8 = 248 bytes)
@@ -436,7 +444,7 @@ impl ScarletAbi {
     /// ```
     ///
     /// # Arguments passed to handler
-    /// - x0: event content type discriminant
+    /// - x0: pointer to EventInfo
     /// - x1: event subtype
     /// - x2: pointer to saved context on stack
     fn invoke_user_handler(
@@ -444,7 +452,7 @@ impl ScarletAbi {
         handler: EventHandlerEntry,
         event: Event,
         task: &crate::task::Task,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         let trapframe = task.get_trapframe();
 
         let (content_type, subtype) = match &event.content {
@@ -478,10 +486,11 @@ impl ScarletAbi {
 
         // trampoline(8) + subtype(8) + content_type(8) + regs(31×8) + elr(8) + sp(8) = 288
         const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8;
-        sp -= SIGNAL_FRAME_SIZE;
+        sp -= SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE;
         sp &= !0xF;
 
         let frame_base = sp;
+        let event_info_addr = frame_base + SIGNAL_FRAME_SIZE;
 
         // Trampoline: movz x8, #643 (0xd2805068) + svc #0 (0xd4000001)
         let trampoline_instr_0: u32 = 0xd2805068;
@@ -530,14 +539,16 @@ impl ScarletAbi {
             *(paddr as *mut u64) = trapframe.sp;
         }
 
+        write_event_info(task, event_info_addr, content_type, subtype)?;
+
         trapframe.elr = handler.handler as u64;
         trapframe.sp = sp as u64;
-        trapframe.regs.reg[0] = content_type;
+        trapframe.regs.reg[0] = event_info_addr;
         trapframe.regs.reg[1] = subtype;
         trapframe.regs.reg[2] = frame_base + 24;
         trapframe.regs.reg[30] = frame_base; // LR = trampoline address
 
-        Ok(())
+        Ok(EventProcessOutcome::UserHandlerArmed)
     }
 
     /// Restore context saved by `invoke_user_handler` (syscall 643 — event_return).
@@ -583,33 +594,34 @@ impl ScarletAbi {
     }
 
     /// Process any pending events (called when mask changes)
-    pub fn process_pending_events(&mut self, task: &crate::task::Task) -> Result<(), &'static str> {
+    pub fn process_pending_events(
+        &mut self,
+        task: &crate::task::Task,
+    ) -> Result<EventProcessOutcome, &'static str> {
         // We must not drop events that are still blocked; they should remain pending
         // until the event mask allows them to be delivered.
+        let pending_events = core::mem::take(&mut self.pending_events);
+        let mut pending_iter = pending_events.into_iter();
 
-        // First, separate events into blocked and unblocked
-        let mut still_blocked: Vec<Event> = Vec::new();
-        let mut events_to_process: Vec<Event> = Vec::new();
-
-        for event in self.pending_events.drain(..) {
+        while let Some(event) = pending_iter.next() {
             if self.event_mask.is_blocked(&event.content) {
-                // Keep blocked events pending for future processing
-                still_blocked.push(event);
-            } else {
-                // Queue for processing
-                events_to_process.push(event);
+                self.pending_events.push(event);
+                continue;
+            }
+
+            let outcome = self.process_event(event, task)?;
+            match outcome {
+                EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
+                EventProcessOutcome::UserHandlerArmed
+                | EventProcessOutcome::NeedReschedule
+                | EventProcessOutcome::Exited => {
+                    self.pending_events.extend(pending_iter);
+                    return Ok(outcome);
+                }
             }
         }
 
-        // Restore the blocked events as the new pending queue
-        self.pending_events = still_blocked;
-
-        // Now process unblocked events
-        for event in events_to_process {
-            self.process_event(event, task)?;
-        }
-
-        Ok(())
+        Ok(EventProcessOutcome::Continue)
     }
 }
 
@@ -621,6 +633,37 @@ fn content_type_discriminant(content: &EventContent) -> u8 {
         EventContent::Notification(_) => 2,
         EventContent::Custom { .. } => 3,
     }
+}
+
+/// Write the user-visible EventInfo structure for a Scarlet event handler.
+fn write_event_info(
+    task: &crate::task::Task,
+    event_info_addr: usize,
+    content_type: usize,
+    subtype: usize,
+) -> Result<(), &'static str> {
+    let header_addr = task
+        .vm_manager
+        .translate_to_kva(event_info_addr)
+        .ok_or("Failed to translate event info address")?;
+    // SAFETY: The translated address belongs to the current task's user stack frame.
+    unsafe {
+        *(header_addr as *mut u64) = content_type as u8 as u64;
+    }
+
+    for i in 0..4 {
+        let data_addr = task
+            .vm_manager
+            .translate_to_kva(event_info_addr + 8 + i * 8)
+            .ok_or("Failed to translate event info address")?;
+        let value = if i == 0 { subtype as u64 } else { 0 };
+        // SAFETY: Each translated slot is an aligned u64 field in EventInfo.content_data.
+        unsafe {
+            *(data_addr as *mut u64) = value;
+        }
+    }
+
+    Ok(())
 }
 
 impl AbiModule for ScarletAbi {
@@ -1122,7 +1165,7 @@ impl AbiModule for ScarletAbi {
         &mut self,
         event: crate::ipc::Event,
         _target_task_id: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         // Get the current task to process the event
         if let Some(task) = crate::task::mytask() {
             self.handle_incoming_event(event, task)

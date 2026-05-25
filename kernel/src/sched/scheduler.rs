@@ -37,6 +37,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
+use crate::abi::EventProcessOutcome;
 use crate::arch::ArchCpuState;
 use crate::arch::get_trapvector;
 use crate::arch::set_next_mode;
@@ -898,8 +899,26 @@ pub fn schedule(trapframe: &mut Trapframe) {
         }
     }
 
-    if let Some(current_task) = current_task(cpu_id) {
-        let _ = current_task.process_pending_events();
+    process_pending_events_before_user_return(trapframe);
+}
+
+/// Process events that must be delivered before returning to userspace.
+pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
+    let cpu_id = get_cpu().get_cpuid();
+    let Some(current_task) = current_task(cpu_id) else {
+        return;
+    };
+
+    match current_task.process_pending_events() {
+        Ok(EventProcessOutcome::NeedReschedule | EventProcessOutcome::Exited) => {
+            schedule(trapframe)
+        }
+        Ok(
+            EventProcessOutcome::Continue
+            | EventProcessOutcome::Pending
+            | EventProcessOutcome::UserHandlerArmed,
+        ) => {}
+        Err(_) => {}
     }
 }
 

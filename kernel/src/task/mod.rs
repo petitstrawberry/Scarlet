@@ -18,7 +18,7 @@ use core::{cell::UnsafeCell, sync::atomic};
 use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
-use crate::abi::{AbiModule, scarlet::ScarletAbi};
+use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
 use crate::device::char::tty::TtyDevice;
 use crate::sync::waker::Waker;
 use crate::{
@@ -2066,10 +2066,10 @@ impl Task {
     /// - Process a limited number of events per scheduler cycle to avoid starvation
     /// - Critical events (like KILL) are processed immediately
     /// - Normal events are batched and processed in priority order
-    pub fn process_pending_events(&self) -> Result<(), &'static str> {
+    pub fn process_pending_events(&self) -> Result<EventProcessOutcome, &'static str> {
         // Check if events are enabled
         if !self.events_enabled() {
-            return Ok(()); // Events disabled, skip processing
+            return Ok(EventProcessOutcome::Continue); // Events disabled, skip processing
         }
 
         // Delegate to ABI module for event processing
@@ -2092,7 +2092,13 @@ impl Task {
                         let is_critical = self.is_critical_event(&event);
 
                         // Let ABI handle the event
-                        abi.handle_event(event, self.id as u32)?;
+                        let outcome = abi.handle_event(event, self.id as u32)?;
+                        match outcome {
+                            EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
+                            EventProcessOutcome::UserHandlerArmed
+                            | EventProcessOutcome::NeedReschedule
+                            | EventProcessOutcome::Exited => return Ok(outcome),
+                        }
 
                         // Check if events were disabled during handling
                         if !self.events_enabled() {
@@ -2120,7 +2126,7 @@ impl Task {
                 }
             }
 
-            Ok(())
+            Ok(EventProcessOutcome::Continue)
         })
     }
 

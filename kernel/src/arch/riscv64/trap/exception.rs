@@ -215,12 +215,14 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
+                    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
                 }
                 Err(msg) => {
                     // panic!("Syscall error: {}", msg);
                     // println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
                     trapframe.increment_pc_next(mytask().unwrap());
+                    crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
                 }
             }
         }
