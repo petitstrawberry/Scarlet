@@ -16,7 +16,10 @@ use crate::{
             GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature,
             GpuMemoryEntry, GpuResource3dDescription, GpuTransfer3d,
         },
-        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat, output::DisplayRegion},
+        graphics::{
+            FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
+            output::DisplayRegion,
+        },
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
@@ -305,6 +308,7 @@ pub struct VirtioGpuDeviceCore {
     retired_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
     resource_id: Mutex<u32>,
     current_resource_id: RwLock<Option<u32>>,
+    scanout_resource_id: RwLock<Option<u32>>,
     negotiated_features: RwLock<u32>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
@@ -331,6 +335,7 @@ impl VirtioGpuDeviceCore {
             retired_framebuffer_allocs: Mutex::new(Vec::new()),
             resource_id: Mutex::new(1),
             current_resource_id: RwLock::new(None),
+            scanout_resource_id: RwLock::new(None),
             negotiated_features: RwLock::new(0),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
@@ -971,26 +976,8 @@ impl VirtioGpuDeviceCore {
             ContiguousPages::new(fb_pages).ok_or("Failed to allocate framebuffer memory")?;
         let fb_addr = fb_alloc.as_paddr();
 
-        self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
-        // Set scanout to use this framebuffer
-        let scanout_cmd = VirtioGpuSetScanout {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            r: VirtioGpuRect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
-            scanout_id: 0,
-            resource_id,
-        };
-        self.send_control_command(&scanout_cmd)?;
+        self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?;
+        self.set_primary_scanout(resource_id, width, height)?;
         unsafe {
             let fb_virt = crate::vm::addr::phys_to_virt(fb_addr) as *mut u8;
             ptr::write_bytes(fb_virt, 0, fb_size);
@@ -1074,6 +1061,79 @@ impl VirtioGpuDeviceCore {
             .ok_or("Framebuffer not initialized")
     }
 
+    fn clamp_region_to_rect(
+        region: DisplayRegion,
+        width: u32,
+        height: u32,
+    ) -> Option<VirtioGpuRect> {
+        if region.width == 0 || region.height == 0 || region.x >= width || region.y >= height {
+            return None;
+        }
+
+        Some(VirtioGpuRect {
+            x: region.x,
+            y: region.y,
+            width: region.width.min(width - region.x),
+            height: region.height.min(height - region.y),
+        })
+    }
+
+    fn set_primary_scanout(
+        &self,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
+        if resource_id == 0 || width == 0 || height == 0 {
+            return Err("Primary scanout resource is invalid");
+        }
+        if *self.scanout_resource_id.read() == Some(resource_id) {
+            return Ok(());
+        }
+
+        let scanout_cmd = VirtioGpuSetScanout {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            r: VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            scanout_id: 0,
+            resource_id,
+        };
+        self.send_control_command(&scanout_cmd)?;
+        *self.scanout_resource_id.write() = Some(resource_id);
+        Ok(())
+    }
+
+    fn flush_resource_region(
+        &self,
+        resource_id: u32,
+        rect: VirtioGpuRect,
+    ) -> Result<(), &'static str> {
+        let flush_cmd = VirtioGpuResourceFlush {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            r: rect,
+            resource_id,
+            padding: 0,
+        };
+
+        self.send_control_command(&flush_cmd)
+    }
+
     fn present_framebuffer_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
         let display_info = self.display_info.read();
         let display_info = display_info.as_ref().ok_or("Device not initialized")?;
@@ -1081,30 +1141,18 @@ impl VirtioGpuDeviceCore {
         if primary.enabled == 0 {
             return Err("Primary display not enabled");
         }
-        if region.width == 0
-            || region.height == 0
-            || region.x >= primary.r.width
-            || region.y >= primary.r.height
-        {
+        let Some(rect) = Self::clamp_region_to_rect(region, primary.r.width, primary.r.height)
+        else {
             return Ok(());
-        }
-
-        let width = region.width.min(primary.r.width - region.x);
-        let height = region.height.min(primary.r.height - region.y);
-        let rect = VirtioGpuRect {
-            x: region.x,
-            y: region.y,
-            width,
-            height,
         };
-        let offset = ((region.y as u64 * primary.r.width as u64) + region.x as u64) * 4;
 
-        // Get the resource ID from our tracked resources
         let resource_id = self
             .current_resource_id
             .read()
             .ok_or("No framebuffer resource found")?;
+        self.set_primary_scanout(resource_id, primary.r.width, primary.r.height)?;
 
+        let offset = ((rect.y as u64 * primary.r.width as u64) + rect.x as u64) * 4;
         let transfer_cmd = VirtioGpuTransferToHost2d {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
@@ -1120,22 +1168,23 @@ impl VirtioGpuDeviceCore {
         };
 
         self.send_control_command(&transfer_cmd)?;
+        self.flush_resource_region(resource_id, rect)
+    }
 
-        let flush_cmd = VirtioGpuResourceFlush {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            r: rect,
-            resource_id,
-            padding: 0,
+    fn present_gpu_resource_region(
+        &self,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        if resource.resource_id == 0 || resource.width == 0 || resource.height == 0 {
+            return Err("GPU display resource is invalid");
+        }
+        let Some(rect) = Self::clamp_region_to_rect(region, resource.width, resource.height) else {
+            return Ok(());
         };
 
-        self.send_control_command(&flush_cmd)?;
-        Ok(())
+        self.set_primary_scanout(resource.resource_id, resource.width, resource.height)?;
+        self.flush_resource_region(resource.resource_id, rect)
     }
 }
 
@@ -1378,6 +1427,16 @@ impl GraphicsDevice for VirtioGpuDevice {
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
         self.core.lock().present_framebuffer_region(region)
+    }
+
+    fn present_gpu_resource_region(
+        &self,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        self.core
+            .lock()
+            .present_gpu_resource_region(resource, region)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {

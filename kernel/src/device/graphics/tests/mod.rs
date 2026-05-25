@@ -46,6 +46,15 @@ fn test_generic_graphics_device() {
             .present_current_framebuffer_region(DisplayRegion::new(0, 0, 100, 100))
             .is_ok()
     );
+
+    assert!(
+        device
+            .present_gpu_resource_region(
+                GpuDisplayResource::new(1, 100, 100),
+                DisplayRegion::new(0, 0, 100, 100),
+            )
+            .is_err()
+    );
 }
 
 #[test_case]

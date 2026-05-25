@@ -46,6 +46,8 @@ pub mod commands {
     pub const GPU_TRANSFER_TO_HOST_3D: u32 = 0x470c;
     /// Transfer a host 3D resource into attached backing memory.
     pub const GPU_TRANSFER_FROM_HOST_3D: u32 = 0x470d;
+    /// Present a GPU resource through the display pipeline.
+    pub const GPU_PRESENT_RESOURCE: u32 = 0x470e;
 }
 
 /// Capability bit for virgl command submission.
@@ -288,6 +290,26 @@ pub struct GpuTransfer3dRequest {
     pub height: u32,
     /// Transfer depth.
     pub depth: u32,
+}
+
+/// GPU resource present request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuPresentResourceRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Resource width in pixels.
+    pub resource_width: u32,
+    /// Resource height in pixels.
+    pub resource_height: u32,
+    /// Updated region X origin.
+    pub x: u32,
+    /// Updated region Y origin.
+    pub y: u32,
+    /// Updated region width.
+    pub width: u32,
+    /// Updated region height.
+    pub height: u32,
 }
 
 /// GPU control device wrapper.
@@ -600,6 +622,62 @@ impl Gpu {
             &request as *const _ as usize,
         )?;
         Ok(())
+    }
+
+    /// Present a GPU resource region through the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource identifier.
+    /// * `resource_width` - Resource width in pixels.
+    /// * `resource_height` - Resource height in pixels.
+    /// * `x` - Updated region X origin.
+    /// * `y` - Updated region Y origin.
+    /// * `width` - Updated region width.
+    /// * `height` - Updated region height.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn present_resource_region(
+        &self,
+        resource_id: u32,
+        resource_width: u32,
+        resource_height: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> HandleResult<()> {
+        let request = GpuPresentResourceRequest {
+            resource_id,
+            resource_width,
+            resource_height,
+            x,
+            y,
+            width,
+            height,
+        };
+        self.file.as_handle().control(
+            commands::GPU_PRESENT_RESOURCE,
+            &request as *const _ as usize,
+        )?;
+        Ok(())
+    }
+
+    /// Present a whole GPU resource through the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource identifier.
+    /// * `width` - Resource width in pixels.
+    /// * `height` - Resource height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn present_resource(&self, resource_id: u32, width: u32, height: u32) -> HandleResult<()> {
+        self.present_resource_region(resource_id, width, height, 0, 0, width, height)
     }
 
     /// Submit a virgl command stream.

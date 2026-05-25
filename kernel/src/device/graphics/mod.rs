@@ -96,6 +96,47 @@ impl FramebufferConfig {
     }
 }
 
+/// GPU resource that can be presented through the display pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuDisplayResource {
+    /// Backend resource identifier.
+    pub resource_id: u32,
+    /// Resource width in pixels.
+    pub width: u32,
+    /// Resource height in pixels.
+    pub height: u32,
+}
+
+impl GpuDisplayResource {
+    /// Create a displayable GPU resource descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Backend resource identifier.
+    /// * `width` - Resource width in pixels.
+    /// * `height` - Resource height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A GPU display resource descriptor.
+    pub const fn new(resource_id: u32, width: u32, height: u32) -> Self {
+        Self {
+            resource_id,
+            width,
+            height,
+        }
+    }
+
+    /// Get the full resource region.
+    ///
+    /// # Returns
+    ///
+    /// Region covering the whole resource.
+    pub const fn full_region(&self) -> DisplayRegion {
+        DisplayRegion::new(0, 0, self.width, self.height)
+    }
+}
+
 /// Graphics device interface
 ///
 /// This trait defines the interface for graphics devices.
@@ -157,6 +198,41 @@ pub trait GraphicsDevice: Device {
     ) -> Result<(), &'static str> {
         let (config, physical_addr) = self.get_framebuffer_info()?;
         self.present_framebuffer_region(&config, physical_addr, region)
+    }
+
+    /// Present a GPU resource through the display pipeline.
+    ///
+    /// This is the display-side boundary for accelerated producers. GPU
+    /// command submission updates the resource; this method selects the
+    /// resource for scanout and presents the requested region.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - GPU resource to present.
+    /// * `region` - Updated resource region.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_gpu_resource_region(
+        &self,
+        _resource: GpuDisplayResource,
+        _region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        Err("GPU resource presentation is not supported")
+    }
+
+    /// Present a whole GPU resource through the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - GPU resource to present.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_gpu_resource(&self, resource: GpuDisplayResource) -> Result<(), &'static str> {
+        self.present_gpu_resource_region(resource, resource.full_region())
     }
 
     /// Initialize the graphics device (idempotent)

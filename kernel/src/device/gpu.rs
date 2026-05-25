@@ -7,7 +7,10 @@
 
 use alloc::vec::Vec;
 
-use super::Device;
+use super::{
+    Device,
+    graphics::{GpuDisplayResource, GraphicsDevice, output::DisplayRegion},
+};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 
 /// Optional GPU backend features.
@@ -377,6 +380,8 @@ pub mod gpu_commands {
     pub const GPU_TRANSFER_TO_HOST_3D: u32 = 0x470c;
     /// Transfer a host 3D resource into attached backing memory.
     pub const GPU_TRANSFER_FROM_HOST_3D: u32 = 0x470d;
+    /// Present a GPU resource through the display pipeline.
+    pub const GPU_PRESENT_RESOURCE: u32 = 0x470e;
 }
 
 /// Capability bit for virgl command submission.
@@ -554,6 +559,26 @@ pub struct GpuTransfer3dRequest {
     pub depth: u32,
 }
 
+/// Userspace GPU resource present request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuPresentResourceRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Resource width in pixels.
+    pub resource_width: u32,
+    /// Resource height in pixels.
+    pub resource_height: u32,
+    /// Updated region X origin.
+    pub x: u32,
+    /// Updated region Y origin.
+    pub y: u32,
+    /// Updated region width.
+    pub width: u32,
+    /// Updated region height.
+    pub height: u32,
+}
+
 fn gpu_feature_bits(capabilities: &GpuCapabilities) -> u32 {
     let mut bits = 0;
     for feature in capabilities.features.iter() {
@@ -662,6 +687,7 @@ fn user_buffer_to_memory_entries(
 /// Character device exposing a `GpuDevice` to userspace.
 pub struct GpuCharDevice {
     gpu: alloc::sync::Arc<dyn GpuDevice>,
+    display: alloc::sync::Arc<dyn GraphicsDevice>,
 }
 
 impl GpuCharDevice {
@@ -670,12 +696,16 @@ impl GpuCharDevice {
     /// # Arguments
     ///
     /// * `gpu` - GPU backend to expose.
+    /// * `display` - Display endpoint used to present GPU resources.
     ///
     /// # Returns
     ///
     /// A new GPU character device.
-    pub fn new(gpu: alloc::sync::Arc<dyn GpuDevice>) -> Self {
-        Self { gpu }
+    pub fn new(
+        gpu: alloc::sync::Arc<dyn GpuDevice>,
+        display: alloc::sync::Arc<dyn GraphicsDevice>,
+    ) -> Self {
+        Self { gpu, display }
     }
 
     fn handle_get_capabilities(&self, arg: usize) -> Result<i32, &'static str> {
@@ -849,6 +879,23 @@ impl GpuCharDevice {
         })?;
         Ok(0)
     }
+
+    fn handle_present_resource(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuPresentResourceRequest = read_user_value(arg)?;
+        if request.resource_id == 0 || request.resource_width == 0 || request.resource_height == 0 {
+            return Err("GPU present resource is invalid");
+        }
+
+        self.display.present_gpu_resource_region(
+            GpuDisplayResource::new(
+                request.resource_id,
+                request.resource_width,
+                request.resource_height,
+            ),
+            DisplayRegion::new(request.x, request.y, request.width, request.height),
+        )?;
+        Ok(0)
+    }
 }
 
 impl Device for GpuCharDevice {
@@ -914,6 +961,7 @@ impl crate::object::capability::ControlOps for GpuCharDevice {
             GPU_DETACH_RESOURCE_BACKING => self.handle_detach_resource_backing(arg),
             GPU_TRANSFER_TO_HOST_3D => self.handle_transfer_to_host_3d(arg),
             GPU_TRANSFER_FROM_HOST_3D => self.handle_transfer_from_host_3d(arg),
+            GPU_PRESENT_RESOURCE => self.handle_present_resource(arg),
             _ => Err("Unsupported GPU control command"),
         }
     }
