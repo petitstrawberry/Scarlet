@@ -79,7 +79,7 @@ pub trait DisplayOutput: Send + Sync {
     ///
     /// * `config` - Framebuffer configuration.
     /// * `fb_paddr` - Physical address of the framebuffer memory.
-    /// * `region` - Optional update region. `None` means the whole framebuffer.
+    /// * `region` - Updated display region.
     ///
     /// # Returns
     ///
@@ -88,7 +88,7 @@ pub trait DisplayOutput: Send + Sync {
         &self,
         config: &FramebufferConfig,
         fb_paddr: usize,
-        _region: Option<DisplayRegion>,
+        _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         self.present(config, fb_paddr)
     }

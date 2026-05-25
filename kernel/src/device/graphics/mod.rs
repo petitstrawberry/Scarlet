@@ -3,9 +3,8 @@
 //! This module defines the interface for graphics devices in the kernel.
 //! It provides abstractions for framebuffer operations and graphics device management.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
 
 use self::output::{DisplayOutput, DisplayRegion};
 use alloc::sync::Arc;
@@ -97,40 +96,6 @@ impl FramebufferConfig {
     }
 }
 
-/// Graphics operation requests
-#[derive(Debug)]
-pub enum GraphicsRequest {
-    /// Get framebuffer configuration
-    GetFramebufferConfig,
-    /// Map framebuffer memory
-    MapFramebuffer,
-    /// Flush framebuffer changes to display
-    FlushFramebuffer {
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    },
-}
-
-/// Result of graphics operations
-#[derive(Debug)]
-pub struct GraphicsResult {
-    pub request: Box<GraphicsRequest>,
-    pub result: Result<GraphicsResponse, &'static str>,
-}
-
-/// Response from graphics operations
-#[derive(Debug)]
-pub enum GraphicsResponse {
-    /// Framebuffer configuration
-    FramebufferConfig(FramebufferConfig),
-    /// Framebuffer memory address
-    FramebufferAddress(usize),
-    /// Operation completed successfully
-    Success,
-}
-
 /// Graphics device interface
 ///
 /// This trait defines the interface for graphics devices.
@@ -157,26 +122,14 @@ pub trait GraphicsDevice: Device {
         Ok((config, physical_addr))
     }
 
-    /// Flush framebuffer region to display
-    fn flush_framebuffer(
-        &self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<(), &'static str>;
-
     /// Present a framebuffer backing store to the display pipeline.
-    ///
-    /// This separates display presentation from the legacy framebuffer flush
-    /// entrypoint. Devices may override it when the scanout/present path is not
-    /// just a flush of the same framebuffer memory.
     ///
     /// # Arguments
     ///
     /// * `config` - Framebuffer configuration for the backing store.
     /// * `physical_addr` - Physical address of the framebuffer backing store.
-    /// * `region` - Optional update region. `None` means the whole framebuffer.
+    /// * `region` - Updated display region. Use `DisplayRegion::full(config)`
+    ///   for a full-frame present.
     ///
     /// # Returns
     ///
@@ -184,25 +137,23 @@ pub trait GraphicsDevice: Device {
     fn present_framebuffer_region(
         &self,
         config: &FramebufferConfig,
-        _physical_addr: usize,
-        region: Option<DisplayRegion>,
-    ) -> Result<(), &'static str> {
-        let region = region.unwrap_or_else(|| DisplayRegion::full(config));
-        self.flush_framebuffer(region.x, region.y, region.width, region.height)
-    }
+        physical_addr: usize,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str>;
 
     /// Present the device's current framebuffer to the display pipeline.
     ///
     /// # Arguments
     ///
-    /// * `region` - Optional update region. `None` means the whole framebuffer.
+    /// * `region` - Updated display region. Use `DisplayRegion::full(config)`
+    ///   for a full-frame present.
     ///
     /// # Returns
     ///
     /// Success or an error describing why presentation failed.
     fn present_current_framebuffer_region(
         &self,
-        region: Option<DisplayRegion>,
+        region: DisplayRegion,
     ) -> Result<(), &'static str> {
         let (config, physical_addr) = self.get_framebuffer_info()?;
         self.present_framebuffer_region(&config, physical_addr, region)
@@ -225,7 +176,6 @@ pub struct GenericGraphicsDevice {
     display_name: &'static str,
     config: Option<FramebufferConfig>,
     framebuffer_addr: Option<usize>,
-    request_queue: Mutex<Vec<Box<GraphicsRequest>>>,
 }
 
 impl GenericGraphicsDevice {
@@ -234,7 +184,6 @@ impl GenericGraphicsDevice {
             display_name,
             config: None,
             framebuffer_addr: None,
-            request_queue: Mutex::new(Vec::new()),
         }
     }
 
@@ -325,14 +274,12 @@ impl GraphicsDevice for GenericGraphicsDevice {
         self.framebuffer_addr.ok_or("Framebuffer address not set")
     }
 
-    fn flush_framebuffer(
+    fn present_framebuffer_region(
         &self,
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
+        _config: &FramebufferConfig,
+        _physical_addr: usize,
+        _region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        // Generic implementation - no-op
         Ok(())
     }
 

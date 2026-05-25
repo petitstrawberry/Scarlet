@@ -649,13 +649,13 @@ mod integration_tests {
         }
 
         {
-            // Flush the framebuffer using control operation (ioctl-equivalent)
+            // Present the framebuffer using control operation (ioctl-equivalent)
             use crate::device::graphics::framebuffer_device::framebuffer_commands::FBIO_FLUSH;
             use crate::object::capability::ControlOps;
             let result = fb_char_device.control(FBIO_FLUSH, 0);
             assert!(
                 result.is_ok(),
-                "Failed to flush framebuffer via control operation"
+                "Failed to present framebuffer via control operation"
             );
         }
 

@@ -16,13 +16,13 @@ use crate::{
             GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature,
             GpuMemoryEntry, GpuResource3dDescription, GpuTransfer3d,
         },
-        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
+        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat, output::DisplayRegion},
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{ContiguousPages, Page, allocate_raw_pages},
+    mem::page::ContiguousPages,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
     vm::addr::virt_to_phys,
@@ -301,11 +301,8 @@ pub struct VirtioGpuDeviceCore {
     virtqueues: Mutex<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
     display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: RwLock<Option<usize>>,
-    shadow_framebuffer_addr: RwLock<Option<usize>>,
     framebuffer_alloc: RwLock<Option<ContiguousPages>>,
-    shadow_framebuffer_alloc: RwLock<Option<ContiguousPages>>,
     retired_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
-    retired_shadow_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
     resource_id: Mutex<u32>,
     current_resource_id: RwLock<Option<u32>>,
     negotiated_features: RwLock<u32>,
@@ -330,11 +327,8 @@ impl VirtioGpuDeviceCore {
             virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
             display_info: RwLock::new(None),
             framebuffer_addr: RwLock::new(None),
-            shadow_framebuffer_addr: RwLock::new(None),
             framebuffer_alloc: RwLock::new(None),
-            shadow_framebuffer_alloc: RwLock::new(None),
             retired_framebuffer_allocs: Mutex::new(Vec::new()),
-            retired_shadow_framebuffer_allocs: Mutex::new(Vec::new()),
             resource_id: Mutex::new(1),
             current_resource_id: RwLock::new(None),
             negotiated_features: RwLock::new(0),
@@ -976,9 +970,6 @@ impl VirtioGpuDeviceCore {
         let fb_alloc =
             ContiguousPages::new(fb_pages).ok_or("Failed to allocate framebuffer memory")?;
         let fb_addr = fb_alloc.as_paddr();
-        let shadow_alloc =
-            ContiguousPages::new(fb_pages).ok_or("Failed to allocate shadow framebuffer memory")?;
-        let shadow_addr = shadow_alloc.as_paddr();
 
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
         // Set scanout to use this framebuffer
@@ -1013,19 +1004,6 @@ impl VirtioGpuDeviceCore {
         }
         *self.framebuffer_addr.write() = Some(fb_addr);
         *self.current_resource_id.write() = Some(resource_id);
-        if let Some(old_alloc) = self.shadow_framebuffer_alloc.write().replace(shadow_alloc) {
-            self.retired_shadow_framebuffer_allocs
-                .lock()
-                .push(old_alloc);
-        }
-        // Initialize shadow framebuffer with the contents of the framebuffer
-        let fb_size = fb_size as usize;
-        unsafe {
-            let fb_virt = crate::vm::addr::phys_to_virt(fb_addr) as *const u8;
-            let shadow_virt = crate::vm::addr::phys_to_virt(shadow_addr) as *mut u8;
-            ptr::copy_nonoverlapping(fb_virt, shadow_virt, fb_size);
-        }
-        *self.shadow_framebuffer_addr.write() = Some(shadow_addr);
         Ok(())
     }
 
@@ -1096,15 +1074,30 @@ impl VirtioGpuDeviceCore {
             .ok_or("Framebuffer not initialized")
     }
 
-    fn flush_framebuffer(
-        &self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<(), &'static str> {
+    fn present_framebuffer_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
         let display_info = self.display_info.read();
-        let _display_info = display_info.as_ref().ok_or("Device not initialized")?;
+        let display_info = display_info.as_ref().ok_or("Device not initialized")?;
+        let primary = display_info.pmodes[0];
+        if primary.enabled == 0 {
+            return Err("Primary display not enabled");
+        }
+        if region.width == 0
+            || region.height == 0
+            || region.x >= primary.r.width
+            || region.y >= primary.r.height
+        {
+            return Ok(());
+        }
+
+        let width = region.width.min(primary.r.width - region.x);
+        let height = region.height.min(primary.r.height - region.y);
+        let rect = VirtioGpuRect {
+            x: region.x,
+            y: region.y,
+            width,
+            height,
+        };
+        let offset = ((region.y as u64 * primary.r.width as u64) + region.x as u64) * 4;
 
         // Get the resource ID from our tracked resources
         let resource_id = self
@@ -1112,12 +1105,6 @@ impl VirtioGpuDeviceCore {
             .read()
             .ok_or("No framebuffer resource found")?;
 
-        // crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}",
-        //     x, y, width, height, resource_id);
-
-        // Transfer to host - copies data from guest memory to host
-        // This is necessary because the host GPU driver needs to know
-        // that the framebuffer contents have changed
         let transfer_cmd = VirtioGpuTransferToHost2d {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
@@ -1126,21 +1113,14 @@ impl VirtioGpuDeviceCore {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect {
-                x,
-                y,
-                width,
-                height,
-            },
-            offset: 0,
+            r: rect,
+            offset,
             resource_id,
             padding: 0,
         };
 
         self.send_control_command(&transfer_cmd)?;
 
-        // Flush resource - tells the display to update the specified region
-        // This actually triggers the display update
         let flush_cmd = VirtioGpuResourceFlush {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
@@ -1149,18 +1129,12 @@ impl VirtioGpuDeviceCore {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect {
-                x,
-                y,
-                width,
-                height,
-            },
+            r: rect,
             resource_id,
             padding: 0,
         };
 
         self.send_control_command(&flush_cmd)?;
-        // crate::early_println!("[Virtio GPU] Framebuffer flush completed");
         Ok(())
     }
 }
@@ -1397,14 +1371,13 @@ impl GraphicsDevice for VirtioGpuDevice {
         Ok((config, physical_addr))
     }
 
-    fn flush_framebuffer(
+    fn present_framebuffer_region(
         &self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
+        _config: &FramebufferConfig,
+        _physical_addr: usize,
+        region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.core.lock().flush_framebuffer(x, y, width, height)
+        self.core.lock().present_framebuffer_region(region)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {
@@ -1451,7 +1424,7 @@ struct FramebufferUpdateHandler {
 }
 
 impl FramebufferUpdateHandler {
-    fn compare_and_flush(&self) {
+    fn present_framebuffer(&self) {
         let now = get_tick();
         let should_poll_resize = {
             let mut last_poll = self.last_resize_poll_tick.lock();
@@ -1466,16 +1439,11 @@ impl FramebufferUpdateHandler {
             let _ = self.device.lock().poll_display_resize();
         }
 
-        let (_fb_addr, _shadow_addr, width, height) = {
+        let (width, height) = {
             let core = self.device.lock();
-            let fb_addr = match *core.framebuffer_addr.read() {
-                Some(addr) => addr,
-                None => return,
-            };
-            let shadow_addr = match *core.shadow_framebuffer_addr.read() {
-                Some(addr) => addr,
-                None => return,
-            };
+            if core.framebuffer_addr.read().is_none() {
+                return;
+            }
             let display_info_guard = core.display_info.read();
             let display_info = match display_info_guard.as_ref() {
                 Some(info) => info,
@@ -1483,29 +1451,18 @@ impl FramebufferUpdateHandler {
             };
             let width = display_info.pmodes[0].r.width;
             let height = display_info.pmodes[0].r.height;
-            (fb_addr, shadow_addr, width, height)
+            (width, height)
         };
-        let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
-
-        // // Determine if the framebuffer has changed
-        // let fb_ptr = fb_addr as *const u8;
-        // let shadow_ptr = shadow_addr as *const u8;
-        // let fb_slice = unsafe { core::slice::from_raw_parts(fb_ptr, fb_size) };
-        // let shadow_slice = unsafe { core::slice::from_raw_parts(shadow_ptr, fb_size) };
-        // let changed = fb_slice != shadow_slice;
-
-        // if changed {
-        //     let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
-        //     unsafe {
-        //         ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
-        //     }
-        // }
+        let _ = self
+            .device
+            .lock()
+            .present_framebuffer_region(DisplayRegion::new(0, 0, width, height));
     }
 }
 
 impl TimerHandler for FramebufferUpdateHandler {
     fn on_timer_expired(self: Arc<Self>, context: usize) {
-        self.compare_and_flush();
+        self.present_framebuffer();
         let handler = self as Arc<dyn TimerHandler>;
         add_timer(get_tick() + ms_to_ticks(16), &handler, context);
     }
@@ -1622,9 +1579,9 @@ mod tests {
             }
         }
 
-        // Flush the entire framebuffer
+        // Present the entire framebuffer
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify some pixels were written correctly
@@ -1687,9 +1644,9 @@ mod tests {
             set_pixel(i, i, 0xFFFF0000); // Blue in BGRA format
         }
 
-        // Flush the changes
+        // Present the changes
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify some of the drawn pixels
@@ -1754,9 +1711,9 @@ mod tests {
         draw_rectangle(200, 100, 150, 100, 0xFF00FF00); // Green rectangle
         draw_rectangle(400, 200, 80, 120, 0xFFFF0000); // Blue rectangle
 
-        // Flush changes
+        // Present changes
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify the rectangles were drawn correctly
@@ -1861,7 +1818,7 @@ mod tests {
         draw_border(30, 30, 160, 110, 0xFFFF0000); // Blue inner border
 
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify borders
@@ -1924,7 +1881,7 @@ mod tests {
             }
 
             device
-                .flush_framebuffer(0, 0, config.width, config.height)
+                .present_current_framebuffer_region(DisplayRegion::full(&config))
                 .unwrap();
 
             // Verify the colors were written correctly
@@ -1946,7 +1903,9 @@ mod tests {
             let pixel_index = (100 * config.width + 100) as usize;
             *fb_ptr.add(pixel_index) = semi_transparent_red;
 
-            device.flush_framebuffer(100, 100, 1, 1).unwrap();
+            device
+                .present_current_framebuffer_region(DisplayRegion::new(100, 100, 1, 1))
+                .unwrap();
 
             let written_pixel = *fb_ptr.add(pixel_index);
             assert_eq!(written_pixel, semi_transparent_red);
@@ -1973,7 +1932,7 @@ mod tests {
             config.height
         );
 
-        // Write a test pattern and verify the flush process
+        // Write a test pattern and verify the present path
         unsafe {
             let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
 
@@ -1993,11 +1952,15 @@ mod tests {
 
         crate::early_println!("[Test] Written checkerboard pattern to framebuffer");
 
-        // Test flushing different regions
-        device.flush_framebuffer(0, 0, 50, 50).unwrap();
-        device.flush_framebuffer(50, 50, 50, 50).unwrap();
+        // Test presenting different regions
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::new(0, 0, 50, 50))
+            .unwrap();
+        device
+            .present_current_framebuffer_region(DisplayRegion::new(50, 50, 50, 50))
+            .unwrap();
+        device
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .unwrap();
 
         crate::early_println!("[Test] VirtIO GPU command flow verification completed");
@@ -2020,7 +1983,7 @@ mod tests {
         // The framebuffer should be associated with resource ID 1
         // (as set up in setup_framebuffer)
 
-        // Write some data and flush to verify resource association
+        // Write some data and present to verify resource association
         unsafe {
             let fb_ptr = crate::vm::addr::phys_to_virt(fb_addr) as *mut u32;
             // Write a diagonal line pattern
@@ -2030,9 +1993,14 @@ mod tests {
             }
         }
 
-        // Flush the diagonal region
+        // Present the diagonal region
         device
-            .flush_framebuffer(0, 0, config.width.min(500), config.height.min(500))
+            .present_current_framebuffer_region(DisplayRegion::new(
+                0,
+                0,
+                config.width.min(500),
+                config.height.min(500),
+            ))
             .unwrap();
 
         crate::early_println!("[Test] Resource management test completed");

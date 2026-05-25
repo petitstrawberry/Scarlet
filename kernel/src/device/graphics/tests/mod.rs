@@ -40,8 +40,12 @@ fn test_generic_graphics_device() {
     device.set_framebuffer_address(0x80000000);
     assert_eq!(device.get_framebuffer_address().unwrap(), 0x80000000);
 
-    // Test flush operation
-    assert!(device.flush_framebuffer(0, 0, 100, 100).is_ok());
+    // Test present operation
+    assert!(
+        device
+            .present_current_framebuffer_region(DisplayRegion::new(0, 0, 100, 100))
+            .is_ok()
+    );
 }
 
 #[test_case]
@@ -135,10 +139,10 @@ fn test_framebuffer_drawing_operations() {
         }
     }
 
-    // Flush the framebuffer
+    // Present the framebuffer
     assert!(
         device
-            .flush_framebuffer(0, 0, config.width, config.height)
+            .present_current_framebuffer_region(DisplayRegion::full(&config))
             .is_ok()
     );
 
@@ -269,7 +273,11 @@ fn test_pixel_format_operations() {
             }
         }
 
-        // Test flushing
-        assert!(device.flush_framebuffer(0, 0, 100, 100).is_ok());
+        // Test presenting
+        assert!(
+            device
+                .present_current_framebuffer_region(DisplayRegion::new(0, 0, 100, 100))
+                .is_ok()
+        );
     }
 }
