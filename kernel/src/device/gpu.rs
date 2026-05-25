@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 
 use super::Device;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 
 /// Optional GPU backend features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,10 +572,18 @@ fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
         return Err("GPU ioctl pointer is null");
     }
 
-    // SAFETY: Scarlet's existing device control ABI passes userspace pointers
-    // directly to device objects. The caller supplies the pointer and the kernel
-    // expects the current address space to make it accessible for this access.
-    Ok(unsafe { core::ptr::read(ptr as *const T) })
+    let task = crate::task::mytask().ok_or("No current task for GPU ioctl")?;
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: `value` is uninitialized storage for exactly one `T`; viewing it
+    // as bytes is only used to fill the storage before initialization.
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    };
+    copy_from_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl from user")?;
+
+    // SAFETY: `bytes` covers the whole `T` storage and has just been filled by
+    // `copy_from_user`.
+    Ok(unsafe { value.assume_init() })
 }
 
 fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> {
@@ -582,12 +591,40 @@ fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> 
         return Err("GPU ioctl pointer is null");
     }
 
-    // SAFETY: See `read_user_value`; this mirrors the existing framebuffer
-    // control ABI style for writing small fixed-size response structures.
-    unsafe {
-        core::ptr::write(ptr as *mut T, *value);
-    }
+    let task = crate::task::mytask().ok_or("No current task for GPU ioctl")?;
+    // SAFETY: `value` is a valid initialized `T`; exposing its bytes for a copy
+    // to userspace does not outlive this function call.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    copy_to_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl to user")?;
     Ok(())
+}
+
+fn read_user_bytes(ptr: usize, len: usize) -> Result<Vec<u8>, &'static str> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr == 0 {
+        return Err("GPU user buffer is null");
+    }
+
+    let task = crate::task::mytask().ok_or("No current task for GPU user buffer")?;
+    let mut bytes = alloc::vec![0u8; len];
+    copy_from_user(task, ptr, &mut bytes).map_err(|_| "Failed to copy GPU buffer from user")?;
+    Ok(bytes)
+}
+
+fn write_user_bytes(ptr: usize, bytes: &[u8]) -> Result<(), &'static str> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if ptr == 0 {
+        return Err("GPU user buffer is null");
+    }
+
+    let task = crate::task::mytask().ok_or("No current task for GPU user buffer")?;
+    copy_to_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU buffer to user")
 }
 
 fn user_buffer_to_memory_entries(
@@ -667,13 +704,14 @@ impl GpuCharDevice {
             return Err("GPU capset buffer is invalid");
         }
 
-        // SAFETY: The userspace request supplies a writable destination buffer.
-        // This follows the same direct-pointer device control convention as the
-        // framebuffer control path.
-        let buffer = unsafe {
-            core::slice::from_raw_parts_mut(request.buffer_ptr as *mut u8, request.buffer_len)
-        };
-        request.bytes_written = self.gpu.read_capset(request.id, request.version, buffer)?;
+        let mut buffer = alloc::vec![0u8; request.buffer_len];
+        request.bytes_written = self
+            .gpu
+            .read_capset(request.id, request.version, &mut buffer)?;
+        write_user_bytes(
+            request.buffer_ptr,
+            &buffer[..request.bytes_written.min(buffer.len())],
+        )?;
         write_user_value(arg, &request)?;
         Ok(0)
     }
@@ -683,11 +721,8 @@ impl GpuCharDevice {
         let name_len = request.name_len.min(GPU_CONTEXT_NAME_MAX);
         let mut name_bytes = [0u8; GPU_CONTEXT_NAME_MAX];
         if request.name_ptr != 0 && name_len != 0 {
-            // SAFETY: The userspace request supplies a readable debug-name
-            // buffer. We cap the copy to a small fixed-size kernel buffer.
-            let source =
-                unsafe { core::slice::from_raw_parts(request.name_ptr as *const u8, name_len) };
-            name_bytes[..name_len].copy_from_slice(source);
+            let source = read_user_bytes(request.name_ptr, name_len)?;
+            name_bytes[..name_len].copy_from_slice(&source);
         }
         let debug_name = core::str::from_utf8(&name_bytes[..name_len])
             .map_err(|_| "GPU context name is not valid UTF-8")?;
@@ -801,11 +836,7 @@ impl GpuCharDevice {
             return Err("GPU command buffer is invalid");
         }
 
-        // SAFETY: The userspace request supplies a readable command buffer. The
-        // GPU backend copies/sends it synchronously before this method returns.
-        let commands = unsafe {
-            core::slice::from_raw_parts(request.commands_ptr as *const u8, request.commands_len)
-        };
+        let commands = read_user_bytes(request.commands_ptr, request.commands_len)?;
         let fence_id = if (request.flags & GPU_SUBMIT_FLAG_FENCE) != 0 {
             Some(request.fence_id)
         } else {
@@ -813,7 +844,7 @@ impl GpuCharDevice {
         };
         self.gpu.submit_commands(GpuCommandSubmission {
             context_id: request.context_id,
-            commands,
+            commands: &commands,
             fence_id,
         })?;
         Ok(0)
