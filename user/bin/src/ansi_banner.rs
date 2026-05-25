@@ -29,11 +29,11 @@ fn main() -> i32 {
     }
     println!();
     for color in 0..8 {
-        print!("\x1b[4{}m       \x1b[0m", color);
+        print!("\x1b[4{}m        \x1b[0m", color);
     }
     println!();
     for color in 0..8 {
-        print!("\x1b[10{}m       \x1b[0m", color);
+        print!("\x1b[10{}m        \x1b[0m", color);
     }
     println!();
     println!();
