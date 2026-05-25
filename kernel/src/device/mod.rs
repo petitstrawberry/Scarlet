@@ -9,6 +9,7 @@ pub mod char;
 pub mod events;
 pub mod fdt;
 pub mod gpio;
+pub mod gpu;
 pub mod graphics;
 pub mod i2c;
 pub mod input;
@@ -113,6 +114,11 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
         None
     }
 
+    /// Cast to GpuDevice if this device provides GPU acceleration.
+    fn as_gpu_device(&self) -> Option<&dyn gpu::GpuDevice> {
+        None
+    }
+
     /// Cast to NetworkDevice if this device is a network device
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
@@ -139,6 +145,14 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn into_graphics_device(
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
+        None
+    }
+
+    /// Cast Arc<Self> to Arc<dyn GpuDevice> if this device provides GPU acceleration.
+    /// This allows direct ownership of the GPU device for efficient operations.
+    fn into_gpu_device(
+        self: alloc::sync::Arc<Self>,
+    ) -> Option<alloc::sync::Arc<dyn gpu::GpuDevice>> {
         None
     }
 
