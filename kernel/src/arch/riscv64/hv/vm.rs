@@ -217,6 +217,12 @@ impl Riscv64VcpuObject {
     }
 }
 
+impl Drop for Riscv64VcpuObject {
+    fn drop(&mut self) {
+        crate::abi::linux::device::kvm::free_vcpu_run_page(self);
+    }
+}
+
 impl VcpuObject for Riscv64VcpuObject {
     fn id(&self) -> VcpuId {
         self.id

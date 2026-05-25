@@ -149,10 +149,9 @@ pub fn sys_handle_duplicate(trapframe: &mut Trapframe) -> usize {
     let handle = trapframe.get_arg(0) as u32;
     trapframe.increment_pc_next(task);
 
-    // Check if the handle exists and get the kernel object
-    if let Some(kernel_obj) = task.handle_table.get(handle) {
-        // Insert a new handle for the same object
-        match task.handle_table.insert(kernel_obj.clone()) {
+    // Duplicate using object-specific dup semantics where available.
+    if let Some(kernel_obj) = task.handle_table.clone_for_dup(handle) {
+        match task.handle_table.insert(kernel_obj) {
             Ok(new_handle) => new_handle as usize,
             Err(_) => usize::MAX, // Handle table full
         }

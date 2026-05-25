@@ -315,7 +315,7 @@ impl ScarletAbi {
                     ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
-                task.exit(exit_code);
+                task.exit_group(exit_code);
                 Ok(())
             }
             ProcessControlType::Stop
@@ -363,7 +363,7 @@ impl ScarletAbi {
                     )
                 } else {
                     // Default: terminate with SIGINT-like exit code
-                    task.exit(128 + 2);
+                    task.exit_group(128 + 2);
                     Ok(())
                 }
             }

@@ -311,7 +311,7 @@ impl TcpSocket {
     ///
     /// Returns None if socket is not a TcpSocket.
     /// This is completely safe and does not use any unsafe code.
-    pub fn from_socket_object(socket: &Arc<dyn SocketObject>) -> Option<&Self> {
+    pub fn from_socket_object(socket: &dyn SocketObject) -> Option<&Self> {
         socket.as_any().downcast_ref::<TcpSocket>()
     }
 
@@ -1877,6 +1877,19 @@ impl Drop for TcpSocket {
                 layer.unregister_socket(port, &self.self_weak);
             }
         }
+
+        if let Some(waker) = self.accept_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+
+        crate::network::NetworkManager::get_manager()
+            .remove_socket_by_ptr(self as *const Self as usize);
     }
 }
 

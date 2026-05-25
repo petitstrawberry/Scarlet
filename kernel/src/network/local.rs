@@ -144,7 +144,7 @@ impl LocalSocket {
     ///
     /// Returns None if the socket is not a LocalSocket.
     /// This is completely safe and does not use any unsafe code.
-    pub fn from_socket_object(socket: &Arc<dyn SocketObject>) -> Option<&Self> {
+    pub fn from_socket_object(socket: &dyn SocketObject) -> Option<&Self> {
         // Use SocketObject's as_any() to get &dyn Any
         socket.as_any().downcast_ref::<LocalSocket>()
     }
@@ -581,37 +581,42 @@ impl StreamOps for LocalSocket {
                 }
             } // Release locks before checking nonblocking/EOF
 
-            // Check nonblocking mode before blocking
+            {
+                let read_buf_arc = self.read_buffer.read();
+
+                // Check EOF before honoring non-blocking mode. A disconnected peer is
+                // a completed read condition, not WouldBlock.
+                let my_state = *self.state.read();
+                if my_state == SocketState::Closed {
+                    return Ok(0);
+                }
+
+                if my_state == SocketState::Connected {
+                    let peer_closed = match self.peer_socket.read().as_ref() {
+                        Some(peer_weak) => match peer_weak.upgrade() {
+                            Some(peer) => *peer.state.read() == SocketState::Closed,
+                            None => true,
+                        },
+                        None => true,
+                    };
+                    if peer_closed {
+                        return Ok(0);
+                    }
+                }
+
+                // Check if this read buffer has been closed by peer's shutdown/drop.
+                if *read_buf_arc.closed.read() {
+                    return Ok(0);
+                }
+            }
+
+            // Check nonblocking mode before blocking.
             if *self.nonblocking.read() {
                 return Err(StreamError::WouldBlock);
             }
 
             {
                 let read_buf_arc = self.read_buffer.read();
-
-                // Check if socket is closed (peer shutdown)
-                // Return 0 to indicate EOF (not an error)
-                let my_state = *self.state.read();
-                if my_state == SocketState::Closed {
-                    return Ok(0);
-                }
-
-                // Check if peer is closed (they called shutdown)
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        let peer_state = *peer.state.read();
-                        if peer_state == SocketState::Closed {
-                            return Ok(0); // Peer closed, return EOF
-                        }
-                    } else {
-                        return Ok(0); // Peer dropped, treat as EOF
-                    }
-                }
-
-                // Check if this read buffer has been closed by peer's shutdown()
-                if *read_buf_arc.closed.read() {
-                    return Ok(0);
-                }
 
                 // Register this task as waiting to read
                 if let Some(task) = mytask() {
@@ -680,6 +685,39 @@ impl StreamIpcOps for LocalSocket {
         let local = self.local_addr.read();
         let peer = self.peer_addr.read();
         format!("LocalSocket[{:?} -> {:?}]", local.as_ref(), peer.as_ref())
+    }
+}
+
+impl Drop for LocalSocket {
+    fn drop(&mut self) {
+        let state = *self.state.read();
+
+        if matches!(state, SocketState::Bound | SocketState::Listening)
+            && let Some(path) = self.local_addr.read().as_ref()
+            && !path.is_empty()
+        {
+            NetworkManager::get_manager().unregister_named_socket(path);
+        }
+
+        if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
+            *peer_buf.closed.write() = true;
+        }
+
+        if let Some(peer_weak) = self.peer_socket.read().as_ref()
+            && let Some(peer) = peer_weak.upgrade()
+        {
+            *peer.peer_read_buffer.write() = None;
+            *peer.peer_socket.write() = None;
+            peer.read_waker.wake_all();
+            peer.handle_waker.wake_all();
+        }
+
+        self.accept_waker.wake_all();
+        self.read_waker.wake_all();
+        self.handle_waker.wake_all();
+        *self.state.write() = SocketState::Closed;
+
+        NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);
     }
 }
 
@@ -816,7 +854,7 @@ impl SocketControl for LocalSocket {
         *server_conn.peer_socket.write() = Some(Arc::downgrade(&client_arc));
 
         // Add server connection to server's backlog
-        let server_local = match Self::from_socket_object(&server_socket) {
+        let server_local = match Self::from_socket_object(server_socket.as_ref()) {
             Some(socket) => socket,
             None => return Err(SocketError::InvalidOperation), // Not a LocalSocket
         };
@@ -1161,6 +1199,35 @@ mod tests {
         let mut buf = [0u8; 4];
         sock1.read(&mut buf).unwrap();
         assert_eq!(&buf, b"pong");
+    }
+
+    #[test_case]
+    fn test_peer_observes_close_when_socket_is_dropped() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        drop(sock1);
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "peer read should observe EOF");
+        assert!(
+            sock2.write(b"closed").is_err(),
+            "peer write should fail after remote drop"
+        );
+    }
+
+    #[test_case]
+    fn test_nonblocking_peer_drop_returns_eof() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        sock2.set_nonblocking(true);
+        drop(sock1);
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "non-blocking peer read should observe EOF");
     }
 
     #[test_case]

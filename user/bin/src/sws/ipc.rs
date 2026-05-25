@@ -3,6 +3,7 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 use std::collections::BTreeMap;
 use std::env;
+use std::handle::Handle;
 use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
@@ -282,6 +283,33 @@ fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: Pendin
     }
 }
 
+/// Wake pipe used by worker threads to interrupt the compositor event loop.
+static COMPOSITOR_WAKE_WRITE: Mutex<Option<Handle>> = Mutex::new(None);
+
+/// Install the compositor wake pipe write handle.
+///
+/// # Arguments
+///
+/// * `write_handle` - Write side of the compositor wake pipe.
+pub fn set_compositor_wake_handle(write_handle: Handle) {
+    let mut wake = COMPOSITOR_WAKE_WRITE.lock();
+    *wake = Some(write_handle);
+}
+
+/// Wake the compositor if it is sleeping on the wake pipe.
+pub fn wake_compositor() {
+    let wake = COMPOSITOR_WAKE_WRITE.lock();
+    let Some(handle) = wake.as_ref() else {
+        return;
+    };
+
+    let Ok(stream) = handle.as_stream() else {
+        return;
+    };
+
+    let _ = stream.write(&[1]);
+}
+
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
 
@@ -357,6 +385,7 @@ pub fn push_ipc_event(event: IpcEvent) {
                 }
             }
         }
+        let should_wake = queue.is_empty();
         queue.push(IpcEvent::ExtensionUpdateBuffer {
             external_client_id,
             window_id,
@@ -365,9 +394,18 @@ pub fn push_ipc_event(event: IpcEvent) {
             damage_width,
             damage_height,
         });
+        drop(queue);
+        if should_wake {
+            wake_compositor();
+        }
         return;
     }
+    let should_wake = queue.is_empty();
     queue.push(event);
+    drop(queue);
+    if should_wake {
+        wake_compositor();
+    }
 }
 
 /// Get all pending events from the queue
@@ -400,6 +438,13 @@ fn unregister_window(window_id: u32) {
         let mut pending = PENDING_SERVER_FRAMES.lock();
         pending.remove(&window_id);
     }
+}
+
+fn cleanup_window_state(window_id: u32) {
+    unregister_window(window_id);
+
+    let mut sessions = APP_SESSIONS.lock();
+    sessions.remove(&window_id);
 }
 
 /// Queue an input event for a specific window (O(log n) lookup)
@@ -466,6 +511,11 @@ pub fn pop_extension_input_events(
     } else {
         Vec::new()
     }
+}
+
+fn cleanup_extension_input_events(extension_id: u32, external_client_id: u32) {
+    let mut pending = PENDING_EXTENSION_INPUT_EVENTS.lock();
+    pending.remove(&(extension_id, external_client_id));
 }
 
 /// Queue a server->client protocol message for a specific window.
@@ -1129,15 +1179,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id, window_id
                 );
 
-                // Unregister window from input routing
-                unregister_window(window_id);
-
+                cleanup_window_state(window_id);
                 window_resizable.remove(&window_id);
-
-                // Remove AppSession
-                {
-                    let mut sessions = APP_SESSIONS.lock();
-                    sessions.remove(&window_id);
+                if let Some(external_client_id) = window_to_external_client.remove(&window_id) {
+                    cleanup_extension_input_events(extension_id, external_client_id);
                 }
 
                 // Remove from managed windows
@@ -1709,16 +1754,20 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     }
 
     // Cleanup: ensure per-window routing queues don't leak when the client disappears.
-    // Also notify the compositor so orphaned windows don't stick around.
-    for window_id in managed_windows.drain(..) {
-        unregister_window(window_id);
-        push_ipc_event(IpcEvent::DestroyWindow {
-            client_id,
-            window_id,
-        });
+    // Also notify the compositor so orphaned windows don't stick around. A disconnected
+    // client cannot receive WINDOW_DESTROYED, so use a separate event that only updates
+    // server-side state and other live clients.
+    let disconnected_windows = core::mem::take(&mut managed_windows);
+    for &window_id in &disconnected_windows {
+        cleanup_window_state(window_id);
+        window_resizable.remove(&window_id);
+        if let Some(external_client_id) = window_to_external_client.remove(&window_id) {
+            cleanup_extension_input_events(extension_id, external_client_id);
+        }
     }
 
-    // Unregister client from broadcast messages
+    // Unregister client from broadcast messages before publishing the disconnect event;
+    // broadcasts produced by window removal must not recreate this dead client's queue.
     {
         let mut pending = PENDING_CLIENT_RESPONSES.lock();
         pending.remove(&client_id);
@@ -1726,6 +1775,18 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             "[ClientThread {}] Unregistered client {} from broadcast messages",
             client_id, client_id
         );
+    }
+
+    if !disconnected_windows.is_empty() {
+        println!(
+            "[ClientThread {}] Scheduling cleanup for {} disconnected windows",
+            client_id,
+            disconnected_windows.len()
+        );
+        push_ipc_event(IpcEvent::ClientDisconnected {
+            client_id,
+            window_ids: disconnected_windows,
+        });
     }
 
     println!("[ClientThread {}] Exiting", client_id);
@@ -1774,6 +1835,11 @@ pub enum IpcEvent {
     DestroyWindow {
         client_id: usize,
         window_id: u32,
+    },
+    /// Client connection was lost; all windows owned by that client must be removed.
+    ClientDisconnected {
+        client_id: usize,
+        window_ids: Vec<u32>,
     },
     /// Client updated their window buffer (damage region only)
     BufferUpdated {

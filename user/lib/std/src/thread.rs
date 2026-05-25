@@ -118,18 +118,34 @@ where
 
 /// Join handle for waiting on thread completion
 pub struct JoinHandle {
-    thread_id: u32,
+    thread_id: Option<u32>,
 }
 
 impl JoinHandle {
-    /// Wait for the thread to finish
-    pub fn join(self) -> Result<(), &'static str> {
+    /// Wait for the thread to finish.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the thread was reaped successfully, otherwise an error.
+    pub fn join(mut self) -> Result<(), &'static str> {
+        let Some(thread_id) = self.thread_id.take() else {
+            return Err("Thread handle is detached");
+        };
+
         // Wait for child thread to exit
-        let (pid, _status) = crate::task::waitpid(self.thread_id as i32, 0);
+        let (pid, _status) = crate::task::waitpid(thread_id as i32, 0);
         if pid < 0 {
             Err("Failed to join thread")
         } else {
             Ok(())
+        }
+    }
+}
+
+impl Drop for JoinHandle {
+    fn drop(&mut self) {
+        if let Some(thread_id) = self.thread_id.take() {
+            let _ = syscall1(Syscall::ThreadDetach, thread_id as usize);
         }
     }
 }
@@ -198,7 +214,7 @@ where
 
     // Parent: return join handle
     Ok(JoinHandle {
-        thread_id: result as u32,
+        thread_id: Some(result as u32),
     })
 }
 

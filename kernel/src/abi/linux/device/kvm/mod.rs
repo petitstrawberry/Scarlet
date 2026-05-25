@@ -20,7 +20,7 @@ use crate::fs::{FileMetadata, FilePermission, FileType};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::types::InterruptType;
 use crate::hypervisor::vm::VmObject;
-use crate::hypervisor::{VcpuRef, VmRef};
+use crate::hypervisor::{VcpuObject, VmRef};
 use crate::ipc::counter::{CounterObject, CounterWriteListener};
 use crate::object::KernelObject;
 use crate::object::capability::file::{FileObject, SeekFrom};
@@ -186,7 +186,7 @@ struct KvmIoEventFd {
 }
 
 struct KvmIoEvent {
-    vm: VmRef,
+    vm_key: usize,
     addr: u64,
     len: u32,
     datamatch: u64,
@@ -386,13 +386,21 @@ struct KvmRunPage {
 }
 
 struct KvmRunPageEntry {
-    vcpu: VcpuRef,
-    vm: VmRef,
+    vcpu_key: usize,
+    vm_key: usize,
     page: KvmRunPage,
 }
 
 static KVM_RUN_PAGES: Once<RwLock<Vec<KvmRunPageEntry>>> = Once::new();
 static KVM_IOEVENTS: Once<RwLock<Vec<KvmIoEvent>>> = Once::new();
+
+pub(super) fn vcpu_key(vcpu: &dyn VcpuObject) -> usize {
+    vcpu as *const dyn VcpuObject as *const () as usize
+}
+
+fn vm_key(vm: &VmRef) -> usize {
+    Arc::as_ptr(vm) as *const () as usize
+}
 
 fn get_run_pages() -> &'static RwLock<Vec<KvmRunPageEntry>> {
     KVM_RUN_PAGES.call_once(|| RwLock::new(Vec::new()))
@@ -403,7 +411,7 @@ fn get_ioevents() -> &'static RwLock<Vec<KvmIoEvent>> {
 }
 
 /// Allocate a shared kvm_run page for the given vCPU and register it.
-pub fn register_vcpu_run_page(vcpu: &VcpuRef, vm: &VmRef) -> Result<(), ()> {
+pub fn register_vcpu_run_page(vcpu: &dyn VcpuObject, vm: &VmRef) -> Result<(), ()> {
     use crate::mem::page::allocate_raw_pages;
     use crate::vm::addr::virt_to_phys;
 
@@ -415,18 +423,19 @@ pub fn register_vcpu_run_page(vcpu: &VcpuRef, vm: &VmRef) -> Result<(), ()> {
     let paddr = virt_to_phys(vaddr);
 
     get_run_pages().write().push(KvmRunPageEntry {
-        vcpu: Arc::clone(vcpu),
-        vm: Arc::clone(vm),
+        vcpu_key: vcpu_key(vcpu),
+        vm_key: vm_key(vm),
         page: KvmRunPage { vaddr, paddr },
     });
     Ok(())
 }
 
-fn get_vcpu_vm(vcpu: &VcpuRef) -> Option<VmRef> {
+fn get_vcpu_vm_key(vcpu: &dyn VcpuObject) -> Option<usize> {
+    let key = vcpu_key(vcpu);
     let pages = get_run_pages().read();
     for entry in pages.iter() {
-        if Arc::ptr_eq(&entry.vcpu, vcpu) {
-            return Some(Arc::clone(&entry.vm));
+        if entry.vcpu_key == key {
+            return Some(entry.vm_key);
         }
     }
     None
@@ -435,10 +444,11 @@ fn get_vcpu_vm(vcpu: &VcpuRef) -> Option<VmRef> {
 /// Look up the physical address of a vCPU's shared kvm_run page.
 /// Returns `None` if the vCPU was not created through the KVM compat layer
 /// (e.g., U-SHV vcpus created via sys_shv_vcpu_create).
-pub fn get_vcpu_run_paddr(vcpu: &VcpuRef) -> Option<usize> {
+pub fn get_vcpu_run_paddr(vcpu: &dyn VcpuObject) -> Option<usize> {
+    let key = vcpu_key(vcpu);
     let pages = get_run_pages().read();
     for entry in pages.iter() {
-        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+        if entry.vcpu_key == key {
             return Some(entry.page.paddr);
         }
     }
@@ -470,10 +480,11 @@ fn decode_mmio_read_data(mmio: &KvmRunMmio) -> Option<(u8, u64)> {
     Some((len as u8, value))
 }
 
-fn read_vcpu_run_mmio_data(vcpu: &VcpuRef) -> Option<(u8, u64)> {
+fn read_vcpu_run_mmio_data(vcpu: &dyn VcpuObject) -> Option<(u8, u64)> {
+    let key = vcpu_key(vcpu);
     let pages = get_run_pages().read();
     for entry in pages.iter() {
-        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+        if entry.vcpu_key == key {
             refresh_run_page_from_poc(entry.page.vaddr);
             let kvm_run = unsafe { &*(entry.page.vaddr as *const KvmRun) };
             if kvm_run.exit_reason == KVM_EXIT_MMIO {
@@ -500,16 +511,21 @@ fn signal_counter(counter: &dyn CounterObject) -> Result<(), ()> {
     counter.write(&value).map(|_| ()).map_err(|_| ())
 }
 
-fn handle_ioeventfd_mmio(vcpu: &VcpuRef, addr: u64, size: u8, data: u64) -> Result<bool, ()> {
+fn handle_ioeventfd_mmio(
+    vcpu: &dyn VcpuObject,
+    addr: u64,
+    size: u8,
+    data: u64,
+) -> Result<bool, ()> {
     const KVM_IOEVENTFD_FLAG_DATAMATCH: u32 = 1 << 1;
 
-    let Some(vm) = get_vcpu_vm(vcpu) else {
+    let Some(vm_key) = get_vcpu_vm_key(vcpu) else {
         return Ok(false);
     };
 
     let events = get_ioevents().read();
     for event in events.iter() {
-        if !Arc::ptr_eq(&event.vm, &vm) || event.addr != addr {
+        if event.vm_key != vm_key || event.addr != addr {
             continue;
         }
         if event.len != 0 && event.len != size as u32 {
@@ -532,10 +548,11 @@ fn handle_ioeventfd_mmio(vcpu: &VcpuRef, addr: u64, size: u8, data: u64) -> Resu
 /// Write VmExit information into a vCPU's shared kvm_run page.
 /// Does nothing if the vCPU has no registered run page (backward compat
 /// with the old pointer-based KVM_RUN path).
-pub fn write_vcpu_run_exit(vcpu: &VcpuRef, exit: &crate::hypervisor::VmExit) -> bool {
+pub fn write_vcpu_run_exit(vcpu: &dyn VcpuObject, exit: &crate::hypervisor::VmExit) -> bool {
+    let key = vcpu_key(vcpu);
     let pages = get_run_pages().read();
     for entry in pages.iter() {
-        if Arc::ptr_eq(&entry.vcpu, vcpu) {
+        if entry.vcpu_key == key {
             // SAFETY: vaddr points to a page-aligned, zero-initialized allocation
             // that is exclusively owned by this kvm_run page management code.
             let kvm_run = unsafe { &mut *(entry.page.vaddr as *mut KvmRun) };
@@ -552,9 +569,11 @@ pub fn write_vcpu_run_exit(vcpu: &VcpuRef, exit: &crate::hypervisor::VmExit) -> 
 
 /// Free a vCPU's shared kvm_run page. Called when the vCPU kernel object
 /// is dropped.
-pub fn free_vcpu_run_page(vcpu: &VcpuRef) {
+pub fn free_vcpu_run_page(vcpu: &dyn VcpuObject) {
+    arch::free_vcpu_state(vcpu);
+    let key = vcpu_key(vcpu);
     let mut pages = get_run_pages().write();
-    let idx = pages.iter().position(|e| Arc::ptr_eq(&e.vcpu, vcpu));
+    let idx = pages.iter().position(|e| e.vcpu_key == key);
     if let Some(i) = idx {
         use crate::mem::page::free_raw_pages;
         let entry = pages.remove(i);
@@ -639,7 +658,7 @@ pub fn handle_vm_ioctl(
             // crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
             let task = mytask().ok_or(())?;
             let vcpu = vm.create_vcpu(vcpu_id).map_err(|_| ())?;
-            register_vcpu_run_page(&vcpu, vm).map_err(|_| ())?;
+            register_vcpu_run_page(vcpu.as_ref(), vm).map_err(|_| ())?;
             let kernel_obj = KernelObject::HypervisorVcpu(vcpu);
             let handle = task.handle_table.insert(kernel_obj).map_err(|_| ())?;
             let fd = abi.allocate_fd(handle).map_err(|_| ())?;
@@ -783,8 +802,9 @@ pub fn handle_vm_ioctl(
             }
             if event.flags & KVM_IOEVENTFD_FLAG_DEASSIGN != 0 {
                 let mut events = get_ioevents().write();
+                let key = vm_key(vm);
                 events.retain(|registered| {
-                    !(Arc::ptr_eq(&registered.vm, vm)
+                    !(registered.vm_key == key
                         && registered.addr == event.addr
                         && registered.len == event.len
                         && registered.datamatch == event.datamatch
@@ -795,13 +815,13 @@ pub fn handle_vm_ioctl(
             }
 
             let handle = abi.get_handle(event.fd as usize).ok_or(())?;
-            let object = task.handle_table.get(handle).ok_or(())?;
+            let object = task.handle_table.get_arc_clone(handle).ok_or(())?;
             let counter = match object {
                 KernelObject::Counter(counter) => counter,
                 _ => return Err(()),
             };
             get_ioevents().write().push(KvmIoEvent {
-                vm: Arc::clone(vm),
+                vm_key: vm_key(vm),
                 addr: event.addr,
                 len: event.len,
                 datamatch: event.datamatch,
@@ -1043,7 +1063,7 @@ fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
 pub fn handle_vcpu_ioctl(
     request: u32,
     arg: usize,
-    vcpu: &VcpuRef,
+    vcpu: &dyn VcpuObject,
     trapframe: &mut crate::arch::Trapframe,
 ) -> Result<Option<usize>, ()> {
     match request {
@@ -1259,7 +1279,7 @@ pub fn handle_vcpu_ioctl(
 // VmExit → kvm_run conversion
 // ---------------------------------------------------------------------------
 
-fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &VcpuRef) {
+fn write_vm_exit(kvm_run: &mut KvmRun, exit: &crate::hypervisor::VmExit, vcpu: &dyn VcpuObject) {
     use crate::hypervisor::VmExit;
 
     kvm_run.exit_data = KvmRunExitData {

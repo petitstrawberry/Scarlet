@@ -26,8 +26,8 @@ use crate::library::std::string::{
 
 use crate::arch::Trapframe;
 use crate::sched::scheduler::{
-    enqueue_task, get_all_task_ids, get_task_by_id, register_task, remove_task_from_queues,
-    schedule,
+    cleanup_zombie, enqueue_task, get_all_task_ids, get_task_by_id, register_task,
+    remove_task_from_queues, schedule,
 };
 use crate::task::{
     CloneFlags, CloneFlagsDef, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
@@ -189,6 +189,79 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             usize::MAX /* Return -1 on error */
         }
     }
+}
+
+/// Detach a child thread from the caller's wait set.
+///
+/// Dropping a user-space JoinHandle calls this syscall. Detached threads must
+/// not remain as zombies owned by the spawning thread; if the thread already
+/// exited, it is reaped immediately.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Namespace-local thread ID to detach.
+///
+/// # Returns
+///
+/// 0 on success, or `usize::MAX` on failure.
+pub fn sys_thread_detach(trapframe: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let local_thread_id = trapframe.get_arg(0);
+    trapframe.increment_pc_next(caller);
+
+    let target_id = match caller.get_namespace().resolve_global_id(local_thread_id) {
+        Some(id) => id,
+        None => return usize::MAX,
+    };
+
+    if target_id == caller.get_id() {
+        return usize::MAX;
+    }
+
+    let Some(target) = get_task_by_id(target_id) else {
+        return usize::MAX;
+    };
+
+    // Only allow detaching threads in the caller's thread group. This keeps the
+    // syscall scoped to std::thread JoinHandle semantics, not arbitrary waitpid.
+    if target.get_thread_group_id() != caller.get_thread_group_id() {
+        return usize::MAX;
+    }
+
+    let Some(parent_id) = target.get_parent_id() else {
+        if target.get_state() == TaskState::Zombie {
+            target.set_state(TaskState::Terminated);
+            remove_task_from_queues(target_id);
+            cleanup_zombie(target_id);
+        }
+        return 0;
+    };
+
+    let Some(parent) = get_task_by_id(parent_id) else {
+        target.clear_parent_id();
+        if target.get_state() == TaskState::Zombie {
+            target.set_state(TaskState::Terminated);
+            remove_task_from_queues(target_id);
+            cleanup_zombie(target_id);
+        }
+        return 0;
+    };
+
+    if parent_id != caller.get_id() && parent.get_thread_group_id() != caller.get_thread_group_id()
+    {
+        return usize::MAX;
+    }
+
+    parent.remove_child(target_id);
+    target.clear_parent_id();
+
+    if target.get_state() == TaskState::Zombie {
+        target.set_state(TaskState::Terminated);
+        remove_task_from_queues(target_id);
+        cleanup_zombie(target_id);
+    }
+
+    0
 }
 
 /// Set the TLS pointer for the current task

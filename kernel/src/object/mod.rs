@@ -17,6 +17,7 @@ use crate::ipc::shared_memory::SharedMemoryObject;
 use crate::object::timer::{Timer, TimerObject};
 use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
+use core::marker::PhantomData;
 
 #[cfg(feature = "network")]
 use crate::network::SocketObject;
@@ -45,6 +46,240 @@ pub enum KernelObject {
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // CharDevice(Arc<dyn CharDevice>),
+}
+
+/// Borrowed view of a kernel object that does not expose `Arc` ownership.
+///
+/// This wrapper is intended for handle-table access paths that only need to
+/// inspect or operate on an object without extending its lifetime. It mirrors
+/// the normal capability accessors on [`KernelObject`], but intentionally omits
+/// APIs that create strong or weak references.
+#[derive(Clone, Copy)]
+pub struct KernelObjectRef<'a> {
+    object: *const KernelObject,
+    _marker: PhantomData<&'a KernelObject>,
+}
+
+impl<'a> KernelObjectRef<'a> {
+    /// Create a borrowed kernel object view.
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - Kernel object borrowed from its owning handle table
+    ///
+    /// # Returns
+    ///
+    /// A borrowed view that cannot clone the underlying object.
+    pub(crate) const fn new(object: &'a KernelObject) -> Self {
+        Self {
+            object,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create a borrowed kernel object view from a stable handle-table slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - Pointer to a kernel object stored in a handle-table slot
+    ///
+    /// # Returns
+    ///
+    /// A borrowed view that cannot clone the underlying object.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must be valid for `'a` and must point to a live
+    /// [`KernelObject`] while this borrowed view is used.
+    pub(crate) const unsafe fn from_ptr(object: *const KernelObject) -> Self {
+        Self {
+            object,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn object(&self) -> &'a KernelObject {
+        // SAFETY: KernelObjectRef is constructed only from handle-table object
+        // references or stable slot pointers whose validity is tied to 'a.
+        unsafe { &*self.object }
+    }
+
+    /// Get the underlying borrowed [`KernelObject`].
+    ///
+    /// # Returns
+    ///
+    /// Borrowed kernel object without extending object lifetime.
+    pub(crate) fn as_kernel_object(&self) -> &'a KernelObject {
+        self.object()
+    }
+
+    /// Get a human-readable object type name.
+    ///
+    /// # Returns
+    ///
+    /// Static object type name for diagnostics.
+    pub fn type_name(&self) -> &'static str {
+        match self.object() {
+            KernelObject::File(_) => "File",
+            KernelObject::Pipe(_) => "Pipe",
+            KernelObject::Counter(_) => "Counter",
+            KernelObject::Timer(_) => "Timer",
+            KernelObject::EventChannel(_) => "EventChannel",
+            KernelObject::EventSubscription(_) => "EventSubscription",
+            KernelObject::SharedMemory(_) => "SharedMemory",
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => "Socket",
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVm(_) => "HypervisorVm",
+            #[cfg(feature = "hypervisor")]
+            KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
+        }
+    }
+
+    /// Try to get the hypervisor VM Arc by borrowed reference.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed VM Arc if the object is a hypervisor VM.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn as_hypervisor_vm_arc(&self) -> Option<&'a hypervisor::VmRef> {
+        match self.object() {
+            KernelObject::HypervisorVm(vm) => Some(vm),
+            _ => None,
+        }
+    }
+
+    /// Try to get the hypervisor vCPU object by borrowed reference.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed vCPU object if the object is a hypervisor vCPU.
+    #[cfg(feature = "hypervisor")]
+    pub(crate) fn as_hypervisor_vcpu(&self) -> Option<&'a dyn hypervisor::VcpuObject> {
+        match self.object() {
+            KernelObject::HypervisorVcpu(vcpu) => Some(vcpu.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Try to get StreamOps capability.
+    ///
+    /// # Returns
+    ///
+    /// Stream capability if the borrowed object supports stream operations.
+    pub fn as_stream(&self) -> Option<&'a dyn StreamOps> {
+        self.object().as_stream()
+    }
+
+    /// Try to get StreamIpcOps capability for IPC stream operations.
+    ///
+    /// # Returns
+    ///
+    /// Stream IPC capability if the borrowed object supports IPC stream operations.
+    pub fn as_stream_ipc(&self) -> Option<&'a dyn StreamIpcOps> {
+        self.object().as_stream_ipc()
+    }
+
+    /// Try to get FileObject that provides file-like operations and stream capabilities.
+    ///
+    /// # Returns
+    ///
+    /// File capability if the borrowed object is file-like.
+    pub fn as_file(&self) -> Option<&'a dyn FileObject> {
+        self.object().as_file()
+    }
+
+    /// Try to get PipeObject that provides pipe-specific operations.
+    ///
+    /// # Returns
+    ///
+    /// Pipe capability if the borrowed object is a pipe.
+    pub fn as_pipe(&self) -> Option<&'a dyn PipeObject> {
+        self.object().as_pipe()
+    }
+
+    /// Try to get SocketObject that provides socket-specific operations.
+    ///
+    /// # Returns
+    ///
+    /// Socket capability if the borrowed object is a socket.
+    #[cfg(feature = "network")]
+    pub fn as_socket(&self) -> Option<&'a dyn SocketObject> {
+        self.object().as_socket()
+    }
+
+    /// Try to get SharedMemoryObject that provides shared memory operations.
+    ///
+    /// # Returns
+    ///
+    /// Shared memory capability if the borrowed object is shared memory.
+    pub fn as_shared_memory(&self) -> Option<&'a dyn SharedMemoryObject> {
+        self.object().as_shared_memory()
+    }
+
+    /// Try to get ControlOps capability.
+    ///
+    /// # Returns
+    ///
+    /// Control capability if the borrowed object supports control operations.
+    pub fn as_control(&self) -> Option<&'a dyn ControlOps> {
+        self.object().as_control()
+    }
+
+    /// Try to get MemoryMappingOps capability.
+    ///
+    /// # Returns
+    ///
+    /// Memory mapping capability if the borrowed object can be mapped.
+    pub fn as_memory_mappable(&self) -> Option<&'a dyn MemoryMappingOps> {
+        self.object().as_memory_mappable()
+    }
+
+    /// Try to get EventChannelObject.
+    ///
+    /// # Returns
+    ///
+    /// Event channel object if the borrowed object is an event channel.
+    pub fn as_event_channel(&self) -> Option<&'a EventChannelObject> {
+        self.object().as_event_channel()
+    }
+
+    /// Try to get EventSubscriptionObject.
+    ///
+    /// # Returns
+    ///
+    /// Event subscription object if the borrowed object is an event subscription.
+    pub fn as_event_subscription(&self) -> Option<&'a EventSubscriptionObject> {
+        self.object().as_event_subscription()
+    }
+
+    /// Try to get CounterObject.
+    ///
+    /// # Returns
+    ///
+    /// Counter capability if the borrowed object is a counter.
+    pub fn as_counter(&self) -> Option<&'a dyn CounterObject> {
+        self.object().as_counter()
+    }
+
+    /// Try to get TimerObject.
+    ///
+    /// # Returns
+    ///
+    /// Timer capability if the borrowed object is a timer.
+    pub fn as_timer(&self) -> Option<&'a dyn TimerObject> {
+        self.object().as_timer()
+    }
+
+    /// Try to get Selectable capability for pselect/select readiness.
+    ///
+    /// # Returns
+    ///
+    /// Selectable capability if the borrowed object exposes readiness state.
+    pub fn as_selectable(&self) -> Option<&'a dyn Selectable> {
+        self.object().as_selectable()
+    }
 }
 
 impl KernelObject {

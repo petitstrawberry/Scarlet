@@ -2336,8 +2336,8 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Dispatch hypervisor (KVM) ioctls before capability-based routing
     #[cfg(feature = "hypervisor")]
-    match &kernel_object {
-        crate::object::KernelObject::HypervisorVm(vm) => {
+    {
+        if let Some(vm) = kernel_object.as_hypervisor_vm_arc() {
             let result = crate::abi::linux::device::kvm::handle_vm_ioctl(request, arg, vm, abi);
             return match result {
                 Ok(Some(ret)) => ret,
@@ -2345,7 +2345,7 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Err(_) => errno::to_result(errno::EINVAL),
             };
         }
-        crate::object::KernelObject::HypervisorVcpu(vcpu) => {
+        if let Some(vcpu) = kernel_object.as_hypervisor_vcpu() {
             let result =
                 crate::abi::linux::device::kvm::handle_vcpu_ioctl(request, arg, vcpu, trapframe);
             return match result {
@@ -2354,11 +2354,10 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Err(_) => errno::to_result(errno::EINVAL),
             };
         }
-        _ => {}
     }
 
     if request == FIONBIO {
-        if let crate::object::KernelObject::Socket(socket) = &kernel_object {
+        if let Some(socket) = kernel_object.as_socket() {
             let arg_paddr = match task.vm_manager.translate_to_kva(arg) {
                 Some(addr) => addr,
                 None => return errno::to_result(errno::EFAULT),
@@ -2397,9 +2396,17 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let device_is_tty = caps
         .map(|caps| caps.iter().any(|c| *c == DeviceCapability::Tty))
         .unwrap_or(false);
-    if device_is_tty || crate::abi::linux::device::tty::is_tty_ioctl_target(request, &kernel_object)
+    if device_is_tty
+        || crate::abi::linux::device::tty::is_tty_ioctl_target(
+            request,
+            kernel_object.as_kernel_object(),
+        )
     {
-        match crate::abi::linux::device::tty::handle_ioctl(request, arg, &kernel_object) {
+        match crate::abi::linux::device::tty::handle_ioctl(
+            request,
+            arg,
+            kernel_object.as_kernel_object(),
+        ) {
             Ok(Some(ret)) => return ret,
             Ok(None) => {
                 // Do NOT pass through unknown TTY ioctls to device-specific control.
@@ -3200,21 +3207,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let file_obj = match kernel_obj.as_file() {
         Some(f) => f,
         None => {
-            let kind = match kernel_obj {
-                crate::object::KernelObject::File(_) => "File",
-                crate::object::KernelObject::Pipe(_) => "Pipe",
-                crate::object::KernelObject::Counter(_) => "Counter",
-                crate::object::KernelObject::Timer(_) => "Timer",
-                crate::object::KernelObject::EventChannel(_) => "EventChannel",
-                crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
-                crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
-                #[cfg(feature = "network")]
-                crate::object::KernelObject::Socket(_) => "Socket",
-                #[cfg(feature = "hypervisor")]
-                crate::object::KernelObject::HypervisorVm(_) => "HypervisorVm",
-                #[cfg(feature = "hypervisor")]
-                crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
-            };
+            let kind = kernel_obj.type_name();
             crate::println!(
                 "sys_ftruncate: fd={} kind={} is not truncatable len={}",
                 fd,
@@ -3229,21 +3222,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Ok(()) => 0,
         Err(err) => {
             if length > 0 {
-                let kind = match kernel_obj {
-                    crate::object::KernelObject::File(_) => "File",
-                    crate::object::KernelObject::Pipe(_) => "Pipe",
-                    crate::object::KernelObject::Counter(_) => "Counter",
-                    crate::object::KernelObject::Timer(_) => "Timer",
-                    crate::object::KernelObject::EventChannel(_) => "EventChannel",
-                    crate::object::KernelObject::EventSubscription(_) => "EventSubscription",
-                    crate::object::KernelObject::SharedMemory(_) => "SharedMemory",
-                    #[cfg(feature = "network")]
-                    crate::object::KernelObject::Socket(_) => "Socket",
-                    #[cfg(feature = "hypervisor")]
-                    crate::object::KernelObject::HypervisorVm(_) => "HypervisorVm",
-                    #[cfg(feature = "hypervisor")]
-                    crate::object::KernelObject::HypervisorVcpu(_) => "HypervisorVcpu",
-                };
+                let kind = kernel_obj.type_name();
             }
             errno::to_result(errno::EIO)
         }

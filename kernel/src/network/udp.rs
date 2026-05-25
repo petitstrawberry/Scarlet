@@ -186,6 +186,26 @@ impl UdpSocket {
     }
 }
 
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        if let Some(SocketAddress::Inet(inet)) = self.local_addr.read().clone() {
+            self.udp_layer.unregister_socket(inet.port, &self.self_weak);
+        }
+
+        *self.state.write() = SocketState::Closed;
+
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+
+        crate::network::NetworkManager::get_manager()
+            .remove_socket_by_ptr(self as *const Self as usize);
+    }
+}
+
 impl SocketObject for UdpSocket {
     fn socket_type(&self) -> SocketType {
         SocketType::Datagram

@@ -170,7 +170,11 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     prot_perm |= 0x08;
 
     if is_map_private_flag && !is_shared {
-        let owner = match kernel_obj.as_memory_mappable_arc() {
+        let owner = match task
+            .handle_table
+            .get_arc_clone(handle)
+            .and_then(|obj| obj.as_memory_mappable_arc())
+        {
             Some(owner) => owner,
             None => return usize::MAX,
         };
@@ -231,7 +235,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         perm
     } | 0x08;
 
-    let owner = kernel_obj.as_memory_mappable_arc();
+    let owner = task
+        .handle_table
+        .get_arc_clone(handle)
+        .and_then(|obj| obj.as_memory_mappable_arc());
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
 
     if !is_map_fixed {
@@ -245,7 +252,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             };
             let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
             let pmarea = MemoryArea::new(paddr, paddr + aligned_length - 1);
-            let owner = kernel_obj.as_memory_mappable_arc();
+            let owner = task
+                .handle_table
+                .get_arc_clone(handle)
+                .and_then(|obj| obj.as_memory_mappable_arc());
             let retry_map =
                 VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
             if task.vm_manager.add_memory_map(retry_map).is_err() {
