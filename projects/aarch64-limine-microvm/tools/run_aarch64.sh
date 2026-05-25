@@ -85,11 +85,11 @@ QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
 QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
 QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-none}"
-QEMU_FRAMEBUFFER="${SCARLET_QEMU_FRAMEBUFFER_AARCH64:-none}"
+QEMU_GPU="${SCARLET_QEMU_GPU:-none}"
 QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
 QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
 
-case "$QEMU_FRAMEBUFFER" in
+case "$QEMU_GPU" in
     virgl|virtio-gpu-gl)
         if [ -z "${SCARLET_QEMU_DISPLAY+x}" ]; then
             QEMU_DISPLAY="egl-headless"
@@ -142,7 +142,7 @@ TEMP_OUTPUT=$(mktemp)
 
 require_virtio_gpu_gl_device() {
     if ! "$1" -device help 2>/dev/null | grep -q 'virtio-gpu-gl-device'; then
-        echo "Error: $1 does not provide virtio-gpu-gl-device; install a QEMU build with virgl/GL support or use SCARLET_QEMU_FRAMEBUFFER_${2}=virtio-gpu"
+        echo "Error: $1 does not provide virtio-gpu-gl-device; install a QEMU build with virgl/GL support or use SCARLET_QEMU_GPU=virtio-gpu"
         exit 1
     fi
 }
@@ -176,22 +176,22 @@ case "$QEMU_DISPLAY" in
         ;;
 esac
 
-QEMU_FRAMEBUFFER_ARGS=()
-case "$QEMU_FRAMEBUFFER" in
+QEMU_GPU_ARGS=()
+case "$QEMU_GPU" in
     virtio-gpu)
-        QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        QEMU_GPU_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
         ;;
     virgl|virtio-gpu-gl)
-        require_virtio_gpu_gl_device qemu-system-aarch64 AARCH64
-        QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        require_virtio_gpu_gl_device qemu-system-aarch64
+        QEMU_GPU_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
         ;;
     ramfb)
-        QEMU_FRAMEBUFFER_ARGS=(-device ramfb)
+        QEMU_GPU_ARGS=(-device ramfb)
         ;;
     none)
         ;;
     *)
-        echo "Error: unsupported SCARLET_QEMU_FRAMEBUFFER_AARCH64=$QEMU_FRAMEBUFFER (expected virtio-gpu, virgl, virtio-gpu-gl, ramfb, or none)"
+        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu, virgl, virtio-gpu-gl, ramfb, or none)"
         exit 1
         ;;
 esac
@@ -332,7 +332,7 @@ qemu-system-aarch64 \
     -device virtio-blk-pci,drive=boot,bus=pcie.0,bootindex=0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
-    "${QEMU_FRAMEBUFFER_ARGS[@]}" \
+    "${QEMU_GPU_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.3 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
