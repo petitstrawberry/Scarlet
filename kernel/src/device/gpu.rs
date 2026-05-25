@@ -79,6 +79,33 @@ pub struct GpuCommandSubmission<'a> {
     pub fence_id: Option<u64>,
 }
 
+/// GPU 3D resource creation descriptor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuResource3dDescription {
+    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
+    pub resource_id: u32,
+    /// Backend-specific resource target.
+    pub target: u32,
+    /// Backend-specific resource format.
+    pub format: u32,
+    /// Backend-specific bind flags.
+    pub bind: u32,
+    /// Resource width in pixels or elements.
+    pub width: u32,
+    /// Resource height in pixels or elements.
+    pub height: u32,
+    /// Resource depth in pixels or elements.
+    pub depth: u32,
+    /// Array layer count.
+    pub array_size: u32,
+    /// Last mip level.
+    pub last_level: u32,
+    /// Multisample count.
+    pub nr_samples: u32,
+    /// Backend-specific creation flags.
+    pub flags: u32,
+}
+
 /// Non-framebuffer GPU interface.
 ///
 /// `GpuDevice` is intentionally separate from `GraphicsDevice`: a device may
@@ -151,6 +178,63 @@ pub trait GpuDevice: Device {
         Err("GPU contexts are not supported")
     }
 
+    /// Create a backend 3D resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `description` - Resource target, format, dimensions, and creation flags.
+    ///
+    /// # Returns
+    ///
+    /// Allocated resource identifier or an error describing why creation failed.
+    fn create_3d_resource(
+        &self,
+        _description: GpuResource3dDescription,
+    ) -> Result<u32, &'static str> {
+        Err("GPU 3D resources are not supported")
+    }
+
+    /// Unreference a backend resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource identifier to release.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why release failed.
+    fn unref_resource(&self, _resource_id: u32) -> Result<(), &'static str> {
+        Err("GPU resources are not supported")
+    }
+
+    /// Attach a resource to a GPU context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Context that should see the resource.
+    /// * `resource_id` - Resource to attach.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why attachment failed.
+    fn attach_resource(&self, _context_id: u32, _resource_id: u32) -> Result<(), &'static str> {
+        Err("GPU resources are not supported")
+    }
+
+    /// Detach a resource from a GPU context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Context that owns the attachment.
+    /// * `resource_id` - Resource to detach.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why detachment failed.
+    fn detach_resource(&self, _context_id: u32, _resource_id: u32) -> Result<(), &'static str> {
+        Err("GPU resources are not supported")
+    }
+
     /// Submit a backend-specific GPU command stream.
     ///
     /// # Arguments
@@ -179,6 +263,14 @@ pub mod gpu_commands {
     pub const GPU_DESTROY_CONTEXT: u32 = 0x4704;
     /// Submit backend-specific GPU commands.
     pub const GPU_SUBMIT_COMMANDS: u32 = 0x4705;
+    /// Create a backend 3D resource.
+    pub const GPU_CREATE_3D_RESOURCE: u32 = 0x4706;
+    /// Unreference a backend resource.
+    pub const GPU_UNREF_RESOURCE: u32 = 0x4707;
+    /// Attach a resource to a GPU context.
+    pub const GPU_ATTACH_RESOURCE: u32 = 0x4708;
+    /// Detach a resource from a GPU context.
+    pub const GPU_DETACH_RESOURCE: u32 = 0x4709;
 }
 
 /// Capability bit for virgl command submission.
@@ -260,6 +352,52 @@ pub struct GpuSubmitRequest {
     pub commands_ptr: usize,
     /// Command buffer length in bytes.
     pub commands_len: usize,
+}
+
+/// Userspace 3D resource creation request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuCreate3dResourceRequest {
+    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
+    pub resource_id: u32,
+    /// Backend-specific resource target.
+    pub target: u32,
+    /// Backend-specific resource format.
+    pub format: u32,
+    /// Backend-specific bind flags.
+    pub bind: u32,
+    /// Resource width in pixels or elements.
+    pub width: u32,
+    /// Resource height in pixels or elements.
+    pub height: u32,
+    /// Resource depth in pixels or elements.
+    pub depth: u32,
+    /// Array layer count.
+    pub array_size: u32,
+    /// Last mip level.
+    pub last_level: u32,
+    /// Multisample count.
+    pub nr_samples: u32,
+    /// Backend-specific creation flags.
+    pub flags: u32,
+}
+
+/// Userspace resource-only request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuResourceRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+}
+
+/// Userspace context/resource association request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuContextResourceRequest {
+    /// Context identifier.
+    pub context_id: u32,
+    /// Resource identifier.
+    pub resource_id: u32,
 }
 
 fn gpu_feature_bits(capabilities: &GpuCapabilities) -> u32 {
@@ -378,6 +516,50 @@ impl GpuCharDevice {
         Ok(0)
     }
 
+    fn handle_create_3d_resource(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreate3dResourceRequest = read_user_value(arg)?;
+        if request.width == 0 || request.height == 0 || request.depth == 0 {
+            return Err("GPU 3D resource dimensions are invalid");
+        }
+
+        let resource_id = self.gpu.create_3d_resource(GpuResource3dDescription {
+            resource_id: request.resource_id,
+            target: request.target,
+            format: request.format,
+            bind: request.bind,
+            width: request.width,
+            height: request.height,
+            depth: request.depth,
+            array_size: request.array_size,
+            last_level: request.last_level,
+            nr_samples: request.nr_samples,
+            flags: request.flags,
+        })?;
+        request.resource_id = resource_id;
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
+
+    fn handle_unref_resource(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuResourceRequest = read_user_value(arg)?;
+        self.gpu.unref_resource(request.resource_id)?;
+        Ok(0)
+    }
+
+    fn handle_attach_resource(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuContextResourceRequest = read_user_value(arg)?;
+        self.gpu
+            .attach_resource(request.context_id, request.resource_id)?;
+        Ok(0)
+    }
+
+    fn handle_detach_resource(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuContextResourceRequest = read_user_value(arg)?;
+        self.gpu
+            .detach_resource(request.context_id, request.resource_id)?;
+        Ok(0)
+    }
+
     fn handle_submit_commands(&self, arg: usize) -> Result<i32, &'static str> {
         let request: GpuSubmitRequest = read_user_value(arg)?;
         if request.commands_ptr == 0 || request.commands_len == 0 {
@@ -458,6 +640,10 @@ impl crate::object::capability::ControlOps for GpuCharDevice {
             GPU_CREATE_CONTEXT => self.handle_create_context(arg),
             GPU_DESTROY_CONTEXT => self.handle_destroy_context(arg),
             GPU_SUBMIT_COMMANDS => self.handle_submit_commands(arg),
+            GPU_CREATE_3D_RESOURCE => self.handle_create_3d_resource(arg),
+            GPU_UNREF_RESOURCE => self.handle_unref_resource(arg),
+            GPU_ATTACH_RESOURCE => self.handle_attach_resource(arg),
+            GPU_DETACH_RESOURCE => self.handle_detach_resource(arg),
             _ => Err("Unsupported GPU control command"),
         }
     }

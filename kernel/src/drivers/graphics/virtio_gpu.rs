@@ -12,7 +12,10 @@ use spin::{Mutex, RwLock};
 use crate::{
     device::{
         Device, DeviceType,
-        gpu::{GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature},
+        gpu::{
+            GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature,
+            GpuResource3dDescription,
+        },
         graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
     },
     drivers::virtio::{
@@ -43,6 +46,9 @@ const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
 const VIRTIO_GPU_CMD_CTX_DESTROY: u32 = 0x0201;
+const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE: u32 = 0x0202;
+const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE: u32 = 0x0203;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
 const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0206;
 
 // VirtIO GPU Response Types
@@ -115,6 +121,40 @@ struct VirtioGpuResourceCreate2d {
     format: u32,
     width: u32,
     height: u32,
+}
+
+/// VirtIO GPU resource unref.
+#[repr(C)]
+struct VirtioGpuResourceUnref {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    padding: u32,
+}
+
+/// VirtIO GPU resource create 3D.
+#[repr(C)]
+struct VirtioGpuResourceCreate3d {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    target: u32,
+    format: u32,
+    bind: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    array_size: u32,
+    last_level: u32,
+    nr_samples: u32,
+    flags: u32,
+    padding: u32,
+}
+
+/// VirtIO GPU context/resource association command.
+#[repr(C)]
+struct VirtioGpuCtxResource {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    padding: u32,
 }
 
 /// VirtIO GPU set scanout
@@ -527,6 +567,105 @@ impl VirtioGpuDeviceCore {
                 ctx_id: context_id,
                 padding: 0,
             },
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn create_3d_resource(
+        &self,
+        description: GpuResource3dDescription,
+    ) -> Result<u32, &'static str> {
+        self.require_virgl()?;
+        if description.width == 0 || description.height == 0 || description.depth == 0 {
+            return Err("Cannot create a zero-sized GPU 3D resource");
+        }
+
+        let resource_id = if description.resource_id == 0 {
+            self.next_resource_id()
+        } else {
+            description.resource_id
+        };
+        let cmd = VirtioGpuResourceCreate3d {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            target: description.target,
+            format: description.format,
+            bind: description.bind,
+            width: description.width,
+            height: description.height,
+            depth: description.depth,
+            array_size: description.array_size,
+            last_level: description.last_level,
+            nr_samples: description.nr_samples,
+            flags: description.flags,
+            padding: 0,
+        };
+        self.send_control_command(&cmd)?;
+        Ok(resource_id)
+    }
+
+    fn unref_resource(&self, resource_id: u32) -> Result<(), &'static str> {
+        self.require_virgl()?;
+        if resource_id == 0 {
+            return Err("Cannot unreference resource 0");
+        }
+
+        let cmd = VirtioGpuResourceUnref {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_RESOURCE_UNREF,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            padding: 0,
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn attach_resource(&self, context_id: u32, resource_id: u32) -> Result<(), &'static str> {
+        self.require_virgl()?;
+        if resource_id == 0 {
+            return Err("Cannot attach resource 0");
+        }
+
+        let cmd = VirtioGpuCtxResource {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: context_id,
+                padding: 0,
+            },
+            resource_id,
+            padding: 0,
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn detach_resource(&self, context_id: u32, resource_id: u32) -> Result<(), &'static str> {
+        self.require_virgl()?;
+        if resource_id == 0 {
+            return Err("Cannot detach resource 0");
+        }
+
+        let cmd = VirtioGpuCtxResource {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: context_id,
+                padding: 0,
+            },
+            resource_id,
+            padding: 0,
         };
         self.send_control_command(&cmd)
     }
@@ -1061,6 +1200,25 @@ impl GpuDevice for VirtioGpuDevice {
 
     fn destroy_context(&self, context_id: u32) -> Result<(), &'static str> {
         self.core.lock().destroy_context(context_id)
+    }
+
+    fn create_3d_resource(
+        &self,
+        description: GpuResource3dDescription,
+    ) -> Result<u32, &'static str> {
+        self.core.lock().create_3d_resource(description)
+    }
+
+    fn unref_resource(&self, resource_id: u32) -> Result<(), &'static str> {
+        self.core.lock().unref_resource(resource_id)
+    }
+
+    fn attach_resource(&self, context_id: u32, resource_id: u32) -> Result<(), &'static str> {
+        self.core.lock().attach_resource(context_id, resource_id)
+    }
+
+    fn detach_resource(&self, context_id: u32, resource_id: u32) -> Result<(), &'static str> {
+        self.core.lock().detach_resource(context_id, resource_id)
     }
 
     fn submit_commands(&self, submission: GpuCommandSubmission<'_>) -> Result<(), &'static str> {

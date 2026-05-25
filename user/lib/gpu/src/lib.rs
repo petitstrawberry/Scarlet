@@ -30,6 +30,14 @@ pub mod commands {
     pub const GPU_DESTROY_CONTEXT: u32 = 0x4704;
     /// Submit backend-specific GPU commands.
     pub const GPU_SUBMIT_COMMANDS: u32 = 0x4705;
+    /// Create a backend 3D resource.
+    pub const GPU_CREATE_3D_RESOURCE: u32 = 0x4706;
+    /// Unreference a backend resource.
+    pub const GPU_UNREF_RESOURCE: u32 = 0x4707;
+    /// Attach a resource to a GPU context.
+    pub const GPU_ATTACH_RESOURCE: u32 = 0x4708;
+    /// Detach a resource from a GPU context.
+    pub const GPU_DETACH_RESOURCE: u32 = 0x4709;
 }
 
 /// Capability bit for virgl command submission.
@@ -120,6 +128,79 @@ pub struct GpuSubmitRequest {
     pub commands_ptr: usize,
     /// Command buffer length in bytes.
     pub commands_len: usize,
+}
+
+/// GPU 3D resource creation descriptor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuResource3dDescription {
+    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
+    pub resource_id: u32,
+    /// Backend-specific resource target.
+    pub target: u32,
+    /// Backend-specific resource format.
+    pub format: u32,
+    /// Backend-specific bind flags.
+    pub bind: u32,
+    /// Resource width in pixels or elements.
+    pub width: u32,
+    /// Resource height in pixels or elements.
+    pub height: u32,
+    /// Resource depth in pixels or elements.
+    pub depth: u32,
+    /// Array layer count.
+    pub array_size: u32,
+    /// Last mip level.
+    pub last_level: u32,
+    /// Multisample count.
+    pub nr_samples: u32,
+    /// Backend-specific creation flags.
+    pub flags: u32,
+}
+
+/// GPU 3D resource creation request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuCreate3dResourceRequest {
+    /// Caller-selected resource identifier, or `0` to let the backend allocate one.
+    pub resource_id: u32,
+    /// Backend-specific resource target.
+    pub target: u32,
+    /// Backend-specific resource format.
+    pub format: u32,
+    /// Backend-specific bind flags.
+    pub bind: u32,
+    /// Resource width in pixels or elements.
+    pub width: u32,
+    /// Resource height in pixels or elements.
+    pub height: u32,
+    /// Resource depth in pixels or elements.
+    pub depth: u32,
+    /// Array layer count.
+    pub array_size: u32,
+    /// Last mip level.
+    pub last_level: u32,
+    /// Multisample count.
+    pub nr_samples: u32,
+    /// Backend-specific creation flags.
+    pub flags: u32,
+}
+
+/// GPU resource-only request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuResourceRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+}
+
+/// GPU context/resource association request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuContextResourceRequest {
+    /// Context identifier.
+    pub context_id: u32,
+    /// Resource identifier.
+    pub resource_id: u32,
 }
 
 /// GPU control device wrapper.
@@ -242,6 +323,95 @@ impl Gpu {
         self.file
             .as_handle()
             .control(commands::GPU_DESTROY_CONTEXT, &request as *const _ as usize)?;
+        Ok(())
+    }
+
+    /// Create a backend 3D resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `description` - Resource target, format, dimensions, and creation flags.
+    ///
+    /// # Returns
+    ///
+    /// Resource identifier allocated by the backend or a handle error.
+    pub fn create_3d_resource(&self, description: GpuResource3dDescription) -> HandleResult<u32> {
+        let mut request = GpuCreate3dResourceRequest {
+            resource_id: description.resource_id,
+            target: description.target,
+            format: description.format,
+            bind: description.bind,
+            width: description.width,
+            height: description.height,
+            depth: description.depth,
+            array_size: description.array_size,
+            last_level: description.last_level,
+            nr_samples: description.nr_samples,
+            flags: description.flags,
+        };
+        self.file.as_handle().control(
+            commands::GPU_CREATE_3D_RESOURCE,
+            &mut request as *mut _ as usize,
+        )?;
+        Ok(request.resource_id)
+    }
+
+    /// Unreference a backend resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource identifier to release.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn unref_resource(&self, resource_id: u32) -> HandleResult<()> {
+        let request = GpuResourceRequest { resource_id };
+        self.file
+            .as_handle()
+            .control(commands::GPU_UNREF_RESOURCE, &request as *const _ as usize)?;
+        Ok(())
+    }
+
+    /// Attach a resource to a GPU context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Context that should see the resource.
+    /// * `resource_id` - Resource to attach.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn attach_resource(&self, context_id: u32, resource_id: u32) -> HandleResult<()> {
+        let request = GpuContextResourceRequest {
+            context_id,
+            resource_id,
+        };
+        self.file
+            .as_handle()
+            .control(commands::GPU_ATTACH_RESOURCE, &request as *const _ as usize)?;
+        Ok(())
+    }
+
+    /// Detach a resource from a GPU context.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Context that owns the attachment.
+    /// * `resource_id` - Resource to detach.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn detach_resource(&self, context_id: u32, resource_id: u32) -> HandleResult<()> {
+        let request = GpuContextResourceRequest {
+            context_id,
+            resource_id,
+        };
+        self.file
+            .as_handle()
+            .control(commands::GPU_DETACH_RESOURCE, &request as *const _ as usize)?;
         Ok(())
     }
 
