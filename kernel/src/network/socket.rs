@@ -352,10 +352,12 @@ pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
     /// Get socket protocol
     fn socket_protocol(&self) -> SocketProtocol;
 
-    /// Cast to Any for safe downcasting
-    fn as_any(&self) -> &dyn core::any::Any
-    where
-        Self: 'static;
+    /// Cast to Any for safe downcasting.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed [`core::any::Any`] view of this socket object.
+    fn as_any(&self) -> &dyn core::any::Any;
 
     /// Send data to a specific address (for datagram sockets)
     /// For stream sockets, address is ignored and data is sent to connected peer

@@ -63,9 +63,13 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Get the VM object from the handle table
-    let vm = match task.handle_table.get(vm_handle) {
-        Some(KernelObject::HypervisorVm(vm)) => vm,
-        _ => return usize::MAX,
+    let vm = match task
+        .handle_table
+        .get(vm_handle)
+        .and_then(|obj| obj.as_hypervisor_vm_arc())
+    {
+        Some(vm) => vm,
+        None => return usize::MAX,
     };
 
     // Create a new vCPU on the VM
@@ -127,9 +131,13 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     };
 
     // Get the vCPU object from the handle table
-    let vcpu = match task.handle_table.get(vcpu_handle) {
-        Some(KernelObject::HypervisorVcpu(vcpu)) => vcpu,
-        _ => return usize::MAX,
+    let vcpu = match task
+        .handle_table
+        .get(vcpu_handle)
+        .and_then(|obj| obj.as_hypervisor_vcpu())
+    {
+        Some(vcpu) => vcpu,
+        None => return usize::MAX,
     };
 
     // crate::println!("[sys_shv_vcpu_run] calling vcpu.run()");

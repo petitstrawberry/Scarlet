@@ -80,8 +80,8 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // doesn't implement that trait — the kvm_run page is managed by the KVM
     // compat layer instead.
     #[cfg(feature = "hypervisor")]
-    if let crate::object::KernelObject::HypervisorVcpu(vcpu) = &kernel_obj {
-        return handle_kvm_vcpu_mmap(task, &vcpu, addr, aligned_length, prot, flags);
+    if let Some(vcpu) = kernel_obj.as_hypervisor_vcpu() {
+        return handle_kvm_vcpu_mmap(task, vcpu, addr, aligned_length, prot, flags);
     }
 
     // Check if object supports MemoryMappingOps
@@ -161,7 +161,11 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     if is_map_private_flag && !is_shared {
-        let owner = match kernel_obj.as_memory_mappable_arc() {
+        let owner = match task
+            .handle_table
+            .get_arc_clone(handle)
+            .and_then(|obj| obj.as_memory_mappable_arc())
+        {
             Some(owner) => owner,
             None => return to_result(errno::ENODEV),
         };
@@ -243,7 +247,10 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + ok_len_aligned - 1);
     let pmarea = MemoryArea::new(paddr, paddr + ok_len_aligned - 1);
 
-    let owner = kernel_obj.as_memory_mappable_arc();
+    let owner = task
+        .handle_table
+        .get_arc_clone(handle)
+        .and_then(|obj| obj.as_memory_mappable_arc());
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
 
     let map_result = if is_fixed {
@@ -533,7 +540,7 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(feature = "hypervisor")]
 fn handle_kvm_vcpu_mmap(
     task: &crate::task::Task,
-    vcpu: &crate::hypervisor::VcpuRef,
+    vcpu: &dyn crate::hypervisor::VcpuObject,
     addr: usize,
     aligned_length: usize,
     prot: usize,

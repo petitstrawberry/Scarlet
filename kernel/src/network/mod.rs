@@ -138,7 +138,7 @@ pub struct NetworkManager {
     named_sockets: spin::RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
 
     /// Active socket connections by ID
-    connections: spin::RwLock<BTreeMap<SocketId, Arc<dyn SocketObject>>>,
+    connections: spin::RwLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
 
     /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
     socket_to_id: spin::RwLock<BTreeMap<usize, SocketId>>,
@@ -485,7 +485,7 @@ impl NetworkManager {
         if let Some(factory) = factories.get(&domain) {
             let socket = factory(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections.write().insert(socket_id, socket.clone());
+            self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
             return Ok(KernelObject::Socket(socket));
         }
         drop(factories);
@@ -493,7 +493,7 @@ impl NetworkManager {
         if let Some(stack) = self.protocol_stacks.get_stack(domain) {
             let socket = stack.create_socket(socket_type, protocol)?;
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections.write().insert(socket_id, socket.clone());
+            self.register_socket_with_id(socket_id, Arc::clone(&socket))?;
             return Ok(KernelObject::Socket(socket));
         }
 
@@ -556,7 +556,10 @@ impl NetworkManager {
     }
 
     pub fn get_socket(&self, socket_id: SocketId) -> Option<Arc<dyn SocketObject>> {
-        self.connections.read().get(&socket_id).cloned()
+        self.connections
+            .read()
+            .get(&socket_id)
+            .and_then(|socket| socket.upgrade())
     }
 
     pub fn register_socket_with_id(
@@ -565,23 +568,31 @@ impl NetworkManager {
         socket: Arc<dyn SocketObject>,
     ) -> Result<(), SocketError> {
         let mut connections = self.connections.write();
-        if connections.contains_key(&socket_id) {
-            return Err(SocketError::AddressInUse);
+        if let Some(existing) = connections.get(&socket_id) {
+            if existing.upgrade().is_some() {
+                return Err(SocketError::AddressInUse);
+            }
+            connections.remove(&socket_id);
         }
         let socket_ptr = Arc::as_ptr(&socket) as *const () as usize;
-        connections.insert(socket_id, socket);
+        connections.insert(socket_id, Arc::downgrade(&socket));
         drop(connections);
         self.socket_to_id.write().insert(socket_ptr, socket_id);
         Ok(())
     }
 
     pub fn remove_socket(&self, socket_id: SocketId) {
-        let mut connections = self.connections.write();
-        if let Some(socket) = connections.get(&socket_id) {
-            let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
-            drop(connections);
-            self.connections.write().remove(&socket_id);
+        let socket = self.connections.write().remove(&socket_id);
+        if let Some(socket) = socket {
+            let socket_ptr = socket.as_ptr() as *const () as usize;
             self.socket_to_id.write().remove(&socket_ptr);
+        }
+    }
+
+    pub(crate) fn remove_socket_by_ptr(&self, socket_ptr: usize) {
+        let socket_id = self.socket_to_id.write().remove(&socket_ptr);
+        if let Some(socket_id) = socket_id {
+            self.connections.write().remove(&socket_id);
         }
     }
 
@@ -634,7 +645,11 @@ impl NetworkManager {
     }
 
     pub fn connection_count(&self) -> usize {
-        self.connections.read().len()
+        self.connections
+            .read()
+            .values()
+            .filter(|socket| socket.upgrade().is_some())
+            .count()
     }
 
     pub fn named_socket_count(&self) -> usize {

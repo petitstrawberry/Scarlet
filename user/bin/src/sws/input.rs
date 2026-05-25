@@ -44,7 +44,12 @@ pub fn set_screen_size(width: u32, height: u32) {
 /// Add an input event to the global queue
 pub fn push_input_event(event: CompositorInputEvent) {
     let mut queue = INPUT_EVENT_QUEUE.lock();
+    let should_wake = queue.is_empty();
     queue.push(event);
+    drop(queue);
+    if should_wake {
+        super::ipc::wake_compositor();
+    }
 }
 
 /// Get all pending input events from the queue

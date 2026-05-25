@@ -614,7 +614,7 @@ pub fn handle_event_for_task(
         SignalAction::Ignore => {}
         SignalAction::ForceTerminate | SignalAction::Terminate => {
             let exit_code = 128 + (signal as i32);
-            target_task.exit(exit_code);
+            target_task.exit_group(exit_code);
         }
         SignalAction::Stop => {
             target_task.set_state(crate::task::TaskState::Blocked(
@@ -723,7 +723,7 @@ pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'stat
             exit_code
         );
 
-        task.exit(exit_code);
+        task.exit_group(exit_code);
         Ok(())
     } else {
         Err("No current task to terminate")

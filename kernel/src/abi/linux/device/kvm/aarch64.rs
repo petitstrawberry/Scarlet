@@ -1,12 +1,11 @@
 //! AArch64 KVM register conversion and arch-specific hooks
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::{Once, RwLock};
 
 use crate::arch::hv::reg_index::reg;
-use crate::hypervisor::VcpuRef;
+use crate::hypervisor::VcpuObject;
 use crate::hypervisor::types::VmExit;
 
 use super::{KVM_EXIT_SHUTDOWN, KVM_EXIT_SYSTEM_EVENT, KvmRun};
@@ -105,7 +104,7 @@ pub enum FirmwareCallResult {
     ForwardToUserspace,
 }
 
-fn finish_smccc_function_call(vcpu: &VcpuRef) {
+fn finish_smccc_function_call(vcpu: &dyn VcpuObject) {
     let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
     let helper_pc = SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire);
     let x8 = vcpu.get_reg(reg::X8).unwrap_or(0);
@@ -215,7 +214,7 @@ impl Default for KvmArmVcpuSysregState {
 }
 
 struct KvmArmVcpuSysregEntry {
-    vcpu: VcpuRef,
+    vcpu_key: usize,
     state: KvmArmVcpuSysregState,
 }
 
@@ -225,14 +224,18 @@ fn get_sysreg_states() -> &'static RwLock<Vec<KvmArmVcpuSysregEntry>> {
     KVM_ARM_SYSREG_STATES.call_once(|| RwLock::new(Vec::new()))
 }
 
-fn with_sysreg_state<R>(vcpu: &VcpuRef, f: impl FnOnce(&mut KvmArmVcpuSysregState) -> R) -> R {
+fn with_sysreg_state<R>(
+    vcpu: &dyn VcpuObject,
+    f: impl FnOnce(&mut KvmArmVcpuSysregState) -> R,
+) -> R {
+    let key = super::vcpu_key(vcpu);
     let mut states = get_sysreg_states().write();
-    if let Some(entry) = states.iter_mut().find(|e| Arc::ptr_eq(&e.vcpu, vcpu)) {
+    if let Some(entry) = states.iter_mut().find(|e| e.vcpu_key == key) {
         return f(&mut entry.state);
     }
 
     states.push(KvmArmVcpuSysregEntry {
-        vcpu: Arc::clone(vcpu),
+        vcpu_key: key,
         state: KvmArmVcpuSysregState::default(),
     });
 
@@ -247,7 +250,7 @@ fn with_sysreg_state<R>(vcpu: &VcpuRef, f: impl FnOnce(&mut KvmArmVcpuSysregStat
 // Public register API (used by shared KVM ioctl dispatch)
 // ---------------------------------------------------------------------------
 
-pub fn read_regs_to_kvm(vcpu: &VcpuRef) -> KvmRegs {
+pub fn read_regs_to_kvm(vcpu: &dyn VcpuObject) -> KvmRegs {
     let mut regs = [0u64; 31];
     for (i, slot) in regs.iter_mut().enumerate() {
         *slot = vcpu.get_reg(i as u32).unwrap_or(0);
@@ -265,7 +268,7 @@ pub fn read_regs_to_kvm(vcpu: &VcpuRef) -> KvmRegs {
     }
 }
 
-pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
+pub fn write_kvm_to_regs(vcpu: &dyn VcpuObject, kvm_regs: &KvmRegs) {
     for (i, value) in kvm_regs.regs.iter().enumerate() {
         let _ = vcpu.set_reg(i as u32, *value);
     }
@@ -274,7 +277,7 @@ pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
     let _ = vcpu.set_reg(reg::PSTATE, kvm_regs.pstate);
 }
 
-pub fn complete_mmio_read(vcpu: &VcpuRef, target_reg: u8, size: u8, value: u64) {
+pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value: u64) {
     if target_reg >= 31 {
         return;
     }
@@ -288,7 +291,7 @@ pub fn complete_mmio_read(vcpu: &VcpuRef, target_reg: u8, size: u8, value: u64) 
     let _ = vcpu.set_reg(target_reg as u32, value & mask);
 }
 
-pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
+pub fn get_one_reg(vcpu: &dyn VcpuObject, id: u64) -> Result<u64, ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
@@ -299,7 +302,7 @@ pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
     }
 }
 
-pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
+pub fn set_one_reg(vcpu: &dyn VcpuObject, id: u64, value: u64) -> Result<(), ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
@@ -329,7 +332,7 @@ fn set_one_fw_reg(id: u64, value: u64) -> Result<(), ()> {
     }
 }
 
-fn get_one_core_reg(vcpu: &VcpuRef, index: u64) -> Result<u64, ()> {
+fn get_one_core_reg(vcpu: &dyn VcpuObject, index: u64) -> Result<u64, ()> {
     match index {
         idx if idx <= 60 && idx % 2 == 0 => vcpu.get_reg((idx / 2) as u32).map_err(|_| ()),
         KVM_CORE_REGS_SP => Ok(with_sysreg_state(vcpu, |s| s.sp_el0)),
@@ -352,7 +355,7 @@ fn get_one_core_reg(vcpu: &VcpuRef, index: u64) -> Result<u64, ()> {
     }
 }
 
-fn set_one_core_reg(vcpu: &VcpuRef, index: u64, value: u64) -> Result<(), ()> {
+fn set_one_core_reg(vcpu: &dyn VcpuObject, index: u64, value: u64) -> Result<(), ()> {
     match index {
         idx if idx <= 60 && idx % 2 == 0 => vcpu.set_reg((idx / 2) as u32, value).map_err(|_| ()),
         KVM_CORE_REGS_SP => {
@@ -380,7 +383,7 @@ fn set_one_core_reg(vcpu: &VcpuRef, index: u64, value: u64) -> Result<(), ()> {
 }
 
 /// Map a decoded sysreg ID to a readable value. Returns Err for unknown regs.
-fn get_one_sysreg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
+fn get_one_sysreg(vcpu: &dyn VcpuObject, id: u64) -> Result<u64, ()> {
     match id {
         SYSREG_CNTV_CTL_EL0 => vcpu.get_reg(reg::CNTV_CTL_EL0).map_err(|_| ()),
         SYSREG_CNTV_CVAL_EL0 => vcpu.get_reg(reg::CNTV_CVAL_EL0).map_err(|_| ()),
@@ -419,7 +422,7 @@ fn get_one_sysreg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
 }
 
 /// Map a decoded sysreg ID to a writable target. Returns Err for unknown/read-only regs.
-fn set_one_sysreg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
+fn set_one_sysreg(vcpu: &dyn VcpuObject, id: u64, value: u64) -> Result<(), ()> {
     match id {
         // Timer registers
         SYSREG_CNTV_CTL_EL0 => vcpu.set_reg(reg::CNTV_CTL_EL0, value).map_err(|_| ()),
@@ -464,7 +467,7 @@ fn set_one_sysreg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
 /// Returns `Handled` if the call was processed and guest registers updated,
 /// `SystemOff` / `SystemReset` for PSCI shutdown (caller should exit to userspace),
 /// or `ForwardToUserspace` if the call should be forwarded.
-pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
+pub fn handle_firmware_call_in_kernel(vcpu: &dyn VcpuObject) -> FirmwareCallResult {
     let function_id = vcpu.get_reg(reg::X0).unwrap_or(0);
 
     match function_id {
@@ -502,7 +505,7 @@ pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
 
 /// Write architecture-specific exit data for firmware calls.
 /// On AArch64, PSCI SYSTEM_OFF/RESET maps to KVM_EXIT_SYSTEM_EVENT.
-pub fn write_firmware_exit(kvm_run: &mut KvmRun, exit: &VmExit, vcpu: &VcpuRef) {
+pub fn write_firmware_exit(kvm_run: &mut KvmRun, exit: &VmExit, vcpu: &dyn VcpuObject) {
     if let VmExit::FirmwareCall { epc: _ } = exit {
         let function_id = vcpu.get_reg(reg::X0).unwrap_or(0);
         match function_id {
@@ -744,7 +747,7 @@ pub struct KvmArmDeviceAddr {
 // ---------------------------------------------------------------------------
 
 struct KvmArmVcpuInitEntry {
-    vcpu: VcpuRef,
+    vcpu_key: usize,
     powered_off: bool,
 }
 
@@ -754,16 +757,27 @@ fn get_vcpu_init_states() -> &'static RwLock<Vec<KvmArmVcpuInitEntry>> {
     KVM_ARM_VCPU_INIT_STATES.call_once(|| RwLock::new(Vec::new()))
 }
 
-fn set_vcpu_powered_off(vcpu: &VcpuRef, powered_off: bool) {
+fn set_vcpu_powered_off(vcpu: &dyn VcpuObject, powered_off: bool) {
+    let key = super::vcpu_key(vcpu);
     let mut states = get_vcpu_init_states().write();
-    if let Some(entry) = states.iter_mut().find(|e| Arc::ptr_eq(&e.vcpu, vcpu)) {
+    if let Some(entry) = states.iter_mut().find(|e| e.vcpu_key == key) {
         entry.powered_off = powered_off;
     } else {
         states.push(KvmArmVcpuInitEntry {
-            vcpu: Arc::clone(vcpu),
+            vcpu_key: key,
             powered_off,
         });
     }
+}
+
+pub fn free_vcpu_state(vcpu: &dyn VcpuObject) {
+    let key = super::vcpu_key(vcpu);
+    get_sysreg_states()
+        .write()
+        .retain(|entry| entry.vcpu_key != key);
+    get_vcpu_init_states()
+        .write()
+        .retain(|entry| entry.vcpu_key != key);
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +824,11 @@ pub fn handle_vm_ioctl(
 // Arch hook: ARM-specific vCPU-level ioctl dispatch
 // ---------------------------------------------------------------------------
 
-pub fn handle_vcpu_ioctl(request: u32, arg: usize, vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
+pub fn handle_vcpu_ioctl(
+    request: u32,
+    arg: usize,
+    vcpu: &dyn VcpuObject,
+) -> Result<Option<usize>, ()> {
     match request {
         KVM_ARM_VCPU_INIT => {
             if arg == 0 {

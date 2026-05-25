@@ -7,6 +7,7 @@ use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use framebuffer::Framebuffer;
 use std::env;
+use std::handle::Handle;
 use std::println;
 use std::vec::Vec;
 use sws_protocol;
@@ -47,6 +48,7 @@ pub struct Compositor {
     framebuffer: Framebuffer,
     window_manager: WindowManager,
     ipc_server: IpcServer,
+    wake_read: Handle,
     cursor: Cursor,
     screen_width: u32,
     screen_height: u32,
@@ -122,6 +124,10 @@ impl Compositor {
             var_info.bits_per_pixel, fix_info.line_length, fix_info.smem_len
         );
 
+        let (wake_read, wake_write) =
+            std::task::pipe().map_err(|_| "Failed to create compositor wake pipe")?;
+        super::ipc::set_compositor_wake_handle(wake_write);
+
         // Start input thread
         InputManager::start_input_thread(screen_width, screen_height)?;
 
@@ -151,6 +157,7 @@ impl Compositor {
             framebuffer,
             window_manager,
             ipc_server,
+            wake_read,
             cursor,
             screen_width,
             screen_height,
@@ -1560,6 +1567,13 @@ impl Compositor {
         self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
     }
 
+    fn wait_for_wake(&mut self) {
+        let mut buf = [0u8; 1];
+        if let Ok(stream) = self.wake_read.as_stream() {
+            let _ = stream.read(&mut buf);
+        }
+    }
+
     /// Main event loop
     pub fn run(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Starting main loop (multithreaded)");
@@ -1605,10 +1619,8 @@ impl Compositor {
                 self.event_counter += 1;
             }
 
-            // Sleep briefly to limit frame rate and reduce CPU usage
-            // 16ms = ~60fps, adjust as needed
-            std::thread::sleep(core::time::Duration::from_millis(16));
-            // yield_now();
+            // Sleep until IPC/input explicitly wakes the compositor.
+            self.wait_for_wake();
 
             // Periodically print Z-order (every 100 redraws)
             // if self.event_counter % 100 == 0 && self.event_counter > 0 {
@@ -2019,6 +2031,132 @@ impl Compositor {
         }
     }
 
+    fn window_id_in(window_ids: &[u32], window_id: u32) -> bool {
+        window_ids.iter().any(|&id| id == window_id)
+    }
+
+    fn broadcast_empty_active_app_changed(&mut self) {
+        let empty_payload = sws_protocol::payload_active_app_changed(
+            0,   // dummy window_id
+            b"", // empty app_id
+            b"", // empty app_name
+            b"", // empty title
+            b"", // empty menu_titles
+        );
+        println!("[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu");
+        super::ipc::broadcast_message_to_all_clients(
+            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+            empty_payload,
+        );
+    }
+
+    fn clear_interaction_state_for_removed_windows(&mut self, window_ids: &[u32]) {
+        if let Some(window_id) = self.pointer_grab_window_id {
+            if Self::window_id_in(window_ids, window_id) {
+                self.pointer_grab_window_id = None;
+                self.last_left_down_cursor = None;
+            }
+        }
+
+        if let Some(state) = self.move_drag {
+            if Self::window_id_in(window_ids, state.window_id) {
+                self.move_drag = None;
+            }
+        }
+
+        if let Some(state) = self.resize_drag {
+            if Self::window_id_in(window_ids, state.window_id) {
+                if let Some(outline) = self.resize_outline.take() {
+                    self.add_pending_damage(outline);
+                }
+                self.resize_drag = None;
+            }
+        }
+    }
+
+    fn close_client_windows(
+        &mut self,
+        client_id: usize,
+        window_ids: &[u32],
+        notify_client: bool,
+    ) -> bool {
+        let mut removed_windows: Vec<(u32, (i32, i32, u32, u32), Vec<u8>)> = Vec::new();
+        for &window_id in window_ids {
+            if let Some(window) = self.window_manager.get_window(window_id) {
+                removed_windows.push((
+                    window_id,
+                    (window.x, window.y, window.width, window.height),
+                    window.app_id.clone().unwrap_or_default(),
+                ));
+            }
+        }
+
+        if removed_windows.is_empty() {
+            return false;
+        }
+
+        let removed_ids: Vec<u32> = removed_windows
+            .iter()
+            .map(|(window_id, _, _)| *window_id)
+            .collect();
+        self.clear_interaction_state_for_removed_windows(&removed_ids);
+
+        let mut active_app_removed = false;
+        for (window_id, rect, app_id) in &removed_windows {
+            if notify_client {
+                let payload = sws_protocol::payload_window_destroyed(*window_id);
+                send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_DESTROYED,
+                    payload.to_vec(),
+                );
+                println!(
+                    "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
+                    window_id, client_id
+                );
+            }
+
+            if self.last_focused_window_id == Some(*window_id) {
+                println!(
+                    "[Compositor] Focused window destroyed, resetting last_focused_window_id (was={})",
+                    window_id
+                );
+                self.last_focused_window_id = None;
+            }
+
+            if self.active_app_id.as_ref().map_or(false, |current_app_id| {
+                current_app_id.as_slice() == app_id.as_slice()
+            }) {
+                println!(
+                    "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
+                    core::str::from_utf8(app_id).unwrap_or("")
+                );
+                active_app_removed = true;
+            }
+
+            self.window_manager.close_window(*window_id);
+            self.add_pending_damage(*rect);
+        }
+
+        if active_app_removed {
+            self.active_app_id = None;
+        }
+
+        if let Some(new_focus) = self.window_manager.get_focused_window_id() {
+            if active_app_removed || self.last_focused_window_id != Some(new_focus) {
+                self.last_focused_window_id = None;
+                self.broadcast_focus_change(new_focus);
+            }
+        }
+
+        if active_app_removed && self.active_app_id.is_none() {
+            self.broadcast_empty_active_app_changed();
+        }
+
+        self.full_redraw_needed = true;
+        true
+    }
+
     /// Handle IPC events from clients
     ///
     /// Returns `Ok(true)` if an immediate redraw is required (e.g., window created/destroyed).
@@ -2244,62 +2382,25 @@ impl Compositor {
                     client_id, window_id
                 );
 
-                // Check if the destroyed window was the active application
-                if let Some(window) = self.window_manager.get_window(window_id) {
-                    let window_app_id = window.app_id.as_deref().unwrap_or(b"");
-
-                    // Reset last_focused_window_id if the destroyed window was focused
-                    if self.last_focused_window_id == Some(window_id) {
-                        println!(
-                            "[Compositor] Focused window destroyed, resetting last_focused_window_id (was={})",
-                            window_id
-                        );
-                        self.last_focused_window_id = None;
-                    }
-
-                    if let Some(current_app_id) = &self.active_app_id {
-                        if current_app_id == window_app_id {
-                            println!(
-                                "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
-                                core::str::from_utf8(window_app_id).unwrap_or("")
-                            );
-                            self.active_app_id = None;
-
-                            // Broadcast ACTIVE_APP_CHANGED with empty menu to clear TaskBar
-                            let empty_payload = sws_protocol::payload_active_app_changed(
-                                0,   // dummy window_id
-                                b"", // empty app_id
-                                b"", // empty app_name
-                                b"", // empty title
-                                b"", // empty menu_titles
-                            );
-                            println!(
-                                "[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu"
-                            );
-                            super::ipc::broadcast_message_to_all_clients(
-                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
-                                empty_payload,
-                            );
-                        }
-                    }
+                if self.close_client_windows(client_id, &[window_id], true) {
+                    self.dump_memory_layout("after IPC DestroyWindow");
+                    return Ok(true);
                 }
-
-                // Send WINDOW_DESTROYED event to client before closing
-                let payload = sws_protocol::payload_window_destroyed(window_id);
-                send_message_to_client(
-                    client_id,
-                    sws_protocol::server_msg::WINDOW_DESTROYED,
-                    payload.to_vec(),
-                );
+            }
+            IpcEvent::ClientDisconnected {
+                client_id,
+                window_ids,
+            } => {
                 println!(
-                    "[Compositor] Sent WINDOW_DESTROYED for window #{} to client {}",
-                    window_id, client_id
+                    "[Compositor] Client {} disconnected; removing {} windows",
+                    client_id,
+                    window_ids.len()
                 );
 
-                self.window_manager.close_window(window_id);
-                self.full_redraw_needed = true;
-
-                self.dump_memory_layout("after IPC DestroyWindow");
+                if self.close_client_windows(client_id, &window_ids, false) {
+                    self.dump_memory_layout("after IPC ClientDisconnected");
+                    return Ok(true);
+                }
             }
             IpcEvent::BufferUpdated {
                 window_id,

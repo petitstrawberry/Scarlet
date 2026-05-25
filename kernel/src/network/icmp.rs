@@ -511,6 +511,23 @@ impl IcmpSocket {
     }
 }
 
+impl Drop for IcmpSocket {
+    fn drop(&mut self) {
+        if let Some(layer) = self.icmp_layer.upgrade() {
+            let mut sockets = layer.sockets.write();
+            if let Some(existing) = sockets.get(&self.identifier)
+                && existing.as_ptr() == self as *const Self
+            {
+                sockets.remove(&self.identifier);
+            }
+        }
+
+        self.recv_waker.wake_all();
+        crate::network::NetworkManager::get_manager()
+            .remove_socket_by_ptr(self as *const Self as usize);
+    }
+}
+
 impl SocketObject for IcmpSocket {
     fn socket_type(&self) -> SocketType {
         SocketType::Datagram

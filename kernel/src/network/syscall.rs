@@ -443,8 +443,8 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     let path_len = tf.get_arg(2);
 
     // Get the socket from handle table
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
+    let socket_arc = match task.handle_table.get_arc_clone(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket,
         _ => return usize::MAX,
     };
 
@@ -563,9 +563,13 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
     let backlog = tf.get_arg(1);
 
     // Get the socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::println!("[sys_socket_listen] Invalid handle {}", handle_id);
             return usize::MAX;
         }
@@ -618,9 +622,13 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
     let path_len = tf.get_arg(2);
 
     // Get the socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return usize::MAX,
     };
 
     if path_len == core::mem::size_of::<Inet4SocketAddress>() {
@@ -694,16 +702,19 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     let handle_id = tf.get_arg(0) as u32;
 
     // Get the listening socket from handle table
-    let socket_obj = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        Some(_) => return usize::MAX,
+    let socket_obj = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
         None => return usize::MAX,
     };
 
     // Try to downcast to LocalSocket or TcpSocket
     use crate::network::local::LocalSocket;
 
-    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(&socket_obj) {
+    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj) {
         // LocalSocket accept
         match local_socket.accept_blocking(task.get_id(), tf) {
             Ok(socket) => socket,
@@ -715,7 +726,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
                 return usize::MAX;
             }
         }
-    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(&socket_obj)
+    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(socket_obj)
     {
         // TcpSocket accept
         match tcp_socket.accept_blocking(task.get_id(), tf) {
@@ -851,9 +862,13 @@ pub fn sys_socket_shutdown(tf: &mut Trapframe) -> usize {
     let how_value = tf.get_arg(1);
 
     // Get the socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return usize::MAX,
     };
 
     // Parse shutdown mode
@@ -908,9 +923,13 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
     let addr_ptr = tf.get_arg(3);
 
     // Get the socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return usize::MAX,
     };
 
     // Create a temporary buffer
@@ -995,9 +1014,13 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     }
 
     // Get the socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return usize::MAX,
     };
 
     // Parse destination address

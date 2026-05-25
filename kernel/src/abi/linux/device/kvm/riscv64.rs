@@ -2,13 +2,12 @@
 
 extern crate alloc;
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Once, RwLock};
 
 use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::hv::reg_index::reg;
-use crate::hypervisor::{VcpuRef, VmRef};
+use crate::hypervisor::{VcpuObject, VmRef};
 
 pub fn irqfd_route_to_vcpu_irq(route: u32) -> u32 {
     route
@@ -165,7 +164,7 @@ struct KvmRiscvVcpuState {
 }
 
 struct KvmRiscvVcpuStateEntry {
-    vcpu: VcpuRef,
+    vcpu_key: usize,
     state: KvmRiscvVcpuState,
 }
 
@@ -251,17 +250,15 @@ fn default_vcpu_state() -> KvmRiscvVcpuState {
     }
 }
 
-fn with_vcpu_state<R>(vcpu: &VcpuRef, f: impl FnOnce(&mut KvmRiscvVcpuState) -> R) -> R {
+fn with_vcpu_state<R>(vcpu: &dyn VcpuObject, f: impl FnOnce(&mut KvmRiscvVcpuState) -> R) -> R {
     let mut states = get_vcpu_states().write();
-    if let Some(entry) = states
-        .iter_mut()
-        .find(|entry| Arc::ptr_eq(&entry.vcpu, vcpu))
-    {
+    let key = super::vcpu_key(vcpu);
+    if let Some(entry) = states.iter_mut().find(|entry| entry.vcpu_key == key) {
         return f(&mut entry.state);
     }
 
     states.push(KvmRiscvVcpuStateEntry {
-        vcpu: Arc::clone(vcpu),
+        vcpu_key: key,
         state: default_vcpu_state(),
     });
 
@@ -354,7 +351,7 @@ fn validate_one_reg_id(id: u64) -> Result<(), ()> {
     Ok(())
 }
 
-pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
+pub fn get_one_reg(vcpu: &dyn VcpuObject, id: u64) -> Result<u64, ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
@@ -429,7 +426,7 @@ pub fn get_one_reg(vcpu: &VcpuRef, id: u64) -> Result<u64, ()> {
     }
 }
 
-pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
+pub fn set_one_reg(vcpu: &dyn VcpuObject, id: u64, value: u64) -> Result<(), ()> {
     validate_one_reg_id(id)?;
 
     match kvm_reg_type(id) {
@@ -563,7 +560,7 @@ pub fn set_one_reg(vcpu: &VcpuRef, id: u64, value: u64) -> Result<(), ()> {
     }
 }
 
-pub fn read_regs_to_kvm(vcpu: &VcpuRef) -> KvmRegs {
+pub fn read_regs_to_kvm(vcpu: &dyn VcpuObject) -> KvmRegs {
     let mut buf = [0u64; 32];
     for (slot, &idx) in PTRACE_REG_INDEX.iter().enumerate() {
         buf[slot] = vcpu.get_reg(idx).unwrap_or(0);
@@ -571,14 +568,14 @@ pub fn read_regs_to_kvm(vcpu: &VcpuRef) -> KvmRegs {
     unsafe { core::mem::transmute(buf) }
 }
 
-pub fn write_kvm_to_regs(vcpu: &VcpuRef, kvm_regs: &KvmRegs) {
+pub fn write_kvm_to_regs(vcpu: &dyn VcpuObject, kvm_regs: &KvmRegs) {
     let buf: &[u64; 32] = unsafe { core::mem::transmute(kvm_regs) };
     for (&idx, &val) in PTRACE_REG_INDEX.iter().zip(buf.iter()) {
         let _ = vcpu.set_reg(idx, val);
     }
 }
 
-pub fn complete_mmio_read(vcpu: &VcpuRef, target_reg: u8, size: u8, value: u64) {
+pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value: u64) {
     if target_reg == 0 {
         return;
     }
@@ -603,12 +600,12 @@ pub enum FirmwareCallResult {
     ForwardToUserspace,
 }
 
-pub fn handle_firmware_call_in_kernel(vcpu: &VcpuRef) -> FirmwareCallResult {
+pub fn handle_firmware_call_in_kernel(vcpu: &dyn VcpuObject) -> FirmwareCallResult {
     use crate::arch::hv::reg_index::reg;
     handle_sbi_in_kernel_impl(vcpu)
 }
 
-fn handle_sbi_in_kernel_impl(vcpu: &VcpuRef) -> FirmwareCallResult {
+fn handle_sbi_in_kernel_impl(vcpu: &dyn VcpuObject) -> FirmwareCallResult {
     use crate::arch::hv::reg_index::reg;
 
     let extension_id = vcpu.get_reg(reg::A7).unwrap_or(0);
@@ -721,7 +718,7 @@ fn handle_sbi_in_kernel_impl(vcpu: &VcpuRef) -> FirmwareCallResult {
 pub fn write_firmware_exit(
     kvm_run: &mut super::KvmRun,
     _exit: &crate::hypervisor::types::VmExit,
-    vcpu: &VcpuRef,
+    vcpu: &dyn VcpuObject,
 ) {
     use super::{KVM_EXIT_RISCV_SBI, KVM_EXIT_SHUTDOWN};
     use crate::arch::hv::reg_index::reg;
@@ -744,6 +741,13 @@ pub fn write_firmware_exit(
         sbi.extension_id = extension_id;
         sbi.function_id = vcpu.get_reg(reg::A6).unwrap_or(0);
     }
+}
+
+pub fn free_vcpu_state(vcpu: &dyn VcpuObject) {
+    let key = super::vcpu_key(vcpu);
+    get_vcpu_states()
+        .write()
+        .retain(|entry| entry.vcpu_key != key);
 }
 
 pub fn check_extension(_cap: usize) -> Option<usize> {
@@ -829,6 +833,10 @@ pub fn handle_vm_ioctl(
 // Arch hook: vCPU-level ioctl dispatch (RISC-V stub)
 // ---------------------------------------------------------------------------
 
-pub fn handle_vcpu_ioctl(_request: u32, _arg: usize, _vcpu: &VcpuRef) -> Result<Option<usize>, ()> {
+pub fn handle_vcpu_ioctl(
+    _request: u32,
+    _arg: usize,
+    _vcpu: &dyn VcpuObject,
+) -> Result<Option<usize>, ()> {
     Ok(None)
 }

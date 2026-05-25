@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use spin::RwLock;
 
-use crate::object::{KernelObject, introspection};
+use crate::object::{KernelObject, KernelObjectRef, introspection};
 
 pub mod syscall;
 
@@ -181,15 +181,69 @@ impl HandleTable {
         inner.handles[handle as usize].as_ref().map(f)
     }
 
-    /// O(1) access - returns an Arc-level clone of the KernelObject if it exists
+    /// O(1) borrowed access that hides `Arc` ownership from the caller.
+    ///
+    /// This method returns a borrowed view of the handle-table object without
+    /// incrementing the object's `Arc` reference count. The returned view does
+    /// not expose the underlying `Arc`, so ordinary handle lookup cannot extend
+    /// object lifetime beyond the owning handle table.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access
+    ///
+    /// # Returns
+    ///
+    /// Borrowed object view if the handle exists, otherwise `None`.
+    pub fn get(&self, handle: Handle) -> Option<KernelObjectRef<'_>> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        let object = inner.handles[handle as usize].as_ref()? as *const KernelObject;
+        // SAFETY: The pointer refers to a handle-table slot in `self`. The view
+        // is lifetime-bound to `&self` and does not own or clone the object.
+        Some(unsafe { KernelObjectRef::from_ptr(object) })
+    }
+
+    /// O(1) borrowed access that hides `Arc` ownership from the caller.
+    ///
+    /// Since the internal data is protected by RwLock, the borrowed view is
+    /// available only for the duration of the closure. Use this for ordinary
+    /// handle operations that should not extend object lifetime beyond the
+    /// owning handle table.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Handle number to access
+    /// * `f` - Closure executed with a borrowed kernel object view
+    ///
+    /// # Returns
+    ///
+    /// The closure result if the handle exists, otherwise `None`.
+    pub fn with_object_ref<F, R>(&self, handle: Handle, f: F) -> Option<R>
+    where
+        F: for<'a> FnOnce(KernelObjectRef<'a>) -> R,
+    {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        inner.handles[handle as usize]
+            .as_ref()
+            .map(|object| f(KernelObjectRef::new(object)))
+    }
+
+    /// O(1) access - returns an Arc-level clone of the KernelObject if it exists.
     ///
     /// This method returns an Arc-level clone of the KernelObject. Unlike the Clone
     /// trait which may have side effects (e.g., incrementing Pipe reader/writer counts),
     /// this performs a simple Arc reference count increment without modifying object state.
     ///
-    /// For cases where you need dup() semantics (creating a new logical file descriptor
-    /// with proper reference counting), use `clone_for_dup()` instead.
-    pub fn get(&self, handle: Handle) -> Option<KernelObject> {
+    /// Prefer [`HandleTable::get`] for ordinary handle lookup. Use this method only
+    /// when an operation must intentionally keep the object alive independently of
+    /// the owning handle table.
+    pub fn get_arc_clone(&self, handle: Handle) -> Option<KernelObject> {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
         }

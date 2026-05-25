@@ -300,7 +300,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     if set_nonblock {
-        if let Some(local_socket) = LocalSocket::from_socket_object(&socket_obj) {
+        if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj.as_ref()) {
             local_socket.set_nonblocking(true);
         }
     }
@@ -374,8 +374,8 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Get the socket object from handle table
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
+    let socket_arc = match task.handle_table.get_arc_clone(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket,
         _ => {
             crate::early_println!("[linux socket] bind fd {} not socket", sockfd);
             return usize::MAX;
@@ -537,15 +537,19 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::early_println!("[linux socket] listen fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
 
-    if socket_arc.listen(backlog.max(0) as usize).is_err() {
+    if socket.listen(backlog.max(0) as usize).is_err() {
         return usize::MAX;
     }
 
@@ -588,18 +592,22 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
         }
     };
 
-    let socket_obj = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket_obj = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::early_println!("[linux socket] accept fd {} not socket", sockfd);
             return usize::MAX;
         }
     };
 
     // Try LocalSocket first, then TcpSocket
-    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(&socket_obj) {
+    let accepted_socket = if let Some(local_socket) = LocalSocket::from_socket_object(socket_obj) {
         local_socket.accept_blocking(task.get_id(), trapframe)
-    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(&socket_obj)
+    } else if let Some(tcp_socket) = crate::network::tcp::TcpSocket::from_socket_object(socket_obj)
     {
         tcp_socket.accept_blocking(task.get_id(), trapframe)
     } else {
@@ -625,7 +633,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     }
 
     if (flags & SOCK_NONBLOCK) != 0 {
-        if let Some(local_socket) = LocalSocket::from_socket_object(&accepted_socket) {
+        if let Some(local_socket) = LocalSocket::from_socket_object(accepted_socket.as_ref()) {
             local_socket.set_nonblocking(true);
         }
     }
@@ -703,9 +711,13 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket_arc = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::early_println!("[linux socket] connect fd {} not socket", sockfd);
             return usize::MAX;
         }
@@ -821,9 +833,13 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket_arc = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::early_println!("[linux socket] getsockname fd {} not socket", sockfd);
             return usize::MAX;
         }
@@ -922,9 +938,13 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let socket_arc = match task.handle_table.get(handle_id) {
-        Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => {
+    let socket_arc = match task
+        .handle_table
+        .get(handle_id)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => {
             crate::early_println!("[linux socket] getpeername fd {} not socket", sockfd);
             return usize::MAX;
         }
@@ -1165,12 +1185,12 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
 
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
-        let socket_arc = match &kernel_obj {
-            KernelObject::Socket(socket) => Arc::clone(socket),
-            _ => return errno::to_result(errno::ENOTSOCK),
+        let socket = match kernel_obj.as_socket() {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
         };
 
-        if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
+        if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
             let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
                 Some(addr) => addr as *const LinuxCmsghdr,
                 None => {
@@ -1440,14 +1460,14 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if msg.msg_control != 0
         && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>()
     {
-        let socket_arc = match &kernel_obj {
-            KernelObject::Socket(socket) => Arc::clone(socket),
-            _ => {
+        let socket = match kernel_obj.as_socket() {
+            Some(socket) => socket,
+            None => {
                 return errno::to_result(errno::ENOTSOCK);
             }
         };
 
-        if let Some(local_socket) = LocalSocket::from_socket_object(&socket_arc) {
+        if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
             match local_socket.recv_handle_and_data(total_buffer_size) {
                 Ok((obj, data)) => {
                     let new_handle = match task.handle_table.insert(obj) {
@@ -1603,9 +1623,13 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Get socket object
-    let socket = match task.handle_table.get(handle) {
-        Some(KernelObject::Socket(s)) => s.clone(),
-        _ => return errno::to_result(errno::ENOTSOCK),
+    let socket = match task
+        .handle_table
+        .get(handle)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return errno::to_result(errno::ENOTSOCK),
     };
 
     // Translate buffer pointer
@@ -1699,9 +1723,13 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Get socket object
-    let socket = match task.handle_table.get(handle) {
-        Some(KernelObject::Socket(s)) => s.clone(),
-        _ => return errno::to_result(errno::ENOTSOCK),
+    let socket = match task
+        .handle_table
+        .get(handle)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return errno::to_result(errno::ENOTSOCK),
     };
 
     // Translate buffer pointer
@@ -1940,9 +1968,13 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Get socket object
-    let socket = match task.handle_table.get(handle) {
-        Some(KernelObject::Socket(s)) => s.clone(),
-        _ => return errno::to_result(errno::ENOTSOCK),
+    let socket = match task
+        .handle_table
+        .get(handle)
+        .and_then(|obj| obj.as_socket())
+    {
+        Some(socket) => socket,
+        None => return errno::to_result(errno::ENOTSOCK),
     };
 
     // Convert how to ShutdownHow

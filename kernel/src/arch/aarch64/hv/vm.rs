@@ -572,6 +572,12 @@ impl Aarch64VcpuObject {
     }
 }
 
+impl Drop for Aarch64VcpuObject {
+    fn drop(&mut self) {
+        crate::abi::linux::device::kvm::free_vcpu_run_page(self);
+    }
+}
+
 impl VcpuObject for Aarch64VcpuObject {
     fn id(&self) -> VcpuId {
         self.id

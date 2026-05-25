@@ -33,6 +33,24 @@ fn test_handle_table_insert_and_get() {
 }
 
 #[test_case]
+fn test_handle_table_with_object_ref_does_not_clone_arc() {
+    let table = HandleTable::new();
+    let mock_file = Arc::new(MockFileObject::new(b"borrowed".to_vec()));
+    let kernel_obj = KernelObject::File(mock_file.clone());
+
+    let handle = table.insert(kernel_obj).unwrap();
+    let count_before = Arc::strong_count(&mock_file);
+
+    let has_stream = table
+        .with_object_ref(handle, |object| object.as_stream().is_some())
+        .unwrap();
+
+    assert!(has_stream);
+    assert_eq!(Arc::strong_count(&mock_file), count_before);
+    assert!(table.with_object_ref(999, |_| true).is_none());
+}
+
+#[test_case]
 fn test_handle_table_remove() {
     let table = HandleTable::new();
     let mock_file = Arc::new(MockFileObject::new(b"test".to_vec()));

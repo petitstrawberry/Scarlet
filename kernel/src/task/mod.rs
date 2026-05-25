@@ -35,8 +35,8 @@ use crate::{
     mem::page::ContiguousPages,
     object::handle::HandleTable,
     sched::scheduler::{
-        current_task, finalize_zombie, get_all_task_ids, get_task_by_id, remove_from_ready_queues,
-        schedule, setup_task_execution, unmark_blocked,
+        cleanup_zombie, current_task, finalize_zombie, get_all_task_ids, get_task_by_id,
+        remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
     },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
@@ -50,6 +50,8 @@ use alloc::collections::BTreeMap;
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use spin::Once;
+
+const INIT_TASK_ID: usize = 1;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -1286,6 +1288,70 @@ impl Task {
         self.parent_id.store(parent_id, Ordering::SeqCst);
     }
 
+    /// Clear the parent task relationship.
+    ///
+    /// # Returns
+    ///
+    /// This function does not return a value.
+    pub fn clear_parent_id(&self) {
+        self.parent_id.store(0, Ordering::SeqCst);
+    }
+
+    fn orphan_reaper(&self) -> Option<&'static Task> {
+        if self.thread_group_id != self.id
+            && let Some(leader) = get_task_by_id(self.thread_group_id)
+            && !matches!(
+                leader.get_state(),
+                TaskState::Zombie | TaskState::Terminated
+            )
+        {
+            return Some(leader);
+        }
+
+        if self.id != INIT_TASK_ID {
+            get_task_by_id(INIT_TASK_ID)
+        } else {
+            None
+        }
+    }
+
+    fn reparent_children(&self) {
+        let child_ids = {
+            let mut children = self.children.write();
+            if children.is_empty() {
+                return;
+            }
+            let child_ids = children.clone();
+            children.clear();
+            child_ids
+        };
+
+        let reaper = self.orphan_reaper();
+
+        for child_id in child_ids {
+            let Some(child) = get_task_by_id(child_id) else {
+                continue;
+            };
+            if child.get_parent_id() != Some(self.id) {
+                continue;
+            }
+
+            if let Some(reaper) = reaper {
+                child.set_parent_id(reaper.get_id());
+                reaper.add_child(child_id);
+                if child.get_state() == TaskState::Zombie {
+                    finalize_zombie(child_id, Some(reaper.get_id()));
+                }
+            } else {
+                child.clear_parent_id();
+                if child.get_state() == TaskState::Zombie {
+                    child.set_state(TaskState::Terminated);
+                    cleanup_zombie(child_id);
+                }
+            }
+        }
+    }
+
     /// Add a child task
     ///
     /// # Arguments
@@ -1736,6 +1802,7 @@ impl Task {
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        self.reparent_children();
 
         match self.get_parent_id() {
             Some(parent_id) => {
@@ -1791,19 +1858,34 @@ impl Task {
     pub fn exit_group(&self, status: i32) {
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
+        let leader_id = thread_group_id;
 
-        // Get all task IDs in the system
+        // The process is exiting, so shared file tables must be closed even
+        // while sibling Task objects still hold HandleTable Arc references.
+        self.handle_table.close_all();
+
         let all_task_ids = get_all_task_ids();
+        let mut leader_finalized = false;
 
-        // Terminate all tasks with the same thread group ID (except self)
+        // Terminate all tasks with the same thread group ID (except self).
+        // The thread-group leader is the process wait target, so keep it as
+        // the observable zombie even when another thread initiates exit_group.
         for task_id in all_task_ids {
             if task_id == my_id {
-                continue; // Skip self
+                continue;
             }
 
             if let Some(task) = get_task_by_id(task_id) {
                 if task.get_thread_group_id() == thread_group_id {
-                    // Terminate this thread group member
+                    if task_id == leader_id {
+                        leader_finalized = true;
+                        remove_from_ready_queues(task_id);
+                        unmark_blocked(task_id);
+                        task.exit(status);
+                        continue;
+                    }
+
+                    task.reparent_children();
                     crate::println!(
                         "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
                         my_id,
@@ -1812,7 +1894,7 @@ impl Task {
                     );
                     // Set state to Terminated directly (bypass normal exit)
                     // Use unsafe to modify state through immutable reference
-                    // This is safe because we're in a termination context
+                    // This is safe because we are in a termination context
                     let task_ptr = task as *const Task as *mut Task;
                     unsafe {
                         (*task_ptr)
@@ -1828,8 +1910,37 @@ impl Task {
             }
         }
 
-        // Now exit the current task normally
-        self.exit(status);
+        if my_id == leader_id {
+            self.exit(status);
+            return;
+        }
+
+        if !leader_finalized
+            && let Some(leader) = get_task_by_id(leader_id)
+            && leader.get_thread_group_id() == thread_group_id
+            && !matches!(
+                leader.get_state(),
+                TaskState::Zombie | TaskState::Terminated
+            )
+        {
+            remove_from_ready_queues(leader_id);
+            unmark_blocked(leader_id);
+            leader.exit(status);
+        }
+
+        self.clear_process_control_stopped();
+        self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        self.reparent_children();
+        self.set_exit_status(status);
+        self.state.store(TaskState::Terminated, Ordering::SeqCst);
+        remove_from_ready_queues(my_id);
+        unmark_blocked(my_id);
+
+        if mytask().is_some_and(|task| task.get_id() == self.id) {
+            if let Some(current_task) = mytask() {
+                schedule(current_task.get_trapframe());
+            }
+        }
     }
 
     /// Wait for a child task to exit and collect its status
@@ -2296,8 +2407,9 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
 
-    use crate::sched::scheduler::{add_task, get_task_by_id, reset};
-    use crate::task::{CloneFlags, CloneFlagsDef};
+    use super::INIT_TASK_ID;
+    use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
+    use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
     #[test_case]
@@ -2357,6 +2469,77 @@ mod tests {
             assert!(parent_task.remove_child(child_id));
             assert!(!parent_task.get_children().contains(&child_id));
         }
+    }
+
+    #[test_case]
+    fn test_task_reparents_children_to_init_on_exit() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        child.set_parent_id(parent_id);
+        parent.add_child(child_id);
+
+        parent.exit(0);
+
+        let init = get_task_by_id(init_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert!(init.get_children().contains(&child_id));
+        assert!(!parent.get_children().contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_task_reparents_zombie_children_to_init_on_exit() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        child.set_parent_id(parent_id);
+        parent.add_child(child_id);
+        child.set_exit_status(7);
+        child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id, Some(parent_id));
+
+        parent.exit(0);
+
+        let init = get_task_by_id(init_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert_eq!(child.get_state(), TaskState::Zombie);
+        assert!(init.get_children().contains(&child_id));
+
+        match init.wait(child_id) {
+            Ok(status) => assert_eq!(status, 7),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(child_id).is_none());
     }
 
     #[test_case]
@@ -2429,6 +2612,42 @@ mod tests {
         let child_id = add_task(child, 0);
         let child = get_task_by_id(child_id).unwrap();
         assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn test_exit_group_from_non_leader_makes_leader_waitable() {
+        reset();
+
+        let mut parent = super::new_user_task("WaitParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+
+        let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+        leader.init();
+        let leader_id = add_task(leader, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let leader = get_task_by_id(leader_id).unwrap();
+        leader.set_parent_id(parent_id);
+        parent.add_child(leader_id);
+
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let worker = leader.clone_task(flags).unwrap();
+        let worker_id = add_task(worker, 0);
+
+        let worker = get_task_by_id(worker_id).unwrap();
+        worker.exit_group(130);
+
+        let leader = get_task_by_id(leader_id).unwrap();
+        assert_eq!(leader.get_state(), TaskState::Zombie);
+        assert_eq!(worker.get_state(), TaskState::Terminated);
+
+        match parent.wait(leader_id) {
+            Ok(status) => assert_eq!(status, 130),
+            Err(error) => panic!("wait failed: {:?}", error),
+        }
+        assert!(get_task_by_id(leader_id).is_none());
     }
 
     #[test_case]
