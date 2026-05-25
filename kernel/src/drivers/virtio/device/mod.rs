@@ -12,6 +12,7 @@ use crate::{
     arch::io_mb,
     device::{
         Device,
+        gpu::GpuCharDevice,
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -1040,14 +1041,20 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         VirtioDeviceType::GPU => {
             let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("vfb{}", id);
+            let graphics_name = format!("vfb{}", id);
+            let gpu_name = format!("gpu{}", id);
             crate::early_println!(
-                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}",
+                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {} and {}",
                 base_addr,
-                name
+                graphics_name,
+                gpu_name
             );
-            let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
-            DeviceManager::get_manager().register_device_with_name(name, dev);
+            let dev = Arc::new(VirtioGpuDevice::new(base_addr));
+            let graphics_dev: Arc<dyn Device> = dev.clone();
+            DeviceManager::get_manager().register_device_with_name(graphics_name, graphics_dev);
+
+            let gpu_char_dev: Arc<dyn Device> = Arc::new(GpuCharDevice::new(dev));
+            DeviceManager::get_manager().register_device_with_name(gpu_name, gpu_char_dev);
         }
         VirtioDeviceType::Input => {
             crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);
