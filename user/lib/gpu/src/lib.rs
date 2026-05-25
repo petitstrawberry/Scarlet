@@ -38,6 +38,14 @@ pub mod commands {
     pub const GPU_ATTACH_RESOURCE: u32 = 0x4708;
     /// Detach a resource from a GPU context.
     pub const GPU_DETACH_RESOURCE: u32 = 0x4709;
+    /// Attach userspace memory backing to a resource.
+    pub const GPU_ATTACH_RESOURCE_BACKING: u32 = 0x470a;
+    /// Detach memory backing from a resource.
+    pub const GPU_DETACH_RESOURCE_BACKING: u32 = 0x470b;
+    /// Transfer attached backing memory to a host 3D resource.
+    pub const GPU_TRANSFER_TO_HOST_3D: u32 = 0x470c;
+    /// Transfer a host 3D resource into attached backing memory.
+    pub const GPU_TRANSFER_FROM_HOST_3D: u32 = 0x470d;
 }
 
 /// Capability bit for virgl command submission.
@@ -50,6 +58,8 @@ pub const GPU_CAPABILITY_FENCES: u32 = 1 << 2;
 pub const GPU_CAPABILITY_CONTEXT_INIT: u32 = 1 << 3;
 /// Submission flag indicating `fence_id` should be used.
 pub const GPU_SUBMIT_FLAG_FENCE: u32 = 1 << 0;
+/// Transfer flag indicating `fence_id` should be used.
+pub const GPU_TRANSFER_FLAG_FENCE: u32 = 1 << 0;
 
 /// GPU capability response.
 #[repr(C)]
@@ -157,6 +167,37 @@ pub struct GpuResource3dDescription {
     pub flags: u32,
 }
 
+/// GPU 3D transfer descriptor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuTransfer3d {
+    /// GPU context associated with the transfer.
+    pub context_id: u32,
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Optional fence identifier signaled when the transfer completes.
+    pub fence_id: Option<u64>,
+    /// Offset into the attached backing memory.
+    pub offset: u64,
+    /// Mip level.
+    pub level: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// Layer stride in bytes.
+    pub layer_stride: u32,
+    /// X origin.
+    pub x: u32,
+    /// Y origin.
+    pub y: u32,
+    /// Z origin.
+    pub z: u32,
+    /// Transfer width.
+    pub width: u32,
+    /// Transfer height.
+    pub height: u32,
+    /// Transfer depth.
+    pub depth: u32,
+}
+
 /// GPU 3D resource creation request.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -201,6 +242,52 @@ pub struct GpuContextResourceRequest {
     pub context_id: u32,
     /// Resource identifier.
     pub resource_id: u32,
+}
+
+/// GPU resource backing attachment request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuAttachResourceBackingRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Userspace buffer pointer.
+    pub buffer_ptr: usize,
+    /// Userspace buffer length in bytes.
+    pub buffer_len: usize,
+}
+
+/// GPU 3D transfer request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuTransfer3dRequest {
+    /// GPU context associated with the transfer.
+    pub context_id: u32,
+    /// Transfer flags such as `GPU_TRANSFER_FLAG_FENCE`.
+    pub flags: u32,
+    /// Optional fence identifier.
+    pub fence_id: u64,
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Mip level.
+    pub level: u32,
+    /// Offset into attached backing memory.
+    pub offset: u64,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// Layer stride in bytes.
+    pub layer_stride: u32,
+    /// X origin.
+    pub x: u32,
+    /// Y origin.
+    pub y: u32,
+    /// Z origin.
+    pub z: u32,
+    /// Transfer width.
+    pub width: u32,
+    /// Transfer height.
+    pub height: u32,
+    /// Transfer depth.
+    pub depth: u32,
 }
 
 /// GPU control device wrapper.
@@ -412,6 +499,106 @@ impl Gpu {
         self.file
             .as_handle()
             .control(commands::GPU_DETACH_RESOURCE, &request as *const _ as usize)?;
+        Ok(())
+    }
+
+    /// Attach userspace memory backing to a resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource that should use the backing memory.
+    /// * `buffer` - Backing memory buffer.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn attach_resource_backing(&self, resource_id: u32, buffer: &mut [u8]) -> HandleResult<()> {
+        let request = GpuAttachResourceBackingRequest {
+            resource_id,
+            buffer_ptr: buffer.as_mut_ptr() as usize,
+            buffer_len: buffer.len(),
+        };
+        self.file.as_handle().control(
+            commands::GPU_ATTACH_RESOURCE_BACKING,
+            &request as *const _ as usize,
+        )?;
+        Ok(())
+    }
+
+    /// Detach memory backing from a resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource whose backing should be detached.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn detach_resource_backing(&self, resource_id: u32) -> HandleResult<()> {
+        let request = GpuResourceRequest { resource_id };
+        self.file.as_handle().control(
+            commands::GPU_DETACH_RESOURCE_BACKING,
+            &request as *const _ as usize,
+        )?;
+        Ok(())
+    }
+
+    fn transfer_request(transfer: GpuTransfer3d) -> GpuTransfer3dRequest {
+        GpuTransfer3dRequest {
+            context_id: transfer.context_id,
+            flags: if transfer.fence_id.is_some() {
+                GPU_TRANSFER_FLAG_FENCE
+            } else {
+                0
+            },
+            fence_id: transfer.fence_id.unwrap_or(0),
+            resource_id: transfer.resource_id,
+            level: transfer.level,
+            offset: transfer.offset,
+            stride: transfer.stride,
+            layer_stride: transfer.layer_stride,
+            x: transfer.x,
+            y: transfer.y,
+            z: transfer.z,
+            width: transfer.width,
+            height: transfer.height,
+            depth: transfer.depth,
+        }
+    }
+
+    /// Transfer attached backing memory to a host 3D resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `transfer` - Transfer region, strides, and optional fence.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn transfer_to_host_3d(&self, transfer: GpuTransfer3d) -> HandleResult<()> {
+        let request = Self::transfer_request(transfer);
+        self.file.as_handle().control(
+            commands::GPU_TRANSFER_TO_HOST_3D,
+            &request as *const _ as usize,
+        )?;
+        Ok(())
+    }
+
+    /// Transfer a host 3D resource into attached backing memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `transfer` - Transfer region, strides, and optional fence.
+    ///
+    /// # Returns
+    ///
+    /// Success or a handle error.
+    pub fn transfer_from_host_3d(&self, transfer: GpuTransfer3d) -> HandleResult<()> {
+        let request = Self::transfer_request(transfer);
+        self.file.as_handle().control(
+            commands::GPU_TRANSFER_FROM_HOST_3D,
+            &request as *const _ as usize,
+        )?;
         Ok(())
     }
 

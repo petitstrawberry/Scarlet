@@ -106,6 +106,46 @@ pub struct GpuResource3dDescription {
     pub flags: u32,
 }
 
+/// Physical memory segment attached to a GPU resource.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuMemoryEntry {
+    /// Physical base address visible to the device.
+    pub paddr: usize,
+    /// Segment length in bytes.
+    pub length: usize,
+}
+
+/// GPU 3D transfer descriptor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuTransfer3d {
+    /// GPU context associated with the transfer.
+    pub context_id: u32,
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Optional fence identifier signaled when the transfer completes.
+    pub fence_id: Option<u64>,
+    /// Offset into the attached backing memory.
+    pub offset: u64,
+    /// Mip level.
+    pub level: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// Layer stride in bytes.
+    pub layer_stride: u32,
+    /// X origin.
+    pub x: u32,
+    /// Y origin.
+    pub y: u32,
+    /// Z origin.
+    pub z: u32,
+    /// Transfer width.
+    pub width: u32,
+    /// Transfer height.
+    pub height: u32,
+    /// Transfer depth.
+    pub depth: u32,
+}
+
 /// Non-framebuffer GPU interface.
 ///
 /// `GpuDevice` is intentionally separate from `GraphicsDevice`: a device may
@@ -221,6 +261,37 @@ pub trait GpuDevice: Device {
         Err("GPU resources are not supported")
     }
 
+    /// Attach guest memory backing to a resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource that should use the backing memory.
+    /// * `entries` - Physical memory segments backing the resource.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why backing attachment failed.
+    fn attach_resource_backing(
+        &self,
+        _resource_id: u32,
+        _entries: &[GpuMemoryEntry],
+    ) -> Result<(), &'static str> {
+        Err("GPU resource backing is not supported")
+    }
+
+    /// Detach guest memory backing from a resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Resource whose backing should be detached.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why backing detachment failed.
+    fn detach_resource_backing(&self, _resource_id: u32) -> Result<(), &'static str> {
+        Err("GPU resource backing is not supported")
+    }
+
     /// Detach a resource from a GPU context.
     ///
     /// # Arguments
@@ -233,6 +304,32 @@ pub trait GpuDevice: Device {
     /// Success or an error describing why detachment failed.
     fn detach_resource(&self, _context_id: u32, _resource_id: u32) -> Result<(), &'static str> {
         Err("GPU resources are not supported")
+    }
+
+    /// Transfer attached backing memory to a host 3D resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `transfer` - Transfer region, strides, and optional fence.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why the transfer failed.
+    fn transfer_to_host_3d(&self, _transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        Err("GPU 3D transfers are not supported")
+    }
+
+    /// Transfer a host 3D resource into attached backing memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `transfer` - Transfer region, strides, and optional fence.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why the transfer failed.
+    fn transfer_from_host_3d(&self, _transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        Err("GPU 3D transfers are not supported")
     }
 
     /// Submit a backend-specific GPU command stream.
@@ -271,6 +368,14 @@ pub mod gpu_commands {
     pub const GPU_ATTACH_RESOURCE: u32 = 0x4708;
     /// Detach a resource from a GPU context.
     pub const GPU_DETACH_RESOURCE: u32 = 0x4709;
+    /// Attach userspace memory backing to a resource.
+    pub const GPU_ATTACH_RESOURCE_BACKING: u32 = 0x470a;
+    /// Detach memory backing from a resource.
+    pub const GPU_DETACH_RESOURCE_BACKING: u32 = 0x470b;
+    /// Transfer attached backing memory to a host 3D resource.
+    pub const GPU_TRANSFER_TO_HOST_3D: u32 = 0x470c;
+    /// Transfer a host 3D resource into attached backing memory.
+    pub const GPU_TRANSFER_FROM_HOST_3D: u32 = 0x470d;
 }
 
 /// Capability bit for virgl command submission.
@@ -283,6 +388,8 @@ pub const GPU_CAPABILITY_FENCES: u32 = 1 << 2;
 pub const GPU_CAPABILITY_CONTEXT_INIT: u32 = 1 << 3;
 /// Submission flag indicating `fence_id` should be used.
 pub const GPU_SUBMIT_FLAG_FENCE: u32 = 1 << 0;
+/// Transfer flag indicating `fence_id` should be used.
+pub const GPU_TRANSFER_FLAG_FENCE: u32 = 1 << 0;
 /// Maximum debug context name accepted by the neutral GPU ABI.
 pub const GPU_CONTEXT_NAME_MAX: usize = 64;
 
@@ -400,6 +507,52 @@ pub struct GpuContextResourceRequest {
     pub resource_id: u32,
 }
 
+/// Userspace resource backing attachment request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuAttachResourceBackingRequest {
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Userspace buffer pointer.
+    pub buffer_ptr: usize,
+    /// Userspace buffer length in bytes.
+    pub buffer_len: usize,
+}
+
+/// Userspace 3D transfer request.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GpuTransfer3dRequest {
+    /// GPU context associated with the transfer.
+    pub context_id: u32,
+    /// Transfer flags such as `GPU_TRANSFER_FLAG_FENCE`.
+    pub flags: u32,
+    /// Optional fence identifier.
+    pub fence_id: u64,
+    /// Resource identifier.
+    pub resource_id: u32,
+    /// Mip level.
+    pub level: u32,
+    /// Offset into attached backing memory.
+    pub offset: u64,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// Layer stride in bytes.
+    pub layer_stride: u32,
+    /// X origin.
+    pub x: u32,
+    /// Y origin.
+    pub y: u32,
+    /// Z origin.
+    pub z: u32,
+    /// Transfer width.
+    pub width: u32,
+    /// Transfer height.
+    pub height: u32,
+    /// Transfer depth.
+    pub depth: u32,
+}
+
 fn gpu_feature_bits(capabilities: &GpuCapabilities) -> u32 {
     let mut bits = 0;
     for feature in capabilities.features.iter() {
@@ -435,6 +588,38 @@ fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> 
         core::ptr::write(ptr as *mut T, *value);
     }
     Ok(())
+}
+
+fn user_buffer_to_memory_entries(
+    buffer_ptr: usize,
+    buffer_len: usize,
+) -> Result<Vec<GpuMemoryEntry>, &'static str> {
+    if buffer_ptr == 0 || buffer_len == 0 {
+        return Err("GPU backing buffer is invalid");
+    }
+
+    let task = crate::task::mytask().ok_or("No current task for GPU backing buffer")?;
+    let mut entries = Vec::new();
+    let mut cursor = buffer_ptr;
+    let mut remaining = buffer_len;
+    while remaining != 0 {
+        let page_offset = cursor & (crate::environment::PAGE_SIZE - 1);
+        let chunk_len = (crate::environment::PAGE_SIZE - page_offset).min(remaining);
+        let paddr = task
+            .vm_manager
+            .translate_to_phys_with_access(
+                cursor,
+                crate::object::capability::memory_mapping::AccessOp::Store,
+            )
+            .ok_or("Failed to translate GPU backing buffer")?;
+        entries.push(GpuMemoryEntry {
+            paddr,
+            length: chunk_len,
+        });
+        cursor += chunk_len;
+        remaining -= chunk_len;
+    }
+    Ok(entries)
 }
 
 /// Character device exposing a `GpuDevice` to userspace.
@@ -560,6 +745,56 @@ impl GpuCharDevice {
         Ok(0)
     }
 
+    fn handle_attach_resource_backing(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuAttachResourceBackingRequest = read_user_value(arg)?;
+        let entries = user_buffer_to_memory_entries(request.buffer_ptr, request.buffer_len)?;
+        self.gpu
+            .attach_resource_backing(request.resource_id, &entries)?;
+        Ok(0)
+    }
+
+    fn handle_detach_resource_backing(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuResourceRequest = read_user_value(arg)?;
+        self.gpu.detach_resource_backing(request.resource_id)?;
+        Ok(0)
+    }
+
+    fn gpu_transfer_from_request(request: GpuTransfer3dRequest) -> GpuTransfer3d {
+        GpuTransfer3d {
+            context_id: request.context_id,
+            resource_id: request.resource_id,
+            fence_id: if (request.flags & GPU_TRANSFER_FLAG_FENCE) != 0 {
+                Some(request.fence_id)
+            } else {
+                None
+            },
+            offset: request.offset,
+            level: request.level,
+            stride: request.stride,
+            layer_stride: request.layer_stride,
+            x: request.x,
+            y: request.y,
+            z: request.z,
+            width: request.width,
+            height: request.height,
+            depth: request.depth,
+        }
+    }
+
+    fn handle_transfer_to_host_3d(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuTransfer3dRequest = read_user_value(arg)?;
+        self.gpu
+            .transfer_to_host_3d(Self::gpu_transfer_from_request(request))?;
+        Ok(0)
+    }
+
+    fn handle_transfer_from_host_3d(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: GpuTransfer3dRequest = read_user_value(arg)?;
+        self.gpu
+            .transfer_from_host_3d(Self::gpu_transfer_from_request(request))?;
+        Ok(0)
+    }
+
     fn handle_submit_commands(&self, arg: usize) -> Result<i32, &'static str> {
         let request: GpuSubmitRequest = read_user_value(arg)?;
         if request.commands_ptr == 0 || request.commands_len == 0 {
@@ -644,6 +879,10 @@ impl crate::object::capability::ControlOps for GpuCharDevice {
             GPU_UNREF_RESOURCE => self.handle_unref_resource(arg),
             GPU_ATTACH_RESOURCE => self.handle_attach_resource(arg),
             GPU_DETACH_RESOURCE => self.handle_detach_resource(arg),
+            GPU_ATTACH_RESOURCE_BACKING => self.handle_attach_resource_backing(arg),
+            GPU_DETACH_RESOURCE_BACKING => self.handle_detach_resource_backing(arg),
+            GPU_TRANSFER_TO_HOST_3D => self.handle_transfer_to_host_3d(arg),
+            GPU_TRANSFER_FROM_HOST_3D => self.handle_transfer_from_host_3d(arg),
             _ => Err("Unsupported GPU control command"),
         }
     }

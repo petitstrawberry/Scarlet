@@ -14,7 +14,7 @@ use crate::{
         Device, DeviceType,
         gpu::{
             GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature,
-            GpuResource3dDescription,
+            GpuMemoryEntry, GpuResource3dDescription, GpuTransfer3d,
         },
         graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
     },
@@ -159,6 +159,29 @@ struct VirtioGpuCtxResource {
     padding: u32,
 }
 
+/// VirtIO GPU 3D transfer box.
+#[repr(C)]
+struct VirtioGpuBox {
+    x: u32,
+    y: u32,
+    z: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+}
+
+/// VirtIO GPU 3D host transfer command.
+#[repr(C)]
+struct VirtioGpuTransferHost3d {
+    hdr: VirtioGpuCtrlHdr,
+    box_: VirtioGpuBox,
+    offset: u64,
+    resource_id: u32,
+    level: u32,
+    stride: u32,
+    layer_stride: u32,
+}
+
 /// VirtIO GPU set scanout
 #[repr(C)]
 struct VirtioGpuSetScanout {
@@ -193,6 +216,14 @@ struct VirtioGpuResourceAttachBacking {
     hdr: VirtioGpuCtrlHdr,
     resource_id: u32,
     nr_entries: u32,
+}
+
+/// VirtIO GPU resource detach backing.
+#[repr(C)]
+struct VirtioGpuResourceDetachBacking {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    padding: u32,
 }
 
 /// VirtIO GPU memory entry
@@ -672,6 +703,52 @@ impl VirtioGpuDeviceCore {
         self.send_control_command(&cmd)
     }
 
+    fn transfer_3d(&self, command_type: u32, transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        self.require_virgl()?;
+        if transfer.resource_id == 0 {
+            return Err("Cannot transfer resource 0");
+        }
+        if transfer.width == 0 || transfer.height == 0 || transfer.depth == 0 {
+            return Err("Cannot issue a zero-sized GPU 3D transfer");
+        }
+
+        let cmd = VirtioGpuTransferHost3d {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: command_type,
+                flags: if transfer.fence_id.is_some() {
+                    VIRTIO_GPU_FLAG_FENCE
+                } else {
+                    0
+                },
+                fence_id: transfer.fence_id.unwrap_or(0),
+                ctx_id: transfer.context_id,
+                padding: 0,
+            },
+            box_: VirtioGpuBox {
+                x: transfer.x,
+                y: transfer.y,
+                z: transfer.z,
+                width: transfer.width,
+                height: transfer.height,
+                depth: transfer.depth,
+            },
+            offset: transfer.offset,
+            resource_id: transfer.resource_id,
+            level: transfer.level,
+            stride: transfer.stride,
+            layer_stride: transfer.layer_stride,
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn transfer_to_host_3d(&self, transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        self.transfer_3d(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, transfer)
+    }
+
+    fn transfer_from_host_3d(&self, transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        self.transfer_3d(VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, transfer)
+    }
+
     fn submit_3d_commands(
         &self,
         context_id: u32,
@@ -797,43 +874,89 @@ impl VirtioGpuDeviceCore {
         Ok(resource_id)
     }
 
-    /// Attach backing memory to a resource
+    /// Attach backing memory to a resource.
+    fn attach_backing_entries_to_resource(
+        &self,
+        resource_id: u32,
+        entries: &[GpuMemoryEntry],
+    ) -> Result<(), &'static str> {
+        if resource_id == 0 {
+            return Err("Cannot attach backing to resource 0");
+        }
+        if entries.is_empty() {
+            return Err("Cannot attach empty resource backing");
+        }
+        if entries.len() > u32::MAX as usize {
+            return Err("Too many GPU backing entries");
+        }
+
+        let attach = VirtioGpuResourceAttachBacking {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            nr_entries: entries.len() as u32,
+        };
+        let mut cmd_buffer = Vec::with_capacity(
+            core::mem::size_of::<VirtioGpuResourceAttachBacking>()
+                + entries.len() * core::mem::size_of::<VirtioGpuMemEntry>(),
+        );
+        append_pod_bytes(&mut cmd_buffer, &attach);
+        for entry in entries {
+            if entry.length == 0 || entry.length > u32::MAX as usize {
+                return Err("GPU backing entry length is invalid");
+            }
+            append_pod_bytes(
+                &mut cmd_buffer,
+                &VirtioGpuMemEntry {
+                    addr: entry.paddr as u64,
+                    length: entry.length as u32,
+                    padding: 0,
+                },
+            );
+        }
+
+        self.send_control_bytes_with_resp_buffer(&cmd_buffer, &mut [0u8; 128])
+    }
+
+    /// Attach one contiguous backing memory range to a resource.
     fn attach_backing_to_resource(
         &self,
         resource_id: u32,
         addr: usize,
         size: usize,
     ) -> Result<(), &'static str> {
-        // Create attach backing command + memory entry in a single buffer
-        #[repr(C)]
-        struct AttachBackingWithEntry {
-            attach: VirtioGpuResourceAttachBacking,
-            entry: VirtioGpuMemEntry,
+        self.attach_backing_entries_to_resource(
+            resource_id,
+            core::slice::from_ref(&GpuMemoryEntry {
+                paddr: addr,
+                length: size,
+            }),
+        )
+    }
+
+    /// Detach backing memory from a resource.
+    fn detach_backing_from_resource(&self, resource_id: u32) -> Result<(), &'static str> {
+        if resource_id == 0 {
+            return Err("Cannot detach backing from resource 0");
         }
 
-        let cmd = AttachBackingWithEntry {
-            attach: VirtioGpuResourceAttachBacking {
-                hdr: VirtioGpuCtrlHdr {
-                    hdr_type: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
-                    flags: 0,
-                    fence_id: 0,
-                    ctx_id: 0,
-                    padding: 0,
-                },
-                resource_id,
-                nr_entries: 1,
-            },
-            entry: VirtioGpuMemEntry {
-                addr: addr as u64,
-                length: size as u32,
+        let cmd = VirtioGpuResourceDetachBacking {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
                 padding: 0,
             },
+            resource_id,
+            padding: 0,
         };
-
-        // crate::early_println!("[Virtio GPU] Attaching framebuffer memory {:#x} (size {}) to resource {}",
-        //     addr, size, resource_id);
-        self.send_control_command(&cmd)?;
-        Ok(())
+        self.send_control_command(&cmd)
     }
 
     /// Set up framebuffer
@@ -1221,6 +1344,28 @@ impl GpuDevice for VirtioGpuDevice {
 
     fn detach_resource(&self, context_id: u32, resource_id: u32) -> Result<(), &'static str> {
         self.core.lock().detach_resource(context_id, resource_id)
+    }
+
+    fn attach_resource_backing(
+        &self,
+        resource_id: u32,
+        entries: &[GpuMemoryEntry],
+    ) -> Result<(), &'static str> {
+        self.core
+            .lock()
+            .attach_backing_entries_to_resource(resource_id, entries)
+    }
+
+    fn detach_resource_backing(&self, resource_id: u32) -> Result<(), &'static str> {
+        self.core.lock().detach_backing_from_resource(resource_id)
+    }
+
+    fn transfer_to_host_3d(&self, transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        self.core.lock().transfer_to_host_3d(transfer)
+    }
+
+    fn transfer_from_host_3d(&self, transfer: GpuTransfer3d) -> Result<(), &'static str> {
+        self.core.lock().transfer_from_host_3d(transfer)
     }
 
     fn submit_commands(&self, submission: GpuCommandSubmission<'_>) -> Result<(), &'static str> {
