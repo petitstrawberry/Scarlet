@@ -7,7 +7,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 use spin::Mutex;
 
-use self::output::DisplayOutput;
+use self::output::{DisplayOutput, DisplayRegion};
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
@@ -165,6 +165,48 @@ pub trait GraphicsDevice: Device {
         width: u32,
         height: u32,
     ) -> Result<(), &'static str>;
+
+    /// Present a framebuffer backing store to the display pipeline.
+    ///
+    /// This separates display presentation from the legacy framebuffer flush
+    /// entrypoint. Devices may override it when the scanout/present path is not
+    /// just a flush of the same framebuffer memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Framebuffer configuration for the backing store.
+    /// * `physical_addr` - Physical address of the framebuffer backing store.
+    /// * `region` - Optional update region. `None` means the whole framebuffer.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_framebuffer_region(
+        &self,
+        config: &FramebufferConfig,
+        _physical_addr: usize,
+        region: Option<DisplayRegion>,
+    ) -> Result<(), &'static str> {
+        let region = region.unwrap_or_else(|| DisplayRegion::full(config));
+        self.flush_framebuffer(region.x, region.y, region.width, region.height)
+    }
+
+    /// Present the device's current framebuffer to the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `region` - Optional update region. `None` means the whole framebuffer.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_current_framebuffer_region(
+        &self,
+        region: Option<DisplayRegion>,
+    ) -> Result<(), &'static str> {
+        let (config, physical_addr) = self.get_framebuffer_info()?;
+        self.present_framebuffer_region(&config, physical_addr, region)
+    }
 
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;

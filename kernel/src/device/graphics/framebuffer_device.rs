@@ -937,10 +937,11 @@ impl FramebufferCharDevice {
         if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
             // Check if the device supports graphics operations
             if let Some(graphics_device) = device.as_graphics_device() {
-                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let (_, physical_addr) = graphics_device.get_framebuffer_info()?;
 
-                // Trigger a full framebuffer flush to ensure display is updated
-                graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
+                // Present through the display pipeline. The legacy framebuffer
+                // device remains only the userspace-compatible backing store.
+                graphics_device.present_current_framebuffer_region(None)?;
 
                 // Verify that the framebuffer address is still valid
                 if physical_addr == 0 {
