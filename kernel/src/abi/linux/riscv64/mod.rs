@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 
 use crate::abi::linux::generic;
 use crate::{
-    abi::AbiModule,
+    abi::{AbiModule, EventProcessOutcome},
     arch::{self, IntRegisters},
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
@@ -79,7 +79,7 @@ impl AbiModule for LinuxRiscv64Abi {
         &mut self,
         event: crate::ipc::Event,
         target_task_id: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<EventProcessOutcome, &'static str> {
         generic::signal::handle_event_for_task(
             &self.0,
             &event,
