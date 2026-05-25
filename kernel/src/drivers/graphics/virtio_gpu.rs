@@ -12,10 +12,11 @@ use spin::{Mutex, RwLock};
 use crate::{
     device::{
         Device, DeviceType,
+        gpu::{GpuCapabilities, GpuCapsetInfo, GpuCommandSubmission, GpuDevice, GpuFeature},
         graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
     },
     drivers::virtio::{
-        device::VirtioDevice,
+        device::{Register, VirtioDevice},
         queue::{DescriptorFlag, VirtQueue},
     },
     mem::page::{ContiguousPages, Page, allocate_raw_pages},
@@ -38,10 +39,22 @@ const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
+const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
+const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
+const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
+const VIRTIO_GPU_CMD_CTX_DESTROY: u32 = 0x0201;
+const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0206;
 
 // VirtIO GPU Response Types
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
+const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
+
+// VirtIO GPU command flags
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
+const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
+const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 
 // VirtIO GPU Formats
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -148,6 +161,67 @@ struct VirtioGpuMemEntry {
     padding: u32,
 }
 
+/// VirtIO GPU capset info request.
+#[repr(C)]
+struct VirtioGpuGetCapsetInfo {
+    hdr: VirtioGpuCtrlHdr,
+    capset_index: u32,
+    padding: u32,
+}
+
+/// VirtIO GPU capset info response.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuRespCapsetInfo {
+    hdr: VirtioGpuCtrlHdr,
+    capset_id: u32,
+    capset_max_version: u32,
+    capset_max_size: u32,
+    padding: u32,
+}
+
+/// VirtIO GPU capset read request.
+#[repr(C)]
+struct VirtioGpuGetCapset {
+    hdr: VirtioGpuCtrlHdr,
+    capset_id: u32,
+    capset_version: u32,
+}
+
+/// VirtIO GPU context create request.
+#[repr(C)]
+struct VirtioGpuCtxCreate {
+    hdr: VirtioGpuCtrlHdr,
+    nlen: u32,
+    context_init: u32,
+    debug_name: [u8; VIRTIO_GPU_MAX_CONTEXT_NAME],
+}
+
+/// VirtIO GPU context destroy request.
+#[repr(C)]
+struct VirtioGpuCtxDestroy {
+    hdr: VirtioGpuCtrlHdr,
+}
+
+/// VirtIO GPU 3D command submission header.
+#[repr(C)]
+struct VirtioGpuCmdSubmit3d {
+    hdr: VirtioGpuCtrlHdr,
+    size: u32,
+    padding: u32,
+}
+
+/// Append a plain old data structure to a byte vector.
+fn append_pod_bytes<T>(buffer: &mut Vec<u8>, value: &T) {
+    // SAFETY: VirtIO command structures in this module are #[repr(C)] and are
+    // sent to the device as their raw byte representation. The borrowed value
+    // lives for the duration of the copy into `buffer`.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    buffer.extend_from_slice(bytes);
+}
+
 /// VirtIO GPU Device Core
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
@@ -161,6 +235,7 @@ pub struct VirtioGpuDeviceCore {
     retired_shadow_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
     resource_id: Mutex<u32>,
     current_resource_id: RwLock<Option<u32>>,
+    negotiated_features: RwLock<u32>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
     resources: Mutex<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
@@ -189,6 +264,7 @@ impl VirtioGpuDeviceCore {
             retired_shadow_framebuffer_allocs: Mutex::new(Vec::new()),
             resource_id: Mutex::new(1),
             current_resource_id: RwLock::new(None),
+            negotiated_features: RwLock::new(0),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
         };
@@ -202,8 +278,13 @@ impl VirtioGpuDeviceCore {
         }
 
         // Initialize the VirtIO device - this will set up the queues with the device
-        if device.init().is_err() {
-            crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
+        match device.init() {
+            Ok(features) => {
+                *device.negotiated_features.write() = features;
+            }
+            Err(_) => {
+                crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
+            }
         }
 
         // crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
@@ -230,6 +311,20 @@ impl VirtioGpuDeviceCore {
         cmd: &T,
         resp_buffer: &mut [u8],
     ) -> Result<(), &'static str> {
+        // SAFETY: The command object remains borrowed until the synchronous
+        // control queue request completes.
+        let cmd_buffer = unsafe {
+            core::slice::from_raw_parts(cmd as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        self.send_control_bytes_with_resp_buffer(cmd_buffer, resp_buffer)
+    }
+
+    /// Send raw command bytes to the control queue, using a caller-provided response buffer.
+    fn send_control_bytes_with_resp_buffer(
+        &self,
+        cmd_buffer: &[u8],
+        resp_buffer: &mut [u8],
+    ) -> Result<(), &'static str> {
         let mut virtqueues = self.virtqueues.lock();
         let control_queue = &mut virtqueues[0]; // Control queue is index 0
 
@@ -249,13 +344,13 @@ impl VirtioGpuDeviceCore {
         // Set up command descriptor (device readable)
         let cmd_desc_ptr =
             &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
-        let cmd_virt_addr = cmd as *const T as usize;
+        let cmd_virt_addr = cmd_buffer.as_ptr() as usize;
         let cmd_phys_addr = crate::vm::get_kernel_vm_manager()
             .translate_to_phys(cmd_virt_addr)
             .ok_or("Failed to translate cmd vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_phys_addr as u64);
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, core::mem::size_of::<T>() as u32);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, cmd_buffer.len() as u32);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
         }
@@ -269,12 +364,9 @@ impl VirtioGpuDeviceCore {
             .ok_or("Failed to translate resp_buffer vaddr to paddr")?;
         unsafe {
             core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_phys_addr as u64);
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32); // Use .len() for safety
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32);
             core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
         }
-
-        // crate::early_println!("[Virtio GPU] Sending command to control queue: type={}",
-        //     unsafe { *(cmd as *const T as *const u32) });
 
         // Submit the request to the queue
         if let Err(e) = control_queue.push(cmd_desc) {
@@ -288,7 +380,6 @@ impl VirtioGpuDeviceCore {
         self.notify(0); // Notify control queue
 
         // Wait for response (simplified polling)
-        // crate::early_println!("[Virtio GPU] Waiting for command response...");
         while control_queue.is_busy() {}
         while *control_queue.used.idx == control_queue.last_used_idx {}
 
@@ -307,9 +398,173 @@ impl VirtioGpuDeviceCore {
         control_queue.free_desc(resp_desc);
         control_queue.free_desc(cmd_desc);
 
-        // crate::early_println!("[Virtio GPU] Command completed successfully");
-
         Ok(())
+    }
+
+    fn negotiated_feature_enabled(&self, feature: u32) -> bool {
+        (*self.negotiated_features.read() & (1u32 << feature)) != 0
+    }
+
+    fn read_config_u32(&self, offset: usize) -> u32 {
+        let addr = self.base_addr + Register::DeviceConfig.offset() + offset;
+        unsafe { crate::arch::mmio::read32(addr) }
+    }
+
+    fn require_virgl(&self) -> Result<(), &'static str> {
+        if self.negotiated_feature_enabled(VIRTIO_GPU_F_VIRGL) {
+            Ok(())
+        } else {
+            Err("virtio-gpu virgl feature was not negotiated")
+        }
+    }
+
+    fn gpu_capabilities(&self) -> GpuCapabilities {
+        let mut capabilities = GpuCapabilities::empty();
+        if self.negotiated_feature_enabled(VIRTIO_GPU_F_VIRGL) {
+            capabilities.features.push(GpuFeature::Virgl);
+            capabilities.capset_count = self.read_config_u32(VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET);
+        }
+        capabilities
+    }
+
+    fn get_capset_info(&self, index: u32) -> Result<GpuCapsetInfo, &'static str> {
+        self.require_virgl()?;
+
+        let cmd = VirtioGpuGetCapsetInfo {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_GET_CAPSET_INFO,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            capset_index: index,
+            padding: 0,
+        };
+        let mut resp_buffer = [0u8; core::mem::size_of::<VirtioGpuRespCapsetInfo>()];
+        self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
+
+        // SAFETY: The response buffer is exactly the response structure size and
+        // may be unaligned because it is byte storage.
+        let response = unsafe {
+            core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuRespCapsetInfo)
+        };
+        if response.hdr.hdr_type != VIRTIO_GPU_RESP_OK_CAPSET_INFO {
+            return Err("GET_CAPSET_INFO returned unexpected response");
+        }
+
+        Ok(GpuCapsetInfo {
+            id: response.capset_id,
+            max_version: response.capset_max_version,
+            max_size: response.capset_max_size,
+        })
+    }
+
+    fn read_capset(&self, id: u32, version: u32, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        self.require_virgl()?;
+
+        let cmd = VirtioGpuGetCapset {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_GET_CAPSET,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            capset_id: id,
+            capset_version: version,
+        };
+        let header_size = core::mem::size_of::<VirtioGpuCtrlHdr>();
+        let mut resp_buffer = alloc::vec![0u8; header_size + buffer.len()];
+        self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
+
+        // SAFETY: The response starts with a VirtIO GPU control header. The
+        // byte buffer may be unaligned, so use read_unaligned.
+        let response =
+            unsafe { core::ptr::read_unaligned(resp_buffer.as_ptr() as *const VirtioGpuCtrlHdr) };
+        if response.hdr_type != VIRTIO_GPU_RESP_OK_CAPSET {
+            return Err("GET_CAPSET returned unexpected response");
+        }
+
+        let data_len = buffer
+            .len()
+            .min(resp_buffer.len().saturating_sub(header_size));
+        buffer[..data_len].copy_from_slice(&resp_buffer[header_size..header_size + data_len]);
+        Ok(data_len)
+    }
+
+    fn create_context(&self, context_id: u32, debug_name: &str) -> Result<(), &'static str> {
+        self.require_virgl()?;
+
+        let mut name = [0u8; VIRTIO_GPU_MAX_CONTEXT_NAME];
+        let name_bytes = debug_name.as_bytes();
+        let name_len = name_bytes.len().min(VIRTIO_GPU_MAX_CONTEXT_NAME);
+        name[..name_len].copy_from_slice(&name_bytes[..name_len]);
+
+        let cmd = VirtioGpuCtxCreate {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_CTX_CREATE,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: context_id,
+                padding: 0,
+            },
+            nlen: name_len as u32,
+            context_init: 0,
+            debug_name: name,
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn destroy_context(&self, context_id: u32) -> Result<(), &'static str> {
+        self.require_virgl()?;
+
+        let cmd = VirtioGpuCtxDestroy {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_CTX_DESTROY,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: context_id,
+                padding: 0,
+            },
+        };
+        self.send_control_command(&cmd)
+    }
+
+    fn submit_3d_commands(
+        &self,
+        context_id: u32,
+        commands: &[u8],
+        fence_id: Option<u64>,
+    ) -> Result<(), &'static str> {
+        self.require_virgl()?;
+        if commands.is_empty() {
+            return Err("Cannot submit an empty GPU command stream");
+        }
+
+        let header = VirtioGpuCmdSubmit3d {
+            hdr: VirtioGpuCtrlHdr {
+                hdr_type: VIRTIO_GPU_CMD_SUBMIT_3D,
+                flags: if fence_id.is_some() {
+                    VIRTIO_GPU_FLAG_FENCE
+                } else {
+                    0
+                },
+                fence_id: fence_id.unwrap_or(0),
+                ctx_id: context_id,
+                padding: 0,
+            },
+            size: commands.len() as u32,
+            padding: 0,
+        };
+
+        let mut cmd_buffer =
+            Vec::with_capacity(core::mem::size_of::<VirtioGpuCmdSubmit3d>() + commands.len());
+        append_pod_bytes(&mut cmd_buffer, &header);
+        cmd_buffer.extend_from_slice(commands);
+
+        let mut resp_buffer = [0u8; 128];
+        self.send_control_bytes_with_resp_buffer(&cmd_buffer, &mut resp_buffer)
     }
 
     /// Get display information from the device
@@ -691,9 +946,9 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const u16 as usize) as u64)
     }
 
-    fn get_supported_features(&self, _device_features: u32) -> u32 {
-        // For now, don't enable any advanced features
-        0
+    fn get_supported_features(&self, device_features: u32) -> u32 {
+        let supported = (1u32 << VIRTIO_GPU_F_VIRGL) | (1u32 << VIRTIO_GPU_F_EDID);
+        device_features & supported
     }
 }
 
@@ -740,6 +995,10 @@ impl Device for VirtioGpuDevice {
     fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
         Some(self)
     }
+
+    fn as_gpu_device(&self) -> Option<&dyn GpuDevice> {
+        Some(self)
+    }
 }
 
 impl ControlOps for VirtioGpuDevice {
@@ -780,6 +1039,36 @@ impl Selectable for VirtioGpuDevice {
         _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+}
+
+impl GpuDevice for VirtioGpuDevice {
+    fn gpu_capabilities(&self) -> GpuCapabilities {
+        self.core.lock().gpu_capabilities()
+    }
+
+    fn get_capset_info(&self, index: u32) -> Result<GpuCapsetInfo, &'static str> {
+        self.core.lock().get_capset_info(index)
+    }
+
+    fn read_capset(&self, id: u32, version: u32, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        self.core.lock().read_capset(id, version, buffer)
+    }
+
+    fn create_context(&self, context_id: u32, debug_name: &str) -> Result<(), &'static str> {
+        self.core.lock().create_context(context_id, debug_name)
+    }
+
+    fn destroy_context(&self, context_id: u32) -> Result<(), &'static str> {
+        self.core.lock().destroy_context(context_id)
+    }
+
+    fn submit_commands(&self, submission: GpuCommandSubmission<'_>) -> Result<(), &'static str> {
+        self.core.lock().submit_3d_commands(
+            submission.context_id,
+            submission.commands,
+            submission.fence_id,
+        )
     }
 }
 
