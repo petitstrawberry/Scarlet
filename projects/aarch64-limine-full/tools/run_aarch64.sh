@@ -231,11 +231,20 @@ case "$QEMU_DISPLAY" in
     sdl)
         QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
         ;;
+    gtk-gl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display gtk,gl=on)
+        ;;
+    sdl-gl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl,gl=on)
+        ;;
+    egl-headless)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display egl-headless,gl=on)
+        ;;
     none)
         QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
         ;;
     *)
-        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, or none)"
+        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, gtk-gl, sdl-gl, egl-headless, or none)"
         exit 1
         ;;
 esac
@@ -245,13 +254,16 @@ case "$QEMU_FRAMEBUFFER" in
     virtio-gpu)
         QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
         ;;
+    virgl|virtio-gpu-gl)
+        QEMU_FRAMEBUFFER_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
     ramfb)
         QEMU_FRAMEBUFFER_ARGS=(-device ramfb)
         ;;
     none)
         ;;
     *)
-        echo "Error: unsupported SCARLET_QEMU_FRAMEBUFFER_AARCH64=$QEMU_FRAMEBUFFER"
+        echo "Error: unsupported SCARLET_QEMU_FRAMEBUFFER_AARCH64=$QEMU_FRAMEBUFFER (expected virtio-gpu, virgl, virtio-gpu-gl, ramfb, or none)"
         exit 1
         ;;
 esac
