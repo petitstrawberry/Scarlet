@@ -314,6 +314,7 @@ pub struct TextGrid {
     cell_height: f32,
     font_size: f32,
     font_stack: Option<FontStack>,
+    background_color: Color,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
 }
@@ -335,6 +336,7 @@ impl TextGrid {
             cell_height: 18.0,
             font_size: 16.0,
             font_stack: None,
+            background_color: Color::BLACK,
             cursor: None,
             cursor_color: Color::rgba_f32(1.0, 1.0, 1.0, 0.65),
         }
@@ -387,6 +389,23 @@ impl TextGrid {
         self
     }
 
+    /// Set the view background color.
+    ///
+    /// This color is painted across the full text-grid view before cell
+    /// backgrounds and glyphs are rendered.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Background color for the whole view.
+    ///
+    /// # Returns
+    ///
+    /// Updated view.
+    pub fn background_color(mut self, color: Color) -> Self {
+        self.background_color = color;
+        self
+    }
+
     /// Set cursor position.
     ///
     /// # Arguments
@@ -435,6 +454,7 @@ impl View for TextGrid {
                 self.cell_height,
                 self.font_size,
                 self.font_stack.clone(),
+                self.background_color,
                 self.cursor,
                 self.cursor_color,
             ),
@@ -457,6 +477,7 @@ pub struct TextGridRenderObject {
     cell_height: f32,
     font_size: f32,
     font_stack: Option<FontStack>,
+    background_color: Color,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
     size: Size,
@@ -475,6 +496,7 @@ impl TextGridRenderObject {
     /// * `cell_height` - Cell height in pixels.
     /// * `font_size` - Font size in pixels.
     /// * `font_stack` - Optional view-local font stack.
+    /// * `background_color` - Background color for the whole view.
     /// * `cursor` - Optional cursor.
     /// * `cursor_color` - Cursor overlay color.
     ///
@@ -487,6 +509,7 @@ impl TextGridRenderObject {
         cell_height: f32,
         font_size: f32,
         font_stack: Option<FontStack>,
+        background_color: Color,
         cursor: Option<TextGridCursor>,
         cursor_color: Color,
     ) -> Self {
@@ -496,6 +519,7 @@ impl TextGridRenderObject {
             cell_height: cell_height.max(1.0),
             font_size: font_size.max(1.0),
             font_stack,
+            background_color,
             cursor,
             cursor_color,
             size: Size::ZERO,
@@ -603,17 +627,6 @@ impl TextGridRenderObject {
         }
     }
 
-    fn background_color(&self) -> Color {
-        let Some(cell) = self.grid.cells().first().copied() else {
-            return Color::BLACK;
-        };
-        if cell.inverse {
-            cell.foreground
-        } else {
-            cell.background
-        }
-    }
-
     fn grid_pixel_width(&self) -> u32 {
         libm::ceilf(self.grid.columns() as f32 * self.cell_width).max(0.0) as u32
     }
@@ -623,7 +636,7 @@ impl TextGridRenderObject {
     }
 
     fn repaint_remainder(&self, canvas: &mut graphics::Canvas<'_>, width: u32, height: u32) {
-        let background = self.background_color();
+        let background = self.background_color;
         let grid_width = self.grid_pixel_width().min(width);
         let grid_height = self.grid_pixel_height().min(height);
 
@@ -689,14 +702,24 @@ impl ElementRenderObject for TextGridRenderObject {
         let natural_width = self.grid.columns() as f32 * self.cell_width;
         let natural_height = self.grid.rows() as f32 * self.cell_height;
 
-        let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+        let width = if constraints.is_tight_width()
+            && constraints.max_width.is_finite()
+            && constraints.max_width > 0.0
+        {
+            constraints.max_width.max(1.0)
+        } else if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
             natural_width
                 .min(constraints.max_width)
                 .max(constraints.min_width)
         } else {
             natural_width.max(constraints.min_width).max(1.0)
         };
-        let height = if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+        let height = if constraints.is_tight_height()
+            && constraints.max_height.is_finite()
+            && constraints.max_height > 0.0
+        {
+            constraints.max_height.max(1.0)
+        } else if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
             natural_height
                 .min(constraints.max_height)
                 .max(constraints.min_height)
@@ -738,7 +761,7 @@ impl ElementRenderObject for TextGridRenderObject {
             let mut data = buffer.data_mut();
             let mut canvas = graphics::Canvas::new(&mut data, width, height);
             if self.full_repaint {
-                canvas.fill_rect(0, 0, width, height, self.background_color());
+                canvas.fill_rect(0, 0, width, height, self.background_color);
                 let visible_columns = self.visible_columns(width);
                 let visible_rows = self.visible_rows(height);
                 let columns = self.grid.columns();
@@ -801,6 +824,11 @@ impl ElementRenderObject for TextGridRenderObject {
         }
         if font_stack_id(self.font_stack.as_ref()) != font_stack_id(text_grid.font_stack.as_ref()) {
             self.font_stack = text_grid.font_stack.clone();
+            self.full_repaint = true;
+            changed = true;
+        }
+        if self.background_color != text_grid.background_color {
+            self.background_color = text_grid.background_color;
             self.full_repaint = true;
             changed = true;
         }

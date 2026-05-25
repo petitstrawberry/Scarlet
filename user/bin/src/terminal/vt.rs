@@ -682,7 +682,14 @@ impl VtScreen {
     }
 
     fn blank_cell(&self) -> TextGridCell {
-        TextGridCell::blank(self.foreground, self.background)
+        let mut cell = TextGridCell::blank(self.foreground, self.background);
+        cell.bold = self.bold;
+        cell.faint = self.faint;
+        cell.italic = self.italic;
+        cell.underline = self.underline;
+        cell.inverse = self.inverse;
+        cell.strikethrough = self.strikethrough;
+        cell
     }
 
     fn push_scrollback_row(&mut self, row: usize) {

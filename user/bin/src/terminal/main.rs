@@ -238,6 +238,7 @@ impl Application for TerminalApp {
             TextGrid::new(self.grid.clone())
                 .cell_size(metrics.cell_width, metrics.cell_height)
                 .font_size(metrics.font_size)
+                .background_color(Color::rgb(12, 14, 18))
                 .cursor(Some(self.cursor.get()))
                 .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
                 .on_key(move |event| {
