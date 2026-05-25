@@ -11,6 +11,7 @@ const CSI_PARAM_LIMIT: usize = 16;
 enum ParserState {
     Ground,
     Escape,
+    Charset,
     Csi,
     Ss3,
     Osc,
@@ -199,6 +200,7 @@ impl VtScreen {
         match self.parser_state {
             ParserState::Ground => self.feed_ground(byte),
             ParserState::Escape => self.feed_escape(byte),
+            ParserState::Charset => self.feed_charset(byte),
             ParserState::Csi => self.feed_csi(byte),
             ParserState::Ss3 => self.feed_ss3(byte),
             ParserState::Osc => self.feed_osc(byte),
@@ -288,6 +290,9 @@ impl VtScreen {
                 self.reset_csi();
                 self.parser_state = ParserState::Csi;
             }
+            b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => {
+                self.parser_state = ParserState::Charset;
+            }
             b'O' => {
                 self.parser_state = ParserState::Ss3;
             }
@@ -309,6 +314,10 @@ impl VtScreen {
             }
             _ => self.parser_state = ParserState::Ground,
         }
+    }
+
+    fn feed_charset(&mut self, _byte: u8) {
+        self.parser_state = ParserState::Ground;
     }
 
     fn feed_ss3(&mut self, byte: u8) {
