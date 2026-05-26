@@ -20,6 +20,16 @@ pub mod commands {
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
+/// Signed 24-bit little-endian interleaved PCM packed in 3 bytes.
+pub const AUDIO_PCM_FORMAT_S24LE3: u32 = 2;
+/// Signed 32-bit little-endian interleaved PCM.
+pub const AUDIO_PCM_FORMAT_S32LE: u32 = 3;
+/// 32-bit little-endian floating point interleaved PCM.
+pub const AUDIO_PCM_FORMAT_F32LE: u32 = 4;
+/// Signed 8-bit interleaved PCM.
+pub const AUDIO_PCM_FORMAT_S8: u32 = 5;
+/// Maximum sample rates returned in one capability query.
+pub const AUDIO_PCM_MAX_RATES: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +59,9 @@ impl AudioPcmParams {
     pub fn frame_bytes(&self) -> usize {
         match self.format {
             AUDIO_PCM_FORMAT_S16LE => self.channels as usize * 2,
+            AUDIO_PCM_FORMAT_S24LE3 => self.channels as usize * 3,
+            AUDIO_PCM_FORMAT_S32LE | AUDIO_PCM_FORMAT_F32LE => self.channels as usize * 4,
+            AUDIO_PCM_FORMAT_S8 => self.channels as usize,
             _ => 0,
         }
     }
@@ -58,14 +71,30 @@ impl AudioPcmParams {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AudioPcmCapabilities {
     pub formats: u32,
-    pub min_rate: u32,
-    pub max_rate: u32,
+    pub rate_count: u32,
+    pub rates: [u32; AUDIO_PCM_MAX_RATES],
     pub min_channels: u16,
     pub max_channels: u16,
     pub min_period_frames: u32,
     pub max_period_frames: u32,
     pub min_buffer_frames: u32,
     pub max_buffer_frames: u32,
+}
+
+impl AudioPcmCapabilities {
+    pub fn supports_format(&self, format: u32) -> bool {
+        if format >= u32::BITS {
+            return false;
+        }
+        self.formats & (1u32 << format) != 0
+    }
+
+    pub fn supports_rate(&self, rate: u32) -> bool {
+        self.rates
+            .iter()
+            .take(self.rate_count as usize)
+            .any(|supported| *supported == rate)
+    }
 }
 
 #[repr(C)]

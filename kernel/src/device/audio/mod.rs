@@ -51,6 +51,16 @@ pub mod commands {
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
+/// Signed 24-bit little-endian interleaved PCM packed in 3 bytes.
+pub const AUDIO_PCM_FORMAT_S24LE3: u32 = 2;
+/// Signed 32-bit little-endian interleaved PCM.
+pub const AUDIO_PCM_FORMAT_S32LE: u32 = 3;
+/// 32-bit little-endian floating point interleaved PCM.
+pub const AUDIO_PCM_FORMAT_F32LE: u32 = 4;
+/// Signed 8-bit interleaved PCM.
+pub const AUDIO_PCM_FORMAT_S8: u32 = 5;
+/// Maximum sample rates returned in one capability query.
+pub const AUDIO_PCM_MAX_RATES: usize = 16;
 
 /// Stream is configured but not running.
 pub const AUDIO_STATE_PREPARED: u32 = 1;
@@ -97,6 +107,9 @@ impl AudioPcmParams {
     pub fn frame_bytes(&self) -> Option<usize> {
         match self.format {
             AUDIO_PCM_FORMAT_S16LE => Some(self.channels as usize * 2),
+            AUDIO_PCM_FORMAT_S24LE3 => Some(self.channels as usize * 3),
+            AUDIO_PCM_FORMAT_S32LE | AUDIO_PCM_FORMAT_F32LE => Some(self.channels as usize * 4),
+            AUDIO_PCM_FORMAT_S8 => Some(self.channels as usize),
             _ => None,
         }
     }
@@ -115,9 +128,6 @@ impl AudioPcmParams {
         if self._reserved != 0 {
             return Err("Audio PCM reserved field must be zero");
         }
-        if self.format != AUDIO_PCM_FORMAT_S16LE {
-            return Err("Unsupported PCM format");
-        }
         if self.rate == 0 || self.channels == 0 {
             return Err("Invalid PCM rate or channel count");
         }
@@ -134,16 +144,24 @@ impl AudioPcmParams {
     }
 }
 
+fn pcm_format_bit(format: u32) -> Option<u32> {
+    if format < u32::BITS {
+        Some(1u32 << format)
+    } else {
+        None
+    }
+}
+
 /// PCM device capabilities exposed to user space.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AudioPcmCapabilities {
     /// Supported sample formats as native Scarlet format bits.
     pub formats: u32,
-    /// Minimum supported sample rate.
-    pub min_rate: u32,
-    /// Maximum supported sample rate.
-    pub max_rate: u32,
+    /// Number of valid entries in [`Self::rates`].
+    pub rate_count: u32,
+    /// Supported sample rates in Hz.
+    pub rates: [u32; AUDIO_PCM_MAX_RATES],
     /// Minimum supported channel count.
     pub min_channels: u16,
     /// Maximum supported channel count.
@@ -156,6 +174,32 @@ pub struct AudioPcmCapabilities {
     pub min_buffer_frames: u32,
     /// Maximum ring size in frames.
     pub max_buffer_frames: u32,
+}
+
+impl AudioPcmCapabilities {
+    fn supports_format(&self, format: u32) -> bool {
+        pcm_format_bit(format)
+            .map(|bit| self.formats & bit != 0)
+            .unwrap_or(false)
+    }
+
+    fn supports_rate(&self, rate: u32) -> bool {
+        self.rates
+            .iter()
+            .take(self.rate_count as usize)
+            .any(|supported| *supported == rate)
+    }
+
+    fn supports_params(&self, params: &AudioPcmParams) -> bool {
+        self.supports_format(params.format)
+            && self.supports_rate(params.rate)
+            && params.channels >= self.min_channels
+            && params.channels <= self.max_channels
+            && params.period_frames >= self.min_period_frames
+            && params.period_frames <= self.max_period_frames
+            && params.buffer_frames >= self.min_buffer_frames
+            && params.buffer_frames <= self.max_buffer_frames
+    }
 }
 
 /// mmap layout for a configured PCM ring.
@@ -551,6 +595,9 @@ impl AudioCharDevice {
     fn handle_set_params(&self, arg: usize) -> Result<i32, &'static str> {
         let params: AudioPcmParams = read_user_value(arg)?;
         params.validate()?;
+        if !self.backend.capabilities().supports_params(&params) {
+            return Err("Unsupported PCM parameters");
+        }
         let mut guard = self.ring.lock();
         if let Some(ring) = guard.as_ref() {
             match ring.state {

@@ -75,8 +75,36 @@ pub struct AudioPcmStatus {
 }
 ```
 
-The MVP supports `S16LE`, 48 kHz, stereo by default. The ABI keeps format/rate
-fields explicit so other formats can be added without changing the transport.
+Capabilities are also native ABI data. Formats are represented as a bitmask over
+Scarlet PCM format IDs. Sample rates are returned as an explicit list so the
+common ABI does not inherit a hardware-specific rate enum.
+
+```rust
+pub struct AudioPcmCapabilities {
+    pub formats: u32,
+    pub rate_count: u32,
+    pub rates: [u32; AUDIO_PCM_MAX_RATES],
+    pub min_channels: u16,
+    pub max_channels: u16,
+    pub min_period_frames: u32,
+    pub max_period_frames: u32,
+    pub min_buffer_frames: u32,
+    pub max_buffer_frames: u32,
+}
+```
+
+Initial PCM format IDs are:
+
+- `AUDIO_PCM_FORMAT_S16LE`
+- `AUDIO_PCM_FORMAT_S24LE3`
+- `AUDIO_PCM_FORMAT_S32LE`
+- `AUDIO_PCM_FORMAT_F32LE`
+- `AUDIO_PCM_FORMAT_S8`
+
+The MVP defaults to `S16LE`, 48 kHz, stereo, but drivers should expose the
+actual format/rate/channel set they can configure. The kernel does not resample
+or convert sample formats; user space must select a supported tuple or perform
+conversion before writing to the PCM ring.
 
 ## Kernel Layers
 
@@ -192,9 +220,10 @@ macOS output device sample rate or use the fixed CoreAudio settings above.
 playwav /root/sweetmemory.wav
 ```
 
-The MVP supports PCM S16LE WAV input. The current virtio-snd backend supports
-48 kHz stereo output, so test WAV files should match that format unless user
-space adds resampling or format conversion before writing to `/dev/audio0`.
+The MVP supports PCM S16LE WAV input. `playwav` queries `/dev/audio0`
+capabilities before configuring the stream, so test WAV files must match a
+format, sample rate, and channel count reported by the driver unless user space
+adds resampling or format conversion before writing to `/dev/audio0`.
 
 ## Compatibility
 

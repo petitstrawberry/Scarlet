@@ -9,8 +9,9 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::device::audio::{
-    AUDIO_PCM_FORMAT_S16LE, AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
-    register_playback_device,
+    AUDIO_PCM_FORMAT_F32LE, AUDIO_PCM_FORMAT_S8, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3,
+    AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioPcmCapabilities, AudioPcmParams,
+    AudioPlaybackDevice, register_playback_device,
 };
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
@@ -49,8 +50,50 @@ const VIRTIO_SND_S_OK: u32 = 0x8000;
 const VIRTIO_SND_S_IO_ERR: u32 = 0x8003;
 
 const VIRTIO_SND_D_OUTPUT: u8 = 0;
+const VIRTIO_SND_PCM_FMT_S8: u8 = 3;
 const VIRTIO_SND_PCM_FMT_S16: u8 = 5;
+const VIRTIO_SND_PCM_FMT_S24_3: u8 = 11;
+const VIRTIO_SND_PCM_FMT_S32: u8 = 17;
+const VIRTIO_SND_PCM_FMT_FLOAT: u8 = 19;
+const VIRTIO_SND_PCM_RATE_5512: u8 = 0;
+const VIRTIO_SND_PCM_RATE_8000: u8 = 1;
+const VIRTIO_SND_PCM_RATE_11025: u8 = 2;
+const VIRTIO_SND_PCM_RATE_16000: u8 = 3;
+const VIRTIO_SND_PCM_RATE_22050: u8 = 4;
+const VIRTIO_SND_PCM_RATE_32000: u8 = 5;
+const VIRTIO_SND_PCM_RATE_44100: u8 = 6;
 const VIRTIO_SND_PCM_RATE_48000: u8 = 7;
+const VIRTIO_SND_PCM_RATE_64000: u8 = 8;
+const VIRTIO_SND_PCM_RATE_88200: u8 = 9;
+const VIRTIO_SND_PCM_RATE_96000: u8 = 10;
+const VIRTIO_SND_PCM_RATE_176400: u8 = 11;
+const VIRTIO_SND_PCM_RATE_192000: u8 = 12;
+const VIRTIO_SND_PCM_RATE_384000: u8 = 13;
+
+const VIRTIO_RATE_TABLE: &[(u8, u32)] = &[
+    (VIRTIO_SND_PCM_RATE_5512, 5_512),
+    (VIRTIO_SND_PCM_RATE_8000, 8_000),
+    (VIRTIO_SND_PCM_RATE_11025, 11_025),
+    (VIRTIO_SND_PCM_RATE_16000, 16_000),
+    (VIRTIO_SND_PCM_RATE_22050, 22_050),
+    (VIRTIO_SND_PCM_RATE_32000, 32_000),
+    (VIRTIO_SND_PCM_RATE_44100, 44_100),
+    (VIRTIO_SND_PCM_RATE_48000, 48_000),
+    (VIRTIO_SND_PCM_RATE_64000, 64_000),
+    (VIRTIO_SND_PCM_RATE_88200, 88_200),
+    (VIRTIO_SND_PCM_RATE_96000, 96_000),
+    (VIRTIO_SND_PCM_RATE_176400, 176_400),
+    (VIRTIO_SND_PCM_RATE_192000, 192_000),
+    (VIRTIO_SND_PCM_RATE_384000, 384_000),
+];
+
+const VIRTIO_FORMAT_TABLE: &[(u8, u32)] = &[
+    (VIRTIO_SND_PCM_FMT_S8, AUDIO_PCM_FORMAT_S8),
+    (VIRTIO_SND_PCM_FMT_S16, AUDIO_PCM_FORMAT_S16LE),
+    (VIRTIO_SND_PCM_FMT_S24_3, AUDIO_PCM_FORMAT_S24LE3),
+    (VIRTIO_SND_PCM_FMT_S32, AUDIO_PCM_FORMAT_S32LE),
+    (VIRTIO_SND_PCM_FMT_FLOAT, AUDIO_PCM_FORMAT_F32LE),
+];
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -402,9 +445,9 @@ impl AudioPlaybackDevice for VirtioSndDevice {
     }
 
     fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
-        if params.format != AUDIO_PCM_FORMAT_S16LE || params.rate != 48_000 {
-            return Err("VirtIO sound MVP supports only S16LE 48000 Hz");
-        }
+        let format =
+            virtio_format_code(params.format).ok_or("Unsupported VirtIO sound PCM format")?;
+        let rate = virtio_rate_code(params.rate).ok_or("Unsupported VirtIO sound sample rate")?;
         let stream_id = (*self.stream_id.read()).ok_or("VirtIO sound has no playback stream")?;
         let configured_periods = (params.buffer_frames / params.period_frames) as usize;
         let req = VirtioSndPcmSetParams {
@@ -418,8 +461,8 @@ impl AudioPlaybackDevice for VirtioSndDevice {
             period_bytes: params.period_bytes().ok_or("PCM period size overflow")? as u32,
             features: 0,
             channels: params.channels as u8,
-            format: VIRTIO_SND_PCM_FMT_S16,
-            rate: VIRTIO_SND_PCM_RATE_48000,
+            format,
+            rate,
             padding: 0,
         };
         let status: VirtioSndHdr = self.control_request(&req)?;
@@ -669,10 +712,12 @@ pub fn register_audio_device(backend: Arc<VirtioSndDevice>) -> alloc::string::St
 }
 
 fn default_capabilities() -> AudioPcmCapabilities {
+    let mut rates = [0u32; AUDIO_PCM_MAX_RATES];
+    rates[0] = 48_000;
     AudioPcmCapabilities {
         formats: 1 << AUDIO_PCM_FORMAT_S16LE,
-        min_rate: 48_000,
-        max_rate: 48_000,
+        rate_count: 1,
+        rates,
         min_channels: 2,
         max_channels: 2,
         min_period_frames: 64,
@@ -686,10 +731,37 @@ fn capabilities_from_pcm_info(info: &VirtioSndPcmInfo) -> AudioPcmCapabilities {
     let mut caps = default_capabilities();
     caps.min_channels = info.channels_min as u16;
     caps.max_channels = info.channels_max as u16;
-    if (info.formats & (1u64 << VIRTIO_SND_PCM_FMT_S16)) == 0 {
-        caps.formats = 0;
+    caps.formats = 0;
+    for (format_code, scarlet_format) in VIRTIO_FORMAT_TABLE.iter() {
+        if (info.formats & (1u64 << *format_code)) != 0 && *scarlet_format < u32::BITS {
+            caps.formats |= 1u32 << *scarlet_format;
+        }
+    }
+    caps.rate_count = 0;
+    caps.rates = [0; AUDIO_PCM_MAX_RATES];
+    for (rate_code, rate_hz) in VIRTIO_RATE_TABLE.iter() {
+        if (info.rates & (1u64 << *rate_code)) != 0
+            && (caps.rate_count as usize) < AUDIO_PCM_MAX_RATES
+        {
+            caps.rates[caps.rate_count as usize] = *rate_hz;
+            caps.rate_count += 1;
+        }
     }
     caps
+}
+
+fn virtio_rate_code(rate_hz: u32) -> Option<u8> {
+    VIRTIO_RATE_TABLE
+        .iter()
+        .find_map(|(rate_code, supported_hz)| (*supported_hz == rate_hz).then_some(*rate_code))
+}
+
+fn virtio_format_code(format: u32) -> Option<u8> {
+    VIRTIO_FORMAT_TABLE
+        .iter()
+        .find_map(|(format_code, scarlet_format)| {
+            (*scarlet_format == format).then_some(*format_code)
+        })
 }
 
 fn read_unaligned<T: Copy>(bytes: &[u8]) -> T {

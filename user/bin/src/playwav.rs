@@ -34,15 +34,32 @@ fn run(path: &str) -> Result<(), &'static str> {
     }
 
     let audio = AudioDevice::open("/dev/audio0").map_err(|_| "failed to open /dev/audio0")?;
+    let caps = audio
+        .capabilities()
+        .map_err(|_| "failed to query audio capabilities")?;
+    if !caps.supports_format(AUDIO_PCM_FORMAT_S16LE) {
+        return Err("audio device does not support PCM S16LE");
+    }
+    if !caps.supports_rate(wav.sample_rate) {
+        return Err("audio device does not support WAV sample rate");
+    }
+    if wav.channels < caps.min_channels || wav.channels > caps.max_channels {
+        return Err("audio device does not support WAV channel count");
+    }
     let frame_bytes = wav.channels as usize * 2;
-    let period_frames = (wav.sample_rate / 100).max(64);
+    let period_frames = (wav.sample_rate / 100)
+        .max(caps.min_period_frames)
+        .min(caps.max_period_frames);
+    let min_periods = caps.min_buffer_frames.div_ceil(period_frames).max(1);
+    let max_periods = (caps.max_buffer_frames / period_frames).max(min_periods);
+    let buffer_frames = period_frames * 4u32.clamp(min_periods, max_periods);
     let params = AudioPcmParams {
         format: AUDIO_PCM_FORMAT_S16LE,
         rate: wav.sample_rate,
         channels: wav.channels,
         _reserved: 0,
         period_frames,
-        buffer_frames: period_frames * 4,
+        buffer_frames,
     };
     audio
         .set_params(&params)
