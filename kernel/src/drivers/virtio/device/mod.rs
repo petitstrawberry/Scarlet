@@ -580,8 +580,15 @@ pub trait VirtioDevice {
             let common = transport.common_cfg;
             unsafe {
                 crate::arch::mmio::write16(common + 0x16, queue_idx as u16);
+                // Check if the queue is ready - if so, try to reset it for reconfiguration
                 if crate::arch::mmio::read16(common + 0x1c) != 0 {
-                    return false;
+                    // Queue appears to be already set up from a previous run.
+                    // Attempt to reset it by writing 0 to QueueReady so we can reconfigure.
+                    crate::arch::mmio::write16(common + 0x1c, 0);
+                    crate::arch::io_mb();
+                    if crate::arch::mmio::read16(common + 0x1c) != 0 {
+                        return false; // Queue still marked as ready, cannot reconfigure
+                    }
                 }
 
                 let queue_size_max = crate::arch::mmio::read16(common + 0x18) as usize;
@@ -612,10 +619,19 @@ pub trait VirtioDevice {
 
         // Select the queue
         self.write32_register(Register::QueueSel, queue_idx as u32);
-        // Check if the queue is ready
+        // Check if the queue is ready - if so, try to reset it for reconfiguration
         let ready = self.read32_register(Register::QueueReady);
         if ready != 0 {
-            return false; // Queue already set up
+            // Queue appears to be already set up from a previous run.
+            // Attempt to reset it by writing 0 to QueueReady so we can reconfigure.
+            // This handles cases where QEMU doesn't fully reset device state between tests.
+            self.write32_register(Register::QueueReady, 0);
+            io_mb();
+            // Re-check after reset attempt
+            let ready_after_reset = self.read32_register(Register::QueueReady);
+            if ready_after_reset != 0 {
+                return false; // Queue still marked as ready, cannot reconfigure
+            }
         }
 
         // Get maximum queue size
