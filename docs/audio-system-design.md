@@ -17,6 +17,77 @@ The kernel owns only:
 The first backend is `virtio-snd`, because it is available in QEMU and maps well
 to the existing VirtIO transport code.
 
+## Architecture
+
+Scarlet has two intended playback paths. A single program can open the native
+device directly, while multiple programs should go through SAS.
+
+```text
+Direct native playback
+======================
+
+  user process
+  +-------------------------+
+  | playwav                 |
+  |                         |
+  |  RIFF/WAVE parser       |
+  |  PCM writer             |
+  +------------+------------+
+               |
+               | open/ioctl/mmap/commit/start
+               v
+  kernel
+  +-------------------------+       +-------------------------+
+  | /dev/audio0             |       | virtio-snd backend      |
+  |                         |       |                         |
+  |  AudioCharDevice        | ----> |  controlq/eventq/txq   |
+  |  AudioPcmRing           |       |  period submission      |
+  |  single-client lock     |       |  completion reclaim     |
+  +------------+------------+       +------------+------------+
+               |                                 |
+               | virtio PCI                      | host audio backend
+               v                                 v
+          QEMU virtio-snd                  CoreAudio/ALSA/etc.
+```
+
+```text
+SAS playback
+============
+
+  client A                 client B
+  +------------------+     +------------------+
+  | playwav --sas    |     | future client    |
+  |                  |     |                  |
+  | mmap client ring |     | mmap client ring |
+  | write PCM frames |     | write PCM frames |
+  +--------+---------+     +--------+---------+
+           |                        |
+           | control IPC only       | control IPC only
+           | /tmp/sas.sock          | /tmp/sas.sock
+           v                        v
+  user space
+  +----------------------------------------------------------+
+  | sas: Scarlet Audio Server                               |
+  |                                                          |
+  |  CONFIGURE -> create SharedMemory ring -> send handle    |
+  |  DRAIN/CLOSE control messages                           |
+  |  read per-client rings                                  |
+  |  mix into one output period                             |
+  +-----------------------------+----------------------------+
+                                |
+                                | the only /dev/audio0 client
+                                v
+  kernel
+  +-------------------------+       +-------------------------+
+  | /dev/audio0             |       | virtio-snd backend      |
+  | AudioCharDevice         | ----> | period submission       |
+  | AudioPcmRing            |       | completion reclaim      |
+  +-------------------------+       +-------------------------+
+```
+
+The socket protocol is deliberately control-only. PCM data moves through shared
+memory rings so the server can mix without copying audio payloads through IPC.
+
 ## Native Device Model
 
 The native device is exposed as `/dev/audio0`. It is a character device with a
@@ -166,9 +237,98 @@ the hardware driver, because the driver should not busy-wait for wall-clock
 audio time. The backend remains responsible for device commands, queue
 submission, and reclaiming completed descriptors.
 
-## User Space
+## Scarlet Audio Server
 
-The first user program is `playwav`:
+`sas` is the Scarlet Audio Server. Its role is intentionally above the kernel
+PCM transport:
+
+- own `/dev/audio0` as the single kernel audio client
+- accept application control messages over `/tmp/sas.sock`
+- register the service name `org.scarlet-os.sas` with sbus when sbus is running
+- create one shared-memory PCM ring per client and mix those rings into one
+  output stream
+- keep decode, resampling, format conversion, routing, and volume policy in user
+  space
+
+The initial SAS control protocol is a small framed local-socket protocol. Each
+message has an 8-byte little-endian header:
+
+```text
+u32 message_type
+u32 payload_size
+```
+
+The MVP messages are:
+
+- `CONFIGURE`: stream format, rate, channel count, preferred period, and
+  preferred buffer size; SAS replies `OK` and transfers a shared-memory handle
+- `DRAIN`: wait until this client's queued PCM has been mixed
+- `CLOSE`: close the stream
+- `OK` / `ERROR`: server responses
+
+PCM sample data is not sent as socket payload. After `CONFIGURE`, the client
+maps the returned shared-memory object and writes interleaved PCM frames into
+the ring. The ring header stores monotonic `write_frames` and `read_frames`
+counters; the client is the single writer, and SAS is the single reader.
+
+```text
+SAS client setup
+================
+
+  client                                sas
+  ------                                ---
+  connect /tmp/sas.sock  ------------> accept
+
+  CONFIGURE(format/rate/ch/buffer) ---> validate MVP format
+                                         SharedMemory::create(ring_size)
+                                         mmap ring in SAS
+                                         initialize RingHeader
+
+  OK + shared-memory handle <--------- send_handle(shm)
+
+  mmap shared-memory ring
+  write PCM frames into ring --------> mix thread reads ring
+  update write_frames                  update read_frames
+
+  DRAIN ------------------------------> wait until read_frames >= write_frames
+  OK <---------------------------------
+
+  CLOSE ------------------------------> mark ring closed
+```
+
+```text
+Shared-memory ring layout
+=========================
+
+  +--------------------------------------------------------------+
+  | RingHeader                                                   |
+  |                                                              |
+  | magic/version                                                |
+  | format/rate/channels/frame_bytes                             |
+  | period_frames/buffer_frames                                  |
+  | write_frames  <- client advances after writing PCM           |
+  | read_frames   <- SAS advances after mixing PCM               |
+  | flags/xrun_count                                             |
+  +--------------------------------------------------------------+
+  | PCM frame 0                                                  |
+  | PCM frame 1                                                  |
+  | ...                                                          |
+  | PCM frame N-1                                                |
+  +--------------------------------------------------------------+
+
+  client write offset = (write_frames % buffer_frames) * frame_bytes
+  server read offset  = (read_frames  % buffer_frames) * frame_bytes
+```
+
+The first implementation accepts only `S16LE`, 48 kHz, stereo client streams and
+mixes by saturating summed samples into a fixed `S16LE`, 48 kHz, stereo output
+stream. That constraint is a server policy, not a kernel ABI limit. Future SAS
+work should query `/dev/audio0` capabilities, choose an output format, and add
+client-side conversion or server-side conversion before mixing.
+
+## User Space Clients
+
+`playwav` can use the kernel device directly:
 
 - parses RIFF/WAVE PCM
 - configures `/dev/audio0`
@@ -177,9 +337,9 @@ The first user program is `playwav`:
 - starts playback after initial buffering
 - polls/status-loops until the stream drains
 
-Future user-space work should add `audiod`, mixing, format conversion, device
-routing, and per-client policy without expanding the kernel beyond the PCM ring
-transport.
+`playwav --sas FILE.wav` sends the WAV data to SAS instead. In that mode,
+`playwav` is a client and does not open `/dev/audio0`; SAS owns the device and
+performs mixing.
 
 ## QEMU Usage
 
@@ -217,13 +377,21 @@ macOS output device sample rate or use the fixed CoreAudio settings above.
 `playwav` plays PCM RIFF/WAVE files through `/dev/audio0`:
 
 ```sh
-playwav /root/sweetmemory.wav
+playwav /root/foo.wav
 ```
 
 The MVP supports PCM S16LE WAV input. `playwav` queries `/dev/audio0`
 capabilities before configuring the stream, so test WAV files must match a
 format, sample rate, and channel count reported by the driver unless user space
 adds resampling or format conversion before writing to `/dev/audio0`.
+
+To test the audio server path, start SAS first and then run:
+
+```sh
+playwav --sas /root/foo.wav
+```
+
+The current SAS MVP accepts only S16LE, 48 kHz, stereo WAV input.
 
 ## Compatibility
 

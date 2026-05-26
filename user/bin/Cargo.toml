@@ -218,6 +218,10 @@ path = "src/top.rs"
 name = "playwav"
 path = "src/playwav.rs"
 
+[[bin]]
+name = "sas"
+path = "src/sas/main.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }

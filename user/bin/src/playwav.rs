@@ -3,21 +3,35 @@
 
 extern crate scarlet_std as std;
 
+use core::sync::atomic::{Ordering, compiler_fence};
+use core::time::Duration;
 use std::audio::{AUDIO_PCM_FORMAT_S16LE, AudioDevice, AudioPcmParams};
 use std::fs::File;
+use std::handle::capability::memory_mapping::{flags as mmap_flags, prot};
+use std::io::{Read, Write};
+use std::ipc::SharedMemory;
 use std::println;
+use std::socket::Socket;
 use std::string::String;
+use std::thread::sleep;
 use std::vec::Vec;
+use userprogram::sas_protocol as protocol;
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        println!("usage: playwav FILE.wav");
+    if args.len() != 2 && !(args.len() == 3 && args[1] == "--sas") {
+        println!("usage: playwav [--sas] FILE.wav");
         return 1;
     }
 
-    match run(&args[1]) {
+    let result = if args.len() == 3 {
+        run_sas(&args[2])
+    } else {
+        run(&args[1])
+    };
+
+    match result {
         Ok(()) => 0,
         Err(message) => {
             println!("playwav: {}", message);
@@ -135,6 +149,130 @@ fn run(path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn run_sas(path: &str) -> Result<(), &'static str> {
+    let bytes = read_file(path)?;
+    let wav = parse_wav(&bytes)?;
+    if wav.audio_format != 1 || wav.bits_per_sample != 16 {
+        return Err("SAS MVP accepts only PCM S16LE WAV files");
+    }
+    if wav.sample_rate != 48_000 || wav.channels != 2 {
+        return Err("SAS MVP accepts only 48000 Hz stereo WAV files");
+    }
+
+    let mut socket = Socket::new().map_err(|_| "failed to create SAS socket")?;
+    socket
+        .connect(protocol::SOCKET_PATH)
+        .map_err(|_| "failed to connect to SAS")?;
+
+    let config = protocol::Config {
+        format: AUDIO_PCM_FORMAT_S16LE,
+        rate: wav.sample_rate,
+        channels: wav.channels,
+        reserved: 0,
+        period_frames: 480,
+        buffer_frames: 1_920,
+    };
+    write_sas_frame(&mut socket, protocol::MSG_CONFIGURE, &config.to_le_bytes())?;
+    read_sas_ok(&mut socket)?;
+    let shm_handle = socket
+        .recv_handle()
+        .map_err(|_| "failed to receive SAS shared ring")?;
+    let shm = SharedMemory::from_handle(shm_handle).map_err(|_| "invalid SAS shared ring")?;
+    let ring_size = protocol::RING_HEADER_SIZE + config.buffer_frames as usize * 4;
+    let mapper = shm
+        .as_handle()
+        .as_memory_mapping()
+        .map_err(|_| "SAS shared ring is not mappable")?;
+    let ring_addr = mapper
+        .mmap(
+            0,
+            ring_size,
+            prot::READ | prot::WRITE,
+            mmap_flags::SHARED,
+            0,
+        )
+        .map_err(|_| "failed to map SAS shared ring")?;
+
+    let data = &bytes[wav.data_offset..wav.data_offset + wav.data_len];
+    let frame_bytes = wav.channels as usize * 2;
+    write_sas_ring(ring_addr, data, frame_bytes)?;
+
+    write_sas_frame(&mut socket, protocol::MSG_DRAIN, &[])?;
+    read_sas_ok(&mut socket)?;
+    let _ = write_sas_frame(&mut socket, protocol::MSG_CLOSE, &[]);
+    Ok(())
+}
+
+fn write_sas_ring(ring_addr: usize, data: &[u8], frame_bytes: usize) -> Result<(), &'static str> {
+    let header = ring_addr as *mut protocol::RingHeader;
+    let data_ptr = (ring_addr + protocol::RING_HEADER_SIZE) as *mut u8;
+    let buffer_frames = unsafe {
+        // SAFETY: `ring_addr` is a mapped SAS ring header received from SAS.
+        core::ptr::addr_of!((*header).buffer_frames).read_volatile() as usize
+    };
+    if buffer_frames == 0 || data.len() % frame_bytes != 0 {
+        return Err("invalid SAS shared ring");
+    }
+
+    let mut written_data_frames = 0usize;
+    let total_data_frames = data.len() / frame_bytes;
+    while written_data_frames < total_data_frames {
+        let read_frames = unsafe {
+            // SAFETY: `ring_addr` is a mapped SAS ring header received from SAS.
+            core::ptr::addr_of!((*header).read_frames).read_volatile()
+        };
+        let write_frames = unsafe {
+            // SAFETY: `ring_addr` is a mapped SAS ring header received from SAS.
+            core::ptr::addr_of!((*header).write_frames).read_volatile()
+        };
+        let queued_frames = write_frames.saturating_sub(read_frames) as usize;
+        let writable_frames = buffer_frames.saturating_sub(queued_frames);
+        if writable_frames == 0 {
+            sleep(Duration::from_millis(2));
+            continue;
+        }
+
+        let frames = writable_frames.min(total_data_frames - written_data_frames);
+        let ring_frame = write_frames as usize % buffer_frames;
+        let contiguous_frames = frames.min(buffer_frames - ring_frame);
+        let data_offset = written_data_frames * frame_bytes;
+        let ring_offset = ring_frame * frame_bytes;
+        let bytes = contiguous_frames * frame_bytes;
+        unsafe {
+            // SAFETY: both source and destination ranges are bounded by the WAV
+            // data slice and SAS shared ring size.
+            core::ptr::copy_nonoverlapping(
+                data[data_offset..].as_ptr(),
+                data_ptr.add(ring_offset),
+                bytes,
+            );
+        }
+
+        let remaining_frames = frames - contiguous_frames;
+        if remaining_frames != 0 {
+            let second_offset = data_offset + bytes;
+            let second_bytes = remaining_frames * frame_bytes;
+            unsafe {
+                // SAFETY: wrap copy writes from the start of the same ring.
+                core::ptr::copy_nonoverlapping(
+                    data[second_offset..].as_ptr(),
+                    data_ptr,
+                    second_bytes,
+                );
+            }
+        }
+
+        compiler_fence(Ordering::Release);
+        unsafe {
+            // SAFETY: `ring_addr` is a mapped SAS ring header received from SAS.
+            core::ptr::addr_of_mut!((*header).write_frames)
+                .write_volatile(write_frames + frames as u64);
+        }
+        written_data_frames += frames;
+    }
+    Ok(())
+}
+
 unsafe fn write_ring_frames(
     ring: *mut u8,
     buffer_frames: usize,
@@ -193,6 +331,56 @@ fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
         out.extend_from_slice(&buf[..n]);
     }
     Ok(out)
+}
+
+fn write_sas_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), &'static str> {
+    let frame = protocol::frame(msg_type, payload);
+    write_all(socket, &frame)
+}
+
+fn read_sas_ok(socket: &mut Socket) -> Result<(), &'static str> {
+    let mut header_bytes = [0u8; protocol::HEADER_SIZE];
+    read_exact(socket, &mut header_bytes)?;
+    let header = protocol::Header::from_le_bytes(header_bytes);
+    if header.payload_size as usize > protocol::MAX_PAYLOAD_SIZE {
+        return Err("SAS response too large");
+    }
+
+    let mut payload = Vec::new();
+    payload.resize(header.payload_size as usize, 0);
+    if !payload.is_empty() {
+        read_exact(socket, &mut payload)?;
+    }
+
+    match header.msg_type {
+        protocol::MSG_OK => Ok(()),
+        protocol::MSG_ERROR => Err("SAS returned an error"),
+        _ => Err("unexpected SAS response"),
+    }
+}
+
+fn read_exact(socket: &mut Socket, out: &mut [u8]) -> Result<(), &'static str> {
+    let mut read = 0usize;
+    while read < out.len() {
+        match socket.read(&mut out[read..]) {
+            Ok(0) => return Err("SAS socket closed"),
+            Ok(n) => read += n,
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
+    Ok(())
+}
+
+fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        match socket.write(&bytes[written..]) {
+            Ok(0) => return Err("SAS socket closed"),
+            Ok(n) => written += n,
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
+    socket.flush().map_err(|_| "failed to flush SAS socket")
 }
 
 struct WavInfo {
