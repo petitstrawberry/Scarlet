@@ -149,7 +149,7 @@ pub struct VirtioNetDevice {
     base_addr: usize,
     virtqueues: Mutex<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
     config: RwLock<Option<NetworkInterfaceConfig>>,
-    features: RwLock<u32>,
+    features: RwLock<u64>,
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
     rx_buffers: Mutex<Vec<ContiguousPages>>,
@@ -250,7 +250,7 @@ impl VirtioNetDevice {
     }
 
     /// Read device configuration from the VirtIO config space
-    fn read_device_config(&mut self, negotiated_features: u32) {
+    fn read_device_config(&mut self, negotiated_features: u64) {
         // Store actually negotiated features
         *self.features.write() = negotiated_features;
 
@@ -272,7 +272,7 @@ impl VirtioNetDevice {
 
         // Read MAC address if supported
         let mut mac_addr = [0u8; 6];
-        if negotiated_features & (1 << VIRTIO_NET_F_MAC) != 0 {
+        if negotiated_features & (1u64 << VIRTIO_NET_F_MAC) != 0 {
             for i in 0..6 {
                 mac_addr[i] = self.read_config::<u8>(i);
             }
@@ -282,7 +282,7 @@ impl VirtioNetDevice {
         }
 
         // Read MTU if supported
-        let mtu = if negotiated_features & (1 << VIRTIO_NET_F_MTU) != 0 {
+        let mtu = if negotiated_features & (1u64 << VIRTIO_NET_F_MTU) != 0 {
             self.read_config::<u16>(12) as usize // MTU at offset 12
         } else {
             DEFAULT_MTU
@@ -499,7 +499,7 @@ impl VirtioNetDevice {
     /// Check link status from device configuration
     fn check_link_status(&self) -> bool {
         let features = *self.features.read();
-        if features & (1 << VIRTIO_NET_F_STATUS) != 0 {
+        if features & (1u64 << VIRTIO_NET_F_STATUS) != 0 {
             // Read status from config space
             let status = self.read_config::<u16>(6); // Status at offset 6
             (status & VIRTIO_NET_S_LINK_UP) != 0
@@ -650,7 +650,7 @@ impl VirtioDevice for VirtioNetDevice {
         virtqueues[queue_idx].get_queue_size()
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
+    fn get_supported_features(&self, device_features: u64) -> u64 {
         // Debug: Print detailed feature analysis
         #[cfg(test)]
         {
@@ -659,19 +659,19 @@ impl VirtioDevice for VirtioNetDevice {
                 "[virtio-net] Analyzing device features: 0x{:x}",
                 device_features
             );
-            if device_features & (1 << VIRTIO_NET_F_MAC) != 0 {
+            if device_features & (1u64 << VIRTIO_NET_F_MAC) != 0 {
                 early_println!(
                     "[virtio-net] Device supports MAC (bit {})",
                     VIRTIO_NET_F_MAC
                 );
             }
-            if device_features & (1 << VIRTIO_NET_F_STATUS) != 0 {
+            if device_features & (1u64 << VIRTIO_NET_F_STATUS) != 0 {
                 early_println!(
                     "[virtio-net] Device supports STATUS (bit {})",
                     VIRTIO_NET_F_STATUS
                 );
             }
-            if device_features & (1 << VIRTIO_NET_F_MTU) != 0 {
+            if device_features & (1u64 << VIRTIO_NET_F_MTU) != 0 {
                 early_println!(
                     "[virtio-net] Device supports MTU (bit {})",
                     VIRTIO_NET_F_MTU
@@ -682,14 +682,14 @@ impl VirtioDevice for VirtioNetDevice {
         // Use virtio-blk style: accept most features, exclude problematic ones
         // Start with all device features and exclude specific ones we don't want
         let mut result = device_features
-            & (1 << VIRTIO_NET_F_STATUS
-                | 1 << VIRTIO_NET_F_MAC
-                | 1 << VIRTIO_NET_F_MTU
-                | 1 << VIRTIO_F_ANY_LAYOUT);
+            & (1u64 << VIRTIO_NET_F_STATUS
+                | 1u64 << VIRTIO_NET_F_MAC
+                | 1u64 << VIRTIO_NET_F_MTU
+                | 1u64 << VIRTIO_F_ANY_LAYOUT);
 
         if self.allow_ring_features() {
             // TODO: Implement EVENT_IDX before negotiating it.
-            result |= device_features & (1 << VIRTIO_RING_F_INDIRECT_DESC);
+            result |= device_features & (1u64 << VIRTIO_RING_F_INDIRECT_DESC);
         }
 
         #[cfg(test)]

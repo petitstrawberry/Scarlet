@@ -45,7 +45,7 @@ pub struct VirtioRngDevice {
     /// Internal buffer for random data
     buffer: Mutex<VecDeque<u8>>,
     /// Negotiated features
-    features: RwLock<u32>,
+    features: RwLock<u64>,
     /// Device initialization status
     initialized: RwLock<bool>,
 }
@@ -256,7 +256,7 @@ impl VirtioDevice for VirtioRngDevice {
         Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const _ as usize) as u64)
     }
 
-    fn get_supported_features(&self, _device_features: u32) -> u32 {
+    fn get_supported_features(&self, _device_features: u64) -> u64 {
         // VirtIO RNG doesn't have device-specific features in the base spec
         // Return 0 to indicate no additional features are requested
         0

@@ -119,7 +119,7 @@ pub struct VirtioBlockDevice {
     virtqueues: Mutex<[VirtQueue<'static>; 1]>, // Only one queue for request/response
     capacity: RwLock<u64>,
     sector_size: RwLock<u32>,
-    features: RwLock<u32>,
+    features: RwLock<u64>,
     read_only: RwLock<bool>,
     request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
 }
@@ -182,12 +182,12 @@ impl VirtioBlockDevice {
         }
 
         // Check if block size feature is supported
-        if negotiated_features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+        if negotiated_features & (1u64 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
             *device.sector_size.write() = device.read_config::<u32>(20); // blk_size at offset 20
         }
 
         // Check if device is read-only
-        *device.read_only.write() = negotiated_features & (1 << VIRTIO_BLK_F_RO) != 0;
+        *device.read_only.write() = negotiated_features & (1u64 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }
@@ -775,17 +775,22 @@ impl VirtioDevice for VirtioBlockDevice {
         virtqueues[queue_idx].get_queue_size()
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
+    fn get_supported_features(&self, device_features: u64) -> u64 {
         // Accept most features but we might want to be selective
-        let mut result = device_features
-            & !(1 << VIRTIO_BLK_F_RO
-                | 1 << VIRTIO_BLK_F_SCSI
-                | 1 << VIRTIO_BLK_F_CONFIG_WCE
-                | 1 << VIRTIO_BLK_F_MQ
-                | 1 << VIRTIO_F_ANY_LAYOUT);
+        let mut result = (device_features & u64::from(u32::MAX))
+            & !(1u64 << VIRTIO_BLK_F_RO
+                | 1u64 << VIRTIO_BLK_F_SCSI
+                | 1u64 << VIRTIO_BLK_F_CONFIG_WCE
+                | 1u64 << VIRTIO_BLK_F_MQ
+                | 1u64 << VIRTIO_F_ANY_LAYOUT);
 
         if !self.allow_ring_features() {
-            result &= !(1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_RING_F_INDIRECT_DESC);
+            result &= !(1u64 << VIRTIO_RING_F_EVENT_IDX | 1u64 << VIRTIO_RING_F_INDIRECT_DESC);
+        }
+
+        if self.pci_transport().is_some() {
+            result |=
+                device_features & (1u64 << crate::drivers::virtio::features::VIRTIO_F_VERSION_1);
         }
 
         result

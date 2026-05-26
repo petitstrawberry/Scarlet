@@ -11,7 +11,7 @@ use scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};
 // room for the post-link tool to inject the real symbol table via objcopy --update-section.
 #[unsafe(link_section = ".scarlet_ksyms")]
 #[used]
-static _KSYM_PLACEHOLDER: [u64; 32768] = [0u64; 32768];
+static _KSYM_PLACEHOLDER: [u64; 65536] = [0u64; 65536];
 
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]

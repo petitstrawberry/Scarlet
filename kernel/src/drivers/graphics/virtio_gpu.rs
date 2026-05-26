@@ -311,7 +311,7 @@ pub struct VirtioGpuDeviceCore {
     resource_id: Mutex<u32>,
     current_resource_id: RwLock<Option<u32>>,
     scanout_resource_id: RwLock<Option<u32>>,
-    negotiated_features: RwLock<u32>,
+    negotiated_features: RwLock<u64>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
     resources: Mutex<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
@@ -494,7 +494,7 @@ impl VirtioGpuDeviceCore {
     }
 
     fn negotiated_feature_enabled(&self, feature: u32) -> bool {
-        (*self.negotiated_features.read() & (1u32 << feature)) != 0
+        (*self.negotiated_features.read() & (1u64 << feature)) != 0
     }
 
     fn read_config_u32(&self, offset: usize) -> u32 {
@@ -1257,8 +1257,11 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         Some(virt_to_phys(virtqueues[queue_idx].used.flags as *const u16 as usize) as u64)
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
-        let supported = (1u32 << VIRTIO_GPU_F_VIRGL) | (1u32 << VIRTIO_GPU_F_EDID);
+    fn get_supported_features(&self, device_features: u64) -> u64 {
+        let mut supported = (1u64 << VIRTIO_GPU_F_VIRGL) | (1u64 << VIRTIO_GPU_F_EDID);
+        if self.pci_transport().is_some() {
+            supported |= 1u64 << crate::drivers::virtio::features::VIRTIO_F_VERSION_1;
+        }
         device_features & supported
     }
 }

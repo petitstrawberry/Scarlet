@@ -220,6 +220,8 @@ impl DeviceStatus {
 /// It provides methods for initializing the device, accessing registers,
 /// and performing device operations according to the VirtIO specification.
 pub trait VirtioDevice {
+    /// Return the mapped PCI transport regions when this device is using
+    /// VirtIO PCI instead of VirtIO MMIO.
     fn pci_transport(&self) -> Option<VirtioPciTransport> {
         None
     }
@@ -325,7 +327,7 @@ pub trait VirtioDevice {
     ///
     /// Returns Ok(negotiated_features) if initialization was successful,
     /// Err message otherwise
-    fn init(&mut self) -> Result<u32, &'static str> {
+    fn init(&mut self) -> Result<u64, &'static str> {
         self.debug_dump_mmio_state("init:entry");
 
         if self.pci_transport().is_none() {
@@ -476,22 +478,24 @@ pub trait VirtioDevice {
     ///
     /// Returns Ok(negotiated_features) if feature negotiation was successful,
     /// Err message otherwise
-    fn negotiate_features(&mut self) -> Result<u32, &'static str> {
+    fn negotiate_features(&mut self) -> Result<u64, &'static str> {
         // Read device features
         self.write32_register(Register::DeviceFeaturesSel, 0);
-        let device_features = self.read32_register(Register::DeviceFeatures);
-        // Select supported features
-        let driver_features = self.get_supported_features(device_features);
+        let device_features0 = self.read32_register(Register::DeviceFeatures);
         self.write32_register(Register::DeviceFeaturesSel, 1);
-        let device_features_hi = self.read32_register(Register::DeviceFeatures);
-        let driver_features_hi =
-            device_features_hi & (1 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32));
+        let device_features1 = self.read32_register(Register::DeviceFeatures);
+        let device_features = u64::from(device_features0) | (u64::from(device_features1) << 32);
+
+        // Select supported features
+        let driver_features = self.get_supported_features(device_features) & device_features;
+        let driver_features0 = driver_features as u32;
+        let driver_features1 = (driver_features >> 32) as u32;
         crate::early_println!(
             "[virtio][feat] device_features=0x{:08x}:{:08x} driver_features=0x{:08x}:{:08x}",
-            device_features_hi,
-            device_features,
-            driver_features_hi,
-            driver_features
+            device_features1,
+            device_features0,
+            driver_features1,
+            driver_features0
         );
 
         #[cfg(test)]
@@ -506,9 +510,9 @@ pub trait VirtioDevice {
 
         // Write driver features
         self.write32_register(Register::DriverFeaturesSel, 0);
-        self.write32_register(Register::DriverFeatures, driver_features);
+        self.write32_register(Register::DriverFeatures, driver_features0);
         self.write32_register(Register::DriverFeaturesSel, 1);
-        self.write32_register(Register::DriverFeatures, driver_features_hi);
+        self.write32_register(Register::DriverFeatures, driver_features1);
 
         // Set FEATURES_OK status bit
         let mut status = self.read32_register(Register::Status);
@@ -548,10 +552,12 @@ pub trait VirtioDevice {
     /// # Returns
     ///
     /// The features supported by the driver
-    fn get_supported_features(&self, device_features: u32) -> u32 {
-        // By default, accept all device features
+    fn get_supported_features(&self, device_features: u64) -> u64 {
+        // By default, preserve the legacy behavior of accepting only the
+        // first 32 feature bits. Device-specific implementations should opt in
+        // to any additional feature bits they actually support.
         // Device-specific implementations should override this
-        device_features
+        device_features & u64::from(u32::MAX)
     }
 
     fn allow_ring_features(&self) -> bool {
@@ -1070,7 +1076,7 @@ impl VirtioDeviceCommon {
 }
 
 impl VirtioDevice for VirtioDeviceCommon {
-    fn init(&mut self) -> Result<u32, &'static str> {
+    fn init(&mut self) -> Result<u64, &'static str> {
         // Initialization is not required for the common device
         Ok(0)
     }
