@@ -58,6 +58,8 @@ pub mod command {
     pub const MEMORY_SPACE: u16 = 1 << 1;
     /// Enable bus mastering for DMA-capable devices.
     pub const BUS_MASTER: u16 = 1 << 2;
+    /// Disable legacy INTx assertion when set.
+    pub const INTERRUPT_DISABLE: u16 = 1 << 10;
 }
 
 /// PCI status register bits.

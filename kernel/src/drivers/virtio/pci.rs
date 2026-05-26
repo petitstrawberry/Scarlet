@@ -21,6 +21,8 @@ use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
 use crate::driver_initcall;
 use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
+use crate::drivers::network::virtio_net::VirtioNetDevice;
+use crate::interrupt::{InterruptId, InterruptManager};
 use crate::vm;
 use crate::{early_println, println};
 
@@ -38,12 +40,14 @@ const VIRTIO_PCI_CAP_OFFSET: usize = 0x08;
 const VIRTIO_PCI_CAP_LENGTH: usize = 0x0c;
 const VIRTIO_PCI_NOTIFY_CAP_MULTIPLIER: usize = 0x10;
 
+const VIRTIO_PCI_TRANSITIONAL_NET_DEVICE_ID: u16 = 0x1000;
 const VIRTIO_PCI_TRANSITIONAL_BLOCK_DEVICE_ID: u16 = 0x1001;
 const VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID: u16 = 0x1042;
 const VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID: u16 = 0x1010;
 const VIRTIO_PCI_MODERN_GPU_DEVICE_ID: u16 = 0x1050;
 
 static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Mapped register blocks for a VirtIO PCI function.
@@ -208,8 +212,59 @@ fn enable_pci_device(config: &PciConfig, device: &PciDeviceInfo) {
     config.write_u16(
         &addr,
         config::offset::COMMAND,
-        command_bits | command::MEMORY_SPACE | command::BUS_MASTER,
+        (command_bits | command::MEMORY_SPACE | command::BUS_MASTER) & !command::INTERRUPT_DISABLE,
     );
+}
+
+fn register_legacy_intx(
+    device: &PciDeviceInfo,
+    handler: Arc<dyn crate::device::events::InterruptCapableDevice>,
+) -> Option<InterruptId> {
+    let interrupt_pin = device.interrupt_pin();
+    let interrupt_id = device.routed_irq().or_else(|| {
+        let line = device.interrupt_line();
+        (line != 0 && line != 0xff).then_some(line as InterruptId)
+    })?;
+
+    if interrupt_pin == 0 {
+        return None;
+    }
+
+    let manager = InterruptManager::global();
+    if let Err(e) = manager.register_interrupt_device(interrupt_id, handler) {
+        early_println!(
+            "[virtio-pci] Failed to register INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
+            interrupt_id,
+            device.address().bus,
+            device.address().device,
+            device.address().function,
+            e
+        );
+        return None;
+    }
+    if let Err(e) =
+        manager.enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+    {
+        early_println!(
+            "[virtio-pci] Failed to enable INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
+            interrupt_id,
+            device.address().bus,
+            device.address().device,
+            device.address().function,
+            e
+        );
+        return None;
+    }
+
+    early_println!(
+        "[virtio-pci] Registered INTx IRQ {} pin {} for {:02x}:{:02x}.{}",
+        interrupt_id,
+        interrupt_pin,
+        device.address().bus,
+        device.address().device,
+        device.address().function
+    );
+    Some(interrupt_id)
 }
 
 fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
@@ -225,6 +280,27 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     let transport = parse_virtio_pci_caps(&config, device)?;
 
     match device.device_id() {
+        VIRTIO_PCI_TRANSITIONAL_NET_DEVICE_ID => {
+            let name = format!("veth{}", NET_COUNTER.fetch_add(1, Ordering::SeqCst));
+            let dev = Arc::new(VirtioNetDevice::new_pci(transport));
+            dev.register_interface(&name);
+
+            if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
+                if let Err(e) = dev.enable_interrupts(interrupt_id) {
+                    early_println!("[virtio-pci] Failed to enable net INTx: {}", e);
+                }
+            } else {
+                early_println!(
+                    "[virtio-pci] No usable INTx routing for net device {}",
+                    name
+                );
+            }
+
+            let registered: Arc<dyn Device> = dev;
+            DeviceManager::get_manager().register_device_with_name(name.clone(), registered);
+            println!("[virtio-pci] Registered net device {}", name);
+            Ok(())
+        }
         VIRTIO_PCI_TRANSITIONAL_BLOCK_DEVICE_ID | VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID => {
             let name = format!("vblk{}", BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst));
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new_pci(transport));
@@ -261,6 +337,7 @@ fn remove_virtio_pci(_device: &PciDeviceInfo) -> Result<(), &'static str> {
 
 fn register_driver() {
     let id_table = vec![
+        PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_TRANSITIONAL_NET_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_TRANSITIONAL_BLOCK_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID),

@@ -1489,12 +1489,20 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
 
     // Enable bus mastering
     let command = config.read_u16(&addr, config::offset::COMMAND);
-    config.write_u16(&addr, config::offset::COMMAND, command | 0x0004); // Bus Master Enable
+    config.write_u16(
+        &addr,
+        config::offset::COMMAND,
+        (command | config::command::BUS_MASTER) & !config::command::INTERRUPT_DISABLE,
+    );
     early_println!("[xHCI] Bus mastering enabled");
 
     // Enable memory access
     let command = config.read_u16(&addr, config::offset::COMMAND);
-    config.write_u16(&addr, config::offset::COMMAND, command | 0x0002); // Memory Access Enable
+    config.write_u16(
+        &addr,
+        config::offset::COMMAND,
+        (command | config::command::MEMORY_SPACE) & !config::command::INTERRUPT_DISABLE,
+    );
     early_println!("[xHCI] Memory access enabled");
 
     // Read BAR0 (and BAR1 if 64-bit)
@@ -1524,9 +1532,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     early_println!("[xHCI] MMIO mapped at {:#x}", mmio_vaddr);
 
     let routed_irq = device.routed_irq();
-    let interrupt_line = routed_irq
-        .map(|irq| irq as u8)
-        .unwrap_or_else(|| device.interrupt_line());
+    let interrupt_line = routed_irq.unwrap_or_else(|| device.interrupt_line() as InterruptId);
     let interrupt_pin = device.interrupt_pin();
     early_println!(
         "[xHCI] IRQ routing: config_line={} pin={} routed_irq={:?}",
@@ -1540,7 +1546,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             interrupt_line,
             interrupt_pin
         );
-        Some(interrupt_line as InterruptId)
+        Some(interrupt_line)
     } else {
         early_println!("[xHCI] No usable legacy IRQ routing for controller");
         None
