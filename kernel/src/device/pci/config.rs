@@ -214,7 +214,7 @@ impl PciConfig {
     pub fn read_u32(&self, addr: &PciAddress, offset: usize) -> u32 {
         let phys_addr = self.config_address(addr, offset & !0x3);
         // SAFETY: ECAM config space is mapped MMIO and DWORD accesses are aligned.
-        unsafe { core::ptr::read_volatile(phys_addr as *const u32) }
+        unsafe { crate::arch::mmio::read32(phys_addr) }
     }
 
     /// Write a 32-bit value to PCI configuration space
@@ -231,7 +231,7 @@ impl PciConfig {
     pub fn write_u32(&self, addr: &PciAddress, offset: usize, value: u32) {
         let phys_addr = self.config_address(addr, offset & !0x3);
         // SAFETY: ECAM config space is mapped MMIO and DWORD accesses are aligned.
-        unsafe { core::ptr::write_volatile(phys_addr as *mut u32, value) }
+        unsafe { crate::arch::mmio::write32(phys_addr, value) }
     }
 
     /// Read a 16-bit value from PCI configuration space
