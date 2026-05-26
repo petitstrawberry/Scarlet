@@ -56,8 +56,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
-use crate::early_println;
 use crate::vm;
+use crate::{early_println, println};
 
 /// PCI device address components
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,11 +150,9 @@ impl PciBus {
 
         let vaddr = vm::ioremap(self.ecam_base, self.ecam_size)?;
         *self.ecam_vaddr.lock() = Some(vaddr);
-        early_println!(
+        println!(
             "[PCI] ECAM mapped paddr={:#x} -> vaddr={:#x} size={:#x}",
-            self.ecam_base,
-            vaddr,
-            self.ecam_size
+            self.ecam_base, vaddr, self.ecam_size
         );
         Ok(vaddr)
     }

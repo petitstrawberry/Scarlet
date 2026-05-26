@@ -71,6 +71,9 @@ if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.
 fi
 
 QEMU_DEBUG_ARGS=""
+QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu}"
+QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
+QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
 
 # Optional QEMU debug logging
 # - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
@@ -157,6 +160,20 @@ else
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
+QEMU_GPU_ARGS=()
+case "$QEMU_GPU" in
+    virtio-gpu)
+        QEMU_GPU_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2)
+        ;;
+    virtio-gpu-pci)
+        QEMU_GPU_ARGS=(-device virtio-gpu-pci,bus=pcie.0,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu or virtio-gpu-pci)"
+        exit 1
+        ;;
+esac
+
 qemu-system-aarch64 \
     -machine virt,gic-version=3,acpi=off \
     -cpu cortex-a57 \
@@ -172,7 +189,7 @@ qemu-system-aarch64 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
     -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.2 \
+    "${QEMU_GPU_ARGS[@]}" \
     -netdev user,id=net0 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \

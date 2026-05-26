@@ -45,6 +45,7 @@ use crate::{
     },
     drivers::virtio::{
         device::VirtioDevice,
+        pci::VirtioPciTransport,
         queue::{DescriptorFlag, VirtQueue},
     },
     object::capability::ControlOps,
@@ -114,6 +115,7 @@ pub struct VirtioBlkReqHeader {
 
 pub struct VirtioBlockDevice {
     base_addr: usize,
+    pci_transport: Option<VirtioPciTransport>,
     virtqueues: Mutex<[VirtQueue<'static>; 1]>, // Only one queue for request/response
     capacity: RwLock<u64>,
     sector_size: RwLock<u32>,
@@ -124,8 +126,26 @@ pub struct VirtioBlockDevice {
 
 impl VirtioBlockDevice {
     pub fn new(base_addr: usize) -> Self {
+        Self::new_with_transport(base_addr, None)
+    }
+
+    /// Create a VirtIO block device backed by the PCI transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - Mapped VirtIO PCI configuration regions
+    ///
+    /// # Returns
+    ///
+    /// A new initialized block device.
+    pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        Self::new_with_transport(transport.common_cfg, Some(transport))
+    }
+
+    fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
             base_addr,
+            pci_transport,
             // Minimal but sufficient queue size based on real usage:
             // - Average batch: 1.15 requests (85.2% are single requests)
             // - Observed max: <5 requests per batch typically
@@ -734,6 +754,10 @@ impl Selectable for VirtioBlockDevice {
 }
 
 impl VirtioDevice for VirtioBlockDevice {
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        self.pci_transport
+    }
+
     fn get_base_addr(&self) -> usize {
         self.base_addr
     }

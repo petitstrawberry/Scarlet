@@ -17,7 +17,8 @@ use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
 const SCARLET_MAIR_EL1: u64 = 0x44ff00;
-const SCARLET_TCR_EL1: u64 = 0x1_B510_3510;
+// TCR_EL1.IPS=0b010 selects a 40-bit PA range; QEMU virt can place PCI ECAM above 36 bits.
+const SCARLET_TCR_EL1: u64 = 0x2_B510_3510;
 const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
 /// Bits we always clear in SCTLR_EL1 when (re)enabling the MMU.
 ///

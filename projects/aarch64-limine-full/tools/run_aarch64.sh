@@ -270,6 +270,9 @@ case "$QEMU_GPU" in
     virtio-gpu)
         QEMU_GPU_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
         ;;
+    virtio-gpu-pci)
+        QEMU_GPU_ARGS=(-device virtio-gpu-pci,bus=pcie.0,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
     virgl|virtio-gpu-gl)
         require_virtio_gpu_gl_device qemu-system-aarch64
         QEMU_GPU_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.2,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
@@ -280,7 +283,7 @@ case "$QEMU_GPU" in
     none)
         ;;
     *)
-        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu, virgl, virtio-gpu-gl, ramfb, or none)"
+        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu, virtio-gpu-pci, virgl, virtio-gpu-gl, ramfb, or none)"
         exit 1
         ;;
 esac

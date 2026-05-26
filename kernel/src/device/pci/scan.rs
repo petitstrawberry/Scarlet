@@ -5,14 +5,13 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::config::{PciConfig, vendor};
+use super::config::{PciBar, PciBarKind, PciConfig, offset, vendor};
 use super::device::PciDeviceInfo;
 use super::{PciAddress, PciBus};
-use crate::early_println;
+use crate::{early_println, println};
 
 /// PCI scanner
 ///
@@ -25,6 +24,47 @@ pub struct PciScanner<'a> {
 }
 
 impl<'a> PciScanner<'a> {
+    fn log_bar(addr: &PciAddress, bar: &PciBar) {
+        let reg = offset::BAR0 + bar.index as usize * 4;
+        let kind = match bar.kind {
+            PciBarKind::Io => "io",
+            PciBarKind::Memory32 | PciBarKind::Memory64 => "mem",
+        };
+        let bits = if bar.is_64bit() { " 64bit" } else { "" };
+        let prefetchable = if bar.prefetchable { " pref" } else { "" };
+
+        if bar.is_assigned() {
+            let end = bar.base.saturating_add(bar.size.saturating_sub(1));
+            println!(
+                "pci 0000:{:02x}:{:02x}.{}: reg {:#04x}: [{} {:#x}-{:#x} size={:#x}{}{}]",
+                addr.bus,
+                addr.device,
+                addr.function,
+                reg,
+                kind,
+                bar.base,
+                end,
+                bar.size,
+                bits,
+                prefetchable
+            );
+        } else {
+            println!(
+                "pci 0000:{:02x}:{:02x}.{}: reg {:#04x}: [{} size={:#x}{}{}] unassigned",
+                addr.bus, addr.device, addr.function, reg, kind, bar.size, bits, prefetchable
+            );
+        }
+    }
+
+    fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+        node.name.starts_with("pci@")
+            || node.name.starts_with("pcie@")
+            || node
+                .compatible()
+                .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+                .unwrap_or(false)
+    }
+
     fn read_be_u32(bytes: &[u8]) -> Option<u32> {
         if bytes.len() < 4 {
             return None;
@@ -139,14 +179,17 @@ impl<'a> PciScanner<'a> {
         }
 
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let soc = fdt.find_node("/soc")?;
-        let pci_node = soc.children().find(|node| {
-            node.name.starts_with("pci@")
-                || node
-                    .compatible()
-                    .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
-                    .unwrap_or(false)
-        })?;
+        let mut pci_node = None;
+        for parent_path in ["/soc", "/"] {
+            let Some(parent) = fdt.find_node(parent_path) else {
+                continue;
+            };
+            pci_node = parent.children().find(Self::is_pci_host_node);
+            if pci_node.is_some() {
+                break;
+            }
+        }
+        let pci_node = pci_node?;
 
         let mask = pci_node.property("interrupt-map-mask")?.value;
         let map = pci_node.property("interrupt-map")?.value;
@@ -193,22 +236,34 @@ impl<'a> PciScanner<'a> {
     pub fn scan(&self) -> Vec<PciDeviceInfo> {
         let mut devices = Vec::new();
         let mut device_id_counter = 0;
+        let mut visited_buses = [false; 256];
 
-        early_println!("Scanning PCI bus...");
+        println!("Scanning PCI bus...");
 
         // Start by checking bus 0
-        self.scan_bus(0, &mut devices, &mut device_id_counter);
+        self.scan_bus(0, &mut devices, &mut device_id_counter, &mut visited_buses);
 
-        early_println!("PCI scan complete: found {} devices", devices.len());
+        println!("PCI scan complete: found {} devices", devices.len());
 
         devices
     }
 
     /// Scan a single PCI bus
-    fn scan_bus(&self, bus: u8, devices: &mut Vec<PciDeviceInfo>, id_counter: &mut usize) {
+    fn scan_bus(
+        &self,
+        bus: u8,
+        devices: &mut Vec<PciDeviceInfo>,
+        id_counter: &mut usize,
+        visited_buses: &mut [bool; 256],
+    ) {
+        if visited_buses[bus as usize] {
+            return;
+        }
+        visited_buses[bus as usize] = true;
+
         // Scan all 32 possible devices on this bus
         for device in 0..32 {
-            self.scan_device(bus, device, devices, id_counter);
+            self.scan_device(bus, device, devices, id_counter, visited_buses);
         }
     }
 
@@ -219,6 +274,7 @@ impl<'a> PciScanner<'a> {
         device: u8,
         devices: &mut Vec<PciDeviceInfo>,
         id_counter: &mut usize,
+        visited_buses: &mut [bool; 256],
     ) {
         let addr = PciAddress::new(0, bus, device, 0);
 
@@ -234,6 +290,7 @@ impl<'a> PciScanner<'a> {
 
         // Scan function 0
         if let Some(device_info) = self.probe_function(bus, device, 0, id_counter) {
+            self.scan_child_bus_if_bridge(&device_info, devices, id_counter, visited_buses);
             devices.push(device_info);
         }
 
@@ -241,10 +298,52 @@ impl<'a> PciScanner<'a> {
         if is_multifunction {
             for function in 1..8 {
                 if let Some(device_info) = self.probe_function(bus, device, function, id_counter) {
+                    self.scan_child_bus_if_bridge(&device_info, devices, id_counter, visited_buses);
                     devices.push(device_info);
                 }
             }
         }
+    }
+
+    fn scan_child_bus_if_bridge(
+        &self,
+        device_info: &PciDeviceInfo,
+        devices: &mut Vec<PciDeviceInfo>,
+        id_counter: &mut usize,
+        visited_buses: &mut [bool; 256],
+    ) {
+        if device_info.base_class() != 0x06 || device_info.subclass() != 0x04 {
+            return;
+        }
+
+        let addr = device_info.address();
+        let secondary = self
+            .config
+            .read_u8(&addr, super::config::offset::SECONDARY_BUS_NUMBER);
+        let subordinate = self
+            .config
+            .read_u8(&addr, super::config::offset::SUBORDINATE_BUS_NUMBER);
+        if secondary == 0 || secondary > subordinate {
+            early_println!(
+                "PCI: bridge {:02x}:{:02x}.{} has invalid bus range secondary={} subordinate={}",
+                addr.bus,
+                addr.device,
+                addr.function,
+                secondary,
+                subordinate
+            );
+            return;
+        }
+
+        early_println!(
+            "PCI: scanning bridge {:02x}:{:02x}.{} secondary bus {} subordinate {}",
+            addr.bus,
+            addr.device,
+            addr.function,
+            secondary,
+            subordinate
+        );
+        self.scan_bus(secondary, devices, id_counter, visited_buses);
     }
 
     /// Probe a specific PCI function
@@ -265,14 +364,6 @@ impl<'a> PciScanner<'a> {
             return None;
         }
 
-        early_println!(
-            "PCI: Found device with vendor {:04x} at {:02x}:{:02x}.{}",
-            vendor_id,
-            bus,
-            device,
-            function
-        );
-
         // Read device configuration
         let device_id = self.config.read_device_id(&addr);
         let class_code = self.config.read_class_code(&addr);
@@ -292,6 +383,17 @@ impl<'a> PciScanner<'a> {
             .config
             .read_u8(&addr, super::config::offset::INTERRUPT_PIN);
         let routed_irq = self.routed_irq_for(&addr, interrupt_pin);
+        let mut bars = self.config.read_bars(&addr);
+        let bar_issues = PciConfig::validate_bars(&bars);
+        if !bar_issues.is_empty() {
+            for issue in &bar_issues {
+                println!(
+                    "PCI: invalid BAR resource at {:02x}:{:02x}.{}: {:?}",
+                    bus, device, function, issue
+                );
+            }
+            bars.clear();
+        }
 
         // Generate device name
         // In a real implementation, this would use a static string pool
@@ -312,19 +414,24 @@ impl<'a> PciScanner<'a> {
             routed_irq,
             name,
             *id_counter,
-        );
+        )
+        .with_bars(bars);
 
         *id_counter += 1;
 
-        early_println!(
-            "Found PCI device: {:04x}:{:04x} at {:02x}:{:02x}.{} (class: {:06x})",
-            vendor_id,
-            device_id,
+        println!(
+            "pci 0000:{:02x}:{:02x}.{}: [{:04x}:{:04x}] type {:02x} class {:#08x}",
             bus,
             device,
             function,
+            vendor_id,
+            device_id,
+            self.config.read_header_type(&addr) & 0x7f,
             class_code
         );
+        for bar in device_info.bars() {
+            Self::log_bar(&addr, bar);
+        }
 
         Some(device_info)
     }
@@ -382,13 +489,13 @@ impl PciBus {
         let devices = self.devices();
         let device_manager = DeviceManager::get_manager();
 
-        early_println!(
+        println!(
             "Registering {} PCI devices with DeviceManager",
             devices.len()
         );
 
         for device in devices {
-            early_println!(
+            println!(
                 "  - {} ({:04x}:{:04x})",
                 device.name(),
                 device.vendor_id(),

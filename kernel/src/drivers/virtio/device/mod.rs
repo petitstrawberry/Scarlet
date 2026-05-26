@@ -22,8 +22,8 @@ use crate::{
     driver_initcall,
     drivers::{
         block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
-        network::virtio_net::VirtioNetDevice, virtio_input::VirtioInputDevice,
-        virtio_rng::VirtioRngDevice,
+        network::virtio_net::VirtioNetDevice, virtio::pci::VirtioPciTransport,
+        virtio_input::VirtioInputDevice, virtio_rng::VirtioRngDevice,
     },
     early_println,
 };
@@ -220,6 +220,10 @@ impl DeviceStatus {
 /// It provides methods for initializing the device, accessing registers,
 /// and performing device operations according to the VirtIO specification.
 pub trait VirtioDevice {
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        None
+    }
+
     #[cfg(not(debug_assertions))]
     #[inline(never)]
     fn write32_register_slowpath(&self, addr: usize, value: u32) {
@@ -324,17 +328,19 @@ pub trait VirtioDevice {
     fn init(&mut self) -> Result<u32, &'static str> {
         self.debug_dump_mmio_state("init:entry");
 
-        // Verify device (Magic Value should be "virt")
-        if self.read32_register(Register::MagicValue) != 0x74726976 {
-            self.set_failed();
-            return Err("Invalid Magic Value");
-        }
+        if self.pci_transport().is_none() {
+            // Verify device (Magic Value should be "virt")
+            if self.read32_register(Register::MagicValue) != 0x74726976 {
+                self.set_failed();
+                return Err("Invalid Magic Value");
+            }
 
-        // Check device version
-        let version = self.read32_register(Register::Version);
-        if version != 2 {
-            self.set_failed();
-            return Err("Invalid Version");
+            // Check device version
+            let version = self.read32_register(Register::Version);
+            if version != 2 {
+                self.set_failed();
+                return Err("Invalid Version");
+            }
         }
 
         // Reset device
@@ -376,14 +382,21 @@ pub trait VirtioDevice {
     }
 
     fn is_modern_device(&self) -> bool {
-        self.read32_register(Register::Version) == 2
+        self.pci_transport().is_some() || self.read32_register(Register::Version) == 2
     }
 
     fn supports_feature(&self, feature: u32) -> bool {
         let selector = feature / 32;
         let bit = feature % 32;
-        self.write32_register(Register::DeviceFeaturesSel, selector);
-        let device_features = self.read32_register(Register::DeviceFeatures);
+        let device_features = if let Some(transport) = self.pci_transport() {
+            unsafe {
+                crate::arch::mmio::write32(transport.common_cfg + 0x00, selector);
+                crate::arch::mmio::read32(transport.common_cfg + 0x04)
+            }
+        } else {
+            self.write32_register(Register::DeviceFeaturesSel, selector);
+            self.read32_register(Register::DeviceFeatures)
+        };
         (device_features & (1u32 << bit)) != 0
     }
 
@@ -465,12 +478,19 @@ pub trait VirtioDevice {
     /// Err message otherwise
     fn negotiate_features(&mut self) -> Result<u32, &'static str> {
         // Read device features
+        self.write32_register(Register::DeviceFeaturesSel, 0);
         let device_features = self.read32_register(Register::DeviceFeatures);
         // Select supported features
         let driver_features = self.get_supported_features(device_features);
+        self.write32_register(Register::DeviceFeaturesSel, 1);
+        let device_features_hi = self.read32_register(Register::DeviceFeatures);
+        let driver_features_hi =
+            device_features_hi & (1 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32));
         crate::early_println!(
-            "[virtio][feat] device_features=0x{:08x} driver_features=0x{:08x}",
+            "[virtio][feat] device_features=0x{:08x}:{:08x} driver_features=0x{:08x}:{:08x}",
+            device_features_hi,
             device_features,
+            driver_features_hi,
             driver_features
         );
 
@@ -485,7 +505,10 @@ pub trait VirtioDevice {
         }
 
         // Write driver features
+        self.write32_register(Register::DriverFeaturesSel, 0);
         self.write32_register(Register::DriverFeatures, driver_features);
+        self.write32_register(Register::DriverFeaturesSel, 1);
+        self.write32_register(Register::DriverFeatures, driver_features_hi);
 
         // Set FEATURES_OK status bit
         let mut status = self.read32_register(Register::Status);
@@ -551,6 +574,40 @@ pub trait VirtioDevice {
     fn setup_queue(&mut self, queue_idx: usize, queue_size: usize) -> bool {
         if queue_idx >= self.get_virtqueue_count() {
             return false;
+        }
+
+        if let Some(transport) = self.pci_transport() {
+            let common = transport.common_cfg;
+            unsafe {
+                crate::arch::mmio::write16(common + 0x16, queue_idx as u16);
+                if crate::arch::mmio::read16(common + 0x1c) != 0 {
+                    return false;
+                }
+
+                let queue_size_max = crate::arch::mmio::read16(common + 0x18) as usize;
+                if queue_size == 0 || queue_size > queue_size_max {
+                    return false;
+                }
+
+                let Some(desc_addr) = self.get_queue_desc_addr(queue_idx) else {
+                    return false;
+                };
+                let Some(driver_addr) = self.get_queue_driver_addr(queue_idx) else {
+                    return false;
+                };
+                let Some(device_addr) = self.get_queue_device_addr(queue_idx) else {
+                    return false;
+                };
+
+                crate::arch::mmio::write16(common + 0x18, queue_size as u16);
+                crate::arch::mmio::write64(common + 0x20, desc_addr);
+                crate::arch::mmio::write64(common + 0x28, driver_addr);
+                crate::arch::mmio::write64(common + 0x30, device_addr);
+                crate::arch::mmio::write16(common + 0x1c, 1);
+                crate::arch::io_mb();
+            }
+
+            return !DeviceStatus::Failed.is_set(self.read32_register(Register::Status));
         }
 
         // Select the queue
@@ -631,7 +688,10 @@ pub trait VirtioDevice {
     ///
     /// The configuration value of type T
     fn read_config<T: Sized>(&self, offset: usize) -> T {
-        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        let addr = self
+            .pci_transport()
+            .map(|transport| transport.device_cfg + offset)
+            .unwrap_or_else(|| self.get_base_addr() + Register::DeviceConfig.offset() + offset);
         // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
         // Fall back to byte-wise access for unusual sizes.
         unsafe {
@@ -674,7 +734,10 @@ pub trait VirtioDevice {
     /// * `offset` - The offset within the configuration space
     /// * `value` - The value to write
     fn write_config<T: Sized>(&self, offset: usize, value: T) {
-        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        let addr = self
+            .pci_transport()
+            .map(|transport| transport.device_cfg + offset)
+            .unwrap_or_else(|| self.get_base_addr() + Register::DeviceConfig.offset() + offset);
         // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
         // Fall back to byte-wise access for unusual sizes.
         unsafe {
@@ -764,6 +827,19 @@ pub trait VirtioDevice {
         if virtqueue_idx >= self.get_virtqueue_count() {
             panic!("Invalid virtqueue index");
         }
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            unsafe {
+                crate::arch::mmio::write16(
+                    transport
+                        .notify_addr(virtqueue_idx)
+                        .unwrap_or(transport.notify_cfg),
+                    virtqueue_idx as u16,
+                );
+            }
+            io_mb();
+            return;
+        }
         // Insert memory barrier before notification
         io_mb();
         self.write32_register(Register::QueueNotify, virtqueue_idx as u32);
@@ -780,6 +856,37 @@ pub trait VirtioDevice {
     ///
     /// The 32-bit value read from the register
     fn read32_register(&self, register: Register) -> u32 {
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            let value = unsafe {
+                match register {
+                    Register::MagicValue => 0x74726976,
+                    Register::Version => 2,
+                    Register::DeviceFeatures => {
+                        crate::arch::mmio::read32(transport.common_cfg + 0x04)
+                    }
+                    Register::DriverFeatures => {
+                        crate::arch::mmio::read32(transport.common_cfg + 0x0c)
+                    }
+                    Register::QueueNumMax | Register::QueueNum => {
+                        u32::from(crate::arch::mmio::read16(transport.common_cfg + 0x18))
+                    }
+                    Register::QueueReady => {
+                        u32::from(crate::arch::mmio::read16(transport.common_cfg + 0x1c))
+                    }
+                    Register::InterruptStatus => {
+                        u32::from(crate::arch::mmio::read8(transport.isr_cfg))
+                    }
+                    Register::Status => {
+                        u32::from(crate::arch::mmio::read8(transport.common_cfg + 0x14))
+                    }
+                    Register::DeviceId | Register::VendorId => 0,
+                    _ => 0,
+                }
+            };
+            io_mb();
+            return value;
+        }
         let addr = self.get_base_addr() + register.offset();
         io_mb();
         let val = unsafe { crate::arch::mmio::read32(addr) };
@@ -794,6 +901,38 @@ pub trait VirtioDevice {
     /// * `register` - The register to write to
     /// * `value` - The 32-bit value to write
     fn write32_register(&self, register: Register, value: u32) {
+        if let Some(transport) = self.pci_transport() {
+            io_mb();
+            unsafe {
+                match register {
+                    Register::DeviceFeaturesSel => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x00, value);
+                    }
+                    Register::DriverFeaturesSel => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x08, value);
+                    }
+                    Register::DriverFeatures => {
+                        crate::arch::mmio::write32(transport.common_cfg + 0x0c, value);
+                    }
+                    Register::QueueSel => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x16, value as u16);
+                    }
+                    Register::QueueNum => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x18, value as u16);
+                    }
+                    Register::QueueReady => {
+                        crate::arch::mmio::write16(transport.common_cfg + 0x1c, value as u16);
+                    }
+                    Register::Status => {
+                        crate::arch::mmio::write8(transport.common_cfg + 0x14, value as u8);
+                    }
+                    Register::InterruptAck => {}
+                    _ => {}
+                }
+            }
+            io_mb();
+            return;
+        }
         let addr = self.get_base_addr() + register.offset();
         // NOTE: Release builds on some environments have shown sensitivity to MMIO
         // sequencing/posted writes. Use a non-inlined slowpath with a readback flush

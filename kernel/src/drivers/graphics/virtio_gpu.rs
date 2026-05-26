@@ -23,6 +23,7 @@ use crate::{
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
+        pci::VirtioPciTransport,
         queue::{DescriptorFlag, VirtQueue},
     },
     mem::page::ContiguousPages,
@@ -301,6 +302,7 @@ fn append_pod_bytes<T>(buffer: &mut Vec<u8>, value: &T) {
 /// VirtIO GPU Device Core
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
+    pci_transport: Option<VirtioPciTransport>,
     virtqueues: Mutex<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
     display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: RwLock<Option<usize>>,
@@ -326,8 +328,26 @@ impl VirtioGpuDeviceCore {
     ///
     /// A new instance of `VirtioGpuDevice`
     pub fn new(base_addr: usize) -> Self {
+        Self::new_with_transport(base_addr, None)
+    }
+
+    /// Create a new VirtIO GPU device core backed by the PCI transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - Mapped VirtIO PCI configuration regions
+    ///
+    /// # Returns
+    ///
+    /// A new instance of `VirtioGpuDeviceCore`.
+    pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        Self::new_with_transport(transport.common_cfg, Some(transport))
+    }
+
+    fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
             base_addr,
+            pci_transport,
             virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
             display_info: RwLock::new(None),
             framebuffer_addr: RwLock::new(None),
@@ -1189,6 +1209,10 @@ impl VirtioGpuDeviceCore {
 }
 
 impl VirtioDevice for VirtioGpuDeviceCore {
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        self.pci_transport
+    }
+
     fn get_base_addr(&self) -> usize {
         self.base_addr
     }
@@ -1257,6 +1281,22 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
+            handler: RwLock::new(None),
+        }
+    }
+
+    /// Create a new VirtIO GPU device backed by the PCI transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - Mapped VirtIO PCI configuration regions
+    ///
+    /// # Returns
+    ///
+    /// A new instance of `VirtioGpuDevice`.
+    pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        Self {
+            core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new_pci(transport))),
             handler: RwLock::new(None),
         }
     }

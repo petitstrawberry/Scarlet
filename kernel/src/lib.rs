@@ -312,6 +312,39 @@ use vm::{
     vmem::MemoryArea,
 };
 
+fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    node.name.starts_with("pci@")
+        || node.name.starts_with("pcie@")
+        || node
+            .compatible()
+            .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+            .unwrap_or(false)
+}
+
+fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(usize, usize)> {
+    for parent_path in ["/soc", "/"] {
+        let Some(parent) = fdt.find_node(parent_path) else {
+            continue;
+        };
+
+        for child in parent.children() {
+            if !is_pci_host_node(&child) {
+                continue;
+            }
+
+            if let Some(regions) = child.reg() {
+                for region in regions {
+                    if let Some(size) = region.size {
+                        return Some((region.starting_address as usize, size));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
 #[panic_handler]
@@ -694,41 +727,20 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     );
 
     if let Some(fdt) = FdtManager::get_manager().get_fdt() {
-        let mut pci_ecam = None;
-
-        if let Some(soc) = fdt.find_node("/soc") {
-            for child in soc.children() {
-                let is_pci_host = child.name.starts_with("pci@")
-                    || child
-                        .compatible()
-                        .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
-                        .unwrap_or(false);
-
-                if !is_pci_host {
-                    continue;
-                }
-
-                if let Some(regions) = child.reg() {
-                    for region in regions {
-                        if let Some(size) = region.size {
-                            pci_ecam = Some((region.starting_address as usize, size));
-                            break;
-                        }
-                    }
-                }
-
-                if pci_ecam.is_some() {
-                    break;
-                }
-            }
-        }
-
-        if let Some((ecam_base, ecam_size)) = pci_ecam {
+        if let Some((ecam_base, ecam_size)) = find_pci_ecam(fdt) {
+            println!(
+                "[PCI] ECAM discovered from FDT paddr={:#x} size={:#x}",
+                ecam_base, ecam_size
+            );
             let pci_bus = PciBus::new(ecam_base, ecam_size);
             if let Err(error) = pci_bus.scan_and_register() {
                 println!("[Scarlet Kernel] PCI scan skipped: {}", error);
             }
+        } else {
+            println!("[PCI] no PCI ECAM found in FDT");
         }
+    } else {
+        println!("[PCI] no FDT available, skipping PCI scan");
     }
     DeviceManager::get_manager().probe_pci_devices();
     fence(Ordering::SeqCst);

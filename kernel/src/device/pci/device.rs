@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use super::PciAddress;
+use super::config::PciBar;
 use crate::device::{DeviceInfo, DeviceType};
 
 /// PCI device class codes
@@ -116,6 +117,8 @@ pub struct PciDeviceInfo {
     name: &'static str,
     /// Unique device ID in the system
     id: usize,
+    /// Decoded BAR resources.
+    bars: Vec<PciBar>,
 }
 
 impl PciDeviceInfo {
@@ -164,7 +167,22 @@ impl PciDeviceInfo {
             routed_irq,
             name,
             id,
+            bars: Vec::new(),
         }
+    }
+
+    /// Attach decoded BAR resources to this PCI device information.
+    ///
+    /// # Arguments
+    ///
+    /// * `bars` - BAR resources decoded by the PCI core during enumeration
+    ///
+    /// # Returns
+    ///
+    /// The updated PCI device information.
+    pub fn with_bars(mut self, bars: Vec<PciBar>) -> Self {
+        self.bars = bars;
+        self
     }
 
     /// Get the PCI address
@@ -275,6 +293,38 @@ impl PciDeviceInfo {
     /// Get the device ID
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    /// Get decoded BAR resources.
+    pub fn bars(&self) -> &[PciBar] {
+        &self.bars
+    }
+
+    /// Get a decoded BAR by index.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - BAR index in the PCI header
+    ///
+    /// # Returns
+    ///
+    /// The decoded BAR resource, if present.
+    pub fn bar(&self, index: usize) -> Option<&PciBar> {
+        self.bars.iter().find(|bar| bar.index as usize == index)
+    }
+
+    /// Get an assigned MMIO BAR by index.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - BAR index in the PCI header
+    ///
+    /// # Returns
+    ///
+    /// The assigned memory BAR, if present.
+    pub fn mmio_bar(&self, index: usize) -> Option<&PciBar> {
+        self.bar(index)
+            .filter(|bar| bar.is_memory() && bar.is_assigned())
     }
 }
 
