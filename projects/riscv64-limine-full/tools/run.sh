@@ -64,6 +64,17 @@ QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_RV64:-virt,acpi=off}"
 QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc}"
+QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu}"
+QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
+QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
+
+case "$QEMU_GPU" in
+    virgl|virtio-gpu-gl)
+        if [ -z "${SCARLET_QEMU_DISPLAY+x}" ]; then
+            QEMU_DISPLAY="egl-headless"
+        fi
+        ;;
+esac
 
 case ",$QEMU_MACHINE," in
     *,virtualization=*)
@@ -139,6 +150,14 @@ else
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
+
+require_virtio_gpu_gl_device() {
+    if ! "$1" -device help 2>/dev/null | grep -q 'virtio-gpu-gl-device'; then
+        echo "Error: $1 does not provide virtio-gpu-gl-device; install a QEMU build with virgl/GL support or use SCARLET_QEMU_GPU=virtio-gpu"
+        exit 1
+    fi
+}
+
 QEMU_DISPLAY_ARGS=()
 case "$QEMU_DISPLAY" in
     vnc)
@@ -150,11 +169,37 @@ case "$QEMU_DISPLAY" in
     sdl)
         QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
         ;;
+    gtk-gl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display gtk,gl=on)
+        ;;
+    sdl-gl)
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl,gl=on)
+        ;;
+    egl-headless)
+        QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display egl-headless,gl=on)
+        ;;
     none)
         QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio)
         ;;
     *)
-        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, or none)"
+        echo "Error: unsupported SCARLET_QEMU_DISPLAY=$QEMU_DISPLAY (expected vnc, cocoa, sdl, gtk-gl, sdl-gl, egl-headless, or none)"
+        exit 1
+        ;;
+esac
+
+QEMU_GPU_ARGS=()
+case "$QEMU_GPU" in
+    virtio-gpu)
+        QEMU_GPU_ARGS=(-device virtio-gpu-device,bus=virtio-mmio-bus.1,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
+    virgl|virtio-gpu-gl)
+        require_virtio_gpu_gl_device qemu-system-riscv64
+        QEMU_GPU_ARGS=(-device virtio-gpu-gl-device,bus=virtio-mmio-bus.1,xres="$QEMU_VIRTIO_GPU_XRES",yres="$QEMU_VIRTIO_GPU_YRES")
+        ;;
+    none)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_GPU=$QEMU_GPU (expected virtio-gpu, virgl, virtio-gpu-gl, or none)"
         exit 1
         ;;
 esac
@@ -174,7 +219,7 @@ qemu-system-riscv64 \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    "${QEMU_GPU_ARGS[@]}" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \

@@ -22,7 +22,7 @@ use spin::RwLock;
 use crate::device::{
     Device, DeviceType,
     char::CharDevice,
-    graphics::{FramebufferConfig, manager::FramebufferResource},
+    graphics::{FramebufferConfig, manager::FramebufferResource, output::DisplayRegion},
     manager::DeviceManager,
 };
 use crate::object::capability::selectable::Selectable;
@@ -939,8 +939,7 @@ impl FramebufferCharDevice {
             if let Some(graphics_device) = device.as_graphics_device() {
                 let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
 
-                // Trigger a full framebuffer flush to ensure display is updated
-                graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
+                graphics_device.present_current_framebuffer_region(DisplayRegion::full(&config))?;
 
                 // Verify that the framebuffer address is still valid
                 if physical_addr == 0 {

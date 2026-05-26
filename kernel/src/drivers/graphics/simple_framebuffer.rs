@@ -3,7 +3,7 @@ use alloc::{boxed::Box, string::String, sync::Arc};
 use crate::{
     device::{
         Device, DeviceInfo, DeviceType,
-        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
+        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat, output::DisplayRegion},
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -107,12 +107,11 @@ impl GraphicsDevice for SimpleFramebufferDevice {
         Ok(self.framebuffer_addr)
     }
 
-    fn flush_framebuffer(
+    fn present_framebuffer_region(
         &self,
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
+        _config: &FramebufferConfig,
+        _physical_addr: usize,
+        _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         Ok(())
     }

@@ -57,6 +57,10 @@ path = "src/cat.rs"
 name = "fb_test"
 path = "src/fb_test.rs"
 
+[[bin]]
+name = "gpu_probe"
+path = "src/gpu_probe.rs"
+
  [[bin]]
  name = "socket_server"
  path = "src/socket_server.rs"
@@ -214,6 +218,7 @@ path = "src/top.rs"
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
+gpu = { path = "../lib/gpu" }
 sws_protocol = { path = "../lib/sws_protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }

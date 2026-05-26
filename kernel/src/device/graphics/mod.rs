@@ -3,11 +3,10 @@
 //! This module defines the interface for graphics devices in the kernel.
 //! It provides abstractions for framebuffer operations and graphics device management.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
 
-use self::output::DisplayOutput;
+use self::output::{DisplayOutput, DisplayRegion};
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
@@ -97,38 +96,45 @@ impl FramebufferConfig {
     }
 }
 
-/// Graphics operation requests
-#[derive(Debug)]
-pub enum GraphicsRequest {
-    /// Get framebuffer configuration
-    GetFramebufferConfig,
-    /// Map framebuffer memory
-    MapFramebuffer,
-    /// Flush framebuffer changes to display
-    FlushFramebuffer {
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-    },
+/// GPU resource that can be presented through the display pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuDisplayResource {
+    /// Backend resource identifier.
+    pub resource_id: u32,
+    /// Resource width in pixels.
+    pub width: u32,
+    /// Resource height in pixels.
+    pub height: u32,
 }
 
-/// Result of graphics operations
-#[derive(Debug)]
-pub struct GraphicsResult {
-    pub request: Box<GraphicsRequest>,
-    pub result: Result<GraphicsResponse, &'static str>,
-}
+impl GpuDisplayResource {
+    /// Create a displayable GPU resource descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource_id` - Backend resource identifier.
+    /// * `width` - Resource width in pixels.
+    /// * `height` - Resource height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A GPU display resource descriptor.
+    pub const fn new(resource_id: u32, width: u32, height: u32) -> Self {
+        Self {
+            resource_id,
+            width,
+            height,
+        }
+    }
 
-/// Response from graphics operations
-#[derive(Debug)]
-pub enum GraphicsResponse {
-    /// Framebuffer configuration
-    FramebufferConfig(FramebufferConfig),
-    /// Framebuffer memory address
-    FramebufferAddress(usize),
-    /// Operation completed successfully
-    Success,
+    /// Get the full resource region.
+    ///
+    /// # Returns
+    ///
+    /// Region covering the whole resource.
+    pub const fn full_region(&self) -> DisplayRegion {
+        DisplayRegion::new(0, 0, self.width, self.height)
+    }
 }
 
 /// Graphics device interface
@@ -157,14 +163,77 @@ pub trait GraphicsDevice: Device {
         Ok((config, physical_addr))
     }
 
-    /// Flush framebuffer region to display
-    fn flush_framebuffer(
+    /// Present a framebuffer backing store to the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Framebuffer configuration for the backing store.
+    /// * `physical_addr` - Physical address of the framebuffer backing store.
+    /// * `region` - Updated display region. Use `DisplayRegion::full(config)`
+    ///   for a full-frame present.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_framebuffer_region(
         &self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
+        config: &FramebufferConfig,
+        physical_addr: usize,
+        region: DisplayRegion,
     ) -> Result<(), &'static str>;
+
+    /// Present the device's current framebuffer to the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `region` - Updated display region. Use `DisplayRegion::full(config)`
+    ///   for a full-frame present.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_current_framebuffer_region(
+        &self,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        let (config, physical_addr) = self.get_framebuffer_info()?;
+        self.present_framebuffer_region(&config, physical_addr, region)
+    }
+
+    /// Present a GPU resource through the display pipeline.
+    ///
+    /// This is the display-side boundary for accelerated producers. GPU
+    /// command submission updates the resource; this method selects the
+    /// resource for scanout and presents the requested region.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - GPU resource to present.
+    /// * `region` - Updated resource region.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_gpu_resource_region(
+        &self,
+        _resource: GpuDisplayResource,
+        _region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        Err("GPU resource presentation is not supported")
+    }
+
+    /// Present a whole GPU resource through the display pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - GPU resource to present.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_gpu_resource(&self, resource: GpuDisplayResource) -> Result<(), &'static str> {
+        self.present_gpu_resource_region(resource, resource.full_region())
+    }
 
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
@@ -183,7 +252,6 @@ pub struct GenericGraphicsDevice {
     display_name: &'static str,
     config: Option<FramebufferConfig>,
     framebuffer_addr: Option<usize>,
-    request_queue: Mutex<Vec<Box<GraphicsRequest>>>,
 }
 
 impl GenericGraphicsDevice {
@@ -192,7 +260,6 @@ impl GenericGraphicsDevice {
             display_name,
             config: None,
             framebuffer_addr: None,
-            request_queue: Mutex::new(Vec::new()),
         }
     }
 
@@ -283,14 +350,12 @@ impl GraphicsDevice for GenericGraphicsDevice {
         self.framebuffer_addr.ok_or("Framebuffer address not set")
     }
 
-    fn flush_framebuffer(
+    fn present_framebuffer_region(
         &self,
-        _x: u32,
-        _y: u32,
-        _width: u32,
-        _height: u32,
+        _config: &FramebufferConfig,
+        _physical_addr: usize,
+        _region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        // Generic implementation - no-op
         Ok(())
     }
 

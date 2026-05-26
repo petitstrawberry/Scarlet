@@ -1465,6 +1465,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu"
+version = "0.16.0"
+dependencies = [
+ "scarlet_std",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4320,6 +4327,7 @@ name = "userprogram"
 version = "0.16.0"
 dependencies = [
  "framebuffer",
+ "gpu",
  "sbus",
  "sbus-client",
  "scarlet-desktop-config",

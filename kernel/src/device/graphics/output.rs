@@ -4,6 +4,60 @@ use alloc::string::String;
 
 use super::FramebufferConfig;
 
+/// Rectangular display update region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayRegion {
+    /// Left edge in pixels.
+    pub x: u32,
+    /// Top edge in pixels.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl DisplayRegion {
+    /// Create a new display update region.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Left edge in pixels.
+    /// * `y` - Top edge in pixels.
+    /// * `width` - Width in pixels.
+    /// * `height` - Height in pixels.
+    ///
+    /// # Returns
+    ///
+    /// A new `DisplayRegion`.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Create a region covering the full framebuffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Framebuffer configuration.
+    ///
+    /// # Returns
+    ///
+    /// A region covering the visible framebuffer.
+    pub const fn full(config: &FramebufferConfig) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: config.width,
+            height: config.height,
+        }
+    }
+}
+
 /// A single display connector / output (panel, DP port, HDMI, etc.)
 pub trait DisplayOutput: Send + Sync {
     /// Human-readable name (e.g. "internal-panel", "dp0")
@@ -18,6 +72,26 @@ pub trait DisplayOutput: Send + Sync {
     /// For direct-mapped displays (e.g. simple-fb) this is a no-op.
     /// For coprocessor-driven displays (e.g. DCPext) this triggers DMA/scanout.
     fn present(&self, config: &FramebufferConfig, fb_paddr: usize) -> Result<(), &'static str>;
+
+    /// Present a framebuffer region on this output.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Framebuffer configuration.
+    /// * `fb_paddr` - Physical address of the framebuffer memory.
+    /// * `region` - Updated display region.
+    ///
+    /// # Returns
+    ///
+    /// Success or an error describing why presentation failed.
+    fn present_region(
+        &self,
+        config: &FramebufferConfig,
+        fb_paddr: usize,
+        _region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        self.present(config, fb_paddr)
+    }
 }
 
 /// A display mode (resolution + refresh rate)

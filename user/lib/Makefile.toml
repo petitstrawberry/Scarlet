@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
+dependencies = ["fmt-std", "fmt-framebuffer", "fmt-gpu", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
+dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
 
 [tasks.fmt-std-check]
 description = "Check formatting for user library std code"
@@ -22,6 +22,12 @@ args = ["fmt", "--", "--check"]
 [tasks.fmt-framebuffer-check]
 description = "Check formatting for user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-gpu-check]
+description = "Check formatting for user library gpu code"
+cwd = "gpu"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -40,6 +46,12 @@ args = ["fmt"]
 [tasks.fmt-framebuffer]
 description = "Format user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-gpu]
+description = "Format user library gpu code"
+cwd = "gpu"
 command = "cargo"
 args = ["fmt"]
 
@@ -76,6 +88,7 @@ description = "Build all user libraries in debug mode"
 script = [
     "cd std && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../gpu && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -86,6 +99,7 @@ description = "Build all user libraries in release mode"
 script = [
     "cd std && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../gpu && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
@@ -96,6 +110,7 @@ description = "Build all user libraries for AArch64 in debug mode"
 script = [
     "cd std && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../gpu && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
@@ -106,6 +121,7 @@ description = "Build all user libraries for AArch64 in release mode"
 script = [
     "cd std && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../gpu && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../sws_protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scarlet-desktop-config && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
     "cd ../scpm && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
@@ -116,6 +132,7 @@ description = "Clean all user library build artifacts"
 script = [
     "cd std && cargo clean",
     "cd ../framebuffer && cargo clean",
+    "cd ../gpu && cargo clean",
     "cd ../sws_protocol && cargo clean",
     "cd ../scarlet-desktop-config && cargo clean",
     "cd ../scpm && cargo clean"
@@ -126,6 +143,7 @@ description = "Test all user libraries"
 script = [
     "cd std && cargo test",
     "cd ../framebuffer && cargo test",
+    "cd ../gpu && cargo test",
     "cd ../sws_protocol && cargo test",
     "cd ../scarlet-desktop-config && cargo test",
     "cd ../scpm && cargo test"
@@ -136,6 +154,7 @@ description = "Generate documentation for all user libraries"
 script = [
     "cd std && cargo doc --no-deps",
     "cd ../framebuffer && cargo doc --no-deps",
+    "cd ../gpu && cargo doc --no-deps",
     "cd ../sws_protocol && cargo doc --no-deps",
     "cd ../scarlet-desktop-config && cargo doc --no-deps",
     "cd ../scpm && cargo doc --no-deps"
@@ -143,7 +162,7 @@ script = [
 
 [tasks.clippy]
 description = "Run clippy for all user libraries"
-dependencies = ["clippy-std", "clippy-framebuffer", "clippy-sws-protocol", "clippy-scarlet-desktop-config", "clippy-scpm"]
+dependencies = ["clippy-std", "clippy-framebuffer", "clippy-gpu", "clippy-sws-protocol", "clippy-scarlet-desktop-config", "clippy-scpm"]
 
 [tasks.clippy-std]
 description = "Run clippy for user library std code"
@@ -154,6 +173,12 @@ args = ["clippy", "--", "-D", "warnings"]
 [tasks.clippy-framebuffer]
 description = "Run clippy for user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-gpu]
+description = "Run clippy for user library gpu code"
+cwd = "gpu"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]
 
@@ -177,7 +202,7 @@ args = ["clippy", "--", "-D", "warnings"]
 
 [tasks.clippy-fix]
 description = "Run clippy with auto-fix for all user libraries"
-dependencies = ["clippy-fix-std", "clippy-fix-framebuffer", "clippy-fix-sws-protocol", "clippy-fix-scarlet-desktop-config", "clippy-fix-scpm"]
+dependencies = ["clippy-fix-std", "clippy-fix-framebuffer", "clippy-fix-gpu", "clippy-fix-sws-protocol", "clippy-fix-scarlet-desktop-config", "clippy-fix-scpm"]
 
 [tasks.clippy-fix-std]
 description = "Run clippy with auto-fix for user library std code"
@@ -188,6 +213,12 @@ args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warni
 [tasks.clippy-fix-framebuffer]
 description = "Run clippy with auto-fix for user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+
+[tasks.clippy-fix-gpu]
+description = "Run clippy with auto-fix for user library gpu code"
+cwd = "gpu"
 command = "cargo"
 args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
