@@ -290,7 +290,7 @@ esac
 
 QEMU_NET_ARGS=()
 if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
-    QEMU_NET_ARGS=(-netdev user,id=net0 -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.3)
+    QEMU_NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0,bus=pcie.0)
 fi
 
 QEMU_INPUT_ARGS=()
