@@ -95,6 +95,7 @@ mod alloc_exports {
 
 mod allocator;
 mod arch;
+pub mod audio;
 pub mod collections;
 pub mod env;
 pub mod ffi;

@@ -21,16 +21,19 @@ use crate::{
     },
     driver_initcall,
     drivers::{
-        block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
-        network::virtio_net::VirtioNetDevice, virtio::pci::VirtioPciTransport,
-        virtio_input::VirtioInputDevice, virtio_rng::VirtioRngDevice,
+        block::virtio_blk::VirtioBlockDevice,
+        graphics::virtio_gpu::VirtioGpuDevice,
+        network::virtio_net::VirtioNetDevice,
+        virtio::pci::VirtioPciTransport,
+        virtio::{next_block_device_name, next_net_device_name},
+        virtio_input::VirtioInputDevice,
+        virtio_rng::VirtioRngDevice,
+        virtio_snd::{VirtioSndDevice, register_audio_device},
     },
     early_println,
 };
 
 // Static counters for device naming
-static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static RNG_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -1023,6 +1026,7 @@ pub enum VirtioDeviceType {
     Rng = 4,
     GPU = 16,
     Input = 18,
+    Sound = 25,
 }
 
 impl VirtioDeviceType {
@@ -1046,6 +1050,7 @@ impl VirtioDeviceType {
             4 => VirtioDeviceType::Rng,
             16 => VirtioDeviceType::GPU,
             18 => VirtioDeviceType::Input,
+            25 => VirtioDeviceType::Sound,
             _ => panic!("Not supported device type"),
         }
     }
@@ -1139,8 +1144,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     match device_type {
         VirtioDeviceType::Block => {
-            let id = BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("vblk{}", id);
+            let name = next_block_device_name();
             crate::early_println!(
                 "[Virtio] Detected Virtio Block Device at {:#x}, registering as {}",
                 base_addr,
@@ -1150,8 +1154,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Net => {
-            let id = NET_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("veth{}", id);
+            let name = next_net_device_name();
             crate::early_println!(
                 "[Virtio] Detected Virtio Network Device at {:#x}, registering as {}",
                 base_addr,
@@ -1187,17 +1190,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         VirtioDeviceType::GPU => {
             let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let graphics_name = format!("vfb{}", id);
             let gpu_name = format!("gpu{}", id);
             crate::early_println!(
-                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {} and {}",
+                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}",
                 base_addr,
-                graphics_name,
                 gpu_name
             );
             let dev = Arc::new(VirtioGpuDevice::new(base_addr));
             let graphics_dev: Arc<dyn Device> = dev.clone();
-            DeviceManager::get_manager().register_device_with_name(graphics_name, graphics_dev);
+            DeviceManager::get_manager().register_device(graphics_dev);
 
             let gpu_backend: Arc<dyn GpuDevice> = dev.clone();
             let display: Arc<dyn GraphicsDevice> = dev.clone();
@@ -1257,6 +1258,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                     .register_device_with_name("random".to_string(), random_char_dev);
                 crate::early_println!("[Virtio] Registered /dev/random character device");
             }
+        }
+        VirtioDeviceType::Sound => {
+            crate::early_println!("[Virtio] Detected Virtio Sound Device at {:#x}", base_addr);
+            let backend = Arc::new(VirtioSndDevice::new(base_addr));
+            let name = register_audio_device(backend);
+            crate::early_println!("[Virtio] Registered sound device {}", name);
         }
         _ => {
             // Unsupported device type

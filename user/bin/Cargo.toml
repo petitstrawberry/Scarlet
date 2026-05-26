@@ -214,6 +214,10 @@ path = "src/ansi_banner.rs"
 name = "top"
 path = "src/top.rs"
 
+[[bin]]
+name = "playwav"
+path = "src/playwav.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }

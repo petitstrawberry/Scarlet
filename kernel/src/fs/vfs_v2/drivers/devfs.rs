@@ -551,13 +551,21 @@ impl DevFileObject {
     ) -> Result<Self, FileSystemError> {
         // Try to get the device from DeviceManager by ID
         match device_manager.get_device(device_id) {
-            Some(device_guard) => Ok(Self {
-                node,
-                position: RwLock::new(0),
-                device_id,
-                device_type,
-                device_guard: Some(device_guard),
-            }),
+            Some(device_guard) => {
+                device_guard.open().map_err(|e| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        format!("Device open failed: {}", e),
+                    )
+                })?;
+                Ok(Self {
+                    node,
+                    position: RwLock::new(0),
+                    device_id,
+                    device_type,
+                    device_guard: Some(device_guard),
+                })
+            }
             None => Err(FileSystemError::new(
                 FileSystemErrorKind::DeviceError,
                 format!("Device with ID {} not found in DeviceManager", device_id),
@@ -895,6 +903,14 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
             return device_guard.as_ref().is_nonblocking();
         }
         crate::object::capability::selectable::Selectable::is_nonblocking(self)
+    }
+}
+
+impl Drop for DevFileObject {
+    fn drop(&mut self) {
+        if let Some(device_guard) = self.device_guard.as_ref() {
+            device_guard.close();
+        }
     }
 }
 

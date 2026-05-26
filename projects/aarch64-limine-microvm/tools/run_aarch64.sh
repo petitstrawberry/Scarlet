@@ -199,6 +199,13 @@ case "$QEMU_GPU" in
         ;;
 esac
 
+QEMU_AUDIO="${SCARLET_QEMU_AUDIO:-0}"
+QEMU_AUDIO_DRIVER="${SCARLET_QEMU_AUDIO_DRIVER:-coreaudio}"
+QEMU_AUDIO_ARGS=()
+if [ "$QEMU_AUDIO" = "1" ] || [ "$QEMU_AUDIO" = "true" ]; then
+    QEMU_AUDIO_ARGS=(-audiodev "$QEMU_AUDIO_DRIVER,id=audio0" -device virtio-sound-pci,audiodev=audio0,bus=pcie.0)
+fi
+
 find_efi_code() {
     if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64_HVF}"
@@ -336,6 +343,7 @@ qemu-system-aarch64 \
     -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
     "${QEMU_GPU_ARGS[@]}" \
+    "${QEMU_AUDIO_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.3 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
