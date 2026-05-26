@@ -45,6 +45,7 @@ use crate::{
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
+        pci::VirtioPciTransport,
         queue::{DescriptorFlag, VirtQueue},
     },
     object::capability::ControlOps,
@@ -147,6 +148,7 @@ impl VirtioNetHdrBasic {
 /// VirtIO Network Device
 pub struct VirtioNetDevice {
     base_addr: usize,
+    pci_transport: Option<VirtioPciTransport>,
     virtqueues: Mutex<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
     config: RwLock<Option<NetworkInterfaceConfig>>,
     features: RwLock<u64>,
@@ -168,8 +170,26 @@ impl VirtioNetDevice {
     ///
     /// A new instance of `VirtioNetDevice`
     pub fn new(base_addr: usize) -> Self {
+        Self::new_with_transport(base_addr, None)
+    }
+
+    /// Create a new VirtIO Network device backed by PCI transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport` - Mapped VirtIO PCI configuration regions
+    ///
+    /// # Returns
+    ///
+    /// A new instance of `VirtioNetDevice`
+    pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        Self::new_with_transport(transport.common_cfg, Some(transport))
+    }
+
+    fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
             base_addr,
+            pci_transport,
             virtqueues: Mutex::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
             config: RwLock::new(None),
             features: RwLock::new(0),
@@ -630,6 +650,10 @@ impl InterruptCapableDevice for VirtioNetDevice {
 }
 
 impl VirtioDevice for VirtioNetDevice {
+    fn pci_transport(&self) -> Option<VirtioPciTransport> {
+        self.pci_transport
+    }
+
     fn get_base_addr(&self) -> usize {
         self.base_addr
     }

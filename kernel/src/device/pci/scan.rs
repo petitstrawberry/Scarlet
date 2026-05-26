@@ -11,6 +11,9 @@ use alloc::vec::Vec;
 use super::config::{PciBar, PciBarKind, PciConfig, offset, vendor};
 use super::device::PciDeviceInfo;
 use super::{PciAddress, PciBus};
+use crate::device::platform::resource::{
+    IrqMetadata, PlatformDeviceResource, PlatformDeviceResourceType,
+};
 use crate::{early_println, println};
 
 /// PCI scanner
@@ -103,20 +106,37 @@ impl<'a> PciScanner<'a> {
         None
     }
 
-    fn decode_parent_irq(parent_irq_cells: &[u32]) -> Option<u32> {
+    fn decode_parent_irq_resource(parent_irq_cells: &[u32]) -> Option<PlatformDeviceResource> {
         match parent_irq_cells.len() {
             0 => None,
-            3 => parent_irq_cells.get(1).copied(),
-            _ => parent_irq_cells.first().copied(),
+            3 => Some(PlatformDeviceResource {
+                res_type: PlatformDeviceResourceType::IRQ,
+                start: parent_irq_cells[1] as usize,
+                end: parent_irq_cells[1] as usize,
+                irq_metadata: Some(IrqMetadata {
+                    irq_type: parent_irq_cells[0],
+                    irq_number: parent_irq_cells[1],
+                    irq_flags: parent_irq_cells[2],
+                }),
+            }),
+            _ => {
+                let irq = *parent_irq_cells.first()? as usize;
+                Some(PlatformDeviceResource {
+                    res_type: PlatformDeviceResourceType::IRQ,
+                    start: irq,
+                    end: irq,
+                    irq_metadata: None,
+                })
+            }
         }
     }
 
-    fn parse_routed_irq_from_map<F>(
+    fn parse_routed_irq_resource_from_map<F>(
         mask: &[u8],
         map: &[u8],
         child_cells: &[u32],
         mut parent_cell_counts: F,
-    ) -> Option<u32>
+    ) -> Option<PlatformDeviceResource>
     where
         F: FnMut(u32) -> Option<(usize, usize)>,
     {
@@ -164,7 +184,7 @@ impl<'a> PciScanner<'a> {
                     let cell_offset = parent_irq_offset + index * 4;
                     *parent_irq_cell = Self::read_be_u32(&map[cell_offset..cell_offset + 4])?;
                 }
-                return Self::decode_parent_irq(&parent_irq_cells);
+                return Self::decode_parent_irq_resource(&parent_irq_cells);
             }
 
             offset += entry_bytes;
@@ -206,13 +226,28 @@ impl<'a> PciScanner<'a> {
         child_cells[0] = ((addr.device as u32) << 11) | ((addr.function as u32) << 8);
         child_cells[child_addr_cells] = interrupt_pin as u32;
 
-        Self::parse_routed_irq_from_map(mask, map, &child_cells, |phandle| {
-            let parent = Self::find_node_by_phandle(fdt, phandle)?;
-            let parent_addr_cells = Self::get_u32_prop(&parent, "#address-cells").unwrap_or(0);
-            let parent_interrupt_cells =
-                Self::get_u32_prop(&parent, "#interrupt-cells").unwrap_or(1);
-            Some((parent_addr_cells as usize, parent_interrupt_cells as usize))
-        })
+        let resource =
+            Self::parse_routed_irq_resource_from_map(mask, map, &child_cells, |phandle| {
+                let parent = Self::find_node_by_phandle(fdt, phandle)?;
+                let parent_addr_cells = Self::get_u32_prop(&parent, "#address-cells").unwrap_or(0);
+                let parent_interrupt_cells =
+                    Self::get_u32_prop(&parent, "#interrupt-cells").unwrap_or(1);
+                Some((parent_addr_cells as usize, parent_interrupt_cells as usize))
+            })?;
+
+        match crate::interrupt::resolve_platform_irq(&resource) {
+            Ok(irq) => Some(irq),
+            Err(e) => {
+                early_println!(
+                    "[PCI] Failed to translate routed IRQ for {:02x}:{:02x}.{}: {}",
+                    addr.bus,
+                    addr.device,
+                    addr.function,
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Create a new PCI scanner
@@ -432,6 +467,25 @@ impl<'a> PciScanner<'a> {
         for bar in device_info.bars() {
             Self::log_bar(&addr, bar);
         }
+        if interrupt_pin != 0 {
+            let pin_name = match interrupt_pin {
+                1 => "A",
+                2 => "B",
+                3 => "C",
+                4 => "D",
+                _ => "?",
+            };
+            match routed_irq {
+                Some(irq) => println!(
+                    "pci 0000:{:02x}:{:02x}.{}: INT{} -> IRQ {}",
+                    bus, device, function, pin_name, irq
+                ),
+                None => println!(
+                    "pci 0000:{:02x}:{:02x}.{}: INT{} unassigned",
+                    bus, device, function, pin_name
+                ),
+            }
+        }
 
         Some(device_info)
     }
@@ -532,12 +586,14 @@ mod tests {
         ];
         let child_cells = [0x0000_0800, 0, 0, 1];
 
-        let routed_irq =
-            PciScanner::parse_routed_irq_from_map(&mask, &map, &child_cells, |phandle| {
+        let irq_resource =
+            PciScanner::parse_routed_irq_resource_from_map(&mask, &map, &child_cells, |phandle| {
                 if phandle == 0x2a { Some((0, 1)) } else { None }
-            });
+            })
+            .expect("expected routed IRQ resource");
 
-        assert_eq!(routed_irq, Some(0x15));
+        assert_eq!(irq_resource.start, 0x15);
+        assert!(irq_resource.irq_metadata.is_none());
     }
 
     #[test_case]
@@ -553,12 +609,19 @@ mod tests {
         ];
         let child_cells = [0x0000_0800, 0, 0, 1];
 
-        let routed_irq =
-            PciScanner::parse_routed_irq_from_map(&mask, &map, &child_cells, |phandle| {
+        let irq_resource =
+            PciScanner::parse_routed_irq_resource_from_map(&mask, &map, &child_cells, |phandle| {
                 if phandle == 0x33 { Some((1, 3)) } else { None }
-            });
+            })
+            .expect("expected routed IRQ resource");
+        let metadata = irq_resource
+            .irq_metadata
+            .expect("expected GIC-style IRQ metadata");
 
-        assert_eq!(routed_irq, Some(0x24));
+        assert_eq!(irq_resource.start, 0x24);
+        assert_eq!(metadata.irq_type, 1);
+        assert_eq!(metadata.irq_number, 0x24);
+        assert_eq!(metadata.irq_flags, 0x04);
     }
 
     #[test_case]

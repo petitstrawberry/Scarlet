@@ -221,7 +221,7 @@ qemu-system-riscv64 \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
     "${QEMU_GPU_ARGS[@]}" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
+    -device virtio-net-pci,netdev=net0,bus=pcie.0 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \

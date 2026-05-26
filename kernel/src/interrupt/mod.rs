@@ -72,7 +72,12 @@ pub struct InterruptManager {
     controllers: spin::Once<spin::Mutex<controllers::InterruptControllers>>,
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
     interrupt_devices: spin::Lazy<
-        spin::Mutex<HashMap<InterruptId, Arc<dyn crate::device::events::InterruptCapableDevice>>>,
+        spin::Mutex<
+            HashMap<
+                InterruptId,
+                alloc::vec::Vec<Arc<dyn crate::device::events::InterruptCapableDevice>>,
+            >,
+        >,
     >,
 }
 
@@ -166,8 +171,10 @@ impl InterruptManager {
             devices.get(&interrupt_id).cloned()
         };
 
-        if let Some(device) = device {
-            device.handle_interrupt()?;
+        if let Some(devices) = device {
+            for device in devices {
+                device.handle_interrupt()?;
+            }
             self.complete_external_interrupt(cpu_id, interrupt_id)
         } else {
             let handler = {
@@ -365,10 +372,7 @@ impl InterruptManager {
         device: Arc<dyn crate::device::events::InterruptCapableDevice>,
     ) -> InterruptResult<()> {
         let mut devices = self.interrupt_devices.lock();
-        if devices.contains_key(&interrupt_id) {
-            return Err(InterruptError::HandlerAlreadyRegistered);
-        }
-        devices.insert(interrupt_id, device);
+        devices.entry(interrupt_id).or_default().push(device);
         Ok(())
     }
 
