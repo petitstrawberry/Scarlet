@@ -1422,11 +1422,27 @@ impl GraphicsDevice for VirtioGpuDevice {
 
     fn present_framebuffer_region(
         &self,
-        _config: &FramebufferConfig,
-        _physical_addr: usize,
+        config: &FramebufferConfig,
+        physical_addr: usize,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.core.lock().present_framebuffer_region(region)
+        let core = self.core.lock();
+        let current_config = core.get_framebuffer_config()?;
+        let current_physical_addr = core.get_framebuffer_address()?;
+        if current_physical_addr != physical_addr {
+            return Err(
+                "Framebuffer physical address does not match current virtio-gpu framebuffer",
+            );
+        }
+        if current_config.width != config.width
+            || current_config.height != config.height
+            || current_config.format != config.format
+            || current_config.stride != config.stride
+        {
+            return Err("Framebuffer config does not match current virtio-gpu framebuffer");
+        }
+
+        core.present_framebuffer_region(region)
     }
 
     fn present_gpu_resource_region(

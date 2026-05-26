@@ -659,6 +659,9 @@ fn user_buffer_to_memory_entries(
     if buffer_ptr == 0 || buffer_len == 0 {
         return Err("GPU backing buffer is invalid");
     }
+    buffer_ptr
+        .checked_add(buffer_len)
+        .ok_or("GPU backing buffer range overflows")?;
 
     let task = crate::task::mytask().ok_or("No current task for GPU backing buffer")?;
     let mut entries = Vec::new();
@@ -678,7 +681,9 @@ fn user_buffer_to_memory_entries(
             paddr,
             length: chunk_len,
         });
-        cursor += chunk_len;
+        cursor = cursor
+            .checked_add(chunk_len)
+            .ok_or("GPU backing buffer range overflows")?;
         remaining -= chunk_len;
     }
     Ok(entries)
@@ -735,13 +740,11 @@ impl GpuCharDevice {
         }
 
         let mut buffer = alloc::vec![0u8; request.buffer_len];
-        request.bytes_written = self
+        let bytes_written = self
             .gpu
             .read_capset(request.id, request.version, &mut buffer)?;
-        write_user_bytes(
-            request.buffer_ptr,
-            &buffer[..request.bytes_written.min(buffer.len())],
-        )?;
+        request.bytes_written = bytes_written.min(buffer.len());
+        write_user_bytes(request.buffer_ptr, &buffer[..request.bytes_written])?;
         write_user_value(arg, &request)?;
         Ok(0)
     }
@@ -938,7 +941,7 @@ impl super::char::CharDevice for GpuCharDevice {
     }
 
     fn can_write(&self) -> bool {
-        true
+        false
     }
 }
 
