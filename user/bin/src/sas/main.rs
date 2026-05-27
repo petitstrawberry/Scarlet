@@ -76,6 +76,11 @@ struct OutputDevice {
     started: bool,
 }
 
+// SAFETY: `OutputDevice` is moved into the audio thread before use and is not
+// shared with other threads afterwards. The mapped ring pointer is only accessed
+// by that owning thread.
+unsafe impl Send for OutputDevice {}
+
 impl OutputDevice {
     fn open() -> Result<Self, &'static str> {
         let audio = AudioDevice::open("/dev/audio0").map_err(|_| "failed to open /dev/audio0")?;
@@ -256,6 +261,14 @@ fn f32_to_s16(sample: f32) -> i16 {
 fn main() -> i32 {
     println!("=== Scarlet Audio Server (SAS) ===");
 
+    let output = match OutputDevice::open() {
+        Ok(output) => output,
+        Err(e) => {
+            println!("sas: audio output unavailable: {}", e);
+            return 1;
+        }
+    };
+
     match sbus::Connection::connect() {
         Ok(mut conn) => {
             if let Err(e) = conn.register_service(protocol::SERVICE_NAME) {
@@ -269,7 +282,7 @@ fn main() -> i32 {
 
     let state = Arc::new(Mutex::new(ServerState::new()));
     let audio_state = state.clone();
-    thread::spawn(move || audio_thread(audio_state));
+    thread::spawn(move || audio_thread(audio_state, output));
 
     let server = match Socket::new() {
         Ok(socket) => socket,
@@ -305,14 +318,7 @@ fn main() -> i32 {
     }
 }
 
-fn audio_thread(state: Arc<Mutex<ServerState>>) {
-    let mut output = match OutputDevice::open() {
-        Ok(output) => output,
-        Err(e) => {
-            println!("sas: audio output unavailable: {}", e);
-            return;
-        }
-    };
+fn audio_thread(state: Arc<Mutex<ServerState>>, mut output: OutputDevice) {
     println!(
         "sas: output configured S16LE {} Hz {}ch period={} buffer={}",
         output.params.rate,
