@@ -157,6 +157,17 @@
             ];
           };
 
+          qemu = pkgs.qemu.overrideAttrs (_finalAttrs: _prevAttrs: {
+            version = "10.2.2";
+            src = pkgs.fetchurl {
+              url = "https://download.qemu.org/qemu-10.2.2.tar.xz";
+              hash = "sha256-eEspb/KcFBeqcjI6vLLS6pq5dxck9Xfc14XDsE8h4XY=";
+            };
+            patches = (_prevAttrs.patches or [ ]) ++ [
+              ./nix/patches/qemu-10-cocoa-retina-toggle.patch
+            ];
+          });
+
         in
         {
           default = pkgs.mkShell {
@@ -166,7 +177,7 @@
               pkgs.cargo-make
 
               # QEMU (system emulation for riscv64 and aarch64)
-              pkgs.qemu
+              qemu
 
               # Cross-compilation toolchains
               pkgs.pkgsCross.riscv64.buildPackages.gcc
@@ -212,8 +223,8 @@
             # - HVF + GICv3 works with QEMU's bundled ArmVirt firmware.
             # - TCG + EL2/VHE currently needs the self-built edk2-stable202502
             #   firmware until the Limine/EDK2 handoff issue is resolved.
-            SCARLET_EFI_CODE_ARM64_HVF = "${pkgs.qemu}/share/qemu/edk2-aarch64-code.fd";
-            SCARLET_EFI_VARS_ARM64_HVF = "${pkgs.qemu}/share/qemu/edk2-arm-vars.fd";
+            SCARLET_EFI_CODE_ARM64_HVF = "${qemu}/share/qemu/edk2-aarch64-code.fd";
+            SCARLET_EFI_VARS_ARM64_HVF = "${qemu}/share/qemu/edk2-arm-vars.fd";
             SCARLET_EFI_CODE_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";
             SCARLET_EFI_VARS_ARM64_EL2 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
             SCARLET_EFI_CODE_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_EFI.fd";

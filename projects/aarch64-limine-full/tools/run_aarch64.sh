@@ -75,8 +75,15 @@ QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"
 QEMU_MEMORY="${SCARLET_QEMU_MEMORY:-8G}"
 QEMU_MACHINE="${SCARLET_QEMU_MACHINE_AARCH64:-virt,gic-version=3,acpi=off}"
-QEMU_CPU="${SCARLET_QEMU_CPU_AARCH64:-max}"
+if [ -n "${SCARLET_QEMU_CPU_AARCH64:-}" ]; then
+    QEMU_CPU="$SCARLET_QEMU_CPU_AARCH64"
+elif [ "$QEMU_ACCEL" = "hvf" ]; then
+    QEMU_CPU="host"
+else
+    QEMU_CPU="max"
+fi
 QEMU_DISPLAY="${SCARLET_QEMU_DISPLAY:-vnc}"
+QEMU_COCOA_RETINA="${SCARLET_QEMU_COCOA_RETINA:-off}"
 QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu}"
 QEMU_VIRTIO_GPU_XRES="${SCARLET_QEMU_VIRTIO_GPU_XRES:-1280}"
 QEMU_VIRTIO_GPU_YRES="${SCARLET_QEMU_VIRTIO_GPU_YRES:-800}"
@@ -242,7 +249,19 @@ case "$QEMU_DISPLAY" in
         QEMU_DISPLAY_ARGS=(-nographic -serial mon:stdio -display vnc=:0)
         ;;
     cocoa)
-        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display cocoa)
+        QEMU_COCOA_DISPLAY="cocoa"
+        case "$QEMU_COCOA_RETINA" in
+            1|true|yes|on)
+                QEMU_COCOA_DISPLAY="$QEMU_COCOA_DISPLAY,retina=on"
+                ;;
+            0|false|no|off)
+                ;;
+            *)
+                echo "Error: unsupported SCARLET_QEMU_COCOA_RETINA=$QEMU_COCOA_RETINA (expected on/off)"
+                exit 1
+                ;;
+        esac
+        QEMU_DISPLAY_ARGS=(-serial mon:stdio -display "$QEMU_COCOA_DISPLAY")
         ;;
     sdl)
         QEMU_DISPLAY_ARGS=(-serial mon:stdio -display sdl)
