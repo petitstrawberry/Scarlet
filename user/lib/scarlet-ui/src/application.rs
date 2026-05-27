@@ -11,8 +11,7 @@ use crate::geometry::{Point, Rect};
 use crate::menu_model;
 use crate::pipeline::RenderingPipeline;
 use crate::platform::{PlatformWindow, SWSPlatformWindow};
-use crate::state::StateId;
-use crate::state::SubscriptionId;
+use crate::state::{InvalidationKind, StateId, SubscriptionId};
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -491,6 +490,7 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
         }
         for listenable in listenables {
             let element_id = self.id;
+            let invalidation_kind = listenable.invalidation_kind();
             if crate::debug::is_enabled() {
                 println!(
                     "[ApplicationRootElement] Subscribing to element_id={}",
@@ -498,7 +498,10 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
                 );
             }
             let callback = alloc::sync::Arc::new(move || {
-                crate::pipeline::mark_element_dirty(element_id);
+                match invalidation_kind {
+                    InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
+                    InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
+                }
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);

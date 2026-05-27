@@ -6,6 +6,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -17,13 +18,14 @@ use core::simd::{
     Simd,
     num::{SimdInt, SimdUint},
 };
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering, compiler_fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, compiler_fence};
 use core::time::Duration;
 
 use rust_h264::decoder::{Decoder, Frame};
 use rust_h264::nal::parse_annex_b;
 use scarlet_ui::{
-    Application, CanvasView, ComponentElement, Element, Size, State, StateId, View, Window,
+    Application, CanvasView, ComponentElement, Element, InvalidationKind, Listenable, Size,
+    SubscriptionId, View, Window,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::File;
@@ -43,28 +45,75 @@ const DISPLAY_WIDTH: u32 = 640;
 const DISPLAY_HEIGHT: u32 = 360;
 const FRAME_INTERVAL_MS: u64 = 33;
 
-#[derive(Clone)]
-struct VideoState {
-    buffer: Arc<VideoBuffer>,
+struct VideoFrameStore {
+    data: Mutex<VideoFrameData>,
+}
+
+struct VideoFrameData {
+    pixels: Vec<u8>,
     width: u32,
     height: u32,
-    generation: u64,
 }
 
-struct VideoBuffer {
-    pixels: Mutex<Vec<u8>>,
-}
-
-impl VideoState {
-    fn loading() -> Self {
+impl VideoFrameStore {
+    fn new() -> Self {
         Self {
-            buffer: Arc::new(VideoBuffer {
-                pixels: Mutex::new(vec![0; (VIDEO_WIDTH * VIDEO_HEIGHT * 4) as usize]),
+            data: Mutex::new(VideoFrameData {
+                pixels: vec![0; (VIDEO_WIDTH * VIDEO_HEIGHT * 4) as usize],
+                width: VIDEO_WIDTH,
+                height: VIDEO_HEIGHT,
             }),
-            width: VIDEO_WIDTH,
-            height: VIDEO_HEIGHT,
-            generation: 0,
         }
+    }
+
+    fn update_from_frame(&self, frame: &Frame) {
+        let width = frame.width;
+        let height = frame.height;
+        let mut data = self.data.lock();
+        let required_len = width as usize * height as usize * 4;
+        if data.pixels.len() != required_len {
+            data.pixels.resize(required_len, 0);
+        }
+        yuv420_to_bgra(frame, &mut data.pixels);
+        data.width = width;
+        data.height = height;
+    }
+}
+
+struct PaintSignal {
+    next_subscription: AtomicU32,
+    subscribers: Mutex<BTreeMap<SubscriptionId, Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl PaintSignal {
+    fn new() -> Self {
+        Self {
+            next_subscription: AtomicU32::new(0),
+            subscribers: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn notify(&self) {
+        let subscribers = self.subscribers.lock();
+        for callback in subscribers.values() {
+            callback();
+        }
+    }
+}
+
+impl Listenable for PaintSignal {
+    fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
+        let id = SubscriptionId::new(self.next_subscription.fetch_add(1, Ordering::Relaxed));
+        self.subscribers.lock().insert(id, callback);
+        id
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.subscribers.lock().remove(&id).is_some()
+    }
+
+    fn invalidation_kind(&self) -> InvalidationKind {
+        InvalidationKind::Paint
     }
 }
 
@@ -72,16 +121,18 @@ impl VideoState {
 struct H264PlayerApp {
     path: String,
     audio_path: Option<String>,
-    frame: State<VideoState>,
+    frame_store: Arc<VideoFrameStore>,
+    paint_signal: Arc<PaintSignal>,
     clock: Arc<AudioClock>,
 }
 
 impl H264PlayerApp {
     fn new(path: String, audio_path: Option<String>) -> Self {
         Self {
-            frame: State::new(StateId::new(0), VideoState::loading()),
             path,
             audio_path,
+            frame_store: Arc::new(VideoFrameStore::new()),
+            paint_signal: Arc::new(PaintSignal::new()),
             clock: Arc::new(AudioClock::new()),
         }
     }
@@ -128,7 +179,7 @@ impl View for H264PlayerApp {
     }
 
     fn listenables(&self) -> Vec<&dyn scarlet_ui::Listenable> {
-        vec![&self.frame]
+        vec![self.paint_signal.as_ref()]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -138,14 +189,14 @@ impl View for H264PlayerApp {
 
 impl Application for H264PlayerApp {
     fn body(&self) -> impl View {
-        let frame_for_canvas = self.frame.clone();
+        let frame_store = self.frame_store.clone();
         Window::new(
             "H.264 Player",
             CanvasView::new(
                 DISPLAY_WIDTH as f32,
                 DISPLAY_HEIGHT as f32,
                 Rc::new(move |buffer, width, height| {
-                    draw_video_frame(buffer, width, height, &frame_for_canvas.get());
+                    draw_video_frame(buffer, width, height, &frame_store);
                 }),
             ),
         )
@@ -159,7 +210,8 @@ impl Application for H264PlayerApp {
         }
         start_decoder_thread(
             self.path.clone(),
-            self.frame.clone(),
+            self.frame_store.clone(),
+            self.paint_signal.clone(),
             self.audio_path.is_some().then(|| self.clock.clone()),
         );
     }
@@ -169,9 +221,14 @@ impl Application for H264PlayerApp {
     }
 }
 
-fn start_decoder_thread(path: String, state: State<VideoState>, clock: Option<Arc<AudioClock>>) {
+fn start_decoder_thread(
+    path: String,
+    frame_store: Arc<VideoFrameStore>,
+    paint_signal: Arc<PaintSignal>,
+    clock: Option<Arc<AudioClock>>,
+) {
     thread::spawn(move || {
-        if let Err(err) = decode_loop(&path, &state, clock.as_deref()) {
+        if let Err(err) = decode_loop(&path, &frame_store, &paint_signal, clock.as_deref()) {
             println!("[h264_player] {}", err);
         }
     });
@@ -179,7 +236,8 @@ fn start_decoder_thread(path: String, state: State<VideoState>, clock: Option<Ar
 
 fn decode_loop(
     path: &str,
-    state: &State<VideoState>,
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
     let data = read_file(path)?;
@@ -191,7 +249,7 @@ fn decode_loop(
     for nal in &nals {
         match decoder.decode_nal(nal) {
             Ok(Some(frame)) => {
-                publish_frame_synced(state, frame, display_index, clock);
+                publish_frame_synced(frame_store, paint_signal, frame, display_index, clock);
                 display_index += 1;
             }
             Ok(None) => {}
@@ -200,7 +258,7 @@ fn decode_loop(
     }
 
     if let Some(frame) = decoder.flush() {
-        publish_frame_synced(state, frame, display_index, clock);
+        publish_frame_synced(frame_store, paint_signal, frame, display_index, clock);
         display_index += 1;
     }
 
@@ -303,7 +361,8 @@ fn play_wav_sas(path: &str, clock: &AudioClock) -> Result<(), String> {
 }
 
 fn publish_frame_synced(
-    state: &State<VideoState>,
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
     frame: Frame,
     display_index: usize,
     clock: Option<&AudioClock>,
@@ -323,27 +382,12 @@ fn publish_frame_synced(
         thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
     }
 
-    publish_frame(state, frame);
+    publish_frame(frame_store, paint_signal, frame);
 }
 
-fn publish_frame(state: &State<VideoState>, frame: Frame) {
-    let width = frame.width;
-    let height = frame.height;
-    let mut video_state = state.get();
-
-    {
-        let mut pixels = video_state.buffer.pixels.lock();
-        let required_len = width as usize * height as usize * 4;
-        if pixels.len() != required_len {
-            pixels.resize(required_len, 0);
-        }
-        yuv420_to_bgra(&frame, &mut pixels);
-    }
-
-    video_state.width = width;
-    video_state.height = height;
-    video_state.generation = video_state.generation.wrapping_add(1);
-    state.set(VideoState { ..video_state });
+fn publish_frame(frame_store: &VideoFrameStore, paint_signal: &PaintSignal, frame: Frame) {
+    frame_store.update_from_frame(&frame);
+    paint_signal.notify();
 }
 
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
@@ -584,17 +628,7 @@ fn yuv420_to_bgra_simd(frame: &Frame, pixels: &mut [u8]) {
             ]);
 
             let (r, g, b) = yuv_to_rgb_simd(y_values, u_values, v_values);
-            let r = r.to_array();
-            let g = g.to_array();
-            let b = b.to_array();
-
-            for lane in 0..LANES {
-                let offset = (y_row + x + lane) * 4;
-                pixels[offset] = b[lane];
-                pixels[offset + 1] = g[lane];
-                pixels[offset + 2] = r[lane];
-                pixels[offset + 3] = 255;
-            }
+            store_bgra8(pixels, (y_row + x) * 4, r, g, b);
 
             x += LANES;
         }
@@ -610,6 +644,22 @@ fn yuv420_to_bgra_simd(frame: &Frame, pixels: &mut [u8]) {
             pixels[offset + 2] = r;
             pixels[offset + 3] = 255;
             x += 1;
+        }
+    }
+}
+
+fn store_bgra8(pixels: &mut [u8], offset: usize, r: Simd<u8, 8>, g: Simd<u8, 8>, b: Simd<u8, 8>) {
+    let packed = b.cast::<u32>()
+        | (g.cast::<u32>() << Simd::splat(8))
+        | (r.cast::<u32>() << Simd::splat(16))
+        | Simd::splat(0xff00_0000);
+    let packed = packed.to_array();
+
+    for (lane, pixel) in packed.iter().enumerate() {
+        // SAFETY: callers pass an offset for 8 BGRA pixels inside `pixels`.
+        // `pixels` is byte-aligned, so each packed pixel is written unaligned.
+        unsafe {
+            (pixels.as_mut_ptr().add(offset + lane * 4) as *mut u32).write_unaligned(*pixel);
         }
     }
 }
@@ -652,22 +702,30 @@ fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
-fn draw_video_frame(buffer: &mut [u8], canvas_width: u32, canvas_height: u32, frame: &VideoState) {
-    if frame.width == 0 || frame.height == 0 || canvas_width == 0 || canvas_height == 0 {
+fn draw_video_frame(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    frame_store: &VideoFrameStore,
+) {
+    let frame = frame_store.data.lock();
+    let frame_width = frame.width;
+    let frame_height = frame.height;
+
+    if frame_width == 0 || frame_height == 0 || canvas_width == 0 || canvas_height == 0 {
         fill_bgra(buffer, [0, 0, 0, 255]);
         return;
     }
 
-    let (out_width, out_height) = fit_size(frame.width, frame.height, canvas_width, canvas_height);
+    let (out_width, out_height) = fit_size(frame_width, frame_height, canvas_width, canvas_height);
     let x_offset = (canvas_width - out_width) / 2;
     let y_offset = (canvas_height - out_height) / 2;
-    let source = frame.buffer.pixels.lock();
-    let source = source.as_slice();
+    let source = frame.pixels.as_slice();
     let canvas_stride = canvas_width as usize * 4;
-    let source_stride = frame.width as usize * 4;
+    let source_stride = frame_width as usize * 4;
 
-    if out_width == frame.width
-        && out_height == frame.height
+    if out_width == frame_width
+        && out_height == frame_height
         && out_width == canvas_width
         && out_height == canvas_height
     {
@@ -683,7 +741,7 @@ fn draw_video_frame(buffer: &mut [u8], canvas_width: u32, canvas_height: u32, fr
     fill_bgra(&mut buffer[bottom_start..], [0, 0, 0, 255]);
 
     for y in 0..out_height {
-        let src_y = (u64::from(y) * u64::from(frame.height) / u64::from(out_height)) as usize;
+        let src_y = (u64::from(y) * u64::from(frame_height) / u64::from(out_height)) as usize;
         let dst_y = (y + y_offset) as usize;
         let row_start = dst_y * canvas_stride;
 
@@ -697,13 +755,13 @@ fn draw_video_frame(buffer: &mut [u8], canvas_width: u32, canvas_height: u32, fr
         }
 
         let dst = row_start + x_offset as usize * 4;
-        if out_width == frame.width && out_height == frame.height {
+        if out_width == frame_width && out_height == frame_height {
             let src = src_y * source_stride;
             let bytes = out_width as usize * 4;
             buffer[dst..dst + bytes].copy_from_slice(&source[src..src + bytes]);
         } else {
             for x in 0..out_width {
-                let src_x = (u64::from(x) * u64::from(frame.width) / u64::from(out_width)) as usize;
+                let src_x = (u64::from(x) * u64::from(frame_width) / u64::from(out_width)) as usize;
                 let src = src_y * source_stride + src_x * 4;
                 let dst = dst + x as usize * 4;
                 buffer[dst..dst + 4].copy_from_slice(&source[src..src + 4]);
@@ -731,8 +789,23 @@ fn fit_size(source_width: u32, source_height: u32, max_width: u32, max_height: u
 }
 
 fn fill_bgra(buffer: &mut [u8], color: [u8; 4]) {
-    for pixel in buffer.chunks_exact_mut(4) {
+    const LANES: usize = 64;
+
+    let mut repeated = [0u8; LANES];
+    for pixel in repeated.chunks_exact_mut(4) {
         pixel.copy_from_slice(&color);
+    }
+    let block = Simd::<u8, LANES>::from_array(repeated);
+
+    let mut offset = 0usize;
+    while offset + LANES <= buffer.len() {
+        block.copy_to_slice(&mut buffer[offset..offset + LANES]);
+        offset += LANES;
+    }
+
+    while offset < buffer.len() {
+        buffer[offset] = color[offset & 3];
+        offset += 1;
     }
 }
 

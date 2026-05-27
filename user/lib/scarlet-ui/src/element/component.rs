@@ -10,7 +10,7 @@ use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Size};
-use crate::state::SubscriptionId;
+use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
 /// Element that wraps a View and manages its lifecycle
@@ -145,10 +145,12 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         // Store the subscription IDs so we can unsubscribe later
         for listenable in listenables {
             let element_id = self.id;
+            let invalidation_kind = listenable.invalidation_kind();
             let callback = Arc::new(move || {
-                // Mark this element as dirty via the PipelineOwner's global callback
-                // This will notify PipelineOwner to schedule a rebuild
-                crate::pipeline::mark_element_dirty(element_id);
+                match invalidation_kind {
+                    InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
+                    InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
+                }
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);

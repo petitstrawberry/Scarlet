@@ -72,7 +72,7 @@ pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
 pub use color::{Color, ColorScheme, ColorPalette, SemanticColor, SystemColors};
 pub use color::system::{GrayColors, BlueColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors, YellowColors};
 pub use error::{Error, Result};
-pub use state::{State, StateId, SubscriptionId, generate_state_id, Listenable};
+pub use state::{generate_state_id, InvalidationKind, Listenable, State, StateId, SubscriptionId};
 pub use view::{View, ViewExt};
 pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, ElementRenderObject, DirtyFlags};
 pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher, FocusEvent, LifecycleEvent};
@@ -103,7 +103,7 @@ pub mod prelude {
     pub use crate::geometry::*;
     pub use crate::color::{Color, ColorScheme, ColorPalette, SemanticColor};
     pub use crate::error::{Error, Result};
-    pub use crate::state::{State, StateId, SubscriptionId, Listenable};
+    pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt};
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};

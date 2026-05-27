@@ -60,6 +60,15 @@ pub fn generate_subscription_id() -> SubscriptionId {
     SubscriptionId(id)
 }
 
+/// Rendering pipeline invalidation requested by a Listenable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InvalidationKind {
+    /// The subscribed element must rebuild its View tree.
+    Build,
+    /// The subscribed element only needs repainting.
+    Paint,
+}
+
 /// Trait for types that can be subscribed to for change notifications
 pub trait Listenable: Any {
     /// Subscribe to any changes in this listenable
@@ -67,6 +76,11 @@ pub trait Listenable: Any {
 
     /// Unsubscribe from this listenable using the subscription ID
     fn unsubscribe(&self, id: SubscriptionId) -> bool;
+
+    /// Return the pipeline invalidation needed when this listenable changes.
+    fn invalidation_kind(&self) -> InvalidationKind {
+        InvalidationKind::Build
+    }
 }
 
 impl<T: Any> Listenable for State<T> {
