@@ -4,7 +4,7 @@
 [service.sws]
 exec = "/bin/sws"
 order = 01
-depends = ["sbusd"]
+depends = ["sbusd", "sas"]
 
 [service.scarlet-desktop]
 exec = "/bin/scarlet_desktop"
