@@ -3389,7 +3389,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "rust_h264"
 version = "0.4.0"
-source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=5be5ff23cf1f1f520325d14097f705b6e1737647#5be5ff23cf1f1f520325d14097f705b6e1737647"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=edcf83ee2c99fa0087fa2d85a492a4c313e11ed0#edcf83ee2c99fa0087fa2d85a492a4c313e11ed0"
 
 [[package]]
 name = "rustc-hash"

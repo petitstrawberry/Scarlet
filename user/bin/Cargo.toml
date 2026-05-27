@@ -246,7 +246,7 @@ sbus-client = { path = "../lib/sbus-client" }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
-rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "5be5ff23cf1f1f520325d14097f705b6e1737647", default-features = false }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
 slint = { version = "1.14", default-features = false, features = [
     "unsafe-single-threaded",
     "renderer-software",
