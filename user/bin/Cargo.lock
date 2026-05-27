@@ -3387,6 +3387,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "rust_h264"
+version = "0.4.0"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=5be5ff23cf1f1f520325d14097f705b6e1737647#5be5ff23cf1f1f520325d14097f705b6e1737647"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4328,6 +4333,7 @@ version = "0.16.0"
 dependencies = [
  "framebuffer",
  "gpu",
+ "rust_h264",
  "sbus",
  "sbus-client",
  "scarlet-desktop-config",
