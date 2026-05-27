@@ -21,4 +21,5 @@ pub mod usb;
 pub mod virtio;
 pub mod virtio_input;
 pub mod virtio_rng;
+pub mod virtio_snd;
 pub mod watchdog;

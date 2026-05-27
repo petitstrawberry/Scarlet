@@ -4,6 +4,7 @@
 //! It includes device information and driver management,
 //! as well as platform-specific device handling.
 
+pub mod audio;
 pub mod block;
 pub mod char;
 pub mod events;
@@ -36,6 +37,8 @@ pub enum DeviceCapability {
     Tty,
     /// Device provides raw serial I/O (low-level byte stream, no line discipline)
     Serial,
+    /// Device provides native Scarlet PCM audio.
+    Audio,
 }
 
 pub trait DeviceInfo {
@@ -84,6 +87,23 @@ pub enum DeviceType {
 /// and memory mapping operations through the MemoryMappingOps trait.
 ///
 pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
+    /// Called when a device file object is opened.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the open may proceed.
+    fn open(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// Called when a device file object is closed.
+    ///
+    /// # Behavior
+    ///
+    /// Implementations may release per-open resources. The default implementation
+    /// does nothing.
+    fn close(&self) {}
+
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;

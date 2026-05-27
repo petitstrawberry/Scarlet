@@ -22,6 +22,8 @@ use crate::driver_initcall;
 use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
 use crate::drivers::network::virtio_net::VirtioNetDevice;
+use crate::drivers::virtio::{next_block_device_name, next_net_device_name};
+use crate::drivers::virtio_snd::{VirtioSndDevice, register_audio_device};
 use crate::interrupt::{InterruptId, InterruptManager};
 use crate::vm;
 use crate::{early_println, println};
@@ -45,11 +47,9 @@ const VIRTIO_PCI_TRANSITIONAL_BLOCK_DEVICE_ID: u16 = 0x1001;
 const VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID: u16 = 0x1042;
 const VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID: u16 = 0x1010;
 const VIRTIO_PCI_MODERN_GPU_DEVICE_ID: u16 = 0x1050;
+const VIRTIO_PCI_MODERN_SOUND_DEVICE_ID: u16 = 0x1059;
 
-static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
 /// Mapped register blocks for a VirtIO PCI function.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioPciTransport {
@@ -281,7 +281,7 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
 
     match device.device_id() {
         VIRTIO_PCI_TRANSITIONAL_NET_DEVICE_ID => {
-            let name = format!("veth{}", NET_COUNTER.fetch_add(1, Ordering::SeqCst));
+            let name = next_net_device_name();
             let dev = Arc::new(VirtioNetDevice::new_pci(transport));
             dev.register_interface(&name);
 
@@ -302,7 +302,7 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_TRANSITIONAL_BLOCK_DEVICE_ID | VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID => {
-            let name = format!("vblk{}", BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst));
+            let name = next_block_device_name();
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new_pci(transport));
             DeviceManager::get_manager().register_device_with_name(name.clone(), dev);
             println!("[virtio-pci] Registered block device {}", name);
@@ -310,21 +310,22 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         }
         VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID | VIRTIO_PCI_MODERN_GPU_DEVICE_ID => {
             let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let graphics_name = format!("vfb{}", id);
             let gpu_name = format!("gpu{}", id);
             let dev = Arc::new(VirtioGpuDevice::new_pci(transport));
             let graphics_dev: Arc<dyn Device> = dev.clone();
-            DeviceManager::get_manager()
-                .register_device_with_name(graphics_name.clone(), graphics_dev);
+            DeviceManager::get_manager().register_device(graphics_dev);
 
             let gpu_backend: Arc<dyn GpuDevice> = dev.clone();
             let display: Arc<dyn GraphicsDevice> = dev.clone();
             let gpu_char_dev: Arc<dyn Device> = Arc::new(GpuCharDevice::new(gpu_backend, display));
             DeviceManager::get_manager().register_device_with_name(gpu_name.clone(), gpu_char_dev);
-            println!(
-                "[virtio-pci] Registered GPU devices {} and {}",
-                graphics_name, gpu_name
-            );
+            println!("[virtio-pci] Registered GPU device {}", gpu_name);
+            Ok(())
+        }
+        VIRTIO_PCI_MODERN_SOUND_DEVICE_ID => {
+            let backend = Arc::new(VirtioSndDevice::new_pci(transport));
+            let name = register_audio_device(backend);
+            println!("[virtio-pci] Registered sound device {}", name);
             Ok(())
         }
         _ => Err("Unsupported VirtIO PCI device"),
@@ -342,6 +343,7 @@ fn register_driver() {
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_GPU_DEVICE_ID),
+        PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_SOUND_DEVICE_ID),
     ];
     let driver = PciDeviceDriver::new("virtio-pci", id_table, probe_virtio_pci, remove_virtio_pci);
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);

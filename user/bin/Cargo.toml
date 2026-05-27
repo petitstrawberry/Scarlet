@@ -214,6 +214,14 @@ path = "src/ansi_banner.rs"
 name = "top"
 path = "src/top.rs"
 
+[[bin]]
+name = "mplayer"
+path = "src/mplayer.rs"
+
+[[bin]]
+name = "sas"
+path = "src/sas/main.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }

@@ -204,6 +204,13 @@ case "$QEMU_GPU" in
         ;;
 esac
 
+QEMU_AUDIO="${SCARLET_QEMU_AUDIO:-0}"
+QEMU_AUDIO_DRIVER="${SCARLET_QEMU_AUDIO_DRIVER:-coreaudio}"
+QEMU_AUDIO_ARGS=()
+if [ "$QEMU_AUDIO" = "1" ] || [ "$QEMU_AUDIO" = "true" ]; then
+    QEMU_AUDIO_ARGS=(-audiodev "$QEMU_AUDIO_DRIVER,id=audio0" -device virtio-sound-pci,audiodev=audio0,bus=pcie.0)
+fi
+
 qemu-system-riscv64 \
     -machine "$QEMU_MACHINE" \
     -accel "$QEMU_ACCEL" \
@@ -222,6 +229,7 @@ qemu-system-riscv64 \
     "${QEMU_GPU_ARGS[@]}" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-pci,netdev=net0,bus=pcie.0 \
+    "${QEMU_AUDIO_ARGS[@]}" \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
