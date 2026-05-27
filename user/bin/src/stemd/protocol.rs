@@ -24,6 +24,12 @@
 //!
 //! ### LAUNCH (0x05)
 //! Same payload as LAUNCH_OR_FOCUS, but always starts a new process.
+//!
+//! ### SERVICE_READY (0x06)
+//! - Payload:
+//!   - service_name_len (u32, little-endian)
+//!   - service_name_bytes (variable)
+//! - Used by services to notify stemd that they finished initialization.
 
 use std::vec::Vec;
 
@@ -35,6 +41,7 @@ pub mod cmd {
     pub const UNREGISTER_APP: u8 = 0x03;
     pub const SHUTDOWN: u8 = 0x04;
     pub const LAUNCH: u8 = 0x05;
+    pub const SERVICE_READY: u8 = 0x06;
 }
 
 /// Build LAUNCH_OR_FOCUS command payload
@@ -46,5 +53,14 @@ pub fn payload_launch_or_focus(app_id: &[u8], exec_path: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(app_id);
     payload.extend_from_slice(&(exec_path.len() as u32).to_le_bytes());
     payload.extend_from_slice(exec_path);
+    payload
+}
+
+/// Build SERVICE_READY command payload
+/// Format: service_name_len(4) + service_name
+pub fn payload_service_ready(service_name: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(service_name.len() as u32).to_le_bytes());
+    payload.extend_from_slice(service_name);
     payload
 }

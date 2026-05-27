@@ -7,9 +7,38 @@
 #![no_main]
 
 extern crate scarlet_std as std;
+extern crate sws_client;
 
+use core::time::Duration;
 use std::println;
 use std::task::{EXECVE_FORCE_ABI_REBUILD, execve_with_flags, exit, fork, waitpid};
+use std::thread;
+
+const SWS_READY_RETRIES: usize = 100;
+const SWS_READY_RETRY_DELAY_MS: u64 = 50;
+const COMPONENT_RESPAWN_DELAY_MS: u64 = 100;
+
+fn wait_for_sws_ready() -> bool {
+    for attempt in 0..SWS_READY_RETRIES {
+        if let Ok(mut conn) = sws_client::Connection::connect("/tmp/sws.sock")
+            && conn.get_screen_size().is_ok()
+        {
+            println!(
+                "[scarlet_desktop] SWS ready after {} attempt(s)",
+                attempt + 1
+            );
+            return true;
+        }
+
+        thread::sleep(Duration::from_millis(SWS_READY_RETRY_DELAY_MS));
+    }
+
+    println!(
+        "[scarlet_desktop] SWS was not ready after {} attempts; continuing anyway",
+        SWS_READY_RETRIES
+    );
+    false
+}
 
 fn spawn_component(name: &str, args: &[&str]) -> i32 {
     match fork() {
@@ -52,19 +81,19 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop] Starting desktop session");
+    wait_for_sws_ready();
 
-    let bg_pid = spawn_component("scarlet_desktop_background", &[]);
+    let mut bg_pid = spawn_component("scarlet_desktop_background", &[]);
     if bg_pid > 0 {
         println!("[scarlet_desktop] background pid={}", bg_pid);
     }
 
-    let taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
+    let mut taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
     if taskbar_pid > 0 {
         println!("[scarlet_desktop] taskbar pid={}", taskbar_pid);
     }
 
-    // Session manager: wait for one of the components to exit.
-    // (Keeps the session alive and reaps children.)
+    // Session manager: supervise core components and respawn them if they exit.
     loop {
         let (pid, status) = waitpid(-1, 0);
         if pid < 0 {
@@ -75,10 +104,25 @@ pub extern "C" fn main() -> i32 {
             pid, status
         );
 
-        // If a core component exits, terminate the session.
-        if pid == bg_pid || pid == taskbar_pid {
-            println!("[scarlet_desktop] core component exited; terminating session");
-            return 0;
+        if pid == bg_pid {
+            println!("[scarlet_desktop] background exited; respawning");
+            thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
+            wait_for_sws_ready();
+            bg_pid = spawn_component("scarlet_desktop_background", &[]);
+            if bg_pid > 0 {
+                println!("[scarlet_desktop] background respawned pid={}", bg_pid);
+            }
+            continue;
+        }
+
+        if pid == taskbar_pid {
+            println!("[scarlet_desktop] taskbar exited; respawning");
+            thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
+            wait_for_sws_ready();
+            taskbar_pid = spawn_component("scarlet_desktop_taskbar", &[]);
+            if taskbar_pid > 0 {
+                println!("[scarlet_desktop] taskbar respawned pid={}", taskbar_pid);
+            }
         }
     }
 }

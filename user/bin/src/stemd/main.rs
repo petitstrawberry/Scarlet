@@ -86,6 +86,8 @@ struct Service {
     after: Vec<String>,
     tty: Option<String>,
     order: i32,
+    ready_notify: bool,
+    ready_timeout_ms: u32,
 }
 
 /// Running application tracking
@@ -110,6 +112,7 @@ static RUNNING_APPS: Mutex<Vec<RunningApp>> = Mutex::new(Vec::new());
 
 // Global tracking for running services
 static RUNNING_SERVICES: Mutex<Vec<RunningService>> = Mutex::new(Vec::new());
+static READY_SERVICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 // Global sbus connection for receiving method calls
 // Wrapped in Option to handle initialization
@@ -142,6 +145,8 @@ impl ConfigParser {
                 let mut after = Vec::new();
                 let mut tty: Option<String> = None;
                 let mut order: i32 = 0;
+                let mut ready_notify = false;
+                let mut ready_timeout_ms = 5000u32;
 
                 // Parse service properties
                 i += 1;
@@ -203,6 +208,16 @@ impl ConfigParser {
                                     order = v;
                                 }
                             }
+                            "ready_notify" => {
+                                if let Some(v) = Self::parse_bool(value) {
+                                    ready_notify = v;
+                                }
+                            }
+                            "ready_timeout_ms" => {
+                                if let Some(v) = Self::parse_u32(value) {
+                                    ready_timeout_ms = v;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -218,6 +233,8 @@ impl ConfigParser {
                         after,
                         tty,
                         order,
+                        ready_notify,
+                        ready_timeout_ms,
                     });
                 }
 
@@ -268,6 +285,32 @@ impl ConfigParser {
 
         Some(if neg { acc.saturating_neg() } else { acc })
     }
+
+    fn parse_u32(s: &str) -> Option<u32> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        let mut acc: u32 = 0;
+        for ch in s.bytes() {
+            if !ch.is_ascii_digit() {
+                return None;
+            }
+            let digit = (ch - b'0') as u32;
+            acc = acc.saturating_mul(10).saturating_add(digit);
+        }
+
+        Some(acc)
+    }
+
+    fn parse_bool(s: &str) -> Option<bool> {
+        match Self::unquote(s).as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// Add a running app to the tracking list
@@ -307,10 +350,91 @@ fn add_running_service(name: String, pid: i32, exec_path: String) {
 
 fn remove_running_service_by_pid(pid: i32) -> Option<RunningService> {
     let mut services = RUNNING_SERVICES.lock();
-    services
+    let removed = services
         .iter()
         .position(|service| service.pid == pid)
-        .map(|pos| services.remove(pos))
+        .map(|pos| services.remove(pos));
+    if let Some(service) = removed.as_ref() {
+        clear_service_ready(&service.name);
+    }
+    removed
+}
+
+fn mark_service_ready(service_name: &str) {
+    let mut ready = READY_SERVICES.lock();
+    if !ready.iter().any(|name| name == service_name) {
+        ready.push(service_name.to_string());
+    }
+}
+
+fn clear_service_ready(service_name: &str) {
+    let mut ready = READY_SERVICES.lock();
+    ready.retain(|name| name != service_name);
+}
+
+fn is_service_ready(service_name: &str) -> bool {
+    let ready = READY_SERVICES.lock();
+    ready.iter().any(|name| name == service_name)
+}
+
+fn is_running_service_pid(pid: i32) -> bool {
+    let services = RUNNING_SERVICES.lock();
+    services.iter().any(|service| service.pid == pid)
+}
+
+fn wait_for_service_ready(service: &Service, pid: i32) -> Result<(), &'static str> {
+    if !service.ready_notify {
+        return Ok(());
+    }
+
+    let mut waited_ms = 0u32;
+    let sleep_ms = 50u32;
+
+    while waited_ms < service.ready_timeout_ms {
+        reap_children_nonblocking("wait-ready");
+
+        if is_service_ready(&service.name) {
+            println!(
+                "stemd: Service '{}' reported ready after {} ms",
+                service.name, waited_ms
+            );
+            return Ok(());
+        }
+
+        if !is_running_service_pid(pid) {
+            println!(
+                "stemd: Service '{}' exited before reporting ready",
+                service.name
+            );
+            return Err("Service exited before ready");
+        }
+
+        thread::sleep(core::time::Duration::from_millis(sleep_ms as u64));
+        waited_ms = waited_ms.saturating_add(sleep_ms);
+    }
+
+    println!(
+        "stemd: Timed out waiting for service '{}' readiness notification",
+        service.name
+    );
+    Err("Timed out waiting for service readiness")
+}
+
+fn launch_service_and_wait(service: &Service) -> Result<(), &'static str> {
+    if service.ready_notify {
+        clear_service_ready(&service.name);
+    }
+    let pid = launch_service(service)?;
+    fence(core::sync::atomic::Ordering::SeqCst);
+    wait_for_service_ready(service, pid)
+}
+
+fn has_failed_dependency(service: &Service, failed_services: &[String]) -> Option<String> {
+    service
+        .depends
+        .iter()
+        .find(|dep| failed_services.iter().any(|failed| failed == *dep))
+        .cloned()
 }
 
 fn reap_children_nonblocking(context: &str) {
@@ -1052,6 +1176,38 @@ fn ipc_thread() {
                                 let error_msg = "ERROR: Malformed LAUNCH_OR_FOCUS command\n";
                                 let _ = stream.write(error_msg.as_bytes());
                             }
+                        } else if buffer[0] == cmd::SERVICE_READY {
+                            if n >= 5 {
+                                let service_name_len = u32::from_le_bytes([
+                                    buffer[1], buffer[2], buffer[3], buffer[4],
+                                ]) as usize;
+                                let end = 5 + service_name_len;
+                                if n >= end {
+                                    match core::str::from_utf8(&buffer[5..end]) {
+                                        Ok(service_name) => {
+                                            println!(
+                                                "stemd: SERVICE_READY received for '{}'",
+                                                service_name
+                                            );
+                                            mark_service_ready(service_name);
+                                            let _ = stream
+                                                .write("OK: Service marked ready\n".as_bytes());
+                                        }
+                                        Err(_) => {
+                                            let _ = stream.write(
+                                                "ERROR: Invalid UTF-8 in service name\n".as_bytes(),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let _ = stream.write(
+                                        "ERROR: Incomplete SERVICE_READY command\n".as_bytes(),
+                                    );
+                                }
+                            } else {
+                                let _ = stream
+                                    .write("ERROR: Malformed SERVICE_READY command\n".as_bytes());
+                            }
                         } else if buffer[0] == cmd::SHUTDOWN {
                             println!("stemd: Received SHUTDOWN command");
 
@@ -1637,6 +1793,10 @@ tty = "/dev/tty0"
         );
     }
 
+    // Spawn IPC thread before launching services so they can report readiness.
+    println!("stemd: Starting IPC thread");
+    let _ipc_handle = thread::spawn(ipc_thread);
+
     // Resolve dependencies and get launch order
     let launch_order = resolve_dependencies(&services);
     println!("stemd: Launch order resolved");
@@ -1652,12 +1812,11 @@ tty = "/dev/tty0"
 
             // Find the dependency service and launch it
             if let Some(dep_service) = services.iter().find(|s| s.name == *dep_name) {
-                if let Err(e) = launch_service(dep_service) {
+                if let Err(e) = launch_service_and_wait(dep_service) {
                     println!("stemd: Failed to launch dependency {}: {}", dep_name, e);
                 } else {
                     println!("stemd: Successfully launched dependency: {}", dep_name);
                 }
-                fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
     }
@@ -1714,6 +1873,7 @@ tty = "/dev/tty0"
 
     // Phase 3: Launch other services (excluding stemd itself)
     println!("stemd: Launching services...");
+    let mut failed_services: Vec<String> = Vec::new();
 
     for service in &launch_order {
         // Skip stemd itself (we're already running!)
@@ -1733,10 +1893,19 @@ tty = "/dev/tty0"
             continue;
         }
 
-        if let Err(e) = launch_service(service) {
-            println!("stemd: Failed to launch service {}: {}", service.name, e);
+        if let Some(dep_name) = has_failed_dependency(service, &failed_services) {
+            println!(
+                "stemd: Skipping service '{}' because dependency '{}' failed or was not ready",
+                service.name, dep_name
+            );
+            failed_services.push(service.name.clone());
+            continue;
         }
-        fence(core::sync::atomic::Ordering::SeqCst);
+
+        if let Err(e) = launch_service_and_wait(service) {
+            println!("stemd: Failed to launch service {}: {}", service.name, e);
+            failed_services.push(service.name.clone());
+        }
     }
 
     println!("stemd: All services launched");
@@ -1764,10 +1933,6 @@ tty = "/dev/tty0"
     } else {
         println!("stemd: No application definitions found");
     }
-
-    // Spawn IPC thread
-    println!("stemd: Starting IPC thread");
-    let _ipc_handle = thread::spawn(ipc_thread);
 
     // Spawn sbus handler thread if we registered with sbus
     if registered {

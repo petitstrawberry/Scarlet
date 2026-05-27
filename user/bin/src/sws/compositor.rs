@@ -2383,22 +2383,21 @@ impl Compositor {
                                 sws_protocol::server_msg::WINDOW_CONFIGURE,
                                 payload.to_vec(),
                             );
-
-                            let workarea_y = height as i32;
-                            let workarea_height = self.screen_height.saturating_sub(height);
-                            self.workarea =
-                                Some((0, workarea_y, self.screen_width, workarea_height));
-                            self.window_manager.set_workarea(
-                                0,
-                                workarea_y,
-                                self.screen_width,
-                                workarea_height,
-                            );
-                            println!(
-                                "[Compositor] Updated workarea for resized taskbar: y={}, height={}",
-                                workarea_y, workarea_height
-                            );
                         }
+
+                        let workarea_y = height as i32;
+                        let workarea_height = self.screen_height.saturating_sub(height);
+                        self.workarea = Some((0, workarea_y, self.screen_width, workarea_height));
+                        self.window_manager.set_workarea(
+                            0,
+                            workarea_y,
+                            self.screen_width,
+                            workarea_height,
+                        );
+                        println!(
+                            "[Compositor] Updated workarea for taskbar #{}: y={}, height={}",
+                            window_id, workarea_y, workarea_height
+                        );
                     }
                     _ => {}
                 }

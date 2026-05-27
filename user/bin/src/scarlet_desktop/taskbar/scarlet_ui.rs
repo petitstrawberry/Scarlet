@@ -34,6 +34,29 @@ use std::{format, println};
 use sws_client as sws;
 use sws_protocol::window_types;
 
+const SWS_CONNECT_RETRIES: usize = 100;
+const SWS_RETRY_DELAY_MS: u64 = 50;
+
+fn connect_sws_with_screen_size_retry() -> core::result::Result<(sws::Connection, u32, u32), ()> {
+    for attempt in 0..SWS_CONNECT_RETRIES {
+        if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock")
+            && let Ok((width, height)) = conn.get_screen_size()
+        {
+            println!(
+                "[TaskBar] Connected to SWS after {} attempt(s); screen={}x{}",
+                attempt + 1,
+                width,
+                height
+            );
+            return Ok((conn, width, height));
+        }
+
+        std::thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
+    }
+
+    Err(())
+}
+
 /// TaskBar Application
 #[derive(View, Clone)]
 struct TaskBarApp {
@@ -694,10 +717,10 @@ impl TaskBarApp {
 
         // Menu popup handling thread (still needed for interactive menu popup)
         std::thread::spawn(move || {
-            let mut conn = match sws::Connection::connect("/tmp/sws.sock") {
-                Ok(conn) => conn,
-                Err(e) => {
-                    println!("[TaskBar] Failed to connect to SWS for menu popup: {:?}", e);
+            let mut conn = match connect_sws_with_screen_size_retry() {
+                Ok((conn, _, _)) => conn,
+                Err(()) => {
+                    println!("[TaskBar] Failed to connect to SWS for menu popup after retries");
                     return;
                 }
             };
@@ -958,22 +981,8 @@ pub extern "C" fn main() {
     let bar_height: u32 = TASKBAR_HEIGHT;
 
     // Get screen size from SWS before creating the app
-    let screen_width = match sws::Connection::connect("/tmp/sws.sock") {
-        Ok(mut conn) => {
-            let (width, height) = match conn.get_screen_size() {
-                Ok((width, height)) => {
-                    println!("[TaskBar] Screen size: {}x{}", width, height);
-                    (width, height)
-                }
-                Err(e) => {
-                    println!(
-                        "[TaskBar] Failed to get screen size: {:?}, using default 1920x1080",
-                        e
-                    );
-                    (1920, 1080)
-                }
-            };
-
+    let screen_width = match connect_sws_with_screen_size_retry() {
+        Ok((mut conn, width, height)) => {
             let workarea_y = bar_height as i32;
             let workarea_height = height.saturating_sub(bar_height);
             let _ = conn.set_workarea(0, workarea_y, width, workarea_height);
@@ -984,10 +993,9 @@ pub extern "C" fn main() {
 
             width as f32
         }
-        Err(e) => {
+        Err(()) => {
             println!(
-                "[TaskBar] Failed to connect to SWS: {:?}, using default screen width 1920",
-                e
+                "[TaskBar] Failed to connect to SWS after retries, using default screen width 1920"
             );
             1920.0
         }

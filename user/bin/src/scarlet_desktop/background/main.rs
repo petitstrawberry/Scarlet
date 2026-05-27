@@ -15,6 +15,27 @@ use std::thread;
 use sws_client::{Connection, Event, SurfaceBuilder};
 use sws_protocol::window_types;
 
+const SWS_CONNECT_RETRIES: usize = 100;
+const SWS_RETRY_DELAY_MS: u64 = 50;
+
+fn connect_sws_with_retry() -> Result<Connection, ()> {
+    for attempt in 0..SWS_CONNECT_RETRIES {
+        if let Ok(mut conn) = Connection::connect("/tmp/sws.sock")
+            && conn.get_screen_size().is_ok()
+        {
+            println!(
+                "[scarlet_desktop_background] connected to SWS after {} attempt(s)",
+                attempt + 1
+            );
+            return Ok(conn);
+        }
+
+        thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
+    }
+
+    Err(())
+}
+
 fn draw_gradient_background(
     conn: &mut Connection,
     surface_id: u32,
@@ -146,10 +167,10 @@ fn draw_background(conn: &mut Connection, surface_id: u32) {
 pub extern "C" fn main() -> i32 {
     println!("[scarlet_desktop_background] starting");
 
-    let mut conn = match Connection::connect("/tmp/sws.sock") {
+    let mut conn = match connect_sws_with_retry() {
         Ok(c) => c,
-        Err(_) => {
-            println!("[scarlet_desktop_background] Failed to connect to SWS");
+        Err(()) => {
+            println!("[scarlet_desktop_background] Failed to connect to SWS after retries");
             return 1;
         }
     };

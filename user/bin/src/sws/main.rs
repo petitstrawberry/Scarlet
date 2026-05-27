@@ -14,8 +14,40 @@ mod ipc;
 mod window;
 
 use compositor::Compositor;
+use core::time::Duration;
 use sbus_client as sbus;
+use std::io::Write;
 use std::println;
+use std::socket::Socket;
+
+const STEMD_SERVICE_READY_CMD: u8 = 0x06;
+const STEMD_NOTIFY_RETRIES: usize = 100;
+const STEMD_NOTIFY_DELAY_MS: u64 = 50;
+
+fn notify_service_ready(service_name: &str) {
+    for attempt in 0..STEMD_NOTIFY_RETRIES {
+        if let Ok(mut stream) = Socket::new()
+            && stream.connect("/tmp/stemd.sock").is_ok()
+        {
+            let mut payload = std::vec::Vec::new();
+            payload.push(STEMD_SERVICE_READY_CMD);
+            payload.extend_from_slice(&(service_name.len() as u32).to_le_bytes());
+            payload.extend_from_slice(service_name.as_bytes());
+
+            if stream.write(&payload).is_ok() {
+                println!(
+                    "[sws] Reported ready to stemd after {} attempt(s)",
+                    attempt + 1
+                );
+                return;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(STEMD_NOTIFY_DELAY_MS));
+    }
+
+    println!("[sws] Failed to report ready to stemd after retries");
+}
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -54,6 +86,7 @@ fn main() -> i32 {
     }
 
     println!("Compositor ready. Starting main loop...");
+    notify_service_ready("sws");
 
     // Run main loop
     if let Err(e) = compositor.run() {

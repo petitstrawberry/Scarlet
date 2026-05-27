@@ -5,6 +5,8 @@
 exec = "/bin/sws"
 order = 01
 depends = ["sbusd", "sas"]
+ready_notify = true
+ready_timeout_ms = 5000
 
 [service.scarlet-desktop]
 exec = "/bin/scarlet_desktop"
