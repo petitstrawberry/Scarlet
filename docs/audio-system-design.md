@@ -28,7 +28,7 @@ Direct native playback
 
   user process
   +-------------------------+
-  | playwav                 |
+  | mplayer                 |
   |                         |
   |  RIFF/WAVE parser       |
   |  PCM writer             |
@@ -56,7 +56,7 @@ SAS playback
 
   client A                 client B
   +------------------+     +------------------+
-  | playwav --sas    |     | future client    |
+  | mplayer --sas    |     | future client    |
   |                  |     |                  |
   | mmap client ring |     | mmap client ring |
   | write PCM frames |     | write PCM frames |
@@ -321,14 +321,114 @@ Shared-memory ring layout
 ```
 
 The first implementation accepts only `S16LE`, 48 kHz, stereo client streams and
-mixes by saturating summed samples into a fixed `S16LE`, 48 kHz, stereo output
-stream. That constraint is a server policy, not a kernel ABI limit. Future SAS
-work should query `/dev/audio0` capabilities, choose an output format, and add
-client-side conversion or server-side conversion before mixing.
+mixes into a fixed `S16LE`, 48 kHz, stereo output stream. That constraint is a
+server policy, not a kernel ABI limit. Future SAS work should query
+`/dev/audio0` capabilities, choose an output format, and add client-side
+conversion or server-side conversion before mixing.
+
+## SAS Mixer
+
+SAS uses an internal mixer backend boundary so the simple MVP mixer can be
+replaced later without changing the client protocol or the `/dev/audio0` output
+path.
+
+```text
+Per-client rings
+================
+
+  client ring A       client ring B       client ring C
+  S16LE frames        S16LE frames        future format
+       |                   |                   |
+       | read/convert      | read/convert      | convert/resample later
+       v                   v                   v
+  +------------------------------------------------------+
+  | MixerBackend                                         |
+  |                                                      |
+  |  current: ScalarF32Mixer                             |
+  |    - read S16LE interleaved client rings             |
+  |    - convert samples to f32                          |
+  |    - apply per-client gain                           |
+  |    - accumulate one output period                    |
+  |    - clamp and convert to device S16LE               |
+  |                                                      |
+  |  later: NeonMixer / RvvMixer / other SIMD backend    |
+  +-------------------------+----------------------------+
+                            |
+                            v
+                    /dev/audio0 PCM ring
+```
+
+Current mixing is:
+
+```text
+acc[n] = sum(client_sample[n] * client_gain)
+out[n] = clamp(acc[n], -1.0, 1.0) converted to S16LE
+```
+
+This is still a scalar loop, but the loop is now behind a backend interface.
+That keeps the first implementation portable and leaves room for architecture
+specific acceleration later. The more important scalability step is still to
+avoid unnecessary work before adding SIMD:
+
+- keep inactive, drained, muted, or zero-volume streams out of the hot path
+- keep the mixer period-oriented
+- keep conversion and resampling as a pre-mix stage
+- let the mixer fast path handle already-normalized internal buffers
+- add limiter or attenuation policy before many active clients clip the output
+
+## SAS Exclusive Mode
+
+SAS should also support an exclusive playback mode for clients that want to avoid
+the mixer. This mode is still owned and mediated by SAS; clients should not be
+handed `/dev/audio0` directly.
+
+```text
+Shared mode
+===========
+
+  client rings -> MixerBackend -> /dev/audio0
+
+Exclusive mode
+==============
+
+  one client ring -> exclusive copy path -> /dev/audio0
+                 no other SAS clients mixed into the stream
+```
+
+The intended state model is:
+
+```text
+                 REQUEST_EXCLUSIVE accepted
+  +--------+ ---------------------------------> +-----------+
+  | shared |                                    | exclusive |
+  +--------+ <--------------------------------- +-----------+
+                 exclusive client closes
+                 or SAS revokes the lease
+```
+
+Exclusive mode is useful for low-latency playback, avoiding mixer CPU cost, and
+cases that want less processing between the client and the device. SAS remains
+the owner of device policy:
+
+- reject exclusive requests while shared clients are active, or wait for a
+  drain if the caller explicitly requests that behavior
+- stop the shared mixer output before entering exclusive mode
+- configure `/dev/audio0` for the exclusive client's requested tuple if the
+  device supports it
+- expose a dedicated shared-memory ring to the exclusive client
+- copy or submit only that client's ring into `/dev/audio0`
+- reject or queue new shared clients while exclusive mode is active
+- stop/release the exclusive stream and return to shared mode on close or client
+  death
+
+Protocol-wise, this should be a separate request such as
+`CONFIGURE_EXCLUSIVE`, rather than overloading the existing `CONFIGURE`
+message. That keeps the current shared-mode client protocol simple and makes the
+policy transition explicit.
 
 ## User Space Clients
 
-`playwav` can use the kernel device directly:
+`mplayer` can use the kernel device directly:
 
 - parses RIFF/WAVE PCM
 - configures `/dev/audio0`
@@ -337,8 +437,8 @@ client-side conversion or server-side conversion before mixing.
 - starts playback after initial buffering
 - polls/status-loops until the stream drains
 
-`playwav --sas FILE.wav` sends the WAV data to SAS instead. In that mode,
-`playwav` is a client and does not open `/dev/audio0`; SAS owns the device and
+`mplayer --sas FILE.wav` sends the WAV data to SAS instead. In that mode,
+`mplayer` is a client and does not open `/dev/audio0`; SAS owns the device and
 performs mixing.
 
 ## QEMU Usage
@@ -374,13 +474,13 @@ macOS output device sample rate or use the fixed CoreAudio settings above.
 
 ## Playback Test
 
-`playwav` plays PCM RIFF/WAVE files through `/dev/audio0`:
+`mplayer` plays PCM RIFF/WAVE files through `/dev/audio0`:
 
 ```sh
-playwav /root/foo.wav
+mplayer /root/foo.wav
 ```
 
-The MVP supports PCM S16LE WAV input. `playwav` queries `/dev/audio0`
+The MVP supports PCM S16LE WAV input. `mplayer` queries `/dev/audio0`
 capabilities before configuring the stream, so test WAV files must match a
 format, sample rate, and channel count reported by the driver unless user space
 adds resampling or format conversion before writing to `/dev/audio0`.
@@ -388,10 +488,14 @@ adds resampling or format conversion before writing to `/dev/audio0`.
 To test the audio server path, start SAS first and then run:
 
 ```sh
-playwav --sas /root/foo.wav
+mplayer --sas /root/foo.wav
 ```
 
 The current SAS MVP accepts only S16LE, 48 kHz, stereo WAV input.
+`mplayer --sas` keeps one SAS client connection for the current track; seek
+resets and reuses the shared ring instead of reconnecting. Interactive controls
+are read by a blocking TTY input thread: Space toggles play/pause, `j`/`l` seek
+by 10 seconds, `n`/`p` skip tracks, and `q` quits.
 
 ## Compatibility
 

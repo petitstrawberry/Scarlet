@@ -35,6 +35,7 @@ struct ClientStream {
     ring_size: usize,
     buffer_frames: usize,
     frame_bytes: usize,
+    gain: f32,
     configured: bool,
     closed: bool,
 }
@@ -47,6 +48,7 @@ impl ClientStream {
             ring_size: 0,
             buffer_frames: 0,
             frame_bytes: 0,
+            gain: 1.0,
             configured: false,
             closed: false,
         }
@@ -175,6 +177,81 @@ impl Drop for OutputDevice {
     }
 }
 
+trait MixerBackend {
+    fn reset(&mut self, samples: usize);
+
+    unsafe fn mix_s16le_ring(
+        &mut self,
+        stream: &ClientStream,
+        ring_addr: usize,
+        read_frames: u64,
+        frames: usize,
+        channels: usize,
+    );
+
+    fn finish_s16le(&self, out: &mut [i16]);
+}
+
+struct ScalarF32Mixer {
+    acc: Vec<f32>,
+}
+
+impl ScalarF32Mixer {
+    fn new() -> Self {
+        Self { acc: Vec::new() }
+    }
+}
+
+impl MixerBackend for ScalarF32Mixer {
+    fn reset(&mut self, samples: usize) {
+        if self.acc.len() != samples {
+            self.acc.resize(samples, 0.0);
+        } else {
+            self.acc.fill(0.0);
+        }
+    }
+
+    unsafe fn mix_s16le_ring(
+        &mut self,
+        stream: &ClientStream,
+        ring_addr: usize,
+        read_frames: u64,
+        frames: usize,
+        channels: usize,
+    ) {
+        let data = (ring_addr + protocol::RING_HEADER_SIZE) as *const u8;
+        for frame in 0..frames {
+            let ring_frame = (read_frames as usize + frame) % stream.buffer_frames;
+            let frame_offset = ring_frame * stream.frame_bytes;
+            for channel in 0..channels {
+                let sample_offset = frame_offset + channel * 2;
+                // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
+                let lo = unsafe { data.add(sample_offset).read_volatile() };
+                // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
+                let hi = unsafe { data.add(sample_offset + 1).read_volatile() };
+                let sample = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
+                let acc_index = frame * channels + channel;
+                self.acc[acc_index] += sample * stream.gain;
+            }
+        }
+    }
+
+    fn finish_s16le(&self, out: &mut [i16]) {
+        for (dst, sample) in out.iter_mut().zip(self.acc.iter()) {
+            *dst = f32_to_s16(*sample);
+        }
+    }
+}
+
+fn f32_to_s16(sample: f32) -> i16 {
+    let sample = sample.clamp(-1.0, 1.0);
+    if sample <= -1.0 {
+        i16::MIN
+    } else {
+        (sample * i16::MAX as f32) as i16
+    }
+}
+
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("=== Scarlet Audio Server (SAS) ===");
@@ -245,10 +322,11 @@ fn audio_thread(state: Arc<Mutex<ServerState>>) {
     );
 
     let samples_per_period = output.params.period_frames as usize * output.params.channels as usize;
+    let mut mixer = ScalarF32Mixer::new();
+    let mut mixed = alloc::vec![0i16; samples_per_period];
     let mut idle_ticks = 0usize;
     loop {
-        let mut mixed = alloc::vec![0i16; samples_per_period];
-        let active = mix_period(&state, &mut mixed);
+        let active = mix_period(&state, &mut mixer, &mut mixed);
         if active {
             idle_ticks = 0;
             if let Err(e) = output.write_period(&mixed) {
@@ -266,27 +344,30 @@ fn audio_thread(state: Arc<Mutex<ServerState>>) {
     }
 }
 
-fn mix_period(state: &Arc<Mutex<ServerState>>, out: &mut [i16]) -> bool {
-    let mut acc = alloc::vec![0i32; out.len()];
+fn mix_period(
+    state: &Arc<Mutex<ServerState>>,
+    mixer: &mut dyn MixerBackend,
+    out: &mut [i16],
+) -> bool {
+    mixer.reset(out.len());
     let mut active = false;
     let mut to_remove = Vec::new();
 
     {
         let mut guard = state.lock();
         for (client_id, stream) in guard.clients.iter_mut() {
+            if stream.closed {
+                to_remove.push(*client_id);
+                continue;
+            }
+
             let Some(ring_addr) = stream.ring_addr else {
-                if stream.closed {
-                    to_remove.push(*client_id);
-                }
                 continue;
             };
 
-            let frames = unsafe { mix_client_ring(stream, ring_addr, &mut acc) };
+            let frames = unsafe { mix_client_ring(mixer, stream, ring_addr) };
             if frames != 0 {
                 active = true;
-            }
-            if stream.closed && frames == 0 && unsafe { ring_is_empty(ring_addr) } {
-                to_remove.push(*client_id);
             }
         }
 
@@ -295,13 +376,15 @@ fn mix_period(state: &Arc<Mutex<ServerState>>, out: &mut [i16]) -> bool {
         }
     }
 
-    for (dst, sample) in out.iter_mut().zip(acc.iter()) {
-        *dst = (*sample).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    }
+    mixer.finish_s16le(out);
     active
 }
 
-unsafe fn mix_client_ring(stream: &ClientStream, ring_addr: usize, acc: &mut [i32]) -> usize {
+unsafe fn mix_client_ring(
+    mixer: &mut dyn MixerBackend,
+    stream: &ClientStream,
+    ring_addr: usize,
+) -> usize {
     let header = ring_addr as *mut protocol::RingHeader;
     // SAFETY: `ring_addr` is a server-side mapping of a SAS shared-memory ring.
     let read_frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
@@ -316,20 +399,10 @@ unsafe fn mix_client_ring(stream: &ClientStream, ring_addr: usize, acc: &mut [i3
     }
 
     let channels = OUTPUT_CHANNELS as usize;
-    let data = (ring_addr + protocol::RING_HEADER_SIZE) as *const u8;
-    for frame in 0..frames {
-        let ring_frame = (read_frames as usize + frame) % stream.buffer_frames;
-        let frame_offset = ring_frame * stream.frame_bytes;
-        for channel in 0..channels {
-            let sample_offset = frame_offset + channel * 2;
-            // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
-            let lo = unsafe { data.add(sample_offset).read_volatile() };
-            // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
-            let hi = unsafe { data.add(sample_offset + 1).read_volatile() };
-            let sample = i16::from_le_bytes([lo, hi]);
-            let acc_index = frame * channels + channel;
-            acc[acc_index] = acc[acc_index].saturating_add(sample as i32);
-        }
+    // SAFETY: the ring was created by SAS and `frames` is bounded by readable
+    // frames and one output period.
+    unsafe {
+        mixer.mix_s16le_ring(stream, ring_addr, read_frames, frames, channels);
     }
 
     compiler_fence(Ordering::Release);
@@ -369,6 +442,7 @@ fn client_thread(client_id: usize, mut socket: Socket, state: Arc<Mutex<ServerSt
             }
             protocol::MSG_CLOSE => {
                 mark_client_closed(client_id, &state);
+                println!("sas: client {} disconnected: close requested", client_id);
                 let _ = write_ok(&mut socket);
                 return;
             }

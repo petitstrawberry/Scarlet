@@ -215,8 +215,8 @@ name = "top"
 path = "src/top.rs"
 
 [[bin]]
-name = "playwav"
-path = "src/playwav.rs"
+name = "mplayer"
+path = "src/mplayer.rs"
 
 [[bin]]
 name = "sas"
