@@ -22,10 +22,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, compiler_fe
 use core::time::Duration;
 
 use rust_h264::decoder::{Decoder, Frame};
-use rust_h264::nal::parse_annex_b;
+use rust_h264::nal::{NalUnit, NalUnitType, parse_annex_b};
 use scarlet_ui::{
-    Application, CanvasView, ComponentElement, Element, InvalidationKind, Listenable, Size,
-    SubscriptionId, View, Window,
+    Application, CanvasView, ComponentElement, Element, Event, InvalidationKind, KeyCode, KeyEvent,
+    Listenable, MouseButton, MouseEvent, Size, SubscriptionId, View, ViewExt, Window,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::File;
@@ -44,6 +44,14 @@ const VIDEO_HEIGHT: u32 = 360;
 const DISPLAY_WIDTH: u32 = 640;
 const DISPLAY_HEIGHT: u32 = 360;
 const FRAME_INTERVAL_MS: u64 = 33;
+const CONTROLS_HIDE_INTERVAL_MS: u64 = 250;
+const CONTROLS_HIDE_IDLE_TICKS: u32 = 6;
+const CONTROLS_MIN_WIDTH: u32 = 96;
+const CONTROLS_MIN_HEIGHT: u32 = 48;
+const CONTROLS_PANEL_HEIGHT: u32 = 56;
+const PLAY_BUTTON_SIZE: u32 = 32;
+const PLAY_BUTTON_LEFT_INSET: u32 = 16;
+const PLAY_BUTTON_TOP_INSET: u32 = 12;
 
 struct VideoFrameStore {
     data: Mutex<VideoFrameData>,
@@ -53,6 +61,8 @@ struct VideoFrameData {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
+    current_frame: u32,
+    total_frames: u32,
 }
 
 impl VideoFrameStore {
@@ -62,11 +72,13 @@ impl VideoFrameStore {
                 pixels: vec![0; (VIDEO_WIDTH * VIDEO_HEIGHT * 4) as usize],
                 width: VIDEO_WIDTH,
                 height: VIDEO_HEIGHT,
+                current_frame: 0,
+                total_frames: 0,
             }),
         }
     }
 
-    fn update_from_frame(&self, frame: &Frame) {
+    fn update_from_frame(&self, frame: &Frame, current_frame: u32, total_frames: u32) {
         let width = frame.width;
         let height = frame.height;
         let mut data = self.data.lock();
@@ -77,6 +89,86 @@ impl VideoFrameStore {
         yuv420_to_bgra(frame, &mut data.pixels);
         data.width = width;
         data.height = height;
+        data.current_frame = current_frame;
+        data.total_frames = total_frames;
+    }
+
+    fn mark_complete(&self) {
+        let mut data = self.data.lock();
+        if data.total_frames != 0 {
+            data.current_frame = data.total_frames;
+        }
+    }
+}
+
+struct ControlsOverlay {
+    visible: AtomicBool,
+    activity_epoch: AtomicU32,
+    paused: AtomicBool,
+    canvas_width: AtomicU32,
+    canvas_height: AtomicU32,
+}
+
+impl ControlsOverlay {
+    fn new() -> Self {
+        Self {
+            visible: AtomicBool::new(false),
+            activity_epoch: AtomicU32::new(0),
+            paused: AtomicBool::new(false),
+            canvas_width: AtomicU32::new(DISPLAY_WIDTH),
+            canvas_height: AtomicU32::new(DISPLAY_HEIGHT),
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible.load(Ordering::Acquire)
+    }
+
+    fn show_for_mouse_activity(&self) -> bool {
+        self.activity_epoch.fetch_add(1, Ordering::AcqRel);
+        self.visible.swap(true, Ordering::AcqRel) != true
+    }
+
+    fn hide(&self) -> bool {
+        self.visible.swap(false, Ordering::AcqRel) != false
+    }
+
+    fn activity_epoch(&self) -> u32 {
+        self.activity_epoch.load(Ordering::Acquire)
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    fn toggle_paused(&self) {
+        let paused = !self.paused.load(Ordering::Acquire);
+        self.paused.store(paused, Ordering::Release);
+        self.show_for_mouse_activity();
+    }
+
+    fn update_canvas_size(&self, width: u32, height: u32) {
+        self.canvas_width.store(width, Ordering::Release);
+        self.canvas_height.store(height, Ordering::Release);
+    }
+
+    fn play_pause_button_contains(&self, x: i32, y: i32) -> bool {
+        let width = self.canvas_width.load(Ordering::Acquire);
+        let height = self.canvas_height.load(Ordering::Acquire);
+        let Some((button_x, button_y)) = play_pause_button_origin(width, height) else {
+            return false;
+        };
+        let Ok(x) = u32::try_from(x) else {
+            return false;
+        };
+        let Ok(y) = u32::try_from(y) else {
+            return false;
+        };
+
+        x >= button_x
+            && x < button_x + PLAY_BUTTON_SIZE
+            && y >= button_y
+            && y < button_y + PLAY_BUTTON_SIZE
     }
 }
 
@@ -122,6 +214,7 @@ struct H264PlayerApp {
     path: String,
     audio_path: Option<String>,
     frame_store: Arc<VideoFrameStore>,
+    controls: Arc<ControlsOverlay>,
     paint_signal: Arc<PaintSignal>,
     clock: Arc<AudioClock>,
 }
@@ -132,6 +225,7 @@ impl H264PlayerApp {
             path,
             audio_path,
             frame_store: Arc::new(VideoFrameStore::new()),
+            controls: Arc::new(ControlsOverlay::new()),
             paint_signal: Arc::new(PaintSignal::new()),
             clock: Arc::new(AudioClock::new()),
         }
@@ -190,28 +284,36 @@ impl View for H264PlayerApp {
 impl Application for H264PlayerApp {
     fn body(&self) -> impl View {
         let frame_store = self.frame_store.clone();
+        let controls = self.controls.clone();
+        let controls_for_event = self.controls.clone();
+        let controls_for_key = self.controls.clone();
+        let paint_signal_for_key = self.paint_signal.clone();
         Window::new(
             "H.264 Player",
             CanvasView::new(
                 DISPLAY_WIDTH as f32,
                 DISPLAY_HEIGHT as f32,
                 Rc::new(move |buffer, width, height| {
-                    draw_video_frame(buffer, width, height, &frame_store);
+                    draw_video_frame(buffer, width, height, &frame_store, &controls);
                 }),
-            ),
+            )
+            .on_event(move |event| handle_canvas_event(event, &controls_for_event))
+            .on_key(move |event| handle_key_event(event, &controls_for_key, &paint_signal_for_key)),
         )
         .app_id("org.scarlet-os.h264-player")
         .size(Size::new(DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32))
     }
 
     fn init(&mut self) {
+        start_controls_thread(self.controls.clone(), self.paint_signal.clone());
         if let Some(audio_path) = self.audio_path.clone() {
-            start_audio_thread(audio_path, self.clock.clone());
+            start_audio_thread(audio_path, self.clock.clone(), self.controls.clone());
         }
         start_decoder_thread(
             self.path.clone(),
             self.frame_store.clone(),
             self.paint_signal.clone(),
+            self.controls.clone(),
             self.audio_path.is_some().then(|| self.clock.clone()),
         );
     }
@@ -225,11 +327,47 @@ fn start_decoder_thread(
     path: String,
     frame_store: Arc<VideoFrameStore>,
     paint_signal: Arc<PaintSignal>,
+    controls: Arc<ControlsOverlay>,
     clock: Option<Arc<AudioClock>>,
 ) {
     thread::spawn(move || {
-        if let Err(err) = decode_loop(&path, &frame_store, &paint_signal, clock.as_deref()) {
+        if let Err(err) = decode_loop(
+            &path,
+            &frame_store,
+            &paint_signal,
+            &controls,
+            clock.as_deref(),
+        ) {
             println!("[h264_player] {}", err);
+        }
+    });
+}
+
+fn start_controls_thread(controls: Arc<ControlsOverlay>, paint_signal: Arc<PaintSignal>) {
+    thread::spawn(move || {
+        let mut last_epoch = controls.activity_epoch();
+        let mut idle_ticks = 0u32;
+
+        loop {
+            thread::sleep(Duration::from_millis(CONTROLS_HIDE_INTERVAL_MS));
+            let epoch = controls.activity_epoch();
+            if epoch != last_epoch {
+                last_epoch = epoch;
+                idle_ticks = 0;
+                continue;
+            }
+
+            if controls.is_visible() {
+                idle_ticks = idle_ticks.saturating_add(1);
+                if idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
+                    idle_ticks = 0;
+                    if controls.hide() {
+                        paint_signal.notify();
+                    }
+                }
+            } else {
+                idle_ticks = 0;
+            }
         }
     });
 }
@@ -238,18 +376,29 @@ fn decode_loop(
     path: &str,
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
     let data = read_file(path)?;
     let nals = parse_annex_b(&data);
+    let total_frames = count_slice_nals(&nals).max(1) as u32;
     let mut decoder = Decoder::new();
     let mut display_index = 0usize;
     println!("[h264_player] {} NAL units", nals.len());
 
     for nal in &nals {
+        wait_while_paused(controls);
         match decoder.decode_nal(nal) {
             Ok(Some(frame)) => {
-                publish_frame_synced(frame_store, paint_signal, frame, display_index, clock);
+                publish_frame_synced(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    frame,
+                    display_index,
+                    total_frames,
+                    clock,
+                );
                 display_index += 1;
             }
             Ok(None) => {}
@@ -258,24 +407,45 @@ fn decode_loop(
     }
 
     if let Some(frame) = decoder.flush() {
-        publish_frame_synced(frame_store, paint_signal, frame, display_index, clock);
+        publish_frame_synced(
+            frame_store,
+            paint_signal,
+            controls,
+            frame,
+            display_index,
+            total_frames,
+            clock,
+        );
         display_index += 1;
     }
 
+    frame_store.mark_complete();
+    paint_signal.notify();
     println!("[h264_player] finished: {} frames", display_index);
 
     Ok(())
 }
 
-fn start_audio_thread(path: String, clock: Arc<AudioClock>) {
+fn count_slice_nals(nals: &[NalUnit<'_>]) -> usize {
+    nals.iter()
+        .filter(|nal| {
+            matches!(
+                nal.nal_unit_type,
+                NalUnitType::Slice | NalUnitType::SliceIdr
+            )
+        })
+        .count()
+}
+
+fn start_audio_thread(path: String, clock: Arc<AudioClock>, controls: Arc<ControlsOverlay>) {
     thread::spawn(move || {
-        if let Err(err) = play_wav_sas(&path, &clock) {
+        if let Err(err) = play_wav_sas(&path, &clock, &controls) {
             println!("[h264_player] audio: {}", err);
         }
     });
 }
 
-fn play_wav_sas(path: &str, clock: &AudioClock) -> Result<(), String> {
+fn play_wav_sas(path: &str, clock: &AudioClock, controls: &ControlsOverlay) -> Result<(), String> {
     let bytes = read_file(path)?;
     let wav = parse_wav(&bytes)?;
     if wav.audio_format != 1 || wav.bits_per_sample != 16 {
@@ -328,6 +498,11 @@ fn play_wav_sas(path: &str, clock: &AudioClock) -> Result<(), String> {
     while pos_frame < total_data_frames {
         // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
         clock.update_read_frames(unsafe { sas_ring_read_frames(ring_addr) });
+        while controls.is_paused() {
+            // SAFETY: `ring_addr` remains mapped while audio playback is active.
+            clock.update_read_frames(unsafe { sas_ring_read_frames(ring_addr) });
+            thread::sleep(Duration::from_millis(10));
+        }
         // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
         let frames = unsafe { writable_sas_frames(ring_addr).min(total_data_frames - pos_frame) };
         if frames == 0 {
@@ -363,12 +538,16 @@ fn play_wav_sas(path: &str, clock: &AudioClock) -> Result<(), String> {
 fn publish_frame_synced(
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
     frame: Frame,
     display_index: usize,
+    total_frames: u32,
     clock: Option<&AudioClock>,
 ) {
+    wait_while_paused(controls);
     if let Some(clock) = clock {
         loop {
+            wait_while_paused(controls);
             let Some(target_index) = clock.video_frame_index() else {
                 thread::sleep(Duration::from_millis(1));
                 continue;
@@ -382,12 +561,34 @@ fn publish_frame_synced(
         thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
     }
 
-    publish_frame(frame_store, paint_signal, frame);
+    publish_frame(
+        frame_store,
+        paint_signal,
+        controls,
+        frame,
+        display_index,
+        total_frames,
+    );
 }
 
-fn publish_frame(frame_store: &VideoFrameStore, paint_signal: &PaintSignal, frame: Frame) {
-    frame_store.update_from_frame(&frame);
+fn publish_frame(
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
+    frame: Frame,
+    display_index: usize,
+    total_frames: u32,
+) {
+    wait_while_paused(controls);
+    let current_frame = (display_index + 1).min(u32::MAX as usize) as u32;
+    frame_store.update_from_frame(&frame, current_frame, total_frames);
     paint_signal.notify();
+}
+
+fn wait_while_paused(controls: &ControlsOverlay) {
+    while controls.is_paused() {
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
@@ -707,7 +908,9 @@ fn draw_video_frame(
     canvas_width: u32,
     canvas_height: u32,
     frame_store: &VideoFrameStore,
+    controls: &ControlsOverlay,
 ) {
+    controls.update_canvas_size(canvas_width, canvas_height);
     let frame = frame_store.data.lock();
     let frame_width = frame.width;
     let frame_height = frame.height;
@@ -731,6 +934,7 @@ fn draw_video_frame(
     {
         let copy_len = buffer.len().min(source.len());
         buffer[..copy_len].copy_from_slice(&source[..copy_len]);
+        draw_seek_bar(buffer, canvas_width, canvas_height, &frame, controls);
         return;
     }
 
@@ -768,6 +972,303 @@ fn draw_video_frame(
             }
         }
     }
+
+    draw_seek_bar(buffer, canvas_width, canvas_height, &frame, controls);
+}
+
+fn handle_canvas_event(event: &Event, controls: &ControlsOverlay) -> bool {
+    match event {
+        Event::Mouse(MouseEvent::Entered { .. }) | Event::Mouse(MouseEvent::Moved { .. }) => {
+            controls.show_for_mouse_activity()
+        }
+        Event::Mouse(MouseEvent::Exited { .. }) => controls.hide(),
+        Event::Mouse(MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            x,
+            y,
+        }) => {
+            controls.show_for_mouse_activity();
+            if controls.play_pause_button_contains(*x, *y) {
+                controls.toggle_paused();
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn handle_key_event(
+    event: KeyEvent,
+    controls: &ControlsOverlay,
+    paint_signal: &PaintSignal,
+) -> bool {
+    if let KeyEvent::Pressed {
+        keycode: KeyCode::Space,
+    } = event
+    {
+        controls.toggle_paused();
+        paint_signal.notify();
+        true
+    } else {
+        false
+    }
+}
+
+fn draw_seek_bar(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    frame: &VideoFrameData,
+    controls: &ControlsOverlay,
+) {
+    if !controls.is_visible() {
+        return;
+    }
+
+    let Some((button_x, button_y)) = play_pause_button_origin(canvas_width, canvas_height) else {
+        return;
+    };
+    let total_frames = frame.total_frames.max(frame.current_frame).max(1);
+    let current_frame = frame.current_frame.min(total_frames);
+    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
+
+    blend_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        0,
+        panel_y,
+        canvas_width,
+        canvas_height - panel_y,
+        [0, 0, 0, 112],
+    );
+
+    if canvas_width < 180 {
+        draw_play_pause_button(
+            buffer,
+            canvas_width,
+            canvas_height,
+            button_x,
+            button_y,
+            controls.is_paused(),
+        );
+        return;
+    }
+
+    let track_x = 80u32;
+    let right_inset = 32u32.min(canvas_width / 8);
+    let track_width = canvas_width.saturating_sub(track_x + right_inset).max(1);
+    let track_height = 4;
+    let track_y = canvas_height.saturating_sub(28);
+    let progress_width =
+        (u64::from(track_width) * u64::from(current_frame) / u64::from(total_frames)) as u32;
+    let knob_x = track_x + progress_width.saturating_sub(1).min(track_width - 1);
+
+    blend_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        track_x,
+        track_y,
+        track_width,
+        track_height,
+        [88, 88, 88, 192],
+    );
+    draw_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        track_x,
+        track_y,
+        progress_width,
+        track_height,
+        [238, 238, 238, 255],
+    );
+    draw_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        knob_x.saturating_sub(3),
+        track_y.saturating_sub(5),
+        7,
+        14,
+        [255, 255, 255, 255],
+    );
+    draw_play_pause_button(
+        buffer,
+        canvas_width,
+        canvas_height,
+        button_x,
+        button_y,
+        controls.is_paused(),
+    );
+}
+
+fn play_pause_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u32, u32)> {
+    if canvas_width < CONTROLS_MIN_WIDTH || canvas_height < CONTROLS_MIN_HEIGHT {
+        return None;
+    }
+
+    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
+    let button_x = PLAY_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(PLAY_BUTTON_SIZE));
+    let button_y = panel_y + PLAY_BUTTON_TOP_INSET;
+    Some((button_x, button_y))
+}
+
+fn draw_play_pause_button(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    paused: bool,
+) {
+    blend_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x,
+        y,
+        32,
+        32,
+        [0, 0, 0, 96],
+    );
+
+    if paused {
+        draw_play_triangle(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x + 12,
+            y + 8,
+            [255, 255, 255, 255],
+        );
+    } else {
+        draw_rect_bgra(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x + 10,
+            y + 8,
+            4,
+            16,
+            [255, 255, 255, 255],
+        );
+        draw_rect_bgra(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x + 18,
+            y + 8,
+            4,
+            16,
+            [255, 255, 255, 255],
+        );
+    }
+}
+
+fn draw_play_triangle(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    color: [u8; 4],
+) {
+    const HEIGHT: u32 = 16;
+    const WIDTH: u32 = 14;
+    const MID: u32 = HEIGHT / 2;
+
+    for row in 0..HEIGHT {
+        let distance = row.abs_diff(MID);
+        let width = 1 + (WIDTH - 1) * (MID.saturating_sub(distance)) / MID;
+        let row_y = y + row;
+        draw_rect_bgra(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x,
+            row_y,
+            width,
+            1,
+            color,
+        );
+    }
+}
+
+fn draw_rect_bgra(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+) {
+    let x_end = x.saturating_add(width).min(canvas_width);
+    let y_end = y.saturating_add(height).min(canvas_height);
+    if x >= x_end || y >= y_end {
+        return;
+    }
+
+    let stride = canvas_width as usize * 4;
+
+    for row in y..y_end {
+        let start = row as usize * stride + x as usize * 4;
+        let end = row as usize * stride + x_end as usize * 4;
+        fill_bgra(&mut buffer[start..end], color);
+    }
+}
+
+fn blend_rect_bgra(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+) {
+    let x_end = x.saturating_add(width).min(canvas_width);
+    let y_end = y.saturating_add(height).min(canvas_height);
+    let alpha = color[3] as u32;
+    if alpha == 0 || x >= x_end || y >= y_end {
+        return;
+    }
+    if alpha == 255 {
+        draw_rect_bgra(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x,
+            y,
+            width,
+            height,
+            color,
+        );
+        return;
+    }
+
+    let inv_alpha = 255 - alpha;
+    let stride = canvas_width as usize * 4;
+    for row in y..y_end {
+        let row_start = row as usize * stride;
+        for col in x..x_end {
+            let offset = row_start + col as usize * 4;
+            buffer[offset] = blend_channel(buffer[offset], color[0], alpha, inv_alpha);
+            buffer[offset + 1] = blend_channel(buffer[offset + 1], color[1], alpha, inv_alpha);
+            buffer[offset + 2] = blend_channel(buffer[offset + 2], color[2], alpha, inv_alpha);
+            buffer[offset + 3] = 255;
+        }
+    }
+}
+
+fn blend_channel(dst: u8, src: u8, alpha: u32, inv_alpha: u32) -> u8 {
+    ((u32::from(src) * alpha + u32::from(dst) * inv_alpha + 127) / 255) as u8
 }
 
 fn fit_size(source_width: u32, source_height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
