@@ -860,17 +860,19 @@ impl WindowRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[WindowRenderObject] Creating buffer: {}x{}", width, height);
             }
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
             use crate::graphics::Canvas;
-            let mut canvas = Canvas::new(buffer.data_mut(), w, h);
+            let mut canvas = Canvas::for_buffer(buffer);
+            let w = canvas.width();
+            let h = canvas.height();
 
             // Fill background with specified color (or skip if None for transparent)
             if let Some(bg_color) = self.background_color {
@@ -883,8 +885,8 @@ impl WindowRenderObject {
                     &title,
                     focused,
                     &mut canvas,
-                    width as u32,
-                    height as u32,
+                    w,
+                    h,
                     close_state,
                     maximize_state,
                     minimize_state,
@@ -921,11 +923,16 @@ impl WindowRenderObject {
         };
 
         for child_buffer in child_buffers {
+            let scale_milli = buffer.scale_milli();
+            let physical_x =
+                ((border_offset as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
+            let physical_y =
+                ((titlebar_height as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
             // Composite child inside border, below titlebar
             buffer.composite(
                 child_buffer,
-                border_offset,
-                titlebar_height,
+                physical_x,
+                physical_y,
                 1.0, // Full opacity
             );
         }

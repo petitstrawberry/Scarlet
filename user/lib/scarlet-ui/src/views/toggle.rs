@@ -238,12 +238,15 @@ impl ToggleRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
+            let physical_w = buffer.width();
+            let physical_h = buffer.height();
+            let ui_scale = (buffer.scale_milli() as f32) / 1000.0;
             let palette = ColorPalette::default();
             let bg_color = if self.is_on {
                 palette.green().base
@@ -256,15 +259,15 @@ impl ToggleRenderObject {
             let data = buffer.data_mut();
             data.fill(0);
 
-            let scale = 2u32;
-            let w_hi = w * scale;
-            let h_hi = h * scale;
+            let aa_scale = 2u32;
+            let w_hi = physical_w * aa_scale;
+            let h_hi = physical_h * aa_scale;
             let mut track_hi = alloc::vec![0u8; (w_hi * h_hi * 4) as usize];
             let mut canvas_hi = graphics::Canvas::new(&mut track_hi, w_hi, h_hi);
             let radius_hi = (h_hi / 2).max(1);
             Self::fill_rounded_rect(&mut canvas_hi, 0, 0, w_hi, h_hi, radius_hi, border_color);
 
-            let inset = scale;
+            let inset = aa_scale;
             let inner_w = w_hi.saturating_sub(inset * 2);
             let inner_h = h_hi.saturating_sub(inset * 2);
             if inner_w > 0 && inner_h > 0 {
@@ -280,8 +283,8 @@ impl ToggleRenderObject {
                 );
             }
 
-            let mut track = alloc::vec![0u8; (w * h * 4) as usize];
-            Self::downsample_2x(&track_hi, w_hi, h_hi, &mut track, w, h);
+            let mut track = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
+            Self::downsample_2x(&track_hi, w_hi, h_hi, &mut track, physical_w, physical_h);
             data.copy_from_slice(&track);
 
             // Thumb position: on = right side, off = left side
@@ -291,9 +294,9 @@ impl ToggleRenderObject {
             } else {
                 0.0
             };
-            let thumb_x = ((thumb_offset + 2.0) * scale as f32) as i32;
-            let thumb_y = (2.0 * scale as f32) as i32;
-            let thumb_size = libm::ceilf(thumb_diameter * scale as f32) as i32;
+            let thumb_x = ((thumb_offset + 2.0) * ui_scale * aa_scale as f32) as i32;
+            let thumb_y = (2.0 * ui_scale * aa_scale as f32) as i32;
+            let thumb_size = libm::ceilf(thumb_diameter * ui_scale * aa_scale as f32) as i32;
             let radius = (thumb_size / 2).max(1);
             let center_x = thumb_x + radius;
             let center_y = thumb_y + radius;
@@ -301,16 +304,16 @@ impl ToggleRenderObject {
             let mut thumb_canvas = graphics::Canvas::new(&mut thumb_hi, w_hi, h_hi);
             Self::fill_circle(&mut thumb_canvas, center_x, center_y, radius, thumb_color);
 
-            let mut thumb = alloc::vec![0u8; (w * h * 4) as usize];
+            let mut thumb = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
             Self::downsample_2x(
                 &thumb_hi,
                 w_hi,
                 h_hi,
                 &mut thumb,
-                w,
-                h,
+                physical_w,
+                physical_h,
             );
-            Self::blend_bgra_over(data, &thumb, w, h);
+            Self::blend_bgra_over(data, &thumb, physical_w, physical_h);
         }
     }
 }
@@ -329,9 +332,9 @@ impl ElementRenderObject for ToggleRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         self.size

@@ -17,6 +17,9 @@ use crate::color::Color;
 pub struct Buffer {
     width: u32,
     height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    scale_milli: u32,
     data: Vec<u32>,
 }
 
@@ -28,6 +31,9 @@ impl Buffer {
         Self {
             width,
             height,
+            logical_width: width,
+            logical_height: height,
+            scale_milli: 1000,
             data: vec![0; (width * height) as usize],
         }
     }
@@ -37,8 +43,47 @@ impl Buffer {
         Self {
             width,
             height,
+            logical_width: width,
+            logical_height: height,
+            scale_milli: 1000,
             data: vec![0; (width * height) as usize],
         }
+    }
+
+    /// Create a physical buffer for a logical size using the current UI scale.
+    pub fn from_logical_dimensions(logical_width: u32, logical_height: u32) -> Self {
+        Self::from_logical_dimensions_with_scale(
+            logical_width,
+            logical_height,
+            crate::graphics::current_scale_milli(),
+        )
+    }
+
+    /// Create a physical buffer for a logical size using an explicit UI scale.
+    pub fn from_logical_dimensions_with_scale(
+        logical_width: u32,
+        logical_height: u32,
+        scale_milli: u32,
+    ) -> Self {
+        let scale_milli = scale_milli.max(1);
+        let width = Self::scale_len(logical_width, scale_milli);
+        let height = Self::scale_len(logical_height, scale_milli);
+        Self {
+            width,
+            height,
+            logical_width,
+            logical_height,
+            scale_milli,
+            data: vec![0; (width * height) as usize],
+        }
+    }
+
+    fn scale_len(value: u32, scale_milli: u32) -> u32 {
+        ((value as u64)
+            .saturating_mul(scale_milli as u64)
+            .saturating_add(999)
+            / 1000)
+            .max(1) as u32
     }
 
     /// Get the buffer width
@@ -49,6 +94,21 @@ impl Buffer {
     /// Get the buffer height
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Get the logical buffer width.
+    pub fn logical_width(&self) -> u32 {
+        self.logical_width
+    }
+
+    /// Get the logical buffer height.
+    pub fn logical_height(&self) -> u32 {
+        self.logical_height
+    }
+
+    /// Get the scale used to create this buffer in milli-units.
+    pub fn scale_milli(&self) -> u32 {
+        self.scale_milli
     }
 
     /// Get the buffer size

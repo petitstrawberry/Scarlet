@@ -37,18 +37,52 @@ use sws_protocol::window_types;
 const SWS_CONNECT_RETRIES: usize = 100;
 const SWS_RETRY_DELAY_MS: u64 = 50;
 
-fn connect_sws_with_screen_size_retry() -> core::result::Result<(sws::Connection, u32, u32), ()> {
+type SwsScreenConnection = (sws::Connection, u32, u32, u32);
+
+fn scale_milli_or_default(scale_milli: u32) -> u32 {
+    scale_milli.max(1)
+}
+
+fn scale_u32(value: u32, scale_milli: u32) -> u32 {
+    let scale_milli = scale_milli_or_default(scale_milli) as u64;
+    (((value as u64) * scale_milli + 999) / 1000).max(1) as u32
+}
+
+fn scale_i32(value: i32, scale_milli: u32) -> i32 {
+    let scale_milli = scale_milli_or_default(scale_milli) as i64;
+    ((value as i64) * scale_milli / 1000) as i32
+}
+
+fn unscale_u32(value: u32, scale_milli: u32) -> u32 {
+    let scale_milli = scale_milli_or_default(scale_milli) as u64;
+    (((value as u64) * 1000 + scale_milli - 1) / scale_milli).max(1) as u32
+}
+
+fn unscale_i32(value: i32, scale_milli: u32) -> i32 {
+    let scale_milli = scale_milli_or_default(scale_milli) as i64;
+    ((value as i64) * 1000 / scale_milli) as i32
+}
+
+fn query_output_scale(conn: &mut sws::Connection) -> u32 {
+    conn.get_output_scale().unwrap_or(1000).max(1)
+}
+
+fn connect_sws_with_screen_size_retry() -> core::result::Result<SwsScreenConnection, ()> {
     for attempt in 0..SWS_CONNECT_RETRIES {
         if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock")
-            && let Ok((width, height)) = conn.get_screen_size()
+            && let Ok((physical_width, physical_height)) = conn.get_screen_size()
         {
+            let scale_milli = query_output_scale(&mut conn);
+            let width = unscale_u32(physical_width, scale_milli);
+            let height = unscale_u32(physical_height, scale_milli);
             println!(
-                "[TaskBar] Connected to SWS after {} attempt(s); screen={}x{}",
+                "[TaskBar] Connected to SWS after {} attempt(s); screen={}x{} scale_milli={}",
                 attempt + 1,
                 width,
-                height
+                height,
+                scale_milli
             );
-            return Ok((conn, width, height));
+            return Ok((conn, width, height, scale_milli));
         }
 
         std::thread::sleep(Duration::from_millis(SWS_RETRY_DELAY_MS));
@@ -495,10 +529,12 @@ fn build_menu_items(
 struct PopupMenuRenderer {
     render_object: MenuRenderObject,
     size: Size,
+    scale_milli: u32,
 }
 
 impl PopupMenuRenderer {
-    fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32) -> Self {
+    fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32, scale_milli: u32) -> Self {
+        graphics::set_current_scale_milli(scale_milli);
         let mut render_object = MenuRenderObject::new(items, item_height, width);
         let constraints = LayoutConstraints {
             min_width: width,
@@ -511,6 +547,7 @@ impl PopupMenuRenderer {
         Self {
             render_object,
             size,
+            scale_milli,
         }
     }
 
@@ -535,6 +572,7 @@ impl PopupMenuRenderer {
     }
 
     fn render(&mut self) {
+        graphics::set_current_scale_milli(self.scale_milli);
         self.render_object.render();
     }
 
@@ -590,7 +628,7 @@ impl Application for TaskBarApp {
         println!("[TaskBar] on_resize: width={}, height={}", width, height);
         self.screen_width.set(width as f32);
         self.open_menu_index.set(None);
-        self.update_workarea_from_screen_query(width, height);
+        self.update_workarea_from_screen_query(width, TASKBAR_HEIGHT);
     }
 
     fn on_screen_size_changed(&mut self, width: u32, height: u32) -> Option<Size> {
@@ -663,22 +701,28 @@ impl Application for TaskBarApp {
 
 impl TaskBarApp {
     fn update_workarea(&self, screen_width: u32, screen_height: u32, bar_height: u32) {
-        let workarea_y = bar_height as i32;
-        let workarea_height = screen_height.saturating_sub(bar_height);
         if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") {
-            let _ = conn.set_workarea(0, workarea_y, screen_width, workarea_height);
+            let scale_milli = query_output_scale(&mut conn);
+            let physical_width = scale_u32(screen_width, scale_milli);
+            let physical_height = scale_u32(screen_height, scale_milli);
+            let workarea_y = scale_i32(bar_height as i32, scale_milli);
+            let workarea_height =
+                physical_height.saturating_sub(scale_u32(bar_height, scale_milli));
+            let _ = conn.set_workarea(0, workarea_y, physical_width, workarea_height);
+            println!(
+                "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
+                workarea_y, physical_width, workarea_height
+            );
         }
-        println!(
-            "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
-            workarea_y, screen_width, workarea_height
-        );
     }
 
     fn update_workarea_from_screen_query(&self, fallback_width: u32, bar_height: u32) {
         if let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") {
             if let Ok((screen_width, screen_height)) = conn.get_screen_size() {
-                let workarea_y = bar_height as i32;
-                let workarea_height = screen_height.saturating_sub(bar_height);
+                let scale_milli = query_output_scale(&mut conn);
+                let physical_bar_height = scale_u32(bar_height, scale_milli);
+                let workarea_y = physical_bar_height as i32;
+                let workarea_height = screen_height.saturating_sub(physical_bar_height);
                 let _ = conn.set_workarea(0, workarea_y, screen_width, workarea_height);
                 println!(
                     "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
@@ -717,13 +761,16 @@ impl TaskBarApp {
 
         // Menu popup handling thread (still needed for interactive menu popup)
         std::thread::spawn(move || {
-            let mut conn = match connect_sws_with_screen_size_retry() {
-                Ok((conn, _, _)) => conn,
-                Err(()) => {
-                    println!("[TaskBar] Failed to connect to SWS for menu popup after retries");
-                    return;
-                }
-            };
+            let (mut conn, popup_screen_width, _, mut scale_milli) =
+                match connect_sws_with_screen_size_retry() {
+                    Ok((conn, width, height, scale_milli)) => (conn, width, height, scale_milli),
+                    Err(()) => {
+                        println!("[TaskBar] Failed to connect to SWS for menu popup after retries");
+                        return;
+                    }
+                };
+            graphics::set_current_scale_milli(scale_milli);
+            screen_width_popup.set(popup_screen_width as f32);
 
             let mut popup_surface_id: Option<u32> = None;
             let mut popup_renderer: Option<PopupMenuRenderer> = None;
@@ -759,14 +806,17 @@ impl TaskBarApp {
                             );
                             let item_height = 28.0;
                             let menu_width = 220.0;
-                            let renderer = PopupMenuRenderer::new(items, item_height, menu_width);
+                            let renderer =
+                                PopupMenuRenderer::new(items, item_height, menu_width, scale_milli);
                             let size = renderer.size();
                             let width = size.width as u32;
                             let height = size.height as u32;
+                            let physical_width = scale_u32(width, scale_milli);
+                            let physical_height = scale_u32(height, scale_milli);
                             popup_renderer = Some(renderer);
                             needs_render = true;
 
-                            let bar_height = 40;
+                            let bar_height = TASKBAR_HEIGHT as i32;
                             let screen_width = screen_width_popup.get().max(1.0);
                             let popup_x = menu_bar_popup_x(&menu_tree_value.items, index)
                                 .min((screen_width - width as f32).max(0.0));
@@ -777,14 +827,14 @@ impl TaskBarApp {
                                         "org.scarlet-os.popup.menu",
                                         "Menu",
                                         "",
-                                        width,
-                                        height,
+                                        physical_width,
+                                        physical_height,
                                         window_types::ALWAYS_ON_TOP,
                                         false,
                                         true,
                                         false,
-                                        popup_x as i32,
-                                        bar_height,
+                                        scale_i32(popup_x as i32, scale_milli),
+                                        scale_i32(bar_height, scale_milli),
                                     ) {
                                         Ok(id) => {
                                             popup_surface_id = Some(id);
@@ -842,11 +892,11 @@ impl TaskBarApp {
                             }
                             match (input.type_, input.code) {
                                 (sws::event::event_type::EV_ABS, sws::event::abs_code::ABS_X) => {
-                                    pointer_x = input.value;
+                                    pointer_x = unscale_i32(input.value, scale_milli);
                                     pending_move = true;
                                 }
                                 (sws::event::event_type::EV_ABS, sws::event::abs_code::ABS_Y) => {
-                                    pointer_y = input.value;
+                                    pointer_y = unscale_i32(input.value, scale_milli);
                                     pending_move = true;
                                 }
                                 (
@@ -855,11 +905,8 @@ impl TaskBarApp {
                                 ) => {
                                     if input.value == 1 {
                                         // pressed
-                                    } else {
-                                        if let Some(renderer) = popup_renderer.as_ref() {
-                                            renderer
-                                                .handle_click(pointer_x as f32, pointer_y as f32);
-                                        }
+                                    } else if let Some(renderer) = popup_renderer.as_ref() {
+                                        renderer.handle_click(pointer_x as f32, pointer_y as f32);
                                     }
                                 }
                                 (sws::event::event_type::EV_SYN, _) => {
@@ -877,7 +924,20 @@ impl TaskBarApp {
                             }
                         }
                         sws::event::Event::ScreenSizeChanged { width, .. } => {
-                            screen_width_popup.set(width as f32);
+                            screen_width_popup.set(unscale_u32(width, scale_milli) as f32);
+                            open_menu_index_popup.set(None);
+                            if let Some(surface_id) = popup_surface_id.take() {
+                                let _ = conn.destroy_surface(surface_id);
+                            }
+                            popup_surface_id_popup.set(None);
+                            popup_renderer = None;
+                            last_open_index = None;
+                        }
+                        sws::event::Event::OutputScaleChanged {
+                            scale_milli: next_scale_milli,
+                        } => {
+                            scale_milli = next_scale_milli.max(1);
+                            graphics::set_current_scale_milli(scale_milli);
                             open_menu_index_popup.set(None);
                             if let Some(surface_id) = popup_surface_id.take() {
                                 let _ = conn.destroy_surface(surface_id);
@@ -982,13 +1042,16 @@ pub extern "C" fn main() {
 
     // Get screen size from SWS before creating the app
     let screen_width = match connect_sws_with_screen_size_retry() {
-        Ok((mut conn, width, height)) => {
-            let workarea_y = bar_height as i32;
-            let workarea_height = height.saturating_sub(bar_height);
-            let _ = conn.set_workarea(0, workarea_y, width, workarea_height);
+        Ok((mut conn, width, height, scale_milli)) => {
+            let physical_width = scale_u32(width, scale_milli);
+            let physical_height = scale_u32(height, scale_milli);
+            let workarea_y = scale_i32(bar_height as i32, scale_milli);
+            let workarea_height =
+                physical_height.saturating_sub(scale_u32(bar_height, scale_milli));
+            let _ = conn.set_workarea(0, workarea_y, physical_width, workarea_height);
             println!(
                 "[TaskBar] Workarea: x=0, y={}, width={}, height={}",
-                workarea_y, width, workarea_height
+                workarea_y, physical_width, workarea_height
             );
 
             width as f32

@@ -1732,6 +1732,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::GetScreenSize { client_id });
             }
+            Ok(ClientMessageRef::GetOutputScale {}) => {
+                println!(
+                    "[ClientThread {}] GetOutputScale: forwarding to compositor",
+                    client_id
+                );
+                push_ipc_event(IpcEvent::GetOutputScale { client_id });
+            }
             Ok(ClientMessageRef::GetWindowList {}) => {
                 println!(
                     "[ClientThread {}] GetWindowList: requesting window list",
@@ -2000,6 +2007,11 @@ pub enum IpcEvent {
 
     /// Get the screen size
     GetScreenSize {
+        client_id: usize,
+    },
+
+    /// Get the output scale
+    GetOutputScale {
         client_id: usize,
     },
 

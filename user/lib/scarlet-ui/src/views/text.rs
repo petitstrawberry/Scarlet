@@ -153,9 +153,9 @@ impl ElementRenderObject for TextRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         self.size
@@ -184,16 +184,14 @@ impl ElementRenderObject for TextRenderObject {
     fn render(&mut self) {
         // Render text to buffer
         if let Some(ref mut buffer) = self.buffer {
-            let width = buffer.width();
-            let height = buffer.height();
+            let mut canvas = graphics::Canvas::for_buffer(buffer);
+            let width = canvas.width();
+            let height = canvas.height();
 
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
-                    width, height, buffer.data().len());
+                    width, height, width.saturating_mul(height).saturating_mul(4));
             }
-
-            let mut data = buffer.data_mut();
-            let mut canvas = graphics::Canvas::new(&mut data, width, height);
 
             // Clear to avoid blending text on top of previous frames.
             canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);

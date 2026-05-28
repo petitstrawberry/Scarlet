@@ -257,9 +257,9 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         self.size
@@ -292,10 +292,9 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         let separator_color = Color::rgb(0.784, 0.784, 0.784);
 
         if let Some(ref mut buffer) = self.buffer {
-            let width = buffer.width();
-            let height = buffer.height();
-            let mut data = buffer.data_mut();
-            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+            let mut canvas = graphics::Canvas::for_buffer(buffer);
+            let width = canvas.width();
+            let height = canvas.height();
 
             // Fill background
             canvas.fill_rect(0, 0, width, height, bg_color);

@@ -40,6 +40,22 @@ const CURSOR_BITMAP: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
 ];
 
+fn scale_milli_or_default(scale_milli: u32) -> u32 {
+    scale_milli.max(1)
+}
+
+fn scaled_len(value: usize, scale_milli: u32) -> u32 {
+    let scale_milli = scale_milli_or_default(scale_milli) as usize;
+    ((value * scale_milli + 999) / 1000).max(1) as u32
+}
+
+fn scaled_cell_bounds(index: usize, scale_milli: u32) -> (u32, u32) {
+    let scale_milli = scale_milli_or_default(scale_milli) as usize;
+    let start = index * scale_milli / 1000;
+    let end = ((index + 1) * scale_milli + 999) / 1000;
+    (start as u32, end.max(start + 1) as u32)
+}
+
 /// Cursor state
 pub struct Cursor {
     pub x: i32,
@@ -48,19 +64,22 @@ pub struct Cursor {
     prev_y: i32,
     pub width: u32,
     pub height: u32,
+    scale_milli: u32,
     needs_redraw: bool,
 }
 
 impl Cursor {
     /// Create a new cursor
-    pub fn new() -> Self {
+    pub fn new(scale_milli: u32) -> Self {
+        let scale_milli = scale_milli_or_default(scale_milli);
         Self {
             x: 0,
             y: 0,
             prev_x: 0,
             prev_y: 0,
-            width: CURSOR_WIDTH as u32,
-            height: CURSOR_HEIGHT as u32,
+            width: scaled_len(CURSOR_WIDTH, scale_milli),
+            height: scaled_len(CURSOR_HEIGHT, scale_milli),
+            scale_milli,
             needs_redraw: true,
         }
     }
@@ -122,8 +141,8 @@ impl Cursor {
                     continue;
                 }
 
-                let px = cx.saturating_add(x as u32);
-                let py = cy.saturating_add(y as u32);
+                let (x0, x1) = scaled_cell_bounds(x, self.scale_milli);
+                let (y0, y1) = scaled_cell_bounds(y, self.scale_milli);
 
                 let color = if pixel == 2 {
                     CURSOR_BORDER
@@ -131,7 +150,11 @@ impl Cursor {
                     CURSOR_COLOR
                 };
 
-                let _ = fb.write_pixel(px, py, color);
+                for dy in y0..y1 {
+                    for dx in x0..x1 {
+                        let _ = fb.write_pixel(cx.saturating_add(dx), cy.saturating_add(dy), color);
+                    }
+                }
             }
         }
     }
@@ -168,32 +191,39 @@ impl Cursor {
                     continue;
                 }
 
-                let screen_x = cx + x as i32;
-                let screen_y = cy + y as i32;
-
-                // Bounds check
-                if screen_x < 0
-                    || screen_x >= screen_width as i32
-                    || screen_y < 0
-                    || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
-
-                let offset =
-                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
-
                 let color = if pixel == 2 {
                     CURSOR_BORDER
                 } else {
                     CURSOR_COLOR
                 };
 
-                if offset + 4 <= buffer.len() {
-                    buffer[offset] = color[0]; // B
-                    buffer[offset + 1] = color[1]; // G
-                    buffer[offset + 2] = color[2]; // R
-                    buffer[offset + 3] = color[3]; // A
+                let (x0, x1) = scaled_cell_bounds(x, self.scale_milli);
+                let (y0, y1) = scaled_cell_bounds(y, self.scale_milli);
+                for dy in y0..y1 {
+                    for dx in x0..x1 {
+                        let screen_x = cx + dx as i32;
+                        let screen_y = cy + dy as i32;
+
+                        // Bounds check
+                        if screen_x < 0
+                            || screen_x >= screen_width as i32
+                            || screen_y < 0
+                            || screen_y >= screen_height as i32
+                        {
+                            continue;
+                        }
+
+                        let offset = ((screen_y as u32 * stride)
+                            + (screen_x as u32 * bytes_per_pixel))
+                            as usize;
+
+                        if offset + 4 <= buffer.len() {
+                            buffer[offset] = color[0]; // B
+                            buffer[offset + 1] = color[1]; // G
+                            buffer[offset + 2] = color[2]; // R
+                            buffer[offset + 3] = color[3]; // A
+                        }
+                    }
                 }
             }
         }

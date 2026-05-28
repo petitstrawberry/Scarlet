@@ -203,9 +203,9 @@ impl ElementRenderObject for RectangleRenderObject {
             let needs_resize = self
                 .buffer
                 .as_ref()
-                .map_or(true, |b| b.width() != w2 || b.height() != h2);
+                .map_or(true, |b| b.logical_width() != w2 || b.logical_height() != h2);
             if needs_resize {
-                self.buffer = Some(Buffer::from_dimensions(w2, h2));
+                self.buffer = Some(Buffer::from_logical_dimensions(w2, h2));
             }
             self.size = Size { width: constraints.min_width.max(1.0), height: constraints.min_height.max(1.0) };
             return self.size;
@@ -214,9 +214,9 @@ impl ElementRenderObject for RectangleRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         self.size
@@ -241,16 +241,15 @@ impl ElementRenderObject for RectangleRenderObject {
                 self.color, self.buffer.is_some());
         }
         if let Some(ref mut buffer) = self.buffer {
-            let width = buffer.width();
-            let height = buffer.height();
+            let mut canvas = graphics::Canvas::for_buffer(buffer);
+            let width = canvas.width();
+            let height = canvas.height();
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[RectangleRenderObject] buffer {}x{}", width, height);
             }
-            let mut data = buffer.data_mut();
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[RectangleRenderObject] creating canvas...");
             }
-            let mut canvas = graphics::Canvas::new(&mut data, width, height);
             if crate::debug::is_enabled() {
                 scarlet_std::println!("[RectangleRenderObject] filling rect...");
             }
