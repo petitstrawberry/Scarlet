@@ -371,7 +371,8 @@ impl FramebufferCharDevice {
             .get_device(self.fb_resource.source_device_id)
         {
             if let Some(graphics_device) = device.as_graphics_device() {
-                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let config = graphics_device.get_framebuffer_config()?;
+                let physical_addr = graphics_device.get_framebuffer_address()?;
                 let size = Self::page_aligned_size(config.size());
                 return Ok(CurrentFramebufferInfo {
                     config,
@@ -531,7 +532,8 @@ impl FbCompatFlushHandler {
             .get_device(self.fb_resource.source_device_id)
         {
             if let Some(graphics_device) = device.as_graphics_device() {
-                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let config = graphics_device.get_framebuffer_config()?;
+                let physical_addr = graphics_device.get_framebuffer_address()?;
                 let size = FramebufferCharDevice::page_aligned_size(config.size());
                 return Ok(CurrentFramebufferInfo {
                     config,
