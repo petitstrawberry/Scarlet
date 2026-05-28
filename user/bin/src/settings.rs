@@ -29,6 +29,8 @@ pub struct PresetColor {
 
 const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
 const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
+const SWS_CONFIG_DIR: &str = "/etc/sws";
+const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
 
 const PRESET_COLORS: &[PresetColor] = &[
     PresetColor {
@@ -64,6 +66,28 @@ const PRESET_COLORS: &[PresetColor] = &[
         color: [90, 200, 250],
     },
 ];
+
+fn save_output_scale_config(scale_milli: u32) {
+    let config_content = match scale_milli {
+        1000 => "[output]\nscale = 1.0\n",
+        _ => "[output]\nscale = 2.0\n",
+    };
+
+    let _ = fs::create_directory(SWS_CONFIG_DIR);
+
+    match fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(SWS_CONFIG_PATH)
+    {
+        Ok(mut file) => match file.write(config_content.as_bytes()) {
+            Ok(_) => println!("[settings] Saved output scale: {}", scale_milli),
+            Err(e) => println!("[settings] Write SWS config error: {:?}", e),
+        },
+        Err(e) => println!("[settings] Create SWS config error: {:?}", e),
+    }
+}
 
 #[derive(View, Clone)]
 struct SettingsApp {
@@ -455,6 +479,28 @@ fn network_page() -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+fn display_page() -> impl View {
+    vstack! {
+        Text::new("Display").font_size(28.0),
+        Text::new("Output").font_size(13.0),
+        Divider::new(),
+
+        vstack! {
+            Text::new("Scaling").font_size(14.0),
+            hstack! {
+                Text::new("Scale").font_size(13.0).frame_width(80.0),
+                Button::new("x1.0").on_click(|| { save_output_scale_config(1000); }),
+                Spacer::new().frame_width(8.0),
+                Button::new("x2.0").on_click(|| { save_output_scale_config(2000); }),
+            }
+            .padding(10.0),
+        }
+        .padding(10.0),
+    }
+    .padding(10.0)
+    .frame(f32::INFINITY, f32::INFINITY)
+}
+
 impl Application for SettingsApp {
     fn body(&self) -> impl View {
         let app = self.clone();
@@ -524,6 +570,7 @@ impl Application for SettingsApp {
                         app.clone()
                     )
                 }),
+                NavigationLink::new("Display", Icon::Search, display_page),
                 NavigationLink::new("Network", Icon::Search, network_page),
                 NavigationLink::new("About", Icon::Info, about_page),
             }

@@ -4,12 +4,25 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont};
 
 use crate::color::Color;
+use crate::buffer::Buffer;
 use scarlet_std::{println, sync::Mutex, fs::File};
+
+static CURRENT_SCALE_MILLI: AtomicU32 = AtomicU32::new(1000);
+
+/// Return the current UI scale in milli-units.
+pub fn current_scale_milli() -> u32 {
+    CURRENT_SCALE_MILLI.load(Ordering::Relaxed).max(1)
+}
+
+/// Set the current UI scale in milli-units.
+pub fn set_current_scale_milli(scale_milli: u32) {
+    CURRENT_SCALE_MILLI.store(scale_milli.max(1), Ordering::Relaxed);
+}
 
 /// Glyph cache key
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -575,6 +588,9 @@ pub struct Canvas<'a> {
     buffer: &'a mut [u8],
     width: u32,
     height: u32,
+    physical_width: u32,
+    physical_height: u32,
+    scale_milli: u32,
 }
 
 impl<'a> Canvas<'a> {
@@ -584,6 +600,26 @@ impl<'a> Canvas<'a> {
             buffer,
             width,
             height,
+            physical_width: width,
+            physical_height: height,
+            scale_milli: 1000,
+        }
+    }
+
+    /// Create a canvas that draws logical coordinates into a scaled buffer.
+    pub fn for_buffer(buffer: &'a mut Buffer) -> Self {
+        let width = buffer.logical_width();
+        let height = buffer.logical_height();
+        let physical_width = buffer.width();
+        let physical_height = buffer.height();
+        let scale_milli = buffer.scale_milli();
+        Self {
+            buffer: buffer.data_mut(),
+            width,
+            height,
+            physical_width,
+            physical_height,
+            scale_milli,
         }
     }
 
@@ -605,13 +641,44 @@ impl<'a> Canvas<'a> {
         self.height
     }
 
+    fn scale_floor_i32(&self, value: i32) -> i32 {
+        ((value as i64).saturating_mul(self.scale_milli as i64) / 1000) as i32
+    }
+
+    fn scale_ceil_i32(&self, value: i32) -> i32 {
+        ((value as i64)
+            .saturating_mul(self.scale_milli as i64)
+            .saturating_add(999)
+            / 1000) as i32
+    }
+
+    fn scale_len_u32(&self, value: u32) -> u32 {
+        ((value as u64)
+            .saturating_mul(self.scale_milli as u64)
+            .saturating_add(999)
+            / 1000)
+            .max(1) as u32
+    }
+
     /// Draw a single pixel
     pub fn put_pixel(&mut self, x: i32, y: i32, color: Color) {
-        if x < 0 || x >= self.width as i32 || y < 0 || y >= self.height as i32 {
+        let px = self.scale_floor_i32(x);
+        let py = self.scale_floor_i32(y);
+        let w = self.scale_len_u32(1);
+        let h = self.scale_len_u32(1);
+        self.fill_physical_rect(px, py, w, h, color);
+    }
+
+    fn put_pixel_physical(&mut self, x: i32, y: i32, color: Color) {
+        if x < 0
+            || x >= self.physical_width as i32
+            || y < 0
+            || y >= self.physical_height as i32
+        {
             return;
         }
 
-        let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
+        let offset = ((y as u32 * self.physical_width + x as u32) * 4) as usize;
         if offset + 4 <= self.buffer.len() {
             // Convert to BGRA and use little-endian bytes
             // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
@@ -620,11 +687,15 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn get_pixel(&self, x: i32, y: i32) -> Color {
-        if x < 0 || x >= self.width as i32 || y < 0 || y >= self.height as i32 {
+    fn get_pixel_physical(&self, x: i32, y: i32) -> Color {
+        if x < 0
+            || x >= self.physical_width as i32
+            || y < 0
+            || y >= self.physical_height as i32
+        {
             return Color::BLACK;
         }
-        let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
+        let offset = ((y as u32 * self.physical_width + x as u32) * 4) as usize;
         if offset + 4 > self.buffer.len() {
             return Color::BLACK;
         }
@@ -634,16 +705,16 @@ impl<'a> Canvas<'a> {
         Color::from_bgra(u32::from_le_bytes(bgra_bytes))
     }
 
-    fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
+    fn put_pixel_physical_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
         if alpha <= 0.0 {
             return;
         }
         if alpha >= 1.0 {
-            self.put_pixel(x, y, color);
+            self.put_pixel_physical(x, y, color);
             return;
         }
 
-        let dst = self.get_pixel(x, y);
+        let dst = self.get_pixel_physical(x, y);
 
         // color.a is already in 0.0-1.0 range, not 0-255
         let src_a = (alpha * color.a).clamp(0.0, 1.0);
@@ -651,7 +722,7 @@ impl<'a> Canvas<'a> {
         let out_a = src_a + dst_a * (1.0 - src_a);
 
         if out_a <= 0.0 {
-            self.put_pixel(x, y, Color::rgba(0.0, 0.0, 0.0, 0.0));
+            self.put_pixel_physical(x, y, Color::rgba(0.0, 0.0, 0.0, 0.0));
             return;
         }
 
@@ -660,11 +731,21 @@ impl<'a> Canvas<'a> {
         let out_b = (color.b * src_a + dst.b * dst_a * (1.0 - src_a)) / out_a;
         let out_a_f32 = out_a;
 
-        self.put_pixel(x, y, Color::rgba(out_r, out_g, out_b, out_a_f32));
+        self.put_pixel_physical(x, y, Color::rgba(out_r, out_g, out_b, out_a_f32));
     }
 
     /// Fill a rectangle with a solid color
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+        let x0 = self.scale_floor_i32(x);
+        let y0 = self.scale_floor_i32(y);
+        let x1 = self.scale_ceil_i32(x.saturating_add(width as i32));
+        let y1 = self.scale_ceil_i32(y.saturating_add(height as i32));
+        let physical_width = (x1 - x0).max(0) as u32;
+        let physical_height = (y1 - y0).max(0) as u32;
+        self.fill_physical_rect(x0, y0, physical_width, physical_height, color);
+    }
+
+    fn fill_physical_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         // Convert to BGRA and use little-endian bytes
         // to_bgra() produces 0xAARRGGBB which becomes [BB, GG, RR, AA] in little-endian
         let bgra = color.to_bgra();
@@ -675,11 +756,15 @@ impl<'a> Canvas<'a> {
                 let px = x + dx as i32;
                 let py = y + dy as i32;
 
-                if px < 0 || px >= self.width as i32 || py < 0 || py >= self.height as i32 {
+                if px < 0
+                    || px >= self.physical_width as i32
+                    || py < 0
+                    || py >= self.physical_height as i32
+                {
                     continue;
                 }
 
-                let offset = ((py as u32 * self.width + px as u32) * 4) as usize;
+                let offset = ((py as u32 * self.physical_width + px as u32) * 4) as usize;
                 if offset + 4 <= self.buffer.len() {
                     self.buffer[offset..offset + 4].copy_from_slice(&bgra_bytes);
                 }
@@ -722,15 +807,17 @@ impl<'a> Canvas<'a> {
         font_size_px: f32,
         font_stack: &FontStack,
     ) {
-        let scale = PxScale::from(font_size_px);
+        let ui_scale = (self.scale_milli as f32) / 1000.0;
+        let scale = PxScale::from(font_size_px * ui_scale);
         let base_scaled = font_stack.primary.as_scaled(scale);
 
-        let mut caret_x = x as f32;
-        let mut caret_y = y as f32 + base_scaled.ascent();
+        let origin_x = self.scale_floor_i32(x) as f32;
+        let mut caret_x = origin_x;
+        let mut caret_y = self.scale_floor_i32(y) as f32 + base_scaled.ascent();
 
         for ch in text.chars() {
             if ch == '\n' {
-                caret_x = x as f32;
+                caret_x = origin_x;
                 caret_y += base_scaled.height() + base_scaled.line_gap();
                 continue;
             }
@@ -754,7 +841,7 @@ impl<'a> Canvas<'a> {
                         let alpha = (a as f32) / 255.0;
                         let px = base_x + ox + gx as i32;
                         let py = base_y + oy + gy as i32;
-                        self.put_pixel_alpha(px, py, color, alpha);
+                        self.put_pixel_physical_alpha(px, py, color, alpha);
                     }
                 }
             }
@@ -769,21 +856,18 @@ impl<'a> Canvas<'a> {
             return;
         }
 
-        // Top and bottom edges
-        for dx in 0..width {
-            self.put_pixel(x + dx as i32, y, color);
-            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
-        }
-
-        // Left and right edges
-        for dy in 0..height {
-            self.put_pixel(x, y + dy as i32, color);
-            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
-        }
+        self.fill_rect(x, y, width, 1, color);
+        self.fill_rect(x, y + height as i32 - 1, width, 1, color);
+        self.fill_rect(x, y, 1, height, color);
+        self.fill_rect(x + width as i32 - 1, y, 1, height, color);
     }
 
     /// Draw line using Bresenham's algorithm
     pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        x0 = self.scale_floor_i32(x0);
+        y0 = self.scale_floor_i32(y0);
+        let x1 = self.scale_floor_i32(x1);
+        let y1 = self.scale_floor_i32(y1);
         let dx = (x1 - x0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
         let dy = -(y1 - y0).abs();
@@ -791,7 +875,7 @@ impl<'a> Canvas<'a> {
 
         let mut err = dx + dy;
         loop {
-            self.put_pixel(x0, y0, color);
+            self.put_pixel_physical(x0, y0, color);
             if x0 == x1 && y0 == y1 {
                 break;
             }

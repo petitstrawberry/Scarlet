@@ -116,6 +116,9 @@ pub trait Application: View {
         // 3. Initialize the application
         self.init();
 
+        let output_scale_milli = SWSPlatformWindow::query_output_scale();
+        pipeline.set_scale_milli(output_scale_milli);
+
         // 4. Perform initial layout to determine window size and extract window properties
         let (
             app_id,

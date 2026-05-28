@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
 
+const DEFAULT_SCALE_MILLI: u32 = 1000;
+
 const KEY_LEFTCTRL: u16 = 0x1d;
 const KEY_LEFTSHIFT: u16 = 0x2a;
 const KEY_RIGHTSHIFT: u16 = 0x36;
@@ -22,6 +24,7 @@ const KEY_RIGHTALT: u16 = 0x64;
 pub struct SWSPlatformWindow {
     conn: sws::Connection,
     surface_id: u32,
+    scale_milli: u32,
     current_size: Size,
     pending_events: Vec<Event>,
     pending_head: usize,
@@ -37,6 +40,47 @@ pub struct SWSPlatformWindow {
 }
 
 impl SWSPlatformWindow {
+    fn sanitize_scale(scale_milli: u32) -> u32 {
+        scale_milli.max(1)
+    }
+
+    pub fn query_output_scale() -> u32 {
+        let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") else {
+            return DEFAULT_SCALE_MILLI;
+        };
+        conn.get_output_scale()
+            .map(Self::sanitize_scale)
+            .unwrap_or(DEFAULT_SCALE_MILLI)
+    }
+
+    fn logical_to_physical_len_with_scale(value: u32, scale_milli: u32) -> u32 {
+        ((value as u64)
+            .saturating_mul(scale_milli as u64)
+            .saturating_add(999)
+            / 1000)
+            .max(1) as u32
+    }
+
+    fn logical_to_physical_len(&self, value: u32) -> u32 {
+        Self::logical_to_physical_len_with_scale(value, self.scale_milli)
+    }
+
+    fn physical_to_logical_len(&self, value: u32) -> u32 {
+        ((value as u64)
+            .saturating_mul(1000)
+            .saturating_add(self.scale_milli as u64 - 1)
+            / self.scale_milli as u64)
+            .max(1) as u32
+    }
+
+    fn logical_to_physical_pos(&self, value: i32) -> i32 {
+        ((value as i64).saturating_mul(self.scale_milli as i64) / 1000) as i32
+    }
+
+    fn physical_to_logical_pos(&self, value: i32) -> i32 {
+        ((value as i64).saturating_mul(1000) / self.scale_milli as i64) as i32
+    }
+
     /// Get the connection
     pub fn connection(&self) -> &sws::Connection {
         &self.conn
@@ -97,6 +141,14 @@ impl SWSPlatformWindow {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
+        let scale_milli = conn
+            .get_output_scale()
+            .map(Self::sanitize_scale)
+            .unwrap_or(DEFAULT_SCALE_MILLI);
+        let physical_width =
+            Self::logical_to_physical_len_with_scale(size.width.max(1.0) as u32, scale_milli);
+        let physical_height =
+            Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
 
         // Create surface with type
         let surface_id = conn
@@ -104,8 +156,8 @@ impl SWSPlatformWindow {
                 app_id,
                 title,
                 menu_titles,
-                size.width as u32,
-                size.height as u32,
+                physical_width,
+                physical_height,
                 window_type,
                 true,
                 focus_on_create,
@@ -116,6 +168,7 @@ impl SWSPlatformWindow {
         Ok(Self {
             conn,
             surface_id,
+            scale_milli,
             current_size: size,
             pending_events: Vec::new(),
             pending_head: 0,
@@ -371,15 +424,24 @@ impl PlatformWindow for SWSPlatformWindow {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
+        let scale_milli = conn
+            .get_output_scale()
+            .map(Self::sanitize_scale)
+            .unwrap_or(DEFAULT_SCALE_MILLI);
+        let physical_width =
+            Self::logical_to_physical_len_with_scale(size.width.max(1.0) as u32, scale_milli);
+        let physical_height =
+            Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
 
         // Create surface
         let surface_id = conn
-            .create_surface(app_id, title, "", size.width as u32, size.height as u32)
+            .create_surface(app_id, title, "", physical_width, physical_height)
             .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
             surface_id,
+            scale_milli,
             current_size: size,
             pending_events: Vec::new(),
             pending_head: 0,
@@ -487,8 +549,11 @@ impl PlatformWindow for SWSPlatformWindow {
             return Ok(());
         }
 
+        let physical_width = self.logical_to_physical_len(width);
+        let physical_height = self.logical_to_physical_len(height);
+
         self.conn
-            .resize_window(self.surface_id, width, height)
+            .resize_window(self.surface_id, physical_width, physical_height)
             .map_err(|_| crate::error::Error::IoError)?;
 
         self.current_size = new_size;
@@ -536,8 +601,8 @@ impl PlatformWindow for SWSPlatformWindow {
                 "org.scarlet-os.popup",
                 "Popup",
                 "",
-                size.width as u32,
-                size.height as u32,
+                self.logical_to_physical_len(size.width.max(1.0) as u32),
+                self.logical_to_physical_len(size.height.max(1.0) as u32),
                 sws_protocol::window_types::ALWAYS_ON_TOP,
                 true,
                 true,
@@ -547,7 +612,11 @@ impl PlatformWindow for SWSPlatformWindow {
 
         // Position the popup
         self.conn
-            .move_window(popup_surface_id, position.x as i32, position.y as i32)
+            .move_window(
+                popup_surface_id,
+                self.logical_to_physical_pos(position.x as i32),
+                self.logical_to_physical_pos(position.y as i32),
+            )
             .map_err(|_| crate::error::Error::IoError)?;
 
         Ok(popup_surface_id)
@@ -561,7 +630,12 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
         self.conn
-            .set_workarea(x, y, width, height)
+            .set_workarea(
+                self.logical_to_physical_pos(x),
+                self.logical_to_physical_pos(y),
+                self.logical_to_physical_len(width),
+                self.logical_to_physical_len(height),
+            )
             .map_err(|_| crate::error::Error::IoError)
     }
 
@@ -577,14 +651,22 @@ impl PlatformWindow for SWSPlatformWindow {
     {
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| crate::error::Error::ConnectionFailed)?;
+        let scale_milli = conn
+            .get_output_scale()
+            .map(Self::sanitize_scale)
+            .unwrap_or(DEFAULT_SCALE_MILLI);
+        let physical_width =
+            Self::logical_to_physical_len_with_scale(size.width.max(1.0) as u32, scale_milli);
+        let physical_height =
+            Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
 
         let surface_id = conn
             .create_surface_with_type(
                 app_id,
                 title,
                 "",
-                size.width as u32,
-                size.height as u32,
+                physical_width,
+                physical_height,
                 window_type,
             )
             .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
@@ -592,6 +674,7 @@ impl PlatformWindow for SWSPlatformWindow {
         Ok(Self {
             conn,
             surface_id,
+            scale_milli,
             current_size: size,
             pending_events: Vec::new(),
             pending_head: 0,
@@ -609,7 +692,11 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
         self.conn
-            .move_window(self.surface_id, x, y)
+            .move_window(
+                self.surface_id,
+                self.logical_to_physical_pos(x),
+                self.logical_to_physical_pos(y),
+            )
             .map_err(|_| crate::error::Error::IoError)
     }
 
@@ -620,9 +707,14 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn get_screen_size(&mut self) -> Result<(u32, u32)> {
-        self.conn
+        let (width, height) = self
+            .conn
             .get_screen_size()
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| crate::error::Error::IoError)?;
+        Ok((
+            self.physical_to_logical_len(width),
+            self.physical_to_logical_len(height),
+        ))
     }
 
     fn surface_id(&self) -> u32 {
@@ -640,10 +732,10 @@ impl PlatformWindow for SWSPlatformWindow {
                 .set_window_size_limits(self.surface_id, sws::WindowSizeLimits::NONE);
         } else {
             let limits = sws::WindowSizeLimits {
-                min_width: self.current_size.width.max(0.0) as u32,
-                min_height: self.current_size.height.max(0.0) as u32,
-                max_width: self.current_size.width.max(0.0) as u32,
-                max_height: self.current_size.height.max(0.0) as u32,
+                min_width: self.logical_to_physical_len(self.current_size.width.max(1.0) as u32),
+                min_height: self.logical_to_physical_len(self.current_size.height.max(1.0) as u32),
+                max_width: self.logical_to_physical_len(self.current_size.width.max(1.0) as u32),
+                max_height: self.logical_to_physical_len(self.current_size.height.max(1.0) as u32),
             };
             let _ = self.conn.set_window_size_limits(self.surface_id, limits);
         }
@@ -688,14 +780,14 @@ impl SWSPlatformWindow {
 
                 match (input.type_, input.code) {
                     (event_type::EV_ABS, abs_code::ABS_X) => {
-                        self.pointer_x = input.value;
+                        self.pointer_x = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
                             scarlet_std::println!("[SWSPlatformWindow] ABS_X: {}", input.value);
                         }
                     }
                     (event_type::EV_ABS, abs_code::ABS_Y) => {
-                        self.pointer_y = input.value;
+                        self.pointer_y = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
                             scarlet_std::println!("[SWSPlatformWindow] ABS_Y: {}", input.value);
@@ -850,18 +942,35 @@ impl SWSPlatformWindow {
                 height,
             } => {
                 if surface_id == self.surface_id {
-                    self.push_event(Event::Resize { width, height });
+                    let logical_width = self.physical_to_logical_len(width);
+                    let logical_height = self.physical_to_logical_len(height);
+                    self.push_event(Event::Resize {
+                        width: logical_width,
+                        height: logical_height,
+                    });
                     if debug {
                         scarlet_std::println!(
-                            "[SWSPlatformWindow] SurfaceConfigure: {}x{}",
+                            "[SWSPlatformWindow] SurfaceConfigure: physical={}x{} logical={}x{}",
                             width,
-                            height
+                            height,
+                            logical_width,
+                            logical_height
                         );
                     }
                 }
             }
             SwsEvent::ScreenSizeChanged { width, height } => {
-                self.push_event(Event::ScreenSizeChanged { width, height });
+                self.push_event(Event::ScreenSizeChanged {
+                    width: self.physical_to_logical_len(width),
+                    height: self.physical_to_logical_len(height),
+                });
+            }
+            SwsEvent::OutputScaleChanged { scale_milli } => {
+                self.scale_milli = Self::sanitize_scale(scale_milli);
+                self.push_event(Event::Resize {
+                    width: self.current_size.width.max(1.0) as u32,
+                    height: self.current_size.height.max(1.0) as u32,
+                });
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {

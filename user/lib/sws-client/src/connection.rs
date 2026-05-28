@@ -935,6 +935,10 @@ impl Connection {
                     self.pending_events
                         .push(Event::ScreenSizeChanged { width, height });
                 }
+                ServerMessage::OutputScaleChanged { scale_milli } => {
+                    self.pending_events
+                        .push(Event::OutputScaleChanged { scale_milli });
+                }
                 ServerMessage::WindowConfigure {
                     window_id,
                     width,
@@ -1045,6 +1049,11 @@ impl Connection {
                             ServerMessage::ScreenSizeChanged { width, height } => {
                                 self.pending_events
                                     .push(Event::ScreenSizeChanged { width, height });
+                                count += 1;
+                            }
+                            ServerMessage::OutputScaleChanged { scale_milli } => {
+                                self.pending_events
+                                    .push(Event::OutputScaleChanged { scale_milli });
                                 count += 1;
                             }
                             ServerMessage::Error { code } => {
@@ -1178,6 +1187,128 @@ impl Connection {
         }
     }
 
+    fn queue_async_message(&mut self, message: ServerMessage) -> bool {
+        match message {
+            ServerMessage::InputEvent {
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            } => {
+                self.pending_events.push(Event::Input(InputEvent {
+                    surface_id: window_id,
+                    time,
+                    type_,
+                    code,
+                    value,
+                }));
+                true
+            }
+            ServerMessage::WindowDestroyed { window_id } => {
+                self.surfaces.remove(&window_id);
+                self.pending_events.push(Event::SurfaceDestroyed {
+                    surface_id: window_id,
+                });
+                true
+            }
+            ServerMessage::WindowResized { .. } => true,
+            ServerMessage::WindowConfigure {
+                window_id,
+                width,
+                height,
+            } => {
+                self.pending_events.push(Event::SurfaceConfigure {
+                    surface_id: window_id,
+                    width,
+                    height,
+                });
+                true
+            }
+            ServerMessage::ScreenSizeChanged { width, height } => {
+                self.pending_events
+                    .push(Event::ScreenSizeChanged { width, height });
+                true
+            }
+            ServerMessage::OutputScaleChanged { scale_milli } => {
+                self.pending_events
+                    .push(Event::OutputScaleChanged { scale_milli });
+                true
+            }
+            ServerMessage::Error { code } => {
+                self.pending_events.push(Event::Error { code });
+                true
+            }
+            ServerMessage::FocusChanged {
+                window_id,
+                app_id,
+                app_id_len,
+                app_name,
+                app_name_len,
+                title,
+                title_len,
+                menu_titles,
+                menu_titles_len,
+            } => {
+                let app_id = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                let app_name =
+                    String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
+                let title = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                let menu_titles =
+                    String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                self.pending_events.push(Event::FocusChanged {
+                    window_id,
+                    app_id,
+                    app_name,
+                    title,
+                    menu_titles,
+                });
+                true
+            }
+            ServerMessage::ActiveAppChanged {
+                window_id,
+                app_id,
+                app_id_len,
+                app_name,
+                app_name_len,
+                title,
+                title_len,
+                menu_titles,
+                menu_titles_len,
+            } => {
+                let app_id = String::from_utf8_lossy(&app_id[..app_id_len as usize]).into_owned();
+                let app_name =
+                    String::from_utf8_lossy(&app_name[..app_name_len as usize]).into_owned();
+                let title = String::from_utf8_lossy(&title[..title_len as usize]).into_owned();
+                let menu_titles =
+                    String::from_utf8_lossy(&menu_titles[..menu_titles_len as usize]).into_owned();
+                self.pending_events.push(Event::ActiveAppChanged {
+                    window_id,
+                    app_id,
+                    app_name,
+                    title,
+                    menu_titles,
+                });
+                true
+            }
+            ServerMessage::MenuItemActivated {
+                window_id,
+                menu_item_id,
+                menu_item_id_len,
+            } => {
+                let menu_item_id =
+                    String::from_utf8_lossy(&menu_item_id[..menu_item_id_len as usize])
+                        .into_owned();
+                self.pending_events.push(Event::MenuItemActivated {
+                    window_id,
+                    menu_item_id,
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Get the screen size.
     ///
     /// This is a synchronous request: it blocks until the server responds with SCREEN_SIZE.
@@ -1203,12 +1334,40 @@ impl Connection {
                     let _ = self.socket.set_nonblocking(true);
                     return Ok((width, height));
                 }
-                ServerMessage::ScreenSizeChanged { width, height } => {
-                    self.pending_events
-                        .push(Event::ScreenSizeChanged { width, height });
-                }
+                message if self.queue_async_message(message) => {}
                 _ => {
                     // Restore non-blocking mode
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
+            }
+        }
+    }
+
+    /// Get the output scale in milli-units.
+    ///
+    /// This is a synchronous request: it blocks until the server responds with OUTPUT_SCALE.
+    pub fn get_output_scale(&mut self) -> Result<u32, Error> {
+        write_frame(&mut self.socket, protocol::client_msg::GET_OUTPUT_SCALE, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            match response {
+                ServerMessage::OutputScale { scale_milli } => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok(scale_milli.max(1));
+                }
+                message if self.queue_async_message(message) => {}
+                _ => {
                     let _ = self.socket.set_nonblocking(true);
                     return Err(Error::InvalidResponse);
                 }

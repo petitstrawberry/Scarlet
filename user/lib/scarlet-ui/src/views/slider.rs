@@ -214,13 +214,15 @@ impl SliderRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            let mut canvas = graphics::Canvas::new(buffer.data_mut(), w, h);
+            let mut canvas = graphics::Canvas::for_buffer(buffer);
+            let w = canvas.width();
+            let h = canvas.height();
             canvas.fill_rect(0, 0, w, h, Color::rgba(0.0, 0.0, 0.0, 0.0));
 
             let center_y = (height as f32 / 2.0) as i32;
@@ -296,9 +298,9 @@ impl ElementRenderObject for SliderRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != w || b.height() != h);
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
         self.size

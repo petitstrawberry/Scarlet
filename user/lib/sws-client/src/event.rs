@@ -31,6 +31,8 @@ pub enum Event {
     },
     /// Display size changed.
     ScreenSizeChanged { width: u32, height: u32 },
+    /// Output scale changed.
+    OutputScaleChanged { scale_milli: u32 },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
     /// Focus changed to a different window

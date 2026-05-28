@@ -180,6 +180,9 @@ impl EventLoop {
             SwsEvent::ScreenSizeChanged { .. } => {
                 // SurfaceConfigure carries the per-window resize request.
             }
+            SwsEvent::OutputScaleChanged { .. } => {
+                // slint-scarlet keeps its existing physical-size behavior for now.
+            }
             SwsEvent::MenuItemActivated { .. } => {
                 // Menu item activated - not used in slint apps
             }

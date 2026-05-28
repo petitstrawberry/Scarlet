@@ -28,6 +28,8 @@ pub struct RenderingPipeline {
     compositor: Option<Compositor>,
     /// Current window size
     window_size: Size,
+    /// Current output scale in milli-units.
+    scale_milli: u32,
     /// Event dispatcher
     event_dispatcher: EventDispatcher,
 }
@@ -40,7 +42,23 @@ impl RenderingPipeline {
             pipeline_owner: PipelineOwner::new(),
             compositor: None,
             window_size: Size::new(800.0, 600.0),
+            scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+        }
+    }
+
+    /// Set the output scale in milli-units.
+    pub fn set_scale_milli(&mut self, scale_milli: u32) {
+        self.scale_milli = scale_milli.max(1);
+        crate::graphics::set_current_scale_milli(self.scale_milli);
+        if let Some(ref mut compositor) = self.compositor {
+            compositor.set_scale_milli(self.scale_milli, self.window_size);
+        }
+        if let Some(root) = self.element_tree.root_mut() {
+            root.clear_buffers();
+        }
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_layout(root.id());
         }
     }
 
@@ -188,7 +206,8 @@ impl RenderingPipeline {
         let _layout_size = self.element_tree.layout(constraints);
 
         // Create compositor with the window size (not layout size)
-        self.compositor = Some(Compositor::new(window_size));
+        crate::graphics::set_current_scale_milli(self.scale_milli);
+        self.compositor = Some(Compositor::new(window_size, self.scale_milli));
         self.window_size = window_size;
 
         // Mark root as dirty for initial paint
@@ -210,6 +229,7 @@ impl RenderingPipeline {
     /// Set window size and resize compositor
     pub fn resize(&mut self, new_size: Size) {
         self.window_size = new_size;
+        crate::graphics::set_current_scale_milli(self.scale_milli);
         if let Some(ref mut compositor) = self.compositor {
             compositor.resize(new_size);
         }
@@ -233,6 +253,7 @@ impl RenderingPipeline {
             scarlet_std::println!("[RenderingPipeline] render() starting...");
         }
         // Flush all dirty phases (build, layout, paint)
+        crate::graphics::set_current_scale_milli(self.scale_milli);
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
         if crate::debug::is_enabled() {
             scarlet_std::println!("[RenderingPipeline] flush() completed");

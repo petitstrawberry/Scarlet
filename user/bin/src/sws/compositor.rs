@@ -7,8 +7,10 @@ use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use framebuffer::Framebuffer;
 use std::env;
+use std::fs::File;
 use std::handle::Handle;
 use std::println;
+use std::string::String;
 use std::vec::Vec;
 use sws_protocol;
 
@@ -42,6 +44,133 @@ const LOG_RENDER_VALIDATION: bool = false;
 const ENABLE_DIRTY_RECT: bool = true;
 const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
+const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
+const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
+
+fn load_output_scale_milli() -> u32 {
+    match read_sws_config(SWS_CONFIG_PATH) {
+        Ok(content) => parse_output_scale_milli(&content).unwrap_or_else(|| {
+            println!(
+                "[Compositor] No output scale in {}; using default {}",
+                SWS_CONFIG_PATH, DEFAULT_OUTPUT_SCALE_MILLI
+            );
+            DEFAULT_OUTPUT_SCALE_MILLI
+        }),
+        Err(_) => DEFAULT_OUTPUT_SCALE_MILLI,
+    }
+}
+
+fn read_sws_config(path: &str) -> Result<String, &'static str> {
+    let mut file = File::open(path).map_err(|_| "Failed to open SWS config")?;
+    let mut content = String::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|_| "Failed to read SWS config")?;
+        if bytes == 0 {
+            break;
+        }
+        let chunk =
+            core::str::from_utf8(&buffer[..bytes]).map_err(|_| "SWS config is not valid UTF-8")?;
+        content.push_str(chunk);
+    }
+
+    Ok(content)
+}
+
+fn parse_output_scale_milli(content: &str) -> Option<u32> {
+    let mut accepts_output_scale = true;
+
+    for raw_line in content.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = line[1..line.len() - 1].trim();
+            accepts_output_scale = section == "output" || section == "display";
+            continue;
+        }
+
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq_pos].trim();
+        let value = line[eq_pos + 1..].trim();
+
+        if key == "scale_milli" && accepts_output_scale {
+            if let Some(scale_milli) = parse_u32_value(value) {
+                return Some(normalize_scale_milli(scale_milli));
+            }
+        }
+
+        if key == "scale" && accepts_output_scale {
+            if let Some(scale_milli) = parse_scale_value_milli(value) {
+                return Some(normalize_scale_milli(scale_milli));
+            }
+        }
+    }
+
+    None
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_string = false;
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn trim_toml_string(value: &str) -> &str {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].trim()
+    } else {
+        value
+    }
+}
+
+fn parse_u32_value(value: &str) -> Option<u32> {
+    trim_toml_string(value).parse::<u32>().ok()
+}
+
+fn parse_scale_value_milli(value: &str) -> Option<u32> {
+    let value = trim_toml_string(value);
+    if value.is_empty() {
+        return None;
+    }
+
+    let mut parts = value.split('.');
+    let whole = parts.next()?.parse::<u32>().ok()?;
+    let frac = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let mut frac_milli = 0u32;
+    if let Some(frac) = frac {
+        let mut factor = 100;
+        for ch in frac.chars().take(3) {
+            let digit = ch.to_digit(10)?;
+            frac_milli = frac_milli.saturating_add(digit.saturating_mul(factor));
+            factor /= 10;
+        }
+    }
+
+    Some(whole.saturating_mul(1000).saturating_add(frac_milli))
+}
+
+fn normalize_scale_milli(scale_milli: u32) -> u32 {
+    scale_milli.clamp(250, 8000)
+}
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
@@ -52,6 +181,7 @@ pub struct Compositor {
     cursor: Cursor,
     screen_width: u32,
     screen_height: u32,
+    output_scale_milli: u32,
     bg_color: [u8; 4],
     bytes_per_pixel: u32,
     backbuffer: Vec<u8>,
@@ -116,9 +246,15 @@ impl Compositor {
 
         let screen_width = var_info.xres;
         let screen_height = var_info.yres;
+        let output_scale_milli = load_output_scale_milli();
         let bytes_per_pixel = 4; // BGRA
 
         println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
+        println!(
+            "[Compositor] Output scale: {}.{}",
+            output_scale_milli / 1000,
+            output_scale_milli % 1000
+        );
         println!(
             "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
             var_info.bits_per_pixel, fix_info.line_length, fix_info.smem_len
@@ -139,7 +275,7 @@ impl Compositor {
         let window_manager = WindowManager::new();
 
         // Initialize cursor at center
-        let mut cursor = Cursor::new();
+        let mut cursor = Cursor::new(output_scale_milli);
         cursor.x = (screen_width / 2) as i32;
         cursor.y = (screen_height / 2) as i32;
         // Keep prev position consistent to avoid an oversized first dirty region.
@@ -161,6 +297,7 @@ impl Compositor {
             cursor,
             screen_width,
             screen_height,
+            output_scale_milli,
             bg_color,
             bytes_per_pixel,
             backbuffer,
@@ -3110,6 +3247,22 @@ impl Compositor {
                 println!(
                     "[Compositor] Sent SCREEN_SIZE: {}x{} to client {}",
                     self.screen_width, self.screen_height, client_id
+                );
+            }
+            IpcEvent::GetOutputScale { client_id } => {
+                println!(
+                    "[Compositor] GetOutputScale request from client {}",
+                    client_id
+                );
+                let payload = sws_protocol::payload_output_scale(self.output_scale_milli);
+                super::ipc::send_message_to_client(
+                    client_id,
+                    sws_protocol::server_msg::OUTPUT_SCALE,
+                    payload.to_vec(),
+                );
+                println!(
+                    "[Compositor] Sent OUTPUT_SCALE: {} to client {}",
+                    self.output_scale_milli, client_id
                 );
             }
             IpcEvent::GetWindowList { client_id } => {

@@ -733,9 +733,9 @@ impl ElementRenderObject for TextGridRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |buffer| buffer.width() != w || buffer.height() != h);
+            .map_or(true, |buffer| buffer.logical_width() != w || buffer.logical_height() != h);
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(w, h));
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
             self.full_repaint = true;
         }
 
@@ -755,11 +755,10 @@ impl ElementRenderObject for TextGridRenderObject {
             return;
         };
 
-        let width = buffer.width();
-        let height = buffer.height();
+        let width = buffer.logical_width();
+        let height = buffer.logical_height();
         {
-            let mut data = buffer.data_mut();
-            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+            let mut canvas = graphics::Canvas::for_buffer(&mut buffer);
             if self.full_repaint {
                 canvas.fill_rect(0, 0, width, height, self.background_color);
                 let visible_columns = self.visible_columns(width);

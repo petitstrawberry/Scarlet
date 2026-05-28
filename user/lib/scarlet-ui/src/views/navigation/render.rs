@@ -237,10 +237,10 @@ impl ElementRenderObject for NavigationViewRenderObject {
         let needs_resize = self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.width() != sidebar_width_px || b.height() != sidebar_height_px);
+            .map_or(true, |b| b.logical_width() != sidebar_width_px || b.logical_height() != sidebar_height_px);
 
         if needs_resize {
-            self.buffer = Some(Buffer::from_dimensions(sidebar_width_px, sidebar_height_px));
+            self.buffer = Some(Buffer::from_logical_dimensions(sidebar_width_px, sidebar_height_px));
         }
 
         self.size
@@ -264,10 +264,9 @@ impl ElementRenderObject for NavigationViewRenderObject {
         }
 
         if let Some(ref mut buffer) = self.buffer {
-            let width = buffer.width();
-            let height = buffer.height();
-            let mut data = buffer.data_mut();
-            let mut canvas = graphics::Canvas::new(&mut data, width, height);
+            let mut canvas = graphics::Canvas::for_buffer(buffer);
+            let width = canvas.width();
+            let height = canvas.height();
 
             // Fill background (lighter, semi-transparent look)
             let palette = ColorPalette::default();

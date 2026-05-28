@@ -61,6 +61,7 @@ pub mod client_msg {
     pub const SET_WINDOW_HAS_ALPHA_CONTENT: u32 = 28; // Set whether window content has alpha channel
     pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
     pub const ACTIVATE_MENU_ITEM: u32 = 30; // Request menu item activation for a window
+    pub const GET_OUTPUT_SCALE: u32 = 31; // Get output scale in milli-units (1000 = 1.0)
 }
 
 /// Message type IDs (server -> client).
@@ -84,6 +85,8 @@ pub mod server_msg {
     pub const MENU_ITEM_ACTIVATED: u32 = 20; // Menu item activation for a window
     pub const ACTIVE_APP_CHANGED: u32 = 21; // Broadcast when active application changes (normal windows only)
     pub const SCREEN_SIZE_CHANGED: u32 = 22; // Broadcast when the display size changes
+    pub const OUTPUT_SCALE: u32 = 23; // Response to GET_OUTPUT_SCALE
+    pub const OUTPUT_SCALE_CHANGED: u32 = 24; // Broadcast when output scale changes
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -320,6 +323,11 @@ pub enum ClientMessageRef<'a> {
     /// Get the screen size
     GetScreenSize {},
 
+    /// Get the output scale in milli-units.
+    ///
+    /// `1000` means 1.0, `2000` means 2.0.
+    GetOutputScale {},
+
     /// Get list of all windows
     GetWindowList {},
 
@@ -402,6 +410,18 @@ pub enum ServerMessage {
     ScreenSizeChanged {
         width: u32,
         height: u32,
+    },
+    /// Response to GET_OUTPUT_SCALE request.
+    ///
+    /// Scale is encoded in milli-units: `1000` means 1.0, `2000` means 2.0.
+    OutputScale {
+        scale_milli: u32,
+    },
+    /// Output scale changed asynchronously.
+    ///
+    /// Scale is encoded in milli-units: `1000` means 1.0, `2000` means 2.0.
+    OutputScaleChanged {
+        scale_milli: u32,
     },
     /// Response to GET_WINDOW_LIST request
     /// Contains a serialized list of windows
@@ -851,6 +871,12 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::GetScreenSize {})
         }
+        client_msg::GET_OUTPUT_SCALE => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::GetOutputScale {})
+        }
         client_msg::GET_WINDOW_LIST => {
             if !payload.is_empty() {
                 return Err(ProtocolError::MalformedPayload);
@@ -1047,6 +1073,20 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             Ok(ServerMessage::ScreenSizeChanged { width, height })
+        }
+        server_msg::OUTPUT_SCALE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let scale_milli = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ServerMessage::OutputScale { scale_milli })
+        }
+        server_msg::OUTPUT_SCALE_CHANGED => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let scale_milli = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            Ok(ServerMessage::OutputScaleChanged { scale_milli })
         }
         server_msg::WINDOW_LIST => {
             // Window list payload is variable length, just validate it's not empty
@@ -1774,6 +1814,13 @@ pub fn payload_screen_size(width: u32, height: u32) -> [u8; 8] {
     payload[0..4].copy_from_slice(&width.to_le_bytes());
     payload[4..8].copy_from_slice(&height.to_le_bytes());
     payload
+}
+
+/// Build payload for server->client `OUTPUT_SCALE`.
+///
+/// Scale is encoded in milli-units: `1000` means 1.0, `2000` means 2.0.
+pub fn payload_output_scale(scale_milli: u32) -> [u8; 4] {
+    scale_milli.to_le_bytes()
 }
 
 /// Window list entry for WINDOW_LIST message

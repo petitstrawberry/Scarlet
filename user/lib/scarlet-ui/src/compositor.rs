@@ -20,16 +20,36 @@ struct ClipRegion {
 /// Compositor for rendering element trees to buffers
 pub struct Compositor {
     window_buffer: Buffer,
+    scale_milli: u32,
     last_bounds: BTreeMap<ElementId, Rect>,
 }
 
 impl Compositor {
     /// Create a new compositor with the given window size
-    pub fn new(window_size: Size) -> Self {
+    pub fn new(window_size: Size, scale_milli: u32) -> Self {
         Self {
-            window_buffer: Buffer::new(window_size),
+            window_buffer: Buffer::from_logical_dimensions_with_scale(
+                libm::ceilf(window_size.width.max(1.0)) as u32,
+                libm::ceilf(window_size.height.max(1.0)) as u32,
+                scale_milli,
+            ),
+            scale_milli: scale_milli.max(1),
             last_bounds: BTreeMap::new(),
         }
+    }
+
+    fn scale_pos(&self, value: f32) -> i32 {
+        libm::floorf(value * self.scale_milli as f32 / 1000.0) as i32
+    }
+
+    fn scale_len(&self, value: f32) -> i32 {
+        libm::ceilf(value.max(0.0) * self.scale_milli as f32 / 1000.0) as i32
+    }
+
+    /// Set the output scale and recreate the physical window buffer.
+    pub fn set_scale_milli(&mut self, scale_milli: u32, logical_size: Size) {
+        self.scale_milli = scale_milli.max(1);
+        self.resize(logical_size);
     }
 
     /// Clear the window buffer with a color
@@ -77,7 +97,8 @@ impl Compositor {
 
         self.merge_overlapping_rects(&mut rects);
 
-        let window_area = (self.window_buffer.width() as f32) * (self.window_buffer.height() as f32);
+        let window_area = (self.window_buffer.logical_width() as f32)
+            * (self.window_buffer.logical_height() as f32);
         let dirty_area: f32 = rects.iter().map(|r| r.size.width * r.size.height).sum();
         if dirty_area >= window_area * 0.6 {
             self.composite_elements(root);
@@ -121,7 +142,8 @@ impl Compositor {
 
         self.merge_overlapping_rects(&mut rects);
 
-        let window_area = (self.window_buffer.width() as f32) * (self.window_buffer.height() as f32);
+        let window_area = (self.window_buffer.logical_width() as f32)
+            * (self.window_buffer.logical_height() as f32);
         let dirty_area: f32 = rects.iter().map(|r| r.size.width * r.size.height).sum();
         if dirty_area >= window_area * 0.6 {
             self.composite_tree(tree);
@@ -169,8 +191,8 @@ impl Compositor {
 
                 self.window_buffer.composite(
                     buffer,
-                    absolute_origin.x as i32,
-                    absolute_origin.y as i32,
+                    self.scale_pos(absolute_origin.x),
+                    self.scale_pos(absolute_origin.y),
                     opacity,
                 );
             }
@@ -236,20 +258,20 @@ impl Compositor {
                 let (x, y, w, h) = self.rect_to_i32(active_clip.rect);
                 self.window_buffer.composite_clipped_rounded(
                     buffer,
-                    absolute_origin.x as i32,
-                    absolute_origin.y as i32,
+                    self.scale_pos(absolute_origin.x),
+                    self.scale_pos(absolute_origin.y),
                     opacity,
                     x,
                     y,
                     w,
                     h,
-                    active_clip.radius,
+                    self.scale_len(active_clip.radius) as f32,
                 );
             } else {
                 self.window_buffer.composite(
                     buffer,
-                    absolute_origin.x as i32,
-                    absolute_origin.y as i32,
+                    self.scale_pos(absolute_origin.x),
+                    self.scale_pos(absolute_origin.y),
                     opacity,
                 );
             }
@@ -325,20 +347,20 @@ impl Compositor {
                 if clip_radius > 0.0 {
                     self.window_buffer.composite_clipped_rounded(
                         buffer,
-                        absolute_origin.x as i32,
-                        absolute_origin.y as i32,
+                        self.scale_pos(absolute_origin.x),
+                        self.scale_pos(absolute_origin.y),
                         opacity,
                         x,
                         y,
                         w,
                         h,
-                        clip_radius,
+                        self.scale_len(clip_radius) as f32,
                     );
                 } else {
                     self.window_buffer.composite_clipped(
                         buffer,
-                        absolute_origin.x as i32,
-                        absolute_origin.y as i32,
+                        self.scale_pos(absolute_origin.x),
+                        self.scale_pos(absolute_origin.y),
                         opacity,
                         x,
                         y,
@@ -376,8 +398,8 @@ impl Compositor {
                         let (x, y, w, h) = self.rect_to_i32(*rect);
                         self.window_buffer.composite_clipped(
                             buffer,
-                            absolute_origin.x as i32,
-                            absolute_origin.y as i32,
+                            self.scale_pos(absolute_origin.x),
+                            self.scale_pos(absolute_origin.y),
                             opacity,
                             x,
                             y,
@@ -497,10 +519,12 @@ impl Compositor {
     }
 
     fn rect_to_u32(&self, rect: Rect) -> (u32, u32, u32, u32) {
-        let x0 = libm::floorf(rect.origin.x).max(0.0);
-        let y0 = libm::floorf(rect.origin.y).max(0.0);
-        let x1 = libm::ceilf(rect.origin.x + rect.size.width).min(self.window_buffer.width() as f32);
-        let y1 = libm::ceilf(rect.origin.y + rect.size.height).min(self.window_buffer.height() as f32);
+        let x0 = libm::floorf(rect.origin.x * self.scale_milli as f32 / 1000.0).max(0.0);
+        let y0 = libm::floorf(rect.origin.y * self.scale_milli as f32 / 1000.0).max(0.0);
+        let x1 = libm::ceilf((rect.origin.x + rect.size.width) * self.scale_milli as f32 / 1000.0)
+            .min(self.window_buffer.width() as f32);
+        let y1 = libm::ceilf((rect.origin.y + rect.size.height) * self.scale_milli as f32 / 1000.0)
+            .min(self.window_buffer.height() as f32);
         let w = (x1 - x0).max(0.0);
         let h = (y1 - y0).max(0.0);
         (x0 as u32, y0 as u32, w as u32, h as u32)
@@ -535,7 +559,11 @@ impl Compositor {
 
     /// Resize the window buffer
     pub fn resize(&mut self, new_size: Size) {
-        self.window_buffer = Buffer::new(new_size);
+        self.window_buffer = Buffer::from_logical_dimensions_with_scale(
+            libm::ceilf(new_size.width.max(1.0)) as u32,
+            libm::ceilf(new_size.height.max(1.0)) as u32,
+            self.scale_milli,
+        );
         self.last_bounds.clear();
     }
 
