@@ -1032,6 +1032,26 @@ fn handle_shutdown() {
     shutdown(ShutdownType::PowerOff);
 }
 
+fn read_until(
+    stream: &std::handle::capability::StreamOps<'_>,
+    buffer: &mut [u8],
+    filled: &mut usize,
+    target: usize,
+) -> bool {
+    if target > buffer.len() {
+        return false;
+    }
+
+    while *filled < target {
+        match stream.read(&mut buffer[*filled..target]) {
+            Ok(0) | Err(_) => return false,
+            Ok(bytes) => *filled += bytes,
+        }
+    }
+
+    true
+}
+
 /// IPC thread: accept commands via socket
 fn ipc_thread() {
     println!("stemd: IPC thread started");
@@ -1073,18 +1093,18 @@ fn ipc_thread() {
                 // Read command (larger buffer for binary commands)
                 let mut buffer = [0u8; 1024];
                 match stream.read(&mut buffer) {
-                    Ok(n) if n > 0 => {
+                    Ok(mut n) if n > 0 => {
                         // Check if this is a binary launch command.
                         if buffer[0] == cmd::LAUNCH_OR_FOCUS || buffer[0] == cmd::LAUNCH {
                             // Parse launch command.
                             // Format: cmd(1) + app_id_len(4) + app_id + exec_path_len(4) + exec_path
-                            if n >= 9 {
+                            if read_until(&stream, &mut buffer, &mut n, 9) {
                                 let app_id_len = u32::from_le_bytes([
                                     buffer[1], buffer[2], buffer[3], buffer[4],
                                 ]) as usize;
 
                                 let exec_path_offset = 5 + app_id_len;
-                                if n >= exec_path_offset + 4 {
+                                if read_until(&stream, &mut buffer, &mut n, exec_path_offset + 4) {
                                     let exec_path_len = u32::from_le_bytes([
                                         buffer[exec_path_offset],
                                         buffer[exec_path_offset + 1],
@@ -1094,7 +1114,7 @@ fn ipc_thread() {
                                         as usize;
 
                                     let total_len = exec_path_offset + 4 + exec_path_len;
-                                    if n >= total_len {
+                                    if read_until(&stream, &mut buffer, &mut n, total_len) {
                                         let app_id =
                                             core::str::from_utf8(&buffer[5..5 + app_id_len]);
                                         let exec_path = core::str::from_utf8(
@@ -1177,12 +1197,12 @@ fn ipc_thread() {
                                 let _ = stream.write(error_msg.as_bytes());
                             }
                         } else if buffer[0] == cmd::SERVICE_READY {
-                            if n >= 5 {
+                            if read_until(&stream, &mut buffer, &mut n, 5) {
                                 let service_name_len = u32::from_le_bytes([
                                     buffer[1], buffer[2], buffer[3], buffer[4],
                                 ]) as usize;
                                 let end = 5 + service_name_len;
-                                if n >= end {
+                                if read_until(&stream, &mut buffer, &mut n, end) {
                                     match core::str::from_utf8(&buffer[5..end]) {
                                         Ok(service_name) => {
                                             println!(

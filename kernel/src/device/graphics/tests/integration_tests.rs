@@ -276,6 +276,7 @@ mod integration_tests {
             physical_addr: 0, // Invalid address
             size: invalid_config.size(),
             created_char_device_id: RwLock::new(None),
+            created_display_device_id: RwLock::new(None),
         });
 
         let char_device = FramebufferCharDevice::new(invalid_resource);
@@ -299,6 +300,7 @@ mod integration_tests {
             physical_addr: 0x1003,
             size: crate::environment::PAGE_SIZE,
             created_char_device_id: RwLock::new(None),
+            created_display_device_id: RwLock::new(None),
         });
         let char_device = FramebufferCharDevice::new(resource);
 

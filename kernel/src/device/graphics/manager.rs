@@ -55,6 +55,8 @@ pub struct FramebufferResource {
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
     pub created_char_device_id: RwLock<Option<usize>>,
+    /// ID of the created /dev/displayX character device (if any)
+    pub created_display_device_id: RwLock<Option<usize>>,
 }
 
 impl FramebufferResource {
@@ -73,6 +75,7 @@ impl FramebufferResource {
             physical_addr,
             size,
             created_char_device_id: RwLock::new(None),
+            created_display_device_id: RwLock::new(None),
         }
     }
 }
@@ -289,6 +292,19 @@ impl GraphicsManager {
             );
         }
 
+        crate::early_println!(
+            "[GraphicsManager] Creating display char device for {}",
+            logical_name
+        );
+        if let Err(e) = self.create_display_char_device_with_manager(&logical_name, device_manager)
+        {
+            crate::early_println!(
+                "[GraphicsManager] Warning: Failed to create display device for {}: {}",
+                logical_name,
+                e
+            );
+        }
+
         Ok(())
     }
 
@@ -424,6 +440,96 @@ impl GraphicsManager {
         if let Some(map) = framebuffers.as_mut() {
             if let Some(resource) = map.get_mut(fb_name) {
                 *resource.created_char_device_id.write() = Some(char_device_id);
+                Ok(())
+            } else {
+                Err("Framebuffer not found")
+            }
+        } else {
+            Err("Framebuffer not found")
+        }
+    }
+
+    /// Create a DisplayCharDevice and register it with DeviceManager.
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical framebuffer name backing the display.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    pub fn create_display_char_device(&self, fb_name: &str) -> Result<(), &'static str> {
+        self.create_display_char_device_with_manager(fb_name, DeviceManager::get_manager())
+    }
+
+    fn create_display_char_device_with_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        use crate::device::graphics::display_device::DisplayCharDevice;
+        use alloc::sync::Arc;
+
+        let fb_resource = {
+            let framebuffers = self.framebuffers.lock();
+            framebuffers
+                .as_ref()
+                .and_then(|map| map.get(fb_name))
+                .cloned()
+                .ok_or("Framebuffer not found")?
+        };
+
+        let display_index = fb_name
+            .strip_prefix("fb")
+            .ok_or("Invalid framebuffer name")?;
+        let display_name = format!("display{}", display_index);
+
+        #[cfg(test)]
+        let display_device =
+            DisplayCharDevice::new_with_device_manager(fb_resource, device_manager);
+        #[cfg(not(test))]
+        let display_device = DisplayCharDevice::new(fb_resource);
+
+        let device_id = device_manager
+            .register_device_with_name(display_name.clone(), Arc::new(display_device));
+
+        self.set_display_device_id(fb_name, device_id)?;
+
+        crate::early_println!(
+            "[GraphicsManager] Created display character device: /dev/{}",
+            display_name
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn create_display_char_device_with_device_manager(
+        &self,
+        fb_name: &str,
+        device_manager: &DeviceManager,
+    ) -> Result<(), &'static str> {
+        self.create_display_char_device_with_manager(fb_name, device_manager)
+    }
+
+    /// Update the display character device ID for a framebuffer resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical framebuffer name.
+    /// * `display_device_id` - The character device ID from DeviceManager.
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure.
+    pub fn set_display_device_id(
+        &self,
+        fb_name: &str,
+        display_device_id: usize,
+    ) -> Result<(), &'static str> {
+        let mut framebuffers = self.framebuffers.lock();
+        if let Some(map) = framebuffers.as_mut() {
+            if let Some(resource) = map.get_mut(fb_name) {
+                *resource.created_display_device_id.write() = Some(display_device_id);
                 Ok(())
             } else {
                 Err("Framebuffer not found")

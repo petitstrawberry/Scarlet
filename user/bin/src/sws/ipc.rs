@@ -1,6 +1,6 @@
 //! IPC Server module - handles client connections and messages
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::collections::BTreeMap;
 use std::env;
 use std::handle::Handle;
@@ -285,6 +285,7 @@ fn push_input_event_coalesced(events: &mut Vec<PendingInputEvent>, event: Pendin
 
 /// Wake pipe used by worker threads to interrupt the compositor event loop.
 static COMPOSITOR_WAKE_WRITE: Mutex<Option<Handle>> = Mutex::new(None);
+static COMPOSITOR_WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Install the compositor wake pipe write handle.
 ///
@@ -298,16 +299,32 @@ pub fn set_compositor_wake_handle(write_handle: Handle) {
 
 /// Wake the compositor if it is sleeping on the wake pipe.
 pub fn wake_compositor() {
+    if COMPOSITOR_WAKE_PENDING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
     let wake = COMPOSITOR_WAKE_WRITE.lock();
     let Some(handle) = wake.as_ref() else {
+        COMPOSITOR_WAKE_PENDING.store(false, Ordering::Release);
         return;
     };
 
     let Ok(stream) = handle.as_stream() else {
+        COMPOSITOR_WAKE_PENDING.store(false, Ordering::Release);
         return;
     };
 
-    let _ = stream.write(&[1]);
+    if stream.write(&[1]).is_err() {
+        COMPOSITOR_WAKE_PENDING.store(false, Ordering::Release);
+    }
+}
+
+/// Mark the currently pending compositor wake as consumed.
+pub fn consume_compositor_wake() {
+    COMPOSITOR_WAKE_PENDING.store(false, Ordering::Release);
 }
 
 /// Global event queue for IPC events
@@ -450,18 +467,16 @@ fn cleanup_window_state(window_id: u32) {
 /// Queue an input event for a specific window (O(log n) lookup)
 pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, value: i32) {
     let mut pending = PENDING_INPUT_EVENTS.lock();
-
-    if let Some(events) = pending.get_mut(&window_id) {
-        push_input_event_coalesced(
-            events,
-            PendingInputEvent {
-                time,
-                type_,
-                code,
-                value,
-            },
-        );
-    }
+    let events = pending.entry(window_id).or_insert_with(Vec::new);
+    push_input_event_coalesced(
+        events,
+        PendingInputEvent {
+            time,
+            type_,
+            code,
+            value,
+        },
+    );
 }
 
 /// Pending extension input events: BTreeMap from (extension_id, external_client_id) to events

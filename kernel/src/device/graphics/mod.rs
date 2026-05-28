@@ -13,6 +13,7 @@ use super::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
+pub mod display_device;
 pub mod framebuffer_device;
 pub mod manager;
 pub mod output;

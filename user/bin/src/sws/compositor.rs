@@ -5,12 +5,15 @@ use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
-use framebuffer::Framebuffer;
+use core::time::Duration;
+use framebuffer::DisplaySurface;
 use std::env;
 use std::fs::File;
 use std::handle::Handle;
+use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
 use std::string::String;
+use std::thread;
 use std::vec::Vec;
 use sws_protocol;
 
@@ -28,8 +31,8 @@ fn is_sws_debug_enabled() -> bool {
     enabled
 }
 
-// NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
-// Rendering goes through the framebuffer library (which may internally use mmap).
+// NOTE: The compositor intentionally opens the modern display surface endpoint,
+// not the legacy framebuffer node. The endpoint may internally use mmap.
 
 // Debug: dump VRAM mmap range and window buffer ranges.
 // This helps confirm whether corruption is caused by virtual-address overlap.
@@ -44,8 +47,12 @@ const LOG_RENDER_VALIDATION: bool = false;
 const ENABLE_DIRTY_RECT: bool = true;
 const MAX_PENDING_DAMAGE_RECTS: usize = 8;
 const DAMAGE_MERGE_AREA_FACTOR: u64 = 2;
+const FRAME_BATCH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const DEFAULT_OUTPUT_SCALE_MILLI: u32 = 2000;
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
+
+type DamageRect = (i32, i32, u32, u32);
+type PresentDamage = Option<Vec<DamageRect>>;
 
 fn load_output_scale_milli() -> u32 {
     match read_sws_config(SWS_CONFIG_PATH) {
@@ -174,7 +181,7 @@ fn normalize_scale_milli(scale_milli: u32) -> u32 {
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
-    framebuffer: Framebuffer,
+    display: DisplaySurface,
     window_manager: WindowManager,
     ipc_server: IpcServer,
     wake_read: Handle,
@@ -231,16 +238,16 @@ impl Compositor {
     pub fn new() -> Result<Self, &'static str> {
         println!("[Compositor] Starting initialization...");
 
-        // Open framebuffer
-        let framebuffer =
-            Framebuffer::open("/dev/fb0").map_err(|_| "Failed to open framebuffer")?;
+        // Open the modern display endpoint. The legacy framebuffer node remains
+        // a compatibility path for direct framebuffer clients.
+        let display = DisplaySurface::open_primary().map_err(|_| "Failed to open display")?;
 
         // Get screen dimensions
-        let var_info = framebuffer
+        let var_info = display
             .get_var_screen_info()
             .map_err(|_| "Failed to get screen info")?;
 
-        let fix_info = framebuffer
+        let fix_info = display
             .get_fix_screen_info()
             .map_err(|_| "Failed to get fixed screen info")?;
 
@@ -290,7 +297,7 @@ impl Compositor {
         backbuffer.resize(buffer_size, 0);
 
         Ok(Self {
-            framebuffer,
+            display,
             window_manager,
             ipc_server,
             wake_read,
@@ -460,7 +467,7 @@ impl Compositor {
 
     fn check_display_resize(&mut self) -> Result<bool, &'static str> {
         let var_info = self
-            .framebuffer
+            .display
             .get_var_screen_info()
             .map_err(|_| "Failed to get screen info")?;
         let new_width = var_info.xres;
@@ -478,9 +485,9 @@ impl Compositor {
             self.screen_width, self.screen_height, new_width, new_height
         );
 
-        self.framebuffer
+        self.display
             .refresh_mapping()
-            .map_err(|_| "Failed to refresh framebuffer mapping")?;
+            .map_err(|_| "Failed to refresh display mapping")?;
 
         self.screen_width = new_width;
         self.screen_height = new_height;
@@ -581,24 +588,24 @@ impl Compositor {
         let sp_hint = (&stack_marker as *const u8) as usize;
         println!("[Compositor] stack marker addr: 0x{:x}", sp_hint);
 
-        if let Some((addr, size)) = self.framebuffer.get_mapping_info() {
+        if let Some((addr, size)) = self.display.get_mapping_info() {
             let vram_start = addr;
             let vram_end = addr.saturating_add(size);
             println!(
-                "[Compositor] VRAM mmap (framebuffer lib): 0x{:x}..0x{:x} ({} bytes)",
+                "[Compositor] display mmap: 0x{:x}..0x{:x} ({} bytes)",
                 vram_start, vram_end, size
             );
 
             let bb_overlap = bb_start < vram_end && vram_start < bb_end;
             if bb_overlap {
-                println!("[Compositor] WARNING: backbuffer overlaps framebuffer mapping!");
+                println!("[Compositor] WARNING: backbuffer overlaps display mapping!");
             }
 
             if sp_hint >= vram_start && sp_hint < vram_end {
-                println!("[Compositor] WARNING: stack marker is inside framebuffer mapping!");
+                println!("[Compositor] WARNING: stack marker is inside display mapping!");
             }
         } else {
-            println!("[Compositor] VRAM mmap (framebuffer lib): (unavailable)");
+            println!("[Compositor] display mmap: (unavailable)");
         }
 
         let mut ranges: Vec<(u32, usize, usize, usize)> = Vec::new();
@@ -616,12 +623,12 @@ impl Compositor {
                     w.id, shm_addr, end, buffer_size
                 );
 
-                if let Some((vram_start, vram_size)) = self.framebuffer.get_mapping_info() {
+                if let Some((vram_start, vram_size)) = self.display.get_mapping_info() {
                     let vram_end = vram_start.saturating_add(vram_size);
                     let overlap = shm_addr < vram_end && vram_start < end;
                     if overlap {
                         println!(
-                            "[Compositor] WARNING: window #{} SHM overlaps framebuffer mapping!",
+                            "[Compositor] WARNING: window #{} SHM overlaps display mapping!",
                             w.id
                         );
                     }
@@ -647,12 +654,12 @@ impl Compositor {
                     w.id, start, end, len, fp
                 );
 
-                if let Some((vram_start, vram_size)) = self.framebuffer.get_mapping_info() {
+                if let Some((vram_start, vram_size)) = self.display.get_mapping_info() {
                     let vram_end = vram_start.saturating_add(vram_size);
                     let overlap = start < vram_end && vram_start < end;
                     if overlap {
                         println!(
-                            "[Compositor] WARNING: window #{} buffer overlaps framebuffer mapping!",
+                            "[Compositor] WARNING: window #{} buffer overlaps display mapping!",
                             w.id
                         );
                     }
@@ -792,7 +799,7 @@ impl Compositor {
         union_area <= separate_area.saturating_mul(DAMAGE_MERGE_AREA_FACTOR)
     }
 
-    fn push_damage_rect(rects: &mut Vec<(i32, i32, u32, u32)>, rect: (i32, i32, u32, u32)) {
+    fn push_damage_rect(rects: &mut Vec<DamageRect>, rect: DamageRect) {
         for existing in rects.iter_mut() {
             if Self::should_merge_damage(*existing, rect) {
                 *existing = Self::union_damage_rect(*existing, rect);
@@ -816,6 +823,20 @@ impl Compositor {
             }
         }
         rects[best_index] = Self::union_damage_rect(rects[best_index], rect);
+    }
+
+    fn merge_present_damage(accumulated: &mut PresentDamage, next: PresentDamage) {
+        match (accumulated, next) {
+            (accum @ Some(_), None) => {
+                *accum = None;
+            }
+            (Some(accumulated_rects), Some(next_rects)) => {
+                for rect in next_rects {
+                    Self::push_damage_rect(accumulated_rects, rect);
+                }
+            }
+            (None, _) => {}
+        }
     }
 
     fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
@@ -842,9 +863,8 @@ impl Compositor {
         }
     }
 
-    /// Composite all layers directly to VRAM (or framebuffer as fallback)
-    fn composite_and_present(&mut self) -> Result<(), &'static str> {
-        let dirty_rects = if !ENABLE_DIRTY_RECT {
+    fn pending_present_damage(&self) -> PresentDamage {
+        if !ENABLE_DIRTY_RECT {
             // Force full redraw when dirty rect optimization is disabled
             None
         } else if self.full_redraw_needed {
@@ -860,27 +880,65 @@ impl Compositor {
                 Self::push_damage_rect(&mut rects, rect);
             }
             Some(rects)
-        };
+        }
+    }
 
+    fn composite_damage_to_display(
+        &mut self,
+        dirty_rects: &PresentDamage,
+    ) -> Result<(), &'static str> {
         match dirty_rects {
             None => {
-                self.composite_via_framebuffer(None)?;
+                self.composite_via_display(None)?;
             }
             Some(rects) => {
-                for rect in rects {
-                    self.composite_via_framebuffer(Some(rect))?;
+                for rect in rects.iter().copied() {
+                    self.composite_via_display(Some(rect))?;
                 }
             }
         }
 
-        // Flush to display
-        self.framebuffer
-            .flush()
-            .map_err(|_| "Failed to flush framebuffer")?;
-
+        self.cursor.mark_drawn();
         self.full_redraw_needed = false;
         self.pending_damage.clear();
         Ok(())
+    }
+
+    fn present_damage(&self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
+        // Present only the damage SWS actually composed. Legacy framebuffer
+        // clients keep their own full-frame compatibility path.
+        match dirty_rects {
+            None => self
+                .display
+                .present()
+                .map_err(|_| "Failed to present display")?,
+            Some(rects) => {
+                for (x, y, width, height) in rects {
+                    let Some((x, y, width, height)) =
+                        self.clamp_rect_to_screen((x, y, width, height))
+                    else {
+                        continue;
+                    };
+                    self.display
+                        .present_region(x as u32, y as u32, width, height)
+                        .map_err(|_| "Failed to present display region")?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn composite_pending_to_display(&mut self) -> Result<PresentDamage, &'static str> {
+        let dirty_rects = self.pending_present_damage();
+        self.composite_damage_to_display(&dirty_rects)?;
+        Ok(dirty_rects)
+    }
+
+    /// Composite all layers directly to the display backing store.
+    fn composite_and_present(&mut self) -> Result<(), &'static str> {
+        let dirty_rects = self.composite_pending_to_display()?;
+        self.present_damage(dirty_rects)
     }
 
     fn validate_vram_samples(
@@ -1367,7 +1425,7 @@ impl Compositor {
     }
 
     /// Composite into the persistent backbuffer, then present the affected region.
-    fn composite_via_framebuffer(
+    fn composite_via_display(
         &mut self,
         dirty: Option<(i32, i32, u32, u32)>,
     ) -> Result<(), &'static str> {
@@ -1394,7 +1452,6 @@ impl Compositor {
 
         if w == 0 || h == 0 {
             // Nothing to redraw.
-            self.cursor.mark_drawn();
             return Ok(());
         }
 
@@ -1464,22 +1521,18 @@ impl Compositor {
 
             // Layer 3: Draw cursor
             let cursor = &self.cursor;
-            cursor.draw_to_buffer_direct(
+            cursor.draw_to_buffer_direct_clipped(
                 backbuffer,
                 screen_width,
                 screen_height,
                 bytes_per_pixel,
                 stride,
+                clip,
             );
         }
 
         // Validate composition against expected pixels before presenting.
-        self.validate_vram_samples(
-            &self.backbuffer,
-            stride,
-            dirty,
-            "after framebuffer composite",
-        );
+        self.validate_vram_samples(&self.backbuffer, stride, dirty, "after display composite");
 
         // Present only the dirty region when available.
         let src_off = (y0 as usize)
@@ -1490,11 +1543,10 @@ impl Compositor {
         }
         let src = &self.backbuffer[src_off..];
 
-        self.framebuffer
-            .write_block_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
+        self.display
+            .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
             .map_err(|_| "Failed to write backbuffer")?;
 
-        self.cursor.mark_drawn();
         Ok(())
     }
 
@@ -1739,11 +1791,78 @@ impl Compositor {
         self.send_mouse_position_to_window_coords(window_id, window, window_x, window_y);
     }
 
-    fn wait_for_wake(&mut self) {
+    fn wait_for_event_signal(&mut self) {
+        let Ok(stream) = self.wake_read.as_stream() else {
+            return;
+        };
+
         let mut buf = [0u8; 1];
-        if let Ok(stream) = self.wake_read.as_stream() {
-            let _ = stream.read(&mut buf);
+        if stream.read(&mut buf).is_ok() {
+            super::ipc::consume_compositor_wake();
         }
+    }
+
+    fn consume_event_signal_if_ready(&mut self) {
+        let mut handles = [PollHandle::new(self.wake_read.as_raw() as u32, POLLIN)];
+        let Ok(ready) = poll(&mut handles, 0) else {
+            return;
+        };
+        if ready == 0 || (handles[0].revents & POLLIN) == 0 {
+            return;
+        }
+
+        let Ok(stream) = self.wake_read.as_stream() else {
+            return;
+        };
+
+        let mut buf = [0u8; 1];
+        if stream.read(&mut buf).is_ok() {
+            super::ipc::consume_compositor_wake();
+        }
+    }
+
+    fn process_pending_events(&mut self) -> Result<bool, &'static str> {
+        let mut needs_redraw = false;
+
+        if self.check_display_resize()? {
+            needs_redraw = true;
+        }
+
+        // Process IPC events from global queue (non-blocking)
+        let ipc_events = self.ipc_server.process_messages()?;
+        // if !ipc_events.is_empty() {
+        //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
+        // }
+        for event in ipc_events {
+            if self.handle_ipc_event(event)? {
+                needs_redraw = true;
+            }
+        }
+
+        // Process input events from global queue (non-blocking)
+        let input_events = super::input::pop_all_input_events();
+        if !input_events.is_empty() {
+            for event in input_events {
+                if self.handle_input_event(event)? {
+                    needs_redraw = true;
+                }
+            }
+        }
+
+        Ok(needs_redraw)
+    }
+
+    fn has_pending_redraw(&self, needs_redraw: bool) -> bool {
+        needs_redraw
+            || self.full_redraw_needed
+            || !self.pending_damage.is_empty()
+            || self.cursor.needs_redraw()
+    }
+
+    fn wait_for_frame_batch(&mut self) -> Result<bool, &'static str> {
+        thread::sleep(FRAME_BATCH_INTERVAL);
+        self.consume_event_signal_if_ready();
+        self.process_pending_events()
     }
 
     /// Main event loop
@@ -1751,48 +1870,27 @@ impl Compositor {
         println!("[Compositor] Starting main loop (multithreaded)");
 
         loop {
-            let mut needs_redraw = false;
-
-            if self.check_display_resize()? {
-                needs_redraw = true;
-            }
-
-            // Process IPC events from global queue (non-blocking)
-            let ipc_events = self.ipc_server.process_messages()?;
-            // if !ipc_events.is_empty() {
-            //     println!("[Compositor] Processing {} IPC events", ipc_events.len());
-            // }
-            for event in ipc_events {
-                if self.handle_ipc_event(event)? {
-                    needs_redraw = true;
-                }
-            }
-
-            // Process input events from global queue (non-blocking)
-            let input_events = super::input::pop_all_input_events();
-            if !input_events.is_empty() {
-                for event in input_events {
-                    if self.handle_input_event(event)? {
-                        needs_redraw = true;
-                    }
-                }
-            }
+            let mut needs_redraw = self.process_pending_events()?;
 
             // Re-composite and present if needed
-            if needs_redraw
-                || self.full_redraw_needed
-                || !self.pending_damage.is_empty()
-                || self.cursor.needs_redraw()
-            {
+            if self.has_pending_redraw(needs_redraw) {
+                let mut present_damage = self.composite_pending_to_display()?;
+                needs_redraw |= self.wait_for_frame_batch()?;
                 if self.full_redraw_needed && is_sws_debug_enabled() {
                     println!("[Compositor] Full redraw triggered");
                 }
-                self.composite_and_present()?;
+                if self.has_pending_redraw(needs_redraw) {
+                    let next_damage = self.composite_pending_to_display()?;
+                    Self::merge_present_damage(&mut present_damage, next_damage);
+                }
+                self.present_damage(present_damage)?;
                 self.event_counter += 1;
             }
 
-            // Sleep until IPC/input explicitly wakes the compositor.
-            self.wait_for_wake();
+            // Sleep until IPC/input explicitly signals that new work is queued.
+            // Signal writes are coalesced so producers cannot fill the pipe
+            // while the compositor is busy processing a batch.
+            self.wait_for_event_signal();
 
             // Periodically print Z-order (every 100 redraws)
             // if self.event_counter % 100 == 0 && self.event_counter > 0 {

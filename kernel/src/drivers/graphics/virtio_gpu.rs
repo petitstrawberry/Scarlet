@@ -28,7 +28,6 @@ use crate::{
     },
     mem::page::ContiguousPages,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    timer::{TimerHandler, add_timer, get_tick, ms_to_ticks},
     vm::addr::virt_to_phys,
 };
 use core::ptr;
@@ -1268,7 +1267,6 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<Mutex<VirtioGpuDeviceCore>>,
-    handler: RwLock<Option<Arc<dyn TimerHandler>>>,
 }
 
 impl VirtioGpuDevice {
@@ -1284,7 +1282,6 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
-            handler: RwLock::new(None),
         }
     }
 
@@ -1300,7 +1297,6 @@ impl VirtioGpuDevice {
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new_pci(transport))),
-            handler: RwLock::new(None),
         }
     }
 }
@@ -1458,6 +1454,7 @@ impl GraphicsDevice for VirtioGpuDevice {
 
     fn get_framebuffer_info(&self) -> Result<(FramebufferConfig, usize), &'static str> {
         let core = self.core.lock();
+        let _ = core.poll_display_resize();
         let config = core.get_framebuffer_config()?;
         let physical_addr = core.get_framebuffer_address()?;
         Ok((config, physical_addr))
@@ -1519,70 +1516,8 @@ impl GraphicsDevice for VirtioGpuDevice {
         // Set up framebuffer
         self.core.lock().setup_framebuffer()?;
 
-        crate::early_println!("[virtio-gpu] init_graphics: add timer handler");
-
-        let handler: Arc<dyn TimerHandler> = Arc::new(FramebufferUpdateHandler {
-            device: self.core.clone(),
-            last_resize_poll_tick: Mutex::new(0),
-        });
-
-        add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
-
-        // Store handler via interior mutability
-        *self.handler.write() = Some(handler);
-
         crate::early_println!("[virtio-gpu] init_graphics: done");
         Ok(())
-    }
-}
-
-struct FramebufferUpdateHandler {
-    device: Arc<Mutex<VirtioGpuDeviceCore>>,
-    last_resize_poll_tick: Mutex<u64>,
-}
-
-impl FramebufferUpdateHandler {
-    fn present_framebuffer(&self) {
-        let now = get_tick();
-        let should_poll_resize = {
-            let mut last_poll = self.last_resize_poll_tick.lock();
-            if now.saturating_sub(*last_poll) >= ms_to_ticks(250) {
-                *last_poll = now;
-                true
-            } else {
-                false
-            }
-        };
-        if should_poll_resize {
-            let _ = self.device.lock().poll_display_resize();
-        }
-
-        let (width, height) = {
-            let core = self.device.lock();
-            if core.framebuffer_addr.read().is_none() {
-                return;
-            }
-            let display_info_guard = core.display_info.read();
-            let display_info = match display_info_guard.as_ref() {
-                Some(info) => info,
-                None => return,
-            };
-            let width = display_info.pmodes[0].r.width;
-            let height = display_info.pmodes[0].r.height;
-            (width, height)
-        };
-        let _ = self
-            .device
-            .lock()
-            .present_framebuffer_region(DisplayRegion::new(0, 0, width, height));
-    }
-}
-
-impl TimerHandler for FramebufferUpdateHandler {
-    fn on_timer_expired(self: Arc<Self>, context: usize) {
-        self.present_framebuffer();
-        let handler = self as Arc<dyn TimerHandler>;
-        add_timer(get_tick() + ms_to_ticks(16), &handler, context);
     }
 }
 
