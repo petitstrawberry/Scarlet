@@ -62,6 +62,11 @@ pub struct DisplayInfo {
     pub format: u32,
     /// Page-aligned size of the mappable display backing store.
     pub buffer_len: u32,
+    /// Opaque identifier for the current mappable backing store.
+    ///
+    /// This value changes when the display surface's mapped backing changes,
+    /// even if `buffer_len` remains the same.
+    pub backing_id: usize,
 }
 
 /// Region argument for DISPLAY_PRESENT_REGION.
@@ -210,6 +215,7 @@ impl DisplayCharDevice {
             stride: backing.config.stride,
             format: Self::display_format(backing.config.format),
             buffer_len: backing.size as u32,
+            backing_id: backing.physical_addr,
         })
     }
 

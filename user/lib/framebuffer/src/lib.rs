@@ -74,6 +74,11 @@ pub struct DisplayInfo {
     pub format: u32,
     /// Page-aligned size of the mappable display backing store.
     pub buffer_len: u32,
+    /// Opaque identifier for the current mappable backing store.
+    ///
+    /// This value changes when the display surface's mapped backing changes,
+    /// even if `buffer_len` remains the same.
+    pub backing_id: usize,
 }
 
 /// Region argument for DISPLAY_PRESENT_REGION.
@@ -273,6 +278,7 @@ pub struct Framebuffer {
 pub struct DisplaySurface {
     file: File,
     mapped_buffer: Option<(usize, usize)>,
+    mapped_backing_id: usize,
 }
 
 impl DisplaySurface {
@@ -299,6 +305,7 @@ impl DisplaySurface {
         let mut display = Self {
             file,
             mapped_buffer: None,
+            mapped_backing_id: 0,
         };
         let _ = display.setup_mmap();
         Ok(display)
@@ -322,6 +329,7 @@ impl DisplaySurface {
             )
             .map_err(|_| HandleError::SystemError(-1))?;
         self.mapped_buffer = Some((mapped_addr, info.buffer_len as usize));
+        self.mapped_backing_id = info.backing_id;
         Ok(())
     }
 
@@ -535,13 +543,16 @@ impl DisplaySurface {
     pub fn refresh_mapping(&mut self) -> HandleResult<()> {
         let info = self.get_info()?;
         let new_size = info.buffer_len as usize;
-        if matches!(self.mapped_buffer, Some((_, mapped_size)) if mapped_size == new_size) {
+        if matches!(self.mapped_buffer, Some((_, mapped_size)) if mapped_size == new_size)
+            && self.mapped_backing_id == info.backing_id
+        {
             return Ok(());
         }
 
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
             let _ = munmap(mapped_addr, mapped_size);
         }
+        self.mapped_backing_id = 0;
 
         match self.setup_mmap() {
             Ok(()) => Ok(()),

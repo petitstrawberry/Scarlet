@@ -9,6 +9,11 @@ legacy framebuffer node. Clients that track damage in screen coordinates call
 `DisplaySurface::present_region` for each bounded damage rectangle after CPU
 composition into the display backing store.
 
+`DISPLAY_GET_INFO` reports both `buffer_len` and a `backing_id`. Display
+clients reuse an mmap only while both values match. This matters for resize and
+mode-change paths where the graphics device may allocate a new backing store
+whose page-aligned size is identical to the previous one.
+
 That call maps to `DISPLAY_PRESENT_REGION`, and the kernel forwards the region
 to the graphics device as
 `present_current_framebuffer_region(region)`. For virtio-gpu this becomes:
