@@ -5,6 +5,7 @@ use framebuffer::Framebuffer;
 /// Cursor bitmap - simple 0/1/2 format
 const CURSOR_WIDTH: usize = 16;
 const CURSOR_HEIGHT: usize = 24;
+const CURSOR_DAMAGE_PADDING: i32 = 2;
 
 /// Cursor color (white)
 const CURSOR_COLOR: [u8; 4] = [255, 255, 255, 255]; // BGRA
@@ -180,8 +181,30 @@ impl Cursor {
         bytes_per_pixel: u32,
         stride: u32,
     ) {
+        self.draw_to_buffer_direct_clipped(
+            buffer,
+            screen_width,
+            screen_height,
+            bytes_per_pixel,
+            stride,
+            None,
+        );
+    }
+
+    /// Draw cursor directly to a buffer with custom stride and optional clip.
+    pub fn draw_to_buffer_direct_clipped(
+        &self,
+        buffer: &mut [u8],
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
+        stride: u32,
+        clip_rect: Option<(i32, i32, u32, u32)>,
+    ) {
         let cx = self.x;
         let cy = self.y;
+        let clip = clip_rect
+            .map(|(x, y, w, h)| (x, y, x.saturating_add(w as i32), y.saturating_add(h as i32)));
 
         for y in 0..CURSOR_HEIGHT {
             for x in 0..CURSOR_WIDTH {
@@ -212,6 +235,15 @@ impl Cursor {
                         {
                             continue;
                         }
+                        if let Some((clip_x0, clip_y0, clip_x1, clip_y1)) = clip {
+                            if screen_x < clip_x0
+                                || screen_x >= clip_x1
+                                || screen_y < clip_y0
+                                || screen_y >= clip_y1
+                            {
+                                continue;
+                            }
+                        }
 
                         let offset = ((screen_y as u32 * stride)
                             + (screen_x as u32 * bytes_per_pixel))
@@ -236,10 +268,20 @@ impl Cursor {
 
     /// Get the dirty region that needs redrawing (union of prev and current cursor)
     pub fn get_dirty_region(&self) -> (i32, i32, u32, u32) {
-        let min_x = self.prev_x.min(self.x);
-        let min_y = self.prev_y.min(self.y);
-        let max_x = (self.prev_x + self.width as i32).max(self.x + self.width as i32);
-        let max_y = (self.prev_y + self.height as i32).max(self.y + self.height as i32);
+        let min_x = self
+            .prev_x
+            .min(self.x)
+            .saturating_sub(CURSOR_DAMAGE_PADDING);
+        let min_y = self
+            .prev_y
+            .min(self.y)
+            .saturating_sub(CURSOR_DAMAGE_PADDING);
+        let max_x = (self.prev_x + self.width as i32)
+            .max(self.x + self.width as i32)
+            .saturating_add(CURSOR_DAMAGE_PADDING);
+        let max_y = (self.prev_y + self.height as i32)
+            .max(self.y + self.height as i32)
+            .saturating_add(CURSOR_DAMAGE_PADDING);
         (min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32)
     }
 

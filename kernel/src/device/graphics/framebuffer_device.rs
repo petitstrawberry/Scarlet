@@ -17,7 +17,7 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
-use spin::RwLock;
+use spin::{Mutex, RwLock};
 
 use crate::device::{
     Device, DeviceType,
@@ -25,8 +25,14 @@ use crate::device::{
     graphics::{FramebufferConfig, manager::FramebufferResource, output::DisplayRegion},
     manager::DeviceManager,
 };
+use crate::environment::PAGE_SIZE;
+use crate::object::capability::memory_mapping::{
+    AccessKind, AccessOp, ResolveFaultError, ResolveFaultResult,
+};
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::sched::scheduler::get_task_by_id;
+use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm::addr::phys_to_virt;
 
 /// Linux framebuffer ioctl command constants
@@ -222,12 +228,29 @@ impl Default for FbBitfield {
     }
 }
 
-/// Mock mapping for testing purposes
-#[allow(dead_code)]
+/// Active legacy framebuffer mmap alias.
 #[derive(Debug, Clone)]
-struct MockMapping {
+struct FramebufferMapping {
+    task_id: usize,
     vaddr: usize,
     length: usize,
+    offset: usize,
+    write_protect: bool,
+}
+
+#[derive(Debug)]
+struct FbCompatDirtyState {
+    dirty: bool,
+    timer_armed: bool,
+    generation: usize,
+}
+
+struct FbCompatFlushHandler {
+    fb_resource: Arc<FramebufferResource>,
+    mappings: Arc<RwLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
+    dirty_state: Arc<Mutex<FbCompatDirtyState>>,
+    #[cfg(test)]
+    device_manager_addr: Option<usize>,
 }
 
 /// Framebuffer character device implementation
@@ -241,8 +264,12 @@ struct MockMapping {
 pub struct FramebufferCharDevice {
     /// The framebuffer resource this device represents
     fb_resource: Arc<FramebufferResource>,
-    /// Track mappings for testing purposes  
-    mappings: RwLock<BTreeMap<usize, MockMapping>>, // virtual_start -> MockMapping
+    /// Track legacy framebuffer mmap aliases by (task_id, virtual_start).
+    mappings: Arc<RwLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
+    /// Dirty state for legacy fb compat one-shot flushing.
+    dirty_state: Arc<Mutex<FbCompatDirtyState>>,
+    /// Timer handler kept alive for the legacy fb compat one-shot flush.
+    flush_handler: Arc<FbCompatFlushHandler>,
     #[cfg(test)]
     device_manager_addr: Option<usize>,
 }
@@ -264,9 +291,25 @@ impl FramebufferCharDevice {
     ///
     /// A new FramebufferCharDevice instance
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
+        let mappings = Arc::new(RwLock::new(BTreeMap::new()));
+        let dirty_state = Arc::new(Mutex::new(FbCompatDirtyState {
+            dirty: false,
+            timer_armed: false,
+            generation: 0,
+        }));
+        let flush_handler = Arc::new(FbCompatFlushHandler {
+            fb_resource: Arc::clone(&fb_resource),
+            mappings: Arc::clone(&mappings),
+            dirty_state: Arc::clone(&dirty_state),
+            #[cfg(test)]
+            device_manager_addr: None,
+        });
+
         Self {
             fb_resource,
-            mappings: RwLock::new(BTreeMap::new()),
+            mappings,
+            dirty_state,
+            flush_handler,
             #[cfg(test)]
             device_manager_addr: None,
         }
@@ -277,10 +320,26 @@ impl FramebufferCharDevice {
         fb_resource: Arc<FramebufferResource>,
         device_manager: &DeviceManager,
     ) -> Self {
+        let mappings = Arc::new(RwLock::new(BTreeMap::new()));
+        let dirty_state = Arc::new(Mutex::new(FbCompatDirtyState {
+            dirty: false,
+            timer_armed: false,
+            generation: 0,
+        }));
+        let device_manager_addr = device_manager as *const DeviceManager as usize;
+        let flush_handler = Arc::new(FbCompatFlushHandler {
+            fb_resource: Arc::clone(&fb_resource),
+            mappings: Arc::clone(&mappings),
+            dirty_state: Arc::clone(&dirty_state),
+            device_manager_addr: Some(device_manager_addr),
+        });
+
         Self {
             fb_resource,
-            mappings: RwLock::new(BTreeMap::new()),
-            device_manager_addr: Some(device_manager as *const DeviceManager as usize),
+            mappings,
+            dirty_state,
+            flush_handler,
+            device_manager_addr: Some(device_manager_addr),
         }
     }
 
@@ -327,6 +386,217 @@ impl FramebufferCharDevice {
             physical_addr: self.fb_resource.physical_addr,
             size: self.fb_resource.size,
         })
+    }
+
+    fn current_task_id() -> usize {
+        crate::task::mytask().map(|task| task.get_id()).unwrap_or(0)
+    }
+
+    fn record_mapping_for_current_task(
+        &self,
+        vaddr: usize,
+        length: usize,
+        offset: usize,
+        write_protect: bool,
+    ) {
+        let task_id = Self::current_task_id();
+        let mapping = FramebufferMapping {
+            task_id,
+            vaddr,
+            length,
+            offset,
+            write_protect,
+        };
+        self.mappings.write().insert((task_id, vaddr), mapping);
+    }
+
+    fn mark_legacy_dirty(&self) {
+        let arm_context = {
+            let mut state = self.dirty_state.lock();
+            state.dirty = true;
+            if state.timer_armed {
+                None
+            } else {
+                state.timer_armed = true;
+                state.generation = state.generation.wrapping_add(1);
+                Some(state.generation)
+            }
+        };
+
+        if let Some(context) = arm_context {
+            let handler: Arc<dyn TimerHandler> = self.flush_handler.clone();
+            add_timer(
+                get_tick().saturating_add(ms_to_ticks(16)),
+                &handler,
+                context,
+            );
+        }
+    }
+
+    fn disarm_legacy_dirty_timer(&self) {
+        let mut state = self.dirty_state.lock();
+        state.dirty = false;
+        state.timer_armed = false;
+        state.generation = state.generation.wrapping_add(1);
+    }
+
+    fn mapping_for_fault(
+        &self,
+        access: &AccessKind,
+        vm_start: usize,
+        info: &CurrentFramebufferInfo,
+    ) -> Option<FramebufferMapping> {
+        let task_id = Self::current_task_id();
+        if let Some(mapping) = self.mappings.read().get(&(task_id, vm_start)).cloned() {
+            return Some(mapping);
+        }
+
+        let task = crate::task::mytask()?;
+        let memory_map = task.vm_manager.search_memory_map(access.vaddr)?;
+        let map_object_offset = memory_map.pmarea.start.saturating_sub(info.physical_addr);
+        let map_vm_offset = memory_map.vmarea.start.saturating_sub(memory_map.vm_start);
+        let base_offset = map_object_offset.saturating_sub(map_vm_offset);
+        let mapping = FramebufferMapping {
+            task_id,
+            vaddr: memory_map.vm_start,
+            length: memory_map
+                .vmarea
+                .end
+                .saturating_sub(memory_map.vm_start)
+                .saturating_add(1),
+            offset: base_offset,
+            write_protect: memory_map.is_shared,
+        };
+        self.mappings
+            .write()
+            .insert((task_id, memory_map.vm_start), mapping.clone());
+        Some(mapping)
+    }
+
+    fn write_protect_mappings(
+        mappings: &RwLock<BTreeMap<(usize, usize), FramebufferMapping>>,
+        info: &CurrentFramebufferInfo,
+    ) {
+        let snapshot: Vec<FramebufferMapping> = mappings.read().values().cloned().collect();
+        for mapping in snapshot {
+            if !mapping.write_protect {
+                continue;
+            }
+            let Some(task) = get_task_by_id(mapping.task_id) else {
+                continue;
+            };
+            let Some(root_pagetable) = task.vm_manager.get_root_page_table() else {
+                continue;
+            };
+
+            let asid = task.vm_manager.get_asid();
+            let mut page_offset = 0usize;
+            while page_offset < mapping.length {
+                let object_offset = mapping.offset.saturating_add(page_offset);
+                if object_offset >= info.size {
+                    break;
+                }
+
+                root_pagetable.map(
+                    asid,
+                    mapping.vaddr.saturating_add(page_offset),
+                    info.physical_addr.saturating_add(object_offset),
+                    0x1 | 0x08,
+                    true,
+                    false,
+                );
+                page_offset = page_offset.saturating_add(PAGE_SIZE);
+            }
+        }
+    }
+}
+
+impl FbCompatFlushHandler {
+    #[cfg(test)]
+    fn device_manager(&self) -> &DeviceManager {
+        match self.device_manager_addr {
+            Some(device_manager_addr) => unsafe { &*(device_manager_addr as *const DeviceManager) },
+            None => DeviceManager::get_manager(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn device_manager(&self) -> &DeviceManager {
+        DeviceManager::get_manager()
+    }
+
+    fn current_framebuffer_info(&self) -> Result<CurrentFramebufferInfo, &'static str> {
+        if let Some(device) = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+        {
+            if let Some(graphics_device) = device.as_graphics_device() {
+                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let size = FramebufferCharDevice::page_aligned_size(config.size());
+                return Ok(CurrentFramebufferInfo {
+                    config,
+                    physical_addr,
+                    size,
+                });
+            }
+        }
+
+        Ok(CurrentFramebufferInfo {
+            config: self.fb_resource.config.clone(),
+            physical_addr: self.fb_resource.physical_addr,
+            size: self.fb_resource.size,
+        })
+    }
+
+    fn trigger_display_update(&self, region: DisplayRegion) -> Result<(), &'static str> {
+        let device_manager = self.device_manager();
+        if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
+            if let Some(graphics_device) = device.as_graphics_device() {
+                let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+                let region = DisplayRegion::new(
+                    region.x.min(config.width),
+                    region.y.min(config.height),
+                    region.width.min(config.width.saturating_sub(region.x)),
+                    region.height.min(config.height.saturating_sub(region.y)),
+                );
+                graphics_device.present_current_framebuffer_region(region)?;
+                if physical_addr == 0 {
+                    return Err("Graphics device framebuffer address is null");
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl TimerHandler for FbCompatFlushHandler {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
+        let should_flush = {
+            let mut state = self.dirty_state.lock();
+            if !state.timer_armed || state.generation != context {
+                false
+            } else {
+                state.timer_armed = false;
+                if state.dirty {
+                    state.dirty = false;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+
+        if !should_flush {
+            return;
+        }
+
+        if let Ok(info) = self.current_framebuffer_info() {
+            if info.physical_addr != 0 {
+                let _ = self.trigger_display_update(DisplayRegion::full(&info.config));
+                FramebufferCharDevice::write_protect_mappings(&self.mappings, &info);
+            }
+        }
     }
 }
 
@@ -503,6 +773,10 @@ impl CharDevice for FramebufferCharDevice {
             }
         }
 
+        if to_write > 0 {
+            self.mark_legacy_dirty();
+        }
+
         Ok(to_write)
     }
 }
@@ -573,15 +847,20 @@ impl MemoryMappingOps for FramebufferCharDevice {
         Ok((paddr, permissions, is_shared))
     }
 
-    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
-        // Record this mapping in our tracking structure
-        let mapping = MockMapping { vaddr, length };
-        self.mappings.write().insert(vaddr, mapping);
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        self.record_mapping_for_current_task(vaddr, length, offset, paddr != 0);
     }
 
-    fn on_unmapped(&self, vaddr: usize, _length: usize) {
-        // Remove the mapping from our tracking
-        self.mappings.write().remove(&vaddr);
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        let task_id = Self::current_task_id();
+        let unmap_end = vaddr.saturating_add(length);
+        self.mappings.write().retain(|_, mapping| {
+            if task_id != 0 && mapping.task_id != task_id {
+                return true;
+            }
+            let mapping_end = mapping.vaddr.saturating_add(mapping.length);
+            mapping_end <= vaddr || mapping.vaddr >= unmap_end
+        });
     }
 
     fn supports_mmap(&self) -> bool {
@@ -589,6 +868,51 @@ impl MemoryMappingOps for FramebufferCharDevice {
             Ok(info) => info.physical_addr != 0 && info.size > 0,
             Err(_) => false,
         }
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &AccessKind,
+        _page_idx: usize,
+        vm_start: usize,
+    ) -> Result<ResolveFaultResult, ResolveFaultError> {
+        let info = self
+            .current_framebuffer_info()
+            .map_err(|_| ResolveFaultError::Invalid)?;
+        let mapping = self
+            .mapping_for_fault(access, vm_start, &info)
+            .ok_or(ResolveFaultError::Invalid)?;
+
+        if access.vaddr < mapping.vaddr {
+            return Err(ResolveFaultError::Invalid);
+        }
+
+        let page_offset = (access.vaddr - mapping.vaddr) & !(PAGE_SIZE - 1);
+        let object_offset = mapping.offset.saturating_add(page_offset);
+        if object_offset >= info.size {
+            return Err(ResolveFaultError::Unmapped);
+        }
+
+        if matches!(access.op, AccessOp::Store) {
+            self.mark_legacy_dirty();
+        }
+
+        Ok(ResolveFaultResult {
+            paddr_page_base: info.physical_addr.saturating_add(object_offset),
+            is_tail: false,
+        })
+    }
+
+    fn fault_page_permissions(&self, access: &AccessKind, default_permissions: usize) -> usize {
+        if matches!(access.op, AccessOp::Store) {
+            default_permissions
+        } else {
+            default_permissions & !0x2
+        }
+    }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::string::String::from("framebuffer")
     }
 }
 
@@ -922,7 +1246,9 @@ impl FramebufferCharDevice {
 
         // Trigger display controller update if needed
         // For some hardware, writing to framebuffer memory doesn't immediately update the display
-        self.trigger_display_update()?;
+        self.trigger_display_update(DisplayRegion::full(&info.config))?;
+        self.disarm_legacy_dirty_timer();
+        Self::write_protect_mappings(&self.mappings, &info);
 
         Ok(0) // Success
     }
@@ -931,7 +1257,7 @@ impl FramebufferCharDevice {
     ///
     /// Some display controllers require explicit commands to update the display
     /// from framebuffer contents. This method handles such updates.
-    fn trigger_display_update(&self) -> Result<(), &'static str> {
+    fn trigger_display_update(&self, region: DisplayRegion) -> Result<(), &'static str> {
         // Try to get the source graphics device to trigger a display update
         let device_manager = self.device_manager();
         if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
@@ -939,7 +1265,13 @@ impl FramebufferCharDevice {
             if let Some(graphics_device) = device.as_graphics_device() {
                 let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
 
-                graphics_device.present_current_framebuffer_region(DisplayRegion::full(&config))?;
+                let region = DisplayRegion::new(
+                    region.x.min(config.width),
+                    region.y.min(config.height),
+                    region.width.min(config.width.saturating_sub(region.x)),
+                    region.height.min(config.height.saturating_sub(region.y)),
+                );
+                graphics_device.present_current_framebuffer_region(region)?;
 
                 // Verify that the framebuffer address is still valid
                 if physical_addr == 0 {
@@ -1307,6 +1639,7 @@ mod tests {
             physical_addr: 0, // Invalid address
             size: 300,
             created_char_device_id: RwLock::new(None),
+            created_display_device_id: RwLock::new(None),
         });
         let invalid_device = FramebufferCharDevice::new(invalid_resource);
 
@@ -1579,7 +1912,7 @@ mod tests {
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 1);
-            assert!(mappings.contains_key(&0x1000));
+            assert!(mappings.contains_key(&(0, 0x1000)));
         }
 
         // Test on_unmapped callback

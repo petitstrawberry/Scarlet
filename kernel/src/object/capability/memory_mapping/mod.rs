@@ -101,6 +101,29 @@ pub trait MemoryMappingOps: Send + Sync {
         Err(crate::object::capability::memory_mapping::ResolveFaultError::Unmapped)
     }
 
+    /// Choose the actual page-table permissions for a resolved fault.
+    ///
+    /// The virtual memory map keeps the maximum permissions requested by mmap,
+    /// while some owners need to install a stricter PTE temporarily. A
+    /// framebuffer compatibility mapping, for example, keeps the VM map
+    /// writable but resolves read faults as read-only so a later store still
+    /// traps and can mark the legacy framebuffer dirty.
+    ///
+    /// # Arguments
+    /// * `access` - Access that caused the fault
+    /// * `default_permissions` - Permissions from the virtual memory map
+    ///
+    /// # Returns
+    /// The permissions to install in the page table for this fault.
+    fn fault_page_permissions(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        default_permissions: usize,
+    ) -> usize {
+        let _ = access;
+        default_permissions
+    }
+
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
 
     fn fork_clone(&self) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {

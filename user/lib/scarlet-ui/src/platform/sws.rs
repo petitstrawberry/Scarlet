@@ -496,8 +496,6 @@ impl PlatformWindow for SWSPlatformWindow {
                 let dst_data =
                     unsafe { core::slice::from_raw_parts_mut(shm_buf.as_mut_ptr(), shm_len) };
 
-                dst_data.fill(0);
-
                 let src_width = buffer.width() as usize;
                 let src_height = buffer.height() as usize;
                 let dst_width = width as usize;
@@ -517,6 +515,25 @@ impl PlatformWindow for SWSPlatformWindow {
                     let len = (src_end - src_offset).min(dst_end - dst_offset);
                     dst_data[dst_offset..dst_offset + len]
                         .copy_from_slice(&src_data[src_offset..src_offset + len]);
+                }
+
+                if copy_width < dst_width {
+                    for y in 0..copy_height {
+                        let row_start = y
+                            .saturating_mul(dst_width)
+                            .saturating_add(copy_width)
+                            .saturating_mul(4);
+                        let row_end = y.saturating_add(1).saturating_mul(dst_width).saturating_mul(4);
+                        if row_start < row_end && row_end <= dst_data.len() {
+                            dst_data[row_start..row_end].fill(0);
+                        }
+                    }
+                }
+                if copy_height < dst_height {
+                    let clear_start = copy_height.saturating_mul(dst_width).saturating_mul(4);
+                    if clear_start < dst_data.len() {
+                        dst_data[clear_start..].fill(0);
+                    }
                 }
             });
         }

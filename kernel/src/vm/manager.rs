@@ -542,6 +542,7 @@ impl VirtualMemoryManager {
             };
             match owner.resolve_fault(&owner_access, page_idx, memory_map.vm_start) {
                 Ok(res) => {
+                    perms = owner.fault_page_permissions(&owner_access, perms);
                     if res.is_tail {
                         perms &= !0x1;
                         perms &= !0x2;
@@ -677,6 +678,8 @@ impl VirtualMemoryManager {
                         let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
                         match owner.resolve_fault(&test_access, page_idx, map.vm_start) {
                             Ok(res) => {
+                                let permissions =
+                                    owner.fault_page_permissions(&test_access, map.permissions);
                                 // Owner says this offset is valid - extend vmarea.end
                                 let new_end = page_vaddr + PAGE_SIZE - 1;
                                 crate::println!(
@@ -687,7 +690,7 @@ impl VirtualMemoryManager {
                                 );
                                 map.vmarea.end = new_end;
 
-                                found = Some((res.paddr_page_base, map.permissions));
+                                found = Some((res.paddr_page_base, permissions));
                                 break;
                             }
                             Err(_) => {
