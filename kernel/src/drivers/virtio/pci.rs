@@ -331,8 +331,17 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID => {
-            let dev: Arc<dyn Device> = Arc::new(VirtioVideoDevice::new_pci(transport));
-            DeviceManager::get_manager().register_device_with_name(format!("vvideo0"), dev);
+            let dev = Arc::new(VirtioVideoDevice::new_pci(transport));
+            if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
+                if let Err(e) = dev.enable_interrupts(interrupt_id) {
+                    early_println!("[virtio-pci] Failed to enable video INTx: {}", e);
+                }
+            } else {
+                early_println!("[virtio-pci] No usable INTx routing for video decoder device");
+            }
+
+            let registered: Arc<dyn Device> = dev;
+            DeviceManager::get_manager().register_device_with_name(format!("vvideo0"), registered);
             println!("[virtio-pci] Registered video decoder device vvideo0");
             Ok(())
         }

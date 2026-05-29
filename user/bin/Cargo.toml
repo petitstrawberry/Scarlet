@@ -223,8 +223,8 @@ name = "h264_probe"
 path = "src/h264_probe.rs"
 
 [[bin]]
-name = "h264_player"
-path = "src/h264_player.rs"
+name = "video_player"
+path = "src/video_player.rs"
 
 [[bin]]
 name = "sas"
