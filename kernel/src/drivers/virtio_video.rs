@@ -48,6 +48,7 @@ const VIRTIO_VIDEO_QUEUE_TYPE_INPUT: u32 = 256;
 const VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT: u32 = 257;
 const VIRTIO_VIDEO_PLANES_LAYOUT_SINGLE_BUFFER: u32 = 1;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
+const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES: u32 = 0;
 
 const STREAM_ID: u32 = 1;
@@ -108,7 +109,7 @@ struct ScarletVideoBufferInfo {
 #[derive(Clone, Copy)]
 struct ScarletVideoSubmit {
     input_len: u32,
-    flags: u32,
+    coded_format: u32,
     timestamp: u64,
 }
 
@@ -194,6 +195,7 @@ pub struct VirtioVideoDevice {
     input_capability_descs: RwLock<u32>,
     output_capability_descs: RwLock<u32>,
     stream_created: RwLock<bool>,
+    stream_coded_format: RwLock<u32>,
     decoded_frame: Mutex<DecodedFrameState>,
     mapped_buffer: RwLock<Option<ContiguousPages>>,
     mapped_frame: Mutex<Option<MappedFrameInfo>>,
@@ -241,6 +243,7 @@ impl VirtioVideoDevice {
             input_capability_descs: RwLock::new(0),
             output_capability_descs: RwLock::new(0),
             stream_created: RwLock::new(false),
+            stream_coded_format: RwLock::new(0),
             decoded_frame: Mutex::new(DecodedFrameState {
                 bytes: Vec::new(),
                 read_cursor: 0,
@@ -289,8 +292,9 @@ impl VirtioVideoDevice {
         *self.input_capability_descs.write() = input_descs;
         *self.output_capability_descs.write() = output_descs;
 
-        self.create_h264_stream(STREAM_ID)?;
+        self.create_stream(STREAM_ID, VIRTIO_VIDEO_FORMAT_H264)?;
         *self.stream_created.write() = true;
+        *self.stream_coded_format.write() = VIRTIO_VIDEO_FORMAT_H264;
 
         crate::early_println!(
             "[virtio-video] H.264 decoder bootstrap ok: input_descs={} output_descs={}",
@@ -320,9 +324,13 @@ impl VirtioVideoDevice {
         read_le32(&response, core::mem::size_of::<VirtioVideoCmdHdr>())
     }
 
-    fn create_h264_stream(&self, stream_id: u32) -> Result<(), &'static str> {
+    fn create_stream(&self, stream_id: u32, coded_format: u32) -> Result<(), &'static str> {
         let mut tag = [0u8; 64];
-        let name = b"scarlet-videotoolbox-h264";
+        let name = match coded_format {
+            VIRTIO_VIDEO_FORMAT_H264 => b"scarlet-videotoolbox-h264".as_slice(),
+            VIRTIO_VIDEO_FORMAT_AV1 => b"scarlet-videotoolbox-av1".as_slice(),
+            _ => return Err("Unsupported VirtIO video coded format"),
+        };
         tag[..name.len()].copy_from_slice(name);
 
         let request = VirtioVideoStreamCreate {
@@ -332,7 +340,7 @@ impl VirtioVideoDevice {
             },
             in_mem_type: VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES,
             out_mem_type: VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES,
-            coded_format: VIRTIO_VIDEO_FORMAT_H264,
+            coded_format,
             padding: [0; 4],
             tag,
         };
@@ -347,10 +355,29 @@ impl VirtioVideoDevice {
         Ok(())
     }
 
-    fn decode_h264_access_unit(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        if !*self.stream_created.read() {
-            return Err("VirtIO video stream is not ready");
+    fn ensure_stream_format(&self, coded_format: u32) -> Result<(), &'static str> {
+        if coded_format == 0 {
+            return Err("VirtIO video coded format is missing");
         }
+        if !matches!(coded_format, VIRTIO_VIDEO_FORMAT_H264 | VIRTIO_VIDEO_FORMAT_AV1) {
+            return Err("Unsupported VirtIO video coded format");
+        }
+        if *self.stream_created.read() && *self.stream_coded_format.read() == coded_format {
+            return Ok(());
+        }
+
+        self.invalidate_mapped_resources();
+        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
+        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
+        self.create_stream(STREAM_ID, coded_format)?;
+        *self.stream_created.write() = true;
+        *self.stream_coded_format.write() = coded_format;
+        *self.next_timestamp.lock() = 1;
+        Ok(())
+    }
+
+    fn decode_h264_access_unit(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        self.ensure_stream_format(VIRTIO_VIDEO_FORMAT_H264)?;
         if buffer.is_empty() {
             return Err("H.264 input is empty");
         }
@@ -415,19 +442,18 @@ impl VirtioVideoDevice {
         Ok(buffer.len())
     }
 
-    fn decode_mapped_h264_access_unit(
+    fn decode_mapped_access_unit(
         &self,
+        coded_format: u32,
         input_len: usize,
         timestamp: u64,
     ) -> Result<(), &'static str> {
-        if !*self.stream_created.read() {
-            return Err("VirtIO video stream is not ready");
-        }
+        self.ensure_stream_format(coded_format)?;
         if input_len == 0 {
-            return Err("H.264 input is empty");
+            return Err("VirtIO video input is empty");
         }
         if input_len > MAPPED_INPUT_BYTES {
-            return Err("H.264 input exceeds mapped video input buffer");
+            return Err("VirtIO video input exceeds mapped video input buffer");
         }
 
         let (input_paddr, output_paddr) = {
@@ -887,11 +913,12 @@ impl VirtioVideoDevice {
         let frame_summary = frame_header_summary(&state.bytes).unwrap_or_default();
         let last_error = state.last_error.unwrap_or("none");
         let status = format!(
-            "virtio-video decoder features=0x{:x} input_caps={} output_caps={} stream_created={} frames={} last_error={}{}\n",
+            "virtio-video decoder features=0x{:x} input_caps={} output_caps={} stream_created={} coded_format={} frames={} last_error={}{}\n",
             *self.features.read(),
             *self.input_capability_descs.read(),
             *self.output_capability_descs.read(),
             *self.stream_created.read(),
+            *self.stream_coded_format.read(),
             state.frame_count,
             last_error,
             frame_summary
@@ -1076,12 +1103,15 @@ impl VirtioVideoDevice {
 
     fn handle_submit(&self, arg: usize) -> Result<i32, &'static str> {
         let submit: ScarletVideoSubmit = read_user_value(arg)?;
-        let _flags = submit.flags;
         if let Err(e) = self.try_complete_pending_decode() {
             self.decoded_frame.lock().last_error = Some(e);
             return Err(e);
         }
-        match self.decode_mapped_h264_access_unit(submit.input_len as usize, submit.timestamp) {
+        match self.decode_mapped_access_unit(
+            submit.coded_format,
+            submit.input_len as usize,
+            submit.timestamp,
+        ) {
             Ok(()) => Ok(0),
             Err(e) => {
                 self.decoded_frame.lock().last_error = Some(e);
@@ -1259,7 +1289,7 @@ impl ControlOps for VirtioVideoDevice {
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         alloc::vec![
             (VVIDEO_GET_BUFFER, "Get mmap video buffer layout"),
-            (VVIDEO_SUBMIT, "Submit mmap-written H.264 access unit"),
+            (VVIDEO_SUBMIT, "Submit mmap-written coded video access unit"),
             (VVIDEO_DEQUEUE, "Dequeue a decoded mmap video frame"),
         ]
     }

@@ -52,9 +52,11 @@ private let virtioVideoQueueTypeOutput: UInt32 = 257
 private let virtioVideoPlanesLayoutSingleBuffer: UInt32 = 1
 private let virtioVideoFormatNv12: UInt32 = 3
 private let virtioVideoFormatH264: UInt32 = 4098
+private let virtioVideoFormatAV1: UInt32 = 4103
 private let virtioVideoMemTypeGuestPages: UInt32 = 0
 
 private let scarletVideoFrameMagic = Array("SVF1".utf8)
+private let scarletAV1AccessUnitMagic = Array("SVA1".utf8)
 private let nv12PixelFormat: UInt32 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
 private extension Data {
@@ -270,13 +272,17 @@ private struct DecodedFrame {
     let nv12: Data
 }
 
-private let decompressionCallback: VTDecompressionOutputCallback = { refCon, _, status, _, imageBuffer, _, _ in
-    guard let refCon else { return }
-    let decoder = Unmanaged<H264VideoToolboxDecoder>.fromOpaque(refCon).takeUnretainedValue()
-    decoder.complete(status: status, imageBuffer: imageBuffer)
+private protocol VideoToolboxDecoderCallback: AnyObject {
+    func complete(status: OSStatus, imageBuffer: CVImageBuffer?)
 }
 
-private final class H264VideoToolboxDecoder {
+private let decompressionCallback: VTDecompressionOutputCallback = { refCon, _, status, _, imageBuffer, _, _ in
+    guard let refCon else { return }
+    let decoder = Unmanaged<AnyObject>.fromOpaque(refCon).takeUnretainedValue()
+    (decoder as? VideoToolboxDecoderCallback)?.complete(status: status, imageBuffer: imageBuffer)
+}
+
+private final class H264VideoToolboxDecoder: VideoToolboxDecoderCallback {
     private var sps: Data?
     private var pps: Data?
     private var formatDescription: CMVideoFormatDescription?
@@ -569,13 +575,239 @@ private final class H264VideoToolboxDecoder {
     }
 }
 
+private final class AV1VideoToolboxDecoder: VideoToolboxDecoderCallback {
+    private var configRecord: Data?
+    private var width: UInt32 = 0
+    private var height: UInt32 = 0
+    private var formatDescription: CMVideoFormatDescription?
+    private var session: VTDecompressionSession?
+    private let lock = NSLock()
+    private var pendingFrame: DecodedFrame?
+    private var pendingStatus: OSStatus = noErr
+
+    deinit {
+        if let session {
+            VTDecompressionSessionInvalidate(session)
+        }
+    }
+
+    func complete(status: OSStatus, imageBuffer: CVImageBuffer?) {
+        lock.lock()
+        defer { lock.unlock() }
+        pendingStatus = status
+        if status == noErr, let pixelBuffer = imageBuffer {
+            pendingFrame = copyNV12(pixelBuffer)
+        }
+    }
+
+    func decode(_ packet: Data) throws -> DecodedFrame {
+        guard packet.count >= 20,
+              Array(packet[0..<4]) == scarletAV1AccessUnitMagic
+        else {
+            throw RuntimeError("AV1 input missing Scarlet av1C header")
+        }
+        let packetWidth = packet.u32(4)
+        let packetHeight = packet.u32(8)
+        let configLength = Int(packet.u32(12))
+        let sampleLength = Int(packet.u32(16))
+        let configStart = 20
+        let sampleStart = configStart + configLength
+        let packetEnd = sampleStart + sampleLength
+        guard packetWidth > 0, packetHeight > 0, configLength >= 4, packetEnd <= packet.count else {
+            throw RuntimeError("AV1 input header is invalid")
+        }
+
+        let packetConfig = packet.subdata(in: configStart..<sampleStart)
+        if session == nil || configRecord != packetConfig || width != packetWidth || height != packetHeight {
+            configRecord = packetConfig
+            width = packetWidth
+            height = packetHeight
+            try rebuildSession()
+        }
+        guard let session, let formatDescription else {
+            throw RuntimeError("VideoToolbox AV1 session is not ready")
+        }
+
+        let sample = packet.subdata(in: sampleStart..<packetEnd)
+        var blockBuffer: CMBlockBuffer?
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: sample.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: sample.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr, let blockBuffer else {
+            throw RuntimeError("CMBlockBufferCreateWithMemoryBlock failed: \(status)")
+        }
+        try sample.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            let replaceStatus = CMBlockBufferReplaceDataBytes(with: base, blockBuffer: blockBuffer, offsetIntoDestination: 0, dataLength: sample.count)
+            if replaceStatus != noErr {
+                throw RuntimeError("CMBlockBufferReplaceDataBytes failed: \(replaceStatus)")
+            }
+        }
+
+        var sampleBuffer: CMSampleBuffer?
+        var sampleSize = sample.count
+        status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 0,
+            sampleTimingArray: nil,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSize,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else {
+            throw RuntimeError("CMSampleBufferCreateReady failed: \(status)")
+        }
+        setSampleAttachments(sampleBuffer)
+
+        lock.lock()
+        pendingFrame = nil
+        pendingStatus = noErr
+        lock.unlock()
+
+        var infoFlags = VTDecodeInfoFlags()
+        status = VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sampleBuffer,
+            flags: [],
+            frameRefcon: nil,
+            infoFlagsOut: &infoFlags
+        )
+        guard status == noErr else {
+            throw RuntimeError("VTDecompressionSessionDecodeFrame failed: \(status)")
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(session)
+
+        lock.lock()
+        defer { lock.unlock() }
+        guard pendingStatus == noErr else {
+            throw RuntimeError("VideoToolbox callback failed: \(pendingStatus)")
+        }
+        guard let frame = pendingFrame else {
+            throw RuntimeError("VideoToolbox produced no AV1 frame")
+        }
+        return frame
+    }
+
+    private func rebuildSession() throws {
+        guard let configRecord, width > 0, height > 0 else {
+            throw RuntimeError("AV1 configuration missing")
+        }
+        if let session {
+            VTDecompressionSessionInvalidate(session)
+        }
+        session = nil
+
+        var extensions: CFDictionary?
+        let av1ConfigKey = "av1C" as CFString
+        let extensionAtoms = [av1ConfigKey: configRecord] as CFDictionary
+        extensions = [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String: extensionAtoms] as CFDictionary
+
+        var newDescription: CMVideoFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_AV1,
+            width: Int32(width),
+            height: Int32(height),
+            extensions: extensions,
+            formatDescriptionOut: &newDescription
+        )
+        guard status == noErr, let newDescription else {
+            throw RuntimeError("CMVideoFormatDescriptionCreate AV1 failed: \(status)")
+        }
+        formatDescription = newDescription
+
+        var callback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: decompressionCallback,
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        let decoderSpec = [
+            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String: true
+        ] as CFDictionary
+        let imageAttributes = [
+            kCVPixelBufferPixelFormatTypeKey as String: nv12PixelFormat,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ] as CFDictionary
+
+        var newSession: VTDecompressionSession?
+        let sessionStatus = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: newDescription,
+            decoderSpecification: decoderSpec,
+            imageBufferAttributes: imageAttributes,
+            outputCallback: &callback,
+            decompressionSessionOut: &newSession
+        )
+        guard sessionStatus == noErr, let newSession else {
+            throw RuntimeError("VTDecompressionSessionCreate AV1 hardware decoder failed: \(sessionStatus)")
+        }
+        session = newSession
+        log("[vhost-video-vt] VideoToolbox AV1 hardware session \(width)x\(height)")
+    }
+
+    private func setSampleAttachments(_ sampleBuffer: CMSampleBuffer) {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
+              CFArrayGetCount(attachments) > 0,
+              let attachment = CFArrayGetValueAtIndex(attachments, 0)
+        else {
+            return
+        }
+        let dictionary = unsafeBitCast(attachment, to: CFMutableDictionary.self)
+        CFDictionarySetValue(
+            dictionary,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        )
+    }
+
+    private func copyNV12(_ pixelBuffer: CVImageBuffer) -> DecodedFrame? {
+        let pixelBuffer = pixelBuffer as CVPixelBuffer
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 else { return nil }
+        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+        guard
+            let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0),
+            let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)
+        else {
+            return nil
+        }
+
+        var data = Data()
+        data.reserveCapacity(width * height * 3 / 2)
+        for row in 0..<height {
+            data.append(yBase.advanced(by: row * yStride).assumingMemoryBound(to: UInt8.self), count: width)
+        }
+        for row in 0..<(height / 2) {
+            data.append(uvBase.advanced(by: row * uvStride).assumingMemoryBound(to: UInt8.self), count: width)
+        }
+        return DecodedFrame(width: UInt32(width), height: UInt32(height), nv12: data)
+    }
+}
+
 private final class VideoBackend {
     let memory = GuestMemory()
     var queues: [VirtQueue]
     private var streams = Set<UInt32>()
+    private var streamFormats: [UInt32: UInt32] = [:]
     private var resources: [String: Resource] = [:]
     private var queuedOutputResource: UInt32?
-    private let decoder = H264VideoToolboxDecoder()
+    private let h264Decoder = H264VideoToolboxDecoder()
+    private let av1Decoder = AV1VideoToolboxDecoder()
 
     init(queueCount: Int) {
         queues = (0..<queueCount).map { VirtQueue(index: $0) }
@@ -688,13 +920,20 @@ private final class VideoBackend {
 
         log("[vhost-video-vt] QUERY_CAPABILITY queue_type=\(queueType) format=\(format)")
         var response = header(virtioVideoRespOkQueryCapability, streamId: streamId)
-        appendU32(&response, 1)
+        appendU32(&response, queueType == virtioVideoQueueTypeInput ? 2 : 1)
         appendU32(&response, 0)
         appendU64(&response, 0)
         appendU32(&response, format)
         appendU32(&response, virtioVideoPlanesLayoutSingleBuffer)
         appendU32(&response, 4096)
         appendU32(&response, 0)
+        if queueType == virtioVideoQueueTypeInput {
+            appendU64(&response, 0)
+            appendU32(&response, virtioVideoFormatAV1)
+            appendU32(&response, virtioVideoPlanesLayoutSingleBuffer)
+            appendU32(&response, 4096)
+            appendU32(&response, 0)
+        }
         return response
     }
 
@@ -705,12 +944,14 @@ private final class VideoBackend {
         let codedFormat = request.u32(16)
         guard inMem == virtioVideoMemTypeGuestPages,
               outMem == virtioVideoMemTypeGuestPages,
-              codedFormat == virtioVideoFormatH264
+              (codedFormat == virtioVideoFormatH264 || codedFormat == virtioVideoFormatAV1)
         else {
             return header(virtioVideoRespErrInvalidParameter, streamId: streamId)
         }
         streams.insert(streamId)
-        log("[vhost-video-vt] STREAM_CREATE stream_id=\(streamId) format=H264 hardware=required")
+        streamFormats[streamId] = codedFormat
+        let formatName = codedFormat == virtioVideoFormatAV1 ? "AV1" : "H264"
+        log("[vhost-video-vt] STREAM_CREATE stream_id=\(streamId) format=\(formatName) hardware=required")
         return header(virtioVideoRespOkNoData, streamId: streamId)
     }
 
@@ -763,7 +1004,13 @@ private final class VideoBackend {
         }
 
         let input = try readResource(resource, maxLength: Int(dataSize))
-        let frame = try decoder.decode(input)
+        let codedFormat = streamFormats[streamId] ?? virtioVideoFormatH264
+        let frame: DecodedFrame
+        if codedFormat == virtioVideoFormatAV1 {
+            frame = try av1Decoder.decode(input)
+        } else {
+            frame = try h264Decoder.decode(input)
+        }
         var packed = Data(scarletVideoFrameMagic)
         appendU32(&packed, frame.width)
         appendU32(&packed, frame.height)
@@ -773,7 +1020,8 @@ private final class VideoBackend {
         try writeResource(output, packed)
         queuedOutputResource = nil
 
-        log("[vhost-video-vt] decoded timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
+        let formatName = codedFormat == virtioVideoFormatAV1 ? "AV1" : "H264"
+        log("[vhost-video-vt] decoded \(formatName) timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
         return resourceQueueResponse(streamId: streamId, timestamp: timestamp, flags: 0, size: UInt32(packed.count))
     }
 

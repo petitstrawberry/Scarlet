@@ -35,6 +35,18 @@ use std::ipc::SharedMemory;
 use std::socket::Socket;
 use std::sync::Mutex;
 use std::{format, println, thread};
+#[cfg(feature = "mp4-aac")]
+use symphonia_codec_aac::AacDecoder;
+#[cfg(feature = "mp4-aac")]
+use symphonia_core::audio::layouts;
+#[cfg(feature = "mp4-aac")]
+use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
+#[cfg(feature = "mp4-aac")]
+use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
+#[cfg(feature = "mp4-aac")]
+use symphonia_core::packet::PacketRef;
+#[cfg(feature = "mp4-aac")]
+use symphonia_core::units::{Duration as AudioDuration, Timestamp as AudioTimestamp};
 use userprogram::sas_protocol as protocol;
 
 const DEFAULT_VIDEO_PATH: &str = "/root/media/bad_apple.h264";
@@ -58,6 +70,9 @@ const NV12_VIDEO_RANGE_PIXEL_FORMAT: u32 = 0x3432_3076;
 const VVIDEO_GET_BUFFER: u32 = 0x5600;
 const VVIDEO_SUBMIT: u32 = 0x5601;
 const VVIDEO_DEQUEUE: u32 = 0x5602;
+const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
+const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
+const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -74,7 +89,7 @@ struct ScarletVideoBufferInfo {
 #[derive(Clone, Copy, Default)]
 struct ScarletVideoSubmit {
     input_len: u32,
-    flags: u32,
+    coded_format: u32,
     timestamp: u64,
 }
 
@@ -284,7 +299,8 @@ impl Listenable for PaintSignal {
 #[derive(Clone)]
 struct VideoPlayerApp {
     path: String,
-    audio_path: Option<String>,
+    mp4_data: Option<Arc<Vec<u8>>>,
+    audio_source: Option<PlayerAudioSource>,
     hardware_decode: bool,
     frame_store: Arc<VideoFrameStore>,
     controls: Arc<ControlsOverlay>,
@@ -292,11 +308,23 @@ struct VideoPlayerApp {
     clock: Arc<AudioClock>,
 }
 
+#[derive(Clone)]
+enum PlayerAudioSource {
+    Wav(String),
+    Mp4Aac(Arc<Vec<u8>>),
+}
+
 impl VideoPlayerApp {
-    fn new(path: String, audio_path: Option<String>, hardware_decode: bool) -> Self {
+    fn new(
+        path: String,
+        mp4_data: Option<Arc<Vec<u8>>>,
+        audio_source: Option<PlayerAudioSource>,
+        hardware_decode: bool,
+    ) -> Self {
         Self {
             path,
-            audio_path,
+            mp4_data,
+            audio_source,
             hardware_decode,
             frame_store: Arc::new(VideoFrameStore::new()),
             controls: Arc::new(ControlsOverlay::new()),
@@ -390,15 +418,16 @@ impl Application for VideoPlayerApp {
 
     fn init(&mut self) {
         start_controls_thread(self.controls.clone(), self.paint_signal.clone());
-        if let Some(audio_path) = self.audio_path.clone() {
-            start_audio_thread(audio_path, self.clock.clone(), self.controls.clone());
+        if let Some(audio_source) = self.audio_source.clone() {
+            start_audio_thread(audio_source, self.clock.clone(), self.controls.clone());
         }
         start_decoder_thread(
             self.path.clone(),
+            self.mp4_data.clone(),
             self.frame_store.clone(),
             self.paint_signal.clone(),
             self.controls.clone(),
-            self.audio_path.is_some().then(|| self.clock.clone()),
+            self.audio_source.is_some().then(|| self.clock.clone()),
             self.hardware_decode,
         );
     }
@@ -410,6 +439,7 @@ impl Application for VideoPlayerApp {
 
 fn start_decoder_thread(
     path: String,
+    mp4_data: Option<Arc<Vec<u8>>>,
     frame_store: Arc<VideoFrameStore>,
     paint_signal: Arc<PaintSignal>,
     controls: Arc<ControlsOverlay>,
@@ -420,6 +450,7 @@ fn start_decoder_thread(
         let result = if hardware_decode {
             decode_loop_hardware(
                 &path,
+                mp4_data.as_deref().map(Vec::as_slice),
                 &frame_store,
                 &paint_signal,
                 &controls,
@@ -428,6 +459,7 @@ fn start_decoder_thread(
         } else {
             decode_loop_software(
                 &path,
+                mp4_data.as_deref().map(Vec::as_slice),
                 &frame_store,
                 &paint_signal,
                 &controls,
@@ -472,15 +504,22 @@ fn start_controls_thread(controls: Arc<ControlsOverlay>, paint_signal: Arc<Paint
 
 fn decode_loop_software(
     path: &str,
+    mp4_data: Option<&[u8]>,
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
-    let source = load_video_source(path)?;
+    let source = load_video_source(path, mp4_data)?;
+    if source.access_units.iter().any(|unit| unit.codec != VideoCodec::H264) {
+        return Err(String::from(
+            "software decoder supports only H.264; use --hwdc for this video",
+        ));
+    }
     let total_frames = source.access_units.len().max(1) as u32;
     let mut decoder = Decoder::new();
     let mut display_index = 0usize;
+    let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] software decode: {} {} access units",
         APP_NAME,
@@ -490,7 +529,8 @@ fn decode_loop_software(
 
     for access_unit in &source.access_units {
         wait_while_paused(controls);
-        let nals = parse_annex_b(&access_unit.bytes);
+        let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
+        let nals = parse_annex_b(access_unit_bytes);
         for nal in &nals {
             match decoder.decode_nal(nal) {
                 Ok(Some(frame)) => {
@@ -535,15 +575,17 @@ fn decode_loop_software(
 
 fn decode_loop_hardware(
     path: &str,
+    mp4_data: Option<&[u8]>,
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
-    let source = load_video_source(path)?;
+    let source = load_video_source(path, mp4_data)?;
     let total_frames = source.access_units.len().max(1) as u32;
     let mut decoder = HardwareVideoDecoder::open()?;
     let mut reorder = FrameReorderBuffer::new(total_frames);
+    let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] hardware decode: {} {} access units",
         APP_NAME,
@@ -553,15 +595,27 @@ fn decode_loop_hardware(
 
     for access_unit in &source.access_units {
         wait_while_paused(controls);
-        let Some(frame) = decoder.decode_access_unit(&access_unit.bytes)? else {
+        let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
+        let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
             return Err(String::from("hardware decoder produced no frame"));
         };
-        reorder.push(
-            access_unit.display_rank,
-            access_unit.presentation_time_us,
-            DecodedVideoFrame::Hardware(frame.into_owned()),
-        )?;
-        reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+        if reorder.can_publish_immediately(access_unit.display_rank) {
+            reorder.publish_immediate(
+                frame_store,
+                paint_signal,
+                controls,
+                clock,
+                access_unit.presentation_time_us,
+                DecodedVideoFrame::Hardware(frame),
+            )?;
+        } else {
+            reorder.push(
+                access_unit.display_rank,
+                access_unit.presentation_time_us,
+                DecodedVideoFrame::Hardware(frame.into_owned()),
+            )?;
+            reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+        }
     }
     reorder.finish(frame_store, paint_signal, controls, clock)?;
 
@@ -578,14 +632,68 @@ struct VideoSource {
 }
 
 struct VideoAccessUnit {
-    bytes: Vec<u8>,
+    payload: VideoAccessUnitPayload,
+    codec: VideoCodec,
     display_rank: usize,
     presentation_time_us: u64,
+}
+
+enum VideoAccessUnitPayload {
+    Owned(Vec<u8>),
+    Mp4Av1Sample {
+        offset: usize,
+        size: usize,
+        config: Av1Config,
+    },
+}
+
+impl VideoAccessUnit {
+    fn bytes<'a>(
+        &'a self,
+        mp4_data: Option<&'a [u8]>,
+        scratch: &'a mut Vec<u8>,
+    ) -> Result<&'a [u8], String> {
+        match &self.payload {
+            VideoAccessUnitPayload::Owned(bytes) => Ok(bytes),
+            VideoAccessUnitPayload::Mp4Av1Sample {
+                offset,
+                size,
+                config,
+            } => {
+                let data = mp4_data
+                    .ok_or_else(|| String::from("MP4 backing data is unavailable"))?;
+                let end = offset
+                    .checked_add(*size)
+                    .ok_or_else(|| String::from("MP4 AV1 sample offset overflow"))?;
+                let sample = data
+                    .get(*offset..end)
+                    .ok_or_else(|| String::from("MP4 AV1 sample points outside file"))?;
+                av1_sample_to_scarlet_into(config, sample, scratch)?;
+                Ok(scratch)
+            }
+        }
+    }
 }
 
 enum VideoContainerFormat {
     RawH264,
     Mp4H264,
+    Mp4Av1,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoCodec {
+    H264,
+    Av1,
+}
+
+impl VideoCodec {
+    fn coded_format(self) -> u32 {
+        match self {
+            VideoCodec::H264 => VIRTIO_VIDEO_FORMAT_H264,
+            VideoCodec::Av1 => VIRTIO_VIDEO_FORMAT_AV1,
+        }
+    }
 }
 
 impl VideoSource {
@@ -593,14 +701,18 @@ impl VideoSource {
         match self.format {
             VideoContainerFormat::RawH264 => "raw H.264",
             VideoContainerFormat::Mp4H264 => "MP4/H.264",
+            VideoContainerFormat::Mp4Av1 => "MP4/AV1",
         }
     }
 }
 
-fn load_video_source(path: &str) -> Result<VideoSource, String> {
+fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource, String> {
+    if let Some(data) = mp4_data {
+        return load_mp4_video_source(data, true);
+    }
     let data = read_file(path)?;
     if looks_like_mp4(&data) {
-        return load_mp4_h264_source(&data);
+        return load_mp4_video_source(&data, false);
     }
     Ok(VideoSource {
         format: VideoContainerFormat::RawH264,
@@ -608,7 +720,8 @@ fn load_video_source(path: &str) -> Result<VideoSource, String> {
             .into_iter()
             .enumerate()
             .map(|(display_rank, bytes)| VideoAccessUnit {
-                bytes,
+                payload: VideoAccessUnitPayload::Owned(bytes),
+                codec: VideoCodec::H264,
                 display_rank,
                 presentation_time_us: display_rank as u64 * FRAME_INTERVAL_MS * 1_000,
             })
@@ -649,7 +762,10 @@ struct Mp4Box {
 #[derive(Default)]
 struct Mp4Track {
     is_video: bool,
+    is_audio: bool,
     avcc: Option<AvcConfig>,
+    av1: Option<Av1Config>,
+    aac: Option<AacConfig>,
     media_timescale: u32,
     sample_sizes: Vec<u32>,
     time_to_sample: Vec<TimeToSampleEntry>,
@@ -662,6 +778,20 @@ struct Mp4Track {
 struct AvcConfig {
     nal_length_size: usize,
     parameter_sets: Vec<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct Av1Config {
+    config_record: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct AacConfig {
+    audio_specific_config: Vec<u8>,
+    sample_rate: u32,
+    channels: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -687,7 +817,7 @@ fn looks_like_mp4(data: &[u8]) -> bool {
     false
 }
 
-fn load_mp4_h264_source(data: &[u8]) -> Result<VideoSource, String> {
+fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<VideoSource, String> {
     let mut offset = 0usize;
     let mut video_track = None;
     while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
@@ -698,11 +828,14 @@ fn load_mp4_h264_source(data: &[u8]) -> Result<VideoSource, String> {
         offset = mp4_box.data_end;
     }
 
-    let track = video_track.ok_or_else(|| String::from("MP4 has no H.264 video track"))?;
-    let avcc = track
-        .avcc
-        .as_ref()
-        .ok_or_else(|| String::from("MP4 H.264 track has no avcC configuration"))?;
+    let track = video_track.ok_or_else(|| String::from("MP4 has no supported video track"))?;
+    let video_format = if track.avcc.is_some() {
+        VideoContainerFormat::Mp4H264
+    } else if track.av1.is_some() {
+        VideoContainerFormat::Mp4Av1
+    } else {
+        return Err(String::from("MP4 has no supported video codec"));
+    };
     let sample_offsets = mp4_sample_offsets(&track)?;
     if sample_offsets.len() != track.sample_sizes.len() {
         return Err(String::from("MP4 sample table is inconsistent"));
@@ -719,16 +852,103 @@ fn load_mp4_h264_source(data: &[u8]) -> Result<VideoSource, String> {
         let sample = data
             .get(offset..end)
             .ok_or_else(|| String::from("MP4 sample points outside file"))?;
+        let (payload, codec) = match video_format {
+            VideoContainerFormat::Mp4H264 => {
+                let avcc = track
+                    .avcc
+                    .as_ref()
+                    .ok_or_else(|| String::from("MP4 H.264 track has no avcC configuration"))?;
+                (
+                    VideoAccessUnitPayload::Owned(avc_sample_to_annex_b(avcc, sample)?),
+                    VideoCodec::H264,
+                )
+            }
+            VideoContainerFormat::Mp4Av1 => {
+                let av1 = track
+                    .av1
+                    .as_ref()
+                    .ok_or_else(|| String::from("MP4 AV1 track has no av1C configuration"))?;
+                if can_reference_mp4_data {
+                    (
+                        VideoAccessUnitPayload::Mp4Av1Sample {
+                            offset,
+                            size,
+                            config: av1.clone(),
+                        },
+                        VideoCodec::Av1,
+                    )
+                } else {
+                    (
+                        VideoAccessUnitPayload::Owned(av1_sample_to_scarlet(av1, sample)?),
+                        VideoCodec::Av1,
+                    )
+                }
+            }
+            VideoContainerFormat::RawH264 => unreachable!(),
+        };
         access_units.push(VideoAccessUnit {
-            bytes: avc_sample_to_annex_b(&avcc, sample)?,
+            payload,
+            codec,
             display_rank: display_ranks[index],
             presentation_time_us: presentation_times_us[index],
         });
     }
 
     Ok(VideoSource {
-        format: VideoContainerFormat::Mp4H264,
+        format: video_format,
         access_units,
+    })
+}
+
+struct Mp4AacAudioSource {
+    data: Arc<Vec<u8>>,
+    config: AacConfig,
+    samples: Vec<SampleRange>,
+}
+
+#[derive(Clone, Copy)]
+struct SampleRange {
+    offset: usize,
+    size: usize,
+}
+
+fn load_mp4_aac_audio_source(data: Arc<Vec<u8>>) -> Result<Mp4AacAudioSource, String> {
+    let mut offset = 0usize;
+    let mut audio_track = None;
+    while let Some(mp4_box) = read_mp4_box(data.as_slice(), offset, data.len()) {
+        if &mp4_box.typ == b"moov" {
+            audio_track = find_mp4_audio_track(data.as_slice(), mp4_box.data_start, mp4_box.data_end)?;
+            break;
+        }
+        offset = mp4_box.data_end;
+    }
+
+    let track = audio_track.ok_or_else(|| String::from("MP4 has no AAC audio track"))?;
+    let config = track
+        .aac
+        .clone()
+        .ok_or_else(|| String::from("MP4 audio track has no AAC config"))?;
+    let sample_offsets = mp4_sample_offsets(&track)?;
+    if sample_offsets.len() != track.sample_sizes.len() {
+        return Err(String::from("MP4 audio sample table is inconsistent"));
+    }
+
+    let mut samples = Vec::new();
+    for (index, offset) in sample_offsets.iter().enumerate() {
+        let offset = *offset as usize;
+        let size = track.sample_sizes[index] as usize;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| String::from("MP4 AAC sample offset overflow"))?;
+        data.get(offset..end)
+            .ok_or_else(|| String::from("MP4 AAC sample points outside file"))?;
+        samples.push(SampleRange { offset, size });
+    }
+
+    Ok(Mp4AacAudioSource {
+        data,
+        config,
+        samples,
     })
 }
 
@@ -737,7 +957,21 @@ fn find_mp4_video_track(data: &[u8], start: usize, end: usize) -> Result<Option<
     while let Some(mp4_box) = read_mp4_box(data, offset, end) {
         if &mp4_box.typ == b"trak" {
             let track = parse_mp4_track(data, mp4_box.data_start, mp4_box.data_end)?;
-            if track.is_video && track.avcc.is_some() {
+            if track.is_video && (track.avcc.is_some() || track.av1.is_some()) {
+                return Ok(Some(track));
+            }
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(None)
+}
+
+fn find_mp4_audio_track(data: &[u8], start: usize, end: usize) -> Result<Option<Mp4Track>, String> {
+    let mut offset = start;
+    while let Some(mp4_box) = read_mp4_box(data, offset, end) {
+        if &mp4_box.typ == b"trak" {
+            let track = parse_mp4_track(data, mp4_box.data_start, mp4_box.data_end)?;
+            if track.is_audio && track.aac.is_some() {
                 return Ok(Some(track));
             }
         }
@@ -830,6 +1064,7 @@ fn parse_hdlr(data: &[u8], start: usize, _end: usize, track: &mut Mp4Track) -> R
         .get(start + 8..start + 12)
         .ok_or_else(|| String::from("MP4 hdlr box is truncated"))?;
     track.is_video = handler == b"vide";
+    track.is_audio = handler == b"soun";
     Ok(())
 }
 
@@ -865,10 +1100,214 @@ fn parse_stsd(data: &[u8], start: usize, end: usize, track: &mut Mp4Track) -> Re
         };
         if &entry.typ == b"avc1" || &entry.typ == b"avc3" {
             parse_avc_sample_entry(data, entry.data_start, entry.data_end, track)?;
+        } else if &entry.typ == b"av01" {
+            parse_av1_sample_entry(data, entry.data_start, entry.data_end, track)?;
+        } else if &entry.typ == b"mp4a" {
+            parse_mp4a_sample_entry(data, entry.data_start, entry.data_end, track)?;
         }
         offset = entry.data_end;
     }
     Ok(())
+}
+
+fn parse_mp4a_sample_entry(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track: &mut Mp4Track,
+) -> Result<(), String> {
+    let entry = data
+        .get(start..end)
+        .ok_or_else(|| String::from("MP4 mp4a sample entry is truncated"))?;
+    if entry.len() < 28 {
+        return Err(String::from("MP4 mp4a sample entry is truncated"));
+    }
+    let fallback_channels = read_u16_be(&entry[16..18]);
+    let fallback_sample_rate = read_u32_be(&entry[24..28]) >> 16;
+    let mut offset = start
+        .checked_add(28)
+        .ok_or_else(|| String::from("MP4 mp4a sample entry overflow"))?;
+    while let Some(mp4_box) = read_mp4_box(data, offset, end) {
+        if &mp4_box.typ == b"esds" {
+            let asc = parse_esds(data, mp4_box.data_start, mp4_box.data_end)?;
+            let (sample_rate, channels, object_type) = parse_aac_audio_specific_config(&asc)
+                .unwrap_or((fallback_sample_rate, fallback_channels, 2));
+            if object_type != 2 {
+                return Err(String::from("MP4 AAC track is not AAC-LC"));
+            }
+            track.aac = Some(AacConfig {
+                audio_specific_config: asc,
+                sample_rate,
+                channels,
+            });
+            return Ok(());
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(())
+}
+
+fn parse_esds(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, String> {
+    let esds = data
+        .get(start..end)
+        .ok_or_else(|| String::from("MP4 esds box is truncated"))?;
+    if esds.len() < 4 {
+        return Err(String::from("MP4 esds box is truncated"));
+    }
+    let mut cursor = 4usize;
+    let tag = read_mp4_descriptor(esds, &mut cursor)?;
+    if tag.tag != 0x03 {
+        return Err(String::from("MP4 esds missing ES_Descriptor"));
+    }
+    let es_end = tag
+        .payload_start
+        .checked_add(tag.payload_len)
+        .ok_or_else(|| String::from("MP4 esds descriptor overflow"))?;
+    cursor = tag
+        .payload_start
+        .checked_add(3)
+        .ok_or_else(|| String::from("MP4 esds descriptor overflow"))?;
+    if cursor > es_end {
+        return Err(String::from("MP4 esds ES_Descriptor is truncated"));
+    }
+    let flags = esds[cursor - 1];
+    if flags & 0x80 != 0 {
+        cursor = cursor
+            .checked_add(2)
+            .ok_or_else(|| String::from("MP4 esds dependsOn overflow"))?;
+    }
+    if flags & 0x40 != 0 {
+        let url_len = *esds
+            .get(cursor)
+            .ok_or_else(|| String::from("MP4 esds URL is truncated"))?
+            as usize;
+        cursor = cursor
+            .checked_add(1 + url_len)
+            .ok_or_else(|| String::from("MP4 esds URL overflow"))?;
+    }
+    if flags & 0x20 != 0 {
+        cursor = cursor
+            .checked_add(2)
+            .ok_or_else(|| String::from("MP4 esds OCR overflow"))?;
+    }
+    if cursor > es_end {
+        return Err(String::from("MP4 esds ES_Descriptor overread"));
+    }
+
+    let decoder_config = read_mp4_descriptor(esds, &mut cursor)?;
+    if decoder_config.tag != 0x04 {
+        return Err(String::from("MP4 esds missing DecoderConfigDescriptor"));
+    }
+    let decoder_start = decoder_config.payload_start;
+    let decoder_end = decoder_start
+        .checked_add(decoder_config.payload_len)
+        .ok_or_else(|| String::from("MP4 esds decoder config overflow"))?;
+    if decoder_start.checked_add(13).unwrap_or(usize::MAX) > decoder_end {
+        return Err(String::from(
+            "MP4 esds DecoderConfigDescriptor is truncated",
+        ));
+    }
+    if esds[decoder_start] != 0x40 {
+        return Err(String::from("MP4 esds object type is not MPEG-4 AAC"));
+    }
+    cursor = decoder_start + 13;
+    let decoder_specific = read_mp4_descriptor(esds, &mut cursor)?;
+    if decoder_specific.tag != 0x05 {
+        return Err(String::from("MP4 esds missing AudioSpecificConfig"));
+    }
+    let asc_end = decoder_specific
+        .payload_start
+        .checked_add(decoder_specific.payload_len)
+        .ok_or_else(|| String::from("MP4 esds AudioSpecificConfig overflow"))?;
+    Ok(esds
+        .get(decoder_specific.payload_start..asc_end)
+        .ok_or_else(|| String::from("MP4 esds AudioSpecificConfig is truncated"))?
+        .to_vec())
+}
+
+struct Mp4Descriptor {
+    tag: u8,
+    payload_start: usize,
+    payload_len: usize,
+}
+
+fn read_mp4_descriptor(data: &[u8], cursor: &mut usize) -> Result<Mp4Descriptor, String> {
+    let tag = *data
+        .get(*cursor)
+        .ok_or_else(|| String::from("MP4 descriptor tag is truncated"))?;
+    *cursor += 1;
+    let mut len = 0usize;
+    for _ in 0..4 {
+        let byte = *data
+            .get(*cursor)
+            .ok_or_else(|| String::from("MP4 descriptor length is truncated"))?;
+        *cursor += 1;
+        len = (len << 7) | usize::from(byte & 0x7f);
+        if byte & 0x80 == 0 {
+            return Ok(Mp4Descriptor {
+                tag,
+                payload_start: *cursor,
+                payload_len: len,
+            });
+        }
+    }
+    Err(String::from("MP4 descriptor length is invalid"))
+}
+
+fn parse_aac_audio_specific_config(asc: &[u8]) -> Result<(u32, u16, u8), String> {
+    let mut reader = BitReaderMsb::new(asc);
+    let object_type = reader
+        .read_bits(5)
+        .ok_or_else(|| String::from("AAC AudioSpecificConfig object type is truncated"))?
+        as u8;
+    let frequency_index = reader
+        .read_bits(4)
+        .ok_or_else(|| String::from("AAC AudioSpecificConfig frequency is truncated"))?
+        as usize;
+    let sample_rate = if frequency_index == 15 {
+        reader
+            .read_bits(24)
+            .ok_or_else(|| String::from("AAC explicit sample rate is truncated"))?
+    } else {
+        *AAC_SAMPLE_RATES
+            .get(frequency_index)
+            .ok_or_else(|| String::from("AAC sample rate index is unsupported"))?
+    };
+    let channel_config = reader
+        .read_bits(4)
+        .ok_or_else(|| String::from("AAC AudioSpecificConfig channel config is truncated"))?
+        as u16;
+    Ok((sample_rate, channel_config, object_type))
+}
+
+const AAC_SAMPLE_RATES: [u32; 13] = [
+    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
+    7_350,
+];
+
+struct BitReaderMsb<'a> {
+    bytes: &'a [u8],
+    bit_offset: usize,
+}
+
+impl<'a> BitReaderMsb<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            bit_offset: 0,
+        }
+    }
+
+    fn read_bits(&mut self, count: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..count {
+            let byte = *self.bytes.get(self.bit_offset / 8)?;
+            let bit = (byte >> (7 - (self.bit_offset % 8))) & 1;
+            self.bit_offset += 1;
+            value = (value << 1) | u32::from(bit);
+        }
+        Some(value)
+    }
 }
 
 fn parse_avc_sample_entry(
@@ -883,6 +1322,44 @@ fn parse_avc_sample_entry(
     while let Some(mp4_box) = read_mp4_box(data, offset, end) {
         if &mp4_box.typ == b"avcC" {
             track.avcc = Some(parse_avcc(data, mp4_box.data_start, mp4_box.data_end)?);
+            return Ok(());
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(())
+}
+
+fn parse_av1_sample_entry(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track: &mut Mp4Track,
+) -> Result<(), String> {
+    let entry = data
+        .get(start..end)
+        .ok_or_else(|| String::from("MP4 av01 sample entry is truncated"))?;
+    if entry.len() < 78 {
+        return Err(String::from("MP4 av01 sample entry is truncated"));
+    }
+    let width = read_u16_be(&entry[24..26]) as u32;
+    let height = read_u16_be(&entry[26..28]) as u32;
+    let mut offset = start
+        .checked_add(78)
+        .ok_or_else(|| String::from("MP4 av01 sample entry overflow"))?;
+    while let Some(mp4_box) = read_mp4_box(data, offset, end) {
+        if &mp4_box.typ == b"av1C" {
+            let config_record = data
+                .get(mp4_box.data_start..mp4_box.data_end)
+                .ok_or_else(|| String::from("MP4 av1C box is truncated"))?
+                .to_vec();
+            if config_record.len() < 4 || config_record[0] >> 7 != 1 {
+                return Err(String::from("MP4 av1C configuration is unsupported"));
+            }
+            track.av1 = Some(Av1Config {
+                config_record,
+                width,
+                height,
+            });
             return Ok(());
         }
         offset = mp4_box.data_end;
@@ -1199,6 +1676,39 @@ fn avc_sample_to_annex_b(config: &AvcConfig, sample: &[u8]) -> Result<Vec<u8>, S
     Ok(out)
 }
 
+fn av1_sample_to_scarlet(config: &Av1Config, sample: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    av1_sample_to_scarlet_into(config, sample, &mut out)?;
+    Ok(out)
+}
+
+fn av1_sample_to_scarlet_into(
+    config: &Av1Config,
+    sample: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let config_len = u32::try_from(config.config_record.len())
+        .map_err(|_| String::from("MP4 av1C configuration is too large"))?;
+    let sample_len =
+        u32::try_from(sample.len()).map_err(|_| String::from("MP4 AV1 sample is too large"))?;
+    out.clear();
+    let total_len = SCARLET_AV1_ACCESS_UNIT_MAGIC
+        .len()
+        .checked_add(16)
+        .and_then(|len| len.checked_add(config.config_record.len()))
+        .and_then(|len| len.checked_add(sample.len()))
+        .ok_or_else(|| String::from("MP4 AV1 access unit length overflow"))?;
+    out.reserve(total_len.saturating_sub(out.capacity()));
+    out.extend_from_slice(SCARLET_AV1_ACCESS_UNIT_MAGIC);
+    out.extend_from_slice(&config.width.to_le_bytes());
+    out.extend_from_slice(&config.height.to_le_bytes());
+    out.extend_from_slice(&config_len.to_le_bytes());
+    out.extend_from_slice(&sample_len.to_le_bytes());
+    out.extend_from_slice(&config.config_record);
+    out.extend_from_slice(sample);
+    Ok(())
+}
+
 fn read_nal_length(sample: &[u8], offset: usize, nal_length_size: usize) -> Result<usize, String> {
     let end = offset
         .checked_add(nal_length_size)
@@ -1318,6 +1828,7 @@ impl HardwareVideoDecoder {
 
     fn decode_access_unit(
         &mut self,
+        codec: VideoCodec,
         access_unit: &[u8],
     ) -> Result<Option<ScarletVideoFrame>, String> {
         if access_unit.is_empty() {
@@ -1325,8 +1836,13 @@ impl HardwareVideoDecoder {
         }
         if let Some(buffer) = &self.mapped {
             if access_unit.len() <= buffer.input_len {
-                return self.decode_access_unit_mapped(access_unit);
+                return self.decode_access_unit_mapped(codec, access_unit);
             }
+        }
+        if codec != VideoCodec::H264 {
+            return Err(String::from(
+                "hardware decoder mmap input overflow for non-H.264 access unit",
+            ));
         }
         self.decode_access_unit_stream(access_unit)
     }
@@ -1381,6 +1897,7 @@ impl HardwareVideoDecoder {
 
     fn decode_access_unit_mapped(
         &mut self,
+        codec: VideoCodec,
         access_unit: &[u8],
     ) -> Result<Option<ScarletVideoFrame>, String> {
         let Some(buffer) = &self.mapped else {
@@ -1406,7 +1923,7 @@ impl HardwareVideoDecoder {
 
         let submit = ScarletVideoSubmit {
             input_len: access_unit.len() as u32,
-            flags: 0,
+            coded_format: codec.coded_format(),
             timestamp: 0,
         };
         self.device
@@ -1524,6 +2041,34 @@ impl FrameReorderBuffer {
             total_frames,
             published: 0,
         }
+    }
+
+    fn can_publish_immediately(&self, display_rank: usize) -> bool {
+        self.pending.is_empty() && display_rank == self.next_rank
+    }
+
+    fn publish_immediate(
+        &mut self,
+        frame_store: &VideoFrameStore,
+        paint_signal: &PaintSignal,
+        controls: &ControlsOverlay,
+        clock: Option<&AudioClock>,
+        presentation_time_us: u64,
+        frame: DecodedVideoFrame,
+    ) -> Result<(), String> {
+        publish_frame_synced(
+            frame_store,
+            paint_signal,
+            controls,
+            frame,
+            self.published,
+            self.total_frames,
+            presentation_time_us,
+            clock,
+        )?;
+        self.next_rank += 1;
+        self.published += 1;
+        Ok(())
     }
 
     fn push(
@@ -1736,13 +2281,28 @@ impl<'a> EbspBitReader<'a> {
     }
 }
 
-fn start_audio_thread(path: String, clock: Arc<AudioClock>, controls: Arc<ControlsOverlay>) {
+fn start_audio_thread(
+    source: PlayerAudioSource,
+    clock: Arc<AudioClock>,
+    controls: Arc<ControlsOverlay>,
+) {
     thread::spawn(move || {
-        if let Err(err) = play_wav_sas(&path, &clock, &controls) {
+        if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
             clock.mark_unavailable();
             println!("[{}] audio: {}", APP_NAME, err);
         }
     });
+}
+
+fn play_audio_source_sas(
+    source: &PlayerAudioSource,
+    clock: &AudioClock,
+    controls: &ControlsOverlay,
+) -> Result<(), String> {
+    match source {
+        PlayerAudioSource::Wav(path) => play_wav_sas(path, clock, controls),
+        PlayerAudioSource::Mp4Aac(data) => play_mp4_aac_sas(data.clone(), clock, controls),
+    }
 }
 
 fn play_wav_sas(path: &str, clock: &AudioClock, controls: &ControlsOverlay) -> Result<(), String> {
@@ -1751,88 +2311,243 @@ fn play_wav_sas(path: &str, clock: &AudioClock, controls: &ControlsOverlay) -> R
     if wav.audio_format != 1 || wav.bits_per_sample != 16 {
         return Err(String::from("SAS accepts only PCM S16LE WAV files"));
     }
-    if wav.sample_rate != 48_000 || wav.channels != 2 {
-        return Err(String::from("SAS accepts only 48000 Hz stereo WAV files"));
+    let data = &bytes[wav.data_offset..wav.data_offset + wav.data_len];
+    play_sas_pcm_s16le(data, wav.sample_rate, wav.channels, clock, controls)
+}
+
+fn play_mp4_aac_sas(
+    data: Arc<Vec<u8>>,
+    clock: &AudioClock,
+    controls: &ControlsOverlay,
+) -> Result<(), String> {
+    #[cfg(not(feature = "mp4-aac"))]
+    {
+        let _ = (data, clock, controls);
+        Err(String::from("MP4/AAC audio support is not built"))
     }
 
-    let mut socket = Socket::new().map_err(|_| format!("failed to create SAS socket"))?;
-    socket
-        .connect(protocol::SOCKET_PATH)
-        .map_err(|_| format!("failed to connect to SAS"))?;
+    #[cfg(feature = "mp4-aac")]
+    {
+        let source = load_mp4_aac_audio_source(data)?;
+        println!(
+            "[{}] audio AAC: {} samples rate={} channels={}",
+            APP_NAME,
+            source.samples.len(),
+            source.config.sample_rate,
+            source.config.channels
+        );
+        play_aac_source_sas(&source, clock, controls)
+    }
+}
 
-    let config = protocol::Config {
-        format: AUDIO_PCM_FORMAT_S16LE,
-        rate: wav.sample_rate,
-        channels: wav.channels,
-        reserved: 0,
-        period_frames: 480,
-        buffer_frames: 1_920,
-    };
-    write_sas_frame(&mut socket, protocol::MSG_CONFIGURE, &config.to_le_bytes())?;
-    read_sas_ok(&mut socket)?;
-    let shm_handle = socket
-        .recv_handle()
-        .map_err(|_| format!("failed to receive SAS shared ring"))?;
-    let shm = SharedMemory::from_handle(shm_handle).map_err(|_| format!("invalid SAS ring"))?;
-    let ring_size = protocol::RING_HEADER_SIZE + config.buffer_frames as usize * 4;
-    let mapper = shm
-        .as_handle()
-        .as_memory_mapping()
-        .map_err(|_| format!("SAS shared ring is not mappable"))?;
-    let ring_addr = mapper
-        .mmap(
-            0,
-            ring_size,
-            prot::READ | prot::WRITE,
-            mmap_flags::SHARED,
-            0,
-        )
-        .map_err(|_| format!("failed to map SAS shared ring"))?;
+fn play_sas_pcm_s16le(
+    data: &[u8],
+    sample_rate: u32,
+    channels: u16,
+    clock: &AudioClock,
+    controls: &ControlsOverlay,
+) -> Result<(), String> {
+    if sample_rate == 0 {
+        return Err(String::from("audio sample rate is zero"));
+    }
+    if channels == 0 {
+        return Err(String::from("audio channel count is zero"));
+    }
+    let frame_bytes = channels as usize * 2;
+    if data.len() < frame_bytes {
+        clock.mark_started(sample_rate);
+        return Ok(());
+    }
 
-    let data = &bytes[wav.data_offset..wav.data_offset + wav.data_len];
-    let frame_bytes = wav.channels as usize * 2;
-    let total_data_frames = data.len() / frame_bytes;
-    let mut pos_frame = 0usize;
-    clock.mark_started(wav.sample_rate);
+    let mut writer = SasPcmWriter::new(sample_rate, channels, frame_bytes, clock)?;
+    writer.write_bytes(data, controls, clock)?;
+    writer.drain_close(clock)
+}
 
-    while pos_frame < total_data_frames {
-        // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
-        clock.update_read_frames(unsafe { sas_ring_read_frames(ring_addr) });
-        while controls.is_paused() {
-            // SAFETY: `ring_addr` remains mapped while audio playback is active.
-            clock.update_read_frames(unsafe { sas_ring_read_frames(ring_addr) });
+struct SasPcmWriter {
+    socket: Socket,
+    ring_addr: usize,
+    frame_bytes: usize,
+}
+
+impl SasPcmWriter {
+    fn new(
+        sample_rate: u32,
+        channels: u16,
+        frame_bytes: usize,
+        clock: &AudioClock,
+    ) -> Result<Self, String> {
+        let mut socket = Socket::new().map_err(|_| format!("failed to create SAS socket"))?;
+        socket
+            .connect(protocol::SOCKET_PATH)
+            .map_err(|_| format!("failed to connect to SAS"))?;
+
+        let period_frames = (sample_rate / 100).max(64);
+        let buffer_frames = (sample_rate / 5).max(period_frames * 4);
+        let config = protocol::Config {
+            format: AUDIO_PCM_FORMAT_S16LE,
+            rate: sample_rate,
+            channels,
+            reserved: 0,
+            period_frames,
+            buffer_frames,
+        };
+        write_sas_frame(&mut socket, protocol::MSG_CONFIGURE, &config.to_le_bytes())?;
+        read_sas_ok(&mut socket)?;
+        let shm_handle = socket
+            .recv_handle()
+            .map_err(|_| format!("failed to receive SAS shared ring"))?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| format!("invalid SAS ring"))?;
+        let ring_size = protocol::RING_HEADER_SIZE + config.buffer_frames as usize * frame_bytes;
+        let mapper = shm
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| format!("SAS shared ring is not mappable"))?;
+        let ring_addr = mapper
+            .mmap(
+                0,
+                ring_size,
+                prot::READ | prot::WRITE,
+                mmap_flags::SHARED,
+                0,
+            )
+            .map_err(|_| format!("failed to map SAS shared ring"))?;
+
+        clock.mark_started(sample_rate);
+
+        Ok(Self {
+            socket,
+            ring_addr,
+            frame_bytes,
+        })
+    }
+
+    fn write_bytes(
+        &mut self,
+        data: &[u8],
+        controls: &ControlsOverlay,
+        clock: &AudioClock,
+    ) -> Result<(), String> {
+        let total_data_frames = data.len() / self.frame_bytes;
+        let mut pos_frame = 0usize;
+
+        while pos_frame < total_data_frames {
+            // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
+            clock.update_read_frames(unsafe { sas_ring_read_frames(self.ring_addr) });
+            while controls.is_paused() {
+                // SAFETY: `ring_addr` remains mapped while audio playback is active.
+                clock.update_read_frames(unsafe { sas_ring_read_frames(self.ring_addr) });
+                thread::sleep(Duration::from_millis(10));
+            }
+            // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
+            let frames =
+                unsafe { writable_sas_frames(self.ring_addr).min(total_data_frames - pos_frame) };
+            if frames == 0 {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+
+            let data_offset = pos_frame * self.frame_bytes;
+            // SAFETY: `frames` is bounded by SAS writable space and source data length.
+            unsafe {
+                write_sas_ring_chunk(
+                    self.ring_addr,
+                    &data[data_offset..data_offset + frames * self.frame_bytes],
+                    self.frame_bytes,
+                    frames,
+                );
+            }
+            pos_frame += frames;
+        }
+        Ok(())
+    }
+
+    fn drain_close(mut self, clock: &AudioClock) -> Result<(), String> {
+        write_sas_frame(&mut self.socket, protocol::MSG_DRAIN, &[])?;
+        // SAFETY: `ring_addr` remains mapped until playback cleanup completes.
+        while !unsafe { sas_ring_is_empty(self.ring_addr) } {
+            // SAFETY: `ring_addr` remains mapped until playback cleanup completes.
+            clock.update_read_frames(unsafe { sas_ring_read_frames(self.ring_addr) });
             thread::sleep(Duration::from_millis(10));
         }
-        // SAFETY: `ring_addr` is the SAS shared ring mmap returned by SAS.
-        let frames = unsafe { writable_sas_frames(ring_addr).min(total_data_frames - pos_frame) };
-        if frames == 0 {
-            thread::sleep(Duration::from_millis(2));
-            continue;
-        }
-
-        let data_offset = pos_frame * frame_bytes;
-        // SAFETY: `frames` is bounded by SAS writable space and source data length.
-        unsafe {
-            write_sas_ring_chunk(
-                ring_addr,
-                &data[data_offset..data_offset + frames * frame_bytes],
-                frame_bytes,
-                frames,
-            );
-        }
-        pos_frame += frames;
+        read_sas_ok(&mut self.socket)?;
+        let _ = write_sas_frame(&mut self.socket, protocol::MSG_CLOSE, &[]);
+        Ok(())
     }
+}
 
-    write_sas_frame(&mut socket, protocol::MSG_DRAIN, &[])?;
-    // SAFETY: `ring_addr` remains mapped until playback cleanup completes.
-    while !unsafe { sas_ring_is_empty(ring_addr) } {
-        // SAFETY: `ring_addr` remains mapped until playback cleanup completes.
-        clock.update_read_frames(unsafe { sas_ring_read_frames(ring_addr) });
-        thread::sleep(Duration::from_millis(10));
+#[cfg(feature = "mp4-aac")]
+fn play_aac_source_sas(
+    source: &Mp4AacAudioSource,
+    clock: &AudioClock,
+    controls: &ControlsOverlay,
+) -> Result<(), String> {
+    let frame_bytes = source.config.channels as usize * 2;
+    if frame_bytes == 0 {
+        return Err(String::from("AAC channel count is zero"));
     }
-    read_sas_ok(&mut socket)?;
-    let _ = write_sas_frame(&mut socket, protocol::MSG_CLOSE, &[]);
-    Ok(())
+    let mut writer = SasPcmWriter::new(
+        source.config.sample_rate,
+        source.config.channels,
+        frame_bytes,
+        clock,
+    )?;
+    let mut decoder = create_aac_decoder(source)?;
+    let mut samples = Vec::<i16>::new();
+    let mut bytes = Vec::<u8>::new();
+    let mut pts = 0i64;
+    for range in &source.samples {
+        let sample_end = range
+            .offset
+            .checked_add(range.size)
+            .ok_or_else(|| String::from("MP4 AAC sample range overflow"))?;
+        let sample = source
+            .data
+            .get(range.offset..sample_end)
+            .ok_or_else(|| String::from("MP4 AAC sample range is invalid"))?;
+        let packet = PacketRef::new(
+            0,
+            AudioTimestamp::new(pts),
+            AudioDuration::new(1024),
+            sample,
+        );
+        pts = pts.saturating_add(1024);
+        samples.clear();
+        let decoded = decoder
+            .decode_ref(&packet)
+            .map_err(|_| String::from("AAC frame decode failed"))?;
+        decoded.copy_to_vec_interleaved::<i16>(&mut samples);
+        bytes.clear();
+        bytes.reserve(samples.len() * 2);
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        writer.write_bytes(&bytes, controls, clock)?;
+    }
+    writer.drain_close(clock)
+}
+
+#[cfg(feature = "mp4-aac")]
+fn create_aac_decoder(source: &Mp4AacAudioSource) -> Result<AacDecoder, String> {
+    let channels = match source.config.channels {
+        1 => layouts::CHANNEL_LAYOUT_MONO,
+        2 => layouts::CHANNEL_LAYOUT_STEREO,
+        _ => return Err(String::from("AAC decoder supports only mono/stereo output")),
+    };
+    let mut params = AudioCodecParameters::new();
+    params
+        .for_codec(CODEC_ID_AAC)
+        .with_sample_rate(source.config.sample_rate)
+        .with_channels(channels)
+        .with_extra_data(
+            source
+                .config
+                .audio_specific_config
+                .clone()
+                .into_boxed_slice(),
+        );
+    AacDecoder::try_new(&params, &AudioDecoderOptions::default())
+        .map_err(|_| String::from("AAC decoder initialization failed"))
 }
 
 fn publish_frame_synced(
@@ -2732,11 +3447,29 @@ pub extern "C" fn main() -> i32 {
     if args.hardware_decode {
         println!("[{}] hardware decoder {}", APP_NAME, VVIDEO_DEVICE_PATH);
     }
-    if let Some(path) = args.audio_path.as_ref() {
-        println!("[{}] audio {}", APP_NAME, path);
+    let mp4_data = if is_mp4_path(&video_path) {
+        println!("[{}] loading MP4 {}", APP_NAME, video_path);
+        Some(Arc::new(read_file(&video_path).unwrap_or_else(|_| {
+            println!("[{}] Application error: failed to read MP4 file", APP_NAME);
+            Vec::new()
+        })))
+    } else {
+        None
+    };
+    if matches!(mp4_data.as_ref().map(|data| data.is_empty()), Some(true)) {
+        return 1;
     }
+    let audio_source = if let Some(path) = args.audio_path {
+        println!("[{}] audio {}", APP_NAME, path);
+        Some(PlayerAudioSource::Wav(path))
+    } else if let Some(data) = &mp4_data {
+        println!("[{}] audio MP4/AAC", APP_NAME);
+        Some(PlayerAudioSource::Mp4Aac(data.clone()))
+    } else {
+        None
+    };
 
-    let mut app = VideoPlayerApp::new(video_path, args.audio_path, args.hardware_decode);
+    let mut app = VideoPlayerApp::new(video_path, mp4_data, audio_source, args.hardware_decode);
     match app.run() {
         Ok(()) => 0,
         Err(error) => {
@@ -2744,6 +3477,10 @@ pub extern "C" fn main() -> i32 {
             1
         }
     }
+}
+
+fn is_mp4_path(path: &str) -> bool {
+    path.ends_with(".mp4") || path.ends_with(".m4v") || path.ends_with(".m4a")
 }
 
 struct PlayerArgs {

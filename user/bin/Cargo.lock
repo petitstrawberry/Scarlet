@@ -2087,6 +2087,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin 0.9.8",
+]
+
+[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2432,6 +2441,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
  "num-traits",
 ]
 
@@ -3527,7 +3545,7 @@ name = "scarlet_std"
 version = "0.16.0"
 dependencies = [
  "hashbrown 0.15.5",
- "spin",
+ "spin 0.10.0",
  "talc",
 ]
 
@@ -3833,6 +3851,12 @@ dependencies = [
 
 [[package]]
 name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spin"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
@@ -3919,6 +3943,50 @@ name = "sws_protocol"
 version = "0.16.0"
 dependencies = [
  "scarlet_std",
+]
+
+[[package]]
+name = "symphonia-codec-aac"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-common"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "log",
+ "symphonia-core",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "bitflags 2.10.0",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-std"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -4348,6 +4416,8 @@ dependencies = [
  "slint-scarlet",
  "sws-client",
  "sws_protocol",
+ "symphonia-codec-aac",
+ "symphonia-core",
  "vm-fdt",
 ]
 
