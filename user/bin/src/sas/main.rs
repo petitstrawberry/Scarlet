@@ -27,7 +27,9 @@ const OUTPUT_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: u16 = 2;
 const OUTPUT_PERIOD_FRAMES: u32 = 480;
 const OUTPUT_BUFFER_FRAMES: u32 = 1_920;
-const MAX_CLIENT_RING_FRAMES: usize = OUTPUT_RATE as usize * 2;
+const MIN_CLIENT_RATE: u32 = 8_000;
+const MAX_CLIENT_RATE: u32 = 192_000;
+const MAX_CLIENT_RING_FRAMES: usize = MAX_CLIENT_RATE as usize * 2;
 
 struct ClientStream {
     shm: Option<SharedMemory>,
@@ -35,6 +37,9 @@ struct ClientStream {
     ring_size: usize,
     buffer_frames: usize,
     frame_bytes: usize,
+    rate: u32,
+    channels: u16,
+    resample_pos_num: u128,
     gain: f32,
     configured: bool,
     closed: bool,
@@ -48,6 +53,9 @@ impl ClientStream {
             ring_size: 0,
             buffer_frames: 0,
             frame_bytes: 0,
+            rate: OUTPUT_RATE,
+            channels: OUTPUT_CHANNELS,
+            resample_pos_num: 0,
             gain: 1.0,
             configured: false,
             closed: false,
@@ -191,7 +199,7 @@ trait MixerBackend {
         ring_addr: usize,
         read_frames: u64,
         frames: usize,
-        channels: usize,
+        available_frames: usize,
     );
 
     fn finish_s16le(&self, out: &mut [i16]);
@@ -222,22 +230,31 @@ impl MixerBackend for ScalarF32Mixer {
         ring_addr: usize,
         read_frames: u64,
         frames: usize,
-        channels: usize,
+        available_frames: usize,
     ) {
         let data = (ring_addr + protocol::RING_HEADER_SIZE) as *const u8;
         for frame in 0..frames {
-            let ring_frame = (read_frames as usize + frame) % stream.buffer_frames;
-            let frame_offset = ring_frame * stream.frame_bytes;
-            for channel in 0..channels {
-                let sample_offset = frame_offset + channel * 2;
-                // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
-                let lo = unsafe { data.add(sample_offset).read_volatile() };
-                // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
-                let hi = unsafe { data.add(sample_offset + 1).read_volatile() };
-                let sample = i16::from_le_bytes([lo, hi]) as f32 / 32768.0;
-                let acc_index = frame * channels + channel;
-                self.acc[acc_index] += sample * stream.gain;
-            }
+            let src_pos_num = stream.resample_pos_num + frame as u128 * u128::from(stream.rate);
+            let src_index = (src_pos_num / u128::from(OUTPUT_RATE)) as usize;
+            let frac = (src_pos_num % u128::from(OUTPUT_RATE)) as u32;
+            let next_index = (src_index + 1).min(available_frames - 1);
+            let left = unsafe {
+                interpolate_ring_s16(data, stream, read_frames, src_index, next_index, 0, frac)
+            };
+            let right_channel = if stream.channels > 1 { 1 } else { 0 };
+            let right = unsafe {
+                interpolate_ring_s16(
+                    data,
+                    stream,
+                    read_frames,
+                    src_index,
+                    next_index,
+                    right_channel,
+                    frac,
+                )
+            };
+            self.acc[frame * 2] += left * stream.gain;
+            self.acc[frame * 2 + 1] += right * stream.gain;
         }
     }
 
@@ -388,7 +405,7 @@ fn mix_period(
 
 unsafe fn mix_client_ring(
     mixer: &mut dyn MixerBackend,
-    stream: &ClientStream,
+    stream: &mut ClientStream,
     ring_addr: usize,
 ) -> usize {
     let header = ring_addr as *mut protocol::RingHeader;
@@ -399,24 +416,88 @@ unsafe fn mix_client_ring(
     compiler_fence(Ordering::Acquire);
 
     let available = write_frames.saturating_sub(read_frames) as usize;
-    let frames = available.min(OUTPUT_PERIOD_FRAMES as usize);
+    let frames = resampled_output_frames(stream, available);
     if frames == 0 {
+        if is_ring_draining(header) && available != 0 {
+            compiler_fence(Ordering::Release);
+            // SAFETY: `ring_addr` is a server-side mapping of a SAS shared-memory ring.
+            unsafe {
+                core::ptr::addr_of_mut!((*header).read_frames).write_volatile(write_frames);
+            }
+            stream.resample_pos_num = 0;
+        }
         return 0;
     }
 
-    let channels = OUTPUT_CHANNELS as usize;
     // SAFETY: the ring was created by SAS and `frames` is bounded by readable
     // frames and one output period.
     unsafe {
-        mixer.mix_s16le_ring(stream, ring_addr, read_frames, frames, channels);
+        mixer.mix_s16le_ring(stream, ring_addr, read_frames, frames, available);
     }
 
+    stream.resample_pos_num += frames as u128 * u128::from(stream.rate);
+    let consumed = stream.resample_pos_num / u128::from(OUTPUT_RATE);
+    stream.resample_pos_num %= u128::from(OUTPUT_RATE);
     compiler_fence(Ordering::Release);
     // SAFETY: `ring_addr` is a server-side mapping of a SAS shared-memory ring.
     unsafe {
-        core::ptr::addr_of_mut!((*header).read_frames).write_volatile(read_frames + frames as u64);
+        core::ptr::addr_of_mut!((*header).read_frames)
+            .write_volatile(read_frames + consumed as u64);
     }
     frames
+}
+
+fn resampled_output_frames(stream: &ClientStream, available: usize) -> usize {
+    if available == 0 {
+        return 0;
+    }
+    let mut frames = 0usize;
+    while frames < OUTPUT_PERIOD_FRAMES as usize {
+        let src_pos_num = stream.resample_pos_num + frames as u128 * u128::from(stream.rate);
+        let src_index = (src_pos_num / u128::from(OUTPUT_RATE)) as usize;
+        if src_index >= available {
+            break;
+        }
+        frames += 1;
+    }
+    frames
+}
+
+unsafe fn interpolate_ring_s16(
+    data: *const u8,
+    stream: &ClientStream,
+    read_frames: u64,
+    src_index: usize,
+    next_index: usize,
+    channel: u16,
+    frac: u32,
+) -> f32 {
+    let a = unsafe { read_ring_s16(data, stream, read_frames, src_index, channel) } as i32;
+    let b = unsafe { read_ring_s16(data, stream, read_frames, next_index, channel) } as i32;
+    let mixed = (a * (OUTPUT_RATE - frac) as i32 + b * frac as i32) / OUTPUT_RATE as i32;
+    mixed as f32 / 32768.0
+}
+
+unsafe fn read_ring_s16(
+    data: *const u8,
+    stream: &ClientStream,
+    read_frames: u64,
+    src_index: usize,
+    channel: u16,
+) -> i16 {
+    let ring_frame = (read_frames as usize + src_index) % stream.buffer_frames;
+    let sample_offset = ring_frame * stream.frame_bytes + channel as usize * 2;
+    // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
+    let lo = unsafe { data.add(sample_offset).read_volatile() };
+    // SAFETY: sample offset is bounded by `buffer_frames * frame_bytes`.
+    let hi = unsafe { data.add(sample_offset + 1).read_volatile() };
+    i16::from_le_bytes([lo, hi])
+}
+
+fn is_ring_draining(header: *mut protocol::RingHeader) -> bool {
+    // SAFETY: `header` points to a mapped SAS ring header.
+    let flags = unsafe { core::ptr::addr_of!((*header).flags).read_volatile() };
+    flags & protocol::RING_FLAG_DRAINING != 0
 }
 
 unsafe fn ring_is_empty(ring_addr: usize) -> bool {
@@ -468,11 +549,14 @@ fn handle_configure(
     socket: &mut Socket,
 ) -> Result<(), &'static str> {
     let config = protocol::Config::from_payload(payload).ok_or("invalid SAS config")?;
-    if config.format != AUDIO_PCM_FORMAT_S16LE
-        || config.rate != OUTPUT_RATE
-        || config.channels != OUTPUT_CHANNELS
-    {
-        return Err("SAS MVP accepts only S16LE 48000 Hz stereo streams");
+    if config.format != AUDIO_PCM_FORMAT_S16LE {
+        return Err("SAS accepts only S16LE streams");
+    }
+    if !(MIN_CLIENT_RATE..=MAX_CLIENT_RATE).contains(&config.rate) {
+        return Err("SAS stream sample rate is unsupported");
+    }
+    if config.channels == 0 || config.channels > OUTPUT_CHANNELS {
+        return Err("SAS accepts only mono or stereo streams");
     }
 
     let frame_bytes = config.channels as usize * 2;
@@ -510,6 +594,9 @@ fn handle_configure(
     stream.ring_size = ring_size;
     stream.buffer_frames = buffer_frames;
     stream.frame_bytes = frame_bytes;
+    stream.rate = config.rate;
+    stream.channels = config.channels;
+    stream.resample_pos_num = 0;
     stream.configured = true;
     stream.closed = false;
 
