@@ -24,6 +24,7 @@ use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
 use crate::drivers::network::virtio_net::VirtioNetDevice;
 use crate::drivers::virtio::{next_block_device_name, next_net_device_name};
 use crate::drivers::virtio_snd::{VirtioSndDevice, register_audio_device};
+use crate::drivers::virtio_video::VirtioVideoDevice;
 use crate::interrupt::{InterruptId, InterruptManager};
 use crate::vm;
 use crate::{early_println, println};
@@ -48,6 +49,7 @@ const VIRTIO_PCI_MODERN_BLOCK_DEVICE_ID: u16 = 0x1042;
 const VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID: u16 = 0x1010;
 const VIRTIO_PCI_MODERN_GPU_DEVICE_ID: u16 = 0x1050;
 const VIRTIO_PCI_MODERN_SOUND_DEVICE_ID: u16 = 0x1059;
+const VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID: u16 = 0x105f;
 
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Mapped register blocks for a VirtIO PCI function.
@@ -328,6 +330,12 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             println!("[virtio-pci] Registered sound device {}", name);
             Ok(())
         }
+        VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID => {
+            let dev: Arc<dyn Device> = Arc::new(VirtioVideoDevice::new_pci(transport));
+            DeviceManager::get_manager().register_device_with_name(format!("vvideo0"), dev);
+            println!("[virtio-pci] Registered video decoder device vvideo0");
+            Ok(())
+        }
         _ => Err("Unsupported VirtIO PCI device"),
     }
 }
@@ -344,6 +352,7 @@ fn register_driver() {
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_TRANSITIONAL_GPU_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_GPU_DEVICE_ID),
         PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_SOUND_DEVICE_ID),
+        PciDeviceId::new(vendor::REDHAT, VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID),
     ];
     let driver = PciDeviceDriver::new("virtio-pci", id_table, probe_virtio_pci, remove_virtio_pci);
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
