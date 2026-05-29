@@ -805,9 +805,9 @@ private final class VideoBackend {
     private var streams = Set<UInt32>()
     private var streamFormats: [UInt32: UInt32] = [:]
     private var resources: [String: Resource] = [:]
-    private var queuedOutputResource: UInt32?
-    private let h264Decoder = H264VideoToolboxDecoder()
-    private let av1Decoder = AV1VideoToolboxDecoder()
+    private var queuedOutputResources: [UInt32: UInt32] = [:]
+    private var h264Decoders: [UInt32: H264VideoToolboxDecoder] = [:]
+    private var av1Decoders: [UInt32: AV1VideoToolboxDecoder] = [:]
 
     init(queueCount: Int) {
         queues = (0..<queueCount).map { VirtQueue(index: $0) }
@@ -950,6 +950,8 @@ private final class VideoBackend {
         }
         streams.insert(streamId)
         streamFormats[streamId] = codedFormat
+        h264Decoders[streamId] = nil
+        av1Decoders[streamId] = nil
         let formatName = codedFormat == virtioVideoFormatAV1 ? "AV1" : "H264"
         log("[vhost-video-vt] STREAM_CREATE stream_id=\(streamId) format=\(formatName) hardware=required")
         return header(virtioVideoRespOkNoData, streamId: streamId)
@@ -989,15 +991,15 @@ private final class VideoBackend {
         }
 
         if queueType == virtioVideoQueueTypeOutput {
-            queuedOutputResource = resourceId
-            log("[vhost-video-vt] RESOURCE_QUEUE output resource=\(resourceId) timestamp=\(timestamp)")
+            queuedOutputResources[streamId] = resourceId
+            log("[vhost-video-vt] RESOURCE_QUEUE stream_id=\(streamId) output resource=\(resourceId) timestamp=\(timestamp)")
             return resourceQueueResponse(streamId: streamId, timestamp: timestamp, flags: 0, size: 0)
         }
 
         guard queueType == virtioVideoQueueTypeInput else {
             return header(virtioVideoRespErrInvalidParameter, streamId: streamId)
         }
-        guard let outputId = queuedOutputResource,
+        guard let outputId = queuedOutputResources[streamId],
               let output = resources[key(streamId, virtioVideoQueueTypeOutput, outputId)]
         else {
             throw RuntimeError("input queued without an output resource")
@@ -1007,9 +1009,13 @@ private final class VideoBackend {
         let codedFormat = streamFormats[streamId] ?? virtioVideoFormatH264
         let frame: DecodedFrame
         if codedFormat == virtioVideoFormatAV1 {
-            frame = try av1Decoder.decode(input)
+            let decoder = av1Decoders[streamId] ?? AV1VideoToolboxDecoder()
+            av1Decoders[streamId] = decoder
+            frame = try decoder.decode(input)
         } else {
-            frame = try h264Decoder.decode(input)
+            let decoder = h264Decoders[streamId] ?? H264VideoToolboxDecoder()
+            h264Decoders[streamId] = decoder
+            frame = try decoder.decode(input)
         }
         var packed = Data(scarletVideoFrameMagic)
         appendU32(&packed, frame.width)
@@ -1018,10 +1024,10 @@ private final class VideoBackend {
         appendU32(&packed, UInt32(frame.nv12.count))
         packed.append(frame.nv12)
         try writeResource(output, packed)
-        queuedOutputResource = nil
+        queuedOutputResources[streamId] = nil
 
         let formatName = codedFormat == virtioVideoFormatAV1 ? "AV1" : "H264"
-        log("[vhost-video-vt] decoded \(formatName) timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
+        log("[vhost-video-vt] decoded stream_id=\(streamId) \(formatName) timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
         return resourceQueueResponse(streamId: streamId, timestamp: timestamp, flags: 0, size: UInt32(packed.count))
     }
 
@@ -1030,7 +1036,7 @@ private final class VideoBackend {
         let queueType = request.u32(8)
         resources = resources.filter { !$0.key.hasPrefix("\(streamId):\(queueType):") }
         if queueType == virtioVideoQueueTypeOutput {
-            queuedOutputResource = nil
+            queuedOutputResources[streamId] = nil
         }
         return header(virtioVideoRespOkNoData, streamId: streamId)
     }

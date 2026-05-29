@@ -51,7 +51,8 @@ const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES: u32 = 0;
 
-const STREAM_ID: u32 = 1;
+const DEFAULT_STREAM_ID: u32 = 1;
+const MAX_VIDEO_SESSIONS: usize = 4;
 const INPUT_RESOURCE_ID: u32 = 1;
 const OUTPUT_RESOURCE_ID: u32 = 2;
 const MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -67,6 +68,9 @@ const MAPPED_BUFFER_PAGES: usize = MAPPED_BUFFER_BYTES / PAGE_SIZE;
 const VVIDEO_GET_BUFFER: u32 = 0x5600;
 const VVIDEO_SUBMIT: u32 = 0x5601;
 const VVIDEO_DEQUEUE: u32 = 0x5602;
+const VVIDEO_CREATE_SESSION: u32 = 0x5603;
+const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
+const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -123,6 +127,32 @@ struct ScarletVideoDequeuedFrame {
     payload_len: u32,
     flags: u32,
     timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoSessionInfo {
+    stream_id: u32,
+    padding: u32,
+    buffer: ScarletVideoBufferInfo,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoSessionSubmit {
+    stream_id: u32,
+    input_len: u32,
+    coded_format: u32,
+    padding: u32,
+    timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoSessionDequeuedFrame {
+    stream_id: u32,
+    padding: u32,
+    frame: ScarletVideoDequeuedFrame,
 }
 
 struct DecodedFrameState {
@@ -186,6 +216,38 @@ impl DecodeCommandBuffers {
     }
 }
 
+struct VideoSession {
+    stream_id: u32,
+    stream_created: RwLock<bool>,
+    stream_coded_format: RwLock<u32>,
+    mapped_buffer: RwLock<Option<ContiguousPages>>,
+    mapped_frame: Mutex<Option<MappedFrameInfo>>,
+    mapped_resources_created: Mutex<bool>,
+    async_command_buffers: Mutex<Option<DecodeCommandBuffers>>,
+    pending_decode: Mutex<Option<PendingDecode>>,
+    next_timestamp: Mutex<u64>,
+}
+
+impl VideoSession {
+    fn new(index: usize) -> Self {
+        Self {
+            stream_id: (index + 1) as u32,
+            stream_created: RwLock::new(false),
+            stream_coded_format: RwLock::new(0),
+            mapped_buffer: RwLock::new(None),
+            mapped_frame: Mutex::new(None),
+            mapped_resources_created: Mutex::new(false),
+            async_command_buffers: Mutex::new(DecodeCommandBuffers::new()),
+            pending_decode: Mutex::new(None),
+            next_timestamp: Mutex::new(1),
+        }
+    }
+
+    fn mmap_offset(&self) -> usize {
+        (self.stream_id as usize - 1) * MAPPED_BUFFER_BYTES
+    }
+}
+
 /// Prototype VirtIO video decode device.
 pub struct VirtioVideoDevice {
     base_addr: usize,
@@ -194,16 +256,10 @@ pub struct VirtioVideoDevice {
     features: RwLock<u64>,
     input_capability_descs: RwLock<u32>,
     output_capability_descs: RwLock<u32>,
-    stream_created: RwLock<bool>,
-    stream_coded_format: RwLock<u32>,
+    sessions: [VideoSession; MAX_VIDEO_SESSIONS],
     decoded_frame: Mutex<DecodedFrameState>,
-    mapped_buffer: RwLock<Option<ContiguousPages>>,
-    mapped_frame: Mutex<Option<MappedFrameInfo>>,
-    mapped_resources_created: Mutex<bool>,
     sync_command_buffers: Mutex<Option<CommandBuffers>>,
-    async_command_buffers: Mutex<Option<DecodeCommandBuffers>>,
-    next_timestamp: Mutex<u64>,
-    pending_decode: Mutex<Option<PendingDecode>>,
+    next_session_index: Mutex<usize>,
     interrupt_id: Mutex<Option<InterruptId>>,
 }
 
@@ -242,21 +298,15 @@ impl VirtioVideoDevice {
             features: RwLock::new(0),
             input_capability_descs: RwLock::new(0),
             output_capability_descs: RwLock::new(0),
-            stream_created: RwLock::new(false),
-            stream_coded_format: RwLock::new(0),
+            sessions: core::array::from_fn(VideoSession::new),
             decoded_frame: Mutex::new(DecodedFrameState {
                 bytes: Vec::new(),
                 read_cursor: 0,
                 frame_count: 0,
                 last_error: None,
             }),
-            mapped_buffer: RwLock::new(ContiguousPages::new(MAPPED_BUFFER_PAGES)),
-            mapped_frame: Mutex::new(None),
-            mapped_resources_created: Mutex::new(false),
             sync_command_buffers: Mutex::new(CommandBuffers::new()),
-            async_command_buffers: Mutex::new(DecodeCommandBuffers::new()),
-            next_timestamp: Mutex::new(1),
-            pending_decode: Mutex::new(None),
+            next_session_index: Mutex::new(0),
             interrupt_id: Mutex::new(None),
         };
 
@@ -292,9 +342,10 @@ impl VirtioVideoDevice {
         *self.input_capability_descs.write() = input_descs;
         *self.output_capability_descs.write() = output_descs;
 
-        self.create_stream(STREAM_ID, VIRTIO_VIDEO_FORMAT_H264)?;
-        *self.stream_created.write() = true;
-        *self.stream_coded_format.write() = VIRTIO_VIDEO_FORMAT_H264;
+        let session = self.default_session();
+        self.create_stream(session.stream_id, VIRTIO_VIDEO_FORMAT_H264)?;
+        *session.stream_created.write() = true;
+        *session.stream_coded_format.write() = VIRTIO_VIDEO_FORMAT_H264;
 
         crate::early_println!(
             "[virtio-video] H.264 decoder bootstrap ok: input_descs={} output_descs={}",
@@ -322,6 +373,44 @@ impl VirtioVideoDevice {
             return Err("virtio-video QUERY_CAPABILITY failed");
         }
         read_le32(&response, core::mem::size_of::<VirtioVideoCmdHdr>())
+    }
+
+    fn default_session(&self) -> &VideoSession {
+        &self.sessions[0]
+    }
+
+    fn session_by_stream_id(&self, stream_id: u32) -> Result<&VideoSession, &'static str> {
+        let stream_id = if stream_id == 0 {
+            DEFAULT_STREAM_ID
+        } else {
+            stream_id
+        };
+        let index = stream_id
+            .checked_sub(1)
+            .ok_or("Invalid VirtIO video stream id")? as usize;
+        self.sessions
+            .get(index)
+            .ok_or("Invalid VirtIO video stream id")
+    }
+
+    fn allocate_session(&self) -> &VideoSession {
+        let mut next = self.next_session_index.lock();
+        let index = *next % MAX_VIDEO_SESSIONS;
+        *next = next.wrapping_add(1);
+        &self.sessions[index]
+    }
+
+    fn session_by_mmap_offset(
+        &self,
+        offset: usize,
+    ) -> Result<(&VideoSession, usize), &'static str> {
+        let index = offset / MAPPED_BUFFER_BYTES;
+        let session_offset = offset % MAPPED_BUFFER_BYTES;
+        let session = self
+            .sessions
+            .get(index)
+            .ok_or("VirtIO video mmap offset exceeds buffer size")?;
+        Ok((session, session_offset))
     }
 
     fn create_stream(&self, stream_id: u32, coded_format: u32) -> Result<(), &'static str> {
@@ -355,29 +444,37 @@ impl VirtioVideoDevice {
         Ok(())
     }
 
-    fn ensure_stream_format(&self, coded_format: u32) -> Result<(), &'static str> {
+    fn ensure_stream_format(
+        &self,
+        session: &VideoSession,
+        coded_format: u32,
+    ) -> Result<(), &'static str> {
         if coded_format == 0 {
             return Err("VirtIO video coded format is missing");
         }
-        if !matches!(coded_format, VIRTIO_VIDEO_FORMAT_H264 | VIRTIO_VIDEO_FORMAT_AV1) {
+        if !matches!(
+            coded_format,
+            VIRTIO_VIDEO_FORMAT_H264 | VIRTIO_VIDEO_FORMAT_AV1
+        ) {
             return Err("Unsupported VirtIO video coded format");
         }
-        if *self.stream_created.read() && *self.stream_coded_format.read() == coded_format {
+        if *session.stream_created.read() && *session.stream_coded_format.read() == coded_format {
             return Ok(());
         }
 
-        self.invalidate_mapped_resources();
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
-        self.create_stream(STREAM_ID, coded_format)?;
-        *self.stream_created.write() = true;
-        *self.stream_coded_format.write() = coded_format;
-        *self.next_timestamp.lock() = 1;
+        self.invalidate_mapped_resources(session);
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
+        self.create_stream(session.stream_id, coded_format)?;
+        *session.stream_created.write() = true;
+        *session.stream_coded_format.write() = coded_format;
+        *session.next_timestamp.lock() = 1;
         Ok(())
     }
 
     fn decode_h264_access_unit(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        self.ensure_stream_format(VIRTIO_VIDEO_FORMAT_H264)?;
+        let session = self.default_session();
+        self.ensure_stream_format(session, VIRTIO_VIDEO_FORMAT_H264)?;
         if buffer.is_empty() {
             return Err("H.264 input is empty");
         }
@@ -400,16 +497,18 @@ impl VirtioVideoDevice {
             );
         }
 
-        self.invalidate_mapped_resources();
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
+        self.invalidate_mapped_resources(session);
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
         self.resource_create(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_INPUT,
             INPUT_RESOURCE_ID,
             input.as_paddr() as u64,
             buffer.len() as u32,
         )?;
         self.resource_create(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT,
             OUTPUT_RESOURCE_ID,
             output.as_paddr() as u64,
@@ -417,19 +516,21 @@ impl VirtioVideoDevice {
         )?;
 
         let timestamp = {
-            let mut next_timestamp = self.next_timestamp.lock();
+            let mut next_timestamp = session.next_timestamp.lock();
             let timestamp = *next_timestamp;
             *next_timestamp = next_timestamp.wrapping_add(1);
             timestamp
         };
 
         self.resource_queue(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT,
             OUTPUT_RESOURCE_ID,
             timestamp,
             0,
         )?;
         self.resource_queue_input_async(
+            session,
             VIRTIO_VIDEO_QUEUE_TYPE_INPUT,
             INPUT_RESOURCE_ID,
             timestamp,
@@ -444,11 +545,13 @@ impl VirtioVideoDevice {
 
     fn decode_mapped_access_unit(
         &self,
+        stream_id: u32,
         coded_format: u32,
         input_len: usize,
         timestamp: u64,
     ) -> Result<(), &'static str> {
-        self.ensure_stream_format(coded_format)?;
+        let session = self.session_by_stream_id(stream_id)?;
+        self.ensure_stream_format(session, coded_format)?;
         if input_len == 0 {
             return Err("VirtIO video input is empty");
         }
@@ -457,7 +560,7 @@ impl VirtioVideoDevice {
         }
 
         let (input_paddr, output_paddr) = {
-            let mapped_buffer = self.mapped_buffer.read();
+            let mapped_buffer = session.mapped_buffer.read();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("VirtIO video mmap buffer is not available")?;
@@ -467,19 +570,19 @@ impl VirtioVideoDevice {
             )
         };
         let timestamp = if timestamp == 0 {
-            self.next_timestamp()
+            self.next_timestamp(session)
         } else {
             timestamp
         };
 
-        *self.mapped_frame.lock() = None;
-        self.ensure_mapped_resources(input_paddr, output_paddr)?;
+        *session.mapped_frame.lock() = None;
+        self.ensure_mapped_resources(session, input_paddr, output_paddr)?;
 
-        self.resource_queue_decode_pair_async(timestamp, input_len as u32)
+        self.resource_queue_decode_pair_async(session, timestamp, input_len as u32)
     }
 
-    fn next_timestamp(&self) -> u64 {
-        let mut next_timestamp = self.next_timestamp.lock();
+    fn next_timestamp(&self, session: &VideoSession) -> u64 {
+        let mut next_timestamp = session.next_timestamp.lock();
         let timestamp = *next_timestamp;
         *next_timestamp = next_timestamp.wrapping_add(1);
         timestamp
@@ -487,23 +590,26 @@ impl VirtioVideoDevice {
 
     fn ensure_mapped_resources(
         &self,
+        session: &VideoSession,
         input_paddr: u64,
         output_paddr: u64,
     ) -> Result<(), &'static str> {
-        let mut created = self.mapped_resources_created.lock();
+        let mut created = session.mapped_resources_created.lock();
         if *created {
             return Ok(());
         }
 
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
-        self.resource_destroy_all(VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
         self.resource_create(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_INPUT,
             INPUT_RESOURCE_ID,
             input_paddr,
             MAPPED_INPUT_BYTES as u32,
         )?;
         self.resource_create(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT,
             OUTPUT_RESOURCE_ID,
             output_paddr,
@@ -513,12 +619,13 @@ impl VirtioVideoDevice {
         Ok(())
     }
 
-    fn invalidate_mapped_resources(&self) {
-        *self.mapped_resources_created.lock() = false;
+    fn invalidate_mapped_resources(&self, session: &VideoSession) {
+        *session.mapped_resources_created.lock() = false;
     }
 
     fn resource_create(
         &self,
+        stream_id: u32,
         queue_type: u32,
         resource_id: u32,
         paddr: u64,
@@ -526,7 +633,7 @@ impl VirtioVideoDevice {
     ) -> Result<(), &'static str> {
         let mut request = Vec::new();
         push_le32(&mut request, VIRTIO_VIDEO_CMD_RESOURCE_CREATE);
-        push_le32(&mut request, STREAM_ID);
+        push_le32(&mut request, stream_id);
         push_le32(&mut request, queue_type);
         push_le32(&mut request, resource_id);
         push_le32(&mut request, VIRTIO_VIDEO_PLANES_LAYOUT_SINGLE_BUFFER);
@@ -551,6 +658,7 @@ impl VirtioVideoDevice {
 
     fn resource_queue(
         &self,
+        stream_id: u32,
         queue_type: u32,
         resource_id: u32,
         timestamp: u64,
@@ -558,7 +666,7 @@ impl VirtioVideoDevice {
     ) -> Result<usize, &'static str> {
         let mut request = Vec::new();
         push_le32(&mut request, VIRTIO_VIDEO_CMD_RESOURCE_QUEUE);
-        push_le32(&mut request, STREAM_ID);
+        push_le32(&mut request, stream_id);
         push_le32(&mut request, queue_type);
         push_le32(&mut request, resource_id);
         push_le64(&mut request, timestamp);
@@ -576,10 +684,10 @@ impl VirtioVideoDevice {
         Ok(read_le32(&response, 20)? as usize)
     }
 
-    fn resource_destroy_all(&self, queue_type: u32) -> Result<(), &'static str> {
+    fn resource_destroy_all(&self, stream_id: u32, queue_type: u32) -> Result<(), &'static str> {
         let mut request = Vec::new();
         push_le32(&mut request, VIRTIO_VIDEO_CMD_RESOURCE_DESTROY_ALL);
-        push_le32(&mut request, STREAM_ID);
+        push_le32(&mut request, stream_id);
         push_le32(&mut request, queue_type);
         push_le32(&mut request, 0);
 
@@ -592,6 +700,7 @@ impl VirtioVideoDevice {
 
     fn resource_queue_request(
         &self,
+        stream_id: u32,
         queue_type: u32,
         resource_id: u32,
         timestamp: u64,
@@ -599,7 +708,7 @@ impl VirtioVideoDevice {
     ) -> Vec<u8> {
         let mut request = Vec::new();
         push_le32(&mut request, VIRTIO_VIDEO_CMD_RESOURCE_QUEUE);
-        push_le32(&mut request, STREAM_ID);
+        push_le32(&mut request, stream_id);
         push_le32(&mut request, queue_type);
         push_le32(&mut request, resource_id);
         push_le64(&mut request, timestamp);
@@ -614,6 +723,7 @@ impl VirtioVideoDevice {
 
     fn resource_queue_input_async(
         &self,
+        session: &VideoSession,
         queue_type: u32,
         resource_id: u32,
         timestamp: u64,
@@ -622,17 +732,23 @@ impl VirtioVideoDevice {
         output_len: usize,
         decode_timestamp: u64,
     ) -> Result<(), &'static str> {
-        if self.pending_decode.lock().is_some() {
+        if session.pending_decode.lock().is_some() {
             return Err("VirtIO video decode already pending");
         }
 
-        let request = self.resource_queue_request(queue_type, resource_id, timestamp, data_size);
+        let request = self.resource_queue_request(
+            session.stream_id,
+            queue_type,
+            resource_id,
+            timestamp,
+            data_size,
+        );
         let req_len = request.len();
         if req_len > PAGE_SIZE {
             return Err("VirtIO video async command message too large");
         }
 
-        let async_buffers = self.async_command_buffers.lock();
+        let async_buffers = session.async_command_buffers.lock();
         let command_buffers = async_buffers
             .as_ref()
             .ok_or("VirtIO video async command buffers are not available")?;
@@ -675,7 +791,7 @@ impl VirtioVideoDevice {
         drop(virtqueues);
         drop(async_buffers);
 
-        *self.pending_decode.lock() = Some(PendingDecode {
+        *session.pending_decode.lock() = Some(PendingDecode {
             output_req_desc: None,
             input_req_desc: req_desc,
             input_done: false,
@@ -689,20 +805,23 @@ impl VirtioVideoDevice {
 
     fn resource_queue_decode_pair_async(
         &self,
+        session: &VideoSession,
         timestamp: u64,
         input_len: u32,
     ) -> Result<(), &'static str> {
-        if self.pending_decode.lock().is_some() {
+        if session.pending_decode.lock().is_some() {
             return Err("VirtIO video decode already pending");
         }
 
         let output_request = self.resource_queue_request(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT,
             OUTPUT_RESOURCE_ID,
             timestamp,
             0,
         );
         let input_request = self.resource_queue_request(
+            session.stream_id,
             VIRTIO_VIDEO_QUEUE_TYPE_INPUT,
             INPUT_RESOURCE_ID,
             timestamp,
@@ -712,7 +831,7 @@ impl VirtioVideoDevice {
             return Err("VirtIO video async command message too large");
         }
 
-        let async_buffers = self.async_command_buffers.lock();
+        let async_buffers = session.async_command_buffers.lock();
         let command_buffers = async_buffers
             .as_ref()
             .ok_or("VirtIO video async command buffers are not available")?;
@@ -755,7 +874,7 @@ impl VirtioVideoDevice {
         drop(virtqueues);
         drop(async_buffers);
 
-        *self.pending_decode.lock() = Some(PendingDecode {
+        *session.pending_decode.lock() = Some(PendingDecode {
             output_req_desc: Some(output_req_desc),
             input_req_desc,
             input_done: false,
@@ -855,38 +974,42 @@ impl VirtioVideoDevice {
         let mut virtqueues = self.virtqueues.lock();
         let queue = &mut virtqueues[QUEUE_COMMAND];
         let mut spins = 0;
-        while queue.is_busy() {
+        loop {
+            let mut made_progress = false;
+            while let Some((used_desc, _used_len)) = queue.pop_used() {
+                made_progress = true;
+                if used_desc == req_desc {
+                    queue.free_desc_chain(req_desc);
+                    drop(virtqueues);
+
+                    let mut out = alloc::vec![0u8; response_len];
+                    // SAFETY: `resp_alloc` points to a live page and `out` is valid for
+                    // `response_len` bytes. The buffers do not overlap.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            command_buffers.resp_alloc.as_ptr() as *const u8,
+                            out.as_mut_ptr(),
+                            response_len,
+                        );
+                    }
+                    return Ok(out);
+                }
+                if !self.complete_pending_used_descriptor(queue, used_desc)? {
+                    queue.free_desc_chain(used_desc);
+                    queue.free_desc_chain(req_desc);
+                    return Err("VirtIO video command response descriptor mismatch");
+                }
+            }
+
             if spins >= CONTROL_SPIN_LIMIT {
                 queue.free_desc_chain(req_desc);
                 return Err("VirtIO video command timed out");
             }
-            spins += 1;
-            core::hint::spin_loop();
+            if !made_progress {
+                spins += 1;
+                core::hint::spin_loop();
+            }
         }
-
-        let Some((used_desc, _used_len)) = queue.pop_used() else {
-            queue.free_desc_chain(req_desc);
-            return Err("VirtIO video command response missing");
-        };
-        if used_desc != req_desc {
-            queue.free_desc_chain(used_desc);
-            queue.free_desc_chain(req_desc);
-            return Err("VirtIO video command response descriptor mismatch");
-        }
-        queue.free_desc_chain(req_desc);
-        drop(virtqueues);
-
-        let mut out = alloc::vec![0u8; response_len];
-        // SAFETY: `resp_alloc` points to a live page and `out` is valid for
-        // `response_len` bytes. The buffers do not overlap.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                command_buffers.resp_alloc.as_ptr() as *const u8,
-                out.as_mut_ptr(),
-                response_len,
-            );
-        }
-        Ok(out)
     }
 
     fn read_stream(&self, buffer: &mut [u8]) -> usize {
@@ -906,19 +1029,20 @@ impl VirtioVideoDevice {
             state.bytes.clear();
             state.read_cursor = 0;
         }
-        if self.pending_decode.lock().is_some() {
+        if self.has_pending_decode() {
             return 0;
         }
 
         let frame_summary = frame_header_summary(&state.bytes).unwrap_or_default();
         let last_error = state.last_error.unwrap_or("none");
+        let session = self.default_session();
         let status = format!(
             "virtio-video decoder features=0x{:x} input_caps={} output_caps={} stream_created={} coded_format={} frames={} last_error={}{}\n",
             *self.features.read(),
             *self.input_capability_descs.read(),
             *self.output_capability_descs.read(),
-            *self.stream_created.read(),
-            *self.stream_coded_format.read(),
+            *session.stream_created.read(),
+            *session.stream_coded_format.read(),
             state.frame_count,
             last_error,
             frame_summary
@@ -930,44 +1054,57 @@ impl VirtioVideoDevice {
     }
 
     fn try_complete_pending_decode(&self) -> Result<bool, &'static str> {
-        let mut pending_guard = self.pending_decode.lock();
-        if pending_guard.is_none() {
-            return Ok(false);
-        }
-
-        let mut pending = pending_guard
-            .take()
-            .ok_or("VirtIO video pending state missing")?;
         let mut virtqueues = self.virtqueues.lock();
         let queue = &mut virtqueues[QUEUE_COMMAND];
+        let mut completed_any = false;
         while let Some((used_desc, _used_len)) = queue.pop_used() {
+            if !self.complete_pending_used_descriptor(queue, used_desc)? {
+                queue.free_desc_chain(used_desc);
+                return Err("VirtIO video async response descriptor mismatch");
+            }
+            completed_any = true;
+        }
+        Ok(completed_any)
+    }
+
+    fn complete_pending_used_descriptor(
+        &self,
+        queue: &mut VirtQueue<'static>,
+        used_desc: usize,
+    ) -> Result<bool, &'static str> {
+        for session in &self.sessions {
+            let mut pending_guard = session.pending_decode.lock();
+            let Some(pending) = pending_guard.as_mut() else {
+                continue;
+            };
             if Some(used_desc) == pending.output_req_desc {
                 queue.free_desc_chain(used_desc);
                 pending.output_req_desc = None;
-                continue;
-            }
-            if used_desc == pending.input_req_desc {
+            } else if used_desc == pending.input_req_desc {
                 queue.free_desc_chain(used_desc);
                 pending.input_done = true;
+            } else {
                 continue;
             }
 
-            queue.free_desc_chain(used_desc);
-            if let Some(output_req_desc) = pending.output_req_desc {
-                queue.free_desc_chain(output_req_desc);
+            if pending.output_req_desc.is_none() && pending.input_done {
+                let response = self.copy_async_response(session)?;
+                let pending = pending_guard
+                    .take()
+                    .ok_or("VirtIO video pending state missing")?;
+                drop(pending_guard);
+                self.finish_pending_decode(session, pending, &response)?;
             }
-            if !pending.input_done {
-                queue.free_desc_chain(pending.input_req_desc);
-            }
-            return Err("VirtIO video async response descriptor mismatch");
+            return Ok(true);
         }
-        drop(virtqueues);
-        if pending.output_req_desc.is_some() || !pending.input_done {
-            *pending_guard = Some(pending);
-            return Ok(false);
-        }
+        Ok(false)
+    }
 
-        let async_buffers = self.async_command_buffers.lock();
+    fn copy_async_response(
+        &self,
+        session: &VideoSession,
+    ) -> Result<alloc::vec::Vec<u8>, &'static str> {
+        let async_buffers = session.async_command_buffers.lock();
         let command_buffers = async_buffers
             .as_ref()
             .ok_or("VirtIO video async command buffers are not available")?;
@@ -981,7 +1118,15 @@ impl VirtioVideoDevice {
                 response.len(),
             );
         }
-        drop(async_buffers);
+        Ok(response)
+    }
+
+    fn finish_pending_decode(
+        &self,
+        session: &VideoSession,
+        pending: PendingDecode,
+        response: &[u8],
+    ) -> Result<(), &'static str> {
         if read_le32(&response, 0)? != VIRTIO_VIDEO_RESP_OK_RESOURCE_QUEUE {
             return Err("virtio-video async RESOURCE_QUEUE failed");
         }
@@ -1012,8 +1157,9 @@ impl VirtioVideoDevice {
                 state.last_error = None;
             }
             PendingDecodeBuffer::Mapped => {
-                let frame = self.read_mapped_frame_header(decoded_size, pending.timestamp)?;
-                *self.mapped_frame.lock() = Some(frame);
+                let frame =
+                    self.read_mapped_frame_header(session, decoded_size, pending.timestamp)?;
+                *session.mapped_frame.lock() = Some(frame);
 
                 let mut state = self.decoded_frame.lock();
                 state.bytes.clear();
@@ -1022,18 +1168,25 @@ impl VirtioVideoDevice {
                 state.last_error = None;
             }
         }
-        Ok(true)
+        Ok(())
+    }
+
+    fn has_pending_decode(&self) -> bool {
+        self.sessions
+            .iter()
+            .any(|session| session.pending_decode.lock().is_some())
     }
 
     fn read_mapped_frame_header(
         &self,
+        session: &VideoSession,
         decoded_size: usize,
         timestamp: u64,
     ) -> Result<MappedFrameInfo, &'static str> {
         if decoded_size < SCARLET_VIDEO_FRAME_HEADER_LEN {
             return Err("VirtIO video backend returned truncated mapped frame");
         }
-        let mapped_buffer = self.mapped_buffer.read();
+        let mapped_buffer = session.mapped_buffer.read();
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("VirtIO video mmap buffer is not available")?;
@@ -1085,18 +1238,53 @@ impl VirtioVideoDevice {
         Ok(())
     }
 
-    fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
-        if self.mapped_buffer.read().is_none() {
-            return Err("VirtIO video mmap buffer is not available");
-        }
-        let info = ScarletVideoBufferInfo {
-            mmap_offset: 0,
+    fn buffer_info_for_session(
+        &self,
+        session: &VideoSession,
+    ) -> Result<ScarletVideoBufferInfo, &'static str> {
+        self.ensure_mapped_buffer(session)?;
+        Ok(ScarletVideoBufferInfo {
+            mmap_offset: session.mmap_offset() as u64,
             mmap_len: MAPPED_BUFFER_BYTES as u64,
             input_offset: 0,
             input_len: MAPPED_INPUT_BYTES as u32,
             output_offset: MAPPED_OUTPUT_OFFSET as u64,
             output_len: MAPPED_OUTPUT_BYTES as u32,
+        })
+    }
+
+    fn ensure_mapped_buffer(&self, session: &VideoSession) -> Result<(), &'static str> {
+        if session.mapped_buffer.read().is_some() {
+            return Ok(());
+        }
+
+        let mut mapped_buffer = session.mapped_buffer.write();
+        if mapped_buffer.is_none() {
+            *mapped_buffer = ContiguousPages::new(MAPPED_BUFFER_PAGES);
+        }
+        if mapped_buffer.is_some() {
+            Ok(())
+        } else {
+            Err("VirtIO video mmap buffer allocation failed")
+        }
+    }
+
+    fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let info = self.buffer_info_for_session(self.default_session())?;
+        write_user_value(arg, &info)?;
+        Ok(0)
+    }
+
+    fn handle_create_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        let session = if info.stream_id == 0 {
+            self.allocate_session()
+        } else {
+            self.session_by_stream_id(info.stream_id)?
         };
+        info.stream_id = session.stream_id;
+        info.padding = 0;
+        info.buffer = self.buffer_info_for_session(session)?;
         write_user_value(arg, &info)?;
         Ok(0)
     }
@@ -1108,6 +1296,27 @@ impl VirtioVideoDevice {
             return Err(e);
         }
         match self.decode_mapped_access_unit(
+            DEFAULT_STREAM_ID,
+            submit.coded_format,
+            submit.input_len as usize,
+            submit.timestamp,
+        ) {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                self.decoded_frame.lock().last_error = Some(e);
+                Err(e)
+            }
+        }
+    }
+
+    fn handle_submit_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let submit: ScarletVideoSessionSubmit = read_user_value(arg)?;
+        if let Err(e) = self.try_complete_pending_decode() {
+            self.decoded_frame.lock().last_error = Some(e);
+            return Err(e);
+        }
+        match self.decode_mapped_access_unit(
+            submit.stream_id,
             submit.coded_format,
             submit.input_len as usize,
             submit.timestamp,
@@ -1121,14 +1330,49 @@ impl VirtioVideoDevice {
     }
 
     fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
+        self.handle_dequeue_for_stream(DEFAULT_STREAM_ID, arg)
+    }
+
+    fn handle_dequeue_for_stream(&self, stream_id: u32, arg: usize) -> Result<i32, &'static str> {
         if let Err(e) = self.try_complete_pending_decode() {
             self.decoded_frame.lock().last_error = Some(e);
             return Err(e);
         }
-        let Some(frame) = self.mapped_frame.lock().take() else {
+        let session = self.session_by_stream_id(stream_id)?;
+        let Some(frame) = session.mapped_frame.lock().take() else {
             return Ok(0);
         };
         let dequeued = ScarletVideoDequeuedFrame {
+            width: frame.width,
+            height: frame.height,
+            pixel_format: frame.pixel_format,
+            payload_offset: (MAPPED_OUTPUT_OFFSET + SCARLET_VIDEO_FRAME_HEADER_LEN) as u64,
+            payload_len: frame.payload_len,
+            flags: 0,
+            timestamp: frame.timestamp,
+        };
+        write_user_value(arg, &dequeued)?;
+        Ok(1)
+    }
+
+    fn handle_dequeue_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut dequeued: ScarletVideoSessionDequeuedFrame = read_user_value(arg)?;
+        let stream_id = if dequeued.stream_id == 0 {
+            DEFAULT_STREAM_ID
+        } else {
+            dequeued.stream_id
+        };
+        if let Err(e) = self.try_complete_pending_decode() {
+            self.decoded_frame.lock().last_error = Some(e);
+            return Err(e);
+        }
+        let session = self.session_by_stream_id(stream_id)?;
+        let Some(frame) = session.mapped_frame.lock().take() else {
+            return Ok(0);
+        };
+        dequeued.stream_id = session.stream_id;
+        dequeued.padding = 0;
+        dequeued.frame = ScarletVideoDequeuedFrame {
             width: frame.width,
             height: frame.height,
             pixel_format: frame.pixel_format,
@@ -1282,6 +1526,9 @@ impl ControlOps for VirtioVideoDevice {
             VVIDEO_GET_BUFFER => self.handle_get_buffer(arg),
             VVIDEO_SUBMIT => self.handle_submit(arg),
             VVIDEO_DEQUEUE => self.handle_dequeue(arg),
+            VVIDEO_CREATE_SESSION => self.handle_create_session(arg),
+            VVIDEO_SUBMIT_SESSION => self.handle_submit_session(arg),
+            VVIDEO_DEQUEUE_SESSION => self.handle_dequeue_session(arg),
             _ => Err("Unsupported VirtIO video control command"),
         }
     }
@@ -1291,6 +1538,18 @@ impl ControlOps for VirtioVideoDevice {
             (VVIDEO_GET_BUFFER, "Get mmap video buffer layout"),
             (VVIDEO_SUBMIT, "Submit mmap-written coded video access unit"),
             (VVIDEO_DEQUEUE, "Dequeue a decoded mmap video frame"),
+            (
+                VVIDEO_CREATE_SESSION,
+                "Create or query mmap video stream session"
+            ),
+            (
+                VVIDEO_SUBMIT_SESSION,
+                "Submit mmap-written coded video access unit for a stream"
+            ),
+            (
+                VVIDEO_DEQUEUE_SESSION,
+                "Dequeue a decoded mmap video frame for a stream"
+            ),
         ]
     }
 }
@@ -1304,21 +1563,25 @@ impl MemoryMappingOps for VirtioVideoDevice {
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
             return Err("VirtIO video mmap offset and length must be page-aligned");
         }
-        if offset >= MAPPED_BUFFER_BYTES {
+        if offset >= MAPPED_BUFFER_BYTES * MAX_VIDEO_SESSIONS {
             return Err("VirtIO video mmap offset exceeds buffer size");
         }
-        if length > MAPPED_BUFFER_BYTES - offset {
+        let (session, session_offset) = self.session_by_mmap_offset(offset)?;
+        if length > MAPPED_BUFFER_BYTES - session_offset {
             return Err("VirtIO video mmap length exceeds buffer size");
         }
-        let mapped_buffer = self.mapped_buffer.read();
+        self.ensure_mapped_buffer(session)?;
+        let mapped_buffer = session.mapped_buffer.read();
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("VirtIO video mmap buffer is not available")?;
-        Ok((buffer.as_paddr() + offset, 0x3, true))
+        Ok((buffer.as_paddr() + session_offset, 0x3, true))
     }
 
     fn supports_mmap(&self) -> bool {
-        self.mapped_buffer.read().is_some()
+        self.sessions
+            .iter()
+            .any(|session| session.mapped_buffer.read().is_some())
     }
 
     fn mmap_owner_name(&self) -> String {

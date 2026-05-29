@@ -70,6 +70,9 @@ const NV12_VIDEO_RANGE_PIXEL_FORMAT: u32 = 0x3432_3076;
 const VVIDEO_GET_BUFFER: u32 = 0x5600;
 const VVIDEO_SUBMIT: u32 = 0x5601;
 const VVIDEO_DEQUEUE: u32 = 0x5602;
+const VVIDEO_CREATE_SESSION: u32 = 0x5603;
+const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
+const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -103,6 +106,32 @@ struct ScarletVideoDequeuedFrame {
     payload_len: u32,
     flags: u32,
     timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoSessionInfo {
+    stream_id: u32,
+    padding: u32,
+    buffer: ScarletVideoBufferInfo,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoSessionSubmit {
+    stream_id: u32,
+    input_len: u32,
+    coded_format: u32,
+    padding: u32,
+    timestamp: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoSessionDequeuedFrame {
+    stream_id: u32,
+    padding: u32,
+    frame: ScarletVideoDequeuedFrame,
 }
 
 struct VideoFrameStore {
@@ -511,7 +540,11 @@ fn decode_loop_software(
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
-    if source.access_units.iter().any(|unit| unit.codec != VideoCodec::H264) {
+    if source
+        .access_units
+        .iter()
+        .any(|unit| unit.codec != VideoCodec::H264)
+    {
         return Err(String::from(
             "software decoder supports only H.264; use --hwdc for this video",
         ));
@@ -660,8 +693,8 @@ impl VideoAccessUnit {
                 size,
                 config,
             } => {
-                let data = mp4_data
-                    .ok_or_else(|| String::from("MP4 backing data is unavailable"))?;
+                let data =
+                    mp4_data.ok_or_else(|| String::from("MP4 backing data is unavailable"))?;
                 let end = offset
                     .checked_add(*size)
                     .ok_or_else(|| String::from("MP4 AV1 sample offset overflow"))?;
@@ -917,7 +950,8 @@ fn load_mp4_aac_audio_source(data: Arc<Vec<u8>>) -> Result<Mp4AacAudioSource, St
     let mut audio_track = None;
     while let Some(mp4_box) = read_mp4_box(data.as_slice(), offset, data.len()) {
         if &mp4_box.typ == b"moov" {
-            audio_track = find_mp4_audio_track(data.as_slice(), mp4_box.data_start, mp4_box.data_end)?;
+            audio_track =
+                find_mp4_audio_track(data.as_slice(), mp4_box.data_start, mp4_box.data_end)?;
             break;
         }
         offset = mp4_box.data_end;
@@ -1774,7 +1808,10 @@ impl ScarletVideoFrame {
     }
 }
 
+#[derive(Clone, Copy)]
 struct MappedVideoBuffer {
+    stream_id: u32,
+    session_commands: bool,
     ptr: *mut u8,
     mmap_len: usize,
     input_offset: usize,
@@ -1900,7 +1937,7 @@ impl HardwareVideoDecoder {
         codec: VideoCodec,
         access_unit: &[u8],
     ) -> Result<Option<ScarletVideoFrame>, String> {
-        let Some(buffer) = &self.mapped else {
+        let Some(buffer) = self.mapped else {
             return Ok(None);
         };
         let input_ptr = buffer.ptr;
@@ -1921,32 +1958,62 @@ impl HardwareVideoDecoder {
             );
         }
 
-        let submit = ScarletVideoSubmit {
-            input_len: access_unit.len() as u32,
-            coded_format: codec.coded_format(),
-            timestamp: 0,
-        };
-        self.device
-            .as_handle()
-            .control(VVIDEO_SUBMIT, &submit as *const _ as usize)
-            .map_err(|_| {
-                let status = self.read_decoder_status();
-                format!("hardware decoder mmap submit failed{status}")
-            })?;
+        if buffer.session_commands {
+            let submit = ScarletVideoSessionSubmit {
+                stream_id: buffer.stream_id,
+                input_len: access_unit.len() as u32,
+                coded_format: codec.coded_format(),
+                padding: 0,
+                timestamp: 0,
+            };
+            self.device
+                .as_handle()
+                .control(VVIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
+                .map_err(|_| {
+                    let status = self.read_decoder_status();
+                    format!("hardware decoder mmap submit failed{status}")
+                })?;
+        } else {
+            let submit = ScarletVideoSubmit {
+                input_len: access_unit.len() as u32,
+                coded_format: codec.coded_format(),
+                timestamp: 0,
+            };
+            self.device
+                .as_handle()
+                .control(VVIDEO_SUBMIT, &submit as *const _ as usize)
+                .map_err(|_| {
+                    let status = self.read_decoder_status();
+                    format!("hardware decoder mmap submit failed{status}")
+                })?;
+        }
 
         let mut empty_polls = 0usize;
         loop {
-            let mut frame = ScarletVideoDequeuedFrame::default();
-            match self
-                .device
-                .as_handle()
-                .control(VVIDEO_DEQUEUE, &mut frame as *mut _ as usize)
-            {
-                Ok(1) => {
+            let dequeue_result = if buffer.session_commands {
+                let mut session_frame = ScarletVideoSessionDequeuedFrame {
+                    stream_id: buffer.stream_id,
+                    ..Default::default()
+                };
+                let result = self.device.as_handle().control(
+                    VVIDEO_DEQUEUE_SESSION,
+                    &mut session_frame as *mut _ as usize,
+                );
+                result.map(|value| (value, session_frame.frame))
+            } else {
+                let mut frame = ScarletVideoDequeuedFrame::default();
+                let result = self
+                    .device
+                    .as_handle()
+                    .control(VVIDEO_DEQUEUE, &mut frame as *mut _ as usize);
+                result.map(|value| (value, frame))
+            };
+            match dequeue_result {
+                Ok((1, frame)) => {
                     if frame.width == 0 || frame.height == 0 || frame.payload_len == 0 {
                         return Err(String::from("hardware decoder returned empty mmap frame"));
                     }
-                    let Some(buffer) = &self.mapped else {
+                    let Some(buffer) = self.mapped else {
                         return Err(String::from("hardware decoder mmap buffer disappeared"));
                     };
                     let payload_ptr =
@@ -1961,7 +2028,7 @@ impl HardwareVideoDecoder {
                         },
                     }));
                 }
-                Ok(0) => {
+                Ok((0, _)) => {
                     empty_polls += 1;
                     if empty_polls > 10_000 {
                         return Err(String::from(
@@ -1970,7 +2037,7 @@ impl HardwareVideoDecoder {
                     }
                     thread::sleep(Duration::from_millis(1));
                 }
-                Ok(_) => {
+                Ok((_, _)) => {
                     return Err(String::from(
                         "hardware decoder returned invalid dequeue result",
                     ));
@@ -1984,11 +2051,21 @@ impl HardwareVideoDecoder {
     }
 
     fn map_video_buffer(device: &File) -> Option<MappedVideoBuffer> {
-        let mut info = ScarletVideoBufferInfo::default();
-        device
+        let mut session_info = ScarletVideoSessionInfo::default();
+        let (stream_id, session_commands, info) = if device
             .as_handle()
-            .control(VVIDEO_GET_BUFFER, &mut info as *mut _ as usize)
-            .ok()?;
+            .control(VVIDEO_CREATE_SESSION, &mut session_info as *mut _ as usize)
+            .is_ok()
+        {
+            (session_info.stream_id, true, session_info.buffer)
+        } else {
+            let mut info = ScarletVideoBufferInfo::default();
+            device
+                .as_handle()
+                .control(VVIDEO_GET_BUFFER, &mut info as *mut _ as usize)
+                .ok()?;
+            (1, false, info)
+        };
         let mapper = device.as_handle().as_memory_mapping().ok()?;
         let addr = mapper
             .mmap(
@@ -2000,6 +2077,8 @@ impl HardwareVideoDecoder {
             )
             .ok()?;
         Some(MappedVideoBuffer {
+            stream_id,
+            session_commands,
             ptr: addr as *mut u8,
             mmap_len: info.mmap_len as usize,
             input_offset: info.input_offset as usize,
