@@ -1038,6 +1038,13 @@ private final class VideoBackend {
         if queueType == virtioVideoQueueTypeOutput {
             queuedOutputResources[streamId] = nil
         }
+        let streamPrefix = "\(streamId):"
+        if !resources.keys.contains(where: { $0.hasPrefix(streamPrefix) }) {
+            queuedOutputResources[streamId] = nil
+            h264Decoders[streamId] = nil
+            av1Decoders[streamId] = nil
+            log("[vhost-video-vt] RESOURCE_DESTROY_ALL stream_id=\(streamId) released decoder")
+        }
         return header(virtioVideoRespOkNoData, streamId: streamId)
     }
 

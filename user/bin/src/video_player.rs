@@ -29,7 +29,7 @@ use scarlet_ui::{
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
-use std::handle::capability::memory_mapping::{flags as mmap_flags, prot};
+use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{Read, Write};
 use std::ipc::SharedMemory;
 use std::socket::Socket;
@@ -73,6 +73,7 @@ const VVIDEO_DEQUEUE: u32 = 0x5602;
 const VVIDEO_CREATE_SESSION: u32 = 0x5603;
 const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
 const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
+const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -2095,6 +2096,25 @@ impl HardwareVideoDecoder {
             Ok(read) => {
                 let status = core::str::from_utf8(&buffer[..read]).unwrap_or("<non-utf8 status>");
                 format!("; {status}")
+            }
+        }
+    }
+}
+
+impl Drop for HardwareVideoDecoder {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.mapped.take() {
+            let _ = munmap(buffer.ptr as usize, buffer.mmap_len);
+            if buffer.session_commands {
+                let info = ScarletVideoSessionInfo {
+                    stream_id: buffer.stream_id,
+                    padding: 0,
+                    buffer: ScarletVideoBufferInfo::default(),
+                };
+                let _ = self
+                    .device
+                    .as_handle()
+                    .control(VVIDEO_DESTROY_SESSION, &info as *const _ as usize);
             }
         }
     }

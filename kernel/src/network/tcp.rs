@@ -49,6 +49,7 @@ pub mod tcp_flags {
 const MAX_SEND_BUFFER_SIZE: usize = 65536; // 64KB
 const MAX_RECV_BUFFER_SIZE: usize = 65536; // 64KB
 const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
+const LOG_TCP_HTTPS: bool = false;
 
 /// TCP header
 #[derive(Debug, Clone, Copy)]
@@ -474,6 +475,33 @@ impl TcpSocket {
     /// Process incoming TCP segment
     pub fn process_segment(&self, src_ip: Ipv4Address, header: TcpHeader, data: &[u8]) {
         let current_state = self.get_state();
+        let src_port = header.src_port;
+        let dst_port = header.dst_port;
+        if should_log_tcp_https(src_port, dst_port) {
+            let seq = header.seq_number;
+            let ack = header.ack_number;
+            let flags = header.flags();
+            let expected = self.recv_seq.load(Ordering::SeqCst);
+            let send_unacked = self.send_unacked.load(Ordering::SeqCst);
+            let send_seq = self.send_seq.load(Ordering::SeqCst);
+            crate::println!(
+                "[tcp] rx {}.{}.{}.{}:{} -> local:{} state={:?} flags=0x{:02x} seq={} ack={} len={} expected={} send={}..{}",
+                src_ip.0[0],
+                src_ip.0[1],
+                src_ip.0[2],
+                src_ip.0[3],
+                src_port,
+                dst_port,
+                current_state,
+                flags,
+                seq,
+                ack,
+                data.len(),
+                expected,
+                send_unacked,
+                send_seq
+            );
+        }
 
         match current_state {
             TcpState::Listen => {
@@ -609,6 +637,9 @@ impl TcpSocket {
         self.send_ack(src_ip, header.src_port, next_recv);
 
         self.set_state(TcpState::Established);
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
     }
 
     /// Handle RST (Reset) - properly cleanup connection
@@ -653,6 +684,12 @@ impl TcpSocket {
 
         // Set state to Closed
         self.set_state(TcpState::Closed);
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
+        }
     }
 
     /// Handle control segment (ACK, FIN, RST)
@@ -670,6 +707,22 @@ impl TcpSocket {
             self.update_send_window(header.ack_number);
             self.stop_rtt_measurement(header.ack_number);
             self.remove_acked_segments(header.ack_number);
+            self.handle_close_ack(header.ack_number);
+        }
+    }
+
+    /// Handle ACKs that advance TCP close state.
+    fn handle_close_ack(&self, ack_number: u32) {
+        let send_seq = self.send_seq.load(Ordering::SeqCst);
+        if !is_seq_acknowledged(send_seq, ack_number) {
+            return;
+        }
+
+        match self.get_state() {
+            TcpState::FinWait1 => self.set_state(TcpState::FinWait2),
+            TcpState::Closing => self.set_state(TcpState::TimeWait),
+            TcpState::LastAck => self.set_state(TcpState::Closed),
+            _ => {}
         }
     }
 
@@ -682,18 +735,57 @@ impl TcpSocket {
 
         // Check sequence number
         let expected_seq = self.recv_seq.load(Ordering::SeqCst);
-        let segment_seq = header.seq_number;
-        let segment_end = segment_seq.wrapping_add(data.len() as u32);
+        let mut segment_seq = header.seq_number;
+        let mut payload = data;
+        let segment_end = segment_seq.wrapping_add(payload.len() as u32);
 
         // Old segment (duplicate) - send ACK
-        if segment_end <= expected_seq {
+        if seq_before_or_equal(segment_end, expected_seq) {
+            if should_log_tcp_https(header.src_port, header.dst_port) {
+                crate::println!(
+                    "[tcp] drop duplicate seq={} end={} expected={} len={}",
+                    segment_seq,
+                    segment_end,
+                    expected_seq,
+                    payload.len()
+                );
+            }
             self.send_ack(src_ip, header.src_port, expected_seq);
             return;
         }
 
+        // Partially duplicate segment - trim the bytes we already accepted.
+        if seq_before(segment_seq, expected_seq) {
+            let skip = expected_seq.wrapping_sub(segment_seq) as usize;
+            if skip >= payload.len() {
+                if should_log_tcp_https(header.src_port, header.dst_port) {
+                    crate::println!(
+                        "[tcp] drop fully overlapped seq={} expected={} len={} skip={}",
+                        segment_seq,
+                        expected_seq,
+                        payload.len(),
+                        skip
+                    );
+                }
+                self.send_ack(src_ip, header.src_port, expected_seq);
+                return;
+            }
+            if should_log_tcp_https(header.src_port, header.dst_port) {
+                crate::println!(
+                    "[tcp] trim overlap seq={} expected={} len={} skip={}",
+                    segment_seq,
+                    expected_seq,
+                    payload.len(),
+                    skip
+                );
+            }
+            payload = &payload[skip..];
+            segment_seq = expected_seq;
+        }
+
         // Out-of-order segment - buffer it
-        if segment_seq > expected_seq {
-            if !data.is_empty() {
+        if seq_after(segment_seq, expected_seq) {
+            if !payload.is_empty() {
                 let mut out_of_order = self.out_of_order.lock();
                 // Check if segment already buffered
                 if !out_of_order.contains_key(&segment_seq) {
@@ -701,10 +793,19 @@ impl TcpSocket {
                     if out_of_order.len() < 128 {
                         let ooo_seg = OutOfOrderSegment {
                             seq: segment_seq,
-                            data: data.to_vec(),
+                            data: payload.to_vec(),
                         };
                         out_of_order.insert(segment_seq, ooo_seg);
                     }
+                }
+                if should_log_tcp_https(header.src_port, header.dst_port) {
+                    crate::println!(
+                        "[tcp] queue ooo seq={} expected={} len={} ooo_count={}",
+                        segment_seq,
+                        expected_seq,
+                        payload.len(),
+                        out_of_order.len()
+                    );
                 }
                 drop(out_of_order);
 
@@ -722,39 +823,56 @@ impl TcpSocket {
         }
 
         // In-order segment (segment_seq == expected_seq)
-        if !data.is_empty() {
+        if !payload.is_empty() {
             let mut recv_buf = self.recv_buffer.lock();
 
             // Check receive buffer limit - drop data if full (should update window to 0)
-            if recv_buf.len() + data.len() > MAX_RECV_BUFFER_SIZE {
+            if recv_buf.len() + payload.len() > MAX_RECV_BUFFER_SIZE {
                 // Buffer full - send ACK with window=0 to stop sender
+                if should_log_tcp_https(header.src_port, header.dst_port) {
+                    crate::println!(
+                        "[tcp] drop recv full seq={} expected={} len={} recv_len={}",
+                        segment_seq,
+                        expected_seq,
+                        payload.len(),
+                        recv_buf.len()
+                    );
+                }
                 drop(recv_buf);
                 self.send_ack(src_ip, header.src_port, expected_seq);
                 return;
             }
 
-            recv_buf.extend(data);
-            let mut next_seq = expected_seq.wrapping_add(data.len() as u32);
+            recv_buf.extend(payload);
+            let mut next_seq = expected_seq.wrapping_add(payload.len() as u32);
 
             // Check if we can reassemble from out-of-order buffer
             let mut out_of_order = self.out_of_order.lock();
             loop {
                 // Remove and process next consecutive segment from out-of-order buffer
-                if let Some((_seq, ooo_seg)) = out_of_order.first_key_value() {
-                    if *_seq == next_seq {
-                        let seq = *_seq;
-                        let ooo_seg = out_of_order.remove(&seq).unwrap();
+                if let Some((seq, ooo_seg)) = out_of_order.first_key_value() {
+                    let seq = *seq;
+                    let seg_end = seq.wrapping_add(ooo_seg.data.len() as u32);
+                    if seq_after(seq, next_seq) {
+                        // Gap found, stop reassembly.
+                        break;
+                    }
 
-                        // Check buffer limit before adding out-of-order data
-                        if recv_buf.len() + ooo_seg.data.len() <= MAX_RECV_BUFFER_SIZE {
-                            recv_buf.extend(&ooo_seg.data);
-                            next_seq = next_seq.wrapping_add(ooo_seg.data.len() as u32);
-                        } else {
-                            // Buffer full, stop reassembly
-                            break;
-                        }
+                    let ooo_seg = out_of_order.remove(&seq).unwrap();
+                    if seq_before_or_equal(seg_end, next_seq) {
+                        // Entire buffered segment is already covered.
+                        continue;
+                    }
+
+                    let skip = next_seq.wrapping_sub(seq) as usize;
+                    let new_data = &ooo_seg.data[skip..];
+
+                    // Check buffer limit before adding out-of-order data
+                    if recv_buf.len() + new_data.len() <= MAX_RECV_BUFFER_SIZE {
+                        recv_buf.extend(new_data);
+                        next_seq = next_seq.wrapping_add(new_data.len() as u32);
                     } else {
-                        // Gap found, stop reassembly
+                        // Buffer full, stop reassembly
                         break;
                     }
                 } else {
@@ -771,6 +889,15 @@ impl TcpSocket {
 
             self.recv_seq.store(next_seq, Ordering::SeqCst);
             self.recv_ack.store(next_seq, Ordering::SeqCst);
+            if should_log_tcp_https(header.src_port, header.dst_port) {
+                crate::println!(
+                    "[tcp] accept data seq={} len={} next={} recv_len={}",
+                    segment_seq,
+                    payload.len(),
+                    next_seq,
+                    recv_buf.len()
+                );
+            }
             drop(recv_buf);
 
             // Wake up any blocking recv() calls
@@ -783,7 +910,7 @@ impl TcpSocket {
 
             // Update received bytes
             self.bytes_received
-                .fetch_add(data.len() as u64, Ordering::SeqCst);
+                .fetch_add(payload.len() as u64, Ordering::SeqCst);
         }
 
         // Process ACK if present
@@ -822,12 +949,32 @@ impl TcpSocket {
 
     /// Update send window based on acknowledgment
     fn update_send_window(&self, ack_number: u32) {
+        let previous_unacked = self.send_unacked.load(Ordering::SeqCst);
+        let send_seq = self.send_seq.load(Ordering::SeqCst);
+        let mut acknowledged = if seq_after(ack_number, send_seq) {
+            send_seq
+        } else {
+            ack_number
+        };
+        if seq_before(acknowledged, previous_unacked) {
+            acknowledged = previous_unacked;
+        }
+
+        if seq_after(acknowledged, previous_unacked) {
+            let acked_bytes = acknowledged.wrapping_sub(previous_unacked) as usize;
+            let mut send_buf = self.send_buffer.lock();
+            let drain_len = acked_bytes.min(send_buf.len());
+            for _ in 0..drain_len {
+                send_buf.pop_front();
+            }
+        }
+
         // Track the latest acknowledged sequence number
-        self.send_unacked.store(ack_number, Ordering::SeqCst);
+        self.send_unacked.store(acknowledged, Ordering::SeqCst);
 
         // Fast Retransmit - duplicate ACK detection
         let last_ack = self.last_ack_seq.load(Ordering::SeqCst);
-        if ack_number == last_ack {
+        if acknowledged == last_ack {
             // Duplicate ACK - increment counter
             let count = self.dup_ack_count.fetch_add(1, Ordering::SeqCst);
 
@@ -838,7 +985,7 @@ impl TcpSocket {
             }
         } else {
             // New ACK - reset duplicate counter
-            self.last_ack_seq.store(ack_number, Ordering::SeqCst);
+            self.last_ack_seq.store(acknowledged, Ordering::SeqCst);
             self.dup_ack_count.store(0, Ordering::SeqCst);
         }
 
@@ -926,13 +1073,20 @@ impl TcpSocket {
         let local_port = self.local_port.load(Ordering::SeqCst);
 
         let send_seq = self.send_seq.load(Ordering::SeqCst);
+        let recv_seq = self.recv_seq.load(Ordering::SeqCst);
+        let current_state = self.get_state();
 
         let mut header = TcpHeader::new(local_port, dest_port);
         header.seq_number = send_seq;
-        header.set_flags(tcp_flags::FIN);
+        header.ack_number = recv_seq;
+        header.set_flags(tcp_flags::FIN | tcp_flags::ACK);
 
         self.send_segment(dest_ip, header, &[], true, false);
-        self.set_state(TcpState::FinWait1);
+        if current_state == TcpState::CloseWait {
+            self.set_state(TcpState::LastAck);
+        } else {
+            self.set_state(TcpState::FinWait1);
+        }
     }
 
     /// Send FIN-ACK packet
@@ -1353,6 +1507,12 @@ impl TcpSocket {
                 if seg.tx_count >= 12 {
                     // Too many retransmissions, close connection
                     self.set_state(TcpState::Closed);
+                    if let Some(waker) = self.send_waker.lock().as_ref() {
+                        waker.wake_all();
+                    }
+                    if let Some(waker) = self.recv_waker.lock().as_ref() {
+                        waker.wake_all();
+                    }
                     return;
                 }
 
@@ -1468,7 +1628,26 @@ impl TcpSocket {
 fn is_seq_acknowledged(seq: u32, ack: u32) -> bool {
     // Standard TCP sequence number comparison
     // Returns true if ack acknowledges seq
-    seq.wrapping_sub(ack) > (1u32 << 31)
+    seq_before_or_equal(seq, ack)
+}
+
+/// Return true if sequence number `a` is before or equal to `b`.
+fn seq_before_or_equal(a: u32, b: u32) -> bool {
+    a == b || seq_before(a, b)
+}
+
+/// Return true if sequence number `a` is before `b`.
+fn seq_before(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) > (1u32 << 31)
+}
+
+/// Return true if sequence number `a` is after `b`.
+fn seq_after(a: u32, b: u32) -> bool {
+    seq_before(b, a)
+}
+
+fn should_log_tcp_https(src_port: u16, dst_port: u16) -> bool {
+    LOG_TCP_HTTPS && (src_port == 443 || dst_port == 443)
 }
 
 impl SocketObject for TcpSocket {
@@ -1620,7 +1799,32 @@ impl SocketControl for TcpSocket {
 
                 // Start 3-way handshake
                 self.send_syn(addr, port);
-                Ok(())
+
+                if !self.blocking_mode.load(Ordering::SeqCst) {
+                    return Err(SocketError::WouldBlock);
+                }
+
+                let task = crate::task::mytask().ok_or(SocketError::InvalidOperation)?;
+                loop {
+                    match self.get_state() {
+                        TcpState::Established => return Ok(()),
+                        TcpState::Closed => return Err(SocketError::ConnectionRefused),
+                        TcpState::SynSent => {
+                            let waker = {
+                                let mut waker_lock = self.send_waker.lock();
+                                waker_lock
+                                    .get_or_insert_with(|| {
+                                        Arc::new(crate::sync::Waker::new_interruptible(
+                                            "tcp_connect",
+                                        ))
+                                    })
+                                    .clone()
+                            };
+                            waker.wait(task.get_id(), task.get_trapframe());
+                        }
+                        _ => return Err(SocketError::InvalidOperation),
+                    }
+                }
             }
             _ => Err(SocketError::InvalidAddress),
         }
@@ -1734,8 +1938,10 @@ impl crate::object::capability::StreamOps for TcpSocket {
         use crate::object::capability::selectable::Selectable;
 
         if Selectable::is_nonblocking(self) {
-            return self.send_data(data).map_err(|_| {
-                crate::object::capability::StreamError::Other("tcp send error".into())
+            return self.send_data(data).map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                _ => crate::object::capability::StreamError::Other("tcp send error".into()),
             });
         }
 
@@ -1749,7 +1955,11 @@ impl crate::object::capability::StreamOps for TcpSocket {
         };
 
         self.send_blocking(data, task.get_id(), task.get_trapframe())
-            .map_err(|_| crate::object::capability::StreamError::Other("tcp send error".into()))
+            .map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                _ => crate::object::capability::StreamError::Other("tcp send error".into()),
+            })
     }
 }
 
@@ -1786,49 +1996,65 @@ impl crate::object::capability::Selectable for TcpSocket {
         timeout_ticks: Option<u64>,
         _min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
-        let current = self.current_ready(interest);
-        if (interest.read && current.read) || (interest.write && current.write) {
-            return crate::object::capability::selectable::SelectWaitOutcome::Ready;
-        }
-
         let task_id = {
             use crate::arch::get_cpu;
             let cpu_id = get_cpu().get_cpuid();
             current_task_id(cpu_id).unwrap_or(0)
         };
+        let deadline = timeout_ticks.map(|ticks| crate::timer::get_tick().saturating_add(ticks));
 
-        let woke = if interest.read {
-            let waker = {
-                let mut waker_lock = self.recv_waker.lock();
-                waker_lock
-                    .get_or_insert_with(|| {
-                        Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
-                    })
-                    .clone()
-            };
-            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
-        } else if interest.write {
-            let waker = {
-                let mut waker_lock = self.send_waker.lock();
-                waker_lock
-                    .get_or_insert_with(|| {
-                        Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
-                    })
-                    .clone()
-            };
-            waker.wait_with_timeout(task_id, trapframe, timeout_ticks)
-        } else {
-            true
-        };
+        loop {
+            let current = self.current_ready(interest);
+            if (interest.read && current.read) || (interest.write && current.write) {
+                return crate::object::capability::selectable::SelectWaitOutcome::Ready;
+            }
 
-        if timeout_ticks.is_some() && !woke {
-            let after = self.current_ready(interest);
-            if (interest.read && !after.read) && (interest.write && !after.write) {
+            let remaining = match deadline {
+                Some(deadline) => {
+                    let now = crate::timer::get_tick();
+                    if now >= deadline {
+                        return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
+                    }
+                    Some(deadline - now)
+                }
+                None => None,
+            };
+
+            if matches!(remaining, Some(0)) {
                 return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
             }
-        }
 
-        crate::object::capability::selectable::SelectWaitOutcome::Ready
+            let woke = if interest.read {
+                let waker = {
+                    let mut waker_lock = self.recv_waker.lock();
+                    waker_lock
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
+                        })
+                        .clone()
+                };
+                waker.wait_with_timeout(task_id, trapframe, remaining)
+            } else if interest.write {
+                let waker = {
+                    let mut waker_lock = self.send_waker.lock();
+                    waker_lock
+                        .get_or_insert_with(|| {
+                            Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
+                        })
+                        .clone()
+                };
+                waker.wait_with_timeout(task_id, trapframe, remaining)
+            } else {
+                true
+            };
+
+            if !woke {
+                let after = self.current_ready(interest);
+                if !((interest.read && after.read) || (interest.write && after.write)) {
+                    return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
+                }
+            }
+        }
     }
 
     fn set_nonblocking(&self, enabled: bool) {
@@ -1854,18 +2080,13 @@ impl Drop for TcpSocket {
         // Send FIN if connection is still open
         let state = self.get_state();
         match state {
-            TcpState::Established | TcpState::SynReceived | TcpState::SynSent => {
-                // Send FIN to close connection gracefully
-                let _ = self.remote_ip.lock().clone().map(|dest_ip| {
-                    let dest_port = self.remote_port.load(Ordering::SeqCst);
-                    let local_port = self.local_port.load(Ordering::SeqCst);
-                    let send_seq = self.send_seq.load(Ordering::SeqCst);
-
-                    let mut header = TcpHeader::new(local_port, dest_port);
-                    header.seq_number = send_seq;
-                    header.set_flags(tcp_flags::FIN);
-                    self.send_segment(dest_ip, header, &[], true, false);
-                });
+            TcpState::Established
+            | TcpState::SynReceived
+            | TcpState::SynSent
+            | TcpState::CloseWait => {
+                if self.remote_ip.lock().is_some() {
+                    self.send_fin();
+                }
             }
             _ => {}
         }
@@ -2020,6 +2241,23 @@ impl TcpLayer {
 
         if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
             socket.process_segment(src_ip, header, data);
+        } else if should_log_tcp_https(src_port, dst_port) {
+            let seq = header.seq_number;
+            let ack = header.ack_number;
+            let flags = header.flags();
+            crate::println!(
+                "[tcp] no socket {}.{}.{}.{}:{} -> local:{} flags=0x{:02x} seq={} ack={} len={}",
+                src_ip.0[0],
+                src_ip.0[1],
+                src_ip.0[2],
+                src_ip.0[3],
+                src_port,
+                dst_port,
+                flags,
+                seq,
+                ack,
+                data.len()
+            );
         }
     }
 }

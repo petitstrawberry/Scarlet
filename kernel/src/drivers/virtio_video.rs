@@ -71,6 +71,7 @@ const VVIDEO_DEQUEUE: u32 = 0x5602;
 const VVIDEO_CREATE_SESSION: u32 = 0x5603;
 const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
 const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
+const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -218,6 +219,7 @@ impl DecodeCommandBuffers {
 
 struct VideoSession {
     stream_id: u32,
+    owner_task_id: Mutex<Option<usize>>,
     stream_created: RwLock<bool>,
     stream_coded_format: RwLock<u32>,
     mapped_buffer: RwLock<Option<ContiguousPages>>,
@@ -232,6 +234,7 @@ impl VideoSession {
     fn new(index: usize) -> Self {
         Self {
             stream_id: (index + 1) as u32,
+            owner_task_id: Mutex::new(None),
             stream_created: RwLock::new(false),
             stream_coded_format: RwLock::new(0),
             mapped_buffer: RwLock::new(None),
@@ -393,11 +396,73 @@ impl VirtioVideoDevice {
             .ok_or("Invalid VirtIO video stream id")
     }
 
-    fn allocate_session(&self) -> &VideoSession {
+    fn allocate_session(&self, owner_task_id: usize) -> Result<&VideoSession, &'static str> {
         let mut next = self.next_session_index.lock();
-        let index = *next % MAX_VIDEO_SESSIONS;
-        *next = next.wrapping_add(1);
-        &self.sessions[index]
+        for offset in 0..MAX_VIDEO_SESSIONS {
+            let index = (*next + offset) % MAX_VIDEO_SESSIONS;
+            let session = &self.sessions[index];
+            let mut owner = session.owner_task_id.lock();
+            if owner.is_none() {
+                *owner = Some(owner_task_id);
+                *next = index.wrapping_add(1);
+                return Ok(session);
+            }
+        }
+        Err("No free VirtIO video stream sessions")
+    }
+
+    fn current_owner_task_id(&self) -> Result<usize, &'static str> {
+        mytask()
+            .map(|task| task.get_thread_group_id())
+            .ok_or("VirtIO video session requires a current task")
+    }
+
+    fn claim_session(
+        &self,
+        session: &VideoSession,
+        owner_task_id: usize,
+    ) -> Result<(), &'static str> {
+        let mut owner = session.owner_task_id.lock();
+        match *owner {
+            None => {
+                *owner = Some(owner_task_id);
+                Ok(())
+            }
+            Some(existing) if existing == owner_task_id => Ok(()),
+            Some(_) => Err("VirtIO video stream session is already owned"),
+        }
+    }
+
+    fn release_session(&self, session: &VideoSession) -> Result<(), &'static str> {
+        if session.pending_decode.lock().is_some() {
+            return Err("VirtIO video stream session has pending decode");
+        }
+
+        let _ = self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT);
+        let _ = self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT);
+        *session.mapped_resources_created.lock() = false;
+        *session.mapped_frame.lock() = None;
+        *session.mapped_buffer.write() = None;
+        *session.stream_created.write() = false;
+        *session.stream_coded_format.write() = 0;
+        *session.next_timestamp.lock() = 1;
+        *session.owner_task_id.lock() = None;
+        Ok(())
+    }
+
+    fn release_sessions_for_current_task(&self) {
+        let Some(task) = mytask() else {
+            return;
+        };
+        let owner_task_id = task.get_thread_group_id();
+        let _ = self.try_complete_pending_decode();
+        for session in &self.sessions {
+            if *session.owner_task_id.lock() == Some(owner_task_id)
+                && session.pending_decode.lock().is_none()
+            {
+                let _ = self.release_session(session);
+            }
+        }
     }
 
     fn session_by_mmap_offset(
@@ -474,6 +539,8 @@ impl VirtioVideoDevice {
 
     fn decode_h264_access_unit(&self, buffer: &[u8]) -> Result<usize, &'static str> {
         let session = self.default_session();
+        let owner_task_id = self.current_owner_task_id()?;
+        self.claim_session(session, owner_task_id)?;
         self.ensure_stream_format(session, VIRTIO_VIDEO_FORMAT_H264)?;
         if buffer.is_empty() {
             return Err("H.264 input is empty");
@@ -551,6 +618,8 @@ impl VirtioVideoDevice {
         timestamp: u64,
     ) -> Result<(), &'static str> {
         let session = self.session_by_stream_id(stream_id)?;
+        let owner_task_id = self.current_owner_task_id()?;
+        self.claim_session(session, owner_task_id)?;
         self.ensure_stream_format(session, coded_format)?;
         if input_len == 0 {
             return Err("VirtIO video input is empty");
@@ -1270,6 +1339,8 @@ impl VirtioVideoDevice {
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let owner_task_id = self.current_owner_task_id()?;
+        self.claim_session(self.default_session(), owner_task_id)?;
         let info = self.buffer_info_for_session(self.default_session())?;
         write_user_value(arg, &info)?;
         Ok(0)
@@ -1277,15 +1348,33 @@ impl VirtioVideoDevice {
 
     fn handle_create_session(&self, arg: usize) -> Result<i32, &'static str> {
         let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        let owner_task_id = self.current_owner_task_id()?;
         let session = if info.stream_id == 0 {
-            self.allocate_session()
+            self.allocate_session(owner_task_id)?
         } else {
-            self.session_by_stream_id(info.stream_id)?
+            let session = self.session_by_stream_id(info.stream_id)?;
+            self.claim_session(session, owner_task_id)?;
+            session
         };
         info.stream_id = session.stream_id;
         info.padding = 0;
         info.buffer = self.buffer_info_for_session(session)?;
         write_user_value(arg, &info)?;
+        Ok(0)
+    }
+
+    fn handle_destroy_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        let owner_task_id = self.current_owner_task_id()?;
+        let session = self.session_by_stream_id(info.stream_id)?;
+        if *session.owner_task_id.lock() != Some(owner_task_id) {
+            return Err("VirtIO video stream session is not owned by current task");
+        }
+        if let Err(e) = self.try_complete_pending_decode() {
+            self.decoded_frame.lock().last_error = Some(e);
+            return Err(e);
+        }
+        self.release_session(session)?;
         Ok(0)
     }
 
@@ -1339,6 +1428,10 @@ impl VirtioVideoDevice {
             return Err(e);
         }
         let session = self.session_by_stream_id(stream_id)?;
+        let owner_task_id = self.current_owner_task_id()?;
+        if *session.owner_task_id.lock() != Some(owner_task_id) {
+            return Err("VirtIO video stream session is not owned by current task");
+        }
         let Some(frame) = session.mapped_frame.lock().take() else {
             return Ok(0);
         };
@@ -1479,6 +1572,10 @@ impl Device for VirtioVideoDevice {
         self
     }
 
+    fn close(&self) {
+        self.release_sessions_for_current_task();
+    }
+
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
@@ -1529,6 +1626,7 @@ impl ControlOps for VirtioVideoDevice {
             VVIDEO_CREATE_SESSION => self.handle_create_session(arg),
             VVIDEO_SUBMIT_SESSION => self.handle_submit_session(arg),
             VVIDEO_DEQUEUE_SESSION => self.handle_dequeue_session(arg),
+            VVIDEO_DESTROY_SESSION => self.handle_destroy_session(arg),
             _ => Err("Unsupported VirtIO video control command"),
         }
     }
@@ -1550,6 +1648,7 @@ impl ControlOps for VirtioVideoDevice {
                 VVIDEO_DEQUEUE_SESSION,
                 "Dequeue a decoded mmap video frame for a stream"
             ),
+            (VVIDEO_DESTROY_SESSION, "Destroy mmap video stream session"),
         ]
     }
 }
