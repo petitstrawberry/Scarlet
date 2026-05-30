@@ -25,6 +25,7 @@ use std::network::list_interfaces;
 use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
 use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
+use std::sync::Mutex;
 use std::task::execve;
 use std::thread;
 
@@ -39,6 +40,11 @@ const MAX_REDIRECTS: usize = 8;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTPS_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const GETRANDOM_ERROR: u32 = getrandom::Error::CUSTOM_START + 1;
+const LOG_TLS_IO: bool = false;
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 Scarlet-yt/0.1";
+const DEFAULT_EXTRA_HEADERS: &str = "";
+const YOUTUBE_MEDIA_EXTRA_HEADERS: &str =
+    "Accept-Language: en-US,en;q=0.9\r\nRange: bytes=0-\r\nReferer: https://www.youtube.com/\r\n";
 const YOUTUBEI_API_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 const YOUTUBE_WEB_CLIENT_VERSION: &str = "2.20260114.08.00";
 const YOUTUBE_MWEB_CLIENT_VERSION: &str = "2.20260115.01.00";
@@ -129,28 +135,139 @@ fn run() -> Result<(), String> {
     }
 
     let input = input.ok_or_else(|| String::from("missing URL"))?;
-    let mut fetch_url = input.clone();
+    let mut media = MediaSelection {
+        video_url: input.clone(),
+        audio_url: None,
+        user_agent: DEFAULT_USER_AGENT,
+        extra_headers: DEFAULT_EXTRA_HEADERS,
+    };
     if is_youtube_url(&input) {
         println!("[yt] YouTube URL detected");
         let video_id =
             youtube_video_id(&input).ok_or_else(|| String::from("YouTube video id not found"))?;
         println!("[yt] video id: {}", video_id);
-        fetch_url = resolve_youtube_media_url(&input)?;
+        media = resolve_youtube_media(&input)?;
         if output.is_none() {
             output = Some(format!("/root/media/youtube-{}.mp4", video_id));
         }
     }
 
     let output = output.unwrap_or_else(|| String::from("/tmp/yt.mp4"));
-    fetch_url_to_file(&fetch_url, &output, print_headers)?;
-    println!("[yt] saved {}", output);
+    let audio_output = if let Some(audio_url) = media.audio_url {
+        let path = derive_audio_output_path(&output);
+        fetch_media_pair_to_files(
+            media.video_url,
+            output.clone(),
+            audio_url,
+            path.clone(),
+            print_headers,
+            media.user_agent,
+            media.extra_headers,
+        )?;
+        Some(path)
+    } else {
+        fetch_url_to_file(
+            &media.video_url,
+            &output,
+            print_headers,
+            media.user_agent,
+            media.extra_headers,
+        )?;
+        println!("[yt] saved {}", output);
+        None
+    };
     if play {
-        println!("[yt] exec: video_player --hwdc {}", output);
-        let argv = ["video_player", "--hwdc", output.as_str()];
-        let rc = execve("/bin/video_player", &argv, &[]);
+        let rc = if let Some(audio) = audio_output.as_ref() {
+            println!(
+                "[yt] exec: video_player --hwdc {} --audio {}",
+                output, audio
+            );
+            let argv = [
+                "video_player",
+                "--hwdc",
+                output.as_str(),
+                "--audio",
+                audio.as_str(),
+            ];
+            execve("/bin/video_player", &argv, &[])
+        } else {
+            println!("[yt] exec: video_player --hwdc {}", output);
+            let argv = ["video_player", "--hwdc", output.as_str()];
+            execve("/bin/video_player", &argv, &[])
+        };
         return Err(format!("failed to exec /bin/video_player: {}", rc));
     }
-    println!("[yt] play: video_player --hwdc {}", output);
+    if let Some(audio) = audio_output {
+        println!(
+            "[yt] play: video_player --hwdc {} --audio {}",
+            output, audio
+        );
+    } else {
+        println!("[yt] play: video_player --hwdc {}", output);
+    }
+    Ok(())
+}
+
+fn fetch_media_pair_to_files(
+    video_url: String,
+    video_output: String,
+    audio_url: String,
+    audio_output: String,
+    print_headers: bool,
+    user_agent: &'static str,
+    extra_headers: &'static str,
+) -> Result<(), String> {
+    println!("[yt] downloading DASH video/audio concurrently");
+    let video_result = Arc::new(Mutex::new(None));
+    let audio_result = Arc::new(Mutex::new(None));
+
+    let video_result_writer = video_result.clone();
+    let video_output_writer = video_output.clone();
+    let video_handle = thread::spawn(move || {
+        let result = fetch_url_to_file(
+            &video_url,
+            &video_output_writer,
+            print_headers,
+            user_agent,
+            extra_headers,
+        );
+        if result.is_ok() {
+            println!("[yt] saved {}", video_output_writer);
+        }
+        *video_result_writer.lock() = Some(result);
+    });
+
+    let audio_result_writer = audio_result.clone();
+    let audio_output_writer = audio_output.clone();
+    let audio_handle = thread::spawn(move || {
+        let result = fetch_url_to_file(
+            &audio_url,
+            &audio_output_writer,
+            print_headers,
+            user_agent,
+            extra_headers,
+        );
+        if result.is_ok() {
+            println!("[yt] saved {}", audio_output_writer);
+        }
+        *audio_result_writer.lock() = Some(result);
+    });
+
+    video_handle
+        .join()
+        .map_err(|err| format!("video download thread failed: {}", err))?;
+    audio_handle
+        .join()
+        .map_err(|err| format!("audio download thread failed: {}", err))?;
+
+    video_result
+        .lock()
+        .take()
+        .unwrap_or_else(|| Err(String::from("video download did not finish")))?;
+    audio_result
+        .lock()
+        .take()
+        .unwrap_or_else(|| Err(String::from("audio download did not finish")))?;
     Ok(())
 }
 
@@ -168,14 +285,23 @@ fn print_usage() {
     println!("  yt --no-play -o /root/media/video.mp4 'https://example.com/video.mp4'");
 }
 
-fn fetch_url_to_file(url: &str, output: &str, print_headers: bool) -> Result<(), String> {
+fn fetch_url_to_file(
+    url: &str,
+    output: &str,
+    print_headers: bool,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<(), String> {
     let mut current = parse_url(url)?;
     for redirect_index in 0..=MAX_REDIRECTS {
         println!(
             "[yt] GET {}://{}:{}{}",
-            current.scheme, current.host, current.port, current.path
+            current.scheme,
+            current.host,
+            current.port,
+            display_path(&current.path)
         );
-        let response = http_get(&current)?;
+        let response = http_get(&current, user_agent, extra_headers)?;
         if print_headers {
             println!("{}", response.headers);
         }
@@ -191,6 +317,7 @@ fn fetch_url_to_file(url: &str, output: &str, print_headers: bool) -> Result<(),
         }
 
         if response.status < 200 || response.status >= 300 {
+            print_http_error_body(response.status, &response.body);
             return Err(format!("HTTP status {}", response.status));
         }
 
@@ -207,15 +334,26 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
-fn http_get(url: &UrlParts) -> Result<HttpResponse, String> {
+struct MediaSelection {
+    video_url: String,
+    audio_url: Option<String>,
+    user_agent: &'static str,
+    extra_headers: &'static str,
+}
+
+fn http_get(url: &UrlParts, user_agent: &str, extra_headers: &str) -> Result<HttpResponse, String> {
     match url.scheme.as_str() {
-        "http" => plain_http_get(url),
-        "https" => https_get(url),
+        "http" => plain_http_get(url, user_agent, extra_headers),
+        "https" => https_get(url, user_agent, extra_headers),
         _ => Err(format!("unsupported URL scheme: {}", url.scheme)),
     }
 }
 
-fn plain_http_get(url: &UrlParts) -> Result<HttpResponse, String> {
+fn plain_http_get(
+    url: &UrlParts,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<HttpResponse, String> {
     let ip = resolve_host(&url.host)?;
     println!(
         "[yt] resolved {} -> {}.{}.{}.{}",
@@ -231,8 +369,8 @@ fn plain_http_get(url: &UrlParts) -> Result<HttpResponse, String> {
     println!("[yt] TCP connected {}:{}", url.host, url.port);
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 Scarlet-yt/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-        url.path, url.host
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\n{}Connection: close\r\n\r\n",
+        url.path, url.host, user_agent, extra_headers
     );
     write_all(&mut socket, request.as_bytes(), "HTTP request")?;
 
@@ -309,10 +447,14 @@ fn plain_http_get(url: &UrlParts) -> Result<HttpResponse, String> {
     })
 }
 
-fn https_get(url: &UrlParts) -> Result<HttpResponse, String> {
+fn https_get(
+    url: &UrlParts,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<HttpResponse, String> {
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 Scarlet-yt/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
-        url.path, url.host
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\n{}Connection: close\r\n\r\n",
+        url.path, url.host, user_agent, extra_headers
     );
     https_request(url, request.as_bytes())
 }
@@ -377,11 +519,15 @@ fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String>
                     pending_out_len = encode
                         .encode(&mut outgoing_tls)
                         .map_err(|err| format!("TLS encode failed: {:?}", err))?;
-                    println!("[yt] TLS encode {} bytes", pending_out_len);
+                    if LOG_TLS_IO {
+                        println!("[yt] TLS encode {} bytes", pending_out_len);
+                    }
                 }
                 ConnectionState::TransmitTlsData(transmit) => {
                     if pending_out_len > 0 {
-                        println!("[yt] TLS transmit {} bytes", pending_out_len);
+                        if LOG_TLS_IO {
+                            println!("[yt] TLS transmit {} bytes", pending_out_len);
+                        }
                         write_all(
                             &mut socket,
                             &outgoing_tls[..pending_out_len],
@@ -392,7 +538,9 @@ fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String>
                     transmit.done();
                 }
                 ConnectionState::BlockedHandshake => {
-                    println!("[yt] TLS blocked handshake; reading");
+                    if LOG_TLS_IO {
+                        println!("[yt] TLS blocked handshake; reading");
+                    }
                     should_read = true;
                 }
                 ConnectionState::WriteTraffic(mut write_traffic) => {
@@ -402,7 +550,9 @@ fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String>
                         let written = write_traffic
                             .encrypt(request, &mut outgoing_tls)
                             .map_err(|err| format!("TLS HTTP request encrypt failed: {:?}", err))?;
-                        println!("[yt] TLS HTTP request {} bytes", written);
+                        if LOG_TLS_IO {
+                            println!("[yt] TLS HTTP request {} bytes", written);
+                        }
                         write_all(&mut socket, &outgoing_tls[..written], "TLS HTTP request")?;
                         request_sent = true;
                     }
@@ -413,13 +563,17 @@ fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String>
                         if plaintext.len() + record.payload.len() > MAX_HTTPS_RESPONSE_BYTES {
                             return Err(String::from("HTTPS response is too large"));
                         }
-                        println!("[yt] TLS plaintext {} bytes", record.payload.len());
+                        if LOG_TLS_IO {
+                            println!("[yt] TLS plaintext {} bytes", record.payload.len());
+                        }
                         plaintext.extend_from_slice(record.payload);
                         discard = discard.saturating_add(record.discard);
                     }
                 }
                 ConnectionState::PeerClosed | ConnectionState::Closed => {
-                    println!("[yt] TLS closed");
+                    if LOG_TLS_IO {
+                        println!("[yt] TLS closed");
+                    }
                     closed = true;
                 }
                 _ => {
@@ -509,7 +663,9 @@ fn read_tls_from_socket(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<(),
     if n == 0 {
         return Err(String::from("TLS connection closed unexpectedly"));
     }
-    println!("[yt] TLS socket read {} bytes", n);
+    if LOG_TLS_IO {
+        println!("[yt] TLS socket read {} bytes", n);
+    }
     buffer.extend_from_slice(&chunk[..n]);
     Ok(())
 }
@@ -624,6 +780,32 @@ fn write_body(path: &str, body: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+fn print_http_error_body(status: u16, body: &[u8]) {
+    if body.is_empty() {
+        return;
+    }
+    let max_len = body.len().min(512);
+    match core::str::from_utf8(&body[..max_len]) {
+        Ok(text) => println!("[yt] HTTP {} body: {}", status, text),
+        Err(_) => println!("[yt] HTTP {} body: {} bytes", status, body.len()),
+    }
+}
+
+fn derive_audio_output_path(video_output: &str) -> String {
+    if let Some(dot) = video_output.rfind('.') {
+        return format!("{}.m4a", &video_output[..dot]);
+    }
+    format!("{}.m4a", video_output)
+}
+
+fn display_path(path: &str) -> String {
+    const MAX_LEN: usize = 160;
+    if path.len() <= MAX_LEN {
+        return path.to_string();
+    }
+    format!("{}...", &path[..MAX_LEN])
+}
+
 #[derive(Debug)]
 struct ScarletTimeProvider;
 
@@ -698,7 +880,7 @@ fn tls_client_config() -> Result<ClientConfig, String> {
     Ok(config)
 }
 
-fn resolve_youtube_media_url(input: &str) -> Result<String, String> {
+fn resolve_youtube_media(input: &str) -> Result<MediaSelection, String> {
     let video_id =
         youtube_video_id(input).ok_or_else(|| String::from("YouTube video id not found"))?;
     let watch_url = format!(
@@ -706,7 +888,11 @@ fn resolve_youtube_media_url(input: &str) -> Result<String, String> {
         video_id
     );
     println!("[yt] loading YouTube watch page");
-    let response = http_get(&parse_url(&watch_url)?)?;
+    let response = http_get(
+        &parse_url(&watch_url)?,
+        DEFAULT_USER_AGENT,
+        DEFAULT_EXTRA_HEADERS,
+    )?;
     if response.status < 200 || response.status >= 300 {
         return Err(format!(
             "YouTube watch page HTTP status {}",
@@ -715,23 +901,49 @@ fn resolve_youtube_media_url(input: &str) -> Result<String, String> {
     }
     let page = core::str::from_utf8(&response.body)
         .map_err(|_| String::from("YouTube watch page is not UTF-8"))?;
-    if let Some(media) = select_youtube_progressive_mp4(page) {
-        println!("[yt] selected progressive MP4 stream from watch page");
-        return Ok(media);
+    if let Some(media) = select_youtube_dash_mp4(page) {
+        println!(
+            "[yt] selected DASH MP4 streams from watch page: {}p + AAC",
+            media.video_height
+        );
+        return Ok(media.into_selection(DEFAULT_USER_AGENT, YOUTUBE_MEDIA_EXTRA_HEADERS));
     }
 
-    println!("[yt] no progressive MP4 in watch page; trying YouTube player API");
+    println!("[yt] no DASH MP4 pair in watch page; trying YouTube player API");
     let api_key = youtube_innertube_api_key(page).unwrap_or_else(|| YOUTUBEI_API_KEY.to_string());
     let client_version = youtube_innertube_client_version(page)
         .unwrap_or_else(|| YOUTUBE_WEB_CLIENT_VERSION.to_string());
-    resolve_youtube_media_url_via_player_api(&video_id, &api_key, &client_version)
+    let visitor_data = youtube_visitor_data(page);
+    match resolve_youtube_media_url_via_player_api(
+        &video_id,
+        &api_key,
+        &client_version,
+        visitor_data.as_deref(),
+    ) {
+        Ok(media) => Ok(media),
+        Err(error) => {
+            println!("[yt] YouTube player API fallback failed: {}", error);
+            if let Some(url) = select_youtube_progressive_mp4(page) {
+                println!("[yt] selected progressive MP4 stream from watch page");
+                Ok(MediaSelection {
+                    video_url: url,
+                    audio_url: None,
+                    user_agent: DEFAULT_USER_AGENT,
+                    extra_headers: YOUTUBE_MEDIA_EXTRA_HEADERS,
+                })
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn resolve_youtube_media_url_via_player_api(
     video_id: &str,
     api_key: &str,
     client_version: &str,
-) -> Result<String, String> {
+    visitor_data: Option<&str>,
+) -> Result<MediaSelection, String> {
     let clients = [
         YoutubeClientSpec::android_vr(),
         YoutubeClientSpec::web(client_version),
@@ -740,12 +952,26 @@ fn resolve_youtube_media_url_via_player_api(
         YoutubeClientSpec::ios(),
     ];
     let mut last_error = String::from("no YouTube player clients tried");
+    let mut progressive_fallback = None;
 
     for client in clients {
-        match try_youtube_player_client(video_id, api_key, &client) {
-            Ok(Some(url)) => return Ok(url),
-            Ok(None) => {
-                last_error = format!("{} returned no direct progressive MP4 stream", client.label);
+        match try_youtube_player_client(video_id, api_key, &client, visitor_data) {
+            Ok(YoutubeClientMedia::Dash(media)) => {
+                return Ok(media.into_selection(client.user_agent, YOUTUBE_MEDIA_EXTRA_HEADERS));
+            }
+            Ok(YoutubeClientMedia::Progressive(url)) => {
+                if progressive_fallback.is_none() {
+                    progressive_fallback = Some(MediaSelection {
+                        video_url: url,
+                        audio_url: None,
+                        user_agent: client.user_agent,
+                        extra_headers: YOUTUBE_MEDIA_EXTRA_HEADERS,
+                    });
+                }
+                last_error = format!("{} returned only progressive MP4", client.label);
+            }
+            Ok(YoutubeClientMedia::None) => {
+                last_error = format!("{} returned no direct MP4 streams", client.label);
             }
             Err(error) => {
                 println!("[yt] YouTube {} player API failed: {}", client.label, error);
@@ -754,23 +980,29 @@ fn resolve_youtube_media_url_via_player_api(
         }
     }
 
-    Err(last_error)
+    progressive_fallback.ok_or(last_error)
 }
 
 fn try_youtube_player_client(
     video_id: &str,
     api_key: &str,
     client: &YoutubeClientSpec<'_>,
-) -> Result<Option<String>, String> {
+    visitor_data: Option<&str>,
+) -> Result<YoutubeClientMedia, String> {
     let api_url = format!(
         "https://www.youtube.com/youtubei/v1/player?key={}&prettyPrint=false",
         api_key
     );
-    let body = youtube_player_request_body(video_id, client);
-    let extra_headers = format!(
+    let body = youtube_player_request_body(video_id, client, visitor_data);
+    let mut extra_headers = format!(
         "Origin: https://www.youtube.com\r\nReferer: https://www.youtube.com/watch?v={}\r\nX-YouTube-Client-Name: {}\r\nX-YouTube-Client-Version: {}\r\n",
         video_id, client.client_id, client.client_version
     );
+    if let Some(visitor_data) = visitor_data {
+        extra_headers.push_str("X-Goog-Visitor-Id: ");
+        extra_headers.push_str(visitor_data);
+        extra_headers.push_str("\r\n");
+    }
 
     println!("[yt] loading YouTube {} player API", client.label);
     let response = https_post_json(
@@ -795,25 +1027,43 @@ fn try_youtube_player_client(
         .map_err(|_| String::from("YouTube player API response is not UTF-8"))?;
     let stats = youtube_format_stats(payload);
     println!(
-        "[yt] {} formats: total={} progressive_mp4={} direct={} sig={} cipher_s={}",
+        "[yt] {} formats: total={} progressive_mp4={} h264_video={} aac_audio={} direct={} sig={} cipher_s={} dash_direct={} dash_sig={} dash_s={}",
         client.label,
         stats.total,
         stats.progressive_mp4,
+        stats.h264_video_only,
+        stats.aac_audio_only,
         stats.direct_url,
         stats.signature_url,
-        stats.cipher_signature
+        stats.cipher_signature,
+        stats.dash_direct,
+        stats.dash_sig,
+        stats.dash_cipher_s
     );
     if let Some(reason) = youtube_playability_reason(payload) {
         println!("[yt] {} playability: {}", client.label, reason);
     }
-    if let Some(media) = select_youtube_progressive_mp4(payload) {
+    if let Some(media) = select_youtube_dash_mp4(payload) {
         println!(
-            "[yt] selected progressive MP4 stream from {} player API",
+            "[yt] selected DASH MP4 streams from {} player API: {}p + AAC",
+            client.label, media.video_height
+        );
+        return Ok(YoutubeClientMedia::Dash(media));
+    }
+    if let Some(url) = select_youtube_progressive_mp4(payload) {
+        println!(
+            "[yt] found progressive MP4 stream from {} player API",
             client.label
         );
-        return Ok(Some(media));
+        return Ok(YoutubeClientMedia::Progressive(url));
     }
-    Ok(None)
+    Ok(YoutubeClientMedia::None)
+}
+
+enum YoutubeClientMedia {
+    Dash(YoutubeDashSelection),
+    Progressive(String),
+    None,
 }
 
 struct YoutubeClientSpec<'a> {
@@ -889,7 +1139,11 @@ enum YoutubeClientPlatform {
     Ios,
 }
 
-fn youtube_player_request_body(video_id: &str, client: &YoutubeClientSpec<'_>) -> String {
+fn youtube_player_request_body(
+    video_id: &str,
+    client: &YoutubeClientSpec<'_>,
+    visitor_data: Option<&str>,
+) -> String {
     let mut body = format!(
         concat!(
             "{{",
@@ -923,69 +1177,174 @@ fn youtube_player_request_body(video_id: &str, client: &YoutubeClientSpec<'_>) -
         }
     }
 
+    if let Some(visitor_data) = visitor_data {
+        body.push_str(",\"visitorData\":\"");
+        push_json_escaped(&mut body, visitor_data);
+        body.push('"');
+    }
+
     body.push_str("}},");
-    body.push_str(&format!(
-        "\"videoId\":\"{}\",\"contentCheckOk\":true,\"racyCheckOk\":true}}",
-        video_id
-    ));
+    body.push_str("\"videoId\":\"");
+    push_json_escaped(&mut body, video_id);
+    body.push_str("\",\"playbackContext\":{\"contentPlaybackContext\":{\"html5Preference\":\"HTML5_PREF_WANTS\"}},\"contentCheckOk\":true,\"racyCheckOk\":true}");
     body
 }
 
 struct YoutubeFormatStats {
     total: usize,
     progressive_mp4: usize,
+    h264_video_only: usize,
+    aac_audio_only: usize,
     direct_url: usize,
     signature_url: usize,
     cipher_signature: usize,
+    dash_direct: usize,
+    dash_sig: usize,
+    dash_cipher_s: usize,
 }
 
 fn youtube_format_stats(payload: &str) -> YoutubeFormatStats {
-    let Some(formats) = youtube_formats_payload(payload) else {
-        return YoutubeFormatStats {
-            total: 0,
-            progressive_mp4: 0,
-            direct_url: 0,
-            signature_url: 0,
-            cipher_signature: 0,
-        };
-    };
-
     let mut stats = YoutubeFormatStats {
         total: 0,
         progressive_mp4: 0,
+        h264_video_only: 0,
+        aac_audio_only: 0,
         direct_url: 0,
         signature_url: 0,
         cipher_signature: 0,
+        dash_direct: 0,
+        dash_sig: 0,
+        dash_cipher_s: 0,
     };
 
-    for object in JsonObjects::new(formats) {
-        stats.total += 1;
-        let is_progressive_mp4 = json_string_field(object, "mimeType")
-            .map(|mime| mime.contains("video/mp4") && mime.contains("mp4a"))
-            .unwrap_or(false);
-        if !is_progressive_mp4 {
-            continue;
+    if let Some(formats) = youtube_formats_payload(payload) {
+        for object in JsonObjects::new(formats) {
+            collect_youtube_format_stats(object, &mut stats);
         }
-        stats.progressive_mp4 += 1;
-        if json_string_field(object, "url").is_some() {
-            stats.direct_url += 1;
-            continue;
-        }
-        let cipher = json_string_field(object, "signatureCipher")
-            .or_else(|| json_string_field(object, "cipher"));
-        if let Some(cipher) = cipher {
-            if form_value(&cipher, "sig")
-                .or_else(|| form_value(&cipher, "signature"))
-                .is_some()
-            {
-                stats.signature_url += 1;
-            } else if form_value(&cipher, "s").is_some() {
-                stats.cipher_signature += 1;
-            }
+    }
+
+    if let Some(adaptive_formats) = youtube_adaptive_formats_payload(payload) {
+        for object in JsonObjects::new(adaptive_formats) {
+            collect_youtube_format_stats(object, &mut stats);
         }
     }
 
     stats
+}
+
+fn collect_youtube_format_stats(object: &str, stats: &mut YoutubeFormatStats) {
+    stats.total += 1;
+    let mime = json_string_field(object, "mimeType").unwrap_or_default();
+    let is_progressive_mp4 = mime.contains("video/mp4") && mime.contains("mp4a");
+    if mime.contains("video/mp4") && mime.contains("avc1") && !mime.contains("mp4a") {
+        stats.h264_video_only += 1;
+        collect_youtube_dash_url_stats(object, stats);
+    }
+    if mime.contains("audio/mp4") && mime.contains("mp4a") {
+        stats.aac_audio_only += 1;
+        collect_youtube_dash_url_stats(object, stats);
+    }
+    if !is_progressive_mp4 {
+        return;
+    }
+    stats.progressive_mp4 += 1;
+    if json_string_field(object, "url").is_some() {
+        stats.direct_url += 1;
+        return;
+    }
+    let cipher = json_string_field(object, "signatureCipher")
+        .or_else(|| json_string_field(object, "cipher"));
+    if let Some(cipher) = cipher {
+        if form_value(&cipher, "sig")
+            .or_else(|| form_value(&cipher, "signature"))
+            .is_some()
+        {
+            stats.signature_url += 1;
+        } else if form_value(&cipher, "s").is_some() {
+            stats.cipher_signature += 1;
+        }
+    }
+}
+
+fn collect_youtube_dash_url_stats(object: &str, stats: &mut YoutubeFormatStats) {
+    if json_string_field(object, "url").is_some() {
+        stats.dash_direct += 1;
+        return;
+    }
+    let cipher = json_string_field(object, "signatureCipher")
+        .or_else(|| json_string_field(object, "cipher"));
+    if let Some(cipher) = cipher {
+        if form_value(&cipher, "sig")
+            .or_else(|| form_value(&cipher, "signature"))
+            .is_some()
+        {
+            stats.dash_sig += 1;
+        } else if form_value(&cipher, "s").is_some() {
+            stats.dash_cipher_s += 1;
+        }
+    }
+}
+
+struct YoutubeDashSelection {
+    video_url: String,
+    audio_url: String,
+    video_height: usize,
+}
+
+impl YoutubeDashSelection {
+    fn into_selection(
+        self,
+        user_agent: &'static str,
+        extra_headers: &'static str,
+    ) -> MediaSelection {
+        MediaSelection {
+            video_url: self.video_url,
+            audio_url: Some(self.audio_url),
+            user_agent,
+            extra_headers,
+        }
+    }
+}
+
+fn select_youtube_dash_mp4(page: &str) -> Option<YoutubeDashSelection> {
+    let formats = youtube_adaptive_formats_payload(page)?;
+    let mut best_video_url = None;
+    let mut best_video_height = 0usize;
+    let mut best_audio_url = None;
+    let mut best_audio_bitrate = 0usize;
+
+    for object in JsonObjects::new(formats) {
+        let Some(mime) = json_string_field(object, "mimeType") else {
+            continue;
+        };
+        if mime.contains("video/mp4") && mime.contains("avc1") && !mime.contains("mp4a") {
+            let Some(url) = youtube_format_url(object) else {
+                continue;
+            };
+            let height = json_usize_field(object, "height").unwrap_or(0);
+            if best_video_url.is_none() || height > best_video_height {
+                best_video_height = height;
+                best_video_url = Some(url);
+            }
+        } else if mime.contains("audio/mp4") && mime.contains("mp4a") {
+            let Some(url) = youtube_format_url(object) else {
+                continue;
+            };
+            let bitrate = json_usize_field(object, "averageBitrate")
+                .or_else(|| json_usize_field(object, "bitrate"))
+                .unwrap_or(0);
+            if best_audio_url.is_none() || bitrate > best_audio_bitrate {
+                best_audio_bitrate = bitrate;
+                best_audio_url = Some(url);
+            }
+        }
+    }
+
+    Some(YoutubeDashSelection {
+        video_url: best_video_url?,
+        audio_url: best_audio_url?,
+        video_height: best_video_height,
+    })
 }
 
 fn youtube_playability_reason(payload: &str) -> Option<String> {
@@ -998,6 +1357,10 @@ fn youtube_innertube_api_key(page: &str) -> Option<String> {
 
 fn youtube_innertube_client_version(page: &str) -> Option<String> {
     json_string_field(page, "INNERTUBE_CLIENT_VERSION")
+}
+
+fn youtube_visitor_data(page: &str) -> Option<String> {
+    json_string_field(page, "VISITOR_DATA").or_else(|| json_string_field(page, "visitorData"))
 }
 
 fn select_youtube_progressive_mp4(page: &str) -> Option<String> {
@@ -1027,6 +1390,13 @@ fn select_youtube_progressive_mp4(page: &str) -> Option<String> {
 
 fn youtube_formats_payload(page: &str) -> Option<&str> {
     let formats_key = "\"formats\":[";
+    let formats_start = page.find(formats_key)? + formats_key.len() - 1;
+    let formats_end = find_matching_json(page, formats_start, b'[', b']')?;
+    Some(&page[formats_start + 1..formats_end])
+}
+
+fn youtube_adaptive_formats_payload(page: &str) -> Option<&str> {
+    let formats_key = "\"adaptiveFormats\":[";
     let formats_start = page.find(formats_key)? + formats_key.len() - 1;
     let formats_end = find_matching_json(page, formats_start, b'[', b']')?;
     Some(&page[formats_start + 1..formats_end])
@@ -1122,6 +1492,35 @@ fn json_string_field(input: &str, name: &str) -> Option<String> {
     let pattern = format!("\"{}\":\"", name);
     let start = input.find(&pattern)? + pattern.len();
     parse_json_string_value(input, start)
+}
+
+fn push_json_escaped(out: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            ch if ch < ' ' => {
+                out.push_str("\\u00");
+                let byte = ch as u8;
+                out.push(json_hex_digit(byte >> 4));
+                out.push(json_hex_digit(byte & 0x0f));
+            }
+            ch => out.push(ch),
+        }
+    }
+}
+
+fn json_hex_digit(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + value - 10) as char,
+        _ => '0',
+    }
 }
 
 fn parse_json_string_value(input: &str, start: usize) -> Option<String> {
