@@ -30,7 +30,7 @@ use scarlet_ui::{
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
-use std::io::{Read, Write};
+use std::io::{Read, SeekFrom, Write};
 use std::ipc::SharedMemory;
 use std::socket::Socket;
 use std::sync::Mutex;
@@ -58,6 +58,9 @@ const DISPLAY_HEIGHT: u32 = 360;
 const FRAME_INTERVAL_MS: u64 = 33;
 const CONTROLS_HIDE_INTERVAL_MS: u64 = 250;
 const CONTROLS_HIDE_IDLE_TICKS: u32 = 6;
+const STREAM_POLL_INTERVAL_MS: u64 = 25;
+const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
+const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const CONTROLS_MIN_WIDTH: u32 = 96;
 const CONTROLS_MIN_HEIGHT: u32 = 48;
 const CONTROLS_PANEL_HEIGHT: u32 = 56;
@@ -332,6 +335,8 @@ struct VideoPlayerApp {
     mp4_data: Option<Arc<Vec<u8>>>,
     audio_source: Option<PlayerAudioSource>,
     hardware_decode: bool,
+    streaming: bool,
+    stream_complete_path: Option<String>,
     frame_store: Arc<VideoFrameStore>,
     controls: Arc<ControlsOverlay>,
     paint_signal: Arc<PaintSignal>,
@@ -342,6 +347,10 @@ struct VideoPlayerApp {
 enum PlayerAudioSource {
     Wav(String),
     Mp4Aac(Arc<Vec<u8>>),
+    StreamingMp4Aac {
+        path: String,
+        complete_path: Option<String>,
+    },
 }
 
 impl VideoPlayerApp {
@@ -350,12 +359,16 @@ impl VideoPlayerApp {
         mp4_data: Option<Arc<Vec<u8>>>,
         audio_source: Option<PlayerAudioSource>,
         hardware_decode: bool,
+        streaming: bool,
+        stream_complete_path: Option<String>,
     ) -> Self {
         Self {
             path,
             mp4_data,
             audio_source,
             hardware_decode,
+            streaming,
+            stream_complete_path,
             frame_store: Arc::new(VideoFrameStore::new()),
             controls: Arc::new(ControlsOverlay::new()),
             paint_signal: Arc::new(PaintSignal::new()),
@@ -459,6 +472,8 @@ impl Application for VideoPlayerApp {
             self.controls.clone(),
             self.audio_source.is_some().then(|| self.clock.clone()),
             self.hardware_decode,
+            self.streaming,
+            self.stream_complete_path.clone(),
         );
     }
 
@@ -475,17 +490,30 @@ fn start_decoder_thread(
     controls: Arc<ControlsOverlay>,
     clock: Option<Arc<AudioClock>>,
     hardware_decode: bool,
+    streaming: bool,
+    stream_complete_path: Option<String>,
 ) {
     thread::spawn(move || {
         let result = if hardware_decode {
-            decode_loop_hardware(
-                &path,
-                mp4_data.as_deref().map(Vec::as_slice),
-                &frame_store,
-                &paint_signal,
-                &controls,
-                clock.as_deref(),
-            )
+            if streaming && is_mp4_path(&path) {
+                decode_loop_hardware_streaming_mp4(
+                    &path,
+                    stream_complete_path.as_deref(),
+                    &frame_store,
+                    &paint_signal,
+                    &controls,
+                    clock.as_deref(),
+                )
+            } else {
+                decode_loop_hardware(
+                    &path,
+                    mp4_data.as_deref().map(Vec::as_slice),
+                    &frame_store,
+                    &paint_signal,
+                    &controls,
+                    clock.as_deref(),
+                )
+            }
         } else {
             decode_loop_software(
                 &path,
@@ -657,6 +685,136 @@ fn decode_loop_hardware(
     paint_signal.notify();
     println!("[{}] finished: {} frames", APP_NAME, reorder.published());
 
+    Ok(())
+}
+
+fn decode_loop_hardware_streaming_mp4(
+    path: &str,
+    complete_path: Option<&str>,
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
+    clock: Option<&AudioClock>,
+) -> Result<(), String> {
+    let mut data = Vec::new();
+    let mut decoder = HardwareVideoDecoder::open()?;
+    let mut reorder = FrameReorderBuffer::new(u32::MAX);
+    let mut access_unit_scratch = Vec::new();
+    let mut decoded = 0usize;
+    let mut announced = false;
+    let mut last_log_len = 0usize;
+    let mut last_log_samples = 0usize;
+    let mut logged_first_decode = false;
+
+    loop {
+        append_growing_file(path, &mut data)?;
+        let complete = complete_path.map(marker_exists).unwrap_or(false);
+        let source = match load_mp4_video_source_with_options(&data, false, true) {
+            Ok(source) => source,
+            Err(err) if complete => return Err(err),
+            Err(_) => {
+                if data.len() != last_log_len || complete {
+                    println!(
+                        "[{}] stream waiting for video samples bytes={} complete={}",
+                        APP_NAME,
+                        data.len(),
+                        complete
+                    );
+                    last_log_len = data.len();
+                }
+                thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+                continue;
+            }
+        };
+        if source
+            .access_units
+            .iter()
+            .any(|unit| unit.codec != VideoCodec::H264)
+        {
+            return Err(String::from(
+                "streaming hardware decode currently supports MP4/H.264",
+            ));
+        }
+        if !announced {
+            println!(
+                "[{}] hardware stream decode: {}",
+                APP_NAME,
+                source.description()
+            );
+            announced = true;
+        }
+
+        let available = source.access_units.len();
+        let decode_limit = if complete {
+            available
+        } else {
+            available.saturating_sub(STREAM_REORDER_HOLD_SAMPLES)
+        };
+        if decode_limit <= decoded {
+            if data.len() != last_log_len || available != last_log_samples || complete {
+                println!(
+                    "[{}] stream buffered video bytes={} samples={} decoded={} complete={}",
+                    APP_NAME,
+                    data.len(),
+                    available,
+                    decoded,
+                    complete
+                );
+                last_log_len = data.len();
+                last_log_samples = available;
+            }
+            if complete && decoded >= available {
+                break;
+            }
+            thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+            continue;
+        }
+
+        for access_unit in &source.access_units[decoded..decode_limit] {
+            wait_while_paused(controls);
+            let access_unit_bytes = access_unit.bytes(Some(&data), &mut access_unit_scratch)?;
+            if !logged_first_decode {
+                println!(
+                    "[{}] stream decoding first frame sample={} bytes={} pts_us={}",
+                    APP_NAME,
+                    decoded,
+                    access_unit_bytes.len(),
+                    access_unit.presentation_time_us
+                );
+            }
+            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
+            else {
+                return Err(String::from("hardware decoder produced no frame"));
+            };
+            if !logged_first_decode {
+                println!("[{}] stream decoded first frame", APP_NAME);
+                logged_first_decode = true;
+            }
+            if reorder.can_publish_immediately(access_unit.display_rank) {
+                reorder.publish_immediate(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    clock,
+                    access_unit.presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame),
+                )?;
+            } else {
+                reorder.push(
+                    access_unit.display_rank,
+                    access_unit.presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame.into_owned()),
+                )?;
+                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+            }
+            decoded += 1;
+        }
+    }
+
+    reorder.finish(frame_store, paint_signal, controls, clock)?;
+    frame_store.mark_complete();
+    paint_signal.notify();
+    println!("[{}] finished: {} frames", APP_NAME, reorder.published());
     Ok(())
 }
 
@@ -892,6 +1050,14 @@ fn looks_like_mp4(data: &[u8]) -> bool {
 }
 
 fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<VideoSource, String> {
+    load_mp4_video_source_with_options(data, can_reference_mp4_data, false)
+}
+
+fn load_mp4_video_source_with_options(
+    data: &[u8],
+    can_reference_mp4_data: bool,
+    allow_partial: bool,
+) -> Result<VideoSource, String> {
     let mut offset = 0usize;
     let mut video_track = None;
     while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
@@ -919,9 +1085,12 @@ fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<Vi
         let end = offset
             .checked_add(size)
             .ok_or_else(|| String::from("MP4 sample offset overflow"))?;
-        let sample = data
-            .get(offset..end)
-            .ok_or_else(|| String::from("MP4 sample points outside file"))?;
+        let Some(sample) = data.get(offset..end) else {
+            if allow_partial {
+                break;
+            }
+            return Err(String::from("MP4 sample points outside file"));
+        };
         let (payload, codec) = match video_format {
             VideoContainerFormat::Mp4H264 => {
                 let avcc = track
@@ -2908,6 +3077,16 @@ fn play_audio_source_sas(
     match source {
         PlayerAudioSource::Wav(path) => play_wav_sas(path, clock, controls),
         PlayerAudioSource::Mp4Aac(data) => play_mp4_aac_sas(data.clone(), clock, controls),
+        PlayerAudioSource::StreamingMp4Aac {
+            path,
+            complete_path,
+        } => {
+            if let Some(complete_path) = complete_path {
+                wait_for_marker(complete_path);
+            }
+            let data = read_file(path)?;
+            play_mp4_aac_sas(Arc::new(data), clock, controls)
+        }
     }
 }
 
@@ -3168,6 +3347,8 @@ fn publish_frame_synced(
 ) -> Result<(), String> {
     wait_while_paused(controls);
     if let Some(clock) = clock {
+        let mut logged_audio_wait = false;
+        let mut audio_wait_ms = 0u64;
         loop {
             wait_while_paused(controls);
             let Some(audio_time_us) = clock.elapsed_us() else {
@@ -3175,7 +3356,17 @@ fn publish_frame_synced(
                     thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
                     break;
                 }
+                if !logged_audio_wait {
+                    println!("[{}] waiting for audio clock", APP_NAME);
+                    logged_audio_wait = true;
+                }
                 thread::sleep(Duration::from_millis(1));
+                audio_wait_ms += 1;
+                if audio_wait_ms >= AUDIO_CLOCK_START_TIMEOUT_MS {
+                    println!("[{}] audio clock start timed out", APP_NAME);
+                    clock.mark_unavailable();
+                    break;
+                }
                 continue;
             };
             if audio_time_us >= presentation_time_us {
@@ -3239,6 +3430,45 @@ fn read_file(path: &str) -> Result<Vec<u8>, String> {
     }
 
     Ok(data)
+}
+
+fn append_growing_file(path: &str, data: &mut Vec<u8>) -> Result<usize, String> {
+    let mut file = File::open(path).map_err(|_| format!("open failed: {path}"))?;
+    let available_len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|_| format!("seek failed: {path}"))? as usize;
+    if available_len <= data.len() {
+        return Ok(0);
+    }
+    file.seek(SeekFrom::Start(data.len() as u64))
+        .map_err(|_| format!("seek failed: {path}"))?;
+    let before = data.len();
+    let mut buffer = [0u8; 16 * 1024];
+    let mut remaining = available_len - data.len();
+
+    while remaining > 0 {
+        let read_len = remaining.min(buffer.len());
+        let read = file
+            .read(&mut buffer[..read_len])
+            .map_err(|_| format!("read failed"))?;
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..read]);
+        remaining -= read;
+    }
+
+    Ok(data.len().saturating_sub(before))
+}
+
+fn marker_exists(path: &str) -> bool {
+    File::open(path).is_ok()
+}
+
+fn wait_for_marker(path: &str) {
+    while !marker_exists(path) {
+        thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+    }
 }
 
 fn read_exact_file(file: &mut File, out: &mut [u8]) -> Result<(), String> {
@@ -4057,7 +4287,7 @@ pub extern "C" fn main() -> i32 {
     if args.hardware_decode {
         println!("[{}] hardware decoder {}", APP_NAME, VVIDEO_DEVICE_PATH);
     }
-    let mp4_data = if is_mp4_path(&video_path) {
+    let mp4_data = if is_mp4_path(&video_path) && !args.streaming {
         println!("[{}] loading MP4 {}", APP_NAME, video_path);
         Some(Arc::new(read_file(&video_path).unwrap_or_else(|_| {
             println!("[{}] Application error: failed to read MP4 file", APP_NAME);
@@ -4072,14 +4302,21 @@ pub extern "C" fn main() -> i32 {
     let audio_source = if let Some(path) = args.audio_path {
         println!("[{}] audio {}", APP_NAME, path);
         if is_mp4_path(&path) {
-            match read_file(&path) {
-                Ok(data) => Some(PlayerAudioSource::Mp4Aac(Arc::new(data))),
-                Err(_) => {
-                    println!(
-                        "[{}] Application error: failed to read audio file",
-                        APP_NAME
-                    );
-                    return 1;
+            if args.streaming {
+                Some(PlayerAudioSource::StreamingMp4Aac {
+                    path,
+                    complete_path: args.audio_complete_path,
+                })
+            } else {
+                match read_file(&path) {
+                    Ok(data) => Some(PlayerAudioSource::Mp4Aac(Arc::new(data))),
+                    Err(_) => {
+                        println!(
+                            "[{}] Application error: failed to read audio file",
+                            APP_NAME
+                        );
+                        return 1;
+                    }
                 }
             }
         } else {
@@ -4092,7 +4329,14 @@ pub extern "C" fn main() -> i32 {
         None
     };
 
-    let mut app = VideoPlayerApp::new(video_path, mp4_data, audio_source, args.hardware_decode);
+    let mut app = VideoPlayerApp::new(
+        video_path,
+        mp4_data,
+        audio_source,
+        args.hardware_decode,
+        args.streaming,
+        args.stream_complete_path,
+    );
     match app.run() {
         Ok(()) => 0,
         Err(error) => {
@@ -4109,13 +4353,19 @@ fn is_mp4_path(path: &str) -> bool {
 struct PlayerArgs {
     video_path: String,
     audio_path: Option<String>,
+    audio_complete_path: Option<String>,
     hardware_decode: bool,
+    streaming: bool,
+    stream_complete_path: Option<String>,
 }
 
 fn parse_args(args: Vec<String>) -> PlayerArgs {
     let mut positional = Vec::new();
     let mut audio_path = None;
+    let mut audio_complete_path = None;
     let mut hardware_decode = false;
+    let mut streaming = false;
+    let mut stream_complete_path = None;
 
     let mut args = args.into_iter().skip(1);
     while let Some(arg) = args.next() {
@@ -4127,6 +4377,16 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
             audio_path = args.next();
         } else if let Some(path) = arg.strip_prefix("--audio=") {
             audio_path = Some(String::from(path));
+        } else if arg == "--audio-complete" {
+            audio_complete_path = args.next();
+        } else if let Some(path) = arg.strip_prefix("--audio-complete=") {
+            audio_complete_path = Some(String::from(path));
+        } else if arg == "--stream" || arg == "--streaming" {
+            streaming = true;
+        } else if arg == "--stream-complete" {
+            stream_complete_path = args.next();
+        } else if let Some(path) = arg.strip_prefix("--stream-complete=") {
+            stream_complete_path = Some(String::from(path));
         } else {
             positional.push(arg);
         }
@@ -4140,6 +4400,9 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
     PlayerArgs {
         video_path,
         audio_path,
+        audio_complete_path,
         hardware_decode,
+        streaming,
+        stream_complete_path,
     }
 }

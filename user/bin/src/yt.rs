@@ -19,14 +19,14 @@ use rustls::time_provider::TimeProvider;
 use rustls::unbuffered::ConnectionState;
 use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, remove_file};
 use std::io::{ErrorKind, Read, Write};
 use std::network::list_interfaces;
 use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
 use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
 use std::sync::Mutex;
-use std::task::execve;
+use std::task::{execve, exit, fork, waitpid};
 use std::thread;
 
 const DEFAULT_DNS: [u8; 4] = [10, 0, 2, 3];
@@ -153,6 +153,21 @@ fn run() -> Result<(), String> {
     }
 
     let output = output.unwrap_or_else(|| String::from("/tmp/yt.mp4"));
+    if play {
+        if let Some(audio_url) = media.audio_url {
+            let audio_output = derive_audio_output_path(&output);
+            return stream_media_pair_and_play(
+                media.video_url,
+                output,
+                audio_url,
+                audio_output,
+                print_headers,
+                media.user_agent,
+                media.extra_headers,
+            );
+        }
+    }
+
     let audio_output = if let Some(audio_url) = media.audio_url {
         let path = derive_audio_output_path(&output);
         fetch_media_pair_to_files(
@@ -208,11 +223,101 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn stream_media_pair_and_play(
+    video_url: String,
+    video_output: String,
+    audio_url: String,
+    audio_output: String,
+    print_headers: bool,
+    user_agent: &'static str,
+    extra_headers: &'static str,
+) -> Result<(), String> {
+    let stream_video_output = stream_cache_path(&video_output);
+    let stream_audio_output = stream_cache_path(&audio_output);
+    let video_complete = complete_marker_path(&stream_video_output);
+    let audio_complete = complete_marker_path(&stream_audio_output);
+    prepare_stream_output(&stream_video_output, &video_complete)?;
+    prepare_stream_output(&stream_audio_output, &audio_complete)?;
+
+    let child = fork();
+    if child < 0 {
+        return Err(String::from("failed to fork video_player"));
+    }
+    if child == 0 {
+        thread::sleep(Duration::from_millis(500));
+        println!(
+            "[yt] exec: video_player --hwdc --stream {} --audio {}",
+            stream_video_output, stream_audio_output
+        );
+        let argv = [
+            "video_player",
+            "--hwdc",
+            "--stream",
+            "--stream-complete",
+            video_complete.as_str(),
+            "--audio",
+            stream_audio_output.as_str(),
+            "--audio-complete",
+            audio_complete.as_str(),
+            stream_video_output.as_str(),
+        ];
+        let rc = execve("/bin/video_player", &argv, &[]);
+        println!("[yt] failed to exec /bin/video_player: {}", rc);
+        exit(1);
+    }
+
+    let download_result = fetch_media_pair_to_files_with_markers(
+        video_url,
+        stream_video_output,
+        Some(video_complete.clone()),
+        audio_url,
+        stream_audio_output,
+        Some(audio_complete.clone()),
+        print_headers,
+        user_agent,
+        extra_headers,
+    );
+    if download_result.is_err() {
+        let _ = touch_file(&video_complete);
+        let _ = touch_file(&audio_complete);
+    }
+    let (_pid, status) = waitpid(child, 0);
+    download_result?;
+    if status != 0 {
+        return Err(format!("video_player exited with status {}", status));
+    }
+    Ok(())
+}
+
 fn fetch_media_pair_to_files(
     video_url: String,
     video_output: String,
     audio_url: String,
     audio_output: String,
+    print_headers: bool,
+    user_agent: &'static str,
+    extra_headers: &'static str,
+) -> Result<(), String> {
+    fetch_media_pair_to_files_with_markers(
+        video_url,
+        video_output,
+        None,
+        audio_url,
+        audio_output,
+        None,
+        print_headers,
+        user_agent,
+        extra_headers,
+    )
+}
+
+fn fetch_media_pair_to_files_with_markers(
+    video_url: String,
+    video_output: String,
+    video_complete: Option<String>,
+    audio_url: String,
+    audio_output: String,
+    audio_complete: Option<String>,
     print_headers: bool,
     user_agent: &'static str,
     extra_headers: &'static str,
@@ -224,7 +329,7 @@ fn fetch_media_pair_to_files(
     let video_result_writer = video_result.clone();
     let video_output_writer = video_output.clone();
     let video_handle = thread::spawn(move || {
-        let result = fetch_url_to_file(
+        let result = fetch_url_to_file_streaming(
             &video_url,
             &video_output_writer,
             print_headers,
@@ -233,6 +338,12 @@ fn fetch_media_pair_to_files(
         );
         if result.is_ok() {
             println!("[yt] saved {}", video_output_writer);
+            if let Some(marker) = video_complete {
+                if let Err(err) = touch_file(&marker) {
+                    *video_result_writer.lock() = Some(Err(err));
+                    return;
+                }
+            }
         }
         *video_result_writer.lock() = Some(result);
     });
@@ -240,7 +351,7 @@ fn fetch_media_pair_to_files(
     let audio_result_writer = audio_result.clone();
     let audio_output_writer = audio_output.clone();
     let audio_handle = thread::spawn(move || {
-        let result = fetch_url_to_file(
+        let result = fetch_url_to_file_streaming(
             &audio_url,
             &audio_output_writer,
             print_headers,
@@ -249,6 +360,12 @@ fn fetch_media_pair_to_files(
         );
         if result.is_ok() {
             println!("[yt] saved {}", audio_output_writer);
+            if let Some(marker) = audio_complete {
+                if let Err(err) = touch_file(&marker) {
+                    *audio_result_writer.lock() = Some(Err(err));
+                    return;
+                }
+            }
         }
         *audio_result_writer.lock() = Some(result);
     });
@@ -271,6 +388,41 @@ fn fetch_media_pair_to_files(
     Ok(())
 }
 
+fn complete_marker_path(path: &str) -> String {
+    format!("{}.done", path)
+}
+
+fn stream_cache_path(path: &str) -> String {
+    format!("/tmp/scarlet-yt-{}", path_basename(path))
+}
+
+fn path_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn prepare_stream_output(path: &str, marker: &str) -> Result<(), String> {
+    let _ = remove_file(marker);
+    let mut options = OpenOptions::new();
+    let _file = options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| format!("failed to prepare {}", path))?;
+    Ok(())
+}
+
+fn touch_file(path: &str) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    let _file = options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| format!("failed to create {}", path))?;
+    Ok(())
+}
+
 fn print_usage() {
     println!("Usage: yt [options] URL");
     println!();
@@ -283,6 +435,54 @@ fn print_usage() {
     println!("Examples:");
     println!("  yt 'https://www.youtube.com/watch?v=...'");
     println!("  yt --no-play -o /root/media/video.mp4 'https://example.com/video.mp4'");
+}
+
+fn fetch_url_to_file_streaming(
+    url: &str,
+    output: &str,
+    print_headers: bool,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<(), String> {
+    let mut current = parse_url(url)?;
+    for redirect_index in 0..=MAX_REDIRECTS {
+        println!(
+            "[yt] GET {}://{}:{}{}",
+            current.scheme,
+            current.host,
+            current.port,
+            display_path(&current.path)
+        );
+        let response = match current.scheme.as_str() {
+            "https" => https_get_to_file(&current, output, user_agent, extra_headers)?,
+            _ => {
+                fetch_url_to_file(url, output, print_headers, user_agent, extra_headers)?;
+                return Ok(());
+            }
+        };
+        if print_headers {
+            println!("{}", response.headers);
+        }
+
+        if is_redirect(response.status) {
+            let location = header_value(&response.headers, "location")
+                .ok_or_else(|| String::from("redirect without Location header"))?;
+            if redirect_index == MAX_REDIRECTS {
+                return Err(String::from("too many redirects"));
+            }
+            current = resolve_redirect(&current, &location)?;
+            continue;
+        }
+
+        if response.status < 200 || response.status >= 300 {
+            print_http_error_body(response.status, &response.body);
+            return Err(format!("HTTP status {}", response.status));
+        }
+
+        return Ok(());
+    }
+
+    Err(String::from("too many redirects"))
 }
 
 fn fetch_url_to_file(
@@ -459,6 +659,19 @@ fn https_get(
     https_request(url, request.as_bytes())
 }
 
+fn https_get_to_file(
+    url: &UrlParts,
+    output: &str,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<HttpResponse, String> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\n{}Connection: close\r\n\r\n",
+        url.path, url.host, user_agent, extra_headers
+    );
+    https_request_to_file(url, request.as_bytes(), output)
+}
+
 fn https_post_json(
     url: &UrlParts,
     body: &str,
@@ -475,6 +688,181 @@ fn https_post_json(
         body
     );
     https_request(url, request.as_bytes())
+}
+
+fn https_request_to_file(
+    url: &UrlParts,
+    request: &[u8],
+    output: &str,
+) -> Result<HttpResponse, String> {
+    let ip = resolve_host(&url.host)?;
+    println!(
+        "[yt] resolved {} -> {}.{}.{}.{}",
+        url.host, ip[0], ip[1], ip[2], ip[3]
+    );
+
+    let mut socket =
+        Socket::new_with_domain(SocketDomain::Inet4, SocketType::Stream, SocketProtocol::Tcp)
+            .map_err(|_| String::from("failed to create TCP socket"))?;
+    socket
+        .connect_inet(Inet4SocketAddress::new(ip, url.port))
+        .map_err(|_| String::from("TCP connect failed"))?;
+
+    let config = tls_client_config()?;
+    let server_name = ServerName::try_from(url.host.clone())
+        .map_err(|_| String::from("invalid TLS server name"))?;
+    let mut tls = rustls::client::UnbufferedClientConnection::new(Arc::new(config), server_name)
+        .map_err(|err| format!("TLS connection init failed: {:?}", err))?;
+
+    let mut incoming_tls = Vec::new();
+    let mut outgoing_tls = vec![0u8; 64 * 1024];
+    let mut pending_out_len = 0usize;
+    let mut request_sent = false;
+    let mut header_buffer = Vec::new();
+    let mut headers = None::<String>;
+    let mut status = 0u16;
+    let mut content_length = None::<usize>;
+    let mut body_written = 0usize;
+    let mut output_started = false;
+    let mut error_body = Vec::new();
+
+    loop {
+        let discard;
+        let mut should_read = false;
+        let mut closed = false;
+
+        {
+            let tls_status = tls.process_tls_records(incoming_tls.as_mut_slice());
+            discard = tls_status.discard;
+            match tls_status
+                .state
+                .map_err(|err| format!("TLS state failed: {:?}", err))?
+            {
+                ConnectionState::EncodeTlsData(mut encode) => {
+                    pending_out_len = encode
+                        .encode(&mut outgoing_tls)
+                        .map_err(|err| format!("TLS encode failed: {:?}", err))?;
+                }
+                ConnectionState::TransmitTlsData(transmit) => {
+                    if pending_out_len > 0 {
+                        write_all(
+                            &mut socket,
+                            &outgoing_tls[..pending_out_len],
+                            "TLS handshake",
+                        )?;
+                        pending_out_len = 0;
+                    }
+                    transmit.done();
+                }
+                ConnectionState::BlockedHandshake => {
+                    should_read = true;
+                }
+                ConnectionState::WriteTraffic(mut write_traffic) => {
+                    if request_sent {
+                        should_read = true;
+                    } else {
+                        let written = write_traffic
+                            .encrypt(request, &mut outgoing_tls)
+                            .map_err(|err| format!("TLS HTTP request encrypt failed: {:?}", err))?;
+                        write_all(&mut socket, &outgoing_tls[..written], "TLS HTTP request")?;
+                        request_sent = true;
+                    }
+                }
+                ConnectionState::ReadTraffic(mut read_traffic) => {
+                    while let Some(record) = read_traffic.next_record() {
+                        let record = record.map_err(|err| format!("TLS read failed: {:?}", err))?;
+                        if headers.is_none() {
+                            header_buffer.extend_from_slice(record.payload);
+                            if header_buffer.len() > MAX_HEADER_BYTES
+                                && find_bytes(&header_buffer, b"\r\n\r\n").is_none()
+                            {
+                                return Err(String::from("HTTP headers are too large"));
+                            }
+                            let Some(header_end) =
+                                find_bytes(&header_buffer, b"\r\n\r\n").map(|pos| pos + 4)
+                            else {
+                                continue;
+                            };
+                            let parsed_headers = core::str::from_utf8(&header_buffer[..header_end])
+                                .map_err(|_| String::from("HTTP headers are not UTF-8"))?
+                                .to_string();
+                            status = parse_status(&parsed_headers)?;
+                            let is_chunked = header_value(&parsed_headers, "transfer-encoding")
+                                .map(|value| value.to_ascii_lowercase().contains("chunked"))
+                                .unwrap_or(false);
+                            if is_chunked && (200..300).contains(&status) {
+                                return Err(String::from(
+                                    "streaming chunked HTTPS body is unsupported",
+                                ));
+                            }
+                            content_length = header_value(&parsed_headers, "content-length")
+                                .and_then(|value| parse_usize(value.trim()));
+                            if (200..300).contains(&status) {
+                                let body = &header_buffer[header_end..];
+                                if body.is_empty() {
+                                    touch_truncated_file(output)?;
+                                    output_started = true;
+                                } else {
+                                    write_stream_file_chunk(output, body, !output_started)?;
+                                    output_started = true;
+                                    body_written += body.len();
+                                }
+                                header_buffer.clear();
+                            } else {
+                                error_body.extend_from_slice(&header_buffer[header_end..]);
+                            }
+                            headers = Some(parsed_headers);
+                        } else if (200..300).contains(&status) {
+                            write_stream_file_chunk(output, record.payload, !output_started)?;
+                            output_started = true;
+                            body_written += record.payload.len();
+                        } else if error_body.len() < 512 {
+                            let remaining = 512 - error_body.len();
+                            let copy_len = remaining.min(record.payload.len());
+                            error_body.extend_from_slice(&record.payload[..copy_len]);
+                        }
+                    }
+                }
+                ConnectionState::PeerClosed | ConnectionState::Closed => {
+                    closed = true;
+                }
+                _ => return Err(String::from("unsupported TLS state")),
+            }
+        }
+
+        if discard > 0 {
+            incoming_tls.drain(..discard);
+        }
+
+        if let (Some(headers), true) = (headers.as_ref(), is_redirect(status)) {
+            return Ok(HttpResponse {
+                status,
+                headers: headers.clone(),
+                body: error_body,
+            });
+        }
+        if (200..300).contains(&status) {
+            if let Some(length) = content_length {
+                if body_written >= length {
+                    return Ok(HttpResponse {
+                        status,
+                        headers: headers.unwrap_or_default(),
+                        body: Vec::new(),
+                    });
+                }
+            }
+        }
+        if closed {
+            return Ok(HttpResponse {
+                status,
+                headers: headers.unwrap_or_default(),
+                body: error_body,
+            });
+        }
+        if should_read {
+            read_tls_from_socket(&mut socket, &mut incoming_tls)?;
+        }
+    }
 }
 
 fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String> {
@@ -778,6 +1166,28 @@ fn write_body(path: &str, body: Vec<u8>) -> Result<(), String> {
         .map_err(|_| format!("failed to open {}", path))?;
     write_all(&mut file, &body, "output file")?;
     Ok(())
+}
+
+fn touch_truncated_file(path: &str) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    let _file = options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| format!("failed to open {}", path))?;
+    Ok(())
+}
+
+fn write_stream_file_chunk(path: &str, bytes: &[u8], truncate: bool) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    let mut file = if truncate {
+        options.write(true).create(true).truncate(true).open(path)
+    } else {
+        options.append(true).create(true).open(path)
+    }
+    .map_err(|_| format!("failed to open {}", path))?;
+    write_all(&mut file, bytes, "output file")
 }
 
 fn print_http_error_body(status: u16, body: &[u8]) {
