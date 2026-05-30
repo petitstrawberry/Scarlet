@@ -1,0 +1,1638 @@
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+extern crate getrandom;
+extern crate rustls;
+extern crate scarlet_std as std;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::num::NonZeroU32;
+use core::time::Duration;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::time_provider::TimeProvider;
+use rustls::unbuffered::ConnectionState;
+use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme};
+use std::env;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
+use std::network::list_interfaces;
+use std::poll::{POLLIN, PollHandle, poll};
+use std::println;
+use std::socket::{Inet4SocketAddress, Socket, SocketDomain, SocketProtocol, SocketType};
+use std::task::execve;
+use std::thread;
+
+const DEFAULT_DNS: [u8; 4] = [10, 0, 2, 3];
+const DNS_PORT: u16 = 53;
+const HTTP_PORT: u16 = 80;
+const HTTPS_PORT: u16 = 443;
+const DNS_TIMEOUT_NS: i64 = 5_000_000_000;
+const HTTP_TIMEOUT_NS: i64 = 10_000_000_000;
+const TLS_TIMEOUT_NS: i64 = 60_000_000_000;
+const MAX_REDIRECTS: usize = 8;
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTPS_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+const GETRANDOM_ERROR: u32 = getrandom::Error::CUSTOM_START + 1;
+const YOUTUBEI_API_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+const YOUTUBE_WEB_CLIENT_VERSION: &str = "2.20260114.08.00";
+const YOUTUBE_MWEB_CLIENT_VERSION: &str = "2.20260115.01.00";
+const YOUTUBE_ANDROID_CLIENT_VERSION: &str = "21.02.35";
+const YOUTUBE_ANDROID_VR_CLIENT_VERSION: &str = "1.65.10";
+const YOUTUBE_IOS_CLIENT_VERSION: &str = "21.02.3";
+
+getrandom::register_custom_getrandom!(scarlet_getrandom);
+
+fn scarlet_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+    let mut file = File::open("/dev/random").map_err(|_| custom_getrandom_error())?;
+    let mut offset = 0usize;
+    while offset < dest.len() {
+        let n = file
+            .read(&mut dest[offset..])
+            .map_err(|_| custom_getrandom_error())?;
+        if n == 0 {
+            return Err(custom_getrandom_error());
+        }
+        offset += n;
+    }
+    Ok(())
+}
+
+fn custom_getrandom_error() -> getrandom::Error {
+    getrandom::Error::from(NonZeroU32::new(GETRANDOM_ERROR).unwrap())
+}
+
+#[derive(Clone, Debug)]
+struct UrlParts {
+    scheme: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
+    match run() {
+        Ok(()) => 0,
+        Err(error) => {
+            println!("[yt] error: {}", error);
+            1
+        }
+    }
+}
+
+fn run() -> Result<(), String> {
+    let args = env::args_vec();
+    if args.len() < 2 {
+        print_usage();
+        return Ok(());
+    }
+
+    let mut output: Option<String> = None;
+    let mut print_headers = false;
+    let mut play = true;
+    let mut input: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(String::from("--output requires a path"));
+                }
+                output = Some(args[i].clone());
+            }
+            "--headers" => {
+                print_headers = true;
+            }
+            "--no-play" => {
+                play = false;
+            }
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(());
+            }
+            value => {
+                if input.is_some() {
+                    return Err(String::from("multiple URLs are not supported yet"));
+                }
+                input = Some(value.to_string());
+            }
+        }
+        i += 1;
+    }
+
+    let input = input.ok_or_else(|| String::from("missing URL"))?;
+    let mut fetch_url = input.clone();
+    if is_youtube_url(&input) {
+        println!("[yt] YouTube URL detected");
+        let video_id =
+            youtube_video_id(&input).ok_or_else(|| String::from("YouTube video id not found"))?;
+        println!("[yt] video id: {}", video_id);
+        fetch_url = resolve_youtube_media_url(&input)?;
+        if output.is_none() {
+            output = Some(format!("/root/media/youtube-{}.mp4", video_id));
+        }
+    }
+
+    let output = output.unwrap_or_else(|| String::from("/tmp/yt.mp4"));
+    fetch_url_to_file(&fetch_url, &output, print_headers)?;
+    println!("[yt] saved {}", output);
+    if play {
+        println!("[yt] exec: video_player --hwdc {}", output);
+        let argv = ["video_player", "--hwdc", output.as_str()];
+        let rc = execve("/bin/video_player", &argv, &[]);
+        return Err(format!("failed to exec /bin/video_player: {}", rc));
+    }
+    println!("[yt] play: video_player --hwdc {}", output);
+    Ok(())
+}
+
+fn print_usage() {
+    println!("Usage: yt [options] URL");
+    println!();
+    println!("Options:");
+    println!("  -o, --output <path>  Save response body");
+    println!("  --headers           Print response headers");
+    println!("  --no-play           Download only");
+    println!("  -h, --help          Show this help");
+    println!();
+    println!("Examples:");
+    println!("  yt 'https://www.youtube.com/watch?v=...'");
+    println!("  yt --no-play -o /root/media/video.mp4 'https://example.com/video.mp4'");
+}
+
+fn fetch_url_to_file(url: &str, output: &str, print_headers: bool) -> Result<(), String> {
+    let mut current = parse_url(url)?;
+    for redirect_index in 0..=MAX_REDIRECTS {
+        println!(
+            "[yt] GET {}://{}:{}{}",
+            current.scheme, current.host, current.port, current.path
+        );
+        let response = http_get(&current)?;
+        if print_headers {
+            println!("{}", response.headers);
+        }
+
+        if is_redirect(response.status) {
+            let location = header_value(&response.headers, "location")
+                .ok_or_else(|| String::from("redirect without Location header"))?;
+            if redirect_index == MAX_REDIRECTS {
+                return Err(String::from("too many redirects"));
+            }
+            current = resolve_redirect(&current, &location)?;
+            continue;
+        }
+
+        if response.status < 200 || response.status >= 300 {
+            return Err(format!("HTTP status {}", response.status));
+        }
+
+        write_body(output, response.body)?;
+        return Ok(());
+    }
+
+    Err(String::from("too many redirects"))
+}
+
+struct HttpResponse {
+    status: u16,
+    headers: String,
+    body: Vec<u8>,
+}
+
+fn http_get(url: &UrlParts) -> Result<HttpResponse, String> {
+    match url.scheme.as_str() {
+        "http" => plain_http_get(url),
+        "https" => https_get(url),
+        _ => Err(format!("unsupported URL scheme: {}", url.scheme)),
+    }
+}
+
+fn plain_http_get(url: &UrlParts) -> Result<HttpResponse, String> {
+    let ip = resolve_host(&url.host)?;
+    println!(
+        "[yt] resolved {} -> {}.{}.{}.{}",
+        url.host, ip[0], ip[1], ip[2], ip[3]
+    );
+
+    let mut socket =
+        Socket::new_with_domain(SocketDomain::Inet4, SocketType::Stream, SocketProtocol::Tcp)
+            .map_err(|_| String::from("failed to create TCP socket"))?;
+    socket
+        .connect_inet(Inet4SocketAddress::new(ip, url.port))
+        .map_err(|_| String::from("TCP connect failed"))?;
+    println!("[yt] TCP connected {}:{}", url.host, url.port);
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 Scarlet-yt/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        url.path, url.host
+    );
+    write_all(&mut socket, request.as_bytes(), "HTTP request")?;
+
+    let mut received = Vec::new();
+    let header_end = loop {
+        if received.len() > MAX_HEADER_BYTES {
+            return Err(String::from("HTTP headers are too large"));
+        }
+        if let Some(pos) = find_bytes(&received, b"\r\n\r\n") {
+            break pos + 4;
+        }
+        wait_readable(&socket, HTTP_TIMEOUT_NS)?;
+        let mut chunk = [0u8; 2048];
+        let n = socket
+            .read(&mut chunk)
+            .map_err(|_| String::from("HTTP read failed"))?;
+        if n == 0 {
+            return Err(String::from("connection closed before headers"));
+        }
+        received.extend_from_slice(&chunk[..n]);
+    };
+
+    let headers = core::str::from_utf8(&received[..header_end])
+        .map_err(|_| String::from("HTTP headers are not UTF-8"))?
+        .to_string();
+    let status = parse_status(&headers)?;
+    let mut body = Vec::new();
+    body.extend_from_slice(&received[header_end..]);
+
+    if header_value(&headers, "transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
+    {
+        read_chunked_body(&mut socket, &mut body)?;
+    } else if let Some(length) = header_value(&headers, "content-length") {
+        let content_length = parse_usize(length.trim())
+            .ok_or_else(|| String::from("invalid Content-Length header"))?;
+        while body.len() < content_length {
+            wait_readable(&socket, HTTP_TIMEOUT_NS)?;
+            let mut chunk = [0u8; 8192];
+            let n = socket
+                .read(&mut chunk)
+                .map_err(|_| String::from("HTTP body read failed"))?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(content_length);
+    } else {
+        loop {
+            let mut poll_handle = [PollHandle::new(socket.as_raw() as u32, POLLIN)];
+            match poll(&mut poll_handle, 500_000_000) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let mut chunk = [0u8; 8192];
+                    let n = socket
+                        .read(&mut chunk)
+                        .map_err(|_| String::from("HTTP body read failed"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+                Err(_) => return Err(String::from("poll failed while reading HTTP body")),
+            }
+        }
+    }
+
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn https_get(url: &UrlParts) -> Result<HttpResponse, String> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 Scarlet-yt/0.1\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",
+        url.path, url.host
+    );
+    https_request(url, request.as_bytes())
+}
+
+fn https_post_json(
+    url: &UrlParts,
+    body: &str,
+    user_agent: &str,
+    extra_headers: &str,
+) -> Result<HttpResponse, String> {
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        url.path,
+        url.host,
+        user_agent,
+        extra_headers,
+        body.len(),
+        body
+    );
+    https_request(url, request.as_bytes())
+}
+
+fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String> {
+    let ip = resolve_host(&url.host)?;
+    println!(
+        "[yt] resolved {} -> {}.{}.{}.{}",
+        url.host, ip[0], ip[1], ip[2], ip[3]
+    );
+
+    let mut socket =
+        Socket::new_with_domain(SocketDomain::Inet4, SocketType::Stream, SocketProtocol::Tcp)
+            .map_err(|_| String::from("failed to create TCP socket"))?;
+    socket
+        .connect_inet(Inet4SocketAddress::new(ip, url.port))
+        .map_err(|_| String::from("TCP connect failed"))?;
+
+    let config = tls_client_config()?;
+    let server_name = ServerName::try_from(url.host.clone())
+        .map_err(|_| String::from("invalid TLS server name"))?;
+    let mut tls = rustls::client::UnbufferedClientConnection::new(Arc::new(config), server_name)
+        .map_err(|err| format!("TLS connection init failed: {:?}", err))?;
+
+    let mut incoming_tls = Vec::new();
+    let mut outgoing_tls = vec![0u8; 64 * 1024];
+    let mut pending_out_len = 0usize;
+    let mut request_sent = false;
+    let mut plaintext = Vec::new();
+
+    loop {
+        let mut discard;
+        let mut should_read = false;
+        let mut closed = false;
+
+        {
+            let status = tls.process_tls_records(incoming_tls.as_mut_slice());
+            discard = status.discard;
+            match status
+                .state
+                .map_err(|err| format!("TLS state failed: {:?}", err))?
+            {
+                ConnectionState::EncodeTlsData(mut encode) => {
+                    pending_out_len = encode
+                        .encode(&mut outgoing_tls)
+                        .map_err(|err| format!("TLS encode failed: {:?}", err))?;
+                    println!("[yt] TLS encode {} bytes", pending_out_len);
+                }
+                ConnectionState::TransmitTlsData(transmit) => {
+                    if pending_out_len > 0 {
+                        println!("[yt] TLS transmit {} bytes", pending_out_len);
+                        write_all(
+                            &mut socket,
+                            &outgoing_tls[..pending_out_len],
+                            "TLS handshake",
+                        )?;
+                        pending_out_len = 0;
+                    }
+                    transmit.done();
+                }
+                ConnectionState::BlockedHandshake => {
+                    println!("[yt] TLS blocked handshake; reading");
+                    should_read = true;
+                }
+                ConnectionState::WriteTraffic(mut write_traffic) => {
+                    if request_sent {
+                        should_read = true;
+                    } else {
+                        let written = write_traffic
+                            .encrypt(request, &mut outgoing_tls)
+                            .map_err(|err| format!("TLS HTTP request encrypt failed: {:?}", err))?;
+                        println!("[yt] TLS HTTP request {} bytes", written);
+                        write_all(&mut socket, &outgoing_tls[..written], "TLS HTTP request")?;
+                        request_sent = true;
+                    }
+                }
+                ConnectionState::ReadTraffic(mut read_traffic) => {
+                    while let Some(record) = read_traffic.next_record() {
+                        let record = record.map_err(|err| format!("TLS read failed: {:?}", err))?;
+                        if plaintext.len() + record.payload.len() > MAX_HTTPS_RESPONSE_BYTES {
+                            return Err(String::from("HTTPS response is too large"));
+                        }
+                        println!("[yt] TLS plaintext {} bytes", record.payload.len());
+                        plaintext.extend_from_slice(record.payload);
+                        discard = discard.saturating_add(record.discard);
+                    }
+                }
+                ConnectionState::PeerClosed | ConnectionState::Closed => {
+                    println!("[yt] TLS closed");
+                    closed = true;
+                }
+                _ => {
+                    return Err(String::from("unsupported TLS state"));
+                }
+            }
+        }
+
+        if discard > 0 {
+            incoming_tls.drain(..discard);
+        }
+
+        if closed {
+            break;
+        }
+        if request_sent && http_response_complete(&plaintext) {
+            return parse_complete_http_response(plaintext);
+        }
+        if should_read {
+            read_tls_from_socket(&mut socket, &mut incoming_tls)?;
+        }
+    }
+
+    parse_complete_http_response(plaintext)
+}
+
+fn http_response_complete(received: &[u8]) -> bool {
+    let header_end = match find_bytes(received, b"\r\n\r\n") {
+        Some(pos) => pos + 4,
+        None => return false,
+    };
+    let headers = match core::str::from_utf8(&received[..header_end]) {
+        Ok(headers) => headers,
+        Err(_) => return false,
+    };
+    let body = &received[header_end..];
+
+    if header_value(headers, "transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
+    {
+        return chunked_body_complete(body);
+    }
+
+    if let Some(length) = header_value(headers, "content-length") {
+        if let Some(content_length) = parse_usize(length.trim()) {
+            return body.len() >= content_length;
+        }
+    }
+
+    false
+}
+
+fn chunked_body_complete(buffer: &[u8]) -> bool {
+    let mut offset = 0usize;
+
+    loop {
+        let line_end = match find_bytes_from(buffer, b"\r\n", offset) {
+            Some(pos) => pos,
+            None => return false,
+        };
+        let line = match core::str::from_utf8(&buffer[offset..line_end]) {
+            Ok(line) => line,
+            Err(_) => return false,
+        };
+        let size = match parse_hex_usize(line.split(';').next().unwrap_or("").trim()) {
+            Some(size) => size,
+            None => return false,
+        };
+        offset = line_end + 2;
+        if size == 0 {
+            return buffer.len() >= offset + 2;
+        }
+        if buffer.len() < offset + size + 2 {
+            return false;
+        }
+        offset += size + 2;
+    }
+}
+
+fn read_tls_from_socket(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<(), String> {
+    wait_readable(socket, TLS_TIMEOUT_NS)?;
+    let mut chunk = [0u8; 8192];
+    let n = socket
+        .read(&mut chunk)
+        .map_err(|_| String::from("TLS socket read failed"))?;
+    if n == 0 {
+        return Err(String::from("TLS connection closed unexpectedly"));
+    }
+    println!("[yt] TLS socket read {} bytes", n);
+    buffer.extend_from_slice(&chunk[..n]);
+    Ok(())
+}
+
+fn parse_complete_http_response(received: Vec<u8>) -> Result<HttpResponse, String> {
+    let header_end = find_bytes(&received, b"\r\n\r\n")
+        .map(|pos| pos + 4)
+        .ok_or_else(|| String::from("HTTP headers not found"))?;
+    let headers = core::str::from_utf8(&received[..header_end])
+        .map_err(|_| String::from("HTTP headers are not UTF-8"))?
+        .to_string();
+    let status = parse_status(&headers)?;
+    let mut body = received[header_end..].to_vec();
+
+    if header_value(&headers, "transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
+    {
+        body = decode_chunked_buffer(&body)?;
+    } else if let Some(length) = header_value(&headers, "content-length") {
+        let content_length = parse_usize(length.trim())
+            .ok_or_else(|| String::from("invalid Content-Length header"))?;
+        if body.len() > content_length {
+            body.truncate(content_length);
+        }
+    }
+
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn decode_chunked_buffer(buffer: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    let mut offset = 0usize;
+
+    loop {
+        let line_end = find_bytes_from(buffer, b"\r\n", offset)
+            .ok_or_else(|| String::from("invalid chunked body"))?;
+        let line = core::str::from_utf8(&buffer[offset..line_end])
+            .map_err(|_| String::from("invalid chunk size"))?;
+        let size = parse_hex_usize(line.split(';').next().unwrap_or("").trim())
+            .ok_or_else(|| String::from("invalid chunk size"))?;
+        offset = line_end + 2;
+        if size == 0 {
+            break;
+        }
+        if buffer.len() < offset + size + 2 {
+            return Err(String::from("truncated chunked body"));
+        }
+        decoded.extend_from_slice(&buffer[offset..offset + size]);
+        offset += size + 2;
+    }
+
+    Ok(decoded)
+}
+
+fn read_chunked_body(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<(), String> {
+    let mut decoded = Vec::new();
+    let mut offset = 0usize;
+
+    loop {
+        let line_end = loop {
+            if let Some(pos) = find_bytes_from(buffer, b"\r\n", offset) {
+                break pos;
+            }
+            read_more(socket, buffer)?;
+        };
+        let line = core::str::from_utf8(&buffer[offset..line_end])
+            .map_err(|_| String::from("invalid chunk size"))?;
+        let size = parse_hex_usize(line.split(';').next().unwrap_or("").trim())
+            .ok_or_else(|| String::from("invalid chunk size"))?;
+        offset = line_end + 2;
+        if size == 0 {
+            break;
+        }
+        while buffer.len() < offset + size + 2 {
+            read_more(socket, buffer)?;
+        }
+        decoded.extend_from_slice(&buffer[offset..offset + size]);
+        offset += size + 2;
+    }
+
+    *buffer = decoded;
+    Ok(())
+}
+
+fn read_more(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<(), String> {
+    wait_readable(socket, HTTP_TIMEOUT_NS)?;
+    let mut chunk = [0u8; 8192];
+    let n = socket
+        .read(&mut chunk)
+        .map_err(|_| String::from("HTTP body read failed"))?;
+    if n == 0 {
+        return Err(String::from("unexpected EOF"));
+    }
+    buffer.extend_from_slice(&chunk[..n]);
+    Ok(())
+}
+
+fn write_body(path: &str, body: Vec<u8>) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    let mut file = options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| format!("failed to open {}", path))?;
+    write_all(&mut file, &body, "output file")?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ScarletTimeProvider;
+
+impl TimeProvider for ScarletTimeProvider {
+    fn current_time(&self) -> Option<UnixTime> {
+        Some(UnixTime::since_unix_epoch(Duration::from_secs(
+            1_780_000_000,
+        )))
+    }
+}
+
+#[derive(Debug)]
+struct InsecureServerVerifier;
+
+impl ServerCertVerifier for InsecureServerVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
+fn tls_client_config() -> Result<ClientConfig, String> {
+    let mut config = ClientConfig::builder_with_details(
+        Arc::new(rustls::crypto::ring::default_provider()),
+        Arc::new(ScarletTimeProvider),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|err| format!("TLS protocol version setup failed: {:?}", err))?
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(InsecureServerVerifier))
+    .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+fn resolve_youtube_media_url(input: &str) -> Result<String, String> {
+    let video_id =
+        youtube_video_id(input).ok_or_else(|| String::from("YouTube video id not found"))?;
+    let watch_url = format!(
+        "https://www.youtube.com/watch?v={}&bpctr=9999999999&has_verified=1",
+        video_id
+    );
+    println!("[yt] loading YouTube watch page");
+    let response = http_get(&parse_url(&watch_url)?)?;
+    if response.status < 200 || response.status >= 300 {
+        return Err(format!(
+            "YouTube watch page HTTP status {}",
+            response.status
+        ));
+    }
+    let page = core::str::from_utf8(&response.body)
+        .map_err(|_| String::from("YouTube watch page is not UTF-8"))?;
+    if let Some(media) = select_youtube_progressive_mp4(page) {
+        println!("[yt] selected progressive MP4 stream from watch page");
+        return Ok(media);
+    }
+
+    println!("[yt] no progressive MP4 in watch page; trying YouTube player API");
+    let api_key = youtube_innertube_api_key(page).unwrap_or_else(|| YOUTUBEI_API_KEY.to_string());
+    let client_version = youtube_innertube_client_version(page)
+        .unwrap_or_else(|| YOUTUBE_WEB_CLIENT_VERSION.to_string());
+    resolve_youtube_media_url_via_player_api(&video_id, &api_key, &client_version)
+}
+
+fn resolve_youtube_media_url_via_player_api(
+    video_id: &str,
+    api_key: &str,
+    client_version: &str,
+) -> Result<String, String> {
+    let clients = [
+        YoutubeClientSpec::android_vr(),
+        YoutubeClientSpec::web(client_version),
+        YoutubeClientSpec::mweb(),
+        YoutubeClientSpec::android(),
+        YoutubeClientSpec::ios(),
+    ];
+    let mut last_error = String::from("no YouTube player clients tried");
+
+    for client in clients {
+        match try_youtube_player_client(video_id, api_key, &client) {
+            Ok(Some(url)) => return Ok(url),
+            Ok(None) => {
+                last_error = format!("{} returned no direct progressive MP4 stream", client.label);
+            }
+            Err(error) => {
+                println!("[yt] YouTube {} player API failed: {}", client.label, error);
+                last_error = error;
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn try_youtube_player_client(
+    video_id: &str,
+    api_key: &str,
+    client: &YoutubeClientSpec<'_>,
+) -> Result<Option<String>, String> {
+    let api_url = format!(
+        "https://www.youtube.com/youtubei/v1/player?key={}&prettyPrint=false",
+        api_key
+    );
+    let body = youtube_player_request_body(video_id, client);
+    let extra_headers = format!(
+        "Origin: https://www.youtube.com\r\nReferer: https://www.youtube.com/watch?v={}\r\nX-YouTube-Client-Name: {}\r\nX-YouTube-Client-Version: {}\r\n",
+        video_id, client.client_id, client.client_version
+    );
+
+    println!("[yt] loading YouTube {} player API", client.label);
+    let response = https_post_json(
+        &parse_url(&api_url)?,
+        &body,
+        client.user_agent,
+        &extra_headers,
+    )?;
+    if response.status < 200 || response.status >= 300 {
+        if let Ok(body) = core::str::from_utf8(&response.body) {
+            println!(
+                "[yt] YouTube {} player API error body: {}",
+                client.label, body
+            );
+        }
+        return Err(format!(
+            "YouTube {} player API HTTP status {}",
+            client.label, response.status
+        ));
+    }
+    let payload = core::str::from_utf8(&response.body)
+        .map_err(|_| String::from("YouTube player API response is not UTF-8"))?;
+    let stats = youtube_format_stats(payload);
+    println!(
+        "[yt] {} formats: total={} progressive_mp4={} direct={} sig={} cipher_s={}",
+        client.label,
+        stats.total,
+        stats.progressive_mp4,
+        stats.direct_url,
+        stats.signature_url,
+        stats.cipher_signature
+    );
+    if let Some(reason) = youtube_playability_reason(payload) {
+        println!("[yt] {} playability: {}", client.label, reason);
+    }
+    if let Some(media) = select_youtube_progressive_mp4(payload) {
+        println!(
+            "[yt] selected progressive MP4 stream from {} player API",
+            client.label
+        );
+        return Ok(Some(media));
+    }
+    Ok(None)
+}
+
+struct YoutubeClientSpec<'a> {
+    label: &'static str,
+    client_name: &'static str,
+    client_version: &'a str,
+    client_id: u32,
+    user_agent: &'static str,
+    platform: YoutubeClientPlatform,
+}
+
+impl<'a> YoutubeClientSpec<'a> {
+    fn web(client_version: &'a str) -> Self {
+        Self {
+            label: "web",
+            client_name: "WEB",
+            client_version,
+            client_id: 1,
+            user_agent: "Mozilla/5.0 (X11; Scarlet) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+            platform: YoutubeClientPlatform::Web,
+        }
+    }
+
+    fn mweb() -> Self {
+        Self {
+            label: "mweb",
+            client_name: "MWEB",
+            client_version: YOUTUBE_MWEB_CLIENT_VERSION,
+            client_id: 2,
+            user_agent: "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)",
+            platform: YoutubeClientPlatform::Web,
+        }
+    }
+
+    fn android() -> Self {
+        Self {
+            label: "android",
+            client_name: "ANDROID",
+            client_version: YOUTUBE_ANDROID_CLIENT_VERSION,
+            client_id: 3,
+            user_agent: "com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip",
+            platform: YoutubeClientPlatform::Android,
+        }
+    }
+
+    fn android_vr() -> Self {
+        Self {
+            label: "android_vr",
+            client_name: "ANDROID_VR",
+            client_version: YOUTUBE_ANDROID_VR_CLIENT_VERSION,
+            client_id: 28,
+            user_agent: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+            platform: YoutubeClientPlatform::AndroidVr,
+        }
+    }
+
+    fn ios() -> Self {
+        Self {
+            label: "ios",
+            client_name: "IOS",
+            client_version: YOUTUBE_IOS_CLIENT_VERSION,
+            client_id: 5,
+            user_agent: "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+            platform: YoutubeClientPlatform::Ios,
+        }
+    }
+}
+
+enum YoutubeClientPlatform {
+    Web,
+    Android,
+    AndroidVr,
+    Ios,
+}
+
+fn youtube_player_request_body(video_id: &str, client: &YoutubeClientSpec<'_>) -> String {
+    let mut body = format!(
+        concat!(
+            "{{",
+            "\"context\":{{",
+            "\"client\":{{",
+            "\"clientName\":\"{}\",",
+            "\"clientVersion\":\"{}\",",
+            "\"hl\":\"en\",",
+            "\"gl\":\"US\",",
+            "\"utcOffsetMinutes\":0"
+        ),
+        client.client_name, client.client_version
+    );
+
+    match client.platform {
+        YoutubeClientPlatform::Web => {}
+        YoutubeClientPlatform::Android => {
+            body.push_str(
+                ",\"androidSdkVersion\":30,\"userAgent\":\"com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip\",\"osName\":\"Android\",\"osVersion\":\"11\"",
+            );
+        }
+        YoutubeClientPlatform::AndroidVr => {
+            body.push_str(
+                ",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"androidSdkVersion\":32,\"userAgent\":\"com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip\",\"osName\":\"Android\",\"osVersion\":\"12L\"",
+            );
+        }
+        YoutubeClientPlatform::Ios => {
+            body.push_str(
+                ",\"deviceMake\":\"Apple\",\"deviceModel\":\"iPhone16,2\",\"userAgent\":\"com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)\",\"osName\":\"iPhone\",\"osVersion\":\"18.3.2.22D82\"",
+            );
+        }
+    }
+
+    body.push_str("}},");
+    body.push_str(&format!(
+        "\"videoId\":\"{}\",\"contentCheckOk\":true,\"racyCheckOk\":true}}",
+        video_id
+    ));
+    body
+}
+
+struct YoutubeFormatStats {
+    total: usize,
+    progressive_mp4: usize,
+    direct_url: usize,
+    signature_url: usize,
+    cipher_signature: usize,
+}
+
+fn youtube_format_stats(payload: &str) -> YoutubeFormatStats {
+    let Some(formats) = youtube_formats_payload(payload) else {
+        return YoutubeFormatStats {
+            total: 0,
+            progressive_mp4: 0,
+            direct_url: 0,
+            signature_url: 0,
+            cipher_signature: 0,
+        };
+    };
+
+    let mut stats = YoutubeFormatStats {
+        total: 0,
+        progressive_mp4: 0,
+        direct_url: 0,
+        signature_url: 0,
+        cipher_signature: 0,
+    };
+
+    for object in JsonObjects::new(formats) {
+        stats.total += 1;
+        let is_progressive_mp4 = json_string_field(object, "mimeType")
+            .map(|mime| mime.contains("video/mp4") && mime.contains("mp4a"))
+            .unwrap_or(false);
+        if !is_progressive_mp4 {
+            continue;
+        }
+        stats.progressive_mp4 += 1;
+        if json_string_field(object, "url").is_some() {
+            stats.direct_url += 1;
+            continue;
+        }
+        let cipher = json_string_field(object, "signatureCipher")
+            .or_else(|| json_string_field(object, "cipher"));
+        if let Some(cipher) = cipher {
+            if form_value(&cipher, "sig")
+                .or_else(|| form_value(&cipher, "signature"))
+                .is_some()
+            {
+                stats.signature_url += 1;
+            } else if form_value(&cipher, "s").is_some() {
+                stats.cipher_signature += 1;
+            }
+        }
+    }
+
+    stats
+}
+
+fn youtube_playability_reason(payload: &str) -> Option<String> {
+    json_string_field(payload, "reason").or_else(|| json_string_field(payload, "status"))
+}
+
+fn youtube_innertube_api_key(page: &str) -> Option<String> {
+    json_string_field(page, "INNERTUBE_API_KEY")
+}
+
+fn youtube_innertube_client_version(page: &str) -> Option<String> {
+    json_string_field(page, "INNERTUBE_CLIENT_VERSION")
+}
+
+fn select_youtube_progressive_mp4(page: &str) -> Option<String> {
+    let formats = youtube_formats_payload(page)?;
+    let mut best_url = None;
+    let mut best_height = 0usize;
+
+    for object in JsonObjects::new(formats) {
+        let Some(mime) = json_string_field(object, "mimeType") else {
+            continue;
+        };
+        if !mime.contains("video/mp4") || !mime.contains("mp4a") {
+            continue;
+        }
+        let Some(url) = youtube_format_url(object) else {
+            continue;
+        };
+        let height = json_usize_field(object, "height").unwrap_or(0);
+        if best_url.is_none() || height > best_height {
+            best_height = height;
+            best_url = Some(url);
+        }
+    }
+
+    best_url
+}
+
+fn youtube_formats_payload(page: &str) -> Option<&str> {
+    let formats_key = "\"formats\":[";
+    let formats_start = page.find(formats_key)? + formats_key.len() - 1;
+    let formats_end = find_matching_json(page, formats_start, b'[', b']')?;
+    Some(&page[formats_start + 1..formats_end])
+}
+
+fn youtube_format_url(object: &str) -> Option<String> {
+    if let Some(url) = json_string_field(object, "url") {
+        return Some(url);
+    }
+
+    let cipher = json_string_field(object, "signatureCipher")
+        .or_else(|| json_string_field(object, "cipher"))?;
+    let mut url = form_value(&cipher, "url")?;
+    if let Some(sig) = form_value(&cipher, "sig").or_else(|| form_value(&cipher, "signature")) {
+        let sig_name = form_value(&cipher, "sp").unwrap_or_else(|| String::from("signature"));
+        append_query_param(&mut url, &sig_name, &sig);
+        return Some(url);
+    }
+
+    if form_value(&cipher, "s").is_some() {
+        return None;
+    }
+
+    Some(url)
+}
+
+struct JsonObjects<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl<'a> JsonObjects<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, offset: 0 }
+    }
+}
+
+impl<'a> Iterator for JsonObjects<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let bytes = self.input.as_bytes();
+        while self.offset < bytes.len() && bytes[self.offset] != b'{' {
+            self.offset += 1;
+        }
+        if self.offset >= bytes.len() {
+            return None;
+        }
+        let start = self.offset;
+        let end = find_matching_json(self.input, start, b'{', b'}')?;
+        self.offset = end + 1;
+        Some(&self.input[start..=end])
+    }
+}
+
+fn find_matching_json(input: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if *bytes.get(start)? != open {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if *byte == b'"' {
+            in_string = true;
+        } else if *byte == open {
+            depth += 1;
+        } else if *byte == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    None
+}
+
+fn json_string_field(input: &str, name: &str) -> Option<String> {
+    let pattern = format!("\"{}\":\"", name);
+    let start = input.find(&pattern)? + pattern.len();
+    parse_json_string_value(input, start)
+}
+
+fn parse_json_string_value(input: &str, start: usize) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = String::new();
+    let mut index = start;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'"' {
+            return Some(out);
+        }
+        if byte != b'\\' {
+            out.push(byte as char);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        let escaped = *bytes.get(index)?;
+        match escaped {
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'/' => out.push('/'),
+            b'b' => out.push('\u{0008}'),
+            b'f' => out.push('\u{000c}'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'u' => {
+                let code = parse_hex_u16(bytes.get(index + 1..index + 5)?)?;
+                out.push(core::char::from_u32(code as u32)?);
+                index += 4;
+            }
+            _ => return None,
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn json_usize_field(input: &str, name: &str) -> Option<usize> {
+    let pattern = format!("\"{}\":", name);
+    let mut index = input.find(&pattern)? + pattern.len();
+    let bytes = input.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    parse_usize(&input[start..index])
+}
+
+fn parse_hex_u16(input: &[u8]) -> Option<u16> {
+    if input.len() != 4 {
+        return None;
+    }
+    let mut value = 0u16;
+    for byte in input {
+        let digit = match *byte {
+            b'0'..=b'9' => *byte - b'0',
+            b'a'..=b'f' => *byte - b'a' + 10,
+            b'A'..=b'F' => *byte - b'A' + 10,
+            _ => return None,
+        };
+        value = value.checked_mul(16)?.checked_add(digit as u16)?;
+    }
+    Some(value)
+}
+
+fn resolve_host(host: &str) -> Result<[u8; 4], String> {
+    if let Some(ip) = parse_ipv4(host) {
+        return Ok(ip);
+    }
+
+    let dns = configured_dns_server().unwrap_or(DEFAULT_DNS);
+    println!(
+        "[yt] DNS A {} via {}.{}.{}.{}",
+        host, dns[0], dns[1], dns[2], dns[3]
+    );
+    let query = build_dns_query(host)?;
+    let mut socket = Socket::new_with_domain(
+        SocketDomain::Inet4,
+        SocketType::Datagram,
+        SocketProtocol::Udp,
+    )
+    .map_err(|_| String::from("failed to create UDP socket"))?;
+    socket
+        .connect_inet(Inet4SocketAddress::new(dns, DNS_PORT))
+        .map_err(|_| String::from("DNS UDP connect failed"))?;
+    write_all(&mut socket, &query, "DNS query")?;
+    wait_readable(&socket, DNS_TIMEOUT_NS)?;
+
+    let mut response = [0u8; 1500];
+    let n = socket
+        .read(&mut response)
+        .map_err(|_| String::from("DNS read failed"))?;
+    parse_dns_a_response(&response[..n]).ok_or_else(|| String::from("DNS A record not found"))
+}
+
+fn configured_dns_server() -> Option<[u8; 4]> {
+    let (status, _) = list_interfaces().ok()?;
+    if status.dns_set == 1 {
+        Some(status.dns_server)
+    } else {
+        None
+    }
+}
+
+fn build_dns_query(host: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x5954u16.to_be_bytes());
+    out.extend_from_slice(&0x0100u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(String::from("invalid DNS name"));
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    Ok(out)
+}
+
+fn parse_dns_a_response(packet: &[u8]) -> Option<[u8; 4]> {
+    if packet.len() < 12 {
+        return None;
+    }
+    if read_u16(packet, 0)? != 0x5954 {
+        return None;
+    }
+    let qdcount = read_u16(packet, 4)? as usize;
+    let ancount = read_u16(packet, 6)? as usize;
+    let mut offset = 12usize;
+    for _ in 0..qdcount {
+        skip_dns_name(packet, &mut offset)?;
+        offset = offset.checked_add(4)?;
+        if offset > packet.len() {
+            return None;
+        }
+    }
+    for _ in 0..ancount {
+        skip_dns_name(packet, &mut offset)?;
+        let rr_type = read_u16(packet, offset)?;
+        let rr_class = read_u16(packet, offset + 2)?;
+        let rdlen = read_u16(packet, offset + 8)? as usize;
+        offset += 10;
+        if offset + rdlen > packet.len() {
+            return None;
+        }
+        if rr_type == 1 && rr_class == 1 && rdlen == 4 {
+            return Some([
+                packet[offset],
+                packet[offset + 1],
+                packet[offset + 2],
+                packet[offset + 3],
+            ]);
+        }
+        offset += rdlen;
+    }
+    None
+}
+
+fn skip_dns_name(packet: &[u8], offset: &mut usize) -> Option<()> {
+    loop {
+        let len = *packet.get(*offset)?;
+        *offset += 1;
+        if len == 0 {
+            return Some(());
+        }
+        if len & 0xc0 == 0xc0 {
+            *offset += 1;
+            return if *offset <= packet.len() {
+                Some(())
+            } else {
+                None
+            };
+        }
+        *offset += len as usize;
+        if *offset > packet.len() {
+            return None;
+        }
+    }
+}
+
+fn parse_url(input: &str) -> Result<UrlParts, String> {
+    let scheme_end = input
+        .find("://")
+        .ok_or_else(|| String::from("URL must include a scheme"))?;
+    let scheme = input[..scheme_end].to_ascii_lowercase();
+    let rest = &input[scheme_end + 3..];
+    let path_start = match (rest.find('/'), rest.find('?')) {
+        (Some(slash), Some(query)) => slash.min(query),
+        (Some(slash), None) => slash,
+        (None, Some(query)) => query,
+        (None, None) => rest.len(),
+    };
+    let authority = &rest[..path_start];
+    let path = if path_start < rest.len() {
+        if rest.as_bytes()[path_start] == b'?' {
+            format!("/{}", &rest[path_start..])
+        } else {
+            rest[path_start..].to_string()
+        }
+    } else {
+        String::from("/")
+    };
+    if authority.is_empty() {
+        return Err(String::from("URL host is empty"));
+    }
+
+    let (host, port) = if let Some(colon) = authority.rfind(':') {
+        let host = &authority[..colon];
+        let port =
+            parse_u16(&authority[colon + 1..]).ok_or_else(|| String::from("invalid URL port"))?;
+        (host.to_string(), port)
+    } else {
+        let port = match scheme.as_str() {
+            "http" => HTTP_PORT,
+            "https" => HTTPS_PORT,
+            _ => return Err(format!("unsupported URL scheme: {}", scheme)),
+        };
+        (authority.to_string(), port)
+    };
+
+    Ok(UrlParts {
+        scheme,
+        host,
+        port,
+        path,
+    })
+}
+
+fn form_value(input: &str, name: &str) -> Option<String> {
+    for pair in input.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = form_decode(parts.next().unwrap_or(""))?;
+        if key != name {
+            continue;
+        }
+        return form_decode(parts.next().unwrap_or(""));
+    }
+    None
+}
+
+fn form_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = String::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(' ');
+                index += 1;
+            }
+            b'%' => {
+                let high = *bytes.get(index + 1)?;
+                let low = *bytes.get(index + 2)?;
+                let value = (hex_digit(high)? << 4) | hex_digit(low)?;
+                out.push(value as char);
+                index += 3;
+            }
+            byte => {
+                out.push(byte as char);
+                index += 1;
+            }
+        }
+    }
+
+    Some(out)
+}
+
+fn append_query_param(url: &mut String, name: &str, value: &str) {
+    if url.contains('?') {
+        url.push('&');
+    } else {
+        url.push('?');
+    }
+    url.push_str(name);
+    url.push('=');
+    push_form_encoded(url, value);
+}
+
+fn push_form_encoded(out: &mut String, input: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn resolve_redirect(base: &UrlParts, location: &str) -> Result<UrlParts, String> {
+    if location.contains("://") {
+        return parse_url(location);
+    }
+    if location.starts_with('/') {
+        return Ok(UrlParts {
+            scheme: base.scheme.clone(),
+            host: base.host.clone(),
+            port: base.port,
+            path: location.to_string(),
+        });
+    }
+    let mut path = base.path.clone();
+    if let Some(slash) = path.rfind('/') {
+        path.truncate(slash + 1);
+    }
+    path.push_str(location);
+    Ok(UrlParts {
+        scheme: base.scheme.clone(),
+        host: base.host.clone(),
+        port: base.port,
+        path,
+    })
+}
+
+fn parse_status(headers: &str) -> Result<u16, String> {
+    let first = headers
+        .lines()
+        .next()
+        .ok_or_else(|| String::from("empty HTTP response"))?;
+    let mut parts = first.split_whitespace();
+    let _version = parts.next();
+    let status = parts
+        .next()
+        .and_then(parse_u16)
+        .ok_or_else(|| String::from("invalid HTTP status"))?;
+    Ok(status)
+}
+
+fn header_value(headers: &str, name: &str) -> Option<String> {
+    for line in headers.lines().skip(1) {
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let key = &line[..colon];
+        if eq_ignore_ascii_case(key, name) {
+            return Some(line[colon + 1..].trim().to_string());
+        }
+    }
+    None
+}
+
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+fn wait_readable(socket: &Socket, timeout_ns: i64) -> Result<(), String> {
+    let mut poll_handle = [PollHandle::new(socket.as_raw() as u32, POLLIN)];
+    match poll(&mut poll_handle, timeout_ns) {
+        Ok(0) => Err(String::from("network read timed out")),
+        Ok(_) => Ok(()),
+        Err(_) => Err(String::from("network poll failed")),
+    }
+}
+
+fn write_all<W: Write>(writer: &mut W, mut data: &[u8], context: &str) -> Result<(), String> {
+    let mut would_block_retries = 0usize;
+    while !data.is_empty() {
+        let n = match writer.write(data) {
+            Ok(n) => n,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                would_block_retries += 1;
+                if would_block_retries > 200 {
+                    return Err(format!("{} write timed out", context));
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(err) => return Err(format!("{} write failed: {}", context, err)),
+        };
+        if n == 0 {
+            return Err(format!("{} short write", context));
+        }
+        would_block_retries = 0;
+        data = &data[n..];
+        if !data.is_empty() {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    Ok(())
+}
+
+fn is_youtube_url(input: &str) -> bool {
+    input.contains("youtube.com/") || input.contains("youtu.be/")
+}
+
+fn youtube_video_id(input: &str) -> Option<&str> {
+    if let Some(pos) = input.find("youtu.be/") {
+        let tail = &input[pos + "youtu.be/".len()..];
+        return Some(tail.split(['?', '&', '/']).next()?);
+    }
+    let query = input.split('?').nth(1)?;
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("v=") {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_ipv4(input: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut count = 0usize;
+    for part in input.split('.') {
+        if count >= 4 {
+            return None;
+        }
+        out[count] = parse_u8(part)?;
+        count += 1;
+    }
+    if count == 4 { Some(out) } else { None }
+}
+
+fn parse_u8(input: &str) -> Option<u8> {
+    let value = parse_usize(input)?;
+    if value <= u8::MAX as usize {
+        Some(value as u8)
+    } else {
+        None
+    }
+}
+
+fn parse_u16(input: &str) -> Option<u16> {
+    let value = parse_usize(input)?;
+    if value <= u16::MAX as usize {
+        Some(value as u16)
+    } else {
+        None
+    }
+}
+
+fn parse_usize(input: &str) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for byte in input.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+    }
+    Some(value)
+}
+
+fn parse_hex_usize(input: &str) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for byte in input.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = value.checked_mul(16)?.checked_add(digit as usize)?;
+    }
+    Some(value)
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+    ]))
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    find_bytes_from(haystack, needle, 0)
+}
+
+fn find_bytes_from(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() || start > haystack.len() {
+        return None;
+    }
+    (start..=haystack.len() - needle.len())
+        .find(|&index| &haystack[index..index + needle.len()] == needle)
+}
+
+fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .all(|(a, b)| a.eq_ignore_ascii_case(&b))
+}
