@@ -526,6 +526,9 @@ impl VirtioVideoDevice {
         if *session.stream_created.read() && *session.stream_coded_format.read() == coded_format {
             return Ok(());
         }
+        if session.pending_decode.lock().is_some() {
+            return Err("VirtIO video decode already pending");
+        }
 
         self.invalidate_mapped_resources(session);
         self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
@@ -541,6 +544,10 @@ impl VirtioVideoDevice {
         let session = self.default_session();
         let owner_task_id = self.current_owner_task_id()?;
         self.claim_session(session, owner_task_id)?;
+        let _ = self.try_complete_pending_decode()?;
+        if session.pending_decode.lock().is_some() {
+            return Err("VirtIO video decode already pending");
+        }
         self.ensure_stream_format(session, VIRTIO_VIDEO_FORMAT_H264)?;
         if buffer.is_empty() {
             return Err("H.264 input is empty");
@@ -620,6 +627,10 @@ impl VirtioVideoDevice {
         let session = self.session_by_stream_id(stream_id)?;
         let owner_task_id = self.current_owner_task_id()?;
         self.claim_session(session, owner_task_id)?;
+        let _ = self.try_complete_pending_decode()?;
+        if session.pending_decode.lock().is_some() {
+            return Err("VirtIO video decode already pending");
+        }
         self.ensure_stream_format(session, coded_format)?;
         if input_len == 0 {
             return Err("VirtIO video input is empty");
@@ -666,6 +677,9 @@ impl VirtioVideoDevice {
         let mut created = session.mapped_resources_created.lock();
         if *created {
             return Ok(());
+        }
+        if session.pending_decode.lock().is_some() {
+            return Err("VirtIO video decode already pending");
         }
 
         self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;

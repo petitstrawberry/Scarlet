@@ -458,7 +458,13 @@ fn resampled_output_frames(stream: &ClientStream, available: usize) -> usize {
         if src_index >= available {
             break;
         }
-        frames += 1;
+        let next_frames = frames + 1;
+        let consumed = (stream.resample_pos_num + next_frames as u128 * u128::from(stream.rate))
+            / u128::from(OUTPUT_RATE);
+        if consumed > available as u128 {
+            break;
+        }
+        frames = next_frames;
     }
     frames
 }
