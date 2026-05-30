@@ -789,12 +789,14 @@ fn annex_b_access_units(data: &[u8]) -> Vec<Vec<u8>> {
 #[derive(Clone, Copy)]
 struct Mp4Box {
     typ: [u8; 4],
+    start: usize,
     data_start: usize,
     data_end: usize,
 }
 
 #[derive(Default)]
 struct Mp4Track {
+    track_id: u32,
     is_video: bool,
     is_audio: bool,
     avcc: Option<AvcConfig>,
@@ -840,6 +842,44 @@ struct TimeToSampleEntry {
     sample_delta: u32,
 }
 
+#[derive(Clone, Copy)]
+struct Mp4MediaSample {
+    offset: u64,
+    size: u32,
+}
+
+struct Mp4SampleLayout {
+    samples: Vec<Mp4MediaSample>,
+    display_ranks: Vec<usize>,
+    presentation_times_us: Vec<u64>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Mp4FragmentDefaults {
+    duration: u32,
+    size: u32,
+    flags: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Mp4FragmentHeader {
+    track_id: u32,
+    base_data_offset: Option<u64>,
+    defaults: Mp4FragmentDefaults,
+}
+
+#[derive(Clone, Copy)]
+struct Mp4TrunSample {
+    size: u32,
+    duration: u32,
+    composition_offset: i64,
+}
+
+struct Mp4Trun {
+    data_offset: Option<i32>,
+    samples: Vec<Mp4TrunSample>,
+}
+
 fn looks_like_mp4(data: &[u8]) -> bool {
     let mut offset = 0usize;
     while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
@@ -870,16 +910,12 @@ fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<Vi
     } else {
         return Err(String::from("MP4 has no supported video codec"));
     };
-    let sample_offsets = mp4_sample_offsets(&track)?;
-    if sample_offsets.len() != track.sample_sizes.len() {
-        return Err(String::from("MP4 sample table is inconsistent"));
-    }
-    let (display_ranks, presentation_times_us) = mp4_display_timing(&track)?;
+    let sample_layout = mp4_sample_layout(data, &track)?;
 
     let mut access_units = Vec::new();
-    for (index, offset) in sample_offsets.iter().enumerate() {
-        let offset = *offset as usize;
-        let size = track.sample_sizes[index] as usize;
+    for (index, media_sample) in sample_layout.samples.iter().enumerate() {
+        let offset = media_sample.offset as usize;
+        let size = media_sample.size as usize;
         let end = offset
             .checked_add(size)
             .ok_or_else(|| String::from("MP4 sample offset overflow"))?;
@@ -923,8 +959,8 @@ fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<Vi
         access_units.push(VideoAccessUnit {
             payload,
             codec,
-            display_rank: display_ranks[index],
-            presentation_time_us: presentation_times_us[index],
+            display_rank: sample_layout.display_ranks[index],
+            presentation_time_us: sample_layout.presentation_times_us[index],
         });
     }
 
@@ -963,15 +999,12 @@ fn load_mp4_aac_audio_source(data: Arc<Vec<u8>>) -> Result<Mp4AacAudioSource, St
         .aac
         .clone()
         .ok_or_else(|| String::from("MP4 audio track has no AAC config"))?;
-    let sample_offsets = mp4_sample_offsets(&track)?;
-    if sample_offsets.len() != track.sample_sizes.len() {
-        return Err(String::from("MP4 audio sample table is inconsistent"));
-    }
+    let sample_layout = mp4_sample_layout(data.as_slice(), &track)?;
 
     let mut samples = Vec::new();
-    for (index, offset) in sample_offsets.iter().enumerate() {
-        let offset = *offset as usize;
-        let size = track.sample_sizes[index] as usize;
+    for media_sample in &sample_layout.samples {
+        let offset = media_sample.offset as usize;
+        let size = media_sample.size as usize;
         let end = offset
             .checked_add(size)
             .ok_or_else(|| String::from("MP4 AAC sample offset overflow"))?;
@@ -1033,6 +1066,7 @@ fn parse_mp4_track_boxes(
             b"mdia" | b"minf" | b"stbl" => {
                 parse_mp4_track_boxes(data, mp4_box.data_start, mp4_box.data_end, track)?;
             }
+            b"tkhd" => track.track_id = parse_tkhd_track_id(data, mp4_box.data_start)?,
             b"hdlr" => parse_hdlr(data, mp4_box.data_start, mp4_box.data_end, track)?,
             b"mdhd" => track.media_timescale = parse_mdhd(data, mp4_box.data_start)?,
             b"stsd" => parse_stsd(data, mp4_box.data_start, mp4_box.data_end, track)?,
@@ -1089,9 +1123,29 @@ fn read_mp4_box(data: &[u8], offset: usize, limit: usize) -> Option<Mp4Box> {
     }
     Some(Mp4Box {
         typ,
+        start: offset,
         data_start,
         data_end,
     })
+}
+
+fn parse_tkhd_track_id(data: &[u8], start: usize) -> Result<u32, String> {
+    let version = *data
+        .get(start)
+        .ok_or_else(|| String::from("MP4 tkhd box is truncated"))?;
+    let track_id_offset = if version == 1 {
+        start
+            .checked_add(20)
+            .ok_or_else(|| String::from("MP4 tkhd offset overflow"))?
+    } else {
+        start
+            .checked_add(12)
+            .ok_or_else(|| String::from("MP4 tkhd offset overflow"))?
+    };
+    Ok(read_u32_be(
+        data.get(track_id_offset..track_id_offset + 4)
+            .ok_or_else(|| String::from("MP4 tkhd track id is truncated"))?,
+    ))
 }
 
 fn parse_hdlr(data: &[u8], start: usize, _end: usize, track: &mut Mp4Track) -> Result<(), String> {
@@ -1595,6 +1649,459 @@ fn parse_co64(data: &[u8], start: usize, _end: usize) -> Result<Vec<u64>, String
         offset += 8;
     }
     Ok(offsets)
+}
+
+fn mp4_sample_layout(data: &[u8], track: &Mp4Track) -> Result<Mp4SampleLayout, String> {
+    if !track.sample_sizes.is_empty() {
+        let sample_offsets = mp4_sample_offsets(track)?;
+        if sample_offsets.len() != track.sample_sizes.len() {
+            return Err(String::from("MP4 sample table is inconsistent"));
+        }
+        let samples = sample_offsets
+            .iter()
+            .enumerate()
+            .map(|(index, offset)| Mp4MediaSample {
+                offset: *offset,
+                size: track.sample_sizes[index],
+            })
+            .collect();
+        let (display_ranks, presentation_times_us) = mp4_display_timing(track)?;
+        return Ok(Mp4SampleLayout {
+            samples,
+            display_ranks,
+            presentation_times_us,
+        });
+    }
+
+    mp4_fragment_sample_layout(data, track)
+}
+
+fn mp4_fragment_sample_layout(data: &[u8], track: &Mp4Track) -> Result<Mp4SampleLayout, String> {
+    let fragment_defaults = mp4_fragment_defaults(data, track.track_id)?;
+    let mut samples = Vec::new();
+    let mut presentation_order = Vec::new();
+    let mut offset = 0usize;
+
+    while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
+        if &mp4_box.typ == b"moof" {
+            parse_moof_samples(
+                data,
+                &mp4_box,
+                track,
+                fragment_defaults,
+                &mut samples,
+                &mut presentation_order,
+            )?;
+        }
+        offset = mp4_box.data_end;
+    }
+
+    if samples.is_empty() {
+        return Err(String::from("MP4 fragmented sample table is missing"));
+    }
+
+    presentation_order.sort_by_key(|(presentation_time, index)| (*presentation_time, *index));
+    let mut display_ranks = Vec::new();
+    display_ranks.resize(samples.len(), 0usize);
+    for (rank, (_, sample_index)) in presentation_order.iter().enumerate() {
+        display_ranks[*sample_index] = rank;
+    }
+
+    let first_presentation_time = presentation_order
+        .first()
+        .map(|(presentation_time, _)| *presentation_time)
+        .unwrap_or(0);
+    let timescale = u64::from(track.media_timescale).max(1);
+    let mut presentation_times_us = Vec::new();
+    presentation_times_us.resize(samples.len(), 0u64);
+    for (presentation_time, sample_index) in &presentation_order {
+        let relative_time = presentation_time.saturating_sub(first_presentation_time);
+        presentation_times_us[*sample_index] =
+            (relative_time as u128 * 1_000_000 / u128::from(timescale)) as u64;
+    }
+
+    Ok(Mp4SampleLayout {
+        samples,
+        display_ranks,
+        presentation_times_us,
+    })
+}
+
+fn parse_moof_samples(
+    data: &[u8],
+    moof: &Mp4Box,
+    track: &Mp4Track,
+    fragment_defaults: Mp4FragmentDefaults,
+    samples: &mut Vec<Mp4MediaSample>,
+    presentation_order: &mut Vec<(i128, usize)>,
+) -> Result<(), String> {
+    let mut offset = moof.data_start;
+    while let Some(mp4_box) = read_mp4_box(data, offset, moof.data_end) {
+        if &mp4_box.typ == b"traf" {
+            parse_traf_samples(
+                data,
+                &mp4_box,
+                moof.start,
+                track,
+                fragment_defaults,
+                samples,
+                presentation_order,
+            )?;
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(())
+}
+
+fn parse_traf_samples(
+    data: &[u8],
+    traf: &Mp4Box,
+    moof_start: usize,
+    track: &Mp4Track,
+    fragment_defaults: Mp4FragmentDefaults,
+    samples: &mut Vec<Mp4MediaSample>,
+    presentation_order: &mut Vec<(i128, usize)>,
+) -> Result<(), String> {
+    let mut header = None;
+    let mut base_decode_time = 0u64;
+    let mut truns = Vec::new();
+    let mut offset = traf.data_start;
+
+    while let Some(mp4_box) = read_mp4_box(data, offset, traf.data_end) {
+        match &mp4_box.typ {
+            b"tfhd" => {
+                header = Some(parse_tfhd(
+                    data,
+                    mp4_box.data_start,
+                    mp4_box.data_end,
+                    fragment_defaults,
+                )?)
+            }
+            b"tfdt" => {
+                base_decode_time = parse_tfdt(data, mp4_box.data_start, mp4_box.data_end)?;
+            }
+            b"trun" => {
+                truns.push(parse_trun(
+                    data,
+                    mp4_box.data_start,
+                    mp4_box.data_end,
+                    fragment_defaults,
+                    header.as_ref().map(|header| header.defaults),
+                )?);
+            }
+            _ => {}
+        }
+        offset = mp4_box.data_end;
+    }
+
+    let Some(header) = header else {
+        return Ok(());
+    };
+    if track.track_id != 0 && header.track_id != track.track_id {
+        return Ok(());
+    }
+
+    let base_data_offset = header.base_data_offset.unwrap_or(moof_start as u64);
+    let mut current_data_offset = base_data_offset;
+    let mut decode_time = base_decode_time;
+    for trun in truns {
+        let mut sample_offset = if let Some(data_offset) = trun.data_offset {
+            add_signed_u64(base_data_offset, data_offset)?
+        } else {
+            current_data_offset
+        };
+        for trun_sample in trun.samples {
+            let sample_index = samples.len();
+            samples.push(Mp4MediaSample {
+                offset: sample_offset,
+                size: trun_sample.size,
+            });
+            presentation_order.push((
+                i128::from(decode_time) + i128::from(trun_sample.composition_offset),
+                sample_index,
+            ));
+            sample_offset = sample_offset
+                .checked_add(u64::from(trun_sample.size))
+                .ok_or_else(|| String::from("MP4 fragment sample offset overflow"))?;
+            decode_time = decode_time
+                .checked_add(u64::from(trun_sample.duration))
+                .ok_or_else(|| String::from("MP4 fragment decode timestamp overflow"))?;
+        }
+        current_data_offset = sample_offset;
+    }
+
+    Ok(())
+}
+
+fn mp4_fragment_defaults(data: &[u8], track_id: u32) -> Result<Mp4FragmentDefaults, String> {
+    let mut offset = 0usize;
+    while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
+        if &mp4_box.typ == b"moov" {
+            return parse_moov_fragment_defaults(
+                data,
+                mp4_box.data_start,
+                mp4_box.data_end,
+                track_id,
+            );
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(Mp4FragmentDefaults::default())
+}
+
+fn parse_moov_fragment_defaults(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track_id: u32,
+) -> Result<Mp4FragmentDefaults, String> {
+    let mut offset = start;
+    while let Some(mp4_box) = read_mp4_box(data, offset, end) {
+        if &mp4_box.typ == b"mvex" {
+            return parse_mvex_fragment_defaults(
+                data,
+                mp4_box.data_start,
+                mp4_box.data_end,
+                track_id,
+            );
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(Mp4FragmentDefaults::default())
+}
+
+fn parse_mvex_fragment_defaults(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track_id: u32,
+) -> Result<Mp4FragmentDefaults, String> {
+    let mut offset = start;
+    let mut first_defaults = None;
+    while let Some(mp4_box) = read_mp4_box(data, offset, end) {
+        if &mp4_box.typ == b"trex" {
+            let (trex_track_id, defaults) = parse_trex(data, mp4_box.data_start, mp4_box.data_end)?;
+            if first_defaults.is_none() {
+                first_defaults = Some(defaults);
+            }
+            if track_id == 0 || trex_track_id == track_id {
+                return Ok(defaults);
+            }
+        }
+        offset = mp4_box.data_end;
+    }
+    Ok(first_defaults.unwrap_or_default())
+}
+
+fn parse_trex(
+    data: &[u8],
+    start: usize,
+    _end: usize,
+) -> Result<(u32, Mp4FragmentDefaults), String> {
+    let track_id = read_u32_be(
+        data.get(start + 4..start + 8)
+            .ok_or_else(|| String::from("MP4 trex track id is truncated"))?,
+    );
+    let duration = read_u32_be(
+        data.get(start + 12..start + 16)
+            .ok_or_else(|| String::from("MP4 trex duration is truncated"))?,
+    );
+    let size = read_u32_be(
+        data.get(start + 16..start + 20)
+            .ok_or_else(|| String::from("MP4 trex size is truncated"))?,
+    );
+    let flags = read_u32_be(
+        data.get(start + 20..start + 24)
+            .ok_or_else(|| String::from("MP4 trex flags are truncated"))?,
+    );
+    Ok((
+        track_id,
+        Mp4FragmentDefaults {
+            duration,
+            size,
+            flags,
+        },
+    ))
+}
+
+fn parse_tfhd(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    fragment_defaults: Mp4FragmentDefaults,
+) -> Result<Mp4FragmentHeader, String> {
+    let flags = read_full_box_flags(data, start, end, "tfhd")?;
+    let track_id = read_u32_be(
+        data.get(start + 4..start + 8)
+            .ok_or_else(|| String::from("MP4 tfhd track id is truncated"))?,
+    );
+    let mut offset = start + 8;
+    let base_data_offset = if flags & 0x000001 != 0 {
+        let value = read_u64_be(
+            data.get(offset..offset + 8)
+                .ok_or_else(|| String::from("MP4 tfhd base-data-offset is truncated"))?,
+        );
+        offset += 8;
+        Some(value)
+    } else {
+        None
+    };
+    if flags & 0x000002 != 0 {
+        offset = offset
+            .checked_add(4)
+            .ok_or_else(|| String::from("MP4 tfhd offset overflow"))?;
+    }
+    let mut defaults = fragment_defaults;
+    if flags & 0x000008 != 0 {
+        defaults.duration = read_u32_be(
+            data.get(offset..offset + 4)
+                .ok_or_else(|| String::from("MP4 tfhd default duration is truncated"))?,
+        );
+        offset += 4;
+    }
+    if flags & 0x000010 != 0 {
+        defaults.size = read_u32_be(
+            data.get(offset..offset + 4)
+                .ok_or_else(|| String::from("MP4 tfhd default size is truncated"))?,
+        );
+        offset += 4;
+    }
+    if flags & 0x000020 != 0 {
+        defaults.flags = read_u32_be(
+            data.get(offset..offset + 4)
+                .ok_or_else(|| String::from("MP4 tfhd default flags are truncated"))?,
+        );
+    }
+    Ok(Mp4FragmentHeader {
+        track_id,
+        base_data_offset,
+        defaults,
+    })
+}
+
+fn parse_tfdt(data: &[u8], start: usize, end: usize) -> Result<u64, String> {
+    let version = *data
+        .get(start)
+        .ok_or_else(|| String::from("MP4 tfdt box is truncated"))?;
+    read_full_box_flags(data, start, end, "tfdt")?;
+    if version == 1 {
+        Ok(read_u64_be(data.get(start + 4..start + 12).ok_or_else(
+            || String::from("MP4 tfdt decode time is truncated"),
+        )?))
+    } else {
+        Ok(u64::from(read_u32_be(
+            data.get(start + 4..start + 8)
+                .ok_or_else(|| String::from("MP4 tfdt decode time is truncated"))?,
+        )))
+    }
+}
+
+fn parse_trun(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    fragment_defaults: Mp4FragmentDefaults,
+    track_defaults: Option<Mp4FragmentDefaults>,
+) -> Result<Mp4Trun, String> {
+    let version = *data
+        .get(start)
+        .ok_or_else(|| String::from("MP4 trun box is truncated"))?;
+    let flags = read_full_box_flags(data, start, end, "trun")?;
+    let sample_count = read_u32_be(
+        data.get(start + 4..start + 8)
+            .ok_or_else(|| String::from("MP4 trun sample count is truncated"))?,
+    ) as usize;
+    let defaults = track_defaults.unwrap_or(fragment_defaults);
+    let mut offset = start + 8;
+    let data_offset = if flags & 0x000001 != 0 {
+        let value = read_i32_be(
+            data.get(offset..offset + 4)
+                .ok_or_else(|| String::from("MP4 trun data offset is truncated"))?,
+        );
+        offset += 4;
+        Some(value)
+    } else {
+        None
+    };
+    if flags & 0x000004 != 0 {
+        offset = offset
+            .checked_add(4)
+            .ok_or_else(|| String::from("MP4 trun offset overflow"))?;
+    }
+
+    let mut samples = Vec::new();
+    for _ in 0..sample_count {
+        let duration = if flags & 0x000100 != 0 {
+            let value = read_u32_be(
+                data.get(offset..offset + 4)
+                    .ok_or_else(|| String::from("MP4 trun sample duration is truncated"))?,
+            );
+            offset += 4;
+            value
+        } else {
+            defaults.duration
+        };
+        let size = if flags & 0x000200 != 0 {
+            let value = read_u32_be(
+                data.get(offset..offset + 4)
+                    .ok_or_else(|| String::from("MP4 trun sample size is truncated"))?,
+            );
+            offset += 4;
+            value
+        } else {
+            defaults.size
+        };
+        if flags & 0x000400 != 0 {
+            offset = offset
+                .checked_add(4)
+                .ok_or_else(|| String::from("MP4 trun offset overflow"))?;
+        }
+        let composition_offset = if flags & 0x000800 != 0 {
+            let raw = data
+                .get(offset..offset + 4)
+                .ok_or_else(|| String::from("MP4 trun composition offset is truncated"))?;
+            offset += 4;
+            if version == 1 {
+                i64::from(read_i32_be(raw))
+            } else {
+                i64::from(read_u32_be(raw))
+            }
+        } else {
+            0
+        };
+        if size == 0 {
+            return Err(String::from("MP4 trun sample size is missing"));
+        }
+        samples.push(Mp4TrunSample {
+            size,
+            duration,
+            composition_offset,
+        });
+    }
+    Ok(Mp4Trun {
+        data_offset,
+        samples,
+    })
+}
+
+fn read_full_box_flags(data: &[u8], start: usize, end: usize, name: &str) -> Result<u32, String> {
+    let bytes = data
+        .get(start..start + 4)
+        .ok_or_else(|| format!("MP4 {} full box header is truncated", name))?;
+    if start + 4 > end {
+        return Err(format!("MP4 {} full box overread", name));
+    }
+    Ok((u32::from(bytes[1]) << 16) | (u32::from(bytes[2]) << 8) | u32::from(bytes[3]))
+}
+
+fn add_signed_u64(base: u64, offset: i32) -> Result<u64, String> {
+    if offset >= 0 {
+        base.checked_add(offset as u64)
+            .ok_or_else(|| String::from("MP4 fragment data offset overflow"))
+    } else {
+        base.checked_sub(u64::from(offset.unsigned_abs()))
+            .ok_or_else(|| String::from("MP4 fragment data offset underflow"))
+    }
 }
 
 fn mp4_sample_offsets(track: &Mp4Track) -> Result<Vec<u64>, String> {
@@ -2944,6 +3451,10 @@ fn read_u32_be(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
+fn read_i32_be(bytes: &[u8]) -> i32 {
+    i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
 fn read_u64_be(bytes: &[u8]) -> u64 {
     u64::from_be_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -3560,7 +4071,20 @@ pub extern "C" fn main() -> i32 {
     }
     let audio_source = if let Some(path) = args.audio_path {
         println!("[{}] audio {}", APP_NAME, path);
-        Some(PlayerAudioSource::Wav(path))
+        if is_mp4_path(&path) {
+            match read_file(&path) {
+                Ok(data) => Some(PlayerAudioSource::Mp4Aac(Arc::new(data))),
+                Err(_) => {
+                    println!(
+                        "[{}] Application error: failed to read audio file",
+                        APP_NAME
+                    );
+                    return 1;
+                }
+            }
+        } else {
+            Some(PlayerAudioSource::Wav(path))
+        }
     } else if let Some(data) = &mp4_data {
         println!("[{}] audio MP4/AAC", APP_NAME);
         Some(PlayerAudioSource::Mp4Aac(data.clone()))
