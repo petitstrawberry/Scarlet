@@ -52,6 +52,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize
 use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
+const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -1886,12 +1887,14 @@ impl Task {
                     }
 
                     task.reparent_children();
-                    crate::println!(
-                        "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
-                        my_id,
-                        task_id,
-                        thread_group_id
-                    );
+                    if LOG_EXIT_GROUP_SIBLINGS {
+                        crate::println!(
+                            "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
+                            my_id,
+                            task_id,
+                            thread_group_id
+                        );
+                    }
                     // Set state to Terminated directly (bypass normal exit)
                     // Use unsafe to modify state through immutable reference
                     // This is safe because we are in a termination context

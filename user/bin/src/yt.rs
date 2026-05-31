@@ -302,11 +302,21 @@ fn stream_media_pair_and_play(
     let _ = remove_file(&video_socket_path);
 
     let (_pid, status) = waitpid(child, 0);
-    download_result?;
+    if let Err(error) = download_result {
+        if status == 0 && is_media_stream_closed_by_player(&error) {
+            println!("[yt] video_player closed; stopped media stream");
+            return Ok(());
+        }
+        return Err(error);
+    }
     if status != 0 {
         return Err(format!("video_player exited with status {}", status));
     }
     Ok(())
+}
+
+fn is_media_stream_closed_by_player(error: &str) -> bool {
+    error.starts_with("media stream write failed") || error.starts_with("media stream short write")
 }
 
 fn fetch_media_pair_to_files(
