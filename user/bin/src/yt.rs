@@ -2398,23 +2398,22 @@ fn json_hex_digit(value: u8) -> char {
 }
 
 fn parse_json_string_value(input: &str, start: usize) -> Option<String> {
-    let bytes = input.as_bytes();
     let mut out = String::new();
     let mut index = start;
 
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'"' {
+    while index < input.len() {
+        let ch = input[index..].chars().next()?;
+        if ch == '"' {
             return Some(out);
         }
-        if byte != b'\\' {
-            out.push(byte as char);
-            index += 1;
+        if ch != '\\' {
+            out.push(ch);
+            index += ch.len_utf8();
             continue;
         }
 
         index += 1;
-        let escaped = *bytes.get(index)?;
+        let escaped = input.as_bytes().get(index).copied()?;
         match escaped {
             b'"' => out.push('"'),
             b'\\' => out.push('\\'),
@@ -2425,9 +2424,25 @@ fn parse_json_string_value(input: &str, start: usize) -> Option<String> {
             b'r' => out.push('\r'),
             b't' => out.push('\t'),
             b'u' => {
-                let code = parse_hex_u16(bytes.get(index + 1..index + 5)?)?;
-                out.push(core::char::from_u32(code as u32)?);
+                let code = parse_hex_u16(input.as_bytes().get(index + 1..index + 5)?)?;
                 index += 4;
+                if (0xd800..=0xdbff).contains(&code) {
+                    let tail = input.as_bytes().get(index + 1..index + 7)?;
+                    if tail.first().copied() != Some(b'\\') || tail.get(1).copied() != Some(b'u') {
+                        return None;
+                    }
+                    let low = parse_hex_u16(tail.get(2..6)?)?;
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return None;
+                    }
+                    let high_ten = u32::from(code - 0xd800);
+                    let low_ten = u32::from(low - 0xdc00);
+                    let scalar = 0x10000 + ((high_ten << 10) | low_ten);
+                    out.push(core::char::from_u32(scalar)?);
+                    index += 6;
+                } else {
+                    out.push(core::char::from_u32(code as u32)?);
+                }
             }
             _ => return None,
         }
