@@ -397,12 +397,15 @@ impl VirtioVideoDevice {
     }
 
     fn allocate_session(&self, owner_task_id: usize) -> Result<&VideoSession, &'static str> {
+        let _ = self.try_complete_pending_decode();
+        self.cleanup_orphaned_sessions();
+
         let mut next = self.next_session_index.lock();
         for offset in 0..MAX_VIDEO_SESSIONS {
             let index = (*next + offset) % MAX_VIDEO_SESSIONS;
             let session = &self.sessions[index];
             let mut owner = session.owner_task_id.lock();
-            if owner.is_none() {
+            if owner.is_none() && session.pending_decode.lock().is_none() {
                 *owner = Some(owner_task_id);
                 *next = index.wrapping_add(1);
                 return Ok(session);
@@ -425,6 +428,9 @@ impl VirtioVideoDevice {
         let mut owner = session.owner_task_id.lock();
         match *owner {
             None => {
+                if session.pending_decode.lock().is_some() {
+                    return Err("VirtIO video decode already pending");
+                }
                 *owner = Some(owner_task_id);
                 Ok(())
             }
@@ -455,12 +461,31 @@ impl VirtioVideoDevice {
             return;
         };
         let owner_task_id = task.get_thread_group_id();
-        let _ = self.try_complete_pending_decode();
+        if let Err(e) = self.try_complete_pending_decode() {
+            self.decoded_frame.lock().last_error = Some(e);
+        }
         for session in &self.sessions {
-            if *session.owner_task_id.lock() == Some(owner_task_id)
-                && session.pending_decode.lock().is_none()
-            {
-                let _ = self.release_session(session);
+            if *session.owner_task_id.lock() == Some(owner_task_id) {
+                if session.pending_decode.lock().is_none() {
+                    let _ = self.release_session(session);
+                } else {
+                    *session.owner_task_id.lock() = None;
+                }
+            }
+        }
+        self.cleanup_orphaned_sessions();
+    }
+
+    fn cleanup_orphaned_sessions(&self) {
+        for session in &self.sessions {
+            if session.owner_task_id.lock().is_none() && session.pending_decode.lock().is_none() {
+                let has_resources = *session.stream_created.read()
+                    || *session.mapped_resources_created.lock()
+                    || session.mapped_buffer.read().is_some()
+                    || session.mapped_frame.lock().is_some();
+                if has_resources {
+                    let _ = self.release_session(session);
+                }
             }
         }
     }
