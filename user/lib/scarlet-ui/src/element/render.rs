@@ -270,6 +270,33 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         false
     }
 
+    fn wants_keyboard_focus(&self) -> bool {
+        if self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::TextField>()
+            .is_some_and(|field| field.focused_state().get())
+        {
+            return true;
+        }
+        self.render_object
+            .as_any()
+            .downcast_ref::<crate::views::modifiers::FocusableRenderObject>()
+            .is_some_and(|focusable| focusable.is_focused())
+    }
+
+    fn accepts_keyboard_focus(&self) -> bool {
+        self.view
+            .as_any()
+            .downcast_ref::<crate::views::TextField>()
+            .is_some()
+            || self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::FocusableRenderObject>()
+                .is_some()
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.last_constraints = Some(constraints);
         // Delegate layout to the RenderObject (which may layout children)
@@ -356,6 +383,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
         if let Event::Keyboard(key_event) = _event {
+            if _phase == Phase::Target
+                && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+            {
+                return crate::views::text_field::handle_text_field_keyboard(text_field, *key_event);
+            }
             if (_phase == Phase::Target || _phase == Phase::Bubble)
                 && let Some(render_object) = self
                     .render_object
@@ -368,6 +400,23 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 if child.handle_event(_event, _phase) {
                     return true;
                 }
+            }
+            return false;
+        }
+
+        if let Event::Focus(focus_event) = _event {
+            if _phase == Phase::Target
+                && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+            {
+                return crate::views::text_field::handle_text_field_focus(text_field, *focus_event);
+            }
+            if _phase == Phase::Target
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::modifiers::FocusableRenderObject>()
+            {
+                return render_object.handle_focus(*focus_event);
             }
             return false;
         }

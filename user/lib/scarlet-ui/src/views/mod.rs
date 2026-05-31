@@ -5,6 +5,7 @@
 mod window;
 mod text;
 mod button;
+pub(crate) mod text_field;
 mod rectangle;
 mod spacer;
 mod image;
@@ -23,9 +24,10 @@ pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
 pub use window::window_type;
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};
+pub use text_field::{TextField, TextFieldRenderObject};
 pub use rectangle::{Rectangle, RectangleRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
-pub use image::{Image, ImageRenderObject, ImageSource, ImageFit};
+pub use image::{BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource};
 pub use divider::{Divider, DividerRenderObject, DividerOrientation};
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use slider::{Slider, SliderRenderObject};
@@ -44,6 +46,7 @@ pub use modifiers::{
     Background, BackgroundRenderObject,
     SetSize, SizeRenderObject,
     AlignmentFrame, AlignmentRenderObject,
+    Focusable, FocusableRenderObject,
     OnKey, OnKeyRenderObject,
 };
 

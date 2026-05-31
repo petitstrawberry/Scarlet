@@ -15,5 +15,8 @@ pub use frame::{Frame, FrameRenderObject};
 pub use background::{Background, BackgroundRenderObject};
 pub use size::{SetSize, SizeRenderObject};
 pub use alignment::{AlignmentFrame, AlignmentRenderObject};
-pub use events::{OnClick, OnClickRenderObject, OnHover, OnHoverRenderObject, OnExit, OnExitRenderObject, OnKey, OnKeyRenderObject};
+pub use events::{
+    Focusable, FocusableRenderObject, OnClick, OnClickRenderObject, OnExit, OnExitRenderObject,
+    OnHover, OnHoverRenderObject, OnKey, OnKeyRenderObject,
+};
 pub use clip::{Clip, ClipRenderObject};

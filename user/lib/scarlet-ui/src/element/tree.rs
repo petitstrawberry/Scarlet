@@ -88,6 +88,17 @@ impl ElementTree {
         }
     }
 
+    /// Find the path to the element that currently wants keyboard focus.
+    pub fn find_keyboard_focus_path_ids(&self) -> Option<Vec<ElementId>> {
+        let root = self.root.as_deref()?;
+        let mut path = Vec::new();
+        if Self::find_keyboard_focus_recursive(root, &mut path) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// Perform a hit test to find the element at a point
     pub fn hit_test(&self, point: crate::geometry::Point) -> Option<&dyn Element> {
         let root = self.root.as_deref()?;
@@ -98,6 +109,25 @@ impl ElementTree {
     pub fn find_element_mut(&mut self, id: ElementId) -> Option<&mut Box<dyn Element>> {
         // Use a helper function that doesn't take self
         Self::find_element_recursive_helper(self.root.as_mut()?, id)
+    }
+
+    /// Find the nearest focusable element in a path, preferring the deepest one.
+    pub fn nearest_focusable_in_path(&mut self, path: &[ElementId]) -> Option<ElementId> {
+        for id in path.iter().rev() {
+            if self
+                .find_element_mut(*id)
+                .is_some_and(|element| element.accepts_keyboard_focus())
+            {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    /// Return whether an element currently wants keyboard focus.
+    pub fn element_wants_keyboard_focus(&mut self, id: ElementId) -> bool {
+        self.find_element_mut(id)
+            .is_some_and(|element| element.wants_keyboard_focus())
     }
 
     fn find_element_recursive_helper(element: &mut Box<dyn Element>, target_id: ElementId) -> Option<&mut Box<dyn Element>> {
@@ -144,6 +174,22 @@ impl ElementTree {
 
         for child in element.children() {
             if Self::find_path_recursive(child.as_ref(), target, path) {
+                return true;
+            }
+        }
+
+        path.pop();
+        false
+    }
+
+    fn find_keyboard_focus_recursive(element: &dyn Element, path: &mut Vec<ElementId>) -> bool {
+        path.push(element.id());
+        if element.wants_keyboard_focus() {
+            return true;
+        }
+
+        for child in element.children() {
+            if Self::find_keyboard_focus_recursive(child.as_ref(), path) {
                 return true;
             }
         }

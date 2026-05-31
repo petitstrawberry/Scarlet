@@ -5,8 +5,9 @@
 use core::any::Any;
 use crate::view::View;
 use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::event::KeyEvent;
+use crate::event::{FocusEvent, KeyEvent};
 use crate::geometry::Size;
+use crate::state::{Listenable, State};
 use alloc::boxed::Box;
 use alloc::vec;
 
@@ -15,6 +16,123 @@ use alloc::vec;
 pub struct OnClick<V: View, F: Clone + 'static> {
     inner: V,
     callback: F,
+}
+
+/// Focusable modifier - makes any view accept keyboard focus.
+#[derive(Clone)]
+pub struct Focusable<V: View> {
+    inner: V,
+    focused: State<bool>,
+}
+
+impl<V: View> Focusable<V> {
+    /// Create a new Focusable modifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Wrapped view.
+    /// * `focused` - State that tracks focus.
+    ///
+    /// # Returns
+    ///
+    /// A focusable wrapper for the view.
+    pub fn new(inner: V, focused: State<bool>) -> Self {
+        Self { inner, focused }
+    }
+
+    /// Return the focus state.
+    pub fn focused_state(&self) -> &State<bool> {
+        &self.focused
+    }
+}
+
+impl<V: View + Clone> View for Focusable<V> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_children(
+            self.clone(),
+            FocusableRenderObject::new(self.focused.clone()),
+            vec![self.inner.create_element()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
+        let mut listenables = self.inner.listenables();
+        listenables.push(&self.focused);
+        listenables
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Render object for [`Focusable`].
+pub struct FocusableRenderObject {
+    focused: State<bool>,
+    size: Size,
+}
+
+impl FocusableRenderObject {
+    /// Create a new focusable render object.
+    pub fn new(focused: State<bool>) -> Self {
+        Self {
+            focused,
+            size: Size::ZERO,
+        }
+    }
+
+    /// Return whether this object is currently focused.
+    pub fn is_focused(&self) -> bool {
+        self.focused.get()
+    }
+
+    /// Apply a focus event.
+    pub fn handle_focus(&self, event: FocusEvent) -> bool {
+        match event {
+            FocusEvent::Gained => self.focused.set(true),
+            FocusEvent::Lost => self.focused.set(false),
+        }
+        true
+    }
+}
+
+impl ElementRenderObject for FocusableRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        Size::ZERO
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        if let Some(child) = children.first_mut() {
+            let size = child.layout(constraints);
+            self.size = size;
+            size
+        } else {
+            self.size = Size::ZERO;
+            Size::ZERO
+        }
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn render(&mut self) {}
 }
 
 impl<V: View, F: Fn() + Clone + 'static> OnClick<V, F> {

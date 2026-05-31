@@ -12,6 +12,7 @@ libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 bitflags = { version = "2.6", default-features = false }
 ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
+zune-jpeg = { version = "0.5.8", default-features = false }
 
 [dev-dependencies]
 # For additional testing

@@ -80,12 +80,14 @@ pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
-pub use views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-pub use views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+pub use views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
 pub use views::{NavigationView, NavigationLink};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor};
 pub use views::navigation::Icon;
-pub use views::modifiers::{Padding, Frame, Background, SetSize, AlignmentFrame, Clip, OnKey};
+pub use views::modifiers::{
+    AlignmentFrame, Background, Clip, Focusable, Frame, OnKey, Padding, SetSize,
+};
 pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
 pub use graphics::{
@@ -108,11 +110,11 @@ pub mod prelude {
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
-    pub use crate::views::{Window, Text, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
-    pub use crate::views::{Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+    pub use crate::views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+    pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
     pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
-    pub use crate::views::modifiers::{Padding, Frame, Background, Clip, OnKey};
+    pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
     pub use crate::graphics::{
         FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,

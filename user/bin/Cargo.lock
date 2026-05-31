@@ -3529,6 +3529,7 @@ dependencies = [
  "scarlet_std",
  "sws-client",
  "sws_protocol",
+ "zune-jpeg 0.5.8",
 ]
 
 [[package]]
