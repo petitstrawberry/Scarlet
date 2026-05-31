@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-youtube-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std", features = ["alloc_debug"] }
+scarlet-youtube = { path = "../scarlet-youtube" }
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+ring = { version = "0.17", default-features = false, features = ["alloc", "less-safe-getrandom-custom-or-rdrand"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

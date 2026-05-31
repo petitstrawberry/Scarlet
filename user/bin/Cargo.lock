@@ -3588,6 +3588,7 @@ dependencies = [
  "scarlet_std",
  "sws-client",
  "sws_protocol",
+ "zune-jpeg 0.5.8",
 ]
 
 [[package]]
@@ -3597,6 +3598,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "scarlet-youtube"
+version = "0.1.0"
+
+[[package]]
+name = "scarlet-youtube-net"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "ring",
+ "rustls",
+ "scarlet-youtube",
+ "scarlet_std",
 ]
 
 [[package]]
@@ -4471,16 +4487,15 @@ name = "userprogram"
 version = "0.16.0"
 dependencies = [
  "framebuffer",
- "getrandom 0.2.17",
  "gpu",
- "ring",
  "rust_h264",
- "rustls",
  "sbus",
  "sbus-client",
  "scarlet-desktop-config",
  "scarlet-ui",
  "scarlet-ui-macros",
+ "scarlet-youtube",
+ "scarlet-youtube-net",
  "scarlet_std",
  "scpm",
  "serde",

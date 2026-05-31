@@ -217,6 +217,17 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnKey::new(self, callback)
     }
 
+    /// Make this view accept keyboard focus.
+    ///
+    /// # Arguments
+    /// * `focused` - State that tracks whether the view is focused.
+    fn focusable(self, focused: crate::state::State<bool>) -> crate::views::modifiers::Focusable<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Focusable::new(self, focused)
+    }
+
     /// Clip this view to its bounds
     fn clip(self) -> crate::views::modifiers::Clip<Self>
     where

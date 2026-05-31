@@ -320,4 +320,14 @@ pub trait Element {
     fn fill_height(&self) -> bool {
         false
     }
+
+    /// Whether this element currently wants keyboard focus.
+    fn wants_keyboard_focus(&self) -> bool {
+        false
+    }
+
+    /// Whether this element can receive keyboard focus.
+    fn accepts_keyboard_focus(&self) -> bool {
+        false
+    }
 }

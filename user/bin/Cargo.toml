@@ -235,12 +235,18 @@ name = "yt"
 path = "src/yt.rs"
 
 [[bin]]
+name = "yt-gui"
+path = "src/yt_gui.rs"
+
+[[bin]]
 name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
+scarlet-youtube = { path = "../lib/scarlet-youtube" }
+scarlet-youtube-net = { path = "../lib/scarlet-youtube-net" }
 framebuffer = { path = "../lib/framebuffer" }
 gpu = { path = "../lib/gpu" }
 sws_protocol = { path = "../lib/sws_protocol" }
@@ -254,9 +260,6 @@ sbus-client = { path = "../lib/sbus-client" }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
-getrandom = { version = "0.2", default-features = false, features = ["custom"] }
-ring = { version = "0.17", default-features = false, features = ["alloc", "less-safe-getrandom-custom-or-rdrand"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }

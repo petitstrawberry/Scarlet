@@ -24,8 +24,9 @@ use core::time::Duration;
 use rust_h264::decoder::{Decoder, Frame};
 use rust_h264::nal::parse_annex_b;
 use scarlet_ui::{
-    Application, CanvasView, ComponentElement, Element, Event, InvalidationKind, KeyCode, KeyEvent,
-    Listenable, MouseButton, MouseEvent, Size, SubscriptionId, View, ViewExt, Window,
+    Application, Canvas, CanvasView, Color, ComponentElement, Element, Event, InvalidationKind,
+    KeyCode, KeyEvent, Listenable, MouseButton, MouseEvent, Size, SubscriptionId, View, ViewExt,
+    Window, graphics,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
@@ -60,13 +61,22 @@ const CONTROLS_HIDE_INTERVAL_MS: u64 = 250;
 const CONTROLS_HIDE_IDLE_TICKS: u32 = 6;
 const STREAM_POLL_INTERVAL_MS: u64 = 25;
 const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
+const STREAM_START_BUFFER_US: u64 = 1_000_000;
+const STREAM_START_BUFFER_SAMPLES: usize = 24;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
+const LATE_VIDEO_DROP_THRESHOLD_US: u64 = 250_000;
 const CONTROLS_MIN_WIDTH: u32 = 96;
 const CONTROLS_MIN_HEIGHT: u32 = 48;
-const CONTROLS_PANEL_HEIGHT: u32 = 56;
-const PLAY_BUTTON_SIZE: u32 = 32;
-const PLAY_BUTTON_LEFT_INSET: u32 = 16;
-const PLAY_BUTTON_TOP_INSET: u32 = 12;
+const CONTROLS_PANEL_HEIGHT: u32 = 34;
+const PLAY_BUTTON_SIZE: u32 = 22;
+const PLAY_BUTTON_LEFT_INSET: u32 = 10;
+const PLAY_BUTTON_TOP_INSET: u32 = 6;
+const SEEK_TRACK_LEFT_INSET: u32 = 46;
+const SEEK_TRACK_RIGHT_INSET: u32 = 18;
+const SEEK_TRACK_BOTTOM_INSET: u32 = 16;
+const SEEK_TRACK_HEIGHT: u32 = 2;
+const SEEK_KNOB_WIDTH: u32 = 4;
+const SEEK_KNOB_HEIGHT: u32 = 8;
 const VVIDEO_DEVICE_PATH: &str = "/dev/vvideo0";
 const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
 const NV12_VIDEO_RANGE_PIXEL_FORMAT: u32 = 0x3432_3076;
@@ -223,20 +233,69 @@ impl VideoFrameStore {
 
 struct ControlsOverlay {
     visible: AtomicBool,
+    debug_visible: AtomicBool,
     activity_epoch: AtomicU32,
     paused: AtomicBool,
     canvas_width: AtomicU32,
     canvas_height: AtomicU32,
+    presented_frames: AtomicU64,
+    dropped_frames: AtomicU64,
+    first_clock_us: AtomicU64,
+    last_clock_us: AtomicU64,
+    last_video_pts_us: AtomicU64,
+    last_lag_us: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct UiScale {
+    milli: u32,
+}
+
+impl UiScale {
+    fn current() -> Self {
+        Self {
+            milli: graphics::current_scale_milli().max(1),
+        }
+    }
+
+    fn logical_len(self, physical: u32) -> u32 {
+        ((u64::from(physical) * 1000 + u64::from(self.milli).saturating_sub(1))
+            / u64::from(self.milli))
+        .max(1) as u32
+    }
+
+    fn physical_pos(self, logical: u32) -> u32 {
+        (u64::from(logical) * u64::from(self.milli) / 1000) as u32
+    }
+
+    fn physical_len(self, logical: u32) -> u32 {
+        ((u64::from(logical) * u64::from(self.milli) + 999) / 1000).max(1) as u32
+    }
+
+    fn physical_i32(self, logical: i32) -> i32 {
+        ((i64::from(logical) * i64::from(self.milli)) / 1000) as i32
+    }
+
+    fn physical_font(self, logical: f32) -> f32 {
+        logical * (self.milli as f32) / 1000.0
+    }
 }
 
 impl ControlsOverlay {
     fn new() -> Self {
         Self {
             visible: AtomicBool::new(false),
+            debug_visible: AtomicBool::new(false),
             activity_epoch: AtomicU32::new(0),
             paused: AtomicBool::new(false),
             canvas_width: AtomicU32::new(DISPLAY_WIDTH),
             canvas_height: AtomicU32::new(DISPLAY_HEIGHT),
+            presented_frames: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
+            first_clock_us: AtomicU64::new(u64::MAX),
+            last_clock_us: AtomicU64::new(0),
+            last_video_pts_us: AtomicU64::new(0),
+            last_lag_us: AtomicU64::new(0),
         }
     }
 
@@ -261,10 +320,44 @@ impl ControlsOverlay {
         self.paused.load(Ordering::Acquire)
     }
 
+    fn is_debug_visible(&self) -> bool {
+        self.debug_visible.load(Ordering::Acquire)
+    }
+
     fn toggle_paused(&self) {
         let paused = !self.paused.load(Ordering::Acquire);
         self.paused.store(paused, Ordering::Release);
         self.show_for_mouse_activity();
+    }
+
+    fn toggle_debug(&self) {
+        let visible = !self.debug_visible.load(Ordering::Acquire);
+        self.debug_visible.store(visible, Ordering::Release);
+        self.show_for_mouse_activity();
+    }
+
+    fn record_presented_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
+        self.presented_frames.fetch_add(1, Ordering::AcqRel);
+        self.record_video_timing(presentation_time_us, clock_time_us);
+    }
+
+    fn record_dropped_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
+        self.dropped_frames.fetch_add(1, Ordering::AcqRel);
+        self.record_video_timing(presentation_time_us, clock_time_us);
+    }
+
+    fn record_video_timing(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
+        let clock_time_us = clock_time_us.unwrap_or(presentation_time_us);
+        if self.first_clock_us.load(Ordering::Acquire) == u64::MAX {
+            self.first_clock_us.store(clock_time_us, Ordering::Release);
+        }
+        self.last_clock_us.store(clock_time_us, Ordering::Release);
+        self.last_video_pts_us
+            .store(presentation_time_us, Ordering::Release);
+        self.last_lag_us.store(
+            clock_time_us.saturating_sub(presentation_time_us),
+            Ordering::Release,
+        );
     }
 
     fn update_canvas_size(&self, width: u32, height: u32) {
@@ -332,6 +425,7 @@ impl Listenable for PaintSignal {
 #[derive(Clone)]
 struct VideoPlayerApp {
     path: String,
+    window_title: String,
     mp4_data: Option<Arc<Vec<u8>>>,
     audio_source: Option<PlayerAudioSource>,
     hardware_decode: bool,
@@ -360,6 +454,7 @@ enum PlayerAudioSource {
 impl VideoPlayerApp {
     fn new(
         path: String,
+        window_title: String,
         mp4_data: Option<Arc<Vec<u8>>>,
         audio_source: Option<PlayerAudioSource>,
         hardware_decode: bool,
@@ -369,6 +464,7 @@ impl VideoPlayerApp {
     ) -> Self {
         Self {
             path,
+            window_title,
             mp4_data,
             audio_source,
             hardware_decode,
@@ -384,6 +480,7 @@ impl VideoPlayerApp {
 }
 
 struct AudioClock {
+    video_ready: AtomicBool,
     started: AtomicBool,
     unavailable: AtomicBool,
     sample_rate: AtomicU64,
@@ -393,11 +490,16 @@ struct AudioClock {
 impl AudioClock {
     fn new() -> Self {
         Self {
+            video_ready: AtomicBool::new(false),
             started: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             sample_rate: AtomicU64::new(48_000),
             read_frames: AtomicU64::new(0),
         }
+    }
+
+    fn mark_video_ready(&self) {
+        self.video_ready.store(true, Ordering::Release);
     }
 
     fn mark_started(&self, sample_rate: u32) {
@@ -416,6 +518,16 @@ impl AudioClock {
 
     fn update_read_frames(&self, read_frames: u64) {
         self.read_frames.store(read_frames, Ordering::Release);
+    }
+
+    fn wait_until_video_ready(&self) -> bool {
+        while !self.video_ready.load(Ordering::Acquire) {
+            if self.unavailable.load(Ordering::Acquire) {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
     }
 
     fn elapsed_us(&self) -> Option<u64> {
@@ -453,7 +565,7 @@ impl Application for VideoPlayerApp {
         let controls_for_key = self.controls.clone();
         let paint_signal_for_key = self.paint_signal.clone();
         Window::new(
-            "Video Player",
+            self.window_title.clone(),
             CanvasView::new(
                 DISPLAY_WIDTH as f32,
                 DISPLAY_HEIGHT as f32,
@@ -551,6 +663,9 @@ fn start_decoder_thread(
         };
 
         if let Err(err) = result {
+            if let Some(clock) = clock.as_deref() {
+                clock.mark_unavailable();
+            }
             println!("[{}] {}", APP_NAME, err);
         }
     });
@@ -771,6 +886,21 @@ fn decode_loop_hardware_streaming_mp4(
 
         let available = source.access_units.len();
         reorder.set_total_frames(stream_total_frames(&source, decoded, complete));
+        if decoded == 0 && !complete && !stream_start_buffer_ready(&source) {
+            if data.len() != last_log_len || available != last_log_samples {
+                println!(
+                    "[{}] stream prebuffering video bytes={} samples={} target={}ms",
+                    APP_NAME,
+                    data.len(),
+                    available,
+                    STREAM_START_BUFFER_US / 1_000
+                );
+                last_log_len = data.len();
+                last_log_samples = available;
+            }
+            thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+            continue;
+        }
         let decode_limit = if complete {
             available
         } else {
@@ -913,6 +1043,21 @@ fn decode_loop_hardware_streaming_mp4_socket(
 
         let available = source.access_units.len();
         reorder.set_total_frames(stream_total_frames(&source, decoded, complete));
+        if decoded == 0 && !complete && !stream_start_buffer_ready(&source) {
+            if data.len() != last_log_len || available != last_log_samples {
+                println!(
+                    "[{}] stream prebuffering video bytes={} samples={} target={}ms",
+                    APP_NAME,
+                    data.len(),
+                    available,
+                    STREAM_START_BUFFER_US / 1_000
+                );
+                last_log_len = data.len();
+                last_log_samples = available;
+            }
+            thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
+            continue;
+        }
         let decode_limit = if complete {
             available
         } else {
@@ -3202,6 +3347,21 @@ fn stream_total_frames(source: &VideoSource, decoded: usize, complete: bool) -> 
     total.min(u32::MAX as usize).max(1) as u32
 }
 
+fn stream_start_buffer_ready(source: &VideoSource) -> bool {
+    if source.access_units.len() < STREAM_START_BUFFER_SAMPLES {
+        return false;
+    }
+    let Some(first) = source.access_units.first() else {
+        return false;
+    };
+    let Some(last) = source.access_units.last() else {
+        return false;
+    };
+    last.presentation_time_us
+        .saturating_sub(first.presentation_time_us)
+        >= STREAM_START_BUFFER_US
+}
+
 fn parse_raw_annex_b(data: &[u8]) -> Vec<RawNalUnit<'_>> {
     let mut nals = Vec::new();
     let Some((mut nal_start, _)) = find_start_code(data, 0) else {
@@ -3341,6 +3501,9 @@ fn start_audio_thread(
     controls: Arc<ControlsOverlay>,
 ) {
     thread::spawn(move || {
+        if !clock.wait_until_video_ready() {
+            return;
+        }
         if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
             clock.mark_unavailable();
             println!("[{}] audio: {}", APP_NAME, err);
@@ -3629,7 +3792,9 @@ fn publish_frame_synced(
     clock: Option<&AudioClock>,
 ) -> Result<(), String> {
     wait_while_paused(controls);
+    let mut sync_time_us = None;
     if let Some(clock) = clock {
+        clock.mark_video_ready();
         let mut logged_audio_wait = false;
         let mut audio_wait_ms = 0u64;
         loop {
@@ -3652,6 +3817,11 @@ fn publish_frame_synced(
                 }
                 continue;
             };
+            sync_time_us = Some(audio_time_us);
+            if audio_time_us > presentation_time_us.saturating_add(LATE_VIDEO_DROP_THRESHOLD_US) {
+                controls.record_dropped_frame(presentation_time_us, sync_time_us);
+                return Ok(());
+            }
             if audio_time_us >= presentation_time_us {
                 break;
             }
@@ -3668,7 +3838,9 @@ fn publish_frame_synced(
         frame,
         display_index,
         total_frames,
-    )
+    )?;
+    controls.record_presented_frame(presentation_time_us, sync_time_us);
+    Ok(())
 }
 
 fn publish_frame(
@@ -4254,7 +4426,10 @@ fn draw_video_frame(
     frame_store: &VideoFrameStore,
     controls: &ControlsOverlay,
 ) {
-    controls.update_canvas_size(canvas_width, canvas_height);
+    let ui_scale = UiScale::current();
+    let logical_canvas_width = ui_scale.logical_len(canvas_width);
+    let logical_canvas_height = ui_scale.logical_len(canvas_height);
+    controls.update_canvas_size(logical_canvas_width, logical_canvas_height);
     let frame = frame_store.data.lock();
     let frame_width = frame.width;
     let frame_height = frame.height;
@@ -4278,7 +4453,26 @@ fn draw_video_frame(
     {
         let copy_len = buffer.len().min(source.len());
         buffer[..copy_len].copy_from_slice(&source[..copy_len]);
-        draw_seek_bar(buffer, canvas_width, canvas_height, &frame, controls);
+        draw_seek_bar(
+            buffer,
+            canvas_width,
+            canvas_height,
+            logical_canvas_width,
+            logical_canvas_height,
+            &frame,
+            controls,
+            ui_scale,
+        );
+        draw_debug_overlay(
+            buffer,
+            canvas_width,
+            canvas_height,
+            logical_canvas_width,
+            logical_canvas_height,
+            &frame,
+            controls,
+            ui_scale,
+        );
         return;
     }
 
@@ -4317,7 +4511,26 @@ fn draw_video_frame(
         }
     }
 
-    draw_seek_bar(buffer, canvas_width, canvas_height, &frame, controls);
+    draw_seek_bar(
+        buffer,
+        canvas_width,
+        canvas_height,
+        logical_canvas_width,
+        logical_canvas_height,
+        &frame,
+        controls,
+        ui_scale,
+    );
+    draw_debug_overlay(
+        buffer,
+        canvas_width,
+        canvas_height,
+        logical_canvas_width,
+        logical_canvas_height,
+        &frame,
+        controls,
+        ui_scale,
+    );
 }
 
 fn handle_canvas_event(event: &Event, controls: &ControlsOverlay) -> bool {
@@ -4348,48 +4561,141 @@ fn handle_key_event(
     controls: &ControlsOverlay,
     paint_signal: &PaintSignal,
 ) -> bool {
-    if let KeyEvent::Pressed {
-        keycode: KeyCode::Space,
-    } = event
-    {
-        controls.toggle_paused();
-        paint_signal.notify();
-        true
-    } else {
-        false
+    match event {
+        KeyEvent::Pressed {
+            keycode: KeyCode::Space,
+        } => {
+            controls.toggle_paused();
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Char { c: 'd' | 'D' } => {
+            controls.toggle_debug();
+            paint_signal.notify();
+            true
+        }
+        _ => false,
     }
+}
+
+fn draw_debug_overlay(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    logical_canvas_width: u32,
+    logical_canvas_height: u32,
+    frame: &VideoFrameData,
+    controls: &ControlsOverlay,
+    ui_scale: UiScale,
+) {
+    if !controls.is_debug_visible() || logical_canvas_width < 180 || logical_canvas_height < 80 {
+        return;
+    }
+
+    let presented = controls.presented_frames.load(Ordering::Acquire);
+    let dropped = controls.dropped_frames.load(Ordering::Acquire);
+    let first_clock_us = controls.first_clock_us.load(Ordering::Acquire);
+    let last_clock_us = controls.last_clock_us.load(Ordering::Acquire);
+    let last_video_pts_us = controls.last_video_pts_us.load(Ordering::Acquire);
+    let lag_ms = controls.last_lag_us.load(Ordering::Acquire) / 1_000;
+    let total_frames = frame.total_frames.max(frame.current_frame).max(1);
+    let current_frame = frame.current_frame.min(total_frames);
+    let fps_x10 = if first_clock_us != u64::MAX && last_clock_us > first_clock_us {
+        presented.saturating_mul(10_000_000) / last_clock_us.saturating_sub(first_clock_us)
+    } else {
+        0
+    };
+
+    let panel_width = logical_canvas_width.min(360);
+    let panel_height = 86u32.min(logical_canvas_height);
+    blend_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        8,
+        8,
+        panel_width.saturating_sub(16),
+        panel_height.saturating_sub(16),
+        [0, 0, 0, 176],
+        ui_scale,
+    );
+
+    let line1 = format!(
+        "fps {}.{}  shown {}  drop {}",
+        fps_x10 / 10,
+        fps_x10 % 10,
+        presented,
+        dropped
+    );
+    let line2 = format!(
+        "frame {}/{}  pts {}ms",
+        current_frame,
+        total_frames,
+        last_video_pts_us / 1_000
+    );
+    let line3 = format!("lag {}ms  {}x{}", lag_ms, frame.width, frame.height);
+
+    let mut canvas = Canvas::new(buffer, canvas_width, canvas_height);
+    let text_color = Color::rgb(232, 236, 240);
+    canvas.draw_text_sized(
+        ui_scale.physical_i32(18),
+        ui_scale.physical_i32(18),
+        &line1,
+        text_color,
+        ui_scale.physical_font(14.0),
+    );
+    canvas.draw_text_sized(
+        ui_scale.physical_i32(18),
+        ui_scale.physical_i32(38),
+        &line2,
+        text_color,
+        ui_scale.physical_font(14.0),
+    );
+    canvas.draw_text_sized(
+        ui_scale.physical_i32(18),
+        ui_scale.physical_i32(58),
+        &line3,
+        text_color,
+        ui_scale.physical_font(14.0),
+    );
 }
 
 fn draw_seek_bar(
     buffer: &mut [u8],
     canvas_width: u32,
     canvas_height: u32,
+    logical_canvas_width: u32,
+    logical_canvas_height: u32,
     frame: &VideoFrameData,
     controls: &ControlsOverlay,
+    ui_scale: UiScale,
 ) {
     if !controls.is_visible() {
         return;
     }
 
-    let Some((button_x, button_y)) = play_pause_button_origin(canvas_width, canvas_height) else {
+    let Some((button_x, button_y)) =
+        play_pause_button_origin(logical_canvas_width, logical_canvas_height)
+    else {
         return;
     };
     let total_frames = frame.total_frames.max(frame.current_frame).max(1);
     let current_frame = frame.current_frame.min(total_frames);
-    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
+    let panel_y = logical_canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
 
-    blend_rect_bgra(
+    blend_rect_scaled(
         buffer,
         canvas_width,
         canvas_height,
         0,
         panel_y,
-        canvas_width,
-        canvas_height - panel_y,
+        logical_canvas_width,
+        logical_canvas_height - panel_y,
         [0, 0, 0, 112],
+        ui_scale,
     );
 
-    if canvas_width < 180 {
+    if logical_canvas_width < 180 {
         draw_play_pause_button(
             buffer,
             canvas_width,
@@ -4397,20 +4703,23 @@ fn draw_seek_bar(
             button_x,
             button_y,
             controls.is_paused(),
+            ui_scale,
         );
         return;
     }
 
-    let track_x = 80u32;
-    let right_inset = 32u32.min(canvas_width / 8);
-    let track_width = canvas_width.saturating_sub(track_x + right_inset).max(1);
-    let track_height = 4;
-    let track_y = canvas_height.saturating_sub(28);
+    let track_x = SEEK_TRACK_LEFT_INSET;
+    let right_inset = SEEK_TRACK_RIGHT_INSET.min(logical_canvas_width / 8);
+    let track_width = logical_canvas_width
+        .saturating_sub(track_x + right_inset)
+        .max(1);
+    let track_height = SEEK_TRACK_HEIGHT;
+    let track_y = logical_canvas_height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
     let progress_width =
         (u64::from(track_width) * u64::from(current_frame) / u64::from(total_frames)) as u32;
     let knob_x = track_x + progress_width.saturating_sub(1).min(track_width - 1);
 
-    blend_rect_bgra(
+    blend_rect_scaled(
         buffer,
         canvas_width,
         canvas_height,
@@ -4419,8 +4728,9 @@ fn draw_seek_bar(
         track_width,
         track_height,
         [88, 88, 88, 192],
+        ui_scale,
     );
-    draw_rect_bgra(
+    draw_rect_scaled(
         buffer,
         canvas_width,
         canvas_height,
@@ -4429,16 +4739,18 @@ fn draw_seek_bar(
         progress_width,
         track_height,
         [238, 238, 238, 255],
+        ui_scale,
     );
-    draw_rect_bgra(
+    draw_rect_scaled(
         buffer,
         canvas_width,
         canvas_height,
-        knob_x.saturating_sub(3),
-        track_y.saturating_sub(5),
-        7,
-        14,
+        knob_x.saturating_sub(SEEK_KNOB_WIDTH / 2),
+        track_y.saturating_sub((SEEK_KNOB_HEIGHT - SEEK_TRACK_HEIGHT) / 2),
+        SEEK_KNOB_WIDTH,
+        SEEK_KNOB_HEIGHT,
         [255, 255, 255, 255],
+        ui_scale,
     );
     draw_play_pause_button(
         buffer,
@@ -4447,6 +4759,7 @@ fn draw_seek_bar(
         button_x,
         button_y,
         controls.is_paused(),
+        ui_scale,
     );
 }
 
@@ -4468,16 +4781,18 @@ fn draw_play_pause_button(
     x: u32,
     y: u32,
     paused: bool,
+    ui_scale: UiScale,
 ) {
-    blend_rect_bgra(
+    blend_rect_scaled(
         buffer,
         canvas_width,
         canvas_height,
         x,
         y,
-        32,
-        32,
+        PLAY_BUTTON_SIZE,
+        PLAY_BUTTON_SIZE,
         [0, 0, 0, 96],
+        ui_scale,
     );
 
     if paused {
@@ -4485,30 +4800,33 @@ fn draw_play_pause_button(
             buffer,
             canvas_width,
             canvas_height,
-            x + 12,
-            y + 8,
+            x + 8,
+            y + 6,
             [255, 255, 255, 255],
+            ui_scale,
         );
     } else {
-        draw_rect_bgra(
+        draw_rect_scaled(
             buffer,
             canvas_width,
             canvas_height,
-            x + 10,
-            y + 8,
-            4,
-            16,
+            x + 7,
+            y + 6,
+            2,
+            11,
             [255, 255, 255, 255],
+            ui_scale,
         );
-        draw_rect_bgra(
+        draw_rect_scaled(
             buffer,
             canvas_width,
             canvas_height,
-            x + 18,
-            y + 8,
-            4,
-            16,
+            x + 13,
+            y + 6,
+            2,
+            11,
             [255, 255, 255, 255],
+            ui_scale,
         );
     }
 }
@@ -4520,16 +4838,17 @@ fn draw_play_triangle(
     x: u32,
     y: u32,
     color: [u8; 4],
+    ui_scale: UiScale,
 ) {
-    const HEIGHT: u32 = 16;
-    const WIDTH: u32 = 14;
+    const HEIGHT: u32 = 11;
+    const WIDTH: u32 = 10;
     const MID: u32 = HEIGHT / 2;
 
     for row in 0..HEIGHT {
         let distance = row.abs_diff(MID);
         let width = 1 + (WIDTH - 1) * (MID.saturating_sub(distance)) / MID;
         let row_y = y + row;
-        draw_rect_bgra(
+        draw_rect_scaled(
             buffer,
             canvas_width,
             canvas_height,
@@ -4538,8 +4857,55 @@ fn draw_play_triangle(
             width,
             1,
             color,
+            ui_scale,
         );
     }
+}
+
+fn draw_rect_scaled(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    draw_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        ui_scale.physical_pos(x),
+        ui_scale.physical_pos(y),
+        ui_scale.physical_len(width),
+        ui_scale.physical_len(height),
+        color,
+    );
+}
+
+fn blend_rect_scaled(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    blend_rect_bgra(
+        buffer,
+        canvas_width,
+        canvas_height,
+        ui_scale.physical_pos(x),
+        ui_scale.physical_pos(y),
+        ui_scale.physical_len(width),
+        ui_scale.physical_len(height),
+        color,
+    );
 }
 
 fn draw_rect_bgra(
@@ -4658,6 +5024,7 @@ fn fill_bgra(buffer: &mut [u8], color: [u8; 4]) {
 pub extern "C" fn main() -> i32 {
     let args = parse_args(std::env::args().collect());
     let video_path = args.video_path;
+    let window_title = video_window_title(args.title.as_deref(), &video_path);
     println!("[{}] playing {}", APP_NAME, video_path);
     if args.hardware_decode {
         println!("[{}] hardware decoder {}", APP_NAME, VVIDEO_DEVICE_PATH);
@@ -4709,6 +5076,7 @@ pub extern "C" fn main() -> i32 {
 
     let mut app = VideoPlayerApp::new(
         video_path,
+        window_title,
         mp4_data,
         audio_source,
         args.hardware_decode,
@@ -4731,6 +5099,7 @@ fn is_mp4_path(path: &str) -> bool {
 
 struct PlayerArgs {
     video_path: String,
+    title: Option<String>,
     audio_path: Option<String>,
     audio_complete_path: Option<String>,
     hardware_decode: bool,
@@ -4742,6 +5111,7 @@ struct PlayerArgs {
 
 fn parse_args(args: Vec<String>) -> PlayerArgs {
     let mut positional = Vec::new();
+    let mut title = None;
     let mut audio_path = None;
     let mut audio_complete_path = None;
     let mut hardware_decode = false;
@@ -4756,6 +5126,10 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
             hardware_decode = true;
         } else if arg == "--software" || arg == "--swdec" {
             hardware_decode = false;
+        } else if arg == "--title" {
+            title = args.next();
+        } else if let Some(value) = arg.strip_prefix("--title=") {
+            title = Some(String::from(value));
         } else if arg == "--audio" {
             audio_path = args.next();
         } else if let Some(path) = arg.strip_prefix("--audio=") {
@@ -4792,6 +5166,7 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
 
     PlayerArgs {
         video_path,
+        title,
         audio_path,
         audio_complete_path,
         hardware_decode,
@@ -4800,4 +5175,19 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
         stream_socket_path,
         audio_socket_path,
     }
+}
+
+fn video_window_title(title: Option<&str>, path: &str) -> String {
+    let display_title = title
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| file_name_for_title(path));
+    format!("Video Player - {}", display_title)
+}
+
+fn file_name_for_title(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return path;
+    }
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
