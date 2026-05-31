@@ -770,7 +770,7 @@ fn decode_loop_hardware_streaming_mp4(
         }
 
         let available = source.access_units.len();
-        reorder.set_total_frames(stream_total_frames(available, decoded, complete));
+        reorder.set_total_frames(stream_total_frames(&source, decoded, complete));
         let decode_limit = if complete {
             available
         } else {
@@ -912,7 +912,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
 
         let available = source.access_units.len();
-        reorder.set_total_frames(stream_total_frames(available, decoded, complete));
+        reorder.set_total_frames(stream_total_frames(&source, decoded, complete));
         let decode_limit = if complete {
             available
         } else {
@@ -989,6 +989,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
 struct VideoSource {
     format: VideoContainerFormat,
     access_units: Vec<VideoAccessUnit>,
+    estimated_total_frames: Option<u32>,
 }
 
 struct VideoAccessUnit {
@@ -1076,6 +1077,7 @@ fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource,
     }
     Ok(VideoSource {
         format: VideoContainerFormat::RawH264,
+        estimated_total_frames: None,
         access_units: annex_b_access_units(&data)
             .into_iter()
             .enumerate()
@@ -1129,6 +1131,7 @@ struct Mp4Track {
     av1: Option<Av1Config>,
     aac: Option<AacConfig>,
     media_timescale: u32,
+    media_duration: u64,
     sample_sizes: Vec<u32>,
     time_to_sample: Vec<TimeToSampleEntry>,
     composition_offsets: Vec<i64>,
@@ -1301,10 +1304,65 @@ fn load_mp4_video_source_with_options(
         });
     }
 
+    let estimated_total_frames = mp4_estimated_total_frames(
+        track_duration_us(&track),
+        &sample_layout.presentation_times_us,
+        access_units.len(),
+        allow_partial,
+    );
+
     Ok(VideoSource {
         format: video_format,
         access_units,
+        estimated_total_frames,
     })
+}
+
+fn track_duration_us(track: &Mp4Track) -> Option<u64> {
+    if track.media_timescale == 0
+        || track.media_duration == 0
+        || track.media_duration == u64::MAX
+        || track.media_duration == u64::from(u32::MAX)
+    {
+        return None;
+    }
+    Some((u128::from(track.media_duration) * 1_000_000 / u128::from(track.media_timescale)) as u64)
+}
+
+fn mp4_estimated_total_frames(
+    duration_us: Option<u64>,
+    presentation_times_us: &[u64],
+    sample_count: usize,
+    allow_partial: bool,
+) -> Option<u32> {
+    if sample_count == 0 {
+        return None;
+    }
+    if !allow_partial {
+        return Some(sample_count.min(u32::MAX as usize).max(1) as u32);
+    }
+
+    let duration_us = duration_us?;
+    if presentation_times_us.len() < 2 {
+        return None;
+    }
+
+    let mut min_time = u64::MAX;
+    let mut max_time = 0u64;
+    for time in presentation_times_us {
+        min_time = min_time.min(*time);
+        max_time = max_time.max(*time);
+    }
+    let observed_span = max_time.saturating_sub(min_time);
+    if observed_span == 0 {
+        return None;
+    }
+
+    let observed_intervals = presentation_times_us.len().saturating_sub(1).max(1);
+    let estimated =
+        (u128::from(duration_us) * observed_intervals as u128 / u128::from(observed_span)) + 1;
+    let estimated = usize::try_from(estimated).unwrap_or(usize::MAX);
+    Some(estimated.max(sample_count).min(u32::MAX as usize).max(1) as u32)
 }
 
 struct Mp4AacAudioSource {
@@ -1405,7 +1463,11 @@ fn parse_mp4_track_boxes(
             }
             b"tkhd" => track.track_id = parse_tkhd_track_id(data, mp4_box.data_start)?,
             b"hdlr" => parse_hdlr(data, mp4_box.data_start, mp4_box.data_end, track)?,
-            b"mdhd" => track.media_timescale = parse_mdhd(data, mp4_box.data_start)?,
+            b"mdhd" => {
+                let mdhd = parse_mdhd(data, mp4_box.data_start)?;
+                track.media_timescale = mdhd.timescale;
+                track.media_duration = mdhd.duration;
+            }
             b"stsd" => parse_stsd(data, mp4_box.data_start, mp4_box.data_end, track)?,
             b"stts" => {
                 track.time_to_sample = parse_stts(data, mp4_box.data_start, mp4_box.data_end)?
@@ -1494,24 +1556,55 @@ fn parse_hdlr(data: &[u8], start: usize, _end: usize, track: &mut Mp4Track) -> R
     Ok(())
 }
 
-fn parse_mdhd(data: &[u8], start: usize) -> Result<u32, String> {
+struct Mp4MediaHeader {
+    timescale: u32,
+    duration: u64,
+}
+
+fn parse_mdhd(data: &[u8], start: usize) -> Result<Mp4MediaHeader, String> {
     let version = *data
         .get(start)
         .ok_or_else(|| String::from("MP4 mdhd box is truncated"))?;
-    let timescale_offset = if version == 1 {
-        start
-            .checked_add(20)
-            .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?
+    let (timescale_offset, duration_offset, duration_len) = if version == 1 {
+        (
+            start
+                .checked_add(20)
+                .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?,
+            start
+                .checked_add(24)
+                .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?,
+            8usize,
+        )
     } else {
-        start
-            .checked_add(12)
-            .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?
+        (
+            start
+                .checked_add(12)
+                .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?,
+            start
+                .checked_add(16)
+                .ok_or_else(|| String::from("MP4 mdhd offset overflow"))?,
+            4usize,
+        )
     };
     let timescale = read_u32_be(
         data.get(timescale_offset..timescale_offset + 4)
             .ok_or_else(|| String::from("MP4 mdhd timescale is truncated"))?,
     );
-    Ok(timescale)
+    let duration = if duration_len == 8 {
+        read_u64_be(
+            data.get(duration_offset..duration_offset + 8)
+                .ok_or_else(|| String::from("MP4 mdhd duration is truncated"))?,
+        )
+    } else {
+        u64::from(read_u32_be(
+            data.get(duration_offset..duration_offset + 4)
+                .ok_or_else(|| String::from("MP4 mdhd duration is truncated"))?,
+        ))
+    };
+    Ok(Mp4MediaHeader {
+        timescale,
+        duration,
+    })
 }
 
 fn parse_stsd(data: &[u8], start: usize, end: usize, track: &mut Mp4Track) -> Result<(), String> {
@@ -3095,9 +3188,14 @@ impl FrameReorderBuffer {
     }
 }
 
-fn stream_total_frames(available: usize, decoded: usize, complete: bool) -> u32 {
+fn stream_total_frames(source: &VideoSource, decoded: usize, complete: bool) -> u32 {
+    let available = source.access_units.len();
     let total = if complete {
         available
+    } else if let Some(estimated) = source.estimated_total_frames {
+        usize::try_from(estimated)
+            .unwrap_or(usize::MAX)
+            .max(available)
     } else {
         available.max(decoded + 1)
     };
