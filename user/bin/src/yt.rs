@@ -20,7 +20,7 @@ use rustls::unbuffered::ConnectionState;
 use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use std::env;
 use std::fs::{File, OpenOptions, remove_file};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write, stdin, stdout};
 use std::network::list_interfaces;
 use std::poll::{POLLIN, PollHandle, poll};
 use std::println;
@@ -116,7 +116,7 @@ fn run() -> Result<(), String> {
     let mut output: Option<String> = None;
     let mut print_headers = false;
     let mut play = true;
-    let mut input: Option<String> = None;
+    let mut positional = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -138,17 +138,15 @@ fn run() -> Result<(), String> {
                 print_usage();
                 return Ok(());
             }
-            value => {
-                if input.is_some() {
-                    return Err(String::from("multiple URLs are not supported yet"));
-                }
-                input = Some(value.to_string());
-            }
+            value => positional.push(value.to_string()),
         }
         i += 1;
     }
 
-    let input = input.ok_or_else(|| String::from("missing URL"))?;
+    let mut input = parse_input_or_search_query(&positional)?;
+    if !is_youtube_url(&input) && !looks_like_url(&input) {
+        input = select_youtube_search_result(&input)?.watch_url();
+    }
     let mut media = MediaSelection {
         video_url: input.clone(),
         audio_url: None,
@@ -235,6 +233,30 @@ fn run() -> Result<(), String> {
         println!("[yt] play: video_player --hwdc {}", output);
     }
     Ok(())
+}
+
+fn parse_input_or_search_query(positional: &[String]) -> Result<String, String> {
+    if positional.is_empty() {
+        return Err(String::from("missing URL or search query"));
+    }
+    if positional.first().map(String::as_str) == Some("search") {
+        return join_query_terms(&positional[1..]);
+    }
+    join_query_terms(positional)
+}
+
+fn join_query_terms(terms: &[String]) -> Result<String, String> {
+    if terms.is_empty() {
+        return Err(String::from("missing search query"));
+    }
+    let mut out = String::new();
+    for term in terms {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(term);
+    }
+    Ok(out)
 }
 
 fn stream_media_pair_and_play(
@@ -479,6 +501,8 @@ fn touch_file(path: &str) -> Result<(), String> {
 
 fn print_usage() {
     println!("Usage: yt [options] URL");
+    println!("       yt [options] search QUERY");
+    println!("       yt [options] QUERY");
     println!();
     println!("Options:");
     println!("  -o, --output <path>  Save response body");
@@ -488,7 +512,166 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!("  yt 'https://www.youtube.com/watch?v=...'");
+    println!("  yt search hanaarashi eve");
     println!("  yt --no-play -o /root/media/video.mp4 'https://example.com/video.mp4'");
+}
+
+struct YoutubeSearchResult {
+    video_id: String,
+    title: String,
+    channel: Option<String>,
+    duration: Option<String>,
+}
+
+impl YoutubeSearchResult {
+    fn watch_url(&self) -> String {
+        format!("https://www.youtube.com/watch?v={}", self.video_id)
+    }
+}
+
+fn select_youtube_search_result(query: &str) -> Result<YoutubeSearchResult, String> {
+    let results = youtube_search(query)?;
+    if results.is_empty() {
+        return Err(String::from("no YouTube search results found"));
+    }
+
+    println!("[yt] search results for '{}':", query);
+    for (index, result) in results.iter().take(10).enumerate() {
+        let channel = result.channel.as_deref().unwrap_or("unknown");
+        let duration = result.duration.as_deref().unwrap_or("--:--");
+        println!(
+            "[{}] {} [{}] - {}",
+            index + 1,
+            result.title,
+            duration,
+            channel
+        );
+    }
+
+    let prompt = "select video [1-10, enter=1, q=cancel]: ";
+    let choice = read_prompt_line(prompt)?;
+    if choice.is_empty() {
+        return Ok(results.into_iter().next().unwrap());
+    }
+    if choice == "q" || choice == "Q" {
+        return Err(String::from("selection canceled"));
+    }
+    let index = parse_usize(&choice).ok_or_else(|| String::from("invalid selection"))?;
+    if index == 0 || index > results.len().min(10) {
+        return Err(String::from("selection out of range"));
+    }
+    results
+        .into_iter()
+        .nth(index - 1)
+        .ok_or_else(|| String::from("selection out of range"))
+}
+
+fn youtube_search(query: &str) -> Result<Vec<YoutubeSearchResult>, String> {
+    let mut encoded_query = String::new();
+    push_form_encoded(&mut encoded_query, query);
+    let url = format!(
+        "https://www.youtube.com/results?search_query={}",
+        encoded_query
+    );
+    println!("[yt] searching YouTube: {}", query);
+    let response = https_get(
+        &parse_url(&url)?,
+        DEFAULT_USER_AGENT,
+        "Accept-Language: en-US,en;q=0.9\r\n",
+    )?;
+    if response.status < 200 || response.status >= 300 {
+        return Err(format!("YouTube search HTTP status {}", response.status));
+    }
+    let page = core::str::from_utf8(&response.body)
+        .map_err(|_| String::from("YouTube search page is not UTF-8"))?;
+    Ok(parse_youtube_search_results(page))
+}
+
+fn parse_youtube_search_results(page: &str) -> Vec<YoutubeSearchResult> {
+    let mut results = Vec::new();
+    let mut offset = 0usize;
+    let pattern = "\"videoRenderer\":";
+
+    while results.len() < 20 {
+        let Some(found) = page[offset..].find(pattern) else {
+            break;
+        };
+        let mut object_start = offset + found + pattern.len();
+        while page
+            .as_bytes()
+            .get(object_start)
+            .copied()
+            .map(|byte| byte.is_ascii_whitespace())
+            .unwrap_or(false)
+        {
+            object_start += 1;
+        }
+        let Some(object_end) = find_matching_json(page, object_start, b'{', b'}') else {
+            break;
+        };
+        let object = &page[object_start..=object_end];
+        if let Some(result) = parse_youtube_search_result(object)
+            && !results
+                .iter()
+                .any(|existing: &YoutubeSearchResult| existing.video_id == result.video_id)
+        {
+            results.push(result);
+        }
+        offset = object_end + 1;
+    }
+
+    results
+}
+
+fn parse_youtube_search_result(object: &str) -> Option<YoutubeSearchResult> {
+    let video_id = json_string_field(object, "videoId")?;
+    let title = youtube_renderer_text(object, "title")?;
+    Some(YoutubeSearchResult {
+        video_id,
+        title,
+        channel: youtube_renderer_text(object, "ownerText")
+            .or_else(|| youtube_renderer_text(object, "longBylineText"))
+            .or_else(|| youtube_renderer_text(object, "shortBylineText")),
+        duration: youtube_renderer_text(object, "lengthText"),
+    })
+}
+
+fn youtube_renderer_text(object: &str, field: &str) -> Option<String> {
+    let value = json_object_field(object, field)?;
+    json_string_field(value, "simpleText").or_else(|| json_string_field(value, "text"))
+}
+
+fn json_object_field<'a>(input: &'a str, name: &str) -> Option<&'a str> {
+    let pattern = format!("\"{}\":{{", name);
+    let object_start = input.find(&pattern)? + pattern.len() - 1;
+    let object_end = find_matching_json(input, object_start, b'{', b'}')?;
+    Some(&input[object_start..=object_end])
+}
+
+fn read_prompt_line(prompt: &str) -> Result<String, String> {
+    let out = stdout();
+    out.write_all(prompt.as_bytes())
+        .map_err(|_| String::from("failed to write prompt"))?;
+    out.flush()
+        .map_err(|_| String::from("failed to flush prompt"))?;
+
+    let input = stdin();
+    let mut line = String::new();
+    let mut buffer = [0u8; 64];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|_| String::from("failed to read selection"))?;
+        if read == 0 {
+            continue;
+        }
+        for byte in &buffer[..read] {
+            match *byte {
+                b'\n' | b'\r' => return Ok(line.trim().to_string()),
+                byte => line.push(byte as char),
+            }
+        }
+    }
 }
 
 fn fetch_url_to_file_streaming(
@@ -2623,6 +2806,10 @@ fn write_all<W: Write>(writer: &mut W, mut data: &[u8], context: &str) -> Result
 
 fn is_youtube_url(input: &str) -> bool {
     input.contains("youtube.com/") || input.contains("youtu.be/")
+}
+
+fn looks_like_url(input: &str) -> bool {
+    input.contains("://")
 }
 
 fn youtube_video_id(input: &str) -> Option<&str> {
