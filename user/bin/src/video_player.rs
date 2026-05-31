@@ -770,6 +770,7 @@ fn decode_loop_hardware_streaming_mp4(
         }
 
         let available = source.access_units.len();
+        reorder.set_total_frames(stream_total_frames(available, decoded, complete));
         let decode_limit = if complete {
             available
         } else {
@@ -911,6 +912,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
 
         let available = source.access_units.len();
+        reorder.set_total_frames(stream_total_frames(available, decoded, complete));
         let decode_limit = if complete {
             available
         } else {
@@ -3087,6 +3089,19 @@ impl FrameReorderBuffer {
     fn published(&self) -> usize {
         self.published
     }
+
+    fn set_total_frames(&mut self, total_frames: u32) {
+        self.total_frames = total_frames.max(1);
+    }
+}
+
+fn stream_total_frames(available: usize, decoded: usize, complete: bool) -> u32 {
+    let total = if complete {
+        available
+    } else {
+        available.max(decoded + 1)
+    };
+    total.min(u32::MAX as usize).max(1) as u32
 }
 
 fn parse_raw_annex_b(data: &[u8]) -> Vec<RawNalUnit<'_>> {

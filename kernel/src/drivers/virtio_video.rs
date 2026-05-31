@@ -26,6 +26,8 @@ use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::sched::scheduler::get_task_by_id;
+use crate::task::TaskState;
 use crate::task::mytask;
 use crate::vm::addr::virt_to_phys;
 
@@ -398,6 +400,7 @@ impl VirtioVideoDevice {
 
     fn allocate_session(&self, owner_task_id: usize) -> Result<&VideoSession, &'static str> {
         let _ = self.try_complete_pending_decode();
+        self.reclaim_dead_session_owners();
         self.cleanup_orphaned_sessions();
 
         let mut next = self.next_session_index.lock();
@@ -426,6 +429,11 @@ impl VirtioVideoDevice {
         owner_task_id: usize,
     ) -> Result<(), &'static str> {
         let mut owner = session.owner_task_id.lock();
+        if let Some(existing) = *owner
+            && !Self::owner_task_alive(existing)
+        {
+            *owner = None;
+        }
         match *owner {
             None => {
                 if session.pending_decode.lock().is_some() {
@@ -488,6 +496,23 @@ impl VirtioVideoDevice {
                 }
             }
         }
+    }
+
+    fn reclaim_dead_session_owners(&self) {
+        for session in &self.sessions {
+            let mut owner = session.owner_task_id.lock();
+            if let Some(owner_task_id) = *owner
+                && !Self::owner_task_alive(owner_task_id)
+            {
+                *owner = None;
+            }
+        }
+    }
+
+    fn owner_task_alive(owner_task_id: usize) -> bool {
+        get_task_by_id(owner_task_id)
+            .map(|task| !matches!(task.get_state(), TaskState::Zombie | TaskState::Terminated))
+            .unwrap_or(false)
     }
 
     fn session_by_mmap_offset(
