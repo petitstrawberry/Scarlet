@@ -71,10 +71,10 @@ const CONTROLS_PANEL_HEIGHT: u32 = 34;
 const PLAY_BUTTON_SIZE: u32 = 22;
 const PLAY_BUTTON_LEFT_INSET: u32 = 10;
 const PLAY_BUTTON_TOP_INSET: u32 = 6;
-const LOOP_BUTTON_WIDTH: u32 = 54;
+const LOOP_BUTTON_WIDTH: u32 = 24;
 const LOOP_BUTTON_HEIGHT: u32 = 22;
 const LOOP_BUTTON_LEFT_INSET: u32 = 38;
-const SEEK_TRACK_LEFT_INSET: u32 = 104;
+const SEEK_TRACK_LEFT_INSET: u32 = 74;
 const SEEK_TRACK_RIGHT_INSET: u32 = 18;
 const SEEK_TRACK_BOTTOM_INSET: u32 = 16;
 const SEEK_TRACK_HEIGHT: u32 = 2;
@@ -5163,15 +5163,153 @@ fn draw_loop_button(
         ui_scale,
     );
 
-    let mut canvas = Canvas::new(buffer, canvas_width, canvas_height);
-    let label = if enabled { "Loop" } else { "Once" };
-    canvas.draw_text_sized(
-        ui_scale.physical_i32((x + 8) as i32),
-        ui_scale.physical_i32((y + 5) as i32),
-        label,
-        Color::rgb(245, 247, 250),
-        ui_scale.physical_font(11.0),
+    let icon = if enabled {
+        [245, 247, 250, 255]
+    } else {
+        [185, 190, 198, 220]
+    };
+
+    draw_loop_icon(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 3,
+        y + 2,
+        icon,
+        ui_scale,
     );
+}
+
+fn draw_loop_icon(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    draw_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 3,
+        y + 4,
+        11,
+        2,
+        color,
+        ui_scale,
+    );
+    draw_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 2,
+        y + 4,
+        2,
+        6,
+        color,
+        ui_scale,
+    );
+    draw_right_arrowhead_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 13,
+        y + 1,
+        color,
+        ui_scale,
+    );
+
+    draw_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 5,
+        y + 14,
+        11,
+        2,
+        color,
+        ui_scale,
+    );
+    draw_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 16,
+        y + 10,
+        2,
+        6,
+        color,
+        ui_scale,
+    );
+    draw_left_arrowhead_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + 1,
+        y + 11,
+        color,
+        ui_scale,
+    );
+}
+
+fn draw_right_arrowhead_scaled(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    const SIZE: u32 = 7;
+    const MID: u32 = SIZE / 2;
+
+    for row in 0..SIZE {
+        let distance = row.abs_diff(MID);
+        let width = (SIZE - distance * 2).max(1);
+        draw_rect_scaled(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x,
+            y + row,
+            width,
+            1,
+            color,
+            ui_scale,
+        );
+    }
+}
+
+fn draw_left_arrowhead_scaled(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    const SIZE: u32 = 7;
+    const MID: u32 = SIZE / 2;
+
+    for row in 0..SIZE {
+        let distance = row.abs_diff(MID);
+        let width = (SIZE - distance * 2).max(1);
+        draw_rect_scaled(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x + SIZE - width,
+            y + row,
+            width,
+            1,
+            color,
+            ui_scale,
+        );
+    }
 }
 
 fn draw_play_pause_button(
