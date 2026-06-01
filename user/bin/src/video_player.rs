@@ -71,7 +71,10 @@ const CONTROLS_PANEL_HEIGHT: u32 = 34;
 const PLAY_BUTTON_SIZE: u32 = 22;
 const PLAY_BUTTON_LEFT_INSET: u32 = 10;
 const PLAY_BUTTON_TOP_INSET: u32 = 6;
-const SEEK_TRACK_LEFT_INSET: u32 = 46;
+const LOOP_BUTTON_WIDTH: u32 = 54;
+const LOOP_BUTTON_HEIGHT: u32 = 22;
+const LOOP_BUTTON_LEFT_INSET: u32 = 38;
+const SEEK_TRACK_LEFT_INSET: u32 = 104;
 const SEEK_TRACK_RIGHT_INSET: u32 = 18;
 const SEEK_TRACK_BOTTOM_INSET: u32 = 16;
 const SEEK_TRACK_HEIGHT: u32 = 2;
@@ -234,6 +237,7 @@ impl VideoFrameStore {
 struct ControlsOverlay {
     visible: AtomicBool,
     debug_visible: AtomicBool,
+    loop_enabled: AtomicBool,
     activity_epoch: AtomicU32,
     paused: AtomicBool,
     canvas_width: AtomicU32,
@@ -282,10 +286,11 @@ impl UiScale {
 }
 
 impl ControlsOverlay {
-    fn new() -> Self {
+    fn new(loop_enabled: bool) -> Self {
         Self {
             visible: AtomicBool::new(false),
             debug_visible: AtomicBool::new(false),
+            loop_enabled: AtomicBool::new(loop_enabled),
             activity_epoch: AtomicU32::new(0),
             paused: AtomicBool::new(false),
             canvas_width: AtomicU32::new(DISPLAY_WIDTH),
@@ -324,6 +329,10 @@ impl ControlsOverlay {
         self.debug_visible.load(Ordering::Acquire)
     }
 
+    fn is_loop_enabled(&self) -> bool {
+        self.loop_enabled.load(Ordering::Acquire)
+    }
+
     fn toggle_paused(&self) {
         let paused = !self.paused.load(Ordering::Acquire);
         self.paused.store(paused, Ordering::Release);
@@ -333,6 +342,12 @@ impl ControlsOverlay {
     fn toggle_debug(&self) {
         let visible = !self.debug_visible.load(Ordering::Acquire);
         self.debug_visible.store(visible, Ordering::Release);
+        self.show_for_mouse_activity();
+    }
+
+    fn toggle_loop(&self) {
+        let enabled = !self.loop_enabled.load(Ordering::Acquire);
+        self.loop_enabled.store(enabled, Ordering::Release);
         self.show_for_mouse_activity();
     }
 
@@ -382,6 +397,25 @@ impl ControlsOverlay {
             && x < button_x + PLAY_BUTTON_SIZE
             && y >= button_y
             && y < button_y + PLAY_BUTTON_SIZE
+    }
+
+    fn loop_button_contains(&self, x: i32, y: i32) -> bool {
+        let width = self.canvas_width.load(Ordering::Acquire);
+        let height = self.canvas_height.load(Ordering::Acquire);
+        let Some((button_x, button_y)) = loop_button_origin(width, height) else {
+            return false;
+        };
+        let Ok(x) = u32::try_from(x) else {
+            return false;
+        };
+        let Ok(y) = u32::try_from(y) else {
+            return false;
+        };
+
+        x >= button_x
+            && x < button_x + LOOP_BUTTON_WIDTH
+            && y >= button_y
+            && y < button_y + LOOP_BUTTON_HEIGHT
     }
 }
 
@@ -475,7 +509,7 @@ impl VideoPlayerApp {
             stream_complete_path,
             stream_socket_path,
             frame_store: Arc::new(VideoFrameStore::new()),
-            controls: Arc::new(ControlsOverlay::new()),
+            controls: Arc::new(ControlsOverlay::new(loop_playback)),
             paint_signal: Arc::new(PaintSignal::new()),
             clock: Arc::new(AudioClock::new()),
         }
@@ -489,6 +523,7 @@ struct AudioClock {
     sample_rate: AtomicU64,
     base_frames: AtomicU64,
     read_frames: AtomicU64,
+    loop_duration_us: AtomicU64,
 }
 
 impl AudioClock {
@@ -500,6 +535,7 @@ impl AudioClock {
             sample_rate: AtomicU64::new(48_000),
             base_frames: AtomicU64::new(0),
             read_frames: AtomicU64::new(0),
+            loop_duration_us: AtomicU64::new(0),
         }
     }
 
@@ -529,6 +565,16 @@ impl AudioClock {
 
     fn advance_base_frames(&self, frames: u64) {
         self.base_frames.fetch_add(frames, Ordering::AcqRel);
+    }
+
+    fn set_loop_duration_us(&self, duration_us: u64) {
+        self.loop_duration_us
+            .store(duration_us.max(1), Ordering::Release);
+    }
+
+    fn loop_duration_us(&self) -> Option<u64> {
+        let duration = self.loop_duration_us.load(Ordering::Acquire);
+        (duration != 0).then_some(duration)
     }
 
     fn wait_until_video_ready(&self) -> bool {
@@ -610,7 +656,6 @@ impl Application for VideoPlayerApp {
             self.audio_source.is_some().then(|| self.clock.clone()),
             self.hardware_decode,
             self.streaming,
-            self.loop_playback,
             self.stream_complete_path.clone(),
             self.stream_socket_path.clone(),
         );
@@ -630,16 +675,11 @@ fn start_decoder_thread(
     clock: Option<Arc<AudioClock>>,
     hardware_decode: bool,
     streaming: bool,
-    loop_playback: bool,
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
 ) {
     thread::spawn(move || {
-        let result = if loop_playback && streaming {
-            Err(String::from(
-                "loop playback is not supported for streaming inputs",
-            ))
-        } else if hardware_decode {
+        let result = if hardware_decode {
             if streaming {
                 if let Some(socket_path) = stream_socket_path.as_deref() {
                     decode_loop_hardware_streaming_mp4_socket(
@@ -671,7 +711,6 @@ fn start_decoder_thread(
                     &paint_signal,
                     &controls,
                     clock.as_deref(),
-                    loop_playback,
                 )
             }
         } else {
@@ -682,7 +721,6 @@ fn start_decoder_thread(
                 &paint_signal,
                 &controls,
                 clock.as_deref(),
-                loop_playback,
             )
         };
 
@@ -731,7 +769,6 @@ fn decode_loop_software(
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
-    loop_playback: bool,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
     if source
@@ -757,7 +794,7 @@ fn decode_loop_software(
     loop {
         let mut decoder = Decoder::new();
         let mut display_index = 0usize;
-        let loop_time_offset_us = loop_index.saturating_mul(loop_duration_us);
+        let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
 
         for access_unit in &source.access_units {
             wait_while_paused(controls);
@@ -801,7 +838,7 @@ fn decode_loop_software(
             display_index += 1;
         }
 
-        if !loop_playback {
+        if !controls.is_loop_enabled() {
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, display_index);
@@ -826,7 +863,6 @@ fn decode_loop_hardware(
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
-    loop_playback: bool,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
     let total_frames = source.access_units.len().max(1) as u32;
@@ -843,7 +879,7 @@ fn decode_loop_hardware(
     loop {
         let mut decoder = HardwareVideoDecoder::open()?;
         let mut reorder = FrameReorderBuffer::new(total_frames);
-        let loop_time_offset_us = loop_index.saturating_mul(loop_duration_us);
+        let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
 
         for access_unit in &source.access_units {
             wait_while_paused(controls);
@@ -875,7 +911,7 @@ fn decode_loop_hardware(
         }
         reorder.finish(frame_store, paint_signal, controls, clock)?;
 
-        if !loop_playback {
+        if !controls.is_loop_enabled() {
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, reorder.published());
@@ -1033,8 +1069,37 @@ fn decode_loop_hardware_streaming_mp4(
     }
 
     reorder.finish(frame_store, paint_signal, controls, clock)?;
-    frame_store.mark_complete();
-    paint_signal.notify();
+    drop(decoder);
+
+    if controls.is_loop_enabled() {
+        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        if source
+            .access_units
+            .iter()
+            .any(|unit| unit.codec != VideoCodec::H264)
+        {
+            return Err(String::from(
+                "streaming hardware decode currently supports MP4/H.264",
+            ));
+        }
+        println!(
+            "[{}] stream loop source ready: {} frames",
+            APP_NAME,
+            source.access_units.len()
+        );
+        replay_hardware_source_loops(
+            &source,
+            &data,
+            frame_store,
+            paint_signal,
+            controls,
+            clock,
+            1,
+        )?;
+    } else {
+        frame_store.mark_complete();
+        paint_signal.notify();
+    }
     println!("[{}] finished: {} frames", APP_NAME, reorder.published());
     Ok(())
 }
@@ -1190,9 +1255,100 @@ fn decode_loop_hardware_streaming_mp4_socket(
     }
 
     reorder.finish(frame_store, paint_signal, controls, clock)?;
+    drop(decoder);
+
+    if controls.is_loop_enabled() {
+        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        if source
+            .access_units
+            .iter()
+            .any(|unit| unit.codec != VideoCodec::H264)
+        {
+            return Err(String::from(
+                "streaming hardware decode currently supports MP4/H.264",
+            ));
+        }
+        println!(
+            "[{}] stream loop source ready: {} frames",
+            APP_NAME,
+            source.access_units.len()
+        );
+        replay_hardware_source_loops(
+            &source,
+            &data,
+            frame_store,
+            paint_signal,
+            controls,
+            clock,
+            1,
+        )?;
+    } else {
+        frame_store.mark_complete();
+        paint_signal.notify();
+    }
+    println!("[{}] finished: {} frames", APP_NAME, reorder.published());
+    Ok(())
+}
+
+fn replay_hardware_source_loops(
+    source: &VideoSource,
+    mp4_data: &[u8],
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
+    clock: Option<&AudioClock>,
+    mut loop_index: u64,
+) -> Result<(), String> {
+    let total_frames = source.access_units.len().max(1) as u32;
+    let loop_duration_us = video_source_duration_us(source);
+    let mut access_unit_scratch = Vec::new();
+
+    while controls.is_loop_enabled() {
+        let mut decoder = HardwareVideoDecoder::open()?;
+        let mut reorder = FrameReorderBuffer::new(total_frames);
+        let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
+
+        for access_unit in &source.access_units {
+            wait_while_paused(controls);
+            let access_unit_bytes = access_unit.bytes(Some(mp4_data), &mut access_unit_scratch)?;
+            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
+            else {
+                return Err(String::from("hardware decoder produced no frame"));
+            };
+            let presentation_time_us = access_unit
+                .presentation_time_us
+                .saturating_add(loop_time_offset_us);
+            if reorder.can_publish_immediately(access_unit.display_rank) {
+                reorder.publish_immediate(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    clock,
+                    presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame),
+                )?;
+            } else {
+                reorder.push(
+                    access_unit.display_rank,
+                    presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame.into_owned()),
+                )?;
+                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+            }
+        }
+
+        reorder.finish(frame_store, paint_signal, controls, clock)?;
+        println!(
+            "[{}] loop {} complete: {} frames",
+            APP_NAME,
+            loop_index + 1,
+            reorder.published()
+        );
+        loop_index = loop_index.saturating_add(1);
+    }
+
     frame_store.mark_complete();
     paint_signal.notify();
-    println!("[{}] finished: {} frames", APP_NAME, reorder.published());
     Ok(())
 }
 
@@ -1218,6 +1374,17 @@ fn video_source_duration_us(source: &VideoSource) -> u64 {
         .unwrap_or(0)
         .saturating_add(FRAME_INTERVAL_MS * 1_000)
         .max(FRAME_INTERVAL_MS * 1_000)
+}
+
+fn video_loop_time_offset_us(
+    clock: Option<&AudioClock>,
+    fallback_duration_us: u64,
+    loop_index: u64,
+) -> u64 {
+    let duration_us = clock
+        .and_then(AudioClock::loop_duration_us)
+        .unwrap_or(fallback_duration_us);
+    loop_index.saturating_mul(duration_us)
 }
 
 enum VideoAccessUnitPayload {
@@ -3578,9 +3745,6 @@ fn start_audio_thread(
     loop_playback: bool,
 ) {
     thread::spawn(move || {
-        if !clock.wait_until_video_ready() {
-            return;
-        }
         let source = if loop_playback {
             match materialize_audio_source(source) {
                 Ok(source) => source,
@@ -3594,13 +3758,21 @@ fn start_audio_thread(
             source
         };
 
+        if let Some(duration_us) = audio_source_duration_us(&source) {
+            clock.set_loop_duration_us(duration_us);
+        }
+
+        if !clock.wait_until_video_ready() {
+            return;
+        }
+
         loop {
             if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
                 clock.mark_unavailable();
                 println!("[{}] audio: {}", APP_NAME, err);
                 return;
             }
-            if !loop_playback {
+            if !controls.is_loop_enabled() {
                 break;
             }
         }
@@ -3624,6 +3796,41 @@ fn materialize_audio_source(source: PlayerAudioSource) -> Result<PlayerAudioSour
             Ok(PlayerAudioSource::Mp4Aac(Arc::new(data)))
         }
         source => Ok(source),
+    }
+}
+
+fn audio_source_duration_us(source: &PlayerAudioSource) -> Option<u64> {
+    match source {
+        PlayerAudioSource::Wav(path) => {
+            let bytes = read_file(path).ok()?;
+            let wav = parse_wav(&bytes).ok()?;
+            let frame_bytes =
+                usize::from(wav.channels).checked_mul(usize::from(wav.bits_per_sample / 8))?;
+            if frame_bytes == 0 || wav.sample_rate == 0 {
+                return None;
+            }
+            let frames = wav.data_len / frame_bytes;
+            Some((frames as u128 * 1_000_000 / u128::from(wav.sample_rate)) as u64)
+        }
+        PlayerAudioSource::Mp4Aac(data) => {
+            #[cfg(feature = "mp4-aac")]
+            {
+                let source = load_mp4_aac_audio_source(data.clone()).ok()?;
+                if source.config.sample_rate == 0 {
+                    return None;
+                }
+                let frames = source.samples.len() as u128 * 1024;
+                Some((frames * 1_000_000 / u128::from(source.config.sample_rate)) as u64)
+            }
+
+            #[cfg(not(feature = "mp4-aac"))]
+            {
+                let _ = data;
+                None
+            }
+        }
+        PlayerAudioSource::StreamingMp4Aac { .. }
+        | PlayerAudioSource::StreamingMp4AacSocket { .. } => None,
     }
 }
 
@@ -4672,6 +4879,9 @@ fn handle_canvas_event(event: &Event, controls: &ControlsOverlay) -> bool {
             if controls.play_pause_button_contains(*x, *y) {
                 controls.toggle_paused();
                 true
+            } else if controls.loop_button_contains(*x, *y) {
+                controls.toggle_loop();
+                true
             } else {
                 false
             }
@@ -4695,6 +4905,11 @@ fn handle_key_event(
         }
         KeyEvent::Char { c: 'd' | 'D' } => {
             controls.toggle_debug();
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Char { c: 'l' | 'L' } => {
+            controls.toggle_loop();
             paint_signal.notify();
             true
         }
@@ -4885,6 +5100,18 @@ fn draw_seek_bar(
         controls.is_paused(),
         ui_scale,
     );
+    if let Some((loop_x, loop_y)) = loop_button_origin(logical_canvas_width, logical_canvas_height)
+    {
+        draw_loop_button(
+            buffer,
+            canvas_width,
+            canvas_height,
+            loop_x,
+            loop_y,
+            controls.is_loop_enabled(),
+            ui_scale,
+        );
+    }
 }
 
 fn play_pause_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u32, u32)> {
@@ -4896,6 +5123,55 @@ fn play_pause_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u3
     let button_x = PLAY_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(PLAY_BUTTON_SIZE));
     let button_y = panel_y + PLAY_BUTTON_TOP_INSET;
     Some((button_x, button_y))
+}
+
+fn loop_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u32, u32)> {
+    if canvas_width < CONTROLS_MIN_WIDTH + LOOP_BUTTON_WIDTH || canvas_height < CONTROLS_MIN_HEIGHT
+    {
+        return None;
+    }
+
+    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
+    let button_x = LOOP_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(LOOP_BUTTON_WIDTH));
+    let button_y = panel_y + PLAY_BUTTON_TOP_INSET;
+    Some((button_x, button_y))
+}
+
+fn draw_loop_button(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    enabled: bool,
+    ui_scale: UiScale,
+) {
+    let fill = if enabled {
+        [52, 132, 220, 184]
+    } else {
+        [0, 0, 0, 96]
+    };
+    blend_rect_scaled(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x,
+        y,
+        LOOP_BUTTON_WIDTH,
+        LOOP_BUTTON_HEIGHT,
+        fill,
+        ui_scale,
+    );
+
+    let mut canvas = Canvas::new(buffer, canvas_width, canvas_height);
+    let label = if enabled { "Loop" } else { "Once" };
+    canvas.draw_text_sized(
+        ui_scale.physical_i32((x + 8) as i32),
+        ui_scale.physical_i32((y + 5) as i32),
+        label,
+        Color::rgb(245, 247, 250),
+        ui_scale.physical_font(11.0),
+    );
 }
 
 fn draw_play_pause_button(
