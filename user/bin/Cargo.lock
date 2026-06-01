@@ -3620,6 +3620,7 @@ name = "scarlet_std"
 version = "0.16.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "lock_api",
  "spin 0.10.0",
  "talc",
 ]

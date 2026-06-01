@@ -14,14 +14,22 @@ use scarlet_ui::{
     BitmapImage, KeyCode, KeyEvent, State, StateId, hstack, prelude::*, vstack, zstack,
 };
 use scarlet_ui_macros::View;
+use scarlet_youtube_net::{
+    YoutubeSearchCursor, YoutubeVideoDetails, fetch_youtube_thumbnail_bytes, youtube_video_details,
+};
 
-use std::fs::{File, remove_file};
-use std::task::{execve, exit, fork, getpid, waitpid};
+use std::sync::Mutex;
+use std::task::{execve, exit, fork};
+use std::thread;
 use std::{env, format, println};
 
 const PAGE_SIZE: usize = 8;
 const THUMB_WIDTH: u32 = 160;
 const THUMB_HEIGHT: u32 = 90;
+const DETAIL_TEXT_WIDTH: u32 = 272;
+const DETAIL_DESCRIPTION_FONT_SIZE: f32 = 11.0;
+const DETAIL_DESCRIPTION_MAX_CHARS: usize = 900;
+const DETAIL_DESCRIPTION_MAX_LINES: usize = 24;
 
 #[derive(Clone)]
 enum ThumbnailState {
@@ -34,6 +42,41 @@ enum ThumbnailState {
 impl ThumbnailState {
     fn is_not_requested(&self) -> bool {
         matches!(self, Self::NotRequested)
+    }
+}
+
+#[derive(Clone)]
+enum DetailState {
+    Empty,
+    Loading { video_id: String },
+    Ready(GuiVideoDetails),
+    Failed { video_id: String, message: String },
+}
+
+impl Default for DetailState {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+#[derive(Clone)]
+struct GuiVideoDetails {
+    video_id: String,
+    title: Option<String>,
+    author: Option<String>,
+    description: Option<String>,
+    thumbnail_url: Option<String>,
+}
+
+impl GuiVideoDetails {
+    fn from_youtube(details: YoutubeVideoDetails) -> Self {
+        Self {
+            video_id: details.video_id,
+            title: details.title,
+            author: details.author,
+            description: details.description,
+            thumbnail_url: details.thumbnail_url,
+        }
     }
 }
 
@@ -53,6 +96,37 @@ impl GuiSearchResult {
     }
 }
 
+enum GuiMessage {
+    SearchFinished {
+        generation: u64,
+        result: core::result::Result<SearchLoadResult, String>,
+    },
+    SearchMoreFinished {
+        generation: u64,
+        target_page: Option<usize>,
+        result: core::result::Result<SearchLoadResult, String>,
+    },
+    ThumbnailFinished {
+        generation: u64,
+        video_id: String,
+        thumbnail: ThumbnailState,
+    },
+    DetailsFinished {
+        generation: u64,
+        video_id: String,
+        result: core::result::Result<GuiVideoDetails, String>,
+    },
+}
+
+struct SearchLoadResult {
+    results: Vec<GuiSearchResult>,
+    has_more: bool,
+}
+
+static YT_GUI_GENERATION: Mutex<u64> = Mutex::new(0);
+static YT_GUI_MESSAGES: Mutex<Vec<GuiMessage>> = Mutex::new(Vec::new());
+static YT_GUI_SEARCH_CURSOR: Mutex<Option<YoutubeSearchCursor>> = Mutex::new(None);
+
 #[derive(View, Clone)]
 struct YtGuiApp {
     query: State<String>,
@@ -62,6 +136,9 @@ struct YtGuiApp {
     status: State<String>,
     search_focused: State<bool>,
     list_focused: State<bool>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    details: State<DetailState>,
 }
 
 impl YtGuiApp {
@@ -77,6 +154,9 @@ impl YtGuiApp {
             ),
             search_focused: State::new(StateId::new(5), false),
             list_focused: State::new(StateId::new(6), false),
+            has_more: State::new(StateId::new(7), false),
+            loading_more: State::new(StateId::new(8), false),
+            details: State::new(StateId::new(9), DetailState::Empty),
         }
     }
 
@@ -159,6 +239,7 @@ impl YtGuiApp {
         .on_click({
             let results = self.results.clone();
             let selected = self.selected.clone();
+            let details = self.details.clone();
             let search_focused = self.search_focused.clone();
             let list_focused = self.list_focused.clone();
             move || {
@@ -166,6 +247,12 @@ impl YtGuiApp {
                     selected.set(absolute_index);
                     search_focused.set(false);
                     list_focused.set(true);
+                    request_selected_details(
+                        results.clone(),
+                        selected.clone(),
+                        details.clone(),
+                        current_generation(),
+                    );
                 }
             }
         })
@@ -178,8 +265,9 @@ impl Application for YtGuiApp {
         let page = self.page.get();
         let page_count = page_count(results_len);
         let selected = self.selected.get();
+        let has_more = self.has_more.get();
         let selected_result = self.selected_result();
-        let (detail_title, detail_channel, detail_duration, detail_id, detail_thumb) =
+        let (base_title, base_channel, detail_duration, detail_id, detail_thumb) =
             if let Some(row) = selected_result {
                 (
                     compact_text(&row.title, 90),
@@ -199,6 +287,8 @@ impl Application for YtGuiApp {
                     ThumbnailState::NotRequested,
                 )
             };
+        let (detail_title, detail_channel, detail_description) =
+            detail_pane_text(self.details.get(), &detail_id, base_title, base_channel);
 
         Window::new(
             "YouTube",
@@ -219,7 +309,10 @@ impl Application for YtGuiApp {
                             let selected = self.selected.clone();
                             let page = self.page.clone();
                             let status = self.status.clone();
-                            move || perform_search(query.clone(), results.clone(), selected.clone(), page.clone(), status.clone())
+                            let has_more = self.has_more.clone();
+                            let loading_more = self.loading_more.clone();
+                            let details = self.details.clone();
+                            move || perform_search(query.clone(), results.clone(), selected.clone(), page.clone(), status.clone(), has_more.clone(), loading_more.clone(), details.clone())
                         })
                     .frame(660.0, 34.0),
                     Button::new("Search")
@@ -231,13 +324,16 @@ impl Application for YtGuiApp {
                             let selected = self.selected.clone();
                             let page = self.page.clone();
                             let status = self.status.clone();
-                            move || perform_search(query.clone(), results.clone(), selected.clone(), page.clone(), status.clone())
+                            let has_more = self.has_more.clone();
+                            let loading_more = self.loading_more.clone();
+                            let details = self.details.clone();
+                            move || perform_search(query.clone(), results.clone(), selected.clone(), page.clone(), status.clone(), has_more.clone(), loading_more.clone(), details.clone())
                         }),
                 },
                 hstack! {
                     vstack! {
                         hstack! {
-                            Text::new(format!("{} results", results_len))
+                            Text::new(format!("{} results{}", results_len, if has_more { "+" } else { "" }))
                                 .font_size(12.0)
                                 .color(Color::gray(0.35))
                                 .frame_width(110.0),
@@ -258,7 +354,8 @@ impl Application for YtGuiApp {
                                     let page = self.page.clone();
                                     let selected = self.selected.clone();
                                     let status = self.status.clone();
-                                    move || previous_page(results.clone(), page.clone(), selected.clone(), status.clone())
+                                    let details = self.details.clone();
+                                    move || previous_page(results.clone(), page.clone(), selected.clone(), status.clone(), details.clone())
                                 }),
                             Button::new("Next")
                                 .font_size(11.0)
@@ -268,7 +365,10 @@ impl Application for YtGuiApp {
                                     let page = self.page.clone();
                                     let selected = self.selected.clone();
                                     let status = self.status.clone();
-                                    move || next_page(results.clone(), page.clone(), selected.clone(), status.clone())
+                                    let has_more = self.has_more.clone();
+                                    let loading_more = self.loading_more.clone();
+                                    let details = self.details.clone();
+                                    move || next_page(results.clone(), page.clone(), selected.clone(), status.clone(), has_more.clone(), loading_more.clone(), details.clone())
                                 }),
                         }
                         .frame_width(620.0),
@@ -290,7 +390,10 @@ impl Application for YtGuiApp {
                         let page = self.page.clone();
                         let status = self.status.clone();
                         let list_focused = self.list_focused.clone();
-                        move |event| handle_list_key(event, results.clone(), selected.clone(), page.clone(), status.clone(), list_focused.clone())
+                        let has_more = self.has_more.clone();
+                        let loading_more = self.loading_more.clone();
+                        let details = self.details.clone();
+                        move |event| handle_list_key(event, results.clone(), selected.clone(), page.clone(), status.clone(), list_focused.clone(), has_more.clone(), loading_more.clone(), details.clone())
                     })
                     .frame_width(630.0),
                     zstack! {
@@ -321,6 +424,10 @@ impl Application for YtGuiApp {
                                     .color(Color::gray(0.48))
                                     .frame_width(176.0),
                             },
+                            Text::new(detail_description)
+                                .font_size(DETAIL_DESCRIPTION_FONT_SIZE)
+                                .color(Color::gray(0.28))
+                                .frame_width(DETAIL_TEXT_WIDTH as f32),
                         }
                         .padding(12.0)
                     }
@@ -343,6 +450,151 @@ impl Application for YtGuiApp {
     fn debug_logging(&self) -> bool {
         false
     }
+
+    fn on_idle(&mut self) {
+        while let Some(message) = pop_gui_message() {
+            self.handle_message(message);
+        }
+        request_selected_details(
+            self.results.clone(),
+            self.selected.clone(),
+            self.details.clone(),
+            current_generation(),
+        );
+    }
+}
+
+impl YtGuiApp {
+    fn handle_message(&self, message: GuiMessage) {
+        match message {
+            GuiMessage::SearchFinished { generation, result } => {
+                if generation != current_generation() {
+                    return;
+                }
+                match result {
+                    Ok(load) => {
+                        let count = load.results.len();
+                        self.results.set(load.results);
+                        self.selected.set(0);
+                        self.page.set(0);
+                        self.has_more.set(load.has_more);
+                        self.loading_more.set(false);
+                        self.status.set(format!(
+                            "Loaded {} search results{}.",
+                            count,
+                            if load.has_more { " so far" } else { "" }
+                        ));
+                        request_visible_thumbnails(
+                            self.results.clone(),
+                            0,
+                            self.status.clone(),
+                            generation,
+                        );
+                        request_selected_details(
+                            self.results.clone(),
+                            self.selected.clone(),
+                            self.details.clone(),
+                            generation,
+                        );
+                    }
+                    Err(error) => {
+                        self.results.set(Vec::new());
+                        self.selected.set(0);
+                        self.page.set(0);
+                        self.has_more.set(false);
+                        self.loading_more.set(false);
+                        self.details.set(DetailState::Empty);
+                        self.status.set(format!("Search failed: {}", error));
+                    }
+                }
+            }
+            GuiMessage::SearchMoreFinished {
+                generation,
+                target_page,
+                result,
+            } => {
+                if generation != current_generation() {
+                    return;
+                }
+                self.loading_more.set(false);
+                match result {
+                    Ok(load) => {
+                        let mut list = self.results.get();
+                        let added = load.results.len();
+                        list.extend(load.results);
+                        let len = list.len();
+                        self.results.set(list);
+                        self.has_more.set(load.has_more);
+
+                        let page_to_show = if let Some(target_page) = target_page {
+                            target_page.min(page_count(len).saturating_sub(1))
+                        } else {
+                            self.page.get()
+                        };
+                        self.page.set(page_to_show);
+                        if len > 0 {
+                            self.selected
+                                .set((page_to_show.saturating_mul(PAGE_SIZE)).min(len - 1));
+                        }
+                        self.status.set(format!(
+                            "Loaded {} more results ({} total{}).",
+                            added,
+                            len,
+                            if load.has_more { "+" } else { "" }
+                        ));
+                        request_visible_thumbnails(
+                            self.results.clone(),
+                            page_to_show,
+                            self.status.clone(),
+                            generation,
+                        );
+                        request_selected_details(
+                            self.results.clone(),
+                            self.selected.clone(),
+                            self.details.clone(),
+                            generation,
+                        );
+                    }
+                    Err(error) => {
+                        self.status
+                            .set(format!("Search continuation failed: {}", error));
+                    }
+                }
+            }
+            GuiMessage::ThumbnailFinished {
+                generation,
+                video_id,
+                thumbnail,
+            } => {
+                if generation != current_generation() {
+                    return;
+                }
+                let mut list = self.results.get();
+                if let Some(result) = list.iter_mut().find(|result| result.video_id == video_id) {
+                    result.thumbnail = thumbnail;
+                    self.results.set(list);
+                }
+            }
+            GuiMessage::DetailsFinished {
+                generation,
+                video_id,
+                result,
+            } => {
+                if generation != current_generation() {
+                    return;
+                }
+                let current = self.details.get();
+                if !matches!(current, DetailState::Loading { video_id: ref current_id } if current_id == &video_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(details) => self.details.set(DetailState::Ready(details)),
+                    Err(message) => self.details.set(DetailState::Failed { video_id, message }),
+                }
+            }
+        }
+    }
 }
 
 fn handle_list_key(
@@ -352,6 +604,9 @@ fn handle_list_key(
     page: State<usize>,
     status: State<String>,
     list_focused: State<bool>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    details: State<DetailState>,
 ) -> bool {
     match event {
         KeyEvent::Pressed {
@@ -369,13 +624,31 @@ fn handle_list_key(
         KeyEvent::Pressed {
             keycode: KeyCode::Down,
         } => {
-            move_selection(results, selected, page, status, 1);
+            move_selection(
+                results,
+                selected,
+                page,
+                status,
+                has_more,
+                loading_more,
+                details,
+                1,
+            );
             true
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Up,
         } => {
-            move_selection(results, selected, page, status, -1);
+            move_selection(
+                results,
+                selected,
+                page,
+                status,
+                has_more,
+                loading_more,
+                details,
+                -1,
+            );
             true
         }
         KeyEvent::Pressed {
@@ -384,7 +657,15 @@ fn handle_list_key(
         | KeyEvent::Pressed {
             keycode: KeyCode::Right,
         } => {
-            next_page(results, page, selected, status);
+            next_page(
+                results,
+                page,
+                selected,
+                status,
+                has_more,
+                loading_more,
+                details,
+            );
             true
         }
         KeyEvent::Pressed {
@@ -393,7 +674,7 @@ fn handle_list_key(
         | KeyEvent::Pressed {
             keycode: KeyCode::Left,
         } => {
-            previous_page(results, page, selected, status);
+            previous_page(results, page, selected, status, details);
             true
         }
         KeyEvent::Pressed {
@@ -409,6 +690,9 @@ fn perform_search(
     selected: State<usize>,
     page: State<usize>,
     status: State<String>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    details: State<DetailState>,
 ) {
     let query_text = query.get().trim().to_string();
     if query_text.is_empty() {
@@ -416,24 +700,23 @@ fn perform_search(
         return;
     }
 
+    let generation_id = next_generation();
+    results.set(Vec::new());
+    selected.set(0);
+    page.set(0);
+    has_more.set(false);
+    loading_more.set(true);
+    details.set(DetailState::Empty);
+    *YT_GUI_SEARCH_CURSOR.lock() = Some(YoutubeSearchCursor::new(&query_text));
     status.set(format!("Searching: {}", query_text));
     println!("[yt-gui] searching: {}", query_text);
-    match run_yt_search(&query_text) {
-        Ok(gui_results) => {
-            let count = gui_results.len();
-            results.set(gui_results);
-            selected.set(0);
-            page.set(0);
-            status.set(format!("Loaded {} search results.", count));
-            request_visible_thumbnails(results, 0, status);
-        }
-        Err(error) => {
-            results.set(Vec::new());
-            selected.set(0);
-            page.set(0);
-            status.set(format!("Search failed: {}", error));
-        }
-    }
+    thread::spawn(move || {
+        let result = load_search_page(PAGE_SIZE);
+        push_gui_message(GuiMessage::SearchFinished {
+            generation: generation_id,
+            result,
+        });
+    });
 }
 
 fn play_selected(
@@ -469,6 +752,9 @@ fn move_selection(
     selected: State<usize>,
     page: State<usize>,
     status: State<String>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    details: State<DetailState>,
     delta: isize,
 ) {
     let len = results.get().len();
@@ -483,10 +769,21 @@ fn move_selection(
     } else {
         current.saturating_add(delta as usize).min(len - 1)
     };
+    if delta > 0 && next == current && has_more.get() {
+        load_more_search_results(
+            status,
+            has_more,
+            loading_more,
+            Some(page.get().saturating_add(1)),
+        );
+        return;
+    }
     let next_page = next / PAGE_SIZE;
     selected.set(next);
     page.set(next_page);
-    request_visible_thumbnails(results, next_page, status);
+    let generation = current_generation();
+    request_visible_thumbnails(results.clone(), next_page, status, generation);
+    request_selected_details(results, selected, details, generation);
 }
 
 fn next_page(
@@ -494,15 +791,25 @@ fn next_page(
     page: State<usize>,
     selected: State<usize>,
     status: State<String>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    details: State<DetailState>,
 ) {
     let len = results.get().len();
-    let pages = page_count(len);
-    let next = page.get().saturating_add(1).min(pages - 1);
+    let next = page.get().saturating_add(1);
+    if next.saturating_mul(PAGE_SIZE) >= len {
+        if has_more.get() {
+            load_more_search_results(status, has_more, loading_more, Some(next));
+        }
+        return;
+    }
     page.set(next);
     if len > 0 {
         selected.set((next * PAGE_SIZE).min(len - 1));
     }
-    request_visible_thumbnails(results, next, status);
+    let generation = current_generation();
+    request_visible_thumbnails(results.clone(), next, status, generation);
+    request_selected_details(results, selected, details, generation);
 }
 
 fn previous_page(
@@ -510,36 +817,63 @@ fn previous_page(
     page: State<usize>,
     selected: State<usize>,
     status: State<String>,
+    details: State<DetailState>,
 ) {
     let previous = page.get().saturating_sub(1);
     page.set(previous);
     selected.set(previous * PAGE_SIZE);
-    request_visible_thumbnails(results, previous, status);
+    let generation = current_generation();
+    request_visible_thumbnails(results.clone(), previous, status, generation);
+    request_selected_details(results, selected, details, generation);
 }
 
 fn page_count(len: usize) -> usize {
     len.div_ceil(PAGE_SIZE).max(1)
 }
 
-fn run_yt_search(query: &str) -> core::result::Result<Vec<GuiSearchResult>, String> {
-    let path = format!("/tmp/yt-gui-search-{}.tsv", getpid());
-    let _ = remove_file(&path);
-    let argv = ["yt", "--search-results", path.as_str(), query];
-    run_child("/bin/yt", &argv)?;
+fn load_search_page(limit: usize) -> core::result::Result<SearchLoadResult, String> {
+    let mut cursor = YT_GUI_SEARCH_CURSOR.lock();
+    let cursor = cursor
+        .as_mut()
+        .ok_or_else(|| String::from("search cursor is not initialized"))?;
+    let page = cursor.next_page(limit)?;
+    Ok(SearchLoadResult {
+        results: page.results.into_iter().map(gui_search_result).collect(),
+        has_more: page.has_more,
+    })
+}
 
-    let text = read_file_to_string(&path)?;
-    let _ = remove_file(&path);
-    Ok(scarlet_youtube::parse_search_results_tsv(&text)
-        .into_iter()
-        .map(|result| GuiSearchResult {
-            video_id: result.video_id,
-            title: result.title,
-            channel: result.channel,
-            duration: result.duration,
-            thumbnail: ThumbnailState::NotRequested,
-            thumbnail_url: result.thumbnail_url,
-        })
-        .collect())
+fn load_more_search_results(
+    status: State<String>,
+    has_more: State<bool>,
+    loading_more: State<bool>,
+    target_page: Option<usize>,
+) {
+    if loading_more.get() || !has_more.get() {
+        return;
+    }
+    let generation = current_generation();
+    loading_more.set(true);
+    status.set(String::from("Loading more search results."));
+    thread::spawn(move || {
+        let result = load_search_page(PAGE_SIZE);
+        push_gui_message(GuiMessage::SearchMoreFinished {
+            generation,
+            target_page,
+            result,
+        });
+    });
+}
+
+fn gui_search_result(result: scarlet_youtube::YoutubeSearchResult) -> GuiSearchResult {
+    GuiSearchResult {
+        video_id: result.video_id,
+        title: result.title,
+        channel: result.channel,
+        duration: result.duration,
+        thumbnail: ThumbnailState::NotRequested,
+        thumbnail_url: result.thumbnail_url,
+    }
 }
 
 fn thumbnail_image(thumbnail: ThumbnailState) -> scarlet_ui::Image {
@@ -553,6 +887,7 @@ fn request_visible_thumbnails(
     results: State<Vec<GuiSearchResult>>,
     page: usize,
     status: State<String>,
+    generation: u64,
 ) {
     let mut list = results.get();
     let start = page.saturating_mul(PAGE_SIZE);
@@ -561,9 +896,9 @@ fn request_visible_thumbnails(
 
     for result in list.iter_mut().take(end).skip(start) {
         if result.thumbnail.is_not_requested() {
-            if let Some(url) = result.thumbnail_url.clone() {
+            if result.thumbnail_url.is_some() {
                 result.thumbnail = ThumbnailState::Loading;
-                requests.push((result.video_id.clone(), url));
+                requests.push(result.video_id.clone());
             } else {
                 result.thumbnail = ThumbnailState::Failed;
             }
@@ -577,67 +912,92 @@ fn request_visible_thumbnails(
     results.set(list);
     status.set(format!("Loading thumbnails for page {}.", page + 1));
 
-    let mut list = results.get();
-    for (video_id, url) in requests {
-        let thumbnail = match download_thumbnail_image(&video_id, &url) {
-            Some(image) => ThumbnailState::Ready(image),
-            None => ThumbnailState::Failed,
-        };
-        if let Some(result) = list.iter_mut().find(|result| result.video_id == video_id) {
-            result.thumbnail = thumbnail;
+    thread::spawn(move || {
+        for video_id in requests {
+            let thumbnail = match download_thumbnail_image(&video_id) {
+                Ok(image) => ThumbnailState::Ready(image),
+                Err(error) => {
+                    println!("[yt-gui] thumbnail {} failed: {}", video_id, error);
+                    ThumbnailState::Failed
+                }
+            };
+            push_gui_message(GuiMessage::ThumbnailFinished {
+                generation,
+                video_id,
+                thumbnail,
+            });
         }
-    }
-    results.set(list);
-    status.set(format!("Loaded thumbnails for page {}.", page + 1));
+    });
 }
 
-fn download_thumbnail_image(video_id: &str, url: &str) -> Option<BitmapImage> {
-    let path = format!("/tmp/yt-gui-thumb-{}-{}.jpg", getpid(), video_id);
-    let _ = remove_file(&path);
-    let argv = ["yt", "--no-play", "-o", path.as_str(), url];
-    run_child("/bin/yt", &argv).ok()?;
-    let bytes = read_file_to_bytes(&path).ok()?;
-    let _ = remove_file(&path);
-    BitmapImage::from_jpeg_bytes(&bytes)
+fn request_selected_details(
+    results: State<Vec<GuiSearchResult>>,
+    selected: State<usize>,
+    details: State<DetailState>,
+    generation: u64,
+) {
+    let list = results.get();
+    let Some(row) = list.get(selected.get()) else {
+        if !matches!(details.get(), DetailState::Empty) {
+            details.set(DetailState::Empty);
+        }
+        return;
+    };
+    let video_id = row.video_id.clone();
+    if detail_state_matches_video(&details.get(), &video_id) {
+        return;
+    }
+
+    details.set(DetailState::Loading {
+        video_id: video_id.clone(),
+    });
+    thread::spawn(move || {
+        let result = youtube_video_details(&video_id).map(GuiVideoDetails::from_youtube);
+        push_gui_message(GuiMessage::DetailsFinished {
+            generation,
+            video_id,
+            result,
+        });
+    });
 }
 
-fn run_child(path: &str, argv: &[&str]) -> core::result::Result<(), String> {
-    let child = fork();
-    if child < 0 {
-        return Err(format!("failed to fork {}", path));
+fn detail_state_matches_video(state: &DetailState, video_id: &str) -> bool {
+    match state {
+        DetailState::Loading { video_id: current }
+        | DetailState::Failed {
+            video_id: current, ..
+        } => current == video_id,
+        DetailState::Ready(details) => details.video_id == video_id,
+        DetailState::Empty => false,
     }
-    if child == 0 {
-        let rc = execve(path, argv, &[]);
-        println!("[yt-gui] failed to exec {}: {}", path, rc);
-        exit(1);
-    }
-    let (_pid, status) = waitpid(child, 0);
-    if status == 0 {
-        Ok(())
+}
+
+fn download_thumbnail_image(video_id: &str) -> core::result::Result<BitmapImage, String> {
+    let bytes = fetch_youtube_thumbnail_bytes(video_id)?;
+    BitmapImage::from_jpeg_bytes(&bytes).ok_or_else(|| String::from("thumbnail JPEG decode failed"))
+}
+
+fn next_generation() -> u64 {
+    let mut generation = YT_GUI_GENERATION.lock();
+    *generation = generation.saturating_add(1);
+    *generation
+}
+
+fn current_generation() -> u64 {
+    *YT_GUI_GENERATION.lock()
+}
+
+fn push_gui_message(message: GuiMessage) {
+    YT_GUI_MESSAGES.lock().push(message);
+}
+
+fn pop_gui_message() -> Option<GuiMessage> {
+    let mut messages = YT_GUI_MESSAGES.lock();
+    if messages.is_empty() {
+        None
     } else {
-        Err(format!("{} exited with status {}", path, status))
+        Some(messages.remove(0))
     }
-}
-
-fn read_file_to_string(path: &str) -> core::result::Result<String, String> {
-    let bytes = read_file_to_bytes(path)?;
-    String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8", path))
-}
-
-fn read_file_to_bytes(path: &str) -> core::result::Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|_| format!("failed to open {}", path))?;
-    let mut out = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let n = file
-            .read(&mut buffer)
-            .map_err(|_| format!("failed to read {}", path))?;
-        if n == 0 {
-            break;
-        }
-        out.extend_from_slice(&buffer[..n]);
-    }
-    Ok(out)
 }
 
 fn compact_text(input: &str, max_chars: usize) -> String {
@@ -650,6 +1010,170 @@ fn compact_text(input: &str, max_chars: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+fn wrap_description_text(input: &str) -> String {
+    let mut lines = Vec::new();
+    let mut truncated = false;
+    let mut consumed_chars = 0usize;
+
+    for paragraph in input.replace('\r', "").split('\n') {
+        if consumed_chars >= DETAIL_DESCRIPTION_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        if lines.len() >= DETAIL_DESCRIPTION_MAX_LINES {
+            truncated = true;
+            break;
+        }
+
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            continue;
+        }
+
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if consumed_chars >= DETAIL_DESCRIPTION_MAX_CHARS
+                || lines.len() >= DETAIL_DESCRIPTION_MAX_LINES
+            {
+                truncated = true;
+                break;
+            }
+
+            let remaining = DETAIL_DESCRIPTION_MAX_CHARS - consumed_chars;
+            let word = compact_text(word, remaining);
+            consumed_chars = consumed_chars.saturating_add(word.chars().count());
+
+            let candidate = if current.is_empty() {
+                word.clone()
+            } else {
+                format!("{} {}", current, word)
+            };
+
+            if text_fits_detail_width(&candidate) {
+                current = candidate;
+                continue;
+            }
+
+            if !current.is_empty() {
+                lines.push(current);
+                current = String::new();
+            }
+            push_wrapped_word(&mut lines, &mut current, &word);
+        }
+
+        if !current.is_empty() && lines.len() < DETAIL_DESCRIPTION_MAX_LINES {
+            lines.push(current);
+        }
+    }
+
+    if lines.len() > DETAIL_DESCRIPTION_MAX_LINES {
+        lines.truncate(DETAIL_DESCRIPTION_MAX_LINES);
+        truncated = true;
+    }
+
+    if truncated {
+        if let Some(last) = lines.last_mut() {
+            append_ellipsis(last);
+        } else {
+            lines.push(String::from("..."));
+        }
+    }
+
+    join_lines(&lines)
+}
+
+fn push_wrapped_word(lines: &mut Vec<String>, current: &mut String, word: &str) {
+    for ch in word.chars() {
+        if lines.len() >= DETAIL_DESCRIPTION_MAX_LINES {
+            return;
+        }
+        let mut candidate = current.clone();
+        candidate.push(ch);
+        if current.is_empty() || text_fits_detail_width(&candidate) {
+            current.push(ch);
+        } else {
+            lines.push(core::mem::take(current));
+            current.push(ch);
+        }
+    }
+}
+
+fn text_fits_detail_width(text: &str) -> bool {
+    let (width, _) = scarlet_ui::measure_text_sized(text, DETAIL_DESCRIPTION_FONT_SIZE);
+    width <= DETAIL_TEXT_WIDTH
+}
+
+fn append_ellipsis(text: &mut String) {
+    while !text.is_empty() {
+        let candidate = format!("{}...", text);
+        if text_fits_detail_width(&candidate) {
+            text.push_str("...");
+            return;
+        }
+        text.pop();
+    }
+    text.push_str("...");
+}
+
+fn join_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn detail_pane_text(
+    state: DetailState,
+    selected_video_id: &str,
+    base_title: String,
+    base_channel: String,
+) -> (String, String, String) {
+    match state {
+        DetailState::Ready(details) if details.video_id == selected_video_id => {
+            let title = details
+                .title
+                .as_deref()
+                .map(|title| compact_text(title, 90))
+                .unwrap_or(base_title);
+            let channel = details
+                .author
+                .as_deref()
+                .map(|author| compact_text(author, 46))
+                .unwrap_or(base_channel);
+            let description = details
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .map(|description| wrap_description_text(description))
+                .unwrap_or_else(|| String::from("No description."));
+            let _thumbnail_url = details.thumbnail_url.as_deref();
+            (title, channel, description)
+        }
+        DetailState::Loading { video_id } if video_id == selected_video_id => {
+            (base_title, base_channel, String::from("Loading details..."))
+        }
+        DetailState::Failed { video_id, message } if video_id == selected_video_id => (
+            base_title,
+            base_channel,
+            format!("Details failed: {}", compact_text(&message, 180)),
+        ),
+        _ if selected_video_id == "-" => (
+            base_title,
+            base_channel,
+            String::from("Search and select a result."),
+        ),
+        _ => (base_title, base_channel, String::from("Loading details...")),
+    }
 }
 
 fn initial_query() -> String {

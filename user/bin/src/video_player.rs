@@ -430,6 +430,7 @@ struct VideoPlayerApp {
     audio_source: Option<PlayerAudioSource>,
     hardware_decode: bool,
     streaming: bool,
+    loop_playback: bool,
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
     frame_store: Arc<VideoFrameStore>,
@@ -459,6 +460,7 @@ impl VideoPlayerApp {
         audio_source: Option<PlayerAudioSource>,
         hardware_decode: bool,
         streaming: bool,
+        loop_playback: bool,
         stream_complete_path: Option<String>,
         stream_socket_path: Option<String>,
     ) -> Self {
@@ -469,6 +471,7 @@ impl VideoPlayerApp {
             audio_source,
             hardware_decode,
             streaming,
+            loop_playback,
             stream_complete_path,
             stream_socket_path,
             frame_store: Arc::new(VideoFrameStore::new()),
@@ -484,6 +487,7 @@ struct AudioClock {
     started: AtomicBool,
     unavailable: AtomicBool,
     sample_rate: AtomicU64,
+    base_frames: AtomicU64,
     read_frames: AtomicU64,
 }
 
@@ -494,6 +498,7 @@ impl AudioClock {
             started: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             sample_rate: AtomicU64::new(48_000),
+            base_frames: AtomicU64::new(0),
             read_frames: AtomicU64::new(0),
         }
     }
@@ -517,7 +522,13 @@ impl AudioClock {
     }
 
     fn update_read_frames(&self, read_frames: u64) {
-        self.read_frames.store(read_frames, Ordering::Release);
+        let base_frames = self.base_frames.load(Ordering::Acquire);
+        self.read_frames
+            .store(base_frames.saturating_add(read_frames), Ordering::Release);
+    }
+
+    fn advance_base_frames(&self, frames: u64) {
+        self.base_frames.fetch_add(frames, Ordering::AcqRel);
     }
 
     fn wait_until_video_ready(&self) -> bool {
@@ -583,7 +594,12 @@ impl Application for VideoPlayerApp {
     fn init(&mut self) {
         start_controls_thread(self.controls.clone(), self.paint_signal.clone());
         if let Some(audio_source) = self.audio_source.clone() {
-            start_audio_thread(audio_source, self.clock.clone(), self.controls.clone());
+            start_audio_thread(
+                audio_source,
+                self.clock.clone(),
+                self.controls.clone(),
+                self.loop_playback,
+            );
         }
         start_decoder_thread(
             self.path.clone(),
@@ -594,6 +610,7 @@ impl Application for VideoPlayerApp {
             self.audio_source.is_some().then(|| self.clock.clone()),
             self.hardware_decode,
             self.streaming,
+            self.loop_playback,
             self.stream_complete_path.clone(),
             self.stream_socket_path.clone(),
         );
@@ -613,11 +630,16 @@ fn start_decoder_thread(
     clock: Option<Arc<AudioClock>>,
     hardware_decode: bool,
     streaming: bool,
+    loop_playback: bool,
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
 ) {
     thread::spawn(move || {
-        let result = if hardware_decode {
+        let result = if loop_playback && streaming {
+            Err(String::from(
+                "loop playback is not supported for streaming inputs",
+            ))
+        } else if hardware_decode {
             if streaming {
                 if let Some(socket_path) = stream_socket_path.as_deref() {
                     decode_loop_hardware_streaming_mp4_socket(
@@ -649,6 +671,7 @@ fn start_decoder_thread(
                     &paint_signal,
                     &controls,
                     clock.as_deref(),
+                    loop_playback,
                 )
             }
         } else {
@@ -659,6 +682,7 @@ fn start_decoder_thread(
                 &paint_signal,
                 &controls,
                 clock.as_deref(),
+                loop_playback,
             )
         };
 
@@ -707,6 +731,7 @@ fn decode_loop_software(
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
+    loop_playback: bool,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
     if source
@@ -719,8 +744,6 @@ fn decode_loop_software(
         ));
     }
     let total_frames = source.access_units.len().max(1) as u32;
-    let mut decoder = Decoder::new();
-    let mut display_index = 0usize;
     let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] software decode: {} {} access units",
@@ -728,49 +751,70 @@ fn decode_loop_software(
         source.description(),
         source.access_units.len()
     );
+    let loop_duration_us = video_source_duration_us(&source);
+    let mut loop_index = 0u64;
 
-    for access_unit in &source.access_units {
-        wait_while_paused(controls);
-        let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-        let nals = parse_annex_b(access_unit_bytes);
-        for nal in &nals {
-            match decoder.decode_nal(nal) {
-                Ok(Some(frame)) => {
-                    publish_frame_synced(
-                        frame_store,
-                        paint_signal,
-                        controls,
-                        DecodedVideoFrame::Software(frame),
-                        display_index,
-                        total_frames,
-                        access_unit.presentation_time_us,
-                        clock,
-                    )?;
-                    display_index += 1;
+    loop {
+        let mut decoder = Decoder::new();
+        let mut display_index = 0usize;
+        let loop_time_offset_us = loop_index.saturating_mul(loop_duration_us);
+
+        for access_unit in &source.access_units {
+            wait_while_paused(controls);
+            let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
+            let nals = parse_annex_b(access_unit_bytes);
+            for nal in &nals {
+                match decoder.decode_nal(nal) {
+                    Ok(Some(frame)) => {
+                        publish_frame_synced(
+                            frame_store,
+                            paint_signal,
+                            controls,
+                            DecodedVideoFrame::Software(frame),
+                            display_index,
+                            total_frames,
+                            access_unit
+                                .presentation_time_us
+                                .saturating_add(loop_time_offset_us),
+                            clock,
+                        )?;
+                        display_index += 1;
+                    }
+                    Ok(None) => {}
+                    Err(err) => return Err(format!("decode failed: {err}")),
                 }
-                Ok(None) => {}
-                Err(err) => return Err(format!("decode failed: {err}")),
             }
         }
-    }
 
-    if let Some(frame) = decoder.flush() {
-        publish_frame_synced(
-            frame_store,
-            paint_signal,
-            controls,
-            DecodedVideoFrame::Software(frame),
-            display_index,
-            total_frames,
-            display_index as u64 * FRAME_INTERVAL_MS * 1_000,
-            clock,
-        )?;
-        display_index += 1;
-    }
+        if let Some(frame) = decoder.flush() {
+            publish_frame_synced(
+                frame_store,
+                paint_signal,
+                controls,
+                DecodedVideoFrame::Software(frame),
+                display_index,
+                total_frames,
+                loop_time_offset_us
+                    .saturating_add(display_index as u64 * FRAME_INTERVAL_MS * 1_000),
+                clock,
+            )?;
+            display_index += 1;
+        }
 
-    frame_store.mark_complete();
-    paint_signal.notify();
-    println!("[{}] finished: {} frames", APP_NAME, display_index);
+        if !loop_playback {
+            frame_store.mark_complete();
+            paint_signal.notify();
+            println!("[{}] finished: {} frames", APP_NAME, display_index);
+            break;
+        }
+        println!(
+            "[{}] loop {} complete: {} frames",
+            APP_NAME,
+            loop_index + 1,
+            display_index
+        );
+        loop_index = loop_index.saturating_add(1);
+    }
 
     Ok(())
 }
@@ -782,11 +826,10 @@ fn decode_loop_hardware(
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
     clock: Option<&AudioClock>,
+    loop_playback: bool,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
     let total_frames = source.access_units.len().max(1) as u32;
-    let mut decoder = HardwareVideoDecoder::open()?;
-    let mut reorder = FrameReorderBuffer::new(total_frames);
     let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] hardware decode: {} {} access units",
@@ -794,36 +837,58 @@ fn decode_loop_hardware(
         source.description(),
         source.access_units.len()
     );
+    let loop_duration_us = video_source_duration_us(&source);
+    let mut loop_index = 0u64;
 
-    for access_unit in &source.access_units {
-        wait_while_paused(controls);
-        let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-        let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
-            return Err(String::from("hardware decoder produced no frame"));
-        };
-        if reorder.can_publish_immediately(access_unit.display_rank) {
-            reorder.publish_immediate(
-                frame_store,
-                paint_signal,
-                controls,
-                clock,
-                access_unit.presentation_time_us,
-                DecodedVideoFrame::Hardware(frame),
-            )?;
-        } else {
-            reorder.push(
-                access_unit.display_rank,
-                access_unit.presentation_time_us,
-                DecodedVideoFrame::Hardware(frame.into_owned()),
-            )?;
-            reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+    loop {
+        let mut decoder = HardwareVideoDecoder::open()?;
+        let mut reorder = FrameReorderBuffer::new(total_frames);
+        let loop_time_offset_us = loop_index.saturating_mul(loop_duration_us);
+
+        for access_unit in &source.access_units {
+            wait_while_paused(controls);
+            let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
+            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
+            else {
+                return Err(String::from("hardware decoder produced no frame"));
+            };
+            let presentation_time_us = access_unit
+                .presentation_time_us
+                .saturating_add(loop_time_offset_us);
+            if reorder.can_publish_immediately(access_unit.display_rank) {
+                reorder.publish_immediate(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    clock,
+                    presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame),
+                )?;
+            } else {
+                reorder.push(
+                    access_unit.display_rank,
+                    presentation_time_us,
+                    DecodedVideoFrame::Hardware(frame.into_owned()),
+                )?;
+                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+            }
         }
-    }
-    reorder.finish(frame_store, paint_signal, controls, clock)?;
+        reorder.finish(frame_store, paint_signal, controls, clock)?;
 
-    frame_store.mark_complete();
-    paint_signal.notify();
-    println!("[{}] finished: {} frames", APP_NAME, reorder.published());
+        if !loop_playback {
+            frame_store.mark_complete();
+            paint_signal.notify();
+            println!("[{}] finished: {} frames", APP_NAME, reorder.published());
+            break;
+        }
+        println!(
+            "[{}] loop {} complete: {} frames",
+            APP_NAME,
+            loop_index + 1,
+            reorder.published()
+        );
+        loop_index = loop_index.saturating_add(1);
+    }
 
     Ok(())
 }
@@ -1142,6 +1207,17 @@ struct VideoAccessUnit {
     codec: VideoCodec,
     display_rank: usize,
     presentation_time_us: u64,
+}
+
+fn video_source_duration_us(source: &VideoSource) -> u64 {
+    source
+        .access_units
+        .iter()
+        .map(|unit| unit.presentation_time_us)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(FRAME_INTERVAL_MS * 1_000)
+        .max(FRAME_INTERVAL_MS * 1_000)
 }
 
 enum VideoAccessUnitPayload {
@@ -3499,16 +3575,56 @@ fn start_audio_thread(
     source: PlayerAudioSource,
     clock: Arc<AudioClock>,
     controls: Arc<ControlsOverlay>,
+    loop_playback: bool,
 ) {
     thread::spawn(move || {
         if !clock.wait_until_video_ready() {
             return;
         }
-        if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
-            clock.mark_unavailable();
-            println!("[{}] audio: {}", APP_NAME, err);
+        let source = if loop_playback {
+            match materialize_audio_source(source) {
+                Ok(source) => source,
+                Err(err) => {
+                    clock.mark_unavailable();
+                    println!("[{}] audio: {}", APP_NAME, err);
+                    return;
+                }
+            }
+        } else {
+            source
+        };
+
+        loop {
+            if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
+                clock.mark_unavailable();
+                println!("[{}] audio: {}", APP_NAME, err);
+                return;
+            }
+            if !loop_playback {
+                break;
+            }
         }
     });
+}
+
+fn materialize_audio_source(source: PlayerAudioSource) -> Result<PlayerAudioSource, String> {
+    match source {
+        PlayerAudioSource::StreamingMp4Aac {
+            path,
+            complete_path,
+        } => {
+            if let Some(complete_path) = complete_path {
+                wait_for_marker(&complete_path);
+            }
+            let data = read_file(&path)?;
+            Ok(PlayerAudioSource::Mp4Aac(Arc::new(data)))
+        }
+        PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
+            let data = read_socket_to_end(&socket_path)?;
+            Ok(PlayerAudioSource::Mp4Aac(Arc::new(data)))
+        }
+        source => Ok(source),
+    }
 }
 
 fn play_audio_source_sas(
@@ -3590,9 +3706,12 @@ fn play_sas_pcm_s16le(
         return Ok(());
     }
 
+    let total_data_frames = data.len() / frame_bytes;
     let mut writer = SasPcmWriter::new(sample_rate, channels, frame_bytes, clock)?;
     writer.write_bytes(data, controls, clock)?;
-    writer.drain_close(clock)
+    writer.drain_close(clock)?;
+    clock.advance_base_frames(total_data_frames as u64);
+    Ok(())
 }
 
 struct SasPcmWriter {
@@ -3727,6 +3846,7 @@ fn play_aac_source_sas(
     let mut samples = Vec::<i16>::new();
     let mut bytes = Vec::<u8>::new();
     let mut pts = 0i64;
+    let mut written_frames = 0u64;
     for range in &source.samples {
         let sample_end = range
             .offset
@@ -3753,9 +3873,13 @@ fn play_aac_source_sas(
         for sample in &samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
+        written_frames =
+            written_frames.saturating_add((samples.len() / source.config.channels as usize) as u64);
         writer.write_bytes(&bytes, controls, clock)?;
     }
-    writer.drain_close(clock)
+    writer.drain_close(clock)?;
+    clock.advance_base_frames(written_frames);
+    Ok(())
 }
 
 #[cfg(feature = "mp4-aac")]
@@ -5081,6 +5205,7 @@ pub extern "C" fn main() -> i32 {
         audio_source,
         args.hardware_decode,
         args.streaming,
+        args.loop_playback,
         args.stream_complete_path,
         args.stream_socket_path,
     );
@@ -5104,6 +5229,7 @@ struct PlayerArgs {
     audio_complete_path: Option<String>,
     hardware_decode: bool,
     streaming: bool,
+    loop_playback: bool,
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
     audio_socket_path: Option<String>,
@@ -5116,6 +5242,7 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
     let mut audio_complete_path = None;
     let mut hardware_decode = false;
     let mut streaming = false;
+    let mut loop_playback = false;
     let mut stream_complete_path = None;
     let mut stream_socket_path = None;
     let mut audio_socket_path = None;
@@ -5126,6 +5253,8 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
             hardware_decode = true;
         } else if arg == "--software" || arg == "--swdec" {
             hardware_decode = false;
+        } else if arg == "--loop" {
+            loop_playback = true;
         } else if arg == "--title" {
             title = args.next();
         } else if let Some(value) = arg.strip_prefix("--title=") {
@@ -5171,6 +5300,7 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
         audio_complete_path,
         hardware_decode,
         streaming,
+        loop_playback,
         stream_complete_path,
         stream_socket_path,
         audio_socket_path,

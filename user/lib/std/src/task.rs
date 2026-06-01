@@ -76,7 +76,14 @@ pub fn clone(flags: CloneFlags) -> i32 {
 /// - On error: -1
 pub fn fork() -> i32 {
     let clone_flags = CloneFlags::default();
-    clone(clone_flags)
+    crate::allocator::fork_prepare();
+    let result = clone(clone_flags);
+    if result == 0 {
+        crate::allocator::fork_child();
+    } else {
+        crate::allocator::fork_parent();
+    }
+    result
 }
 
 /// Exits the current process (all threads).

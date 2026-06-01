@@ -91,6 +91,16 @@ pub trait Application: View {
         // Default implementation: do nothing
     }
 
+    /// Handle idle ticks on the application main thread.
+    ///
+    /// This is called once per main-loop iteration after pending platform and
+    /// window events are processed and before rendering. Applications can use
+    /// this to drain messages from worker threads and update UI state without
+    /// mutating `State` from background threads.
+    fn on_idle(&mut self) {
+        // Default implementation: do nothing
+    }
+
     /// Enable or disable debug logging for this application
     fn debug_logging(&self) -> bool {
         false
@@ -369,6 +379,7 @@ pub trait Application: View {
             // if let Some(buffer) = pipeline.render() {
             //     platform_window.present(buffer);
             // }
+            self.on_idle();
             if !presented_this_cycle && pipeline.has_dirty() {
                 if crate::debug::is_enabled() {
                     println!("[Application] has_dirty=true, calling render()");

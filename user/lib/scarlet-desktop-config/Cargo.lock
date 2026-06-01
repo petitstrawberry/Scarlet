@@ -52,6 +52,7 @@ name = "scarlet_std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
+ "lock_api",
  "spin",
  "talc",
 ]

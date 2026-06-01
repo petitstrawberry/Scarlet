@@ -71,8 +71,10 @@ fn build_ring_aarch64_asm() {
         objects.push(object_path);
     }
 
-    for object in &objects {
-        println!("cargo:rustc-link-arg-bin=yt={}", object.display());
+    for bin in ["yt", "yt-gui"] {
+        for object in &objects {
+            println!("cargo:rustc-link-arg-bin={}={}", bin, object.display());
+        }
     }
 }
 

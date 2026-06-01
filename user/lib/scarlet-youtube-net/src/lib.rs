@@ -55,7 +55,252 @@ const YOUTUBE_ANDROID_CLIENT_VERSION: &str = "21.02.35";
 const YOUTUBE_ANDROID_VR_CLIENT_VERSION: &str = "1.65.10";
 const YOUTUBE_IOS_CLIENT_VERSION: &str = "21.02.3";
 const YOUTUBE_SEARCH_PAGE_SIZE: usize = 10;
-const YOUTUBE_SEARCH_MAX_RESULTS: usize = 100;
+const YOUTUBE_SEARCH_MAX_RESULTS: usize = 30;
+
+/// A page of YouTube search results.
+pub struct YoutubeSearchPage {
+    /// Results returned for this page.
+    pub results: Vec<YoutubeSearchResult>,
+    /// Whether the search cursor can fetch more results.
+    pub has_more: bool,
+}
+
+/// Basic metadata for a YouTube video.
+pub struct YoutubeVideoDetails {
+    /// YouTube video ID.
+    pub video_id: String,
+    /// Video title, when available.
+    pub title: Option<String>,
+    /// Channel or author name, when available.
+    pub author: Option<String>,
+    /// Video description, when available.
+    pub description: Option<String>,
+    /// Thumbnail URL suitable for display.
+    pub thumbnail_url: Option<String>,
+}
+
+/// Incremental YouTube search cursor.
+pub struct YoutubeSearchCursor {
+    query: String,
+    referer: String,
+    api_key: String,
+    client_version: String,
+    visitor_data: Option<String>,
+    continuation: Option<String>,
+    pending: Vec<YoutubeSearchResult>,
+    seen_video_ids: Vec<String>,
+    started: bool,
+    exhausted: bool,
+}
+
+/// Return the canonical plain-HTTP thumbnail URL for a YouTube video ID.
+///
+/// # Arguments
+///
+/// * `video_id` - YouTube video ID.
+///
+/// # Returns
+///
+/// A URL under `i.ytimg.com` that can be fetched without TLS.
+pub fn youtube_thumbnail_url(video_id: &str) -> String {
+    format!("http://i.ytimg.com/vi/{}/mqdefault.jpg", video_id)
+}
+
+/// Fetch a YouTube thumbnail JPEG into memory.
+///
+/// # Arguments
+///
+/// * `video_id` - YouTube video ID.
+///
+/// # Returns
+///
+/// JPEG bytes for the thumbnail.
+pub fn fetch_youtube_thumbnail_bytes(video_id: &str) -> Result<Vec<u8>, String> {
+    let url = youtube_thumbnail_url(video_id);
+    let bytes = fetch_url_bytes_with_headers(
+        &url,
+        DEFAULT_USER_AGENT,
+        "Accept: image/jpeg,*/*\r\n",
+    )?;
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return Err(format!(
+            "thumbnail response is not JPEG: len={} prefix={}",
+            bytes.len(),
+            byte_prefix_hex(&bytes)
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Fetch basic YouTube video metadata.
+///
+/// # Arguments
+///
+/// * `input` - A YouTube URL or raw video ID.
+///
+/// # Returns
+///
+/// Title, author, description, and thumbnail metadata when available.
+pub fn youtube_video_details(input: &str) -> Result<YoutubeVideoDetails, String> {
+    let video_id = youtube_video_id(input)
+        .or_else(|| youtube_video_id_from_raw(input))
+        .ok_or_else(|| String::from("YouTube video id not found"))?
+        .to_string();
+    let watch_url = format!(
+        "https://www.youtube.com/watch?v={}&bpctr=9999999999&has_verified=1",
+        video_id
+    );
+    println!("[yt] loading YouTube watch page");
+    let response = http_get(
+        &parse_url(&watch_url)?,
+        DEFAULT_USER_AGENT,
+        DEFAULT_EXTRA_HEADERS,
+    )?;
+    if response.status < 200 || response.status >= 300 {
+        return Err(format!(
+            "YouTube watch page HTTP status {}",
+            response.status
+        ));
+    }
+    let page = core::str::from_utf8(&response.body)
+        .map_err(|_| String::from("YouTube watch page is not UTF-8"))?;
+    if let Some(details) = parse_youtube_video_details(&video_id, page)
+        && details_has_content(&details)
+    {
+        return Ok(details);
+    }
+
+    let api_key =
+        youtube_innertube_api_key(page).unwrap_or_else(fallback_youtube_innertube_api_key);
+    let client_version = youtube_innertube_client_version(page)
+        .unwrap_or_else(|| YOUTUBE_WEB_CLIENT_VERSION.to_string());
+    let visitor_data = youtube_visitor_data(page);
+    let client = YoutubeClientSpec::web(&client_version);
+    let payload =
+        fetch_youtube_player_payload(&video_id, &api_key, &client, visitor_data.as_deref())?;
+    parse_youtube_video_details(&video_id, &payload)
+        .ok_or_else(|| String::from("YouTube video details not found"))
+}
+
+impl YoutubeSearchCursor {
+    /// Create a cursor for a YouTube search query.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - Search query text.
+    ///
+    /// # Returns
+    ///
+    /// A cursor that can be advanced with [`YoutubeSearchCursor::next_page`].
+    pub fn new(query: &str) -> Self {
+        let mut encoded_query = String::new();
+        push_form_encoded(&mut encoded_query, query);
+        Self {
+            query: query.to_string(),
+            referer: format!(
+                "https://www.youtube.com/results?search_query={}",
+                encoded_query
+            ),
+            api_key: fallback_youtube_innertube_api_key(),
+            client_version: YOUTUBE_WEB_CLIENT_VERSION.to_string(),
+            visitor_data: None,
+            continuation: None,
+            pending: Vec::new(),
+            seen_video_ids: Vec::new(),
+            started: false,
+            exhausted: false,
+        }
+    }
+
+    /// Fetch the next page of search results.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - Maximum number of results to return.
+    ///
+    /// # Returns
+    ///
+    /// The next search page and whether more results may be available.
+    pub fn next_page(&mut self, limit: usize) -> Result<YoutubeSearchPage, String> {
+        if limit == 0 {
+            return Ok(YoutubeSearchPage {
+                results: Vec::new(),
+                has_more: !self.exhausted || !self.pending.is_empty(),
+            });
+        }
+
+        let mut results = Vec::new();
+        let mut fetches = 0usize;
+        while results.len() < limit {
+            while results.len() < limit && !self.pending.is_empty() {
+                results.push(self.pending.remove(0));
+            }
+            if results.len() >= limit || self.exhausted {
+                break;
+            }
+            if fetches >= 3 {
+                break;
+            }
+            self.fetch_next_batch()?;
+            fetches += 1;
+        }
+
+        Ok(YoutubeSearchPage {
+            results,
+            has_more: !self.exhausted || !self.pending.is_empty(),
+        })
+    }
+
+    fn fetch_next_batch(&mut self) -> Result<(), String> {
+        if self.exhausted {
+            return Ok(());
+        }
+
+        let previous_continuation = self.continuation.clone();
+        let payload = if !self.started {
+            println!("[yt] loading YouTube search API");
+            self.started = true;
+            fetch_youtube_search_initial(
+                &self.api_key,
+                &self.client_version,
+                self.visitor_data.as_deref(),
+                &self.query,
+                &self.referer,
+            )?
+        } else {
+            let Some(token) = self.continuation.clone() else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            fetch_youtube_search_continuation(
+                &self.api_key,
+                &self.client_version,
+                self.visitor_data.as_deref(),
+                &token,
+                &self.referer,
+            )?
+        };
+
+        let mut batch = Vec::new();
+        append_youtube_search_results_limited(&mut batch, &payload, YOUTUBE_SEARCH_MAX_RESULTS);
+        for result in batch {
+            if self
+                .seen_video_ids
+                .iter()
+                .any(|video_id| video_id == &result.video_id)
+            {
+                continue;
+            }
+            self.seen_video_ids.push(result.video_id.clone());
+            self.pending.push(result);
+        }
+
+        let next = youtube_search_continuation_token(&payload);
+        self.exhausted = next.is_none() || next == previous_continuation;
+        self.continuation = next;
+        Ok(())
+    }
+}
 
 getrandom::register_custom_getrandom!(scarlet_getrandom);
 
@@ -121,9 +366,11 @@ fn run() -> Result<(), String> {
     let mut output: Option<String> = None;
     let mut print_headers = false;
     let mut play = true;
+    let mut loop_playback = false;
     let mut positional = Vec::new();
     let mut player_title = None;
     let mut search_results_output = None;
+    let mut thumbnail_batch = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -141,6 +388,9 @@ fn run() -> Result<(), String> {
             "--no-play" => {
                 play = false;
             }
+            "--loop" => {
+                loop_playback = true;
+            }
             "--title" => {
                 i += 1;
                 if i >= args.len() {
@@ -155,6 +405,13 @@ fn run() -> Result<(), String> {
                 }
                 search_results_output = Some(args[i].clone());
             }
+            "--thumbnail-batch" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(String::from("--thumbnail-batch requires a path"));
+                }
+                thumbnail_batch = Some(args[i].clone());
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Ok(());
@@ -162,6 +419,11 @@ fn run() -> Result<(), String> {
             value => positional.push(value.to_string()),
         }
         i += 1;
+    }
+
+    if let Some(path) = thumbnail_batch {
+        fetch_thumbnail_batch(&path)?;
+        return Ok(());
     }
 
     let mut input = parse_input_or_search_query(&positional)?;
@@ -193,7 +455,7 @@ fn run() -> Result<(), String> {
     }
 
     let output = output.unwrap_or_else(|| String::from("/tmp/yt.mp4"));
-    if play {
+    if play && !loop_playback {
         if let Some(audio_url) = media.audio_url {
             let audio_output = derive_audio_output_path(&output);
             return stream_media_pair_and_play(
@@ -238,10 +500,11 @@ fn run() -> Result<(), String> {
 
     let rc = if let Some(audio) = audio_output.as_ref() {
         println!(
-            "[yt] exec: video_player --hwdc {} --audio {}{}",
+            "[yt] exec: video_player --hwdc {} --audio {}{}{}",
             output,
             audio,
-            player_title.as_ref().map_or("", |_| " --title <title>")
+            player_title.as_ref().map_or("", |_| " --title <title>"),
+            if loop_playback { " --loop" } else { "" }
         );
         let mut argv = vec![
             "video_player",
@@ -254,17 +517,24 @@ fn run() -> Result<(), String> {
             argv.push("--title");
             argv.push(title);
         }
+        if loop_playback {
+            argv.push("--loop");
+        }
         execve("/bin/video_player", &argv, &[])
     } else {
         println!(
-            "[yt] exec: video_player --hwdc {}{}",
+            "[yt] exec: video_player --hwdc {}{}{}",
             output,
-            player_title.as_ref().map_or("", |_| " --title <title>")
+            player_title.as_ref().map_or("", |_| " --title <title>"),
+            if loop_playback { " --loop" } else { "" }
         );
         let mut argv = vec!["video_player", "--hwdc", output.as_str()];
         if let Some(title) = player_title.as_deref() {
             argv.push("--title");
             argv.push(title);
+        }
+        if loop_playback {
+            argv.push("--loop");
         }
         execve("/bin/video_player", &argv, &[])
     };
@@ -551,6 +821,7 @@ fn print_usage() {
     println!("  -o, --output <path>  Save response body");
     println!("  --headers           Print response headers");
     println!("  --no-play           Download only");
+    println!("  --loop              Loop playback in video_player");
     println!("  --title <title>     Set video_player window title");
     println!("  --search-results <path>  Write search results as TSV and exit");
     println!("  -h, --help          Show this help");
@@ -758,37 +1029,39 @@ fn consume_escape_tilde() {
 }
 
 pub fn youtube_search(query: &str) -> Result<Vec<YoutubeSearchResult>, String> {
-    let mut encoded_query = String::new();
-    push_form_encoded(&mut encoded_query, query);
-    let url = format!(
-        "https://www.youtube.com/results?search_query={}",
-        encoded_query
-    );
     println!("[yt] searching YouTube: {}", query);
-    let response = https_get(
-        &parse_url(&url)?,
-        DEFAULT_USER_AGENT,
-        "Accept-Language: en-US,en;q=0.9\r\n",
-    )?;
-    if response.status < 200 || response.status >= 300 {
-        return Err(format!("YouTube search HTTP status {}", response.status));
+    let mut cursor = YoutubeSearchCursor::new(query);
+    let mut results = Vec::new();
+
+    while results.len() < YOUTUBE_SEARCH_MAX_RESULTS {
+        let limit = (YOUTUBE_SEARCH_MAX_RESULTS - results.len()).min(YOUTUBE_SEARCH_PAGE_SIZE);
+        let page = cursor.next_page(limit)?;
+        if page.results.is_empty() {
+            break;
+        }
+        results.extend(page.results);
+        if !page.has_more {
+            break;
+        }
     }
-    let page = core::str::from_utf8(&response.body)
-        .map_err(|_| String::from("YouTube search page is not UTF-8"))?;
-    Ok(parse_youtube_search_results(page))
+
+    Ok(results)
 }
 
-fn parse_youtube_search_results(page: &str) -> Vec<YoutubeSearchResult> {
-    let mut results = Vec::new();
+fn append_youtube_search_results_limited(
+    results: &mut Vec<YoutubeSearchResult>,
+    payload: &str,
+    limit: usize,
+) {
     let mut offset = 0usize;
     let pattern = "\"videoRenderer\":";
 
-    while results.len() < YOUTUBE_SEARCH_MAX_RESULTS {
-        let Some(found) = page[offset..].find(pattern) else {
+    while results.len() < limit {
+        let Some(found) = payload[offset..].find(pattern) else {
             break;
         };
         let mut object_start = offset + found + pattern.len();
-        while page
+        while payload
             .as_bytes()
             .get(object_start)
             .copied()
@@ -797,10 +1070,10 @@ fn parse_youtube_search_results(page: &str) -> Vec<YoutubeSearchResult> {
         {
             object_start += 1;
         }
-        let Some(object_end) = find_matching_json(page, object_start, b'{', b'}') else {
+        let Some(object_end) = find_matching_json(payload, object_start, b'{', b'}') else {
             break;
         };
-        let object = &page[object_start..=object_end];
+        let object = &payload[object_start..=object_end];
         if let Some(result) = parse_youtube_search_result(object)
             && !results
                 .iter()
@@ -810,8 +1083,6 @@ fn parse_youtube_search_results(page: &str) -> Vec<YoutubeSearchResult> {
         }
         offset = object_end + 1;
     }
-
-    results
 }
 
 fn parse_youtube_search_result(object: &str) -> Option<YoutubeSearchResult> {
@@ -824,7 +1095,7 @@ fn parse_youtube_search_result(object: &str) -> Option<YoutubeSearchResult> {
             .or_else(|| youtube_renderer_text(object, "longBylineText"))
             .or_else(|| youtube_renderer_text(object, "shortBylineText")),
         duration: youtube_renderer_text(object, "lengthText"),
-        thumbnail_url: youtube_thumbnail_url(object),
+        thumbnail_url: youtube_renderer_thumbnail_url(object),
     })
 }
 
@@ -833,12 +1104,190 @@ fn youtube_renderer_text(object: &str, field: &str) -> Option<String> {
     json_string_field(value, "simpleText").or_else(|| json_string_field(value, "text"))
 }
 
-fn youtube_thumbnail_url(object: &str) -> Option<String> {
+fn youtube_renderer_thumbnail_url(object: &str) -> Option<String> {
     let value = json_object_field(object, "thumbnail")?;
     json_string_field(value, "url").or_else(|| {
         let id = json_string_field(object, "videoId")?;
-        Some(format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", id))
+        Some(youtube_thumbnail_url(&id))
     })
+}
+
+fn parse_youtube_video_details(video_id: &str, payload: &str) -> Option<YoutubeVideoDetails> {
+    let object = json_object_field(payload, "videoDetails").unwrap_or(payload);
+    Some(YoutubeVideoDetails {
+        video_id: json_string_field(object, "videoId").unwrap_or_else(|| video_id.to_string()),
+        title: json_string_field(object, "title"),
+        author: json_string_field(object, "author")
+            .or_else(|| json_string_field(object, "ownerChannelName")),
+        description: json_string_field(object, "shortDescription")
+            .or_else(|| json_string_field(object, "description")),
+        thumbnail_url: youtube_video_details_thumbnail_url(object)
+            .or_else(|| Some(youtube_thumbnail_url(video_id))),
+    })
+}
+
+fn youtube_video_details_thumbnail_url(object: &str) -> Option<String> {
+    let value = json_object_field(object, "thumbnail")?;
+    json_string_field(value, "url")
+}
+
+fn details_has_content(details: &YoutubeVideoDetails) -> bool {
+    details.title.is_some() || details.author.is_some() || details.description.is_some()
+}
+
+fn youtube_search_continuation_token(payload: &str) -> Option<String> {
+    let mut offset = 0usize;
+    let pattern = "\"continuationCommand\":";
+
+    loop {
+        let found = payload[offset..].find(pattern)?;
+        let mut object_start = offset + found + pattern.len();
+        while payload
+            .as_bytes()
+            .get(object_start)
+            .copied()
+            .map(|byte| byte.is_ascii_whitespace())
+            .unwrap_or(false)
+        {
+            object_start += 1;
+        }
+        let Some(object_end) = find_matching_json(payload, object_start, b'{', b'}') else {
+            return None;
+        };
+        let object = &payload[object_start..=object_end];
+        if object.contains("CONTINUATION_REQUEST_TYPE_SEARCH")
+            || object.contains("reloadContinuationData")
+            || object.contains("nextContinuationData")
+        {
+            if let Some(token) = json_string_field(object, "token") {
+                return Some(token);
+            }
+        }
+        offset = object_end + 1;
+    }
+}
+
+fn fetch_youtube_search_initial(
+    api_key: &str,
+    client_version: &str,
+    visitor_data: Option<&str>,
+    query: &str,
+    referer: &str,
+) -> Result<String, String> {
+    let api_url = format!(
+        "https://www.youtube.com/youtubei/v1/search?key={}&prettyPrint=false",
+        api_key
+    );
+    let body = youtube_search_initial_request_body(client_version, visitor_data, query);
+    let mut extra_headers = format!(
+        "Origin: https://www.youtube.com\r\nReferer: {}\r\nX-YouTube-Client-Name: 1\r\nX-YouTube-Client-Version: {}\r\n",
+        referer, client_version
+    );
+    if let Some(visitor_data) = visitor_data {
+        extra_headers.push_str("X-Goog-Visitor-Id: ");
+        extra_headers.push_str(visitor_data);
+        extra_headers.push_str("\r\n");
+    }
+
+    println!("[yt] loading YouTube search API");
+    let response = https_post_json(
+        &parse_url(&api_url)?,
+        &body,
+        YoutubeClientSpec::web(client_version).user_agent,
+        &extra_headers,
+    )?;
+    if response.status < 200 || response.status >= 300 {
+        return Err(format!("YouTube search API HTTP status {}", response.status));
+    }
+    core::str::from_utf8(&response.body)
+        .map(|text| text.to_string())
+        .map_err(|_| String::from("YouTube search API response is not UTF-8"))
+}
+
+fn fetch_youtube_search_continuation(
+    api_key: &str,
+    client_version: &str,
+    visitor_data: Option<&str>,
+    token: &str,
+    referer: &str,
+) -> Result<String, String> {
+    let api_url = format!(
+        "https://www.youtube.com/youtubei/v1/search?key={}&prettyPrint=false",
+        api_key
+    );
+    let body = youtube_search_continuation_request_body(client_version, visitor_data, token);
+    let mut extra_headers = format!(
+        "Origin: https://www.youtube.com\r\nReferer: {}\r\nX-YouTube-Client-Name: 1\r\nX-YouTube-Client-Version: {}\r\n",
+        referer, client_version
+    );
+    if let Some(visitor_data) = visitor_data {
+        extra_headers.push_str("X-Goog-Visitor-Id: ");
+        extra_headers.push_str(visitor_data);
+        extra_headers.push_str("\r\n");
+    }
+
+    let response = https_post_json(
+        &parse_url(&api_url)?,
+        &body,
+        YoutubeClientSpec::web(client_version).user_agent,
+        &extra_headers,
+    )?;
+    if response.status < 200 || response.status >= 300 {
+        return Err(format!(
+            "YouTube search continuation HTTP status {}",
+            response.status
+        ));
+    }
+    core::str::from_utf8(&response.body)
+        .map(|text| text.to_string())
+        .map_err(|_| String::from("YouTube search continuation is not UTF-8"))
+}
+
+fn youtube_search_initial_request_body(
+    client_version: &str,
+    visitor_data: Option<&str>,
+    query: &str,
+) -> String {
+    let mut body = youtube_search_request_context(client_version, visitor_data);
+    body.push_str(",\"query\":\"");
+    push_json_escaped(&mut body, query);
+    body.push_str("\"}");
+    body
+}
+
+fn youtube_search_continuation_request_body(
+    client_version: &str,
+    visitor_data: Option<&str>,
+    token: &str,
+) -> String {
+    let mut body = youtube_search_request_context(client_version, visitor_data);
+    body.push_str(",\"continuation\":\"");
+    push_json_escaped(&mut body, token);
+    body.push_str("\"}");
+    body
+}
+
+fn youtube_search_request_context(client_version: &str, visitor_data: Option<&str>) -> String {
+    let mut body = format!(
+        concat!(
+            "{{",
+            "\"context\":{{",
+            "\"client\":{{",
+            "\"clientName\":\"WEB\",",
+            "\"clientVersion\":\"{}\",",
+            "\"hl\":\"en\",",
+            "\"gl\":\"US\",",
+            "\"utcOffsetMinutes\":0"
+        ),
+        client_version
+    );
+    if let Some(visitor_data) = visitor_data {
+        body.push_str(",\"visitorData\":\"");
+        push_json_escaped(&mut body, visitor_data);
+        body.push('"');
+    }
+    body.push_str("}}");
+    body
 }
 
 fn write_search_results(path: &str, results: &[YoutubeSearchResult]) -> Result<(), String> {
@@ -852,6 +1301,52 @@ fn write_search_results(path: &str, results: &[YoutubeSearchResult]) -> Result<(
     file.write_all(text.as_bytes())
         .map_err(|_| String::from("failed to write search results"))?;
     Ok(())
+}
+
+fn fetch_thumbnail_batch(manifest_path: &str) -> Result<(), String> {
+    let text = read_text_file(manifest_path)?;
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(4, '\t');
+        let video_id = fields
+            .next()
+            .ok_or_else(|| String::from("thumbnail manifest missing video id"))?;
+        let url = fields
+            .next()
+            .ok_or_else(|| String::from("thumbnail manifest missing URL"))?;
+        let output = fields
+            .next()
+            .ok_or_else(|| String::from("thumbnail manifest missing output path"))?;
+        let done = fields.next();
+        match fetch_url_to_file(url, output, false, DEFAULT_USER_AGENT, DEFAULT_EXTRA_HEADERS) {
+            Ok(()) => {}
+            Err(error) => println!("[yt] thumbnail {} failed: {}", video_id, error),
+        }
+        if let Some(done) = done
+            && let Err(error) = touch_truncated_file(done)
+        {
+            println!("[yt] thumbnail {} marker failed: {}", video_id, error);
+        }
+    }
+    Ok(())
+}
+
+fn read_text_file(path: &str) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|_| format!("failed to open {}", path))?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|_| format!("failed to read {}", path))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..n]);
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8", path))
 }
 
 fn json_object_field<'a>(input: &'a str, name: &str) -> Option<&'a str> {
@@ -1386,8 +1881,12 @@ fn https_request_to_file(
                 body: error_body,
             });
         }
-        if should_read {
-            read_tls_from_socket(&mut socket, &mut incoming_tls)?;
+        if should_read && !read_tls_from_socket(&mut socket, &mut incoming_tls)? {
+            return Ok(HttpResponse {
+                status,
+                headers: headers.unwrap_or_default(),
+                body: error_body,
+            });
         }
     }
 }
@@ -1550,8 +2049,12 @@ fn https_request_to_socket(
                 body: error_body,
             });
         }
-        if should_read {
-            read_tls_from_socket(&mut tcp, &mut incoming_tls)?;
+        if should_read && !read_tls_from_socket(&mut tcp, &mut incoming_tls)? {
+            return Ok(HttpResponse {
+                status,
+                headers: headers.unwrap_or_default(),
+                body: error_body,
+            });
         }
     }
 }
@@ -1671,11 +2174,22 @@ fn https_request(url: &UrlParts, request: &[u8]) -> Result<HttpResponse, String>
         if request_sent && http_response_complete(&plaintext) {
             return parse_complete_http_response(plaintext);
         }
-        if should_read {
-            read_tls_from_socket(&mut socket, &mut incoming_tls)?;
+        if should_read && !read_tls_from_socket(&mut socket, &mut incoming_tls)? {
+            if plaintext.is_empty() {
+                return Err(String::from("TLS connection closed before response"));
+            }
+            if !http_response_complete(&plaintext) {
+                return Err(String::from(
+                    "TLS connection closed with incomplete HTTP response",
+                ));
+            }
+            break;
         }
     }
 
+    if !http_response_complete(&plaintext) {
+        return Err(String::from("incomplete HTTP response"));
+    }
     parse_complete_http_response(plaintext)
 }
 
@@ -1729,24 +2243,27 @@ fn chunked_body_complete(buffer: &[u8]) -> bool {
         if buffer.len() < offset + size + 2 {
             return false;
         }
+        if &buffer[offset + size..offset + size + 2] != b"\r\n" {
+            return false;
+        }
         offset += size + 2;
     }
 }
 
-fn read_tls_from_socket(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<(), String> {
+fn read_tls_from_socket(socket: &mut Socket, buffer: &mut Vec<u8>) -> Result<bool, String> {
     wait_readable(socket, TLS_TIMEOUT_NS)?;
     let mut chunk = [0u8; 8192];
     let n = socket
         .read(&mut chunk)
-        .map_err(|_| String::from("TLS socket read failed"))?;
+        .map_err(|err| format!("TLS socket read failed: {}", err))?;
     if n == 0 {
-        return Err(String::from("TLS connection closed unexpectedly"));
+        return Ok(false);
     }
     if LOG_TLS_IO {
         println!("[yt] TLS socket read {} bytes", n);
     }
     buffer.extend_from_slice(&chunk[..n]);
-    Ok(())
+    Ok(true)
 }
 
 fn parse_complete_http_response(received: Vec<u8>) -> Result<HttpResponse, String> {
@@ -1796,6 +2313,9 @@ fn decode_chunked_buffer(buffer: &[u8]) -> Result<Vec<u8>, String> {
         }
         if buffer.len() < offset + size + 2 {
             return Err(String::from("truncated chunked body"));
+        }
+        if &buffer[offset + size..offset + size + 2] != b"\r\n" {
+            return Err(String::from("invalid chunked body"));
         }
         decoded.extend_from_slice(&buffer[offset..offset + size]);
         offset += size + 2;
@@ -2091,6 +2611,48 @@ fn try_youtube_player_client(
     client: &YoutubeClientSpec<'_>,
     visitor_data: Option<&str>,
 ) -> Result<YoutubeClientMedia, String> {
+    let payload = fetch_youtube_player_payload(video_id, api_key, client, visitor_data)?;
+    let stats = youtube_format_stats(&payload);
+    println!(
+        "[yt] {} formats: total={} progressive_mp4={} h264_video={} aac_audio={} direct={} sig={} cipher_s={} dash_direct={} dash_sig={} dash_s={}",
+        client.label,
+        stats.total,
+        stats.progressive_mp4,
+        stats.h264_video_only,
+        stats.aac_audio_only,
+        stats.direct_url,
+        stats.signature_url,
+        stats.cipher_signature,
+        stats.dash_direct,
+        stats.dash_sig,
+        stats.dash_cipher_s
+    );
+    if let Some(reason) = youtube_playability_reason(&payload) {
+        println!("[yt] {} playability: {}", client.label, reason);
+    }
+    if let Some(media) = select_youtube_dash_mp4(&payload) {
+        println!(
+            "[yt] selected DASH MP4 streams from {} player API: {}p + AAC",
+            client.label, media.video_height
+        );
+        return Ok(YoutubeClientMedia::Dash(media));
+    }
+    if let Some(url) = select_youtube_progressive_mp4(&payload) {
+        println!(
+            "[yt] found progressive MP4 stream from {} player API",
+            client.label
+        );
+        return Ok(YoutubeClientMedia::Progressive(url));
+    }
+    Ok(YoutubeClientMedia::None)
+}
+
+fn fetch_youtube_player_payload(
+    video_id: &str,
+    api_key: &str,
+    client: &YoutubeClientSpec<'_>,
+    visitor_data: Option<&str>,
+) -> Result<String, String> {
     let api_url = format!(
         "https://www.youtube.com/youtubei/v1/player?key={}&prettyPrint=false",
         api_key
@@ -2127,39 +2689,7 @@ fn try_youtube_player_client(
     }
     let payload = core::str::from_utf8(&response.body)
         .map_err(|_| String::from("YouTube player API response is not UTF-8"))?;
-    let stats = youtube_format_stats(payload);
-    println!(
-        "[yt] {} formats: total={} progressive_mp4={} h264_video={} aac_audio={} direct={} sig={} cipher_s={} dash_direct={} dash_sig={} dash_s={}",
-        client.label,
-        stats.total,
-        stats.progressive_mp4,
-        stats.h264_video_only,
-        stats.aac_audio_only,
-        stats.direct_url,
-        stats.signature_url,
-        stats.cipher_signature,
-        stats.dash_direct,
-        stats.dash_sig,
-        stats.dash_cipher_s
-    );
-    if let Some(reason) = youtube_playability_reason(payload) {
-        println!("[yt] {} playability: {}", client.label, reason);
-    }
-    if let Some(media) = select_youtube_dash_mp4(payload) {
-        println!(
-            "[yt] selected DASH MP4 streams from {} player API: {}p + AAC",
-            client.label, media.video_height
-        );
-        return Ok(YoutubeClientMedia::Dash(media));
-    }
-    if let Some(url) = select_youtube_progressive_mp4(payload) {
-        println!(
-            "[yt] found progressive MP4 stream from {} player API",
-            client.label
-        );
-        return Ok(YoutubeClientMedia::Progressive(url));
-    }
-    Ok(YoutubeClientMedia::None)
+    Ok(payload.to_string())
 }
 
 enum YoutubeClientMedia {
@@ -2625,6 +3155,19 @@ fn json_hex_digit(value: u8) -> char {
     }
 }
 
+fn byte_prefix_hex(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let limit = bytes.len().min(12);
+    for byte in bytes.iter().take(limit) {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push(json_hex_digit(byte >> 4));
+        out.push(json_hex_digit(byte & 0x0f));
+    }
+    out
+}
+
 fn parse_json_string_value(input: &str, start: usize) -> Option<String> {
     let mut out = String::new();
     let mut index = start;
@@ -3067,6 +3610,18 @@ fn youtube_video_id(input: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn youtube_video_id_from_raw(input: &str) -> Option<&str> {
+    if input.len() == 11
+        && input
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Some(input)
+    } else {
+        None
+    }
 }
 
 fn parse_ipv4(input: &str) -> Option<[u8; 4]> {
