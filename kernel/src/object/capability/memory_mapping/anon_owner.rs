@@ -4,10 +4,10 @@ use alloc::sync::Arc;
 use spin::RwLock;
 
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{ContiguousPages, allocate_raw_pages, free_raw_pages};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
-use super::{AccessKind, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
+use super::{AccessKind, AccessOp, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
 
 pub struct AnonymousPageOwner {
     pages: RwLock<BTreeMap<usize, usize>>,
@@ -110,4 +110,76 @@ pub fn fork_clone_owner(owner: &AnonymousPageOwner) -> Option<Arc<dyn MemoryMapp
     Some(Arc::new(AnonymousPageOwner {
         pages: RwLock::new(new_pages),
     }))
+}
+
+pub struct ForkCowPageOwner {
+    base_page_idx: usize,
+    pages: RwLock<Option<ContiguousPages>>,
+}
+
+impl ForkCowPageOwner {
+    pub fn new(base_page_idx: usize, pages: ContiguousPages) -> Self {
+        Self {
+            base_page_idx,
+            pages: RwLock::new(Some(pages)),
+        }
+    }
+}
+
+impl MemoryMappingOps for ForkCowPageOwner {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        Err("ForkCowPageOwner does not support get_mapping_info")
+    }
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+
+    fn mmap_owner_name(&self) -> String {
+        String::from("fork-cow")
+    }
+
+    fn resolve_fault(
+        &self,
+        _access: &AccessKind,
+        page_idx: usize,
+        _vm_start: usize,
+    ) -> Result<ResolveFaultResult, ResolveFaultError> {
+        let pages = self.pages.read();
+        let pages = pages.as_ref().ok_or(ResolveFaultError::Unmapped)?;
+        if page_idx < self.base_page_idx {
+            return Err(ResolveFaultError::Unmapped);
+        }
+        let offset = page_idx - self.base_page_idx;
+        if offset >= pages.len() {
+            return Err(ResolveFaultError::Unmapped);
+        }
+        Ok(ResolveFaultResult {
+            paddr_page_base: pages.as_paddr() + offset * PAGE_SIZE,
+            is_tail: false,
+        })
+    }
+
+    fn fault_page_permissions(&self, access: &AccessKind, default_permissions: usize) -> usize {
+        if access.op == AccessOp::Store {
+            default_permissions
+        } else {
+            default_permissions & !0x2
+        }
+    }
+
+    fn private_fault_requires_copy(&self, access: &AccessKind) -> bool {
+        access.op == AccessOp::Store
+    }
+
+    fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {
+        // A fork COW owner can be referenced by multiple task VM maps. Releasing
+        // from one mapping must not drop the backing pages while another mapping
+        // can still fault them in. The pages are freed when the final Arc to this
+        // owner is dropped.
+    }
 }

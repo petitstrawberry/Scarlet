@@ -64,6 +64,22 @@ struct InnerVmm {
 }
 
 impl VirtualMemoryManager {
+    fn subrange_pmarea(
+        existing_map: &VirtualMemoryMap,
+        sub_start: usize,
+        sub_end: usize,
+    ) -> MemoryArea {
+        if existing_map.pmarea.start == 0 && existing_map.pmarea.end == 0 {
+            return MemoryArea { start: 0, end: 0 };
+        }
+
+        let pm_offset = sub_start - existing_map.vmarea.start;
+        MemoryArea {
+            start: existing_map.pmarea.start + pm_offset,
+            end: existing_map.pmarea.start + pm_offset + (sub_end - sub_start),
+        }
+    }
+
     /// Creates a new virtual memory manager.
     ///
     /// # Returns
@@ -294,18 +310,12 @@ impl VirtualMemoryManager {
 
                 if overlap_start <= overlap_end {
                     // Create a map for the removed (overlapping) portion
-                    let pm_offset = overlap_start - existing_start;
                     let removed_portion = VirtualMemoryMap {
                         vmarea: MemoryArea {
                             start: overlap_start,
                             end: overlap_end,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start + pm_offset,
-                            end: existing_map.pmarea.start
-                                + pm_offset
-                                + (overlap_end - overlap_start),
-                        },
+                        pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -327,10 +337,11 @@ impl VirtualMemoryManager {
                             start: existing_start,
                             end: remove_start - 1,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start,
-                            end: existing_map.pmarea.start + (remove_start - existing_start) - 1,
-                        },
+                        pmarea: Self::subrange_pmarea(
+                            &existing_map,
+                            existing_start,
+                            remove_start - 1,
+                        ),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -341,16 +352,12 @@ impl VirtualMemoryManager {
 
                 // Case 3: Partial overlap - keep the part after the removal range
                 if existing_end > remove_end {
-                    let after_offset = (remove_end + 1) - existing_start;
                     let after_map = VirtualMemoryMap {
                         vmarea: MemoryArea {
                             start: remove_end + 1,
                             end: existing_end,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start + after_offset,
-                            end: existing_map.pmarea.end,
-                        },
+                        pmarea: Self::subrange_pmarea(&existing_map, remove_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -542,16 +549,16 @@ impl VirtualMemoryManager {
             };
             match owner.resolve_fault(&owner_access, page_idx, memory_map.vm_start) {
                 Ok(res) => {
-                    perms = owner.fault_page_permissions(&owner_access, perms);
+                    perms = owner.fault_page_permissions(&access, perms);
                     if res.is_tail {
                         perms &= !0x1;
                         perms &= !0x2;
                     }
 
-                    // COW: for private owner-based mappings, allocate a private page
-                    // and copy the owner's content. This ensures writes never mutate
-                    // the owner's backing store (e.g. file page cache, shared memory).
-                    if !memory_map.is_shared {
+                    // COW: most private owner-based mappings allocate a private
+                    // page on any resolved fault. Fork COW owners allow reads to
+                    // share a read-only page and request a copy only on stores.
+                    if !memory_map.is_shared && owner.private_fault_requires_copy(&access) {
                         let new_ptr = crate::mem::page::allocate_raw_pages(1);
                         if !new_ptr.is_null() {
                             let new_paddr = crate::vm::addr::virt_to_phys(new_ptr as usize);
@@ -966,18 +973,12 @@ impl VirtualMemoryManager {
                 let overlap_end = core::cmp::min(new_end, existing_end);
                 if overlap_start <= overlap_end {
                     // Cut out the pmarea at the same offset as the intersection
-                    let pm_offset = overlap_start - existing_start;
                     let overwritten_map = VirtualMemoryMap {
                         vmarea: MemoryArea {
                             start: overlap_start,
                             end: overlap_end,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start + pm_offset,
-                            end: existing_map.pmarea.start
-                                + pm_offset
-                                + (overlap_end - overlap_start),
-                        },
+                        pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -1000,10 +1001,7 @@ impl VirtualMemoryManager {
                             start: existing_start,
                             end: new_start - 1,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start,
-                            end: existing_map.pmarea.start + (new_start - existing_start) - 1,
-                        },
+                        pmarea: Self::subrange_pmarea(&existing_map, existing_start, new_start - 1),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -1014,16 +1012,12 @@ impl VirtualMemoryManager {
 
                 // Keep the part after the new mapping (if any)
                 if existing_end > new_end {
-                    let after_offset = (new_end + 1) - existing_start;
                     let after_map = VirtualMemoryMap {
                         vmarea: MemoryArea {
                             start: new_end + 1,
                             end: existing_end,
                         },
-                        pmarea: MemoryArea {
-                            start: existing_map.pmarea.start + after_offset,
-                            end: existing_map.pmarea.end,
-                        },
+                        pmarea: Self::subrange_pmarea(&existing_map, new_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
@@ -1196,9 +1190,11 @@ fn find_memory_map_key_with_cache_update(inner: &mut InnerVmm, vaddr: usize) -> 
 mod tests {
     use crate::arch::vm::alloc_virtual_address_space;
     use crate::environment::PAGE_SIZE;
+    use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
     use crate::vm::VirtualMemoryMap;
     use crate::vm::get_current_direct_map_phys_range;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
+    use alloc::sync::Arc;
 
     #[test_case]
     fn test_new_virtual_memory_manager() {
@@ -2156,5 +2152,52 @@ mod tests {
         let right = manager.search_memory_map(0x7000).unwrap();
         assert_eq!(right.vmarea.start, 0x7000);
         assert_eq!(right.vmarea.end, 0x7fff);
+    }
+
+    #[test_case]
+    fn test_owner_backed_zero_pmarea_stays_zero_when_split() {
+        let manager = VirtualMemoryManager::new();
+        let owner = Arc::new(AnonymousPageOwner::new());
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x4000,
+                end: 0x7fff,
+            },
+            pmarea: MemoryArea { start: 0, end: 0 },
+            vm_start: 0x4000,
+            permissions: 0o644,
+            is_shared: false,
+            owner: Some(owner),
+        };
+        manager.add_memory_map(map).unwrap();
+
+        let replacement = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x5000,
+                end: 0x5fff,
+            },
+            pmarea: MemoryArea {
+                start: 0x8000_0000,
+                end: 0x8000_0fff,
+            },
+            vm_start: 0x5000,
+            permissions: 0o600,
+            is_shared: false,
+            owner: None,
+        };
+        let removed = manager.add_memory_map_fixed(replacement).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].pmarea, MemoryArea { start: 0, end: 0 });
+
+        let left = manager.search_memory_map(0x4000).unwrap();
+        assert_eq!(left.vmarea.start, 0x4000);
+        assert_eq!(left.vmarea.end, 0x4fff);
+        assert_eq!(left.pmarea, MemoryArea { start: 0, end: 0 });
+
+        let right = manager.search_memory_map(0x6000).unwrap();
+        assert_eq!(right.vmarea.start, 0x6000);
+        assert_eq!(right.vmarea.end, 0x7fff);
+        assert_eq!(right.pmarea, MemoryArea { start: 0, end: 0 });
     }
 }

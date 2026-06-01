@@ -124,6 +124,25 @@ pub trait MemoryMappingOps: Send + Sync {
         default_permissions
     }
 
+    /// Decide whether a private mapping fault must copy the resolved backing page.
+    ///
+    /// Most private object mappings use the owner as immutable backing storage
+    /// and therefore copy on every resolved fault. Fork COW mappings override
+    /// this so reads can share the backing page and stores perform the copy.
+    ///
+    /// # Arguments
+    /// * `access` - Access that caused the fault.
+    ///
+    /// # Returns
+    /// `true` when the fault handler must allocate a private page.
+    fn private_fault_requires_copy(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+    ) -> bool {
+        let _ = access;
+        true
+    }
+
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
 
     fn fork_clone(&self) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {

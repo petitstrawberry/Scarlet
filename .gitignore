@@ -11,6 +11,7 @@ dist/
 opencode.json
 /tools/scpm-pack/target
 /cargo-scarlet/target
+/.build
 /drivers/*/target
 /drivers/*/*/target
 /modules/*/target
