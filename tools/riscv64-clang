@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+if command -v clang >/dev/null 2>&1; then
+    installed_dir="$(clang --version | sed -n 's/^InstalledDir: //p' | head -n 1)"
+    if [ -n "${installed_dir}" ] && [ -x "${installed_dir}/clang" ]; then
+        exec "${installed_dir}/clang" --target=riscv64-unknown-elf -DRING_CORE_NOSTDLIBINC "$@" -march=rv64gc -mabi=lp64d
+    fi
+fi
+
+exec clang --target=riscv64-unknown-elf -DRING_CORE_NOSTDLIBINC "$@" -march=rv64gc -mabi=lp64d

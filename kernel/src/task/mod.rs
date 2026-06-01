@@ -2469,6 +2469,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use super::INIT_TASK_ID;
+    use crate::object::capability::memory_mapping::AccessOp;
     use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
     use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
@@ -3011,7 +3012,10 @@ mod tests {
             found.expect("Stack memory map not found in parent task")
         };
 
-        // Write test data to parent's stack
+        let stack_data_vaddr = stack_mmap.vmarea.start + crate::environment::PAGE_SIZE;
+
+        // Write test data to parent's stack before clone. At this point the
+        // parent owns the physical stack allocation directly.
         let stack_test_data: [u8; 16] = [
             0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
             0x99, 0x00,
@@ -3047,19 +3051,33 @@ mod tests {
             found.expect("Stack memory map not found in child task")
         };
 
-        // Verify that stack content was copied correctly
-        unsafe {
-            let parent_stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
-            let child_stack_ptr =
-                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
-                    as *const u8;
+        // Fork converts private stack pages to a COW owner. Reads in parent and
+        // child should resolve to the same backing page until one side stores.
+        let parent_shared_paddr = parent_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Parent stack COW backing not resolved");
+        let child_shared_paddr = child_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Child stack COW backing not resolved");
+        assert_eq!(
+            parent_shared_paddr, child_shared_paddr,
+            "Parent and child should share stack backing before a COW store"
+        );
+        assert_eq!(
+            child_stack_mmap.pmarea.start, 0,
+            "Child COW stack map should not expose a direct physical range"
+        );
+        assert!(
+            child_stack_mmap.owner.is_some(),
+            "Child COW stack map should keep an owner for fault resolution"
+        );
 
-            // Check that physical addresses are different (separate memory)
-            assert_ne!(
-                parent_stack_ptr, child_stack_ptr,
-                "Parent and child should have different stack physical memory"
-            );
+        // Verify that stack content is visible through the COW backing.
+        unsafe {
+            let parent_stack_ptr = phys_to_virt(parent_shared_paddr) as *const u8;
+            let child_stack_ptr = phys_to_virt(child_shared_paddr) as *const u8;
 
             // Check that the stack data content is identical
             for i in 0..stack_test_data.len() {
@@ -3073,16 +3091,26 @@ mod tests {
             }
         }
 
-        // Verify that modifying parent's stack doesn't affect child's stack
+        // Verify that modifying parent's stack triggers COW and doesn't affect child's stack.
+        let parent_private_paddr = parent_task
+            .vm_manager
+            .translate_to_phys_with_access(stack_data_vaddr, AccessOp::Store)
+            .expect("Parent stack store COW did not allocate a private page");
+        assert_ne!(
+            parent_private_paddr, child_shared_paddr,
+            "Parent store should allocate a private stack page"
+        );
+
         unsafe {
-            let parent_stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let parent_stack_ptr = phys_to_virt(parent_private_paddr) as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
-            let child_stack_ptr =
-                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
-                    as *const u8;
+            let child_stack_paddr = child_task
+                .vm_manager
+                .translate_to_phys(stack_data_vaddr)
+                .expect("Child stack backing disappeared after parent COW");
+            let child_stack_ptr = phys_to_virt(child_stack_paddr) as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value
