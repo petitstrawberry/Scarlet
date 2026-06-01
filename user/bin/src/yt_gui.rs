@@ -99,17 +99,20 @@ impl GuiSearchResult {
 enum GuiMessage {
     SearchFinished {
         generation: u64,
-        result: core::result::Result<SearchLoadResult, String>,
+        result: SearchLoadOutcome,
     },
     SearchMoreFinished {
         generation: u64,
         target_page: Option<usize>,
-        result: core::result::Result<SearchLoadResult, String>,
+        result: SearchLoadOutcome,
     },
     ThumbnailFinished {
         generation: u64,
         video_id: String,
         thumbnail: ThumbnailState,
+    },
+    ThumbnailBatchFinished {
+        generation: u64,
     },
     DetailsFinished {
         generation: u64,
@@ -121,11 +124,21 @@ enum GuiMessage {
 struct SearchLoadResult {
     results: Vec<GuiSearchResult>,
     has_more: bool,
+    cursor: YoutubeSearchCursor,
 }
+
+struct SearchLoadError {
+    message: String,
+    cursor: Option<YoutubeSearchCursor>,
+}
+
+type SearchLoadOutcome = core::result::Result<SearchLoadResult, SearchLoadError>;
 
 static YT_GUI_GENERATION: Mutex<u64> = Mutex::new(0);
 static YT_GUI_MESSAGES: Mutex<Vec<GuiMessage>> = Mutex::new(Vec::new());
 static YT_GUI_SEARCH_CURSOR: Mutex<Option<YoutubeSearchCursor>> = Mutex::new(None);
+static YT_GUI_THUMBNAIL_ACTIVE: Mutex<bool> = Mutex::new(false);
+static YT_GUI_DETAILS_ACTIVE: Mutex<bool> = Mutex::new(false);
 
 #[derive(View, Clone)]
 struct YtGuiApp {
@@ -428,6 +441,7 @@ impl Application for YtGuiApp {
                                 .font_size(DETAIL_DESCRIPTION_FONT_SIZE)
                                 .color(Color::gray(0.28))
                                 .frame_width(DETAIL_TEXT_WIDTH as f32),
+                            Spacer::new(),
                         }
                         .padding(12.0)
                     }
@@ -474,6 +488,7 @@ impl YtGuiApp {
                 match result {
                     Ok(load) => {
                         let count = load.results.len();
+                        *YT_GUI_SEARCH_CURSOR.lock() = Some(load.cursor);
                         self.results.set(load.results);
                         self.selected.set(0);
                         self.page.set(0);
@@ -498,13 +513,14 @@ impl YtGuiApp {
                         );
                     }
                     Err(error) => {
+                        *YT_GUI_SEARCH_CURSOR.lock() = None;
                         self.results.set(Vec::new());
                         self.selected.set(0);
                         self.page.set(0);
                         self.has_more.set(false);
                         self.loading_more.set(false);
                         self.details.set(DetailState::Empty);
-                        self.status.set(format!("Search failed: {}", error));
+                        self.status.set(format!("Search failed: {}", error.message));
                     }
                 }
             }
@@ -523,6 +539,7 @@ impl YtGuiApp {
                         let added = load.results.len();
                         list.extend(load.results);
                         let len = list.len();
+                        *YT_GUI_SEARCH_CURSOR.lock() = Some(load.cursor);
                         self.results.set(list);
                         self.has_more.set(load.has_more);
 
@@ -556,8 +573,11 @@ impl YtGuiApp {
                         );
                     }
                     Err(error) => {
+                        if let Some(cursor) = error.cursor {
+                            *YT_GUI_SEARCH_CURSOR.lock() = Some(cursor);
+                        }
                         self.status
-                            .set(format!("Search continuation failed: {}", error));
+                            .set(format!("Search continuation failed: {}", error.message));
                     }
                 }
             }
@@ -575,11 +595,24 @@ impl YtGuiApp {
                     self.results.set(list);
                 }
             }
+            GuiMessage::ThumbnailBatchFinished { generation } => {
+                *YT_GUI_THUMBNAIL_ACTIVE.lock() = false;
+                if generation != current_generation() {
+                    return;
+                }
+                request_visible_thumbnails(
+                    self.results.clone(),
+                    self.page.get(),
+                    self.status.clone(),
+                    generation,
+                );
+            }
             GuiMessage::DetailsFinished {
                 generation,
                 video_id,
                 result,
             } => {
+                *YT_GUI_DETAILS_ACTIVE.lock() = false;
                 if generation != current_generation() {
                     return;
                 }
@@ -707,11 +740,11 @@ fn perform_search(
     has_more.set(false);
     loading_more.set(true);
     details.set(DetailState::Empty);
-    *YT_GUI_SEARCH_CURSOR.lock() = Some(YoutubeSearchCursor::new(&query_text));
+    *YT_GUI_SEARCH_CURSOR.lock() = None;
     status.set(format!("Searching: {}", query_text));
     println!("[yt-gui] searching: {}", query_text);
     thread::spawn(move || {
-        let result = load_search_page(PAGE_SIZE);
+        let result = load_search_page(YoutubeSearchCursor::new(&query_text), PAGE_SIZE);
         push_gui_message(GuiMessage::SearchFinished {
             generation: generation_id,
             result,
@@ -831,16 +864,18 @@ fn page_count(len: usize) -> usize {
     len.div_ceil(PAGE_SIZE).max(1)
 }
 
-fn load_search_page(limit: usize) -> core::result::Result<SearchLoadResult, String> {
-    let mut cursor = YT_GUI_SEARCH_CURSOR.lock();
-    let cursor = cursor
-        .as_mut()
-        .ok_or_else(|| String::from("search cursor is not initialized"))?;
-    let page = cursor.next_page(limit)?;
-    Ok(SearchLoadResult {
-        results: page.results.into_iter().map(gui_search_result).collect(),
-        has_more: page.has_more,
-    })
+fn load_search_page(mut cursor: YoutubeSearchCursor, limit: usize) -> SearchLoadOutcome {
+    match cursor.next_page(limit) {
+        Ok(page) => Ok(SearchLoadResult {
+            results: page.results.into_iter().map(gui_search_result).collect(),
+            has_more: page.has_more,
+            cursor,
+        }),
+        Err(message) => Err(SearchLoadError {
+            message,
+            cursor: Some(cursor),
+        }),
+    }
 }
 
 fn load_more_search_results(
@@ -853,10 +888,18 @@ fn load_more_search_results(
         return;
     }
     let generation = current_generation();
+    let cursor = {
+        let mut cursor = YT_GUI_SEARCH_CURSOR.lock();
+        cursor.take()
+    };
+    let Some(cursor) = cursor else {
+        status.set(String::from("Search results are still loading."));
+        return;
+    };
     loading_more.set(true);
     status.set(String::from("Loading more search results."));
     thread::spawn(move || {
-        let result = load_search_page(PAGE_SIZE);
+        let result = load_search_page(cursor, PAGE_SIZE);
         push_gui_message(GuiMessage::SearchMoreFinished {
             generation,
             target_page,
@@ -889,6 +932,14 @@ fn request_visible_thumbnails(
     status: State<String>,
     generation: u64,
 ) {
+    {
+        let mut active = YT_GUI_THUMBNAIL_ACTIVE.lock();
+        if *active {
+            return;
+        }
+        *active = true;
+    }
+
     let mut list = results.get();
     let start = page.saturating_mul(PAGE_SIZE);
     let end = start.saturating_add(PAGE_SIZE).min(list.len());
@@ -906,6 +957,7 @@ fn request_visible_thumbnails(
     }
 
     if requests.is_empty() {
+        *YT_GUI_THUMBNAIL_ACTIVE.lock() = false;
         return;
     }
 
@@ -914,6 +966,9 @@ fn request_visible_thumbnails(
 
     thread::spawn(move || {
         for video_id in requests {
+            if generation != current_generation() {
+                break;
+            }
             let thumbnail = match download_thumbnail_image(&video_id) {
                 Ok(image) => ThumbnailState::Ready(image),
                 Err(error) => {
@@ -927,6 +982,7 @@ fn request_visible_thumbnails(
                 thumbnail,
             });
         }
+        push_gui_message(GuiMessage::ThumbnailBatchFinished { generation });
     });
 }
 
@@ -947,12 +1003,23 @@ fn request_selected_details(
     if detail_state_matches_video(&details.get(), &video_id) {
         return;
     }
+    {
+        let mut active = YT_GUI_DETAILS_ACTIVE.lock();
+        if *active {
+            return;
+        }
+        *active = true;
+    }
 
     details.set(DetailState::Loading {
         video_id: video_id.clone(),
     });
     thread::spawn(move || {
-        let result = youtube_video_details(&video_id).map(GuiVideoDetails::from_youtube);
+        let result = if generation == current_generation() {
+            youtube_video_details(&video_id).map(GuiVideoDetails::from_youtube)
+        } else {
+            Err(String::from("stale details request"))
+        };
         push_gui_message(GuiMessage::DetailsFinished {
             generation,
             video_id,
