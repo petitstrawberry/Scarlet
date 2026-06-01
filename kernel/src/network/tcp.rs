@@ -982,9 +982,7 @@ impl TcpSocket {
             let acked_bytes = acknowledged.wrapping_sub(previous_unacked) as usize;
             let mut send_buf = self.send_buffer.lock();
             let drain_len = acked_bytes.min(send_buf.len());
-            for _ in 0..drain_len {
-                send_buf.pop_front();
-            }
+            drop(send_buf.drain(..drain_len));
         }
 
         // Track the latest acknowledged sequence number

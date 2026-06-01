@@ -40,6 +40,7 @@ use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use spin::RwLock;
 
+use crate::mem::page::ContiguousPages;
 use crate::object::capability::memory_mapping::AccessOp;
 use crate::{
     arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable},
@@ -61,6 +62,7 @@ struct InnerVmm {
     mmap_base: usize,
     page_tables: Vec<Arc<PageTable>>,
     last_search_cache: Option<(usize, usize, usize)>,
+    owner_task_id: Option<usize>,
 }
 
 impl VirtualMemoryManager {
@@ -91,10 +93,34 @@ impl VirtualMemoryManager {
             mmap_base: 0x40000000, // 1 GB base address for mmap (Default)
             page_tables: Vec::new(),
             last_search_cache: None,
+            owner_task_id: None,
         };
         VirtualMemoryManager {
             inner: Arc::new(RwLock::new(inner)),
         }
+    }
+
+    /// Set the owner task ID if this manager does not already have one.
+    ///
+    /// # Arguments
+    /// * `task_id` - Task ID owning this virtual address space.
+    pub fn set_owner_task_id_if_unset(&self, task_id: usize) {
+        let mut g = self.inner.write();
+        if g.owner_task_id.is_none() {
+            g.owner_task_id = Some(task_id);
+        }
+    }
+
+    fn owner_task_id(&self) -> Option<usize> {
+        self.inner.read().owner_task_id
+    }
+
+    fn private_page_allocation_owner(&self) -> Result<&'static crate::task::Task, &'static str> {
+        let owner_task_id = self
+            .owner_task_id()
+            .ok_or("VM manager has no owner task for private COW allocation")?;
+        crate::sched::scheduler::get_task_by_id(owner_task_id)
+            .ok_or("VM manager owner task is not available for private COW allocation")
     }
 
     /// Sets the ASID (Address Space ID) for the virtual memory manager.
@@ -559,9 +585,11 @@ impl VirtualMemoryManager {
                     // page on any resolved fault. Fork COW owners allow reads to
                     // share a read-only page and request a copy only on stores.
                     if !memory_map.is_shared && owner.private_fault_requires_copy(&access) {
-                        let new_ptr = crate::mem::page::allocate_raw_pages(1);
-                        if !new_ptr.is_null() {
-                            let new_paddr = crate::vm::addr::virt_to_phys(new_ptr as usize);
+                        if let Some(root_pagetable) = self.get_root_page_table() {
+                            let owner_task = self.private_page_allocation_owner()?;
+                            let new_alloc = ContiguousPages::new(1)
+                                .ok_or("Failed to allocate page for private mapping COW")?;
+                            let new_paddr = new_alloc.as_paddr();
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     crate::vm::addr::phys_to_virt(res.paddr_page_base) as *const u8,
@@ -593,31 +621,21 @@ impl VirtualMemoryManager {
                                     }
                                 }
                                 Err(_) => {
-                                    // SAFETY: new_paddr was just allocated by allocate_raw_pages.
-                                    unsafe {
-                                        crate::mem::page::free_raw_pages(
-                                            crate::vm::addr::phys_to_virt(new_paddr) as *mut _,
-                                            1,
-                                        );
-                                    }
                                     return Err("Failed to add COW mapping to VM manager");
                                 }
                             }
-                            if let Some(root_pagetable) = self.get_root_page_table() {
-                                root_pagetable.map(
-                                    self.get_asid(),
-                                    page_vaddr,
-                                    new_paddr,
-                                    perms,
-                                    true,
-                                    access.op == AccessOp::Store,
-                                );
-                                return Ok(());
-                            } else {
-                                return Err("No root page table available for COW mapping");
-                            }
+                            owner_task.page_allocations.write().push(new_alloc);
+                            root_pagetable.map(
+                                self.get_asid(),
+                                page_vaddr,
+                                new_paddr,
+                                perms,
+                                true,
+                                access.op == AccessOp::Store,
+                            );
+                            return Ok(());
                         } else {
-                            return Err("Failed to allocate page for private mapping COW");
+                            return Err("No root page table available for COW mapping");
                         }
                     }
 

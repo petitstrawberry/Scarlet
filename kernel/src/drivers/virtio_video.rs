@@ -447,6 +447,17 @@ impl VirtioVideoDevice {
         }
     }
 
+    fn ensure_session_owned_by_current_task(
+        &self,
+        session: &VideoSession,
+    ) -> Result<usize, &'static str> {
+        let owner_task_id = self.current_owner_task_id()?;
+        if *session.owner_task_id.lock() != Some(owner_task_id) {
+            return Err("VirtIO video stream session is not owned by current task");
+        }
+        Ok(owner_task_id)
+    }
+
     fn release_session(&self, session: &VideoSession) -> Result<(), &'static str> {
         if session.pending_decode.lock().is_some() {
             return Err("VirtIO video stream session has pending decode");
@@ -1492,10 +1503,7 @@ impl VirtioVideoDevice {
             return Err(e);
         }
         let session = self.session_by_stream_id(stream_id)?;
-        let owner_task_id = self.current_owner_task_id()?;
-        if *session.owner_task_id.lock() != Some(owner_task_id) {
-            return Err("VirtIO video stream session is not owned by current task");
-        }
+        self.ensure_session_owned_by_current_task(session)?;
         let Some(frame) = session.mapped_frame.lock().take() else {
             return Ok(0);
         };
@@ -1524,6 +1532,7 @@ impl VirtioVideoDevice {
             return Err(e);
         }
         let session = self.session_by_stream_id(stream_id)?;
+        self.ensure_session_owned_by_current_task(session)?;
         let Some(frame) = session.mapped_frame.lock().take() else {
             return Ok(0);
         };
@@ -1733,6 +1742,8 @@ impl MemoryMappingOps for VirtioVideoDevice {
         if length > MAPPED_BUFFER_BYTES - session_offset {
             return Err("VirtIO video mmap length exceeds buffer size");
         }
+        let owner_task_id = self.current_owner_task_id()?;
+        self.claim_session(session, owner_task_id)?;
         self.ensure_mapped_buffer(session)?;
         let mapped_buffer = session.mapped_buffer.read();
         let buffer = mapped_buffer

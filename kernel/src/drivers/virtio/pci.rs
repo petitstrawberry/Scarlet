@@ -52,6 +52,7 @@ const VIRTIO_PCI_MODERN_SOUND_DEVICE_ID: u16 = 0x1059;
 const VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID: u16 = 0x105f;
 
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static VIDEO_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Mapped register blocks for a VirtIO PCI function.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioPciTransport {
@@ -331,6 +332,8 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID => {
+            let id = VIDEO_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let name = format!("vvideo{}", id);
             let dev = Arc::new(VirtioVideoDevice::new_pci(transport));
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
@@ -341,8 +344,8 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             }
 
             let registered: Arc<dyn Device> = dev;
-            DeviceManager::get_manager().register_device_with_name(format!("vvideo0"), registered);
-            println!("[virtio-pci] Registered video decoder device vvideo0");
+            DeviceManager::get_manager().register_device_with_name(name.clone(), registered);
+            println!("[virtio-pci] Registered video decoder device {}", name);
             Ok(())
         }
         _ => Err("Unsupported VirtIO PCI device"),

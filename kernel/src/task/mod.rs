@@ -2992,6 +2992,14 @@ mod tests {
         let child_private_mmap = child.vm_manager.search_memory_map(vaddr).unwrap();
         assert_eq!(child_private_mmap.pmarea.start, child_private_paddr);
         assert!(child_private_mmap.owner.is_none());
+        assert!(
+            child
+                .page_allocations
+                .read()
+                .iter()
+                .any(|alloc| { alloc.as_paddr() == child_private_paddr && alloc.len() == 1 }),
+            "Child COW private page should be tracked for reclaim"
+        );
     }
 
     #[test_case]

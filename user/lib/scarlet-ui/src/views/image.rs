@@ -13,6 +13,7 @@ use crate::element::{Element, RenderElement, ElementRenderObject};
 use crate::geometry::Size;
 use crate::view::View;
 use std::fs::File;
+use std::io::Read;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
@@ -335,9 +336,7 @@ impl ElementRenderObject for ImageRenderObject {
     }
 
     fn clear_buffer(&mut self) {
-        if let Some(buffer) = self.buffer.as_mut() {
-            buffer.clear(Color::TRANSPARENT);
-        }
+        self.buffer = None;
     }
 }
 
@@ -404,7 +403,7 @@ fn load_image_path(path: &str) -> Option<BitmapImage> {
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
-        let read = file.read(&mut chunk).ok()?;
+        let read = Read::read(&mut file, &mut chunk).ok()?;
         if read == 0 {
             break;
         }
