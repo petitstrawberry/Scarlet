@@ -55,7 +55,7 @@ pub struct VirtualMemoryManager {
     inner: Arc<RwLock<InnerVmm>>, // shared, internally synchronized
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct InnerVmm {
     memmap: BTreeMap<usize, VirtualMemoryMap>,
     asid: u16,
@@ -63,6 +63,7 @@ struct InnerVmm {
     page_tables: Vec<Arc<PageTable>>,
     last_search_cache: Option<(usize, usize, usize)>,
     owner_task_id: Option<usize>,
+    private_page_allocations: Vec<ContiguousPages>,
 }
 
 impl VirtualMemoryManager {
@@ -94,6 +95,7 @@ impl VirtualMemoryManager {
             page_tables: Vec::new(),
             last_search_cache: None,
             owner_task_id: None,
+            private_page_allocations: Vec::new(),
         };
         VirtualMemoryManager {
             inner: Arc::new(RwLock::new(inner)),
@@ -111,16 +113,16 @@ impl VirtualMemoryManager {
         }
     }
 
-    fn owner_task_id(&self) -> Option<usize> {
-        self.inner.read().owner_task_id
-    }
+    fn track_private_page_allocation(&self, alloc: ContiguousPages) {
+        let owner_task_id = self.inner.read().owner_task_id;
+        if let Some(owner_task_id) = owner_task_id {
+            if let Some(owner_task) = crate::sched::scheduler::get_task_by_id(owner_task_id) {
+                owner_task.page_allocations.write().push(alloc);
+                return;
+            }
+        }
 
-    fn private_page_allocation_owner(&self) -> Result<&'static crate::task::Task, &'static str> {
-        let owner_task_id = self
-            .owner_task_id()
-            .ok_or("VM manager has no owner task for private COW allocation")?;
-        crate::sched::scheduler::get_task_by_id(owner_task_id)
-            .ok_or("VM manager owner task is not available for private COW allocation")
+        self.inner.write().private_page_allocations.push(alloc);
     }
 
     /// Sets the ASID (Address Space ID) for the virtual memory manager.
@@ -586,7 +588,6 @@ impl VirtualMemoryManager {
                     // share a read-only page and request a copy only on stores.
                     if !memory_map.is_shared && owner.private_fault_requires_copy(&access) {
                         if let Some(root_pagetable) = self.get_root_page_table() {
-                            let owner_task = self.private_page_allocation_owner()?;
                             let new_alloc = ContiguousPages::new(1)
                                 .ok_or("Failed to allocate page for private mapping COW")?;
                             let new_paddr = new_alloc.as_paddr();
@@ -624,7 +625,7 @@ impl VirtualMemoryManager {
                                     return Err("Failed to add COW mapping to VM manager");
                                 }
                             }
-                            owner_task.page_allocations.write().push(new_alloc);
+                            self.track_private_page_allocation(new_alloc);
                             root_pagetable.map(
                                 self.get_asid(),
                                 page_vaddr,
