@@ -1,7 +1,9 @@
 use crate::boxed::Box;
+use crate::handle::capability::memory_mapping::{
+    flags as mmap_flags, mmap_anonymous, munmap, prot,
+};
 use crate::syscall::{Syscall, syscall0, syscall1, syscall5};
 use crate::task::{CloneFlags, CloneFlagsDef};
-use crate::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
@@ -10,6 +12,106 @@ use core::time::Duration;
 /// This is the TLS area for the main thread. It is initialized
 /// when `init_main_thread_tls` is called.
 static MAIN_THREAD_TLS: AtomicUsize = AtomicUsize::new(0);
+
+const PAGE_SIZE: usize = 4096;
+const STACK_SIZE: usize = 256 * 1024;
+const STACK_ALIGN: usize = 16;
+const TLS_MAPPING_SIZE: usize = PAGE_SIZE;
+const TLS_SIZE: usize = TLS_MAPPING_SIZE;
+const TLS_CLEANUP_OFFSET: usize = 2048;
+const THREAD_CLEANUP_MAGIC: usize = 0x5343_5448_5244_0001;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ThreadCleanupRecord {
+    magic: usize,
+    stack_mapping_base: usize,
+    stack_mapping_len: usize,
+    tls_mapping_base: usize,
+    tls_mapping_len: usize,
+}
+
+struct ThreadStart<F>
+where
+    F: FnOnce() + Send + 'static,
+{
+    closure: Option<F>,
+    stack_mapping_base: usize,
+    stack_mapping_len: usize,
+    tls_mapping_base: usize,
+    tls_mapping_len: usize,
+}
+
+struct ThreadStackMapping {
+    mapping_base: usize,
+    mapping_len: usize,
+    stack_base: usize,
+    stack_len: usize,
+}
+
+fn allocate_thread_stack() -> Result<ThreadStackMapping, &'static str> {
+    let mapping_len = STACK_SIZE + PAGE_SIZE;
+    let mapping_base = mmap_anonymous(0, mapping_len, prot::NONE, mmap_flags::PRIVATE)
+        .map_err(|_| "Failed to allocate thread stack guard")?;
+    let stack_base = mapping_base + PAGE_SIZE;
+
+    if mmap_anonymous(
+        stack_base,
+        STACK_SIZE,
+        prot::READ | prot::WRITE,
+        mmap_flags::PRIVATE | mmap_flags::FIXED,
+    )
+    .is_err()
+    {
+        let _ = munmap(mapping_base, mapping_len);
+        return Err("Failed to allocate thread stack");
+    }
+
+    Ok(ThreadStackMapping {
+        mapping_base,
+        mapping_len,
+        stack_base,
+        stack_len: STACK_SIZE,
+    })
+}
+
+fn allocate_thread_tls() -> Result<usize, &'static str> {
+    mmap_anonymous(
+        0,
+        TLS_MAPPING_SIZE,
+        prot::READ | prot::WRITE,
+        mmap_flags::PRIVATE,
+    )
+    .map_err(|_| "Failed to allocate thread TLS")
+}
+
+fn cleanup_thread_mappings(
+    stack_mapping_base: usize,
+    stack_mapping_len: usize,
+    tls_mapping_base: usize,
+    tls_mapping_len: usize,
+) {
+    let _ = munmap(stack_mapping_base, stack_mapping_len);
+    let _ = munmap(tls_mapping_base, tls_mapping_len);
+}
+
+fn write_thread_cleanup_record(
+    tls_mapping_base: usize,
+    stack_mapping_base: usize,
+    stack_mapping_len: usize,
+) {
+    let record = ThreadCleanupRecord {
+        magic: THREAD_CLEANUP_MAGIC,
+        stack_mapping_base,
+        stack_mapping_len,
+        tls_mapping_base,
+        tls_mapping_len: TLS_MAPPING_SIZE,
+    };
+    unsafe {
+        let ptr = (tls_mapping_base + TLS_CLEANUP_OFFSET) as *mut ThreadCleanupRecord;
+        ptr.write(record);
+    }
+}
 
 /// Get the current thread's TLS base pointer
 ///
@@ -48,8 +150,7 @@ pub unsafe fn init_main_thread_tls() {
         return; // Already initialized
     }
 
-    // Allocate TLS area for main thread (same size as spawned threads)
-    const TLS_SIZE: usize = 1024; // Enough room for multiple TLS variables
+    // Allocate TLS area for main thread (same usable size as spawned threads)
     let tls_box: Box<[u8; TLS_SIZE]> = crate::boxed::Box::new([0u8; TLS_SIZE]);
     let tls_ptr = Box::into_raw(tls_box) as usize;
 
@@ -155,32 +256,32 @@ fn spawn_impl<F>(f: F, _name: Option<&'static str>) -> Result<JoinHandle, &'stat
 where
     F: FnOnce() + Send + 'static,
 {
-    // Keep the allocation type consistent with the typed trampoline.
-    // Using a trait object here and reconstructing it as `Box<F>` is UB.
-    let closure: Box<F> = Box::new(f);
-    let closure_ptr = Box::into_raw(closure) as usize;
-
-    // Allocate thread stack (256KB - reasonable size for embedded system).
-    // Keep this as `u8` so we don't require high-alignment allocations from the allocator.
-    const STACK_SIZE: usize = 256 * 1024;
-    const STACK_ALIGN: usize = 16;
-    let stack: Vec<u8> = crate::vec![0u8; STACK_SIZE];
-    let stack_base = stack.as_ptr() as usize;
-    let stack_end = stack_base + STACK_SIZE;
+    // Allocate the thread stack like libc does: as an anonymous mapping owned by
+    // the threading runtime, not by the general heap allocator.
+    let stack = allocate_thread_stack()?;
+    let stack_end = stack.stack_base + stack.stack_len;
 
     // Stack grows downward, so set SP to top of stack minus 16 bytes.
     // Keep it 16-byte aligned (AArch64/RISC-V ABI friendly).
     let stack_top = (stack_end - 16) & !(STACK_ALIGN - 1);
 
-    // Leak stack (child thread will use it, freed on thread exit)
-    core::mem::forget(stack);
+    let tls_ptr = match allocate_thread_tls() {
+        Ok(ptr) => ptr,
+        Err(e) => {
+            let _ = munmap(stack.mapping_base, stack.mapping_len);
+            return Err(e);
+        }
+    };
+    write_thread_cleanup_record(tls_ptr, stack.mapping_base, stack.mapping_len);
 
-    // Allocate TLS (Thread Local Storage) for the new thread
-    // For now, we allocate a simple TLS area. In a full implementation,
-    // this would include thread-local variables, errno, etc.
-    const TLS_SIZE: usize = 1024; // Reserve space for TLS variables
-    let tls_box: Box<[u8; TLS_SIZE]> = crate::boxed::Box::new([0u8; TLS_SIZE]);
-    let tls_ptr = Box::into_raw(tls_box) as usize;
+    let start: Box<ThreadStart<F>> = Box::new(ThreadStart {
+        closure: Some(f),
+        stack_mapping_base: stack.mapping_base,
+        stack_mapping_len: stack.mapping_len,
+        tls_mapping_base: tls_ptr,
+        tls_mapping_len: TLS_MAPPING_SIZE,
+    });
+    let start_ptr = Box::into_raw(start) as usize;
 
     // Set up clone flags for thread creation (share VM, FS, Files, Thread group)
     let mut flags = CloneFlags::new();
@@ -190,24 +291,27 @@ where
     flags.set(CloneFlagsDef::Fs); // Share filesystem context
     flags.set(CloneFlagsDef::Files); // Share file descriptors
 
-    // Use a typed trampoline that knows about F
-    // Clone with: flags, stack, trampoline function, closure pointer, TLS pointer
+    // Use a typed trampoline that knows about F.
+    // Clone with: flags, stack, trampoline function, start packet, TLS pointer.
     let result = syscall5(
         Syscall::Clone,
         flags.get_raw() as usize,
         stack_top,
         thread_typed_trampoline::<F> as *const () as usize,
-        closure_ptr,
+        start_ptr,
         tls_ptr, // TLS pointer as 5th argument
     );
 
     if result == usize::MAX {
         // Failed to create thread
         unsafe {
-            let _ = Box::from_raw(closure_ptr as *mut F);
-            // Reconstruct and drop TLS to free it
-            let _ = Box::from_raw(tls_ptr as *mut [u8; 1024]);
-            // TODO: free stack
+            let start = Box::from_raw(start_ptr as *mut ThreadStart<F>);
+            cleanup_thread_mappings(
+                start.stack_mapping_base,
+                start.stack_mapping_len,
+                start.tls_mapping_base,
+                start.tls_mapping_len,
+            );
         }
         return Err("Failed to create thread");
     }
@@ -220,18 +324,60 @@ where
 
 /// Typed thread trampoline - knows the closure type F
 #[inline(never)]
-extern "C" fn thread_typed_trampoline<F>(closure_ptr: usize) -> !
+extern "C" fn thread_typed_trampoline<F>(start_ptr: usize) -> !
 where
     F: FnOnce() + Send + 'static,
 {
-    // Reconstruct the Box<F> from the pointer
-    unsafe {
-        let closure = Box::from_raw(closure_ptr as *mut F);
-        closure();
+    let mut start = unsafe { Box::from_raw(start_ptr as *mut ThreadStart<F>) };
+    let Some(closure) = start.closure.take() else {
+        drop(start);
+        exit_current_thread(-1);
+    };
+
+    closure();
+    drop(start);
+
+    exit_current_thread(0);
+}
+
+fn exit_thread_with_cleanup(
+    code: i32,
+    stack_mapping_base: usize,
+    stack_mapping_len: usize,
+    tls_mapping_base: usize,
+    tls_mapping_len: usize,
+) -> ! {
+    syscall5(
+        Syscall::ThreadExitCleanup,
+        code as usize,
+        stack_mapping_base,
+        stack_mapping_len,
+        tls_mapping_base,
+        tls_mapping_len,
+    );
+    unreachable!("thread cleanup exit syscall should not return");
+}
+
+pub(crate) fn exit_current_thread(code: i32) -> ! {
+    let tls_base = tls_pointer();
+    if tls_base != 0 {
+        let record = unsafe {
+            let ptr = (tls_base + TLS_CLEANUP_OFFSET) as *const ThreadCleanupRecord;
+            ptr.read()
+        };
+        if record.magic == THREAD_CLEANUP_MAGIC {
+            exit_thread_with_cleanup(
+                code,
+                record.stack_mapping_base,
+                record.stack_mapping_len,
+                record.tls_mapping_base,
+                record.tls_mapping_len,
+            );
+        }
     }
 
-    // Exit the thread (not the entire process)
-    crate::task::exit_thread(0);
+    syscall1(Syscall::Exit, code as usize);
+    unreachable!("exit_thread syscall should not return");
 }
 
 /// Thread Local Storage key

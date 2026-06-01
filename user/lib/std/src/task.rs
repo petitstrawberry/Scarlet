@@ -143,8 +143,7 @@ pub fn exit(code: i32) -> ! {
 /// loop {}
 /// ```
 pub fn exit_thread(code: i32) -> ! {
-    syscall1(Syscall::Exit, code as usize);
-    unreachable!("exit_thread syscall should not return");
+    crate::thread::exit_current_thread(code);
 }
 
 /// Exits all tasks in the current thread group

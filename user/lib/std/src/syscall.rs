@@ -36,6 +36,7 @@ pub enum Syscall {
     GetTls = 31,
     SetTidAddress = 32,
     ThreadDetach = 33,
+    ThreadExitCleanup = 34,
 
     // ABI Zone Management
     RegisterAbiZone = 90,

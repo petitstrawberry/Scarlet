@@ -1844,6 +1844,13 @@ impl Task {
     /// * `status` - The exit status
     ///
     pub fn exit(&self, status: i32) {
+        self.exit_with_cleanup(status, |_| {});
+    }
+
+    pub(crate) fn exit_with_cleanup<F>(&self, status: i32, cleanup: F)
+    where
+        F: FnOnce(&Task),
+    {
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -1855,6 +1862,7 @@ impl Task {
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        cleanup(self);
         self.reparent_children();
 
         match self.get_parent_id() {

@@ -29,6 +29,15 @@ impl AnonymousPageOwner {
     }
 }
 
+impl Drop for AnonymousPageOwner {
+    fn drop(&mut self) {
+        let pages = core::mem::take(&mut *self.pages.write());
+        for (_, paddr) in pages {
+            free_raw_pages(phys_to_virt(paddr) as *mut _, 1);
+        }
+    }
+}
+
 impl MemoryMappingOps for AnonymousPageOwner {
     fn get_mapping_info(
         &self,
