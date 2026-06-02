@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use scarlet_ui::{Color, TextGridBuffer, TextGridCell, TextGridCursor};
+use scarlet_ui::{Color, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 const SCROLLBACK_LIMIT: usize = 2000;
 const CSI_PARAM_LIMIT: usize = 16;
@@ -131,15 +131,16 @@ impl VtScreen {
     ///
     /// Cursor position suitable for [`scarlet_ui::TextGrid`].
     pub fn cursor(&self) -> TextGridCursor {
+        let column = self.display_cursor_column();
         if self.scrollback_offset > 0 {
             return TextGridCursor {
-                column: self.cursor_column,
+                column,
                 row: self.cursor_row,
                 visible: false,
             };
         }
         TextGridCursor {
-            column: self.cursor_column,
+            column,
             row: self.cursor_row,
             visible: self.cursor_visible,
         }
@@ -182,6 +183,7 @@ impl VtScreen {
         self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
         self.saved_cursor_column = self.saved_cursor_column.min(self.columns.saturating_sub(1));
         self.saved_cursor_row = self.saved_cursor_row.min(self.rows.saturating_sub(1));
+        self.normalize_cursor_column();
     }
 
     /// Feed bytes from a PTY master into the screen model.
@@ -447,6 +449,11 @@ impl VtScreen {
             self.scroll_up(1);
             self.cursor_row = self.rows.saturating_sub(1);
         }
+        let width = text_grid_cell_width(ch);
+        if width == 2 && self.cursor_column + 1 >= self.columns {
+            self.cursor_column = 0;
+            self.line_feed();
+        }
 
         let mut cell = TextGridCell::new(ch, self.foreground, self.background);
         cell.bold = self.bold;
@@ -455,11 +462,22 @@ impl VtScreen {
         cell.underline = self.underline;
         cell.inverse = self.inverse;
         cell.strikethrough = self.strikethrough;
+
+        self.clear_overlapped_wide_cell(self.cursor_column, self.cursor_row);
         let _ = self
             .grid
             .set_cell(self.cursor_column, self.cursor_row, cell);
+        if width == 2 {
+            let _ = self.grid.set_cell(
+                self.cursor_column + 1,
+                self.cursor_row,
+                self.continuation_cell(),
+            );
+        } else if text_grid_cell_width(ch) == 1 {
+            self.clear_following_wide_continuation(self.cursor_column, self.cursor_row);
+        }
 
-        self.cursor_column += 1;
+        self.cursor_column += width;
         if self.cursor_column >= self.columns {
             self.cursor_column = 0;
             self.line_feed();
@@ -477,12 +495,14 @@ impl VtScreen {
     fn backspace(&mut self) {
         if self.cursor_column > 0 {
             self.cursor_column -= 1;
+            self.normalize_cursor_column();
         }
     }
 
     fn tab(&mut self) {
         let next = ((self.cursor_column / 8) + 1).saturating_mul(8);
         self.cursor_column = next.min(self.columns.saturating_sub(1));
+        self.normalize_cursor_column_forward();
     }
 
     fn set_cursor(&mut self, column: usize, row: usize) {
@@ -492,10 +512,12 @@ impl VtScreen {
 
     fn set_cursor_column(&mut self, column: usize) {
         self.cursor_column = column.min(self.columns.saturating_sub(1));
+        self.normalize_cursor_column();
     }
 
     fn set_cursor_row(&mut self, row: usize) {
         self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.normalize_cursor_column();
     }
 
     fn save_cursor(&mut self) {
@@ -506,10 +528,12 @@ impl VtScreen {
     fn restore_cursor(&mut self) {
         self.cursor_column = self.saved_cursor_column.min(self.columns.saturating_sub(1));
         self.cursor_row = self.saved_cursor_row.min(self.rows.saturating_sub(1));
+        self.normalize_cursor_column();
     }
 
     fn move_cursor_up(&mut self, count: usize) {
         self.cursor_row = self.cursor_row.saturating_sub(count);
+        self.normalize_cursor_column();
     }
 
     fn move_cursor_down(&mut self, count: usize) {
@@ -517,6 +541,7 @@ impl VtScreen {
             .cursor_row
             .saturating_add(count)
             .min(self.rows.saturating_sub(1));
+        self.normalize_cursor_column();
     }
 
     fn move_cursor_right(&mut self, count: usize) {
@@ -524,10 +549,12 @@ impl VtScreen {
             .cursor_column
             .saturating_add(count)
             .min(self.columns.saturating_sub(1));
+        self.normalize_cursor_column_forward();
     }
 
     fn move_cursor_left(&mut self, count: usize) {
         self.cursor_column = self.cursor_column.saturating_sub(count);
+        self.normalize_cursor_column();
     }
 
     fn erase_display(&mut self, mode: usize) {
@@ -690,6 +717,75 @@ impl VtScreen {
         cell.inverse = self.inverse;
         cell.strikethrough = self.strikethrough;
         cell
+    }
+
+    fn continuation_cell(&self) -> TextGridCell {
+        let mut cell = TextGridCell::new('\0', self.foreground, self.background);
+        cell.bold = self.bold;
+        cell.faint = self.faint;
+        cell.italic = self.italic;
+        cell.underline = self.underline;
+        cell.inverse = self.inverse;
+        cell.strikethrough = self.strikethrough;
+        cell
+    }
+
+    fn clear_overlapped_wide_cell(&mut self, column: usize, row: usize) {
+        if column > 0
+            && self
+                .grid
+                .cell(column, row)
+                .is_some_and(|cell| cell.ch == '\0')
+        {
+            let _ = self.grid.set_cell(column - 1, row, self.blank_cell());
+        }
+        self.clear_following_wide_continuation(column, row);
+    }
+
+    fn clear_following_wide_continuation(&mut self, column: usize, row: usize) {
+        let Some(cell) = self.grid.cell(column, row) else {
+            return;
+        };
+        if text_grid_cell_width(cell.ch) == 2 && column + 1 < self.columns {
+            let _ = self.grid.set_cell(column + 1, row, self.blank_cell());
+        }
+    }
+
+    fn display_cursor_column(&self) -> usize {
+        if self.cursor_column > 0
+            && self
+                .grid
+                .cell(self.cursor_column, self.cursor_row)
+                .is_some_and(|cell| cell.ch == '\0')
+        {
+            self.cursor_column - 1
+        } else {
+            self.cursor_column
+        }
+    }
+
+    fn normalize_cursor_column(&mut self) {
+        if self.cursor_column > 0
+            && self
+                .grid
+                .cell(self.cursor_column, self.cursor_row)
+                .is_some_and(|cell| cell.ch == '\0')
+        {
+            self.cursor_column -= 1;
+        }
+    }
+
+    fn normalize_cursor_column_forward(&mut self) {
+        if self
+            .grid
+            .cell(self.cursor_column, self.cursor_row)
+            .is_some_and(|cell| cell.ch == '\0')
+        {
+            self.cursor_column = self
+                .cursor_column
+                .saturating_add(1)
+                .min(self.columns.saturating_sub(1));
+        }
     }
 
     fn push_scrollback_row(&mut self, row: usize) {

@@ -69,6 +69,58 @@ const TITLEBAR_CONTROL_COUNT: u32 = 3;
 const WINDOW_CORNER_RADIUS: u32 = 0;
 const WINDOW_BORDER_WIDTH: u32 = 2; // 1 outer border + 1 inner highlight
 
+/// Layout metrics for the content area inside a top-level window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowContentLayout {
+    offset: Point,
+    decoration_size: Size,
+}
+
+impl WindowContentLayout {
+    /// Create content layout metrics for a window decoration mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `decorated` - Whether the window has a titlebar and border.
+    ///
+    /// # Returns
+    ///
+    /// Content offset and total decoration size in ScarletUI logical pixels.
+    pub const fn new(decorated: bool) -> Self {
+        if decorated {
+            let border_width = WINDOW_BORDER_WIDTH as f32;
+            let titlebar_height = TITLEBAR_HEIGHT as f32;
+            Self {
+                offset: Point::new(border_width, titlebar_height),
+                decoration_size: Size::new(border_width * 2.0, titlebar_height + border_width),
+            }
+        } else {
+            Self {
+                offset: Point::ZERO,
+                decoration_size: Size::ZERO,
+            }
+        }
+    }
+
+    /// Get the content area's origin relative to the window origin.
+    ///
+    /// # Returns
+    ///
+    /// Content origin in ScarletUI logical pixels.
+    pub const fn offset(&self) -> Point {
+        self.offset
+    }
+
+    /// Get the total non-content size contributed by decorations.
+    ///
+    /// # Returns
+    ///
+    /// Horizontal and vertical decoration size in ScarletUI logical pixels.
+    pub const fn decoration_size(&self) -> Size {
+        self.decoration_size
+    }
+}
+
 /// Window View - top-level window container
 ///
 /// Window provides window-level properties like title, size, and decorations.
@@ -910,24 +962,15 @@ impl WindowRenderObject {
 
         let buffer = self.buffer.as_mut().unwrap();
 
-        let border_offset = if self.decorated {
-            WINDOW_BORDER_WIDTH as i32
-        } else {
-            0
-        };
-
-        let titlebar_height = if self.decorated {
-            TITLEBAR_HEIGHT as i32
-        } else {
-            0
-        };
+        let content_layout = WindowContentLayout::new(self.decorated);
+        let content_offset = content_layout.offset();
 
         for child_buffer in child_buffers {
             let scale_milli = buffer.scale_milli();
             let physical_x =
-                ((border_offset as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
+                ((content_offset.x as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
             let physical_y =
-                ((titlebar_height as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
+                ((content_offset.y as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
             // Composite child inside border, below titlebar
             buffer.composite(
                 child_buffer,
@@ -1096,22 +1139,13 @@ impl ElementRenderObject for WindowRenderObject {
             scarlet_std::println!("[WindowRenderObject::layout] size={}x{}", size.width, size.height);
         }
 
-        let border_width = if self.decorated {
-            WINDOW_BORDER_WIDTH as f32
-        } else {
-            0.0
-        };
-
-        let titlebar_height = if self.decorated {
-            TITLEBAR_HEIGHT as f32
-        } else {
-            0.0
-        };
-
-        let content_x = border_width;
-        let content_y = titlebar_height;
-        let content_width = libm::ceilf(size.width - border_width * 2.0).max(1.0);
-        let content_height = libm::ceilf(size.height - titlebar_height - border_width).max(1.0);
+        let content_layout = WindowContentLayout::new(self.decorated);
+        let content_offset = content_layout.offset();
+        let decoration_size = content_layout.decoration_size();
+        let content_x = content_offset.x;
+        let content_y = content_offset.y;
+        let content_width = libm::ceilf(size.width - decoration_size.width).max(1.0);
+        let content_height = libm::ceilf(size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
             scarlet_std::println!("[WindowRenderObject::layout] content_area: x={}, y={}, size={}x{}",

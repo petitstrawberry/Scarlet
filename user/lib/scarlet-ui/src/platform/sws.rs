@@ -3,9 +3,10 @@
 //! This implementation uses the sws-client library to create and manage windows.
 
 use crate::buffer::Buffer;
+use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::platform::PlatformWindow;
 use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
@@ -19,6 +20,13 @@ const KEY_RIGHTSHIFT: u16 = 0x36;
 const KEY_LEFTALT: u16 = 0x38;
 const KEY_RIGHTCTRL: u16 = 0x61;
 const KEY_RIGHTALT: u16 = 0x64;
+
+#[derive(Clone, Copy, Debug)]
+struct TextInputContext {
+    context_id: u32,
+    serial: u32,
+    enabled: bool,
+}
 
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
@@ -37,6 +45,7 @@ pub struct SWSPlatformWindow {
     right_control_pressed: bool,
     left_alt_pressed: bool,
     right_alt_pressed: bool,
+    text_input: Option<TextInputContext>,
 }
 
 impl SWSPlatformWindow {
@@ -181,6 +190,7 @@ impl SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            text_input: None,
         })
     }
 
@@ -240,6 +250,99 @@ impl SWSPlatformWindow {
             }
         }
         self.pending_events.push(event);
+    }
+
+    pub fn sync_text_input(&mut self, state: Option<&TextInputElementState>) {
+        let Some(state) = state else {
+            if let Some(context) = self.text_input.as_mut()
+                && context.enabled
+            {
+                if self.conn.disable_text_input(context.context_id).is_ok() {
+                    context.enabled = false;
+                }
+            }
+            return;
+        };
+
+        if self.text_input.is_none() {
+            match self.conn.create_text_input_context(self.surface_id, 0) {
+                Ok((context_id, serial)) => {
+                    self.text_input = Some(TextInputContext {
+                        context_id,
+                        serial,
+                        enabled: false,
+                    });
+                }
+                Err(_) => return,
+            }
+        }
+
+        let Some(context) = self.text_input else {
+            return;
+        };
+        let context_id = context.context_id;
+        let cursor_rect = self.logical_rect_to_physical(state.cursor_rect);
+        let _ = self.conn.set_text_input_cursor_rect(
+            context_id,
+            cursor_rect.origin.x as i32,
+            cursor_rect.origin.y as i32,
+            cursor_rect.size.width.max(1.0) as u32,
+            cursor_rect.size.height.max(1.0) as u32,
+        );
+        let cursor_byte = state.surrounding_text.len() as u32;
+        let _ = self.conn.set_text_input_surrounding_text(
+            context_id,
+            cursor_byte,
+            cursor_byte,
+            &state.surrounding_text,
+        );
+        let _ = self.conn.set_text_input_content_type(
+            context_id,
+            sws_protocol::text_input_content_hints::NONE,
+            sws_protocol::text_input_content_purpose::NORMAL,
+        );
+        let _ = self
+            .conn
+            .commit_text_input_state(context_id, context.serial);
+
+        if !context.enabled && self.conn.enable_text_input(context_id).is_ok() {
+            if let Some(context) = self.text_input.as_mut() {
+                context.enabled = true;
+            }
+        }
+    }
+
+    /// Set a text-input cursor rectangle using ScarletUI logical coordinates.
+    pub fn set_text_input_cursor_rect(
+        &mut self,
+        context_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> core::result::Result<(), sws::Error> {
+        let cursor_rect = self.logical_rect_to_physical(Rect::from_xywh(
+            x as f32,
+            y as f32,
+            width.max(1) as f32,
+            height.max(1) as f32,
+        ));
+        self.conn.set_text_input_cursor_rect(
+            context_id,
+            cursor_rect.origin.x as i32,
+            cursor_rect.origin.y as i32,
+            cursor_rect.size.width.max(1.0) as u32,
+            cursor_rect.size.height.max(1.0) as u32,
+        )
+    }
+
+    fn logical_rect_to_physical(&self, rect: Rect) -> Rect {
+        Rect::from_xywh(
+            self.logical_to_physical_pos(rect.origin.x as i32) as f32,
+            self.logical_to_physical_pos(rect.origin.y as i32) as f32,
+            self.logical_to_physical_len(rect.size.width.max(1.0) as u32) as f32,
+            self.logical_to_physical_len(rect.size.height.max(1.0) as u32) as f32,
+        )
     }
 
     fn map_key_code(code: u16) -> KeyCode {
@@ -454,6 +557,7 @@ impl PlatformWindow for SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            text_input: None,
         })
     }
 
@@ -523,7 +627,10 @@ impl PlatformWindow for SWSPlatformWindow {
                             .saturating_mul(dst_width)
                             .saturating_add(copy_width)
                             .saturating_mul(4);
-                        let row_end = y.saturating_add(1).saturating_mul(dst_width).saturating_mul(4);
+                        let row_end = y
+                            .saturating_add(1)
+                            .saturating_mul(dst_width)
+                            .saturating_mul(4);
                         if row_start < row_end && row_end <= dst_data.len() {
                             dst_data[row_start..row_end].fill(0);
                         }
@@ -704,6 +811,7 @@ impl PlatformWindow for SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            text_input: None,
         })
     }
 
@@ -1007,6 +1115,50 @@ impl SWSPlatformWindow {
                         menu_item_id,
                     });
                 }
+            }
+            SwsEvent::TextInputPreedit {
+                context_id,
+                serial,
+                cursor_byte,
+                anchor_byte,
+                text,
+                spans,
+            } => {
+                self.push_event(Event::TextInputPreedit {
+                    context_id,
+                    serial,
+                    cursor_byte,
+                    anchor_byte,
+                    text,
+                    spans,
+                });
+            }
+            SwsEvent::TextInputCommit {
+                context_id,
+                serial,
+                text,
+            } => {
+                self.push_event(Event::TextInputCommit {
+                    context_id,
+                    serial,
+                    text,
+                });
+            }
+            SwsEvent::TextInputDeleteSurroundingText {
+                context_id,
+                serial,
+                before_bytes,
+                after_bytes,
+            } => {
+                self.push_event(Event::TextInputDeleteSurroundingText {
+                    context_id,
+                    serial,
+                    before_bytes,
+                    after_bytes,
+                });
+            }
+            SwsEvent::TextInputDone { context_id, serial } => {
+                self.push_event(Event::TextInputDone { context_id, serial });
             }
             SwsEvent::FocusChanged {
                 window_id,

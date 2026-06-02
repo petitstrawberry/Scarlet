@@ -3,6 +3,7 @@
 //! Elements are the actual runtime objects that get mounted, laid out, and rendered.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::any::Any;
 
 use crate::geometry::{Point, Rect, Size};
@@ -40,6 +41,13 @@ pub struct WindowSizeLimits {
     pub min: Option<Size>,
     pub max: Option<Size>,
     pub resizable: bool,
+}
+
+/// Text-input state exposed by focused editable elements.
+#[derive(Clone, Debug)]
+pub struct TextInputElementState {
+    pub cursor_rect: Rect,
+    pub surrounding_text: String,
 }
 
 impl WindowSizeLimits {
@@ -301,6 +309,11 @@ pub trait Element {
 
     /// Get per-window size limits if this element represents a Window.
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
+        None
+    }
+
+    /// Get text-input state if this element is the focused editable control.
+    fn text_input_state(&self) -> Option<TextInputElementState> {
         None
     }
 

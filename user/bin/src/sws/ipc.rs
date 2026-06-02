@@ -1,6 +1,6 @@
 //! IPC Server module - handles client connections and messages
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::collections::BTreeMap;
 use std::env;
 use std::handle::Handle;
@@ -8,7 +8,7 @@ use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
-use std::string::{String, ToString};
+use std::string::String;
 use std::sync::Mutex;
 use std::thread::{self, sleep, yield_now};
 use std::vec::Vec;
@@ -86,6 +86,86 @@ static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new
 
 /// Currently focused window ID
 static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
+
+#[derive(Debug, Clone)]
+struct TextInputState {
+    cursor_x: i32,
+    cursor_y: i32,
+    cursor_width: u32,
+    cursor_height: u32,
+    content_hint: u32,
+    content_purpose: u32,
+    text_change_cause: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    surrounding_text: Vec<u8>,
+}
+
+impl TextInputState {
+    fn new() -> Self {
+        Self {
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_width: 0,
+            cursor_height: 0,
+            content_hint: sws_protocol::text_input_content_hints::NONE,
+            content_purpose: sws_protocol::text_input_content_purpose::NORMAL,
+            text_change_cause: sws_protocol::text_input_change_cause::OTHER,
+            cursor_byte: 0,
+            anchor_byte: 0,
+            surrounding_text: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TextInputContext {
+    client_id: usize,
+    context_id: u32,
+    window_id: u32,
+    seat_id: u32,
+    enabled: bool,
+    keyboard_grabbed: bool,
+    serial: u32,
+    pending: TextInputState,
+    current: TextInputState,
+}
+
+#[derive(Debug, Clone)]
+struct InputMethodService {
+    client_id: usize,
+    ime_id: u32,
+    name: String,
+    capabilities: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PendingImeKey {
+    context_id: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TextInputCursorRect {
+    pub window_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+static NEXT_TEXT_INPUT_CONTEXT_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_IME_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_IME_KEY_SERIAL: AtomicU32 = AtomicU32::new(1);
+static TEXT_INPUT_CONTEXTS: Mutex<BTreeMap<u32, TextInputContext>> = Mutex::new(BTreeMap::new());
+static INPUT_METHODS: Mutex<BTreeMap<u32, InputMethodService>> = Mutex::new(BTreeMap::new());
+static ACTIVE_IME_ID: Mutex<Option<u32>> = Mutex::new(None);
+static ACTIVE_TEXT_INPUT_CONTEXT: Mutex<Option<u32>> = Mutex::new(None);
+static PENDING_IME_KEYS: Mutex<BTreeMap<u32, PendingImeKey>> = Mutex::new(BTreeMap::new());
 
 #[derive(Debug)]
 enum FrameIoError {
@@ -589,6 +669,650 @@ pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
         let payload_clone = payload.clone();
         send_message_to_client(client_id, msg_type, payload_clone);
     }
+}
+
+fn active_input_method() -> Option<InputMethodService> {
+    let active_ime_id = *ACTIVE_IME_ID.lock();
+    let ime_id = active_ime_id?;
+    INPUT_METHODS.lock().get(&ime_id).cloned()
+}
+
+fn text_input_context(context_id: u32) -> Option<TextInputContext> {
+    TEXT_INPUT_CONTEXTS.lock().get(&context_id).cloned()
+}
+
+fn send_ime_context_frame(msg_type: u32, context: &TextInputContext) {
+    let Some(ime) = active_input_method() else {
+        return;
+    };
+    let _seat_id = context.seat_id;
+    let state = &context.current;
+    let payload = sws_protocol::payload_ime_context(
+        context.context_id,
+        context.window_id,
+        context.serial,
+        (
+            state.cursor_x,
+            state.cursor_y,
+            state.cursor_width,
+            state.cursor_height,
+        ),
+        state.content_hint,
+        state.content_purpose,
+        state.text_change_cause,
+        state.cursor_byte,
+        state.anchor_byte,
+        &state.surrounding_text,
+    );
+    send_message_to_client(ime.client_id, msg_type, payload);
+}
+
+fn deactivate_context(context_id: u32) {
+    {
+        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+        if let Some(context) = contexts.get_mut(&context_id) {
+            context.keyboard_grabbed = false;
+        }
+    }
+    release_pending_ime_keys(Some(context_id));
+
+    let Some(context) = text_input_context(context_id) else {
+        return;
+    };
+    let Some(ime) = active_input_method() else {
+        return;
+    };
+    let payload = sws_protocol::payload_ime_deactivate(context.context_id, context.serial);
+    send_message_to_client(
+        ime.client_id,
+        sws_protocol::server_msg::IME_DEACTIVATE,
+        payload.to_vec(),
+    );
+}
+
+fn activate_text_input_for_window(window_id: u32) {
+    let next_context = {
+        let contexts = TEXT_INPUT_CONTEXTS.lock();
+        contexts
+            .values()
+            .find(|context| context.enabled && context.window_id == window_id)
+            .cloned()
+    };
+
+    let old_context_id = {
+        let mut active = ACTIVE_TEXT_INPUT_CONTEXT.lock();
+        let old_context_id = *active;
+        *active = next_context.as_ref().map(|context| context.context_id);
+        old_context_id
+    };
+
+    if let Some(old_context_id) = old_context_id
+        && next_context
+            .as_ref()
+            .map_or(true, |context| context.context_id != old_context_id)
+    {
+        deactivate_context(old_context_id);
+    }
+
+    if let Some(context) = next_context {
+        send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
+    }
+}
+
+/// Update focused window state for text-input activation.
+pub fn set_focused_window(window_id: u32) {
+    {
+        let mut focused = FOCUSED_WINDOW_ID.lock();
+        *focused = Some(window_id);
+    }
+    activate_text_input_for_window(window_id);
+}
+
+fn create_text_input_context(client_id: usize, window_id: u32, seat_id: u32) -> TextInputContext {
+    let context_id = NEXT_TEXT_INPUT_CONTEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let context = TextInputContext {
+        client_id,
+        context_id,
+        window_id,
+        seat_id,
+        enabled: false,
+        keyboard_grabbed: false,
+        serial: 1,
+        pending: TextInputState::new(),
+        current: TextInputState::new(),
+    };
+    TEXT_INPUT_CONTEXTS
+        .lock()
+        .insert(context_id, context.clone());
+    context
+}
+
+fn destroy_text_input_context(client_id: usize, context_id: u32) {
+    let was_active = *ACTIVE_TEXT_INPUT_CONTEXT.lock() == Some(context_id);
+    if was_active {
+        deactivate_context(context_id);
+    }
+
+    let removed = {
+        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+        match contexts.get(&context_id) {
+            Some(context) if context.client_id == client_id => contexts.remove(&context_id),
+            _ => None,
+        }
+    };
+
+    if removed.is_some() {
+        let mut active = ACTIVE_TEXT_INPUT_CONTEXT.lock();
+        if *active == Some(context_id) {
+            *active = None;
+        }
+    }
+}
+
+fn cleanup_text_input_contexts_for_client(client_id: usize) {
+    let active_id = *ACTIVE_TEXT_INPUT_CONTEXT.lock();
+    if let Some(active_id) = active_id
+        && let Some(context) = text_input_context(active_id)
+        && context.client_id == client_id
+    {
+        deactivate_context(active_id);
+    }
+
+    let removed: Vec<u32> = {
+        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+        let ids: Vec<u32> = contexts
+            .values()
+            .filter(|context| context.client_id == client_id)
+            .map(|context| context.context_id)
+            .collect();
+        for id in &ids {
+            contexts.remove(id);
+        }
+        ids
+    };
+
+    let mut active = ACTIVE_TEXT_INPUT_CONTEXT.lock();
+    if let Some(active_id) = *active
+        && removed.iter().any(|id| *id == active_id)
+    {
+        *active = None;
+        drop(active);
+        deactivate_context(active_id);
+    }
+}
+
+fn set_text_input_enabled(client_id: usize, context_id: u32, enabled: bool) {
+    let window_id = {
+        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+        let Some(context) = contexts.get_mut(&context_id) else {
+            return;
+        };
+        if context.client_id != client_id {
+            return;
+        }
+        context.enabled = enabled;
+        if !enabled {
+            context.keyboard_grabbed = false;
+        }
+        context.window_id
+    };
+
+    let focused_window = *FOCUSED_WINDOW_ID.lock();
+    if enabled && focused_window == Some(window_id) {
+        activate_text_input_for_window(window_id);
+    } else if !enabled {
+        let mut active = ACTIVE_TEXT_INPUT_CONTEXT.lock();
+        if *active == Some(context_id) {
+            *active = None;
+            drop(active);
+            deactivate_context(context_id);
+        }
+    }
+}
+
+fn update_text_input_cursor_rect(
+    client_id: usize,
+    context_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    let Some(context) = contexts.get_mut(&context_id) else {
+        return;
+    };
+    if context.client_id != client_id {
+        return;
+    }
+    context.pending.cursor_x = x;
+    context.pending.cursor_y = y;
+    context.pending.cursor_width = width;
+    context.pending.cursor_height = height;
+}
+
+fn update_text_input_surrounding_text(
+    client_id: usize,
+    context_id: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    text: &[u8],
+) {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    let Some(context) = contexts.get_mut(&context_id) else {
+        return;
+    };
+    if context.client_id != client_id {
+        return;
+    }
+    context.pending.cursor_byte = cursor_byte;
+    context.pending.anchor_byte = anchor_byte;
+    context.pending.surrounding_text.clear();
+    context
+        .pending
+        .surrounding_text
+        .extend_from_slice(&text[..text.len().min(sws_protocol::TEXT_INPUT_MAX_BYTES)]);
+}
+
+fn update_text_input_content_type(client_id: usize, context_id: u32, hint: u32, purpose: u32) {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    let Some(context) = contexts.get_mut(&context_id) else {
+        return;
+    };
+    if context.client_id != client_id {
+        return;
+    }
+    context.pending.content_hint = hint;
+    context.pending.content_purpose = purpose;
+}
+
+fn update_text_input_change_cause(client_id: usize, context_id: u32, cause: u32) {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    let Some(context) = contexts.get_mut(&context_id) else {
+        return;
+    };
+    if context.client_id != client_id {
+        return;
+    }
+    context.pending.text_change_cause = cause;
+}
+
+fn commit_text_input_state(client_id: usize, context_id: u32, client_serial: u32) {
+    let context = {
+        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+        let Some(context) = contexts.get_mut(&context_id) else {
+            return;
+        };
+        if context.client_id != client_id || context.serial != client_serial {
+            return;
+        }
+        context.current = context.pending.clone();
+        context.serial = context.serial.saturating_add(1);
+        context.clone()
+    };
+
+    if *ACTIVE_TEXT_INPUT_CONTEXT.lock() == Some(context_id) && context.enabled {
+        send_ime_context_frame(sws_protocol::server_msg::IME_CONTEXT_STATE, &context);
+    }
+    push_ipc_event(IpcEvent::TextInputContextUpdated { context_id });
+}
+
+fn register_input_method(client_id: usize, name: &[u8], capabilities: u32) -> InputMethodService {
+    let ime_id = NEXT_IME_ID.fetch_add(1, Ordering::Relaxed);
+    let service = InputMethodService {
+        client_id,
+        ime_id,
+        name: String::from_utf8_lossy(name).into_owned(),
+        capabilities,
+    };
+    INPUT_METHODS.lock().insert(ime_id, service.clone());
+
+    let mut active = ACTIVE_IME_ID.lock();
+    if active.is_none() {
+        *active = Some(ime_id);
+    }
+    service
+}
+
+fn set_active_input_method(ime_id: u32) {
+    let exists = INPUT_METHODS.lock().contains_key(&ime_id);
+    if !exists {
+        return;
+    }
+    *ACTIVE_IME_ID.lock() = Some(ime_id);
+    release_pending_ime_keys(None);
+    clear_keyboard_grabs();
+    if let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock()
+        && let Some(context) = text_input_context(context_id)
+    {
+        send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
+    }
+}
+
+fn clear_keyboard_grabs() {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    for context in contexts.values_mut() {
+        context.keyboard_grabbed = false;
+    }
+}
+
+fn drain_pending_ime_keys(context_id: Option<u32>) -> Vec<PendingImeKey> {
+    let mut pending = PENDING_IME_KEYS.lock();
+    if let Some(context_id) = context_id {
+        let key_serials: Vec<u32> = pending
+            .iter()
+            .filter(|(_, key)| key.context_id == context_id)
+            .map(|(serial, _)| *serial)
+            .collect();
+        let mut keys = Vec::new();
+        for key_serial in key_serials {
+            if let Some(key) = pending.remove(&key_serial) {
+                keys.push(key);
+            }
+        }
+        keys
+    } else {
+        let keys = pending.values().cloned().collect();
+        pending.clear();
+        keys
+    }
+}
+
+fn release_pending_ime_keys(context_id: Option<u32>) {
+    for pending in drain_pending_ime_keys(context_id) {
+        send_input_to_window(
+            pending.window_id,
+            pending.time,
+            pending.type_,
+            pending.code,
+            pending.value,
+        );
+        send_input_to_window(
+            pending.window_id,
+            pending.time,
+            super::input::event_types::EV_SYN,
+            0,
+            0,
+        );
+    }
+}
+
+fn set_ime_keyboard_grabbed(client_id: usize, context_id: u32, grabbed: bool) {
+    let Some(ime) = active_input_method() else {
+        return;
+    };
+    if ime.client_id != client_id {
+        return;
+    }
+    let active_context_id = *ACTIVE_TEXT_INPUT_CONTEXT.lock();
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    let Some(context) = contexts.get_mut(&context_id) else {
+        return;
+    };
+    if active_context_id != Some(context_id) || !context.enabled {
+        return;
+    }
+    context.keyboard_grabbed = grabbed;
+    drop(contexts);
+
+    if !grabbed {
+        release_pending_ime_keys(Some(context_id));
+    }
+}
+
+/// Send an IME trigger to the active input method.
+///
+/// Returns `true` when the trigger was delivered and should be consumed.
+pub fn send_input_method_trigger(window_id: u32, time: u64, code: u16) -> bool {
+    let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock() else {
+        return false;
+    };
+    let Some(context) = text_input_context(context_id) else {
+        return false;
+    };
+    if !context.enabled || context.window_id != window_id {
+        return false;
+    }
+    let Some(ime) = active_input_method() else {
+        return false;
+    };
+
+    let payload = sws_protocol::payload_ime_trigger(
+        context.context_id,
+        context.serial,
+        sws_protocol::ime_trigger::TOGGLE,
+        code,
+        time,
+    );
+    send_message_to_client(
+        ime.client_id,
+        sws_protocol::server_msg::IME_TRIGGER,
+        payload.to_vec(),
+    );
+    true
+}
+
+fn cleanup_input_methods_for_client(client_id: usize) {
+    let removed: Vec<u32> = {
+        let mut methods = INPUT_METHODS.lock();
+        let ids: Vec<u32> = methods
+            .values()
+            .filter(|method| method.client_id == client_id)
+            .map(|method| method.ime_id)
+            .collect();
+        for id in &ids {
+            methods.remove(id);
+        }
+        ids
+    };
+
+    let mut active = ACTIVE_IME_ID.lock();
+    if let Some(active_id) = *active
+        && removed.iter().any(|id| *id == active_id)
+    {
+        release_pending_ime_keys(None);
+        clear_keyboard_grabs();
+        *active = INPUT_METHODS.lock().keys().next().copied();
+    }
+}
+
+/// Forward a key event to the active input method.
+///
+/// Returns `true` when SWS queued the event for IME arbitration and the caller
+/// should not deliver it directly to the application yet.
+pub fn send_key_to_input_method(
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> bool {
+    let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock() else {
+        return false;
+    };
+    let Some(context) = text_input_context(context_id) else {
+        return false;
+    };
+    if !context.enabled || !context.keyboard_grabbed || context.window_id != window_id {
+        return false;
+    }
+    let Some(ime) = active_input_method() else {
+        return false;
+    };
+
+    let key_serial = NEXT_IME_KEY_SERIAL.fetch_add(1, Ordering::Relaxed);
+    PENDING_IME_KEYS.lock().insert(
+        key_serial,
+        PendingImeKey {
+            context_id: context.context_id,
+            window_id,
+            time,
+            type_,
+            code,
+            value,
+        },
+    );
+
+    let payload = sws_protocol::payload_ime_key_event(
+        context.context_id,
+        key_serial,
+        window_id,
+        time,
+        type_,
+        code,
+        value,
+    );
+    send_message_to_client(
+        ime.client_id,
+        sws_protocol::server_msg::IME_KEY_EVENT,
+        payload.to_vec(),
+    );
+    true
+}
+
+fn handle_ime_key_handled(key_serial: u32, handled: bool) {
+    let pending = PENDING_IME_KEYS.lock().remove(&key_serial);
+    let Some(pending) = pending else {
+        return;
+    };
+    if handled {
+        return;
+    }
+    send_input_to_window(
+        pending.window_id,
+        pending.time,
+        pending.type_,
+        pending.code,
+        pending.value,
+    );
+    send_input_to_window(
+        pending.window_id,
+        pending.time,
+        super::input::event_types::EV_SYN,
+        0,
+        0,
+    );
+}
+
+fn context_serial_and_window(context_id: u32) -> Option<(u32, u32)> {
+    text_input_context(context_id).map(|context| (context.serial, context.window_id))
+}
+
+pub fn text_input_cursor_rect(context_id: u32) -> Option<TextInputCursorRect> {
+    text_input_context(context_id).map(|context| TextInputCursorRect {
+        window_id: context.window_id,
+        x: context.current.cursor_x,
+        y: context.current.cursor_y,
+        width: context.current.cursor_width,
+        height: context.current.cursor_height,
+    })
+}
+
+fn client_is_active_input_method(client_id: usize) -> bool {
+    let Some(ime_id) = *ACTIVE_IME_ID.lock() else {
+        return false;
+    };
+    INPUT_METHODS
+        .lock()
+        .get(&ime_id)
+        .is_some_and(|service| service.client_id == client_id)
+}
+
+fn client_can_mutate_ime_context(client_id: usize, context_id: u32) -> bool {
+    if !client_is_active_input_method(client_id) {
+        return false;
+    }
+    if *ACTIVE_TEXT_INPUT_CONTEXT.lock() != Some(context_id) {
+        return false;
+    }
+    text_input_context(context_id).is_some_and(|context| context.enabled)
+}
+
+fn send_text_input_done(window_id: u32, context_id: u32, serial: u32) {
+    let payload = sws_protocol::payload_text_input_done(context_id, serial);
+    send_message_to_window(
+        window_id,
+        sws_protocol::server_msg::TEXT_INPUT_DONE,
+        payload.to_vec(),
+    );
+}
+
+fn forward_ime_preedit(
+    context_id: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    text: &[u8],
+    spans: &[u8],
+) {
+    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
+        return;
+    };
+    let payload = sws_protocol::payload_text_input_preedit(
+        context_id,
+        serial,
+        cursor_byte,
+        anchor_byte,
+        text,
+        spans,
+    );
+    send_message_to_window(
+        window_id,
+        sws_protocol::server_msg::TEXT_INPUT_PREEDIT,
+        payload,
+    );
+    send_text_input_done(window_id, context_id, serial);
+}
+
+fn forward_ime_commit(context_id: u32, text: &[u8]) {
+    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
+        return;
+    };
+    println!(
+        "[IpcServer] IME commit context={} window={} serial={} text={}",
+        context_id,
+        window_id,
+        serial,
+        String::from_utf8_lossy(text)
+    );
+    let payload = sws_protocol::payload_text_input_commit(context_id, serial, text);
+    send_message_to_window(
+        window_id,
+        sws_protocol::server_msg::TEXT_INPUT_COMMIT,
+        payload,
+    );
+    send_text_input_done(window_id, context_id, serial);
+}
+
+fn forward_ime_delete_surrounding_text(context_id: u32, before_bytes: u32, after_bytes: u32) {
+    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
+        return;
+    };
+    let payload = sws_protocol::payload_text_input_delete_surrounding_text(
+        context_id,
+        serial,
+        before_bytes,
+        after_bytes,
+    );
+    send_message_to_window(
+        window_id,
+        sws_protocol::server_msg::TEXT_INPUT_DELETE_SURROUNDING_TEXT,
+        payload.to_vec(),
+    );
+    send_text_input_done(window_id, context_id, serial);
+}
+
+fn forward_ime_status(context_id: u32, state: u32, mode_id: u32, flags: u32, mode_label: &[u8]) {
+    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
+        return;
+    };
+    let payload = sws_protocol::payload_text_input_status(
+        context_id, serial, state, mode_id, flags, mode_label,
+    );
+    send_message_to_window(
+        window_id,
+        sws_protocol::server_msg::TEXT_INPUT_STATUS,
+        payload,
+    );
 }
 
 /// Get application session information for a window.
@@ -1761,6 +2485,179 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 push_ipc_event(IpcEvent::GetWindowList { client_id });
             }
+            Ok(ClientMessageRef::TextInputCreate { window_id, seat_id }) => {
+                if !managed_windows.iter().any(|id| *id == window_id) {
+                    continue;
+                }
+                let context = create_text_input_context(client_id, window_id, seat_id);
+                let payload =
+                    protocol::payload_text_input_created(context.context_id, context.serial);
+                if let Err(e) = write_frame(
+                    &mut socket,
+                    protocol::server_msg::TEXT_INPUT_CREATED,
+                    &payload,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send TEXT_INPUT_CREATED: {:?}",
+                        client_id, e
+                    );
+                    break;
+                }
+            }
+            Ok(ClientMessageRef::TextInputDestroy { context_id }) => {
+                destroy_text_input_context(client_id, context_id);
+            }
+            Ok(ClientMessageRef::TextInputEnable { context_id }) => {
+                set_text_input_enabled(client_id, context_id, true);
+            }
+            Ok(ClientMessageRef::TextInputDisable { context_id }) => {
+                set_text_input_enabled(client_id, context_id, false);
+            }
+            Ok(ClientMessageRef::TextInputSetCursorRect {
+                context_id,
+                x,
+                y,
+                width,
+                height,
+            }) => {
+                update_text_input_cursor_rect(client_id, context_id, x, y, width, height);
+            }
+            Ok(ClientMessageRef::TextInputSetSurroundingText {
+                context_id,
+                cursor_byte,
+                anchor_byte,
+                text,
+            }) => {
+                update_text_input_surrounding_text(
+                    client_id,
+                    context_id,
+                    cursor_byte,
+                    anchor_byte,
+                    text,
+                );
+            }
+            Ok(ClientMessageRef::TextInputSetContentType {
+                context_id,
+                hint,
+                purpose,
+            }) => {
+                update_text_input_content_type(client_id, context_id, hint, purpose);
+            }
+            Ok(ClientMessageRef::TextInputSetTextChangeCause { context_id, cause }) => {
+                update_text_input_change_cause(client_id, context_id, cause);
+            }
+            Ok(ClientMessageRef::TextInputCommitState { context_id, serial }) => {
+                commit_text_input_state(client_id, context_id, serial);
+            }
+            Ok(ClientMessageRef::ImeRegister { name, capabilities }) => {
+                let service = register_input_method(client_id, name, capabilities);
+                println!(
+                    "[ClientThread {}] Registered IME #{} name={} capabilities=0x{:x}",
+                    client_id, service.ime_id, service.name, service.capabilities
+                );
+                let payload = protocol::payload_ime_registered(service.ime_id);
+                if let Err(e) =
+                    write_frame(&mut socket, protocol::server_msg::IME_REGISTERED, &payload)
+                {
+                    println!(
+                        "[ClientThread {}] Failed to send IME_REGISTERED: {:?}",
+                        client_id, e
+                    );
+                    break;
+                }
+            }
+            Ok(ClientMessageRef::ImeSetActive { ime_id }) => {
+                set_active_input_method(ime_id);
+            }
+            Ok(ClientMessageRef::ImeKeyHandled {
+                key_serial,
+                handled,
+            }) => {
+                handle_ime_key_handled(key_serial, handled);
+            }
+            Ok(ClientMessageRef::ImeSetPreedit {
+                context_id,
+                cursor_byte,
+                anchor_byte,
+                text,
+                spans,
+            }) => {
+                let clearing_preedit = text.is_empty() && spans.is_empty();
+                if !client_can_mutate_ime_context(client_id, context_id)
+                    && !(clearing_preedit
+                        && client_is_active_input_method(client_id)
+                        && text_input_context(context_id).is_some())
+                {
+                    continue;
+                }
+                forward_ime_preedit(context_id, cursor_byte, anchor_byte, text, spans);
+            }
+            Ok(ClientMessageRef::ImeCommitText { context_id, text }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
+                forward_ime_commit(context_id, text);
+            }
+            Ok(ClientMessageRef::ImeDeleteSurroundingText {
+                context_id,
+                before_bytes,
+                after_bytes,
+            }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
+                forward_ime_delete_surrounding_text(context_id, before_bytes, after_bytes);
+            }
+            Ok(ClientMessageRef::ImeSetStatus {
+                context_id,
+                state,
+                mode_id,
+                flags,
+                mode_label,
+            }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
+                forward_ime_status(context_id, state, mode_id, flags, mode_label);
+            }
+            Ok(ClientMessageRef::ImeSetPopupWindow {
+                context_id,
+                window_id,
+                offset_x,
+                offset_y,
+                visible,
+            }) => {
+                if !client_is_active_input_method(client_id) {
+                    println!(
+                        "[ClientThread {}] Ignoring IME popup from non-active IME client",
+                        client_id
+                    );
+                    continue;
+                }
+                if visible && !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
+                if !managed_windows.iter().any(|id| *id == window_id) {
+                    println!(
+                        "[ClientThread {}] Ignoring IME popup for foreign window {}",
+                        client_id, window_id
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ImeSetPopupWindow {
+                    context_id,
+                    window_id,
+                    offset_x,
+                    offset_y,
+                    visible,
+                });
+            }
+            Ok(ClientMessageRef::ImeGrabKeyboard { context_id }) => {
+                set_ime_keyboard_grabbed(client_id, context_id, true);
+            }
+            Ok(ClientMessageRef::ImeReleaseKeyboard { context_id }) => {
+                set_ime_keyboard_grabbed(client_id, context_id, false);
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }
@@ -1798,6 +2695,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             client_id, client_id
         );
     }
+    cleanup_text_input_contexts_for_client(client_id);
+    cleanup_input_methods_for_client(client_id);
 
     if !disconnected_windows.is_empty() {
         println!(
@@ -1946,6 +2845,18 @@ pub enum IpcEvent {
     SetWindowOpacity {
         window_id: u32,
         opacity: u8,
+    },
+
+    TextInputContextUpdated {
+        context_id: u32,
+    },
+
+    ImeSetPopupWindow {
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
     },
 
     // Extension API events

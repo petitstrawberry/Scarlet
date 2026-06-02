@@ -9,6 +9,7 @@ extern crate alloc;
 extern crate scarlet_std;
 extern crate scarlet_ui_macros;
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::f32;
@@ -24,6 +25,7 @@ struct DemoApp {
     toggle_state: State<bool>,
     counter: State<i32>,
     slider_value: State<f32>,
+    input_text: State<String>,
 }
 
 impl DemoApp {
@@ -40,6 +42,16 @@ impl Application for DemoApp {
                 .font_size(40.0),
             Text::new("ScarletUIの世界からこんにちは!")
                 .font_size(24.0),
+            vstack! {
+                Text::new("TextField")
+                    .font_size(18.0),
+                TextField::new(self.input_text.clone())
+                    .placeholder("IME input")
+                    .frame_width(360.0),
+                Text::new(format!("Input: {}", self.input_text.get()))
+                    .font_size(16.0),
+            }
+            .frame_width(380.0),
             hstack! {
                 Text::new(format!("Toggle State: {}", if self.toggle_state.get() { "ON" } else { "OFF" }))
                     .font_size(20.0),

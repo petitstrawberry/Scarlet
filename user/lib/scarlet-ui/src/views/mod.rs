@@ -20,7 +20,9 @@ pub mod containers;
 pub mod menu;
 pub mod navigation;
 
-pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
+pub use window::{
+    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject,
+};
 pub use window::window_type;
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};
@@ -35,6 +37,7 @@ pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
+    text_grid_cell_width,
 };
 pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
 pub use navigation::{NavigationView, NavigationLink};

@@ -3,7 +3,7 @@
 use crate::TransientFlags;
 use crate::WindowSizeLimits;
 use crate::error::Error;
-use crate::event::{Event, InputEvent};
+use crate::event::{Event, ImeContextState, InputEvent};
 use crate::surface::Surface;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
@@ -252,6 +252,298 @@ impl Connection {
             read_payload: Vec::new(),
             frame_reader: FrameReader::new(),
         })
+    }
+
+    /// Create a text-input context for a surface.
+    pub fn create_text_input_context(
+        &mut self,
+        surface_id: u32,
+        seat_id: u32,
+    ) -> Result<(u32, u32), Error> {
+        let payload = protocol::payload_text_input_create(surface_id, seat_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_CREATE,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            match response {
+                ServerMessage::TextInputCreated { context_id, serial } => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok((context_id, serial));
+                }
+                message if self.queue_async_message(message) => {}
+                _ => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
+            }
+        }
+    }
+
+    pub fn destroy_text_input_context(&mut self, context_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_context_id(context_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_DESTROY,
+            &payload,
+        )
+    }
+
+    pub fn enable_text_input(&mut self, context_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_context_id(context_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_ENABLE,
+            &payload,
+        )
+    }
+
+    pub fn disable_text_input(&mut self, context_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_context_id(context_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_DISABLE,
+            &payload,
+        )
+    }
+
+    pub fn set_text_input_cursor_rect(
+        &mut self,
+        context_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_set_cursor_rect(context_id, x, y, width, height);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_SET_CURSOR_RECT,
+            &payload,
+        )
+    }
+
+    pub fn set_text_input_surrounding_text(
+        &mut self,
+        context_id: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: &str,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_set_surrounding_text(
+            context_id,
+            cursor_byte,
+            anchor_byte,
+            text.as_bytes(),
+        );
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_SET_SURROUNDING_TEXT,
+            &payload,
+        )
+    }
+
+    pub fn set_text_input_content_type(
+        &mut self,
+        context_id: u32,
+        hint: u32,
+        purpose: u32,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_set_content_type(context_id, hint, purpose);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_SET_CONTENT_TYPE,
+            &payload,
+        )
+    }
+
+    pub fn set_text_input_change_cause(
+        &mut self,
+        context_id: u32,
+        cause: u32,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_set_text_change_cause(context_id, cause);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_SET_TEXT_CHANGE_CAUSE,
+            &payload,
+        )
+    }
+
+    pub fn commit_text_input_state(&mut self, context_id: u32, serial: u32) -> Result<(), Error> {
+        let payload = protocol::payload_text_input_commit_state(context_id, serial);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::TEXT_INPUT_COMMIT_STATE,
+            &payload,
+        )
+    }
+
+    /// Register this connection as an input method service.
+    pub fn register_input_method(&mut self, name: &str, capabilities: u32) -> Result<u32, Error> {
+        let payload = protocol::payload_ime_register(name.as_bytes(), capabilities);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_REGISTER,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            match response {
+                ServerMessage::ImeRegistered { ime_id } => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok(ime_id);
+                }
+                message if self.queue_async_message(message) => {}
+                _ => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
+            }
+        }
+    }
+
+    pub fn set_active_input_method(&mut self, ime_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_ime_set_active(ime_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_SET_ACTIVE,
+            &payload,
+        )
+    }
+
+    pub fn ime_key_handled(&mut self, key_serial: u32, handled: bool) -> Result<(), Error> {
+        let payload = protocol::payload_ime_key_handled(key_serial, handled);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_KEY_HANDLED,
+            &payload,
+        )
+    }
+
+    pub fn ime_set_preedit(
+        &mut self,
+        context_id: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: &str,
+        spans: &[u8],
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_ime_set_preedit(
+            context_id,
+            cursor_byte,
+            anchor_byte,
+            text.as_bytes(),
+            spans,
+        );
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_SET_PREEDIT,
+            &payload,
+        )
+    }
+
+    pub fn ime_commit_text(&mut self, context_id: u32, text: &str) -> Result<(), Error> {
+        let payload = protocol::payload_ime_commit_text(context_id, text.as_bytes());
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_COMMIT_TEXT,
+            &payload,
+        )
+    }
+
+    pub fn ime_delete_surrounding_text(
+        &mut self,
+        context_id: u32,
+        before_bytes: u32,
+        after_bytes: u32,
+    ) -> Result<(), Error> {
+        let payload =
+            protocol::payload_ime_delete_surrounding_text(context_id, before_bytes, after_bytes);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_DELETE_SURROUNDING_TEXT,
+            &payload,
+        )
+    }
+
+    pub fn ime_set_status(
+        &mut self,
+        context_id: u32,
+        state: u32,
+        mode_id: u32,
+        flags: u32,
+        mode_label: &str,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_ime_set_status(
+            context_id,
+            state,
+            mode_id,
+            flags,
+            mode_label.as_bytes(),
+        );
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_SET_STATUS,
+            &payload,
+        )
+    }
+
+    pub fn ime_set_popup_window(
+        &mut self,
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
+    ) -> Result<(), Error> {
+        let payload =
+            protocol::payload_ime_set_popup_window(context_id, window_id, offset_x, offset_y, visible);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_SET_POPUP_WINDOW,
+            &payload,
+        )
+    }
+
+    pub fn ime_grab_keyboard(&mut self, context_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_ime_grab_keyboard(context_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_GRAB_KEYBOARD,
+            &payload,
+        )
+    }
+
+    pub fn ime_release_keyboard(&mut self, context_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_ime_release_keyboard(context_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::IME_RELEASE_KEYBOARD,
+            &payload,
+        )
     }
 
     /// Create a new surface (window)
@@ -1143,7 +1435,11 @@ impl Connection {
                                 });
                                 count += 1;
                             }
-                            _ => {}
+                            _ => {
+                                if self.queue_async_message(msg) {
+                                    count += 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -1203,6 +1499,202 @@ impl Connection {
                     code,
                     value,
                 }));
+                true
+            }
+            ServerMessage::TextInputPreedit {
+                context_id,
+                serial,
+                cursor_byte,
+                anchor_byte,
+                text,
+                text_len,
+                spans,
+                spans_len,
+            } => {
+                let text = String::from_utf8_lossy(&text[..text_len as usize]).into_owned();
+                self.pending_events.push(Event::TextInputPreedit {
+                    context_id,
+                    serial,
+                    cursor_byte,
+                    anchor_byte,
+                    text,
+                    spans: spans[..spans_len as usize].to_vec(),
+                });
+                true
+            }
+            ServerMessage::TextInputCommit {
+                context_id,
+                serial,
+                text,
+                text_len,
+            } => {
+                let text = String::from_utf8_lossy(&text[..text_len as usize]).into_owned();
+                self.pending_events.push(Event::TextInputCommit {
+                    context_id,
+                    serial,
+                    text,
+                });
+                true
+            }
+            ServerMessage::TextInputDeleteSurroundingText {
+                context_id,
+                serial,
+                before_bytes,
+                after_bytes,
+            } => {
+                self.pending_events
+                    .push(Event::TextInputDeleteSurroundingText {
+                        context_id,
+                        serial,
+                        before_bytes,
+                        after_bytes,
+                    });
+                true
+            }
+            ServerMessage::TextInputDone { context_id, serial } => {
+                self.pending_events
+                    .push(Event::TextInputDone { context_id, serial });
+                true
+            }
+            ServerMessage::TextInputStatus {
+                context_id,
+                serial,
+                state,
+                mode_id,
+                flags,
+                mode_label,
+                mode_label_len,
+            } => {
+                let mode_label =
+                    String::from_utf8_lossy(&mode_label[..mode_label_len as usize]).into_owned();
+                self.pending_events.push(Event::TextInputStatus {
+                    context_id,
+                    serial,
+                    state,
+                    mode_id,
+                    flags,
+                    mode_label,
+                });
+                true
+            }
+            ServerMessage::ImeActivate {
+                context_id,
+                window_id,
+                serial,
+                cursor_x,
+                cursor_y,
+                cursor_width,
+                cursor_height,
+                content_hint,
+                content_purpose,
+                text_change_cause,
+                cursor_byte,
+                anchor_byte,
+                surrounding_text,
+                surrounding_text_len,
+            } => {
+                let surrounding_text =
+                    String::from_utf8_lossy(&surrounding_text[..surrounding_text_len as usize])
+                        .into_owned();
+                self.pending_events
+                    .push(Event::ImeActivate(ImeContextState {
+                        context_id,
+                        window_id,
+                        serial,
+                        cursor_x,
+                        cursor_y,
+                        cursor_width,
+                        cursor_height,
+                        content_hint,
+                        content_purpose,
+                        text_change_cause,
+                        cursor_byte,
+                        anchor_byte,
+                        surrounding_text,
+                    }));
+                true
+            }
+            ServerMessage::ImeDeactivate { context_id, serial } => {
+                self.pending_events
+                    .push(Event::ImeDeactivate { context_id, serial });
+                true
+            }
+            ServerMessage::ImeContextState {
+                context_id,
+                window_id,
+                serial,
+                cursor_x,
+                cursor_y,
+                cursor_width,
+                cursor_height,
+                content_hint,
+                content_purpose,
+                text_change_cause,
+                cursor_byte,
+                anchor_byte,
+                surrounding_text,
+                surrounding_text_len,
+            } => {
+                let surrounding_text =
+                    String::from_utf8_lossy(&surrounding_text[..surrounding_text_len as usize])
+                        .into_owned();
+                self.pending_events
+                    .push(Event::ImeContextState(ImeContextState {
+                        context_id,
+                        window_id,
+                        serial,
+                        cursor_x,
+                        cursor_y,
+                        cursor_width,
+                        cursor_height,
+                        content_hint,
+                        content_purpose,
+                        text_change_cause,
+                        cursor_byte,
+                        anchor_byte,
+                        surrounding_text,
+                    }));
+                true
+            }
+            ServerMessage::ImeKeyEvent {
+                context_id,
+                key_serial,
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            } => {
+                self.pending_events.push(Event::ImeKeyEvent {
+                    context_id,
+                    key_serial,
+                    window_id,
+                    time,
+                    type_,
+                    code,
+                    value,
+                });
+                true
+            }
+            ServerMessage::ImeReset { context_id, serial } => {
+                self.pending_events
+                    .push(Event::ImeReset { context_id, serial });
+                true
+            }
+            ServerMessage::ImeTrigger {
+                context_id,
+                serial,
+                trigger_id,
+                code,
+                time,
+            } => {
+                self.pending_events.push(Event::ImeTrigger {
+                    context_id,
+                    serial,
+                    trigger_id,
+                    code,
+                    time,
+                });
                 true
             }
             ServerMessage::WindowDestroyed { window_id } => {
@@ -1348,8 +1840,12 @@ impl Connection {
     ///
     /// This is a synchronous request: it blocks until the server responds with OUTPUT_SCALE.
     pub fn get_output_scale(&mut self) -> Result<u32, Error> {
-        write_frame(&mut self.socket, protocol::client_msg::GET_OUTPUT_SCALE, &[])
-            .map_err(|_| Error::SendFailed)?;
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::GET_OUTPUT_SCALE,
+            &[],
+        )
+        .map_err(|_| Error::SendFailed)?;
 
         self.socket
             .set_nonblocking(false)

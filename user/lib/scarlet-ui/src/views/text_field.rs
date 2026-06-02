@@ -9,9 +9,11 @@ use core::any::Any;
 
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
-use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
+use crate::element::{
+    Element, ElementRenderObject, LayoutConstraints, RenderElement, TextInputElementState,
+};
 use crate::event::{FocusEvent, KeyCode, KeyEvent};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::state::{Listenable, State};
 use crate::view::View;
@@ -20,7 +22,6 @@ use crate::view::View;
 #[derive(Clone)]
 pub struct TextField {
     text: State<String>,
-    focused: State<bool>,
     placeholder: String,
     on_submit: Option<Arc<dyn Fn() + 'static>>,
     blur_on_submit: bool,
@@ -34,12 +35,11 @@ pub struct TextField {
 }
 
 impl TextField {
-    /// Create a new text field bound to the supplied text and focus state.
-    pub fn new(text: State<String>, focused: State<bool>) -> Self {
+    /// Create a new text field bound to the supplied text state.
+    pub fn new(text: State<String>) -> Self {
         let palette = ColorPalette::default();
         Self {
             text,
-            focused,
             placeholder: String::new(),
             on_submit: None,
             blur_on_submit: false,
@@ -88,15 +88,26 @@ impl TextField {
         &self.text
     }
 
-    /// Return the bound focus state.
-    pub fn focused_state(&self) -> &State<bool> {
-        &self.focused
-    }
-
     /// Invoke the submit callback if present.
     pub fn invoke_submit(&self) {
         if let Some(callback) = self.on_submit.as_ref() {
             callback();
+        }
+    }
+
+    pub(crate) fn text_input_state(&self, preedit: &str) -> TextInputElementState {
+        let text = self.text.get();
+        let mut display = text.clone();
+        display.push_str(preedit);
+        let (text_width, _) = graphics::measure_text_sized(&display, self.font_size);
+        TextInputElementState {
+            cursor_rect: Rect::from_xywh(
+                self.padding + text_width as f32,
+                self.padding * 0.5,
+                1.0,
+                self.font_size * 1.25,
+            ),
+            surrounding_text: text,
         }
     }
 }
@@ -110,7 +121,7 @@ impl View for TextField {
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
-        alloc::vec![&self.text, &self.focused]
+        alloc::vec![&self.text]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -121,6 +132,7 @@ impl View for TextField {
 /// TextField RenderObject.
 pub struct TextFieldRenderObject {
     text: String,
+    preedit: String,
     focused: bool,
     placeholder: String,
     background_color: Color,
@@ -139,7 +151,8 @@ impl TextFieldRenderObject {
     pub fn from_view(view: &TextField) -> Self {
         Self {
             text: view.text.get(),
-            focused: view.focused.get(),
+            preedit: String::new(),
+            focused: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
             border_color: view.border_color,
@@ -200,16 +213,17 @@ impl ElementRenderObject for TextFieldRenderObject {
             canvas.fill_rect(0, 0, width, height, self.background_color);
             canvas.draw_rect(0, 0, width, height, border);
 
-            let display = if self.text.is_empty() {
+            let display = if self.text.is_empty() && self.preedit.is_empty() {
                 self.placeholder.clone()
             } else if self.focused {
                 let mut display = self.text.clone();
+                display.push_str(&self.preedit);
                 display.push('|');
                 display
             } else {
                 self.text.clone()
             };
-            let color = if self.text.is_empty() {
+            let color = if self.text.is_empty() && self.preedit.is_empty() {
                 self.placeholder_color
             } else {
                 self.text_color
@@ -217,6 +231,19 @@ impl ElementRenderObject for TextFieldRenderObject {
             let x = self.padding as i32;
             let y = ((height as f32 - self.font_size * 1.2) / 2.0).max(0.0) as i32;
             canvas.draw_text_sized(x, y, &display, color, self.font_size);
+            if self.focused && !self.preedit.is_empty() {
+                let (committed_width, _) = graphics::measure_text_sized(&self.text, self.font_size);
+                let (preedit_width, _) = graphics::measure_text_sized(&self.preedit, self.font_size);
+                let underline_y = (y as f32 + self.font_size * 1.15).max(0.0) as i32;
+                let underline_x = x + committed_width as i32;
+                canvas.draw_line(
+                    underline_x,
+                    underline_y,
+                    underline_x + preedit_width as i32,
+                    underline_y,
+                    self.focused_border_color,
+                );
+            }
         }
     }
 
@@ -240,17 +267,48 @@ impl ElementRenderObject for TextFieldRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextField>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        let focused = self.focused;
+        let preedit = self.preedit.clone();
         *self = TextFieldRenderObject::from_view(view);
+        self.focused = focused;
+        self.preedit = preedit;
         crate::element::UpdateResult::Updated
     }
 }
 
-pub(crate) fn handle_text_field_keyboard(field: &TextField, event: KeyEvent) -> bool {
-    if !field.focused.get() {
+impl TextFieldRenderObject {
+    pub(crate) fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        if !focused {
+            self.preedit.clear();
+        }
+    }
+
+    pub(crate) fn preedit(&self) -> &str {
+        &self.preedit
+    }
+
+    pub(crate) fn set_preedit(&mut self, preedit: &str) {
+        self.preedit.clear();
+        self.preedit.push_str(preedit);
+    }
+}
+
+pub(crate) fn handle_text_field_keyboard(
+    field: &TextField,
+    render_object: &mut TextFieldRenderObject,
+    event: KeyEvent,
+) -> bool {
+    if !render_object.is_focused() {
         return false;
     }
     match event {
         KeyEvent::Char { c } if !c.is_control() => {
+            render_object.set_preedit("");
             let mut text = field.text.get();
             text.push(c);
             field.text.set(text);
@@ -269,7 +327,7 @@ pub(crate) fn handle_text_field_keyboard(field: &TextField, event: KeyEvent) -> 
         } => {
             field.invoke_submit();
             if field.blur_on_submit {
-                field.focused.set(false);
+                render_object.set_focused(false);
             }
             true
         }
@@ -279,17 +337,74 @@ pub(crate) fn handle_text_field_keyboard(field: &TextField, event: KeyEvent) -> 
         | KeyEvent::Pressed {
             keycode: KeyCode::Tab,
         } => {
-            field.focused.set(false);
+            render_object.set_focused(false);
             true
         }
         _ => false,
     }
 }
 
-pub(crate) fn handle_text_field_focus(field: &TextField, event: FocusEvent) -> bool {
+pub(crate) fn handle_text_field_focus(
+    render_object: &mut TextFieldRenderObject,
+    event: FocusEvent,
+) -> bool {
     match event {
-        FocusEvent::Gained => field.focused.set(true),
-        FocusEvent::Lost => field.focused.set(false),
+        FocusEvent::Gained => render_object.set_focused(true),
+        FocusEvent::Lost => render_object.set_focused(false),
     }
     true
+}
+
+pub(crate) fn handle_text_field_text_input(
+    field: &TextField,
+    render_object: &mut TextFieldRenderObject,
+    event: &crate::event::Event,
+) -> bool {
+    if !render_object.is_focused() {
+        return false;
+    }
+
+    match event {
+        crate::event::Event::TextInputCommit { text, .. } => {
+            render_object.set_preedit("");
+            let mut current = field.text.get();
+            current.push_str(text);
+            field.text.set(current);
+            true
+        }
+        crate::event::Event::TextInputPreedit { text, .. } => {
+            render_object.set_preedit(text);
+            true
+        }
+        crate::event::Event::TextInputDeleteSurroundingText {
+            before_bytes,
+            after_bytes,
+            ..
+        } => {
+            render_object.set_preedit("");
+            delete_surrounding_text_at_end(field, *before_bytes, *after_bytes);
+            true
+        }
+        crate::event::Event::TextInputDone { .. } => true,
+        _ => false,
+    }
+}
+
+fn delete_surrounding_text_at_end(field: &TextField, before_bytes: u32, after_bytes: u32) {
+    if after_bytes != 0 {
+        return;
+    }
+
+    let mut text = field.text.get();
+    let delete_bytes = before_bytes as usize;
+    if delete_bytes == 0 {
+        return;
+    }
+
+    let mut remove_from = text.len().saturating_sub(delete_bytes);
+    while remove_from > 0 && !text.is_char_boundary(remove_from) {
+        remove_from -= 1;
+    }
+    text.truncate(remove_from);
+    field.text.set(text);
 }

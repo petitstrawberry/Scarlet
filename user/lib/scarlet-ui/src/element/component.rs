@@ -103,11 +103,19 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             // Update our stored view
             self.view = new_typed_view.clone();
 
+            let focused_path = self
+                .child
+                .as_ref()
+                .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
+
             // Create new child element
             let new_child = self.view.create_element();
 
             // Replace the old child with the new one
             self.child = Some(new_child);
+            if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
 
             UpdateResult::Updated
         } else {
@@ -118,6 +126,11 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
+        let focused_path = self
+            .child
+            .as_ref()
+            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
+
         // Unmount the old child
         if let Some(ref mut child) = self.child {
             child.unmount();
@@ -132,6 +145,9 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         // Mount the new child
         if let Some(ref mut child) = self.child {
             child.mount();
+            if let Some(path) = focused_path.as_deref() {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
         }
 
         UpdateResult::Updated

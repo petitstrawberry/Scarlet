@@ -49,6 +49,8 @@ pub struct LineEditor {
     rendered_cursor_cell: usize,
     // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [, 4=got ESC O)
     esc_state: u8,
+    utf8_codepoint: u32,
+    utf8_remaining: u8,
 }
 
 impl LineEditor {
@@ -64,6 +66,8 @@ impl LineEditor {
             rendered_cells: 0,
             rendered_cursor_cell: 0,
             esc_state: 0,
+            utf8_codepoint: 0,
+            utf8_remaining: 0,
         }
     }
 
@@ -134,13 +138,13 @@ impl LineEditor {
         self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let c = std::io::get_char();
+            let byte = self.read_input_byte()?;
 
-            // In raw mode, we get keycodes; in canonical mode, we get ASCII
+            // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
-                self.handle_raw_key(c as u32)
+                self.handle_raw_byte(byte)
             } else {
-                self.handle_canonical_char(c)
+                self.handle_input_byte(byte)
             };
 
             match action {
@@ -184,13 +188,13 @@ impl LineEditor {
         self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let c = std::io::get_char();
+            let byte = self.read_input_byte()?;
 
-            // In raw mode, we get keycodes; in canonical mode, we get ASCII
+            // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
-                self.handle_raw_key(c as u32)
+                self.handle_raw_byte(byte)
             } else {
-                self.handle_canonical_char(c)
+                self.handle_input_byte(byte)
             };
 
             match action {
@@ -245,7 +249,7 @@ impl LineEditor {
                 // Ctrl-C
                 EditorAction::Interrupt
             }
-            c if ('\x20'..='\x7e').contains(&c) => {
+            c if !c.is_control() => {
                 // Printable character
                 self.buffer.insert(self.cursor, c);
                 self.cursor += 1;
@@ -256,12 +260,25 @@ impl LineEditor {
         }
     }
 
-    /// Handle a character in raw mode (XLATE mode - ASCII + escape sequences)
-    fn handle_raw_key(&mut self, byte: u32) -> EditorAction {
-        let ch = byte as u8 as char;
+    fn handle_input_byte(&mut self, byte: u8) -> EditorAction {
+        if let Some(c) = self.decode_input_byte(byte) {
+            self.handle_canonical_char(c)
+        } else {
+            EditorAction::Continue
+        }
+    }
+
+    /// Handle a byte in raw mode (XLATE mode - UTF-8 text + escape sequences)
+    fn handle_raw_byte(&mut self, byte: u8) -> EditorAction {
+        if self.utf8_remaining != 0 {
+            if let Some(c) = self.decode_input_byte(byte) {
+                self.insert_char(c);
+            }
+            return EditorAction::Continue;
+        }
 
         // Handle escape sequences for arrow keys
-        match (self.esc_state, byte as u8) {
+        match (self.esc_state, byte) {
             (0, 0x1B) => {
                 // ESC pressed - start escape sequence
                 self.esc_state = 1;
@@ -341,7 +358,7 @@ impl LineEditor {
             }
             (2, b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8') => {
                 // ESC [ n - might be Home/End/Delete (ESC [ n ~)
-                self.esc_state = byte as u8;
+                self.esc_state = byte;
                 return EditorAction::Continue;
             }
             (b'1', b'~') | (b'7', b'~') => {
@@ -375,6 +392,17 @@ impl LineEditor {
             _ => {}
         }
 
+        if let Some(c) = self.decode_input_byte(byte) {
+            if !c.is_ascii() {
+                self.insert_char(c);
+                return EditorAction::Continue;
+            }
+        } else {
+            return EditorAction::Continue;
+        }
+
+        let ch = byte as char;
+
         // Handle regular ASCII characters
         match ch {
             '\r' | '\n' => EditorAction::Submit,
@@ -397,6 +425,53 @@ impl LineEditor {
                 EditorAction::Continue
             }
             _ => EditorAction::Continue,
+        }
+    }
+
+    fn read_input_byte(&self) -> Result<u8, ()> {
+        let mut buf = [0u8; 1];
+        match std::io::stdin().read(&mut buf) {
+            Ok(bytes_read) if bytes_read > 0 => Ok(buf[0]),
+            Ok(_) => Err(()),
+            Err(_) => Err(()),
+        }
+    }
+
+    fn decode_input_byte(&mut self, byte: u8) -> Option<char> {
+        if byte < 0x80 {
+            self.utf8_codepoint = 0;
+            self.utf8_remaining = 0;
+            return Some(byte as char);
+        }
+
+        if self.utf8_remaining == 0 {
+            if (0xC2..=0xDF).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x1F) as u32;
+                self.utf8_remaining = 1;
+            } else if (0xE0..=0xEF).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x0F) as u32;
+                self.utf8_remaining = 2;
+            } else if (0xF0..=0xF4).contains(&byte) {
+                self.utf8_codepoint = (byte & 0x07) as u32;
+                self.utf8_remaining = 3;
+            }
+            return None;
+        }
+
+        if (byte & 0xC0) != 0x80 {
+            self.utf8_codepoint = 0;
+            self.utf8_remaining = 0;
+            return None;
+        }
+
+        self.utf8_codepoint = (self.utf8_codepoint << 6) | (byte & 0x3F) as u32;
+        self.utf8_remaining -= 1;
+        if self.utf8_remaining == 0 {
+            let codepoint = self.utf8_codepoint;
+            self.utf8_codepoint = 0;
+            char::from_u32(codepoint)
+        } else {
+            None
         }
     }
 
@@ -498,13 +573,13 @@ impl LineEditor {
             print!("{}", c);
         }
 
-        let total_cells = self.prompt_cells() + self.buffer.len();
+        let total_cells = self.prompt_cells() + self.buffer_cells();
         let current_rows = rendered_rows(total_cells, columns);
         if current_rows > 1 {
             print!("\x1b[{}A", current_rows - 1);
         }
         print!("\r");
-        let cursor_cell = self.prompt_cells() + self.cursor;
+        let cursor_cell = self.prompt_cells() + self.buffer_prefix_cells(self.cursor);
         let cursor_row = cursor_cell / columns;
         let cursor_col = cursor_cell % columns;
         if cursor_row > 0 {
@@ -518,7 +593,15 @@ impl LineEditor {
     }
 
     fn prompt_cells(&self) -> usize {
-        self.prompt.chars().count()
+        display_cells(&self.prompt)
+    }
+
+    fn buffer_cells(&self) -> usize {
+        self.buffer.iter().copied().map(char_cells).sum()
+    }
+
+    fn buffer_prefix_cells(&self, end: usize) -> usize {
+        self.buffer.iter().take(end).copied().map(char_cells).sum()
     }
 
     fn terminal_columns(&self) -> usize {
@@ -550,21 +633,17 @@ impl LineEditor {
 
     /// Get the word at the cursor position
     fn get_word_at_cursor(&self) -> (usize, String) {
-        let line: String = self.buffer.iter().collect();
-        let bytes = line.as_bytes();
-
-        // Find word boundaries
         let mut start = self.cursor;
-        while start > 0 && bytes[start - 1] != b' ' && bytes[start - 1] != b'\t' {
+        while start > 0 && !self.buffer[start - 1].is_whitespace() {
             start -= 1;
         }
 
         let mut end = self.cursor;
-        while end < bytes.len() && bytes[end] != b' ' && bytes[end] != b'\t' {
+        while end < self.buffer.len() && !self.buffer[end].is_whitespace() {
             end += 1;
         }
 
-        let word = String::from(&line[start..end]);
+        let word = self.buffer[start..end].iter().collect();
         (start, word)
     }
 
@@ -589,7 +668,7 @@ impl LineEditor {
         matches.sort();
         matches.dedup();
 
-        self.apply_completion(matches, prefix.len(), word_start);
+        self.apply_completion(matches, prefix.chars().count(), word_start);
     }
 
     /// Complete filename from current directory or specified path
@@ -649,7 +728,7 @@ impl LineEditor {
 
         matches.sort();
 
-        self.apply_completion(matches, prefix.len(), word_start);
+        self.apply_completion(matches, prefix.chars().count(), word_start);
     }
 
     /// Apply completion based on matches
@@ -661,8 +740,6 @@ impl LineEditor {
 
         if matches.len() == 1 {
             // Single match - complete it
-            let _completion = &matches[0][prefix_len..];
-
             // Remove old word and insert new completion
             for _ in 0..prefix_len {
                 if word_start < self.buffer.len() {
@@ -695,10 +772,10 @@ impl LineEditor {
 
             // Find common prefix
             let common_prefix = self.find_common_prefix(&matches);
-            if common_prefix.len() > prefix_len {
+            let common_prefix_len = common_prefix.chars().count();
+            if common_prefix_len > prefix_len {
                 // Complete to common prefix
-                let completion = &common_prefix[prefix_len..];
-                for ch in completion.chars() {
+                for ch in common_prefix.chars().skip(prefix_len) {
                     self.buffer.insert(self.cursor, ch);
                     self.cursor += 1;
                 }
@@ -709,7 +786,7 @@ impl LineEditor {
             for c in &self.buffer {
                 print!("{}", c);
             }
-            self.rendered_cells = self.prompt_cells() + self.buffer.len();
+            self.rendered_cells = self.prompt_cells() + self.buffer_cells();
             self.rendered_cursor_cell = self.rendered_cells;
         }
     }
@@ -755,6 +832,31 @@ impl LineEditor {
 fn rendered_rows(cells: usize, columns: usize) -> usize {
     let columns = columns.max(1);
     cells / columns + 1
+}
+
+fn display_cells(text: &str) -> usize {
+    text.chars().map(char_cells).sum()
+}
+
+fn char_cells(ch: char) -> usize {
+    let code = ch as u32;
+    if matches!(
+        code,
+        0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x20000..=0x3fffd
+    ) {
+        2
+    } else {
+        1
+    }
 }
 
 impl Drop for LineEditor {

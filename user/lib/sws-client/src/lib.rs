@@ -99,7 +99,7 @@ mod builder;
 pub use builder::SurfaceBuilder;
 pub use connection::Connection;
 pub use error::Error;
-pub use event::{Event, InputEvent};
+pub use event::{Event, ImeContextState, InputEvent};
 pub use event::event_type;
 pub use event::abs_code;
 pub use event::rel_code;

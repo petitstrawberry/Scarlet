@@ -8,8 +8,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::element::{Element, ElementId};
-use crate::geometry::Size;
+use crate::element::{Element, ElementId, TextInputElementState};
+use crate::geometry::{Point, Size};
 
 /// Global counter for generating unique Element IDs
 static ELEMENT_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -97,6 +97,12 @@ impl ElementTree {
         } else {
             None
         }
+    }
+
+    /// Return text-input state for the focused editable element, if any.
+    pub fn focused_text_input_state(&self) -> Option<TextInputElementState> {
+        let root = self.root.as_deref()?;
+        Self::focused_text_input_state_recursive(root, Point::ZERO)
     }
 
     /// Perform a hit test to find the element at a point
@@ -196,6 +202,35 @@ impl ElementTree {
 
         path.pop();
         false
+    }
+
+    fn focused_text_input_state_recursive(
+        element: &dyn Element,
+        parent_origin: Point,
+    ) -> Option<TextInputElementState> {
+        let bounds = element.bounds();
+        let absolute_origin = Point {
+            x: parent_origin.x + bounds.origin.x,
+            y: parent_origin.y + bounds.origin.y,
+        };
+
+        if element.wants_keyboard_focus()
+            && let Some(mut state) = element.text_input_state()
+        {
+            state.cursor_rect.origin.x += absolute_origin.x;
+            state.cursor_rect.origin.y += absolute_origin.y;
+            return Some(state);
+        }
+
+        for child in element.children() {
+            if let Some(state) =
+                Self::focused_text_input_state_recursive(child.as_ref(), absolute_origin)
+            {
+                return Some(state);
+            }
+        }
+
+        None
     }
 
     /// Dump the element tree structure for debugging

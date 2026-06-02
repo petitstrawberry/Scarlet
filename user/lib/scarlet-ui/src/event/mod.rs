@@ -50,6 +50,34 @@ pub enum Event {
         window_id: u32,
         menu_item_id: String,
     },
+
+    /// IME preedit text for a text-input context.
+    TextInputPreedit {
+        context_id: u32,
+        serial: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: String,
+        spans: Vec<u8>,
+    },
+
+    /// IME committed text for a text-input context.
+    TextInputCommit {
+        context_id: u32,
+        serial: u32,
+        text: String,
+    },
+
+    /// Request to delete surrounding text for a text-input context.
+    TextInputDeleteSurroundingText {
+        context_id: u32,
+        serial: u32,
+        before_bytes: u32,
+        after_bytes: u32,
+    },
+
+    /// End of a text-input update batch.
+    TextInputDone { context_id: u32, serial: u32 },
 }
 
 /// Mouse events

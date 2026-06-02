@@ -175,6 +175,10 @@ name = "input_dump"
 path = "src/input_dump.rs"
 
 [[bin]]
+name = "scarlet_skk"
+path = "src/scarlet_skk.rs"
+
+[[bin]]
 name = "settings"
 path = "src/settings.rs"
 

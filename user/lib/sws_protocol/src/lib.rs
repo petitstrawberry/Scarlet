@@ -62,6 +62,29 @@ pub mod client_msg {
     pub const SET_WINDOW_MENU_TITLES: u32 = 29; // Update menu titles for a window
     pub const ACTIVATE_MENU_ITEM: u32 = 30; // Request menu item activation for a window
     pub const GET_OUTPUT_SCALE: u32 = 31; // Get output scale in milli-units (1000 = 1.0)
+
+    // Text input client API messages (200-219)
+    pub const TEXT_INPUT_CREATE: u32 = 200;
+    pub const TEXT_INPUT_DESTROY: u32 = 201;
+    pub const TEXT_INPUT_ENABLE: u32 = 202;
+    pub const TEXT_INPUT_DISABLE: u32 = 203;
+    pub const TEXT_INPUT_SET_CURSOR_RECT: u32 = 204;
+    pub const TEXT_INPUT_SET_SURROUNDING_TEXT: u32 = 205;
+    pub const TEXT_INPUT_SET_CONTENT_TYPE: u32 = 206;
+    pub const TEXT_INPUT_SET_TEXT_CHANGE_CAUSE: u32 = 207;
+    pub const TEXT_INPUT_COMMIT_STATE: u32 = 208;
+
+    // Input method service messages (220-239)
+    pub const IME_REGISTER: u32 = 220;
+    pub const IME_SET_ACTIVE: u32 = 221;
+    pub const IME_KEY_HANDLED: u32 = 222;
+    pub const IME_SET_PREEDIT: u32 = 223;
+    pub const IME_COMMIT_TEXT: u32 = 224;
+    pub const IME_DELETE_SURROUNDING_TEXT: u32 = 225;
+    pub const IME_GRAB_KEYBOARD: u32 = 226;
+    pub const IME_RELEASE_KEYBOARD: u32 = 227;
+    pub const IME_SET_STATUS: u32 = 228;
+    pub const IME_SET_POPUP_WINDOW: u32 = 229;
 }
 
 /// Message type IDs (server -> client).
@@ -87,6 +110,115 @@ pub mod server_msg {
     pub const SCREEN_SIZE_CHANGED: u32 = 22; // Broadcast when the display size changes
     pub const OUTPUT_SCALE: u32 = 23; // Response to GET_OUTPUT_SCALE
     pub const OUTPUT_SCALE_CHANGED: u32 = 24; // Broadcast when output scale changes
+
+    // Text input client events (200-219)
+    pub const TEXT_INPUT_CREATED: u32 = 200;
+    pub const TEXT_INPUT_PREEDIT: u32 = 201;
+    pub const TEXT_INPUT_COMMIT: u32 = 202;
+    pub const TEXT_INPUT_DELETE_SURROUNDING_TEXT: u32 = 203;
+    pub const TEXT_INPUT_DONE: u32 = 204;
+    pub const TEXT_INPUT_STATUS: u32 = 205;
+
+    // Input method service events (220-239)
+    pub const IME_REGISTERED: u32 = 220;
+    pub const IME_ACTIVATE: u32 = 221;
+    pub const IME_DEACTIVATE: u32 = 222;
+    pub const IME_CONTEXT_STATE: u32 = 223;
+    pub const IME_KEY_EVENT: u32 = 224;
+    pub const IME_RESET: u32 = 225;
+    pub const IME_TRIGGER: u32 = 226;
+}
+
+/// Maximum UTF-8 bytes carried by one text-input message.
+pub const TEXT_INPUT_MAX_BYTES: usize = 1024;
+
+/// Maximum bytes used for binary preedit span payloads.
+pub const TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES: usize = 512;
+
+/// IME service capabilities advertised by `IME_REGISTER`.
+pub mod ime_capabilities {
+    pub const KEYBOARD_GRAB: u32 = 1 << 0;
+    pub const SURROUNDING_TEXT: u32 = 1 << 1;
+    pub const DELETE_SURROUNDING_TEXT: u32 = 1 << 2;
+    pub const STYLED_PREEDIT: u32 = 1 << 3;
+    pub const STATUS: u32 = 1 << 4;
+    pub const OWN_CANDIDATE_UI: u32 = 1 << 5;
+    pub const PER_CONTEXT_STATE: u32 = 1 << 6;
+}
+
+/// Preedit span style flags.
+pub mod preedit_style {
+    pub const UNDERLINE: u32 = 1 << 0;
+    pub const THICK_UNDERLINE: u32 = 1 << 1;
+    pub const HIGHLIGHT: u32 = 1 << 2;
+    pub const SELECTED: u32 = 1 << 3;
+    pub const CONVERTED: u32 = 1 << 4;
+    pub const TARGET_CONVERTING: u32 = 1 << 5;
+    pub const ERROR: u32 = 1 << 6;
+}
+
+/// IME composition states.
+pub mod ime_state {
+    pub const DISABLED: u32 = 0;
+    pub const DIRECT: u32 = 1;
+    pub const COMPOSING: u32 = 2;
+    pub const CANDIDATES: u32 = 3;
+}
+
+/// IME status flags.
+///
+/// Input modes are IME-local and must not be interpreted by SWS. Toolkits may
+/// display the accompanying mode label, while the mode id is only stable within
+/// the reporting IME.
+pub mod ime_status_flags {
+    pub const MODE_ACTIVE: u32 = 1 << 0;
+    pub const PRIVATE_MODE: u32 = 1 << 1;
+    pub const PREDICTION_ENABLED: u32 = 1 << 2;
+    pub const CANDIDATES_VISIBLE: u32 = 1 << 3;
+}
+
+/// Text input content hints.
+pub mod text_input_content_hints {
+    pub const NONE: u32 = 0;
+    pub const COMPLETION: u32 = 1 << 0;
+    pub const SPELLCHECK: u32 = 1 << 1;
+    pub const AUTO_CAPITALIZATION: u32 = 1 << 2;
+    pub const LOWERCASE: u32 = 1 << 3;
+    pub const UPPERCASE: u32 = 1 << 4;
+    pub const TITLECASE: u32 = 1 << 5;
+    pub const HIDDEN_TEXT: u32 = 1 << 6;
+    pub const SENSITIVE_DATA: u32 = 1 << 7;
+    pub const LATIN: u32 = 1 << 8;
+    pub const MULTILINE: u32 = 1 << 9;
+}
+
+/// Text input content purposes.
+pub mod text_input_content_purpose {
+    pub const NORMAL: u32 = 0;
+    pub const ALPHA: u32 = 1;
+    pub const DIGITS: u32 = 2;
+    pub const NUMBER: u32 = 3;
+    pub const PHONE: u32 = 4;
+    pub const URL: u32 = 5;
+    pub const EMAIL: u32 = 6;
+    pub const NAME: u32 = 7;
+    pub const PASSWORD: u32 = 8;
+    pub const PIN: u32 = 9;
+    pub const DATE: u32 = 10;
+    pub const TIME: u32 = 11;
+    pub const DATETIME: u32 = 12;
+    pub const TERMINAL: u32 = 13;
+}
+
+/// Why surrounding text changed.
+pub mod text_input_change_cause {
+    pub const INPUT_METHOD: u32 = 0;
+    pub const OTHER: u32 = 1;
+}
+
+/// IME trigger identifiers.
+pub mod ime_trigger {
+    pub const TOGGLE: u32 = 1;
 }
 
 /// Flags for transient (parent/child) window behavior.
@@ -109,6 +241,8 @@ pub mod window_types {
     pub const TASKBAR: u32 = 2;
     /// Desktop background window
     pub const DESKTOP: u32 = 3;
+    /// Input-method-owned popup surface anchored to the active text input.
+    pub const IME_POPUP: u32 = 4;
 }
 
 /// Message header.
@@ -161,6 +295,69 @@ pub fn encode_frame(msg_type: u32, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&header.to_le_bytes());
     out.extend_from_slice(payload);
     out
+}
+
+fn read_u32(payload: &[u8], offset: usize) -> Result<u32, ProtocolError> {
+    if payload.len() < offset + 4 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    Ok(u32::from_le_bytes([
+        payload[offset],
+        payload[offset + 1],
+        payload[offset + 2],
+        payload[offset + 3],
+    ]))
+}
+
+fn read_i32(payload: &[u8], offset: usize) -> Result<i32, ProtocolError> {
+    Ok(read_u32(payload, offset)? as i32)
+}
+
+fn read_u64(payload: &[u8], offset: usize) -> Result<u64, ProtocolError> {
+    if payload.len() < offset + 8 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    Ok(u64::from_le_bytes([
+        payload[offset],
+        payload[offset + 1],
+        payload[offset + 2],
+        payload[offset + 3],
+        payload[offset + 4],
+        payload[offset + 5],
+        payload[offset + 6],
+        payload[offset + 7],
+    ]))
+}
+
+fn read_u16(payload: &[u8], offset: usize) -> Result<u16, ProtocolError> {
+    if payload.len() < offset + 2 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    Ok(u16::from_le_bytes([payload[offset], payload[offset + 1]]))
+}
+
+fn read_len_prefixed_bytes<'a>(
+    payload: &'a [u8],
+    offset: usize,
+    max_len: usize,
+) -> Result<&'a [u8], ProtocolError> {
+    let len = read_u32(payload, offset)? as usize;
+    let start = offset + 4;
+    if len > max_len || payload.len() != start + len {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    Ok(&payload[start..])
+}
+
+fn copy_bounded<const N: usize>(bytes: &[u8]) -> Result<([u8; N], u32), ProtocolError> {
+    if bytes.len() > N {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut out = [0u8; N];
+    if !bytes.is_empty() {
+        out[..bytes.len()].copy_from_slice(bytes);
+    }
+    Ok((out, bytes.len() as u32))
 }
 
 /// Borrowed client->server messages (payload may be borrowed).
@@ -364,6 +561,92 @@ pub enum ClientMessageRef<'a> {
         window_id: u32,
         menu_item_id: &'a [u8],
     },
+    TextInputCreate {
+        window_id: u32,
+        seat_id: u32,
+    },
+    TextInputDestroy {
+        context_id: u32,
+    },
+    TextInputEnable {
+        context_id: u32,
+    },
+    TextInputDisable {
+        context_id: u32,
+    },
+    TextInputSetCursorRect {
+        context_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    TextInputSetSurroundingText {
+        context_id: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: &'a [u8],
+    },
+    TextInputSetContentType {
+        context_id: u32,
+        hint: u32,
+        purpose: u32,
+    },
+    TextInputSetTextChangeCause {
+        context_id: u32,
+        cause: u32,
+    },
+    TextInputCommitState {
+        context_id: u32,
+        serial: u32,
+    },
+    ImeRegister {
+        name: &'a [u8],
+        capabilities: u32,
+    },
+    ImeSetActive {
+        ime_id: u32,
+    },
+    ImeKeyHandled {
+        key_serial: u32,
+        handled: bool,
+    },
+    ImeSetPreedit {
+        context_id: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: &'a [u8],
+        spans: &'a [u8],
+    },
+    ImeCommitText {
+        context_id: u32,
+        text: &'a [u8],
+    },
+    ImeDeleteSurroundingText {
+        context_id: u32,
+        before_bytes: u32,
+        after_bytes: u32,
+    },
+    ImeGrabKeyboard {
+        context_id: u32,
+    },
+    ImeReleaseKeyboard {
+        context_id: u32,
+    },
+    ImeSetStatus {
+        context_id: u32,
+        state: u32,
+        mode_id: u32,
+        flags: u32,
+        mode_label: &'a [u8],
+    },
+    ImeSetPopupWindow {
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
+    },
 }
 
 /// Server->client messages.
@@ -400,6 +683,104 @@ pub enum ServerMessage {
         type_: u16,
         code: u16,
         value: i32,
+    },
+    TextInputCreated {
+        context_id: u32,
+        serial: u32,
+    },
+    TextInputPreedit {
+        context_id: u32,
+        serial: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: [u8; TEXT_INPUT_MAX_BYTES],
+        text_len: u32,
+        spans: [u8; TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES],
+        spans_len: u32,
+    },
+    TextInputCommit {
+        context_id: u32,
+        serial: u32,
+        text: [u8; TEXT_INPUT_MAX_BYTES],
+        text_len: u32,
+    },
+    TextInputDeleteSurroundingText {
+        context_id: u32,
+        serial: u32,
+        before_bytes: u32,
+        after_bytes: u32,
+    },
+    TextInputDone {
+        context_id: u32,
+        serial: u32,
+    },
+    TextInputStatus {
+        context_id: u32,
+        serial: u32,
+        state: u32,
+        mode_id: u32,
+        flags: u32,
+        mode_label: [u8; TEXT_INPUT_MAX_BYTES],
+        mode_label_len: u32,
+    },
+    ImeRegistered {
+        ime_id: u32,
+    },
+    ImeActivate {
+        context_id: u32,
+        window_id: u32,
+        serial: u32,
+        cursor_x: i32,
+        cursor_y: i32,
+        cursor_width: u32,
+        cursor_height: u32,
+        content_hint: u32,
+        content_purpose: u32,
+        text_change_cause: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        surrounding_text: [u8; TEXT_INPUT_MAX_BYTES],
+        surrounding_text_len: u32,
+    },
+    ImeDeactivate {
+        context_id: u32,
+        serial: u32,
+    },
+    ImeContextState {
+        context_id: u32,
+        window_id: u32,
+        serial: u32,
+        cursor_x: i32,
+        cursor_y: i32,
+        cursor_width: u32,
+        cursor_height: u32,
+        content_hint: u32,
+        content_purpose: u32,
+        text_change_cause: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        surrounding_text: [u8; TEXT_INPUT_MAX_BYTES],
+        surrounding_text_len: u32,
+    },
+    ImeKeyEvent {
+        context_id: u32,
+        key_serial: u32,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
+    },
+    ImeReset {
+        context_id: u32,
+        serial: u32,
+    },
+    ImeTrigger {
+        context_id: u32,
+        serial: u32,
+        trigger_id: u32,
+        code: u16,
+        time: u64,
     },
     /// Response to GET_SCREEN_SIZE request
     ScreenSize {
@@ -961,7 +1342,269 @@ pub fn parse_client_message<'a>(
                 menu_item_id: &payload[8..],
             })
         }
+        client_msg::TEXT_INPUT_CREATE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputCreate {
+                window_id: read_u32(payload, 0)?,
+                seat_id: read_u32(payload, 4)?,
+            })
+        }
+        client_msg::TEXT_INPUT_DESTROY => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputDestroy {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::TEXT_INPUT_ENABLE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputEnable {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::TEXT_INPUT_DISABLE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputDisable {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::TEXT_INPUT_SET_CURSOR_RECT => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputSetCursorRect {
+                context_id: read_u32(payload, 0)?,
+                x: read_i32(payload, 4)?,
+                y: read_i32(payload, 8)?,
+                width: read_u32(payload, 12)?,
+                height: read_u32(payload, 16)?,
+            })
+        }
+        client_msg::TEXT_INPUT_SET_SURROUNDING_TEXT => {
+            if payload.len() < 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let cursor_byte = read_u32(payload, 4)?;
+            let anchor_byte = read_u32(payload, 8)?;
+            let text = read_len_prefixed_bytes(payload, 12, TEXT_INPUT_MAX_BYTES)?;
+            Ok(ClientMessageRef::TextInputSetSurroundingText {
+                context_id,
+                cursor_byte,
+                anchor_byte,
+                text,
+            })
+        }
+        client_msg::TEXT_INPUT_SET_CONTENT_TYPE => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputSetContentType {
+                context_id: read_u32(payload, 0)?,
+                hint: read_u32(payload, 4)?,
+                purpose: read_u32(payload, 8)?,
+            })
+        }
+        client_msg::TEXT_INPUT_SET_TEXT_CHANGE_CAUSE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputSetTextChangeCause {
+                context_id: read_u32(payload, 0)?,
+                cause: read_u32(payload, 4)?,
+            })
+        }
+        client_msg::TEXT_INPUT_COMMIT_STATE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::TextInputCommitState {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        client_msg::IME_REGISTER => {
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let capabilities = read_u32(payload, 0)?;
+            let name = read_len_prefixed_bytes(payload, 4, TEXT_INPUT_MAX_BYTES)?;
+            Ok(ClientMessageRef::ImeRegister { name, capabilities })
+        }
+        client_msg::IME_SET_ACTIVE => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeSetActive {
+                ime_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::IME_KEY_HANDLED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeKeyHandled {
+                key_serial: read_u32(payload, 0)?,
+                handled: read_u32(payload, 4)? != 0,
+            })
+        }
+        client_msg::IME_SET_PREEDIT => {
+            if payload.len() < 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let cursor_byte = read_u32(payload, 4)?;
+            let anchor_byte = read_u32(payload, 8)?;
+            let text_len = read_u32(payload, 12)? as usize;
+            let spans_len_offset = 16usize.saturating_add(text_len);
+            if text_len > TEXT_INPUT_MAX_BYTES || payload.len() < spans_len_offset + 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let spans_len = read_u32(payload, spans_len_offset)? as usize;
+            let spans_offset = spans_len_offset + 4;
+            if spans_len > TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES
+                || payload.len() != spans_offset + spans_len
+            {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeSetPreedit {
+                context_id,
+                cursor_byte,
+                anchor_byte,
+                text: &payload[16..16 + text_len],
+                spans: &payload[spans_offset..],
+            })
+        }
+        client_msg::IME_COMMIT_TEXT => {
+            if payload.len() < 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let text = read_len_prefixed_bytes(payload, 4, TEXT_INPUT_MAX_BYTES)?;
+            Ok(ClientMessageRef::ImeCommitText { context_id, text })
+        }
+        client_msg::IME_DELETE_SURROUNDING_TEXT => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeDeleteSurroundingText {
+                context_id: read_u32(payload, 0)?,
+                before_bytes: read_u32(payload, 4)?,
+                after_bytes: read_u32(payload, 8)?,
+            })
+        }
+        client_msg::IME_GRAB_KEYBOARD => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeGrabKeyboard {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::IME_RELEASE_KEYBOARD => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeReleaseKeyboard {
+                context_id: read_u32(payload, 0)?,
+            })
+        }
+        client_msg::IME_SET_STATUS => {
+            if payload.len() < 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let state = read_u32(payload, 4)?;
+            let mode_id = read_u32(payload, 8)?;
+            let flags = read_u32(payload, 12)?;
+            let mode_label = read_len_prefixed_bytes(payload, 16, TEXT_INPUT_MAX_BYTES)?;
+            Ok(ClientMessageRef::ImeSetStatus {
+                context_id,
+                state,
+                mode_id,
+                flags,
+                mode_label,
+            })
+        }
+        client_msg::IME_SET_POPUP_WINDOW => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeSetPopupWindow {
+                context_id: read_u32(payload, 0)?,
+                window_id: read_u32(payload, 4)?,
+                offset_x: read_i32(payload, 8)?,
+                offset_y: read_i32(payload, 12)?,
+                visible: read_u32(payload, 16)? != 0,
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
+    }
+}
+
+fn parse_ime_context_message(
+    payload: &[u8],
+    activate: bool,
+) -> Result<ServerMessage, ProtocolError> {
+    if payload.len() < 52 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let context_id = read_u32(payload, 0)?;
+    let window_id = read_u32(payload, 4)?;
+    let serial = read_u32(payload, 8)?;
+    let cursor_x = read_i32(payload, 12)?;
+    let cursor_y = read_i32(payload, 16)?;
+    let cursor_width = read_u32(payload, 20)?;
+    let cursor_height = read_u32(payload, 24)?;
+    let content_hint = read_u32(payload, 28)?;
+    let content_purpose = read_u32(payload, 32)?;
+    let text_change_cause = read_u32(payload, 36)?;
+    let cursor_byte = read_u32(payload, 40)?;
+    let anchor_byte = read_u32(payload, 44)?;
+    let surrounding_text = read_len_prefixed_bytes(payload, 48, TEXT_INPUT_MAX_BYTES)?;
+    let (surrounding_text, surrounding_text_len) = copy_bounded(surrounding_text)?;
+
+    if activate {
+        Ok(ServerMessage::ImeActivate {
+            context_id,
+            window_id,
+            serial,
+            cursor_x,
+            cursor_y,
+            cursor_width,
+            cursor_height,
+            content_hint,
+            content_purpose,
+            text_change_cause,
+            cursor_byte,
+            anchor_byte,
+            surrounding_text,
+            surrounding_text_len,
+        })
+    } else {
+        Ok(ServerMessage::ImeContextState {
+            context_id,
+            window_id,
+            serial,
+            cursor_x,
+            cursor_y,
+            cursor_width,
+            cursor_height,
+            content_hint,
+            content_purpose,
+            text_change_cause,
+            cursor_byte,
+            anchor_byte,
+            surrounding_text,
+            surrounding_text_len,
+        })
     }
 }
 
@@ -1056,6 +1699,158 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 type_,
                 code,
                 value,
+            })
+        }
+        server_msg::TEXT_INPUT_CREATED => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::TextInputCreated {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        server_msg::TEXT_INPUT_PREEDIT => {
+            if payload.len() < 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let serial = read_u32(payload, 4)?;
+            let cursor_byte = read_u32(payload, 8)?;
+            let anchor_byte = read_u32(payload, 12)?;
+            let text_len = read_u32(payload, 16)? as usize;
+            let spans_len_offset = 20usize.saturating_add(text_len);
+            if text_len > TEXT_INPUT_MAX_BYTES || payload.len() < spans_len_offset + 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let spans_len = read_u32(payload, spans_len_offset)? as usize;
+            let spans_offset = spans_len_offset + 4;
+            if spans_len > TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES
+                || payload.len() != spans_offset + spans_len
+            {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let (text, text_len) = copy_bounded(&payload[20..20 + text_len])?;
+            let (spans, spans_len) = copy_bounded(&payload[spans_offset..])?;
+            Ok(ServerMessage::TextInputPreedit {
+                context_id,
+                serial,
+                cursor_byte,
+                anchor_byte,
+                text,
+                text_len,
+                spans,
+                spans_len,
+            })
+        }
+        server_msg::TEXT_INPUT_COMMIT => {
+            if payload.len() < 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let serial = read_u32(payload, 4)?;
+            let text = read_len_prefixed_bytes(payload, 8, TEXT_INPUT_MAX_BYTES)?;
+            let (text, text_len) = copy_bounded(text)?;
+            Ok(ServerMessage::TextInputCommit {
+                context_id,
+                serial,
+                text,
+                text_len,
+            })
+        }
+        server_msg::TEXT_INPUT_DELETE_SURROUNDING_TEXT => {
+            if payload.len() != 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::TextInputDeleteSurroundingText {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+                before_bytes: read_u32(payload, 8)?,
+                after_bytes: read_u32(payload, 12)?,
+            })
+        }
+        server_msg::TEXT_INPUT_DONE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::TextInputDone {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        server_msg::TEXT_INPUT_STATUS => {
+            if payload.len() < 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let context_id = read_u32(payload, 0)?;
+            let serial = read_u32(payload, 4)?;
+            let state = read_u32(payload, 8)?;
+            let mode_id = read_u32(payload, 12)?;
+            let flags = read_u32(payload, 16)?;
+            let mode_label = read_len_prefixed_bytes(payload, 20, TEXT_INPUT_MAX_BYTES)?;
+            let (mode_label, mode_label_len) = copy_bounded(mode_label)?;
+            Ok(ServerMessage::TextInputStatus {
+                context_id,
+                serial,
+                state,
+                mode_id,
+                flags,
+                mode_label,
+                mode_label_len,
+            })
+        }
+        server_msg::IME_REGISTERED => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ImeRegistered {
+                ime_id: read_u32(payload, 0)?,
+            })
+        }
+        server_msg::IME_ACTIVATE => parse_ime_context_message(payload, true),
+        server_msg::IME_CONTEXT_STATE => parse_ime_context_message(payload, false),
+        server_msg::IME_DEACTIVATE => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ImeDeactivate {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        server_msg::IME_KEY_EVENT => {
+            if payload.len() != 28 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ImeKeyEvent {
+                context_id: read_u32(payload, 0)?,
+                key_serial: read_u32(payload, 4)?,
+                window_id: read_u32(payload, 8)?,
+                time: read_u64(payload, 12)?,
+                type_: read_u16(payload, 20)?,
+                code: read_u16(payload, 22)?,
+                value: read_i32(payload, 24)?,
+            })
+        }
+        server_msg::IME_RESET => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ImeReset {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+            })
+        }
+        server_msg::IME_TRIGGER => {
+            if payload.len() != 24 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ImeTrigger {
+                context_id: read_u32(payload, 0)?,
+                serial: read_u32(payload, 4)?,
+                trigger_id: read_u32(payload, 8)?,
+                code: read_u16(payload, 12)?,
+                time: read_u64(payload, 16)?,
             })
         }
         server_msg::SCREEN_SIZE => {
@@ -1685,6 +2480,345 @@ pub fn payload_input_event(
     payload[12..14].copy_from_slice(&type_.to_le_bytes());
     payload[14..16].copy_from_slice(&code.to_le_bytes());
     payload[16..20].copy_from_slice(&value.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_create(window_id: u32, seat_id: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&seat_id.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_context_id(context_id: u32) -> [u8; 4] {
+    context_id.to_le_bytes()
+}
+
+pub fn payload_text_input_created(context_id: u32, serial: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&serial.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_set_cursor_rect(
+    context_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&x.to_le_bytes());
+    payload[8..12].copy_from_slice(&y.to_le_bytes());
+    payload[12..16].copy_from_slice(&width.to_le_bytes());
+    payload[16..20].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+fn clamp_text_offset(offset: u32, text_len: usize) -> u32 {
+    offset.min(text_len as u32)
+}
+
+pub fn payload_text_input_set_surrounding_text(
+    context_id: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    text: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&cursor_byte.to_le_bytes());
+    payload.extend_from_slice(&anchor_byte.to_le_bytes());
+    payload.extend_from_slice(&(text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&text[..text_len]);
+    payload
+}
+
+pub fn payload_text_input_set_content_type(context_id: u32, hint: u32, purpose: u32) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&hint.to_le_bytes());
+    payload[8..12].copy_from_slice(&purpose.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_set_text_change_cause(context_id: u32, cause: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&cause.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_commit_state(context_id: u32, serial: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&serial.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_preedit(
+    context_id: u32,
+    serial: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    text: &[u8],
+    spans: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    let spans_len = spans.len().min(TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&serial.to_le_bytes());
+    payload.extend_from_slice(&cursor_byte.to_le_bytes());
+    payload.extend_from_slice(&anchor_byte.to_le_bytes());
+    payload.extend_from_slice(&(text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&text[..text_len]);
+    payload.extend_from_slice(&(spans_len as u32).to_le_bytes());
+    payload.extend_from_slice(&spans[..spans_len]);
+    payload
+}
+
+pub fn payload_text_input_commit(context_id: u32, serial: u32, text: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&serial.to_le_bytes());
+    payload.extend_from_slice(&(text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&text[..text_len]);
+    payload
+}
+
+pub fn payload_text_input_delete_surrounding_text(
+    context_id: u32,
+    serial: u32,
+    before_bytes: u32,
+    after_bytes: u32,
+) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&serial.to_le_bytes());
+    payload[8..12].copy_from_slice(&before_bytes.to_le_bytes());
+    payload[12..16].copy_from_slice(&after_bytes.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_done(context_id: u32, serial: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&serial.to_le_bytes());
+    payload
+}
+
+pub fn payload_text_input_status(
+    context_id: u32,
+    serial: u32,
+    state: u32,
+    mode_id: u32,
+    flags: u32,
+    mode_label: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let mode_label_len = mode_label.len().min(TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&serial.to_le_bytes());
+    payload.extend_from_slice(&state.to_le_bytes());
+    payload.extend_from_slice(&mode_id.to_le_bytes());
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&(mode_label_len as u32).to_le_bytes());
+    payload.extend_from_slice(&mode_label[..mode_label_len]);
+    payload
+}
+
+pub fn payload_ime_register(name: &[u8], capabilities: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let name_len = name.len().min(TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&capabilities.to_le_bytes());
+    payload.extend_from_slice(&(name_len as u32).to_le_bytes());
+    payload.extend_from_slice(&name[..name_len]);
+    payload
+}
+
+pub fn payload_ime_registered(ime_id: u32) -> [u8; 4] {
+    ime_id.to_le_bytes()
+}
+
+pub fn payload_ime_set_active(ime_id: u32) -> [u8; 4] {
+    ime_id.to_le_bytes()
+}
+
+pub fn payload_ime_key_handled(key_serial: u32, handled: bool) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&key_serial.to_le_bytes());
+    payload[4..8].copy_from_slice(&(handled as u32).to_le_bytes());
+    payload
+}
+
+pub fn payload_ime_set_preedit(
+    context_id: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    text: &[u8],
+    spans: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    let spans_len = spans.len().min(TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&cursor_byte.to_le_bytes());
+    payload.extend_from_slice(&anchor_byte.to_le_bytes());
+    payload.extend_from_slice(&(text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&text[..text_len]);
+    payload.extend_from_slice(&(spans_len as u32).to_le_bytes());
+    payload.extend_from_slice(&spans[..spans_len]);
+    payload
+}
+
+pub fn payload_ime_commit_text(context_id: u32, text: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&(text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&text[..text_len]);
+    payload
+}
+
+pub fn payload_ime_delete_surrounding_text(
+    context_id: u32,
+    before_bytes: u32,
+    after_bytes: u32,
+) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&before_bytes.to_le_bytes());
+    payload[8..12].copy_from_slice(&after_bytes.to_le_bytes());
+    payload
+}
+
+pub fn payload_ime_set_status(
+    context_id: u32,
+    state: u32,
+    mode_id: u32,
+    flags: u32,
+    mode_label: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let mode_label_len = mode_label.len().min(TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&state.to_le_bytes());
+    payload.extend_from_slice(&mode_id.to_le_bytes());
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&(mode_label_len as u32).to_le_bytes());
+    payload.extend_from_slice(&mode_label[..mode_label_len]);
+    payload
+}
+
+pub fn payload_ime_set_popup_window(
+    context_id: u32,
+    window_id: u32,
+    offset_x: i32,
+    offset_y: i32,
+    visible: bool,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&offset_x.to_le_bytes());
+    payload[12..16].copy_from_slice(&offset_y.to_le_bytes());
+    payload[16..20].copy_from_slice(&(visible as u32).to_le_bytes());
+    payload
+}
+
+pub fn payload_ime_grab_keyboard(context_id: u32) -> [u8; 4] {
+    context_id.to_le_bytes()
+}
+
+pub fn payload_ime_release_keyboard(context_id: u32) -> [u8; 4] {
+    context_id.to_le_bytes()
+}
+
+pub fn payload_ime_context(
+    context_id: u32,
+    window_id: u32,
+    serial: u32,
+    cursor_rect: (i32, i32, u32, u32),
+    content_hint: u32,
+    content_purpose: u32,
+    text_change_cause: u32,
+    cursor_byte: u32,
+    anchor_byte: u32,
+    surrounding_text: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let surrounding_text_len = surrounding_text.len().min(TEXT_INPUT_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, surrounding_text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, surrounding_text_len);
+    payload.extend_from_slice(&context_id.to_le_bytes());
+    payload.extend_from_slice(&window_id.to_le_bytes());
+    payload.extend_from_slice(&serial.to_le_bytes());
+    payload.extend_from_slice(&cursor_rect.0.to_le_bytes());
+    payload.extend_from_slice(&cursor_rect.1.to_le_bytes());
+    payload.extend_from_slice(&cursor_rect.2.to_le_bytes());
+    payload.extend_from_slice(&cursor_rect.3.to_le_bytes());
+    payload.extend_from_slice(&content_hint.to_le_bytes());
+    payload.extend_from_slice(&content_purpose.to_le_bytes());
+    payload.extend_from_slice(&text_change_cause.to_le_bytes());
+    payload.extend_from_slice(&cursor_byte.to_le_bytes());
+    payload.extend_from_slice(&anchor_byte.to_le_bytes());
+    payload.extend_from_slice(&(surrounding_text_len as u32).to_le_bytes());
+    payload.extend_from_slice(&surrounding_text[..surrounding_text_len]);
+    payload
+}
+
+pub fn payload_ime_deactivate(context_id: u32, serial: u32) -> [u8; 8] {
+    payload_text_input_done(context_id, serial)
+}
+
+pub fn payload_ime_key_event(
+    context_id: u32,
+    key_serial: u32,
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> [u8; 28] {
+    let mut payload = [0u8; 28];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&key_serial.to_le_bytes());
+    payload[8..12].copy_from_slice(&window_id.to_le_bytes());
+    payload[12..20].copy_from_slice(&time.to_le_bytes());
+    payload[20..22].copy_from_slice(&type_.to_le_bytes());
+    payload[22..24].copy_from_slice(&code.to_le_bytes());
+    payload[24..28].copy_from_slice(&value.to_le_bytes());
+    payload
+}
+
+pub fn payload_ime_reset(context_id: u32, serial: u32) -> [u8; 8] {
+    payload_text_input_done(context_id, serial)
+}
+
+pub fn payload_ime_trigger(
+    context_id: u32,
+    serial: u32,
+    trigger_id: u32,
+    code: u16,
+    time: u64,
+) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&serial.to_le_bytes());
+    payload[8..12].copy_from_slice(&trigger_id.to_le_bytes());
+    payload[12..14].copy_from_slice(&code.to_le_bytes());
+    payload[16..24].copy_from_slice(&time.to_le_bytes());
     payload
 }
 
