@@ -2582,7 +2582,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 text,
                 spans,
             }) => {
-                if !client_can_mutate_ime_context(client_id, context_id) {
+                let clearing_preedit = text.is_empty() && spans.is_empty();
+                if !client_can_mutate_ime_context(client_id, context_id)
+                    && !(clearing_preedit
+                        && client_is_active_input_method(client_id)
+                        && text_input_context(context_id).is_some())
+                {
                     continue;
                 }
                 forward_ime_preedit(context_id, cursor_byte, anchor_byte, text, spans);
@@ -2629,7 +2634,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     );
                     continue;
                 }
-                if !client_can_mutate_ime_context(client_id, context_id) {
+                if visible && !client_can_mutate_ime_context(client_id, context_id) {
                     continue;
                 }
                 if !managed_windows.iter().any(|id| *id == window_id) {

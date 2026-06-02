@@ -23,8 +23,10 @@ use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger, w
 const IME_NAME: &str = "scarlet-skk";
 const MODE_DIRECT_ID: u32 = 0;
 const MODE_SCARLET_SKK_ID: u32 = 1;
+const MODE_SCARLET_SKK_KATAKANA_ID: u32 = 2;
 const MODE_DIRECT_LABEL: &str = "Direct";
 const MODE_SCARLET_SKK_LABEL: &str = "Scarlet SKK";
+const MODE_SCARLET_SKK_KATAKANA_LABEL: &str = "Scarlet SKK Katakana";
 const SKK_DICTIONARY_PATHS: &[&str] = &[
     "/share/skk/SKK-JISYO.L",
     "/usr/share/skk/SKK-JISYO.L",
@@ -60,6 +62,7 @@ struct ScarletSkk {
     selected_index: usize,
     left_shift_down: bool,
     right_shift_down: bool,
+    katakana_mode: bool,
     eaten_keys: Vec<u16>,
     candidate_popup: Option<CandidatePopup>,
     candidate_popup_requested: bool,
@@ -81,6 +84,7 @@ impl ScarletSkk {
             selected_index: 0,
             left_shift_down: false,
             right_shift_down: false,
+            katakana_mode: false,
             eaten_keys: Vec::new(),
             candidate_popup: None,
             candidate_popup_requested: false,
@@ -115,7 +119,8 @@ impl ScarletSkk {
             }
             Event::ImeDeactivate { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
-                    self.hide_candidate_popup(conn, context_id)?;
+                    conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+                    self.close_candidate_popup(conn)?;
                     self.active_context_id = None;
                     self.grabbing = false;
                     self.reset_context();
@@ -241,6 +246,14 @@ impl ScarletSkk {
             return Ok(handled);
         }
 
+        if code == key_code::KEY_Q && !self.shift_down() {
+            let handled = self.handle_katakana_key(conn, context_id)?;
+            if handled && !self.eaten_keys.contains(&code) {
+                self.eaten_keys.push(code);
+            }
+            return Ok(handled);
+        }
+
         let handled = match letter_from_key(code) {
             Some(ch) => {
                 self.handle_letter(conn, context_id, ch)?;
@@ -320,8 +333,11 @@ impl ScarletSkk {
                     self.update_preedit(conn, context_id)
                 } else {
                     self.pending.push(ch as u8);
-                    let text = drain_committable(&mut self.pending);
+                    let mut text = drain_committable(&mut self.pending);
                     if !text.is_empty() {
+                        if self.katakana_mode {
+                            text = hiragana_to_katakana(&text);
+                        }
                         println!("[scarlet_skk] direct commit '{}'", text);
                         conn.ime_commit_text(context_id, &text)?;
                     }
@@ -371,6 +387,41 @@ impl ScarletSkk {
             self.reading.push(ch);
         }
         self.update_preedit(conn, context_id)
+    }
+
+    fn handle_katakana_key(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+    ) -> Result<bool, Error> {
+        if self.phase == SkkPhase::Candidate {
+            self.phase = SkkPhase::Preedit;
+            self.selected_index = 0;
+            self.candidate_popup_requested = false;
+        }
+
+        self.flush_pending_to_reading();
+        if self.reading.is_empty() && self.okuri.is_empty() {
+            self.katakana_mode = !self.katakana_mode;
+            println!(
+                "[scarlet_skk] katakana mode {}",
+                if self.katakana_mode { "on" } else { "off" }
+            );
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+
+        let mut text = String::new();
+        text.push_str(&self.reading);
+        text.push_str(&self.okuri);
+        let text = hiragana_to_katakana(&text);
+        self.clear_composition();
+        if !text.is_empty() {
+            println!("[scarlet_skk] katakana commit '{}'", text);
+            conn.ime_commit_text(context_id, &text)?;
+        }
+        self.update_preedit(conn, context_id)?;
+        Ok(true)
     }
 
     fn handle_control_key(
@@ -552,7 +603,12 @@ impl ScarletSkk {
             SkkPhase::Direct if !self.pending.is_empty() => ime_state::COMPOSING,
             SkkPhase::Direct => ime_state::DIRECT,
         };
-        let (mode_id, mode_label) = if self.grabbing {
+        let (mode_id, mode_label) = if self.grabbing && self.katakana_mode {
+            (
+                MODE_SCARLET_SKK_KATAKANA_ID,
+                MODE_SCARLET_SKK_KATAKANA_LABEL,
+            )
+        } else if self.grabbing {
             (MODE_SCARLET_SKK_ID, MODE_SCARLET_SKK_LABEL)
         } else {
             (MODE_DIRECT_ID, MODE_DIRECT_LABEL)
@@ -778,32 +834,26 @@ impl ScarletSkk {
             .active_on_focus(false)
             .position(0, 0)
             .build(conn)?;
-        self.candidate_popup = Some(CandidatePopup {
-            window_id,
-            visible: false,
-        });
+        self.candidate_popup = Some(CandidatePopup { window_id });
         println!("[scarlet_skk] created candidate popup window={}", window_id);
         Ok(window_id)
     }
 
-    fn hide_candidate_popup(
-        &mut self,
-        conn: &mut Connection,
-        context_id: u32,
-    ) -> Result<(), Error> {
-        let Some(mut popup) = self.candidate_popup else {
+    fn close_candidate_popup(&mut self, conn: &mut Connection) -> Result<(), Error> {
+        let Some(popup) = self.candidate_popup.take() else {
             return Ok(());
         };
-        if popup.visible {
-            conn.ime_set_popup_window(context_id, popup.window_id, 0, 0, false)?;
-            popup.visible = false;
-            self.candidate_popup = Some(popup);
-            println!(
-                "[scarlet_skk] candidate popup hidden context={}",
-                context_id
-            );
+
+        match conn.destroy_surface(popup.window_id) {
+            Ok(()) | Err(Error::SurfaceNotFound) => {
+                println!(
+                    "[scarlet_skk] candidate popup closed window={}",
+                    popup.window_id
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
         }
-        Ok(())
     }
 
     fn sync_candidate_popup(
@@ -812,15 +862,15 @@ impl ScarletSkk {
         context_id: u32,
     ) -> Result<(), Error> {
         if self.phase != SkkPhase::Candidate {
-            return self.hide_candidate_popup(conn, context_id);
+            return self.close_candidate_popup(conn);
         }
         if !self.candidate_popup_requested {
-            return self.hide_candidate_popup(conn, context_id);
+            return self.close_candidate_popup(conn);
         }
 
         let rows = self.candidate_popup_rows();
         if rows.is_empty() {
-            return self.hide_candidate_popup(conn, context_id);
+            return self.close_candidate_popup(conn);
         }
 
         let window_id = self.ensure_candidate_popup(conn)?;
@@ -832,10 +882,7 @@ impl ScarletSkk {
             CANDIDATE_POPUP_OFFSET_Y,
             true,
         )?;
-        self.candidate_popup = Some(CandidatePopup {
-            window_id,
-            visible: true,
-        });
+        self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
             "[scarlet_skk] candidate popup shown context={} window={} selected={}",
             context_id, window_id, self.selected_index
@@ -871,7 +918,6 @@ impl ScarletSkk {
 #[derive(Clone, Copy)]
 struct CandidatePopup {
     window_id: u32,
-    visible: bool,
 }
 
 struct CandidatePopupRow {
@@ -961,6 +1007,21 @@ fn scale_len(value: u32, scale_milli: u32) -> u32 {
         .saturating_add(999)
         / 1000)
         .max(1) as u32
+}
+
+fn hiragana_to_katakana(text: &str) -> String {
+    let mut converted = String::new();
+    for ch in text.chars() {
+        let code = ch as u32;
+        if (0x3041..=0x3096).contains(&code) {
+            if let Some(katakana) = char::from_u32(code + 0x60) {
+                converted.push(katakana);
+                continue;
+            }
+        }
+        converted.push(ch);
+    }
+    converted
 }
 
 fn drain_committable(pending: &mut Vec<u8>) -> String {

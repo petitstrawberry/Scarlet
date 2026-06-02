@@ -9,6 +9,8 @@
 - `Shift` + letter starts `▽` midashi input.
 - `Shift` + letter inside midashi starts an okuri marker.
 - Printable number and symbol keys are interpreted by the IME itself as fullwidth characters while composing.
+- `q` follows SKK-style katakana handling. With no active composition it toggles katakana mode for subsequently committed kana. With an active `▽`/`▼` composition it commits that composition as katakana immediately, e.g. `Katakanaq` commits `カタカナ`.
+- `q` is reserved as an SKK mode/action key, not a romaji prefix; sequences such as `qu` do not produce a kana mapping in this IME.
 - `Space` enters or advances `▼` candidate selection.
 - `Backspace` moves backward through candidates while `▼` conversion is active.
 - `Enter` commits.
