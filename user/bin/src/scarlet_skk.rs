@@ -1,4 +1,4 @@
-//! Simple external IME service for SWS text-input protocol.
+//! Scarlet SKK external IME service for SWS text-input protocol.
 //!
 //! This binary intentionally keeps conversion outside SWS. SWS only brokers
 //! text-input state and key events between applications and this process.
@@ -20,11 +20,11 @@ use std::thread;
 use sws_client::{Connection, Error, Event, SurfaceBuilder, event_type, key_code};
 use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger, window_types};
 
-const IME_NAME: &str = "simple-skk";
+const IME_NAME: &str = "scarlet-skk";
 const MODE_DIRECT_ID: u32 = 0;
-const MODE_SIMPLE_SKK_ID: u32 = 1;
+const MODE_SCARLET_SKK_ID: u32 = 1;
 const MODE_DIRECT_LABEL: &str = "Direct";
-const MODE_SIMPLE_SKK_LABEL: &str = "Simple SKK";
+const MODE_SCARLET_SKK_LABEL: &str = "Scarlet SKK";
 const SKK_DICTIONARY_PATHS: &[&str] = &[
     "/share/skk/SKK-JISYO.L",
     "/usr/share/skk/SKK-JISYO.L",
@@ -48,7 +48,7 @@ enum SkkPhase {
     Candidate,
 }
 
-struct SimpleIme {
+struct ScarletSkk {
     active_context_id: Option<u32>,
     grabbing: bool,
     dictionary: Vec<SkkDictionaryEntry>,
@@ -66,7 +66,7 @@ struct SimpleIme {
     scale_milli: u32,
 }
 
-impl SimpleIme {
+impl ScarletSkk {
     fn new(scale_milli: u32) -> Self {
         let dictionary = load_skk_dictionary();
         Self {
@@ -109,7 +109,7 @@ impl SimpleIme {
                 self.sync_candidate_popup(conn, state.context_id)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
-                    "[simple_ime] activated context={} window={}",
+                    "[scarlet_skk] activated context={} window={}",
                     state.context_id, state.window_id
                 );
             }
@@ -120,12 +120,12 @@ impl SimpleIme {
                     self.grabbing = false;
                     self.reset_context();
                 }
-                println!("[simple_ime] deactivated context={}", context_id);
+                println!("[scarlet_skk] deactivated context={}", context_id);
             }
             Event::ImeContextState(state) => {
                 self.active_context_id = Some(state.context_id);
                 println!(
-                    "[simple_ime] context-state context={} serial={} cursor=({}, {}) purpose={} text='{}' grabbing={}",
+                    "[scarlet_skk] context-state context={} serial={} cursor=({}, {}) purpose={} text='{}' grabbing={}",
                     state.context_id,
                     state.serial,
                     state.cursor_x,
@@ -137,7 +137,7 @@ impl SimpleIme {
             }
             Event::ImeReset { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
-                    println!("[simple_ime] reset context={}", context_id);
+                    println!("[scarlet_skk] reset context={}", context_id);
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
@@ -153,7 +153,7 @@ impl SimpleIme {
                 serial,
             } => {
                 println!(
-                    "[simple_ime] trigger context={} serial={} trigger={} code={} time={} grabbing={}",
+                    "[scarlet_skk] trigger context={} serial={} trigger={} code={} time={} grabbing={}",
                     context_id, serial, trigger_id, code, time, self.grabbing
                 );
                 if trigger_id == ime_trigger::TOGGLE {
@@ -169,7 +169,7 @@ impl SimpleIme {
                 ..
             } => {
                 println!(
-                    "[simple_ime] key-event context={} serial={} {}({}) type={} value={} grabbing={} text='{}'",
+                    "[scarlet_skk] key-event context={} serial={} {}({}) type={} value={} grabbing={} text='{}'",
                     context_id,
                     key_serial,
                     key_name(code),
@@ -182,7 +182,7 @@ impl SimpleIme {
                 let handled = self.handle_key(conn, context_id, type_, code, value)?;
                 conn.ime_key_handled(key_serial, handled)?;
                 println!(
-                    "[simple_ime] key-handled serial={} handled={} text='{}'",
+                    "[scarlet_skk] key-handled serial={} handled={} text='{}'",
                     key_serial,
                     handled,
                     self.debug_text()
@@ -194,7 +194,7 @@ impl SimpleIme {
                     .is_some_and(|popup| popup.window_id == surface_id)
                 {
                     println!(
-                        "[simple_ime] candidate popup destroyed window={}",
+                        "[scarlet_skk] candidate popup destroyed window={}",
                         surface_id
                     );
                     self.candidate_popup = None;
@@ -215,13 +215,13 @@ impl SimpleIme {
     ) -> Result<bool, Error> {
         if !self.grabbing || self.active_context_id != Some(context_id) {
             println!(
-                "[simple_ime] pass-through: not grabbing or inactive context={} active={:?}",
+                "[scarlet_skk] pass-through: not grabbing or inactive context={} active={:?}",
                 context_id, self.active_context_id
             );
             return Ok(false);
         }
         if type_ != event_type::EV_KEY {
-            println!("[simple_ime] pass-through: non-key type={}", type_);
+            println!("[scarlet_skk] pass-through: non-key type={}", type_);
             return Ok(false);
         }
 
@@ -233,7 +233,7 @@ impl SimpleIme {
         if value == 0 {
             let handled = self.remove_eaten_key(code);
             println!(
-                "[simple_ime] key-release {}({}) handled={}",
+                "[scarlet_skk] key-release {}({}) handled={}",
                 key_name(code),
                 code,
                 handled
@@ -272,7 +272,7 @@ impl SimpleIme {
 
         if self.grabbing {
             println!(
-                "[simple_ime] toggle: release requested context={} pending='{}'",
+                "[scarlet_skk] toggle: release requested context={} pending='{}'",
                 context_id,
                 self.pending_text()
             );
@@ -283,17 +283,20 @@ impl SimpleIme {
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
             self.sync_candidate_popup(conn, context_id)?;
             self.emit_status(conn, context_id)?;
-            println!("[simple_ime] released keyboard context={}", context_id);
+            println!("[scarlet_skk] released keyboard context={}", context_id);
             return Ok(());
         }
 
-        println!("[simple_ime] toggle: grab requested context={}", context_id);
+        println!(
+            "[scarlet_skk] toggle: grab requested context={}",
+            context_id
+        );
         self.reset_context();
         self.grabbing = true;
         conn.ime_grab_keyboard(context_id)?;
         conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
         self.emit_status(conn, context_id)?;
-        println!("[simple_ime] grabbed keyboard context={}", context_id);
+        println!("[scarlet_skk] grabbed keyboard context={}", context_id);
         Ok(())
     }
 
@@ -319,7 +322,7 @@ impl SimpleIme {
                     self.pending.push(ch as u8);
                     let text = drain_committable(&mut self.pending);
                     if !text.is_empty() {
-                        println!("[simple_ime] direct commit '{}'", text);
+                        println!("[scarlet_skk] direct commit '{}'", text);
                         conn.ime_commit_text(context_id, &text)?;
                     }
                     self.update_preedit(conn, context_id)
@@ -353,7 +356,7 @@ impl SimpleIme {
         if self.phase == SkkPhase::Direct && self.pending.is_empty() {
             let mut text = String::new();
             text.push(ch);
-            println!("[simple_ime] direct symbol commit '{}'", text);
+            println!("[scarlet_skk] direct symbol commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
             return self.update_preedit(conn, context_id);
         }
@@ -526,7 +529,7 @@ impl SimpleIme {
         let text = self.current_commit_text();
         self.clear_composition();
         if !text.is_empty() {
-            println!("[simple_ime] commit '{}'", text);
+            println!("[scarlet_skk] commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
         }
         self.update_preedit(conn, context_id)
@@ -534,7 +537,7 @@ impl SimpleIme {
 
     fn update_preedit(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
         let preedit = self.preedit_text();
-        println!("[simple_ime] preedit '{}'", preedit);
+        println!("[scarlet_skk] preedit '{}'", preedit);
         let spans = preedit_spans(&preedit, self.phase);
         conn.ime_set_preedit(context_id, preedit.len() as u32, 0, &preedit, &spans)?;
         self.sync_candidate_popup(conn, context_id)?;
@@ -550,7 +553,7 @@ impl SimpleIme {
             SkkPhase::Direct => ime_state::DIRECT,
         };
         let (mode_id, mode_label) = if self.grabbing {
-            (MODE_SIMPLE_SKK_ID, MODE_SIMPLE_SKK_LABEL)
+            (MODE_SCARLET_SKK_ID, MODE_SCARLET_SKK_LABEL)
         } else {
             (MODE_DIRECT_ID, MODE_DIRECT_LABEL)
         };
@@ -562,7 +565,7 @@ impl SimpleIme {
             flags |= ime_status_flags::CANDIDATES_VISIBLE;
         }
         println!(
-            "[simple_ime] status context={} state={} mode_id={} label='{}' flags={}",
+            "[scarlet_skk] status context={} state={} mode_id={} label='{}' flags={}",
             context_id, state, mode_id, mode_label, flags
         );
         conn.ime_set_status(context_id, state, mode_id, flags, mode_label)
@@ -762,7 +765,7 @@ impl SimpleIme {
         }
 
         let window_id = SurfaceBuilder::new()
-            .app_id("org.scarlet.simple-ime.candidates")
+            .app_id("org.scarlet.skk.candidates")
             .app_name("Simple IME Candidates")
             .menu_titles("")
             .size(
@@ -779,7 +782,7 @@ impl SimpleIme {
             window_id,
             visible: false,
         });
-        println!("[simple_ime] created candidate popup window={}", window_id);
+        println!("[scarlet_skk] created candidate popup window={}", window_id);
         Ok(window_id)
     }
 
@@ -795,7 +798,10 @@ impl SimpleIme {
             conn.ime_set_popup_window(context_id, popup.window_id, 0, 0, false)?;
             popup.visible = false;
             self.candidate_popup = Some(popup);
-            println!("[simple_ime] candidate popup hidden context={}", context_id);
+            println!(
+                "[scarlet_skk] candidate popup hidden context={}",
+                context_id
+            );
         }
         Ok(())
     }
@@ -831,7 +837,7 @@ impl SimpleIme {
             visible: true,
         });
         println!(
-            "[simple_ime] candidate popup shown context={} window={} selected={}",
+            "[scarlet_skk] candidate popup shown context={} window={} selected={}",
             context_id, window_id, self.selected_index
         );
         Ok(())
@@ -1310,19 +1316,19 @@ fn load_skk_dictionary() -> Vec<SkkDictionaryEntry> {
         match load_skk_dictionary_file(path) {
             Some(dictionary) if !dictionary.is_empty() => {
                 println!(
-                    "[simple_ime] loaded SKK dictionary '{}' entries={}",
+                    "[scarlet_skk] loaded SKK dictionary '{}' entries={}",
                     path,
                     dictionary.len()
                 );
                 return dictionary;
             }
             Some(_) => {
-                println!("[simple_ime] ignored empty SKK dictionary '{}'", path);
+                println!("[scarlet_skk] ignored empty SKK dictionary '{}'", path);
             }
             None => {}
         }
     }
-    println!("[simple_ime] no UTF-8 SKK dictionary found; using built-in fallback");
+    println!("[scarlet_skk] no UTF-8 SKK dictionary found; using built-in fallback");
     Vec::new()
 }
 
@@ -1345,7 +1351,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
             Ok(len) => len,
             Err(err) => {
                 println!(
-                    "[simple_ime] failed to read SKK dictionary '{}': {:?}",
+                    "[scarlet_skk] failed to read SKK dictionary '{}': {:?}",
                     path, err
                 );
                 return None;
@@ -1353,7 +1359,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
         };
         if bytes.len() + len > MAX_SKK_DICTIONARY_BYTES {
             println!(
-                "[simple_ime] SKK dictionary '{}' is larger than {} bytes",
+                "[scarlet_skk] SKK dictionary '{}' is larger than {} bytes",
                 path, MAX_SKK_DICTIONARY_BYTES
             );
             return None;
@@ -1365,7 +1371,7 @@ fn read_dictionary_text(path: &str) -> Option<String> {
         Ok(text) => Some(text),
         Err(_) => {
             println!(
-                "[simple_ime] SKK dictionary '{}' is not UTF-8; fetch script converts upstream EUC-JP",
+                "[scarlet_skk] SKK dictionary '{}' is not UTF-8; fetch script converts upstream EUC-JP",
                 path
             );
             None
@@ -1582,12 +1588,12 @@ fn preedit_spans(text: &str, phase: SkkPhase) -> Vec<u8> {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("[simple_ime] connecting to SWS...");
+    println!("[scarlet_skk] connecting to SWS...");
 
     let mut conn = match Connection::connect_default() {
         Ok(conn) => conn,
         Err(err) => {
-            println!("[simple_ime] failed to connect to SWS: {:?}", err);
+            println!("[scarlet_skk] failed to connect to SWS: {:?}", err);
             return 1;
         }
     };
@@ -1600,36 +1606,36 @@ fn main() -> i32 {
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,
         Err(err) => {
-            println!("[simple_ime] failed to register IME: {:?}", err);
+            println!("[scarlet_skk] failed to register IME: {:?}", err);
             return 1;
         }
     };
 
     if let Err(err) = conn.set_active_input_method(ime_id) {
-        println!("[simple_ime] failed to activate IME {}: {:?}", ime_id, err);
+        println!("[scarlet_skk] failed to activate IME {}: {:?}", ime_id, err);
         return 1;
     }
 
-    println!("[simple_ime] registered {} as id={}", IME_NAME, ime_id);
+    println!("[scarlet_skk] registered {} as id={}", IME_NAME, ime_id);
 
-    let mut ime = SimpleIme::new(scale_milli);
+    let mut ime = ScarletSkk::new(scale_milli);
     loop {
         match conn.dispatch() {
             Ok(_) => {
                 while let Some(event) = conn.poll_event() {
                     if let Err(err) = ime.handle_event(&mut conn, event) {
-                        println!("[simple_ime] event handling failed: {:?}", err);
+                        println!("[scarlet_skk] event handling failed: {:?}", err);
                         return 1;
                     }
                 }
             }
             Err(Error::WouldBlock) => {}
             Err(Error::Disconnected) => {
-                println!("[simple_ime] disconnected from SWS");
+                println!("[scarlet_skk] disconnected from SWS");
                 return 1;
             }
             Err(err) => {
-                println!("[simple_ime] dispatch failed: {:?}", err);
+                println!("[scarlet_skk] dispatch failed: {:?}", err);
                 return 1;
             }
         }

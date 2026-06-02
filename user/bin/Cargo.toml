@@ -175,8 +175,8 @@ name = "input_dump"
 path = "src/input_dump.rs"
 
 [[bin]]
-name = "simple_ime"
-path = "src/simple_ime.rs"
+name = "scarlet_skk"
+path = "src/scarlet_skk.rs"
 
 [[bin]]
 name = "settings"

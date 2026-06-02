@@ -981,16 +981,18 @@ fn set_active_input_method(ime_id: u32) {
     }
     *ACTIVE_IME_ID.lock() = Some(ime_id);
     release_pending_ime_keys(None);
-    if let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock() {
-        let mut contexts = TEXT_INPUT_CONTEXTS.lock();
-        if let Some(context) = contexts.get_mut(&context_id) {
-            context.keyboard_grabbed = false;
-        }
-    }
+    clear_keyboard_grabs();
     if let Some(context_id) = *ACTIVE_TEXT_INPUT_CONTEXT.lock()
         && let Some(context) = text_input_context(context_id)
     {
         send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
+    }
+}
+
+fn clear_keyboard_grabs() {
+    let mut contexts = TEXT_INPUT_CONTEXTS.lock();
+    for context in contexts.values_mut() {
+        context.keyboard_grabbed = false;
     }
 }
 
@@ -1109,6 +1111,7 @@ fn cleanup_input_methods_for_client(client_id: usize) {
         && removed.iter().any(|id| *id == active_id)
     {
         release_pending_ime_keys(None);
+        clear_keyboard_grabs();
         *active = INPUT_METHODS.lock().keys().next().copied();
     }
 }
@@ -1213,6 +1216,16 @@ fn client_is_active_input_method(client_id: usize) -> bool {
         .lock()
         .get(&ime_id)
         .is_some_and(|service| service.client_id == client_id)
+}
+
+fn client_can_mutate_ime_context(client_id: usize, context_id: u32) -> bool {
+    if !client_is_active_input_method(client_id) {
+        return false;
+    }
+    if *ACTIVE_TEXT_INPUT_CONTEXT.lock() != Some(context_id) {
+        return false;
+    }
+    text_input_context(context_id).is_some_and(|context| context.enabled)
 }
 
 fn send_text_input_done(window_id: u32, context_id: u32, serial: u32) {
@@ -2569,9 +2582,15 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 text,
                 spans,
             }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
                 forward_ime_preedit(context_id, cursor_byte, anchor_byte, text, spans);
             }
             Ok(ClientMessageRef::ImeCommitText { context_id, text }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
                 forward_ime_commit(context_id, text);
             }
             Ok(ClientMessageRef::ImeDeleteSurroundingText {
@@ -2579,6 +2598,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 before_bytes,
                 after_bytes,
             }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
                 forward_ime_delete_surrounding_text(context_id, before_bytes, after_bytes);
             }
             Ok(ClientMessageRef::ImeSetStatus {
@@ -2588,6 +2610,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 flags,
                 mode_label,
             }) => {
+                if !client_can_mutate_ime_context(client_id, context_id) {
+                    continue;
+                }
                 forward_ime_status(context_id, state, mode_id, flags, mode_label);
             }
             Ok(ClientMessageRef::ImeSetPopupWindow {
@@ -2602,6 +2627,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         "[ClientThread {}] Ignoring IME popup from non-active IME client",
                         client_id
                     );
+                    continue;
+                }
+                if !client_can_mutate_ime_context(client_id, context_id) {
                     continue;
                 }
                 if !managed_windows.iter().any(|id| *id == window_id) {

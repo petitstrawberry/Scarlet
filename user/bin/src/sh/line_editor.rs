@@ -138,7 +138,7 @@ impl LineEditor {
         self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let byte = self.read_input_byte();
+            let byte = self.read_input_byte()?;
 
             // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
@@ -188,7 +188,7 @@ impl LineEditor {
         self.rendered_cursor_cell = self.rendered_cells;
 
         loop {
-            let byte = self.read_input_byte();
+            let byte = self.read_input_byte()?;
 
             // In raw mode, we receive terminal input bytes.
             let action = if self.raw_mode_enabled {
@@ -428,13 +428,12 @@ impl LineEditor {
         }
     }
 
-    fn read_input_byte(&self) -> u8 {
+    fn read_input_byte(&self) -> Result<u8, ()> {
         let mut buf = [0u8; 1];
-        loop {
-            match std::io::stdin().read(&mut buf) {
-                Ok(bytes_read) if bytes_read > 0 => return buf[0],
-                _ => {}
-            }
+        match std::io::stdin().read(&mut buf) {
+            Ok(bytes_read) if bytes_read > 0 => Ok(buf[0]),
+            Ok(_) => Err(()),
+            Err(_) => Err(()),
         }
     }
 

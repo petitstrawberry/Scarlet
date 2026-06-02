@@ -2517,6 +2517,10 @@ pub fn payload_text_input_set_cursor_rect(
     payload
 }
 
+fn clamp_text_offset(offset: u32, text_len: usize) -> u32 {
+    offset.min(text_len as u32)
+}
+
 pub fn payload_text_input_set_surrounding_text(
     context_id: u32,
     cursor_byte: u32,
@@ -2525,6 +2529,8 @@ pub fn payload_text_input_set_surrounding_text(
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
     payload.extend_from_slice(&context_id.to_le_bytes());
     payload.extend_from_slice(&cursor_byte.to_le_bytes());
     payload.extend_from_slice(&anchor_byte.to_le_bytes());
@@ -2566,6 +2572,8 @@ pub fn payload_text_input_preedit(
     let mut payload = Vec::new();
     let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
     let spans_len = spans.len().min(TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
     payload.extend_from_slice(&context_id.to_le_bytes());
     payload.extend_from_slice(&serial.to_le_bytes());
     payload.extend_from_slice(&cursor_byte.to_le_bytes());
@@ -2662,6 +2670,8 @@ pub fn payload_ime_set_preedit(
     let mut payload = Vec::new();
     let text_len = text.len().min(TEXT_INPUT_MAX_BYTES);
     let spans_len = spans.len().min(TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, text_len);
     payload.extend_from_slice(&context_id.to_le_bytes());
     payload.extend_from_slice(&cursor_byte.to_le_bytes());
     payload.extend_from_slice(&anchor_byte.to_le_bytes());
@@ -2749,6 +2759,8 @@ pub fn payload_ime_context(
 ) -> Vec<u8> {
     let mut payload = Vec::new();
     let surrounding_text_len = surrounding_text.len().min(TEXT_INPUT_MAX_BYTES);
+    let cursor_byte = clamp_text_offset(cursor_byte, surrounding_text_len);
+    let anchor_byte = clamp_text_offset(anchor_byte, surrounding_text_len);
     payload.extend_from_slice(&context_id.to_le_bytes());
     payload.extend_from_slice(&window_id.to_le_bytes());
     payload.extend_from_slice(&serial.to_le_bytes());
