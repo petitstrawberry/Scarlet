@@ -13,13 +13,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
+use scarlet_ui::{Buffer, Canvas, Color};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::println;
 use std::socket::{ShutdownHow, Socket};
 use std::thread;
-use sws_client::{Connection, Error, Event, event_type, key_code};
-use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger};
+use sws_client::{Connection, Error, Event, SurfaceBuilder, event_type, key_code};
+use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger, window_types};
 
 const IME_NAME: &str = "scarlet-mozc";
 const MOZC_IPC_NAME: &str = "session";
@@ -38,6 +39,14 @@ const KEY_LEFTCTRL: u16 = 0x1d;
 const KEY_RIGHTCTRL: u16 = 0x61;
 const KEY_LEFTALT: u16 = 0x38;
 const KEY_RIGHTALT: u16 = 0x64;
+const CANDIDATE_POPUP_WIDTH: u32 = 360;
+const CANDIDATE_POPUP_HEIGHT: u32 = 148;
+const CANDIDATE_POPUP_PAGE_SIZE: usize = 5;
+const CANDIDATE_POPUP_OFFSET_X: i32 = 0;
+const CANDIDATE_POPUP_OFFSET_Y: i32 = 4;
+const CANDIDATE_POPUP_PADDING_X: i32 = 4;
+const CANDIDATE_POPUP_PADDING_Y: i32 = 4;
+const CANDIDATE_ROW_HEIGHT: i32 = 28;
 
 struct ScarletMozc {
     active_context_id: Option<u32>,
@@ -53,10 +62,12 @@ struct ScarletMozc {
     left_alt_down: bool,
     right_alt_down: bool,
     eaten_keys: Vec<u16>,
+    candidate_popup: Option<CandidatePopup>,
+    scale_milli: u32,
 }
 
 impl ScarletMozc {
-    fn new() -> Self {
+    fn new(scale_milli: u32) -> Self {
         Self {
             active_context_id: None,
             grabbing: false,
@@ -71,6 +82,8 @@ impl ScarletMozc {
             left_alt_down: false,
             right_alt_down: false,
             eaten_keys: Vec::new(),
+            candidate_popup: None,
+            scale_milli: scale_milli.max(1),
         }
     }
 
@@ -87,6 +100,7 @@ impl ScarletMozc {
                 self.active_context_id = Some(state.context_id);
                 self.grabbing = false;
                 conn.ime_set_preedit(state.context_id, 0, 0, "", &[])?;
+                self.close_candidate_popup(conn)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
                     "[scarlet_mozc] activated context={} window={}",
@@ -96,6 +110,7 @@ impl ScarletMozc {
             Event::ImeDeactivate { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+                    self.close_candidate_popup(conn)?;
                     self.active_context_id = None;
                     self.grabbing = false;
                     self.reset_context();
@@ -108,6 +123,7 @@ impl ScarletMozc {
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+                    self.close_candidate_popup(conn)?;
                     self.emit_status(conn, context_id)?;
                 }
             }
@@ -153,6 +169,18 @@ impl ScarletMozc {
                     key_serial, handled, self.preedit
                 );
             }
+            Event::SurfaceDestroyed { surface_id } => {
+                if self
+                    .candidate_popup
+                    .is_some_and(|popup| popup.window_id == surface_id)
+                {
+                    println!(
+                        "[scarlet_mozc] candidate popup destroyed window={}",
+                        surface_id
+                    );
+                    self.candidate_popup = None;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -167,6 +195,7 @@ impl ScarletMozc {
             self.grabbing = false;
             self.reset_context();
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+            self.close_candidate_popup(conn)?;
             conn.ime_release_keyboard(context_id)?;
             self.emit_status(conn, context_id)?;
             println!("[scarlet_mozc] released keyboard context={}", context_id);
@@ -304,7 +333,87 @@ impl ScarletMozc {
             println!("[scarlet_mozc] preedit ''");
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
         }
+        self.sync_candidate_popup(conn, context_id, output.candidate_window.as_ref())?;
         self.emit_status(conn, context_id)
+    }
+
+    fn ensure_candidate_popup(&mut self, conn: &mut Connection) -> Result<u32, Error> {
+        if let Some(popup) = self.candidate_popup {
+            return Ok(popup.window_id);
+        }
+
+        let window_id = SurfaceBuilder::new()
+            .app_id("org.scarlet.mozc.candidates")
+            .app_name("Mozc Candidates")
+            .menu_titles("")
+            .size(
+                scale_len(CANDIDATE_POPUP_WIDTH, self.scale_milli),
+                scale_len(CANDIDATE_POPUP_HEIGHT, self.scale_milli),
+            )
+            .window_type(window_types::IME_POPUP)
+            .resizable(false)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .position(0, 0)
+            .build(conn)?;
+        self.candidate_popup = Some(CandidatePopup { window_id });
+        println!(
+            "[scarlet_mozc] created candidate popup window={}",
+            window_id
+        );
+        Ok(window_id)
+    }
+
+    fn close_candidate_popup(&mut self, conn: &mut Connection) -> Result<(), Error> {
+        let Some(popup) = self.candidate_popup.take() else {
+            return Ok(());
+        };
+
+        match conn.destroy_surface(popup.window_id) {
+            Ok(()) | Err(Error::SurfaceNotFound) => {
+                println!(
+                    "[scarlet_mozc] candidate popup closed window={}",
+                    popup.window_id
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn sync_candidate_popup(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+        candidate_window: Option<&MozcCandidateWindow>,
+    ) -> Result<(), Error> {
+        let Some(candidate_window) = candidate_window else {
+            return self.close_candidate_popup(conn);
+        };
+        if candidate_window.focused_index.is_none() || candidate_window.candidates.is_empty() {
+            return self.close_candidate_popup(conn);
+        }
+
+        let rows = candidate_popup_rows(candidate_window);
+        if rows.is_empty() {
+            return self.close_candidate_popup(conn);
+        }
+
+        let window_id = self.ensure_candidate_popup(conn)?;
+        draw_candidate_popup(conn, window_id, &rows, self.scale_milli)?;
+        conn.ime_set_popup_window(
+            context_id,
+            window_id,
+            CANDIDATE_POPUP_OFFSET_X,
+            CANDIDATE_POPUP_OFFSET_Y,
+            true,
+        )?;
+        self.candidate_popup = Some(CandidatePopup { window_id });
+        println!(
+            "[scarlet_mozc] candidate popup shown context={} window={} focused={:?} size={}",
+            context_id, window_id, candidate_window.focused_index, candidate_window.size
+        );
+        Ok(())
     }
 
     fn emit_status(&self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
@@ -430,6 +539,134 @@ impl ScarletMozc {
     }
 }
 
+#[derive(Clone, Copy)]
+struct CandidatePopup {
+    window_id: u32,
+}
+
+struct CandidatePopupRow {
+    index: usize,
+    text: String,
+    selected: bool,
+}
+
+#[derive(Default)]
+struct MozcCandidateWindow {
+    focused_index: Option<usize>,
+    size: u32,
+    candidates: Vec<MozcCandidate>,
+}
+
+struct MozcCandidate {
+    index: usize,
+    value: String,
+}
+
+fn candidate_popup_rows(candidate_window: &MozcCandidateWindow) -> Vec<CandidatePopupRow> {
+    let Some(focused_index) = candidate_window.focused_index else {
+        return Vec::new();
+    };
+    let page_start =
+        (focused_index / CANDIDATE_POPUP_PAGE_SIZE).saturating_mul(CANDIDATE_POPUP_PAGE_SIZE);
+    let mut rows = Vec::new();
+    for candidate in candidate_window
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.index >= page_start)
+        .take(CANDIDATE_POPUP_PAGE_SIZE)
+    {
+        rows.push(CandidatePopupRow {
+            index: candidate.index,
+            text: candidate.value.clone(),
+            selected: candidate.index == focused_index,
+        });
+    }
+    rows
+}
+
+fn draw_candidate_popup(
+    conn: &mut Connection,
+    window_id: u32,
+    rows: &[CandidatePopupRow],
+    scale_milli: u32,
+) -> Result<(), Error> {
+    let mut ui_buffer = Buffer::from_logical_dimensions_with_scale(
+        CANDIDATE_POPUP_WIDTH,
+        CANDIDATE_POPUP_HEIGHT,
+        scale_milli,
+    );
+    {
+        let mut canvas = Canvas::for_buffer(&mut ui_buffer);
+        draw_candidate_popup_ui(&mut canvas, rows);
+    }
+
+    let Some(surface) = conn.surface_mut(window_id) else {
+        return Err(Error::SurfaceNotFound);
+    };
+
+    surface.with_buffer(|buffer, width, height| {
+        for byte in buffer.iter_mut() {
+            *byte = 0;
+        }
+
+        let src = ui_buffer.data();
+        let src_stride = ui_buffer.width() as usize * 4;
+        let dst_stride = width as usize * 4;
+        let copy_stride = src_stride.min(dst_stride);
+        let copy_rows = ui_buffer.height().min(height) as usize;
+        for row in 0..copy_rows {
+            let src_start = row * src_stride;
+            let dst_start = row * dst_stride;
+            buffer[dst_start..dst_start + copy_stride]
+                .copy_from_slice(&src[src_start..src_start + copy_stride]);
+        }
+    });
+    conn.commit(window_id)
+}
+
+fn draw_candidate_popup_ui(canvas: &mut Canvas<'_>, rows: &[CandidatePopupRow]) {
+    let bg = Color::rgb(250u8, 250u8, 252u8);
+    let border = Color::rgb(106u8, 112u8, 124u8);
+    let text = Color::rgb(24u8, 26u8, 32u8);
+    let selected_bg = Color::rgb(40u8, 96u8, 180u8);
+    let selected_text = Color::WHITE;
+
+    canvas.fill_rect(0, 0, CANDIDATE_POPUP_WIDTH, CANDIDATE_POPUP_HEIGHT, bg);
+    canvas.draw_rect(0, 0, CANDIDATE_POPUP_WIDTH, CANDIDATE_POPUP_HEIGHT, border);
+
+    for (row_pos, row) in rows.iter().enumerate() {
+        let y = CANDIDATE_POPUP_PADDING_Y + (row_pos as i32 * CANDIDATE_ROW_HEIGHT);
+        let row_h = CANDIDATE_ROW_HEIGHT as u32;
+        if row.selected {
+            canvas.fill_rect(
+                CANDIDATE_POPUP_PADDING_X,
+                y,
+                CANDIDATE_POPUP_WIDTH.saturating_sub((CANDIDATE_POPUP_PADDING_X * 2) as u32),
+                row_h,
+                selected_bg,
+            );
+        }
+
+        let row_text = format!("{}  {}", row.index.saturating_add(1), row.text);
+        let color = if row.selected { selected_text } else { text };
+        canvas.draw_text_sized(
+            CANDIDATE_POPUP_PADDING_X + 10,
+            y + 6,
+            &row_text,
+            color,
+            17.0,
+        );
+    }
+}
+
+fn scale_len(value: u32, scale_milli: u32) -> u32 {
+    ((value as u64)
+        .saturating_mul(scale_milli.max(1) as u64)
+        .saturating_add(999)
+        / 1000)
+        .max(1) as u32
+}
+
 struct MozcIpc {
     server_name: &'static str,
     cached_abstract_name: Option<String>,
@@ -504,6 +741,7 @@ struct MozcOutput {
     consumed: Option<bool>,
     result: Option<String>,
     preedit: Option<MozcPreedit>,
+    candidate_window: Option<MozcCandidateWindow>,
     status: Option<MozcStatus>,
     mode: Option<u32>,
 }
@@ -887,7 +1125,7 @@ fn key_name(code: u16) -> &'static str {
 }
 
 mod proto {
-    use super::{MozcOutput, MozcPreedit, MozcStatus};
+    use super::{MozcCandidate, MozcCandidateWindow, MozcOutput, MozcPreedit, MozcStatus};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
@@ -1010,6 +1248,10 @@ mod proto {
                     let preedit = cursor.read_bytes()?;
                     output.preedit = decode_preedit(preedit);
                 }
+                (6, WIRE_BYTES) => {
+                    let candidate_window = cursor.read_bytes()?;
+                    output.candidate_window = decode_candidate_window(candidate_window);
+                }
                 (13, WIRE_BYTES) => {
                     let status = cursor.read_bytes()?;
                     output.status = Some(decode_status(status)?);
@@ -1018,6 +1260,41 @@ mod proto {
             }
         }
         Some(output)
+    }
+
+    fn decode_candidate_window(data: &[u8]) -> Option<MozcCandidateWindow> {
+        let mut window = MozcCandidateWindow::default();
+        let mut cursor = Cursor::new(data);
+        while let Some((field, wire)) = cursor.read_key() {
+            match (field, wire) {
+                (1, WIRE_VARINT) => window.focused_index = cursor.read_varint().map(|v| v as usize),
+                (2, WIRE_VARINT) => window.size = cursor.read_varint()? as u32,
+                (3, WIRE_START_GROUP) => {
+                    if let Some(candidate) = decode_candidate(&mut cursor) {
+                        window.candidates.push(candidate);
+                    }
+                }
+                _ => cursor.skip(wire)?,
+            }
+        }
+        Some(window)
+    }
+
+    fn decode_candidate(cursor: &mut Cursor<'_>) -> Option<MozcCandidate> {
+        let mut index = None;
+        let mut value = None;
+        while let Some((field, wire)) = cursor.read_key() {
+            match (field, wire) {
+                (3, WIRE_END_GROUP) => break,
+                (4, WIRE_VARINT) => index = cursor.read_varint().map(|v| v as usize),
+                (5, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string),
+                _ => cursor.skip(wire)?,
+            }
+        }
+        Some(MozcCandidate {
+            index: index?,
+            value: value?,
+        })
     }
 
     fn decode_result(data: &[u8]) -> Option<Option<String>> {
@@ -1194,10 +1471,12 @@ fn main() -> i32 {
             return 1;
         }
     };
+    let scale_milli = conn.get_output_scale().unwrap_or(1000).max(1);
 
     let capabilities = ime_capabilities::KEYBOARD_GRAB
         | ime_capabilities::STYLED_PREEDIT
-        | ime_capabilities::STATUS;
+        | ime_capabilities::STATUS
+        | ime_capabilities::OWN_CANDIDATE_UI;
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,
         Err(err) => {
@@ -1216,7 +1495,7 @@ fn main() -> i32 {
 
     println!("[scarlet_mozc] registered {} as id={}", IME_NAME, ime_id);
 
-    let mut ime = ScarletMozc::new();
+    let mut ime = ScarletMozc::new(scale_milli);
     loop {
         match conn.dispatch() {
             Ok(_) => {
