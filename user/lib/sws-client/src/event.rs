@@ -194,6 +194,8 @@ pub mod key_code {
     pub const KEY_BACKSPACE: u16 = 0x0e;
     pub const KEY_TAB: u16 = 0x0f;
     pub const KEY_SPACE: u16 = 0x39;
+    pub const KEY_LEFTSHIFT: u16 = 0x2a;
+    pub const KEY_RIGHTSHIFT: u16 = 0x36;
     pub const KEY_Q: u16 = 0x10;
     pub const KEY_W: u16 = 0x11;
     pub const KEY_E: u16 = 0x12;

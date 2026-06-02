@@ -12,36 +12,73 @@ extern crate scarlet_std as std;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
+use std::fs::File;
 use std::println;
 use std::thread;
 use sws_client::{Connection, Error, Event, event_type, key_code};
 use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger};
 
-const IME_NAME: &str = "simple-kana";
+const IME_NAME: &str = "simple-skk";
 const MODE_DIRECT_ID: u32 = 0;
-const MODE_SIMPLE_KANA_ID: u32 = 1;
+const MODE_SIMPLE_SKK_ID: u32 = 1;
 const MODE_DIRECT_LABEL: &str = "Direct";
-const MODE_SIMPLE_KANA_LABEL: &str = "Simple Kana";
+const MODE_SIMPLE_SKK_LABEL: &str = "Simple SKK";
+const SKK_DICTIONARY_PATHS: &[&str] = &[
+    "/share/skk/SKK-JISYO.L",
+    "/usr/share/skk/SKK-JISYO.L",
+    "/usr/local/share/skk/SKK-JISYO.L",
+    "/etc/skk/SKK-JISYO.L",
+];
+const MAX_SKK_DICTIONARY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkkPhase {
+    Direct,
+    Preedit,
+    Candidate,
+}
 
 struct SimpleIme {
     active_context_id: Option<u32>,
     grabbing: bool,
+    dictionary: Vec<SkkDictionaryEntry>,
     pending: Vec<u8>,
+    phase: SkkPhase,
+    reading: String,
+    okuri_marker: Option<char>,
+    okuri: String,
+    selected_index: usize,
+    left_shift_down: bool,
+    right_shift_down: bool,
     eaten_keys: Vec<u16>,
 }
 
 impl SimpleIme {
     fn new() -> Self {
+        let dictionary = load_skk_dictionary();
         Self {
             active_context_id: None,
             grabbing: false,
+            dictionary,
             pending: Vec::new(),
+            phase: SkkPhase::Direct,
+            reading: String::new(),
+            okuri_marker: None,
+            okuri: String::new(),
+            selected_index: 0,
+            left_shift_down: false,
+            right_shift_down: false,
             eaten_keys: Vec::new(),
         }
     }
 
     fn reset_context(&mut self) {
         self.pending.clear();
+        self.phase = SkkPhase::Direct;
+        self.reading.clear();
+        self.okuri_marker = None;
+        self.okuri.clear();
+        self.selected_index = 0;
         self.eaten_keys.clear();
     }
 
@@ -70,13 +107,13 @@ impl SimpleIme {
             Event::ImeContextState(state) => {
                 self.active_context_id = Some(state.context_id);
                 println!(
-                    "[simple_ime] context-state context={} serial={} cursor=({}, {}) purpose={} pending='{}' grabbing={}",
+                    "[simple_ime] context-state context={} serial={} cursor=({}, {}) purpose={} text='{}' grabbing={}",
                     state.context_id,
                     state.serial,
                     state.cursor_x,
                     state.cursor_y,
                     state.content_purpose,
-                    self.pending_text(),
+                    self.debug_text(),
                     self.grabbing
                 );
             }
@@ -114,7 +151,7 @@ impl SimpleIme {
                 ..
             } => {
                 println!(
-                    "[simple_ime] key-event context={} serial={} {}({}) type={} value={} grabbing={} pending='{}'",
+                    "[simple_ime] key-event context={} serial={} {}({}) type={} value={} grabbing={} text='{}'",
                     context_id,
                     key_serial,
                     key_name(code),
@@ -122,15 +159,15 @@ impl SimpleIme {
                     type_,
                     value,
                     self.grabbing,
-                    self.pending_text()
+                    self.debug_text()
                 );
                 let handled = self.handle_key(conn, context_id, type_, code, value)?;
                 conn.ime_key_handled(key_serial, handled)?;
                 println!(
-                    "[simple_ime] key-handled serial={} handled={} pending='{}'",
+                    "[simple_ime] key-handled serial={} handled={} text='{}'",
                     key_serial,
                     handled,
-                    self.pending_text()
+                    self.debug_text()
                 );
             }
             _ => {}
@@ -158,6 +195,11 @@ impl SimpleIme {
             return Ok(false);
         }
 
+        if code == key_code::KEY_LEFTSHIFT || code == key_code::KEY_RIGHTSHIFT {
+            self.set_shift_state(code, value != 0);
+            return Ok(true);
+        }
+
         if value == 0 {
             let handled = self.remove_eaten_key(code);
             println!(
@@ -169,54 +211,12 @@ impl SimpleIme {
             return Ok(handled);
         }
 
-        let handled = if let Some(ch) = letter_from_key(code) {
-            self.pending.push(ch as u8);
-            println!(
-                "[simple_ime] append '{}' -> pending='{}'",
-                ch,
-                self.pending_text()
-            );
-            self.commit_ready_text(conn, context_id)?;
-            self.update_preedit(conn, context_id)?;
-            true
-        } else {
-            match code {
-                key_code::KEY_BACKSPACE => {
-                    if self.pending.pop().is_some() {
-                        self.update_preedit(conn, context_id)?;
-                        true
-                    } else {
-                        false
-                    }
-                }
-                key_code::KEY_ENTER | key_code::KEY_SPACE => {
-                    if self.pending.is_empty() {
-                        false
-                    } else {
-                        self.flush_pending(conn, context_id)?;
-                        true
-                    }
-                }
-                key_code::KEY_COMMA => {
-                    self.flush_pending(conn, context_id)?;
-                    println!("[simple_ime] commit punctuation '、'");
-                    conn.ime_commit_text(context_id, "、")?;
-                    true
-                }
-                key_code::KEY_DOT => {
-                    self.flush_pending(conn, context_id)?;
-                    println!("[simple_ime] commit punctuation '。'");
-                    conn.ime_commit_text(context_id, "。")?;
-                    true
-                }
-                key_code::KEY_SLASH => {
-                    self.flush_pending(conn, context_id)?;
-                    println!("[simple_ime] commit punctuation '・'");
-                    conn.ime_commit_text(context_id, "・")?;
-                    true
-                }
-                _ => false,
+        let handled = match letter_from_key(code) {
+            Some(ch) => {
+                self.handle_letter(conn, context_id, ch)?;
+                true
             }
+            None => self.handle_control_key(conn, context_id, code)?,
         };
 
         if handled && !self.eaten_keys.contains(&code) {
@@ -239,7 +239,7 @@ impl SimpleIme {
                 context_id,
                 self.pending_text()
             );
-            self.flush_pending(conn, context_id)?;
+            self.commit_current_text(conn, context_id)?;
             conn.ime_release_keyboard(context_id)?;
             self.grabbing = false;
             self.reset_context();
@@ -261,61 +261,241 @@ impl SimpleIme {
         Ok(())
     }
 
-    fn commit_ready_text(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
-        let text = drain_committable(&mut self.pending);
-        if !text.is_empty() {
-            println!(
-                "[simple_ime] commit-ready '{}' remaining='{}'",
-                text,
-                self.pending_text()
-            );
-            conn.ime_commit_text(context_id, &text)?;
+    fn handle_letter(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+        ch: char,
+    ) -> Result<(), Error> {
+        let shifted = self.shift_down();
+        if self.phase == SkkPhase::Candidate {
+            self.commit_current_text(conn, context_id)?;
         }
-        Ok(())
+
+        match self.phase {
+            SkkPhase::Direct => {
+                if shifted {
+                    self.phase = SkkPhase::Preedit;
+                    self.pending.push(ch as u8);
+                    self.absorb_ready_kana();
+                    self.update_preedit(conn, context_id)
+                } else {
+                    self.pending.push(ch as u8);
+                    let text = drain_committable(&mut self.pending);
+                    if !text.is_empty() {
+                        println!("[simple_ime] direct commit '{}'", text);
+                        conn.ime_commit_text(context_id, &text)?;
+                    }
+                    self.update_preedit(conn, context_id)
+                }
+            }
+            SkkPhase::Preedit => {
+                if shifted && !self.reading.is_empty() && self.okuri_marker.is_none() {
+                    self.flush_pending_to_reading();
+                    self.okuri_marker = Some(ch);
+                    self.pending.push(ch as u8);
+                } else {
+                    self.pending.push(ch as u8);
+                }
+                self.absorb_ready_kana();
+                self.update_preedit(conn, context_id)
+            }
+            SkkPhase::Candidate => Ok(()),
+        }
     }
 
-    fn flush_pending(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
-        let mut text = drain_committable(&mut self.pending);
-        if self.pending == b"n" {
-            text.push_str("ん");
-        } else if !self.pending.is_empty()
-            && let Ok(raw) = core::str::from_utf8(&self.pending)
-        {
-            text.push_str(raw);
+    fn handle_control_key(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+        code: u16,
+    ) -> Result<bool, Error> {
+        match code {
+            key_code::KEY_BACKSPACE => self.handle_backspace(conn, context_id),
+            key_code::KEY_DELETE => self.handle_delete(conn, context_id),
+            key_code::KEY_ENTER => {
+                if self.is_empty() {
+                    Ok(false)
+                } else {
+                    self.commit_current_text(conn, context_id)?;
+                    Ok(true)
+                }
+            }
+            key_code::KEY_SPACE => {
+                if self.is_empty() {
+                    Ok(false)
+                } else {
+                    self.convert_or_select_next(conn, context_id)?;
+                    Ok(true)
+                }
+            }
+            key_code::KEY_ESC => self.handle_escape(conn, context_id),
+            key_code::KEY_RIGHT | key_code::KEY_DOWN => {
+                if self.phase == SkkPhase::Candidate {
+                    self.select_next_candidate();
+                    self.update_preedit(conn, context_id)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            key_code::KEY_LEFT | key_code::KEY_UP => {
+                if self.phase == SkkPhase::Candidate {
+                    self.select_previous_candidate();
+                    self.update_preedit(conn, context_id)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            key_code::KEY_COMMA => {
+                self.commit_current_text(conn, context_id)?;
+                conn.ime_commit_text(context_id, "、")?;
+                Ok(true)
+            }
+            key_code::KEY_DOT => {
+                self.commit_current_text(conn, context_id)?;
+                conn.ime_commit_text(context_id, "。")?;
+                Ok(true)
+            }
+            key_code::KEY_SLASH => {
+                self.commit_current_text(conn, context_id)?;
+                conn.ime_commit_text(context_id, "・")?;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        self.pending.clear();
+    }
 
+    fn handle_backspace(&mut self, conn: &mut Connection, context_id: u32) -> Result<bool, Error> {
+        if self.is_empty() && self.eaten_keys.contains(&key_code::KEY_BACKSPACE) {
+            return Ok(true);
+        }
+        if self.phase == SkkPhase::Candidate {
+            self.select_previous_candidate();
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+        if self.pending.pop().is_some() {
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+        if self.okuri.pop().is_some() {
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+        if self.okuri_marker.take().is_some() {
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+        if self.reading.pop().is_some() {
+            if self.reading.is_empty() {
+                self.phase = SkkPhase::Direct;
+            }
+            self.update_preedit(conn, context_id)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn handle_delete(&mut self, conn: &mut Connection, context_id: u32) -> Result<bool, Error> {
+        if self.is_empty() {
+            if self.eaten_keys.contains(&key_code::KEY_DELETE) {
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
+        // The current sample IME keeps the preedit cursor at the end. Delete is
+        // therefore distinct from Backspace: it does not remove the previous
+        // preedit unit, but it must not leak to the application while composing.
+        self.update_preedit(conn, context_id)?;
+        Ok(true)
+    }
+
+    fn handle_escape(&mut self, conn: &mut Connection, context_id: u32) -> Result<bool, Error> {
+        match self.phase {
+            SkkPhase::Candidate => {
+                self.phase = SkkPhase::Preedit;
+                self.selected_index = 0;
+                self.update_preedit(conn, context_id)?;
+                Ok(true)
+            }
+            SkkPhase::Preedit => {
+                self.clear_composition();
+                self.update_preedit(conn, context_id)?;
+                Ok(true)
+            }
+            SkkPhase::Direct if !self.pending.is_empty() => {
+                self.pending.clear();
+                self.update_preedit(conn, context_id)?;
+                Ok(true)
+            }
+            SkkPhase::Direct => Ok(false),
+        }
+    }
+
+    fn convert_or_select_next(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+    ) -> Result<(), Error> {
+        if self.phase == SkkPhase::Candidate {
+            self.select_next_candidate();
+        } else {
+            self.flush_pending_to_reading();
+            if self.reading.is_empty() {
+                return self.update_preedit(conn, context_id);
+            }
+            self.phase = SkkPhase::Candidate;
+            self.selected_index = 0;
+        }
+        self.update_preedit(conn, context_id)
+    }
+
+    fn commit_current_text(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
+        self.flush_pending_to_reading();
+        let text = self.current_commit_text();
+        self.clear_composition();
         if !text.is_empty() {
-            println!("[simple_ime] flush commit '{}'", text);
+            println!("[simple_ime] commit '{}'", text);
             conn.ime_commit_text(context_id, &text)?;
         }
         self.update_preedit(conn, context_id)
     }
 
     fn update_preedit(&self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
-        let preedit = core::str::from_utf8(&self.pending).unwrap_or("");
+        let preedit = self.preedit_text();
         println!("[simple_ime] preedit '{}'", preedit);
-        let spans = preedit_spans(preedit);
-        conn.ime_set_preedit(context_id, preedit.len() as u32, 0, preedit, &spans)?;
-        if preedit.is_empty() {
-            conn.ime_hide_candidates(context_id)?;
+        let spans = preedit_spans(&preedit, self.phase);
+        conn.ime_set_preedit(context_id, preedit.len() as u32, 0, &preedit, &spans)?;
+        let candidates = self.candidates();
+        if self.phase == SkkPhase::Candidate && !candidates.is_empty() {
+            let blob = candidate_list_blob(&candidates, self.selected_index);
+            conn.ime_set_candidates(
+                context_id,
+                self.selected_index as u32,
+                0,
+                candidates.len() as u32,
+                0,
+                &blob,
+            )?;
         } else {
-            let candidates = candidate_list_blob(preedit);
-            conn.ime_set_candidates(context_id, 0, 0, 1, 0, &candidates)?;
+            conn.ime_hide_candidates(context_id)?;
         }
         self.emit_status(conn, context_id)?;
         Ok(())
     }
 
     fn emit_status(&self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
-        let has_preedit = !self.pending.is_empty();
-        let state = if has_preedit {
-            ime_state::CANDIDATES
-        } else {
-            ime_state::DIRECT
+        let state = match self.phase {
+            SkkPhase::Candidate => ime_state::CANDIDATES,
+            SkkPhase::Preedit => ime_state::COMPOSING,
+            SkkPhase::Direct if !self.pending.is_empty() => ime_state::COMPOSING,
+            SkkPhase::Direct => ime_state::DIRECT,
         };
         let (mode_id, mode_label) = if self.grabbing {
-            (MODE_SIMPLE_KANA_ID, MODE_SIMPLE_KANA_LABEL)
+            (MODE_SIMPLE_SKK_ID, MODE_SIMPLE_SKK_LABEL)
         } else {
             (MODE_DIRECT_ID, MODE_DIRECT_LABEL)
         };
@@ -323,7 +503,7 @@ impl SimpleIme {
         if self.grabbing {
             flags |= ime_status_flags::MODE_ACTIVE;
         }
-        if has_preedit {
+        if self.phase == SkkPhase::Candidate {
             flags |= ime_status_flags::CANDIDATES_VISIBLE;
         }
         println!(
@@ -335,6 +515,179 @@ impl SimpleIme {
 
     fn pending_text(&self) -> &str {
         core::str::from_utf8(&self.pending).unwrap_or("<invalid>")
+    }
+
+    fn debug_text(&self) -> String {
+        let mut text = self.preedit_text();
+        if text.is_empty() {
+            text.push_str(self.pending_text());
+        }
+        text
+    }
+
+    fn set_shift_state(&mut self, code: u16, pressed: bool) {
+        match code {
+            key_code::KEY_LEFTSHIFT => self.left_shift_down = pressed,
+            key_code::KEY_RIGHTSHIFT => self.right_shift_down = pressed,
+            _ => {}
+        }
+    }
+
+    fn shift_down(&self) -> bool {
+        self.left_shift_down || self.right_shift_down
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+            && self.reading.is_empty()
+            && self.okuri_marker.is_none()
+            && self.okuri.is_empty()
+    }
+
+    fn absorb_ready_kana(&mut self) {
+        let kana = drain_committable(&mut self.pending);
+        if kana.is_empty() {
+            return;
+        }
+        if self.okuri_marker.is_some() {
+            self.okuri.push_str(&kana);
+        } else {
+            self.reading.push_str(&kana);
+        }
+    }
+
+    fn flush_pending_to_reading(&mut self) {
+        let mut text = drain_committable(&mut self.pending);
+        if self.pending == b"n" {
+            text.push_str("ん");
+        } else if !self.pending.is_empty()
+            && let Ok(raw) = core::str::from_utf8(&self.pending)
+        {
+            text.push_str(raw);
+        }
+        self.pending.clear();
+
+        if self.okuri_marker.is_some() {
+            self.okuri.push_str(&text);
+        } else {
+            self.reading.push_str(&text);
+        }
+    }
+
+    fn clear_composition(&mut self) {
+        self.pending.clear();
+        self.phase = SkkPhase::Direct;
+        self.reading.clear();
+        self.okuri_marker = None;
+        self.okuri.clear();
+        self.selected_index = 0;
+    }
+
+    fn candidates(&self) -> Vec<&str> {
+        let key = self.dictionary_key();
+        if let Some(candidates) = self.lookup_loaded_dictionary(&key) {
+            return candidates;
+        }
+        if let Some(candidates) = lookup_builtin_dictionary(&key) {
+            return candidates.to_vec();
+        }
+        if self.reading.is_empty() {
+            Vec::new()
+        } else {
+            let mut candidates = Vec::new();
+            candidates.push(self.reading.as_str());
+            candidates
+        }
+    }
+
+    fn lookup_loaded_dictionary(&self, key: &str) -> Option<Vec<&str>> {
+        self.dictionary
+            .binary_search_by(|entry| entry.key.as_str().cmp(key))
+            .ok()
+            .map(|index| {
+                self.dictionary[index]
+                    .candidates
+                    .iter()
+                    .map(String::as_str)
+                    .collect()
+            })
+    }
+
+    fn dictionary_key(&self) -> String {
+        let mut key = self.reading.clone();
+        if let Some(marker) = self.okuri_marker {
+            key.push(marker);
+        }
+        key
+    }
+
+    fn current_commit_text(&self) -> String {
+        let mut text = String::new();
+        if self.phase == SkkPhase::Candidate {
+            let candidates = self.candidates();
+            if let Some(candidate) = candidates.get(self.selected_index) {
+                text.push_str(candidate);
+                text.push_str(&self.okuri);
+                return text;
+            }
+        }
+        text.push_str(&self.reading);
+        text.push_str(&self.okuri);
+        if let Ok(raw) = core::str::from_utf8(&self.pending) {
+            text.push_str(raw);
+        }
+        text
+    }
+
+    fn preedit_text(&self) -> String {
+        let mut text = String::new();
+        match self.phase {
+            SkkPhase::Direct => {
+                if let Ok(raw) = core::str::from_utf8(&self.pending) {
+                    text.push_str(raw);
+                }
+            }
+            SkkPhase::Preedit => {
+                text.push_str("▽");
+                text.push_str(&self.reading);
+                if self.okuri_marker.is_some() {
+                    text.push('*');
+                }
+                text.push_str(&self.okuri);
+                if let Ok(raw) = core::str::from_utf8(&self.pending) {
+                    text.push_str(raw);
+                }
+            }
+            SkkPhase::Candidate => {
+                text.push_str("▼");
+                let candidates = self.candidates();
+                if let Some(candidate) = candidates.get(self.selected_index) {
+                    text.push_str(candidate);
+                } else {
+                    text.push_str(&self.reading);
+                }
+                text.push_str(&self.okuri);
+            }
+        }
+        text
+    }
+
+    fn select_next_candidate(&mut self) {
+        let len = self.candidates().len();
+        if len > 0 {
+            self.selected_index = (self.selected_index + 1) % len;
+        }
+    }
+
+    fn select_previous_candidate(&mut self) {
+        let len = self.candidates().len();
+        if len > 0 {
+            self.selected_index = if self.selected_index == 0 {
+                len - 1
+            } else {
+                self.selected_index - 1
+            };
+        }
     }
 
     fn remove_eaten_key(&mut self, code: u16) -> bool {
@@ -455,6 +808,7 @@ fn letter_from_key(code: u16) -> Option<char> {
 
 fn key_name(code: u16) -> &'static str {
     match code {
+        key_code::KEY_ESC => "KEY_ESC",
         key_code::KEY_A => "KEY_A",
         key_code::KEY_B => "KEY_B",
         key_code::KEY_C => "KEY_C",
@@ -484,10 +838,303 @@ fn key_name(code: u16) -> &'static str {
         key_code::KEY_ENTER => "KEY_ENTER",
         key_code::KEY_SPACE => "KEY_SPACE",
         key_code::KEY_BACKSPACE => "KEY_BACKSPACE",
+        key_code::KEY_DELETE => "KEY_DELETE",
+        key_code::KEY_LEFTSHIFT => "KEY_LEFTSHIFT",
+        key_code::KEY_RIGHTSHIFT => "KEY_RIGHTSHIFT",
+        key_code::KEY_UP => "KEY_UP",
+        key_code::KEY_DOWN => "KEY_DOWN",
+        key_code::KEY_LEFT => "KEY_LEFT",
+        key_code::KEY_RIGHT => "KEY_RIGHT",
         key_code::KEY_COMMA => "KEY_COMMA",
         key_code::KEY_DOT => "KEY_DOT",
         key_code::KEY_SLASH => "KEY_SLASH",
         _ => "KEY_UNKNOWN",
+    }
+}
+
+struct SkkDictEntry {
+    key: &'static str,
+    candidates: &'static [&'static str],
+}
+
+#[derive(Clone, Debug)]
+struct SkkDictionaryEntry {
+    key: String,
+    candidates: Vec<String>,
+}
+
+const CAND_KANJI: &[&str] = &["漢字", "感じ", "幹事"];
+const CAND_NIHON: &[&str] = &["日本"];
+const CAND_NIHONGO: &[&str] = &["日本語"];
+const CAND_KYOU: &[&str] = &["今日", "京"];
+const CAND_ASHITA: &[&str] = &["明日"];
+const CAND_WATASHI: &[&str] = &["私"];
+const CAND_NAMAE: &[&str] = &["名前"];
+const CAND_KOTOBA: &[&str] = &["言葉"];
+const CAND_HENKAN: &[&str] = &["変換"];
+const CAND_JISHO: &[&str] = &["辞書"];
+const CAND_TOUKYOU: &[&str] = &["東京"];
+const CAND_OOSAKA: &[&str] = &["大阪"];
+const CAND_SEKAI: &[&str] = &["世界"];
+const CAND_SAKURA: &[&str] = &["桜"];
+const CAND_HITO: &[&str] = &["人"];
+const CAND_YAMA: &[&str] = &["山"];
+const CAND_KAWA: &[&str] = &["川"];
+const CAND_MIZU: &[&str] = &["水"];
+const CAND_HI: &[&str] = &["日", "火"];
+const CAND_TSUKI: &[&str] = &["月"];
+const CAND_IK: &[&str] = &["行"];
+const CAND_KAK: &[&str] = &["書"];
+const CAND_YOM: &[&str] = &["読"];
+const CAND_UGOK: &[&str] = &["動"];
+const CAND_OKUR: &[&str] = &["送"];
+const CAND_TABER: &[&str] = &["食べ"];
+
+const BUILTIN_SKK_DICTIONARY: &[SkkDictEntry] = &[
+    SkkDictEntry {
+        key: "かんじ",
+        candidates: CAND_KANJI,
+    },
+    SkkDictEntry {
+        key: "にほん",
+        candidates: CAND_NIHON,
+    },
+    SkkDictEntry {
+        key: "にほんご",
+        candidates: CAND_NIHONGO,
+    },
+    SkkDictEntry {
+        key: "きょう",
+        candidates: CAND_KYOU,
+    },
+    SkkDictEntry {
+        key: "あした",
+        candidates: CAND_ASHITA,
+    },
+    SkkDictEntry {
+        key: "わたし",
+        candidates: CAND_WATASHI,
+    },
+    SkkDictEntry {
+        key: "なまえ",
+        candidates: CAND_NAMAE,
+    },
+    SkkDictEntry {
+        key: "ことば",
+        candidates: CAND_KOTOBA,
+    },
+    SkkDictEntry {
+        key: "へんかん",
+        candidates: CAND_HENKAN,
+    },
+    SkkDictEntry {
+        key: "じしょ",
+        candidates: CAND_JISHO,
+    },
+    SkkDictEntry {
+        key: "とうきょう",
+        candidates: CAND_TOUKYOU,
+    },
+    SkkDictEntry {
+        key: "おおさか",
+        candidates: CAND_OOSAKA,
+    },
+    SkkDictEntry {
+        key: "せかい",
+        candidates: CAND_SEKAI,
+    },
+    SkkDictEntry {
+        key: "さくら",
+        candidates: CAND_SAKURA,
+    },
+    SkkDictEntry {
+        key: "ひと",
+        candidates: CAND_HITO,
+    },
+    SkkDictEntry {
+        key: "やま",
+        candidates: CAND_YAMA,
+    },
+    SkkDictEntry {
+        key: "かわ",
+        candidates: CAND_KAWA,
+    },
+    SkkDictEntry {
+        key: "みず",
+        candidates: CAND_MIZU,
+    },
+    SkkDictEntry {
+        key: "ひ",
+        candidates: CAND_HI,
+    },
+    SkkDictEntry {
+        key: "つき",
+        candidates: CAND_TSUKI,
+    },
+    SkkDictEntry {
+        key: "いk",
+        candidates: CAND_IK,
+    },
+    SkkDictEntry {
+        key: "かk",
+        candidates: CAND_KAK,
+    },
+    SkkDictEntry {
+        key: "よm",
+        candidates: CAND_YOM,
+    },
+    SkkDictEntry {
+        key: "うごk",
+        candidates: CAND_UGOK,
+    },
+    SkkDictEntry {
+        key: "おくr",
+        candidates: CAND_OKUR,
+    },
+    SkkDictEntry {
+        key: "たべr",
+        candidates: CAND_TABER,
+    },
+];
+
+fn lookup_builtin_dictionary(key: &str) -> Option<&'static [&'static str]> {
+    BUILTIN_SKK_DICTIONARY
+        .iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| entry.candidates)
+}
+
+fn load_skk_dictionary() -> Vec<SkkDictionaryEntry> {
+    for path in SKK_DICTIONARY_PATHS {
+        match load_skk_dictionary_file(path) {
+            Some(dictionary) if !dictionary.is_empty() => {
+                println!(
+                    "[simple_ime] loaded SKK dictionary '{}' entries={}",
+                    path,
+                    dictionary.len()
+                );
+                return dictionary;
+            }
+            Some(_) => {
+                println!("[simple_ime] ignored empty SKK dictionary '{}'", path);
+            }
+            None => {}
+        }
+    }
+    println!("[simple_ime] no UTF-8 SKK dictionary found; using built-in fallback");
+    Vec::new()
+}
+
+fn load_skk_dictionary_file(path: &str) -> Option<Vec<SkkDictionaryEntry>> {
+    let text = read_dictionary_text(path)?;
+    let mut dictionary = parse_skk_dictionary(&text);
+    dictionary.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+    merge_duplicate_entries(&mut dictionary);
+    Some(dictionary)
+}
+
+fn read_dictionary_text(path: &str) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+
+    loop {
+        let len = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(len) => len,
+            Err(err) => {
+                println!(
+                    "[simple_ime] failed to read SKK dictionary '{}': {:?}",
+                    path, err
+                );
+                return None;
+            }
+        };
+        if bytes.len() + len > MAX_SKK_DICTIONARY_BYTES {
+            println!(
+                "[simple_ime] SKK dictionary '{}' is larger than {} bytes",
+                path, MAX_SKK_DICTIONARY_BYTES
+            );
+            return None;
+        }
+        bytes.extend_from_slice(&buffer[..len]);
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        Err(_) => {
+            println!(
+                "[simple_ime] SKK dictionary '{}' is not UTF-8; fetch script converts upstream EUC-JP",
+                path
+            );
+            None
+        }
+    }
+}
+
+fn parse_skk_dictionary(text: &str) -> Vec<SkkDictionaryEntry> {
+    let mut dictionary = Vec::new();
+    for line in text.lines() {
+        if let Some(entry) = parse_skk_dictionary_line(line) {
+            dictionary.push(entry);
+        }
+    }
+    dictionary
+}
+
+fn parse_skk_dictionary_line(line: &str) -> Option<SkkDictionaryEntry> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(';') {
+        return None;
+    }
+
+    let (key, body) = line.split_once(' ')?;
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    for raw_candidate in body.split('/') {
+        if let Some(candidate) = parse_skk_candidate(raw_candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    if candidates.is_empty() {
+        None
+    } else {
+        Some(SkkDictionaryEntry {
+            key: String::from(key),
+            candidates,
+        })
+    }
+}
+
+fn parse_skk_candidate(raw_candidate: &str) -> Option<String> {
+    let candidate = raw_candidate
+        .split_once(';')
+        .map_or(raw_candidate, |(text, _)| text);
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.starts_with('[') {
+        None
+    } else {
+        Some(String::from(candidate))
+    }
+}
+
+fn merge_duplicate_entries(dictionary: &mut Vec<SkkDictionaryEntry>) {
+    let mut index = 0;
+    while index + 1 < dictionary.len() {
+        if dictionary[index].key == dictionary[index + 1].key {
+            let duplicate = dictionary.remove(index + 1);
+            for candidate in duplicate.candidates {
+                if !dictionary[index].candidates.contains(&candidate) {
+                    dictionary[index].candidates.push(candidate);
+                }
+            }
+        } else {
+            index += 1;
+        }
     }
 }
 
@@ -616,22 +1263,40 @@ const ROMAJI_KANA: &[(&str, &str)] = &[
     ("o", "お"),
 ];
 
-fn preedit_spans(text: &str) -> Vec<u8> {
+fn preedit_spans(text: &str, phase: SkkPhase) -> Vec<u8> {
     if text.is_empty() {
         return Vec::new();
     }
     let mut spans = Vec::new();
     spans.extend_from_slice(&0u32.to_le_bytes());
     spans.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    spans.extend_from_slice(&sws_protocol::preedit_style::UNDERLINE.to_le_bytes());
+    let style = match phase {
+        SkkPhase::Candidate => sws_protocol::preedit_style::HIGHLIGHT,
+        SkkPhase::Preedit => sws_protocol::preedit_style::UNDERLINE,
+        SkkPhase::Direct => sws_protocol::preedit_style::UNDERLINE,
+    };
+    spans.extend_from_slice(&style.to_le_bytes());
     spans
 }
 
-fn candidate_list_blob(text: &str) -> Vec<u8> {
+fn candidate_list_blob(candidates: &[&str], selected_index: usize) -> Vec<u8> {
     let mut blob = Vec::new();
-    blob.extend_from_slice(&1u32.to_le_bytes());
-    append_candidate(&mut blob, 0, "", text, "", "", 0);
+    blob.extend_from_slice(&(candidates.len() as u32).to_le_bytes());
+    for (index, candidate) in candidates.iter().enumerate() {
+        let label = candidate_label(index);
+        let flags = if index == selected_index {
+            sws_protocol::preedit_style::SELECTED
+        } else {
+            0
+        };
+        append_candidate(&mut blob, index as u32, label, candidate, "", "", flags);
+    }
     blob
+}
+
+fn candidate_label(index: usize) -> &'static str {
+    const LABELS: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    LABELS.get(index).copied().unwrap_or("")
 }
 
 fn append_candidate(

@@ -1482,7 +1482,7 @@ pub fn parse_client_message<'a>(
             })
         }
         client_msg::IME_SET_PREEDIT => {
-            if payload.len() < 24 {
+            if payload.len() < 20 {
                 return Err(ProtocolError::MalformedPayload);
             }
             let context_id = read_u32(payload, 0)?;
@@ -1753,7 +1753,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             })
         }
         server_msg::TEXT_INPUT_PREEDIT => {
-            if payload.len() < 28 {
+            if payload.len() < 24 {
                 return Err(ProtocolError::MalformedPayload);
             }
             let context_id = read_u32(payload, 0)?;
