@@ -89,7 +89,6 @@ impl SimpleIme {
                 self.active_context_id = Some(state.context_id);
                 self.grabbing = false;
                 conn.ime_set_preedit(state.context_id, 0, 0, "", &[])?;
-                conn.ime_hide_candidates(state.context_id)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
                     "[simple_ime] activated context={} window={}",
@@ -123,7 +122,6 @@ impl SimpleIme {
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
-                    conn.ime_hide_candidates(context_id)?;
                     self.emit_status(conn, context_id)?;
                 }
             }
@@ -216,7 +214,14 @@ impl SimpleIme {
                 self.handle_letter(conn, context_id, ch)?;
                 true
             }
-            None => self.handle_control_key(conn, context_id, code)?,
+            None => {
+                if let Some(ch) = printable_symbol_from_key(code, self.shift_down()) {
+                    self.handle_printable_symbol(conn, context_id, ch)?;
+                    true
+                } else {
+                    self.handle_control_key(conn, context_id, code)?
+                }
+            }
         };
 
         if handled && !self.eaten_keys.contains(&code) {
@@ -244,7 +249,6 @@ impl SimpleIme {
             self.grabbing = false;
             self.reset_context();
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
-            conn.ime_hide_candidates(context_id)?;
             self.emit_status(conn, context_id)?;
             println!("[simple_ime] released keyboard context={}", context_id);
             return Ok(());
@@ -255,7 +259,6 @@ impl SimpleIme {
         self.grabbing = true;
         conn.ime_grab_keyboard(context_id)?;
         conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
-        conn.ime_hide_candidates(context_id)?;
         self.emit_status(conn, context_id)?;
         println!("[simple_ime] grabbed keyboard context={}", context_id);
         Ok(())
@@ -302,6 +305,36 @@ impl SimpleIme {
             }
             SkkPhase::Candidate => Ok(()),
         }
+    }
+
+    fn handle_printable_symbol(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+        ch: char,
+    ) -> Result<(), Error> {
+        if self.phase == SkkPhase::Candidate {
+            self.commit_current_text(conn, context_id)?;
+        }
+
+        if self.phase == SkkPhase::Direct && self.pending.is_empty() {
+            let mut text = String::new();
+            text.push(ch);
+            println!("[simple_ime] direct symbol commit '{}'", text);
+            conn.ime_commit_text(context_id, &text)?;
+            return self.update_preedit(conn, context_id);
+        }
+
+        if self.phase == SkkPhase::Direct {
+            self.phase = SkkPhase::Preedit;
+        }
+        self.flush_pending_to_reading();
+        if self.okuri_marker.is_some() {
+            self.okuri.push(ch);
+        } else {
+            self.reading.push(ch);
+        }
+        self.update_preedit(conn, context_id)
     }
 
     fn handle_control_key(
@@ -469,20 +502,6 @@ impl SimpleIme {
         println!("[simple_ime] preedit '{}'", preedit);
         let spans = preedit_spans(&preedit, self.phase);
         conn.ime_set_preedit(context_id, preedit.len() as u32, 0, &preedit, &spans)?;
-        let candidates = self.candidates();
-        if self.phase == SkkPhase::Candidate && !candidates.is_empty() {
-            let blob = candidate_list_blob(&candidates, self.selected_index);
-            conn.ime_set_candidates(
-                context_id,
-                self.selected_index as u32,
-                0,
-                candidates.len() as u32,
-                0,
-                &blob,
-            )?;
-        } else {
-            conn.ime_hide_candidates(context_id)?;
-        }
         self.emit_status(conn, context_id)?;
         Ok(())
     }
@@ -806,9 +825,45 @@ fn letter_from_key(code: u16) -> Option<char> {
     }
 }
 
+fn printable_symbol_from_key(code: u16, shifted: bool) -> Option<char> {
+    match code {
+        key_code::KEY_1 => Some(if shifted { '！' } else { '１' }),
+        key_code::KEY_2 => Some(if shifted { '＠' } else { '２' }),
+        key_code::KEY_3 => Some(if shifted { '＃' } else { '３' }),
+        key_code::KEY_4 => Some(if shifted { '＄' } else { '４' }),
+        key_code::KEY_5 => Some(if shifted { '％' } else { '５' }),
+        key_code::KEY_6 => Some(if shifted { '＾' } else { '６' }),
+        key_code::KEY_7 => Some(if shifted { '＆' } else { '７' }),
+        key_code::KEY_8 => Some(if shifted { '＊' } else { '８' }),
+        key_code::KEY_9 => Some(if shifted { '（' } else { '９' }),
+        key_code::KEY_0 => Some(if shifted { '）' } else { '０' }),
+        key_code::KEY_MINUS => Some(if shifted { '＿' } else { '－' }),
+        key_code::KEY_EQUAL => Some(if shifted { '＋' } else { '＝' }),
+        key_code::KEY_LEFTBRACE => Some(if shifted { '｛' } else { '［' }),
+        key_code::KEY_RIGHTBRACE => Some(if shifted { '｝' } else { '］' }),
+        key_code::KEY_SEMICOLON => Some(if shifted { '：' } else { '；' }),
+        key_code::KEY_APOSTROPHE => Some(if shifted { '＂' } else { '＇' }),
+        key_code::KEY_COMMA if shifted => Some('＜'),
+        key_code::KEY_DOT if shifted => Some('＞'),
+        key_code::KEY_SLASH if shifted => Some('？'),
+        key_code::KEY_BACKSLASH => Some(if shifted { '｜' } else { '＼' }),
+        _ => None,
+    }
+}
+
 fn key_name(code: u16) -> &'static str {
     match code {
         key_code::KEY_ESC => "KEY_ESC",
+        key_code::KEY_1 => "KEY_1",
+        key_code::KEY_2 => "KEY_2",
+        key_code::KEY_3 => "KEY_3",
+        key_code::KEY_4 => "KEY_4",
+        key_code::KEY_5 => "KEY_5",
+        key_code::KEY_6 => "KEY_6",
+        key_code::KEY_7 => "KEY_7",
+        key_code::KEY_8 => "KEY_8",
+        key_code::KEY_9 => "KEY_9",
+        key_code::KEY_0 => "KEY_0",
         key_code::KEY_A => "KEY_A",
         key_code::KEY_B => "KEY_B",
         key_code::KEY_C => "KEY_C",
@@ -848,6 +903,13 @@ fn key_name(code: u16) -> &'static str {
         key_code::KEY_COMMA => "KEY_COMMA",
         key_code::KEY_DOT => "KEY_DOT",
         key_code::KEY_SLASH => "KEY_SLASH",
+        key_code::KEY_MINUS => "KEY_MINUS",
+        key_code::KEY_EQUAL => "KEY_EQUAL",
+        key_code::KEY_SEMICOLON => "KEY_SEMICOLON",
+        key_code::KEY_APOSTROPHE => "KEY_APOSTROPHE",
+        key_code::KEY_LEFTBRACE => "KEY_LEFTBRACE",
+        key_code::KEY_RIGHTBRACE => "KEY_RIGHTBRACE",
+        key_code::KEY_BACKSLASH => "KEY_BACKSLASH",
         _ => "KEY_UNKNOWN",
     }
 }
@@ -1279,48 +1341,6 @@ fn preedit_spans(text: &str, phase: SkkPhase) -> Vec<u8> {
     spans
 }
 
-fn candidate_list_blob(candidates: &[&str], selected_index: usize) -> Vec<u8> {
-    let mut blob = Vec::new();
-    blob.extend_from_slice(&(candidates.len() as u32).to_le_bytes());
-    for (index, candidate) in candidates.iter().enumerate() {
-        let label = candidate_label(index);
-        let flags = if index == selected_index {
-            sws_protocol::preedit_style::SELECTED
-        } else {
-            0
-        };
-        append_candidate(&mut blob, index as u32, label, candidate, "", "", flags);
-    }
-    blob
-}
-
-fn candidate_label(index: usize) -> &'static str {
-    const LABELS: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9"];
-    LABELS.get(index).copied().unwrap_or("")
-}
-
-fn append_candidate(
-    blob: &mut Vec<u8>,
-    id: u32,
-    label: &str,
-    text: &str,
-    annotation: &str,
-    comment: &str,
-    flags: u32,
-) {
-    blob.extend_from_slice(&id.to_le_bytes());
-    append_string(blob, label);
-    append_string(blob, text);
-    append_string(blob, annotation);
-    append_string(blob, comment);
-    blob.extend_from_slice(&flags.to_le_bytes());
-}
-
-fn append_string(blob: &mut Vec<u8>, value: &str) {
-    blob.extend_from_slice(&(value.len() as u32).to_le_bytes());
-    blob.extend_from_slice(value.as_bytes());
-}
-
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("[simple_ime] connecting to SWS...");
@@ -1335,7 +1355,6 @@ fn main() -> i32 {
 
     let capabilities = ime_capabilities::KEYBOARD_GRAB
         | ime_capabilities::STYLED_PREEDIT
-        | ime_capabilities::CANDIDATE_LIST
         | ime_capabilities::STATUS;
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,

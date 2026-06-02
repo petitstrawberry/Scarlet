@@ -272,10 +272,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn wants_keyboard_focus(&self) -> bool {
         if self
-            .view
+            .render_object
             .as_any()
-            .downcast_ref::<crate::views::TextField>()
-            .is_some_and(|field| field.focused_state().get())
+            .downcast_ref::<crate::views::TextFieldRenderObject>()
+            .is_some_and(|field| field.is_focused())
         {
             return true;
         }
@@ -379,14 +379,33 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         Some(&mut self.render_object)
     }
 
+    fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
+        let field = self.view.as_any().downcast_ref::<crate::views::TextField>()?;
+        let render_object = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::TextFieldRenderObject>()?;
+        render_object
+            .is_focused()
+            .then(|| field.text_input_state(render_object.preedit()))
+    }
+
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
         if let Event::Keyboard(key_event) = _event {
             if _phase == Phase::Target
                 && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextFieldRenderObject>()
             {
-                return crate::views::text_field::handle_text_field_keyboard(text_field, *key_event);
+                let handled = crate::views::text_field::handle_text_field_keyboard(text_field, render_object, *key_event);
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                }
+                return handled;
             }
             if (_phase == Phase::Target || _phase == Phase::Bubble)
                 && let Some(render_object) = self
@@ -404,11 +423,47 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return false;
         }
 
-        if let Event::Focus(focus_event) = _event {
+        if matches!(
+            _event,
+            Event::TextInputPreedit { .. }
+                | Event::TextInputCommit { .. }
+                | Event::TextInputDeleteSurroundingText { .. }
+                | Event::TextInputDone { .. }
+        ) {
             if _phase == Phase::Target
                 && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextFieldRenderObject>()
             {
-                return crate::views::text_field::handle_text_field_focus(text_field, *focus_event);
+                let handled = crate::views::text_field::handle_text_field_text_input(text_field, render_object, _event);
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                }
+                return handled;
+            }
+            for child in self.children.iter_mut() {
+                if child.handle_event(_event, _phase) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if let Event::Focus(focus_event) = _event {
+            if _phase == Phase::Target
+                && self.view.as_any().downcast_ref::<crate::views::TextField>().is_some()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextFieldRenderObject>()
+            {
+                let handled = crate::views::text_field::handle_text_field_focus(render_object, *focus_event);
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                }
+                return handled;
             }
             if _phase == Phase::Target
                 && let Some(render_object) = self

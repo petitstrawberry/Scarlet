@@ -138,7 +138,7 @@ impl EventDispatcher {
             Event::TextInputPreedit { .. }
             | Event::TextInputCommit { .. }
             | Event::TextInputDeleteSurroundingText { .. }
-            | Event::TextInputDone { .. } => false,
+            | Event::TextInputDone { .. } => self.dispatch_text_input(element_tree, event),
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false
@@ -486,6 +486,42 @@ impl EventDispatcher {
         handled
     }
 
+    fn dispatch_text_input(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
+        let path = self
+            .focused_id
+            .and_then(|focused_id| {
+                element_tree
+                    .element_wants_keyboard_focus(focused_id)
+                    .then(|| element_tree.find_path_ids(focused_id))
+                    .flatten()
+            })
+            .or_else(|| element_tree.find_keyboard_focus_path_ids())
+            .or_else(|| {
+                if self
+                    .focused_path
+                    .last()
+                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
+                {
+                    Some(self.focused_path.clone())
+                } else {
+                    None
+                }
+            });
+
+        let Some(path) = path else {
+            return false;
+        };
+        let Some(target_id) = path.last().copied() else {
+            return false;
+        };
+        self.focused_id = Some(target_id);
+        self.focused_path = path;
+
+        element_tree
+            .find_element_mut(target_id)
+            .is_some_and(|target| target.handle_event(event, Phase::Target))
+    }
+
     /// Dispatch a focus event
     fn dispatch_focus(
         &mut self,
@@ -723,17 +759,13 @@ impl EventDispatcher {
             return;
         }
 
-        if let Some(old_id) = self.focused_id {
-            let old_path = element_tree
-                .find_path_ids(old_id)
-                .or_else(|| (!self.focused_path.is_empty()).then(|| self.focused_path.clone()));
-            if let Some(old_path) = old_path
-                && let Some(old_target_id) = old_path.last().copied()
-                && let Some(old_target) = element_tree.find_element_mut(old_target_id)
-            {
-                let _ = old_target
-                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
-            }
+        if let Some(old_path) = self.current_focus_path(element_tree)
+            && let Some(old_target_id) = old_path.last().copied()
+            && old_target_id != target_id
+            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
+        {
+            let _ =
+                old_target.handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
         }
 
         self.focused_id = Some(target_id);
@@ -747,14 +779,25 @@ impl EventDispatcher {
     }
 
     fn clear_focused_element(&mut self, element_tree: &mut ElementTree) {
-        if let Some(old_id) = self.focused_id
-            && let Some(old_target) = element_tree.find_element_mut(old_id)
+        if let Some(old_path) = self.current_focus_path(element_tree)
+            && let Some(old_target_id) = old_path.last().copied()
+            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
         {
             let _ = old_target
                 .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
         }
         self.focused_id = None;
         self.focused_path.clear();
+    }
+
+    fn current_focus_path(&mut self, element_tree: &mut ElementTree) -> Option<Vec<ElementId>> {
+        self.focused_id
+            .and_then(|focused_id| {
+                element_tree
+                    .find_path_ids(focused_id)
+                    .filter(|_| element_tree.element_wants_keyboard_focus(focused_id))
+            })
+            .or_else(|| element_tree.find_keyboard_focus_path_ids())
     }
 
     fn path_origins(element_tree: &mut ElementTree, path: &[ElementId]) -> Vec<Point> {

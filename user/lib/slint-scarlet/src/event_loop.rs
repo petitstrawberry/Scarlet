@@ -190,8 +190,6 @@ impl EventLoop {
             | SwsEvent::TextInputCommit { .. }
             | SwsEvent::TextInputDeleteSurroundingText { .. }
             | SwsEvent::TextInputDone { .. }
-            | SwsEvent::TextInputCandidates { .. }
-            | SwsEvent::TextInputHideCandidates { .. }
             | SwsEvent::TextInputStatus { .. }
             | SwsEvent::ImeActivate(_)
             | SwsEvent::ImeDeactivate { .. }

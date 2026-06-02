@@ -81,11 +81,10 @@ pub mod client_msg {
     pub const IME_SET_PREEDIT: u32 = 223;
     pub const IME_COMMIT_TEXT: u32 = 224;
     pub const IME_DELETE_SURROUNDING_TEXT: u32 = 225;
-    pub const IME_SET_CANDIDATES: u32 = 226;
-    pub const IME_HIDE_CANDIDATES: u32 = 227;
-    pub const IME_GRAB_KEYBOARD: u32 = 228;
-    pub const IME_RELEASE_KEYBOARD: u32 = 229;
-    pub const IME_SET_STATUS: u32 = 230;
+    pub const IME_GRAB_KEYBOARD: u32 = 226;
+    pub const IME_RELEASE_KEYBOARD: u32 = 227;
+    pub const IME_SET_STATUS: u32 = 228;
+    pub const IME_SET_POPUP_WINDOW: u32 = 229;
 }
 
 /// Message type IDs (server -> client).
@@ -118,9 +117,7 @@ pub mod server_msg {
     pub const TEXT_INPUT_COMMIT: u32 = 202;
     pub const TEXT_INPUT_DELETE_SURROUNDING_TEXT: u32 = 203;
     pub const TEXT_INPUT_DONE: u32 = 204;
-    pub const TEXT_INPUT_CANDIDATES: u32 = 205;
-    pub const TEXT_INPUT_HIDE_CANDIDATES: u32 = 206;
-    pub const TEXT_INPUT_STATUS: u32 = 207;
+    pub const TEXT_INPUT_STATUS: u32 = 205;
 
     // Input method service events (220-239)
     pub const IME_REGISTERED: u32 = 220;
@@ -135,14 +132,8 @@ pub mod server_msg {
 /// Maximum UTF-8 bytes carried by one text-input message.
 pub const TEXT_INPUT_MAX_BYTES: usize = 1024;
 
-/// Maximum UTF-8 bytes used for candidate payloads.
-pub const TEXT_INPUT_CANDIDATES_MAX_BYTES: usize = 2048;
-
 /// Maximum bytes used for binary preedit span payloads.
 pub const TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES: usize = 512;
-
-/// Maximum bytes used for binary structured candidate payloads.
-pub const TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES: usize = 4096;
 
 /// IME service capabilities advertised by `IME_REGISTER`.
 pub mod ime_capabilities {
@@ -150,10 +141,9 @@ pub mod ime_capabilities {
     pub const SURROUNDING_TEXT: u32 = 1 << 1;
     pub const DELETE_SURROUNDING_TEXT: u32 = 1 << 2;
     pub const STYLED_PREEDIT: u32 = 1 << 3;
-    pub const CANDIDATE_LIST: u32 = 1 << 4;
-    pub const STATUS: u32 = 1 << 5;
-    pub const OWN_CANDIDATE_UI: u32 = 1 << 6;
-    pub const PER_CONTEXT_STATE: u32 = 1 << 7;
+    pub const STATUS: u32 = 1 << 4;
+    pub const OWN_CANDIDATE_UI: u32 = 1 << 5;
+    pub const PER_CONTEXT_STATE: u32 = 1 << 6;
 }
 
 /// Preedit span style flags.
@@ -251,6 +241,8 @@ pub mod window_types {
     pub const TASKBAR: u32 = 2;
     /// Desktop background window
     pub const DESKTOP: u32 = 3;
+    /// Input-method-owned popup surface anchored to the active text input.
+    pub const IME_POPUP: u32 = 4;
 }
 
 /// Message header.
@@ -635,17 +627,6 @@ pub enum ClientMessageRef<'a> {
         before_bytes: u32,
         after_bytes: u32,
     },
-    ImeSetCandidates {
-        context_id: u32,
-        selected_index: u32,
-        page_start: u32,
-        page_size: u32,
-        anchor_byte: u32,
-        candidates: &'a [u8],
-    },
-    ImeHideCandidates {
-        context_id: u32,
-    },
     ImeGrabKeyboard {
         context_id: u32,
     },
@@ -658,6 +639,13 @@ pub enum ClientMessageRef<'a> {
         mode_id: u32,
         flags: u32,
         mode_label: &'a [u8],
+    },
+    ImeSetPopupWindow {
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
     },
 }
 
@@ -710,16 +698,6 @@ pub enum ServerMessage {
         spans: [u8; TEXT_INPUT_PREEDIT_SPANS_MAX_BYTES],
         spans_len: u32,
     },
-    TextInputCandidates {
-        context_id: u32,
-        serial: u32,
-        selected_index: u32,
-        page_start: u32,
-        page_size: u32,
-        anchor_byte: u32,
-        candidates: [u8; TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES],
-        candidates_len: u32,
-    },
     TextInputCommit {
         context_id: u32,
         serial: u32,
@@ -733,10 +711,6 @@ pub enum ServerMessage {
         after_bytes: u32,
     },
     TextInputDone {
-        context_id: u32,
-        serial: u32,
-    },
-    TextInputHideCandidates {
         context_id: u32,
         serial: u32,
     },
@@ -1526,34 +1500,6 @@ pub fn parse_client_message<'a>(
                 after_bytes: read_u32(payload, 8)?,
             })
         }
-        client_msg::IME_SET_CANDIDATES => {
-            if payload.len() < 24 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let context_id = read_u32(payload, 0)?;
-            let selected_index = read_u32(payload, 4)?;
-            let page_start = read_u32(payload, 8)?;
-            let page_size = read_u32(payload, 12)?;
-            let anchor_byte = read_u32(payload, 16)?;
-            let candidates =
-                read_len_prefixed_bytes(payload, 20, TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES)?;
-            Ok(ClientMessageRef::ImeSetCandidates {
-                context_id,
-                selected_index,
-                page_start,
-                page_size,
-                anchor_byte,
-                candidates,
-            })
-        }
-        client_msg::IME_HIDE_CANDIDATES => {
-            if payload.len() != 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            Ok(ClientMessageRef::ImeHideCandidates {
-                context_id: read_u32(payload, 0)?,
-            })
-        }
         client_msg::IME_GRAB_KEYBOARD => {
             if payload.len() != 4 {
                 return Err(ProtocolError::MalformedPayload);
@@ -1585,6 +1531,18 @@ pub fn parse_client_message<'a>(
                 mode_id,
                 flags,
                 mode_label,
+            })
+        }
+        client_msg::IME_SET_POPUP_WINDOW => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeSetPopupWindow {
+                context_id: read_u32(payload, 0)?,
+                window_id: read_u32(payload, 4)?,
+                offset_x: read_i32(payload, 8)?,
+                offset_y: read_i32(payload, 12)?,
+                visible: read_u32(payload, 16)? != 0,
             })
         }
         _ => Err(ProtocolError::UnknownMessageType),
@@ -1816,39 +1774,6 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ServerMessage::TextInputDone {
-                context_id: read_u32(payload, 0)?,
-                serial: read_u32(payload, 4)?,
-            })
-        }
-        server_msg::TEXT_INPUT_CANDIDATES => {
-            if payload.len() < 28 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let context_id = read_u32(payload, 0)?;
-            let serial = read_u32(payload, 4)?;
-            let selected_index = read_u32(payload, 8)?;
-            let page_start = read_u32(payload, 12)?;
-            let page_size = read_u32(payload, 16)?;
-            let anchor_byte = read_u32(payload, 20)?;
-            let candidates =
-                read_len_prefixed_bytes(payload, 24, TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES)?;
-            let (candidates, candidates_len) = copy_bounded(candidates)?;
-            Ok(ServerMessage::TextInputCandidates {
-                context_id,
-                serial,
-                selected_index,
-                page_start,
-                page_size,
-                anchor_byte,
-                candidates,
-                candidates_len,
-            })
-        }
-        server_msg::TEXT_INPUT_HIDE_CANDIDATES => {
-            if payload.len() != 8 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            Ok(ServerMessage::TextInputHideCandidates {
                 context_id: read_u32(payload, 0)?,
                 serial: read_u32(payload, 4)?,
             })
@@ -2683,28 +2608,6 @@ pub fn payload_text_input_done(context_id: u32, serial: u32) -> [u8; 8] {
     payload
 }
 
-pub fn payload_text_input_candidates(
-    context_id: u32,
-    serial: u32,
-    selected_index: u32,
-    page_start: u32,
-    page_size: u32,
-    anchor_byte: u32,
-    candidates: &[u8],
-) -> Vec<u8> {
-    let mut payload = Vec::new();
-    let candidates_len = candidates.len().min(TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES);
-    payload.extend_from_slice(&context_id.to_le_bytes());
-    payload.extend_from_slice(&serial.to_le_bytes());
-    payload.extend_from_slice(&selected_index.to_le_bytes());
-    payload.extend_from_slice(&page_start.to_le_bytes());
-    payload.extend_from_slice(&page_size.to_le_bytes());
-    payload.extend_from_slice(&anchor_byte.to_le_bytes());
-    payload.extend_from_slice(&(candidates_len as u32).to_le_bytes());
-    payload.extend_from_slice(&candidates[..candidates_len]);
-    payload
-}
-
 pub fn payload_text_input_status(
     context_id: u32,
     serial: u32,
@@ -2723,10 +2626,6 @@ pub fn payload_text_input_status(
     payload.extend_from_slice(&(mode_label_len as u32).to_le_bytes());
     payload.extend_from_slice(&mode_label[..mode_label_len]);
     payload
-}
-
-pub fn payload_text_input_hide_candidates(context_id: u32, serial: u32) -> [u8; 8] {
-    payload_text_input_done(context_id, serial)
 }
 
 pub fn payload_ime_register(name: &[u8], capabilities: u32) -> Vec<u8> {
@@ -2794,26 +2693,6 @@ pub fn payload_ime_delete_surrounding_text(
     payload
 }
 
-pub fn payload_ime_set_candidates(
-    context_id: u32,
-    selected_index: u32,
-    page_start: u32,
-    page_size: u32,
-    anchor_byte: u32,
-    candidates: &[u8],
-) -> Vec<u8> {
-    let mut payload = Vec::new();
-    let candidates_len = candidates.len().min(TEXT_INPUT_CANDIDATE_LIST_MAX_BYTES);
-    payload.extend_from_slice(&context_id.to_le_bytes());
-    payload.extend_from_slice(&selected_index.to_le_bytes());
-    payload.extend_from_slice(&page_start.to_le_bytes());
-    payload.extend_from_slice(&page_size.to_le_bytes());
-    payload.extend_from_slice(&anchor_byte.to_le_bytes());
-    payload.extend_from_slice(&(candidates_len as u32).to_le_bytes());
-    payload.extend_from_slice(&candidates[..candidates_len]);
-    payload
-}
-
 pub fn payload_ime_set_status(
     context_id: u32,
     state: u32,
@@ -2832,8 +2711,20 @@ pub fn payload_ime_set_status(
     payload
 }
 
-pub fn payload_ime_hide_candidates(context_id: u32) -> [u8; 4] {
-    context_id.to_le_bytes()
+pub fn payload_ime_set_popup_window(
+    context_id: u32,
+    window_id: u32,
+    offset_x: i32,
+    offset_y: i32,
+    visible: bool,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&context_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&window_id.to_le_bytes());
+    payload[8..12].copy_from_slice(&offset_x.to_le_bytes());
+    payload[12..16].copy_from_slice(&offset_y.to_le_bytes());
+    payload[16..20].copy_from_slice(&(visible as u32).to_le_bytes());
+    payload
 }
 
 pub fn payload_ime_grab_keyboard(context_id: u32) -> [u8; 4] {

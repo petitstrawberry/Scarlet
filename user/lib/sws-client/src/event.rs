@@ -62,18 +62,6 @@ pub enum Event {
     },
     /// End of a text-input update batch.
     TextInputDone { context_id: u32, serial: u32 },
-    /// Structured candidate list for a text-input context.
-    TextInputCandidates {
-        context_id: u32,
-        serial: u32,
-        selected_index: u32,
-        page_start: u32,
-        page_size: u32,
-        anchor_byte: u32,
-        candidates: std::vec::Vec<u8>,
-    },
-    /// Hide candidate UI for a text-input context.
-    TextInputHideCandidates { context_id: u32, serial: u32 },
     /// IME status for a text-input context.
     TextInputStatus {
         context_id: u32,

@@ -54,17 +54,72 @@ const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
 type DamageRect = (i32, i32, u32, u32);
 type PresentDamage = Option<Vec<DamageRect>>;
 
-fn load_output_scale_milli() -> u32 {
+#[derive(Debug, Clone)]
+struct SwsConfig {
+    output_scale_milli: u32,
+    ime_toggle_bindings: Vec<KeyBinding>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeyBinding {
+    code: u16,
+    modifiers: KeyModifiers,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct KeyModifiers {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+}
+
+fn load_sws_config() -> SwsConfig {
+    let mut config = SwsConfig {
+        output_scale_milli: DEFAULT_OUTPUT_SCALE_MILLI,
+        ime_toggle_bindings: default_ime_toggle_bindings(),
+    };
+
     match read_sws_config(SWS_CONFIG_PATH) {
-        Ok(content) => parse_output_scale_milli(&content).unwrap_or_else(|| {
-            println!(
-                "[Compositor] No output scale in {}; using default {}",
-                SWS_CONFIG_PATH, DEFAULT_OUTPUT_SCALE_MILLI
-            );
-            DEFAULT_OUTPUT_SCALE_MILLI
-        }),
-        Err(_) => DEFAULT_OUTPUT_SCALE_MILLI,
+        Ok(content) => {
+            if let Some(output_scale_milli) = parse_output_scale_milli(&content) {
+                config.output_scale_milli = output_scale_milli;
+            } else {
+                println!(
+                    "[Compositor] No output scale in {}; using default {}",
+                    SWS_CONFIG_PATH, DEFAULT_OUTPUT_SCALE_MILLI
+                );
+            }
+
+            if let Some(bindings) = parse_keybindings_ime_toggle(&content) {
+                if bindings.is_empty() {
+                    println!(
+                        "[Compositor] Ignoring empty keybindings.ime_toggle in {}; using default",
+                        SWS_CONFIG_PATH
+                    );
+                } else {
+                    config.ime_toggle_bindings = bindings;
+                }
+            }
+        }
+        Err(_) => {}
     }
+
+    config
+}
+
+fn default_ime_toggle_bindings() -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+    bindings.push(KeyBinding {
+        code: key_codes::KEY_BACKSLASH,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            shift: false,
+            alt: false,
+            meta: false,
+        },
+    });
+    bindings
 }
 
 fn read_sws_config(path: &str) -> Result<String, &'static str> {
@@ -119,6 +174,123 @@ fn parse_output_scale_milli(content: &str) -> Option<u32> {
                 return Some(normalize_scale_milli(scale_milli));
             }
         }
+    }
+
+    None
+}
+
+fn parse_keybindings_ime_toggle(content: &str) -> Option<Vec<KeyBinding>> {
+    let mut accepts_keybindings = false;
+
+    for raw_line in content.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = line[1..line.len() - 1].trim();
+            accepts_keybindings = section == "keybindings";
+            continue;
+        }
+
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq_pos].trim();
+        let value = line[eq_pos + 1..].trim();
+
+        if key == "ime_toggle" && accepts_keybindings {
+            return Some(parse_key_binding_list(value));
+        }
+    }
+
+    None
+}
+
+fn parse_key_binding_list(value: &str) -> Vec<KeyBinding> {
+    let value = value.trim();
+    if value.starts_with('[') && value.ends_with(']') {
+        value[1..value.len() - 1]
+            .split(',')
+            .filter_map(parse_key_binding_value)
+            .collect()
+    } else {
+        parse_key_binding_value(value).into_iter().collect()
+    }
+}
+
+fn parse_key_binding_value(value: &str) -> Option<KeyBinding> {
+    let value = trim_toml_string(value);
+    let mut modifiers = KeyModifiers::default();
+    let mut code = None;
+
+    for token in value.split('+') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+
+        if token.eq_ignore_ascii_case("ctrl") || token.eq_ignore_ascii_case("control") {
+            modifiers.ctrl = true;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("shift") {
+            modifiers.shift = true;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("alt") || token.eq_ignore_ascii_case("option") {
+            modifiers.alt = true;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("meta")
+            || token.eq_ignore_ascii_case("super")
+            || token.eq_ignore_ascii_case("logo")
+            || token.eq_ignore_ascii_case("cmd")
+        {
+            modifiers.meta = true;
+            continue;
+        }
+
+        code = parse_key_code_name(token);
+    }
+
+    code.map(|code| KeyBinding { code, modifiers })
+}
+
+fn parse_key_code_name(value: &str) -> Option<u16> {
+    let value = trim_toml_string(value);
+    if let Some(code) = value.strip_prefix("keycode:") {
+        return code.trim().parse::<u16>().ok();
+    }
+    if let Some(code) = value.strip_prefix("code:") {
+        return code.trim().parse::<u16>().ok();
+    }
+    if let Ok(code) = value.parse::<u16>() {
+        return Some(code);
+    }
+
+    if value == "\\" || value.eq_ignore_ascii_case("backslash") {
+        return Some(key_codes::KEY_BACKSLASH);
+    }
+    if value.eq_ignore_ascii_case("space") {
+        return Some(key_codes::KEY_SPACE);
+    }
+    if value.eq_ignore_ascii_case("zenkaku_hankaku")
+        || value.eq_ignore_ascii_case("zenkakuhankaku")
+        || value.eq_ignore_ascii_case("hankaku_zenkaku")
+        || value.eq_ignore_ascii_case("hankakuzenkaku")
+    {
+        return Some(key_codes::KEY_ZENKAKUHANKAKU);
+    }
+    if value.eq_ignore_ascii_case("henkan") {
+        return Some(key_codes::KEY_HENKAN);
+    }
+    if value.eq_ignore_ascii_case("muhenkan") {
+        return Some(key_codes::KEY_MUHENKAN);
+    }
+    if value.eq_ignore_ascii_case("hangul") || value.eq_ignore_ascii_case("hanguel") {
+        return Some(key_codes::KEY_HANGUEL);
     }
 
     None
@@ -209,7 +381,24 @@ pub struct Compositor {
     last_focused_window_id: Option<u32>,
     left_control_down: bool,
     right_control_down: bool,
-    ime_trigger_key_down: bool,
+    left_shift_down: bool,
+    right_shift_down: bool,
+    left_alt_down: bool,
+    right_alt_down: bool,
+    left_meta_down: bool,
+    right_meta_down: bool,
+    ime_toggle_bindings: Vec<KeyBinding>,
+    ime_trigger_key_down: Option<u16>,
+    ime_popup_windows: Vec<ImePopupWindow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImePopupWindow {
+    context_id: u32,
+    window_id: u32,
+    offset_x: i32,
+    offset_y: i32,
+    visible: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,7 +445,8 @@ impl Compositor {
 
         let screen_width = var_info.xres;
         let screen_height = var_info.yres;
-        let output_scale_milli = load_output_scale_milli();
+        let sws_config = load_sws_config();
+        let output_scale_milli = sws_config.output_scale_milli;
         let bytes_per_pixel = 4; // BGRA
 
         println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
@@ -264,6 +454,10 @@ impl Compositor {
             "[Compositor] Output scale: {}.{}",
             output_scale_milli / 1000,
             output_scale_milli % 1000
+        );
+        println!(
+            "[Compositor] IME toggle bindings: {}",
+            sws_config.ime_toggle_bindings.len()
         );
         println!(
             "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
@@ -326,8 +520,46 @@ impl Compositor {
             last_focused_window_id: None,
             left_control_down: false,
             right_control_down: false,
-            ime_trigger_key_down: false,
+            left_shift_down: false,
+            right_shift_down: false,
+            left_alt_down: false,
+            right_alt_down: false,
+            left_meta_down: false,
+            right_meta_down: false,
+            ime_toggle_bindings: sws_config.ime_toggle_bindings,
+            ime_trigger_key_down: None,
+            ime_popup_windows: Vec::new(),
         })
+    }
+
+    fn update_modifier_key_state(&mut self, code: u16, pressed: bool) {
+        match code {
+            key_codes::KEY_LEFTCTRL => self.left_control_down = pressed,
+            key_codes::KEY_RIGHTCTRL => self.right_control_down = pressed,
+            key_codes::KEY_LEFTSHIFT => self.left_shift_down = pressed,
+            key_codes::KEY_RIGHTSHIFT => self.right_shift_down = pressed,
+            key_codes::KEY_LEFTALT => self.left_alt_down = pressed,
+            key_codes::KEY_RIGHTALT => self.right_alt_down = pressed,
+            key_codes::KEY_LEFTMETA => self.left_meta_down = pressed,
+            key_codes::KEY_RIGHTMETA => self.right_meta_down = pressed,
+            _ => {}
+        }
+    }
+
+    fn current_key_modifiers(&self) -> KeyModifiers {
+        KeyModifiers {
+            ctrl: self.left_control_down || self.right_control_down,
+            shift: self.left_shift_down || self.right_shift_down,
+            alt: self.left_alt_down || self.right_alt_down,
+            meta: self.left_meta_down || self.right_meta_down,
+        }
+    }
+
+    fn is_ime_toggle_key(&self, code: u16) -> bool {
+        let modifiers = self.current_key_modifiers();
+        self.ime_toggle_bindings
+            .iter()
+            .any(|binding| binding.code == code && binding.modifiers == modifiers)
     }
 
     fn draw_outline_rect_to_buffer(
@@ -2262,11 +2494,7 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::Keyboard { code, pressed } => {
-                match code {
-                    key_codes::KEY_LEFTCTRL => self.left_control_down = pressed,
-                    key_codes::KEY_RIGHTCTRL => self.right_control_down = pressed,
-                    _ => {}
-                }
+                self.update_modifier_key_state(code, pressed);
 
                 // Route keyboard events to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
@@ -2292,16 +2520,14 @@ impl Compositor {
                                 0,
                             );
                         } else {
-                            if code == key_codes::KEY_BACKSLASH {
-                                if !pressed && self.ime_trigger_key_down {
-                                    self.ime_trigger_key_down = false;
+                            if !pressed && self.ime_trigger_key_down == Some(code) {
+                                self.ime_trigger_key_down = None;
+                                return Ok(false);
+                            }
+                            if pressed && self.is_ime_toggle_key(code) {
+                                if super::ipc::send_input_method_trigger(focused_id, 0, code) {
+                                    self.ime_trigger_key_down = Some(code);
                                     return Ok(false);
-                                }
-                                if pressed && (self.left_control_down || self.right_control_down) {
-                                    if super::ipc::send_input_method_trigger(focused_id, 0, code) {
-                                        self.ime_trigger_key_down = true;
-                                        return Ok(false);
-                                    }
                                 }
                             }
 
@@ -2405,6 +2631,7 @@ impl Compositor {
             .map(|(window_id, _, _)| *window_id)
             .collect();
         self.clear_interaction_state_for_removed_windows(&removed_ids);
+        self.remove_ime_popup_windows(&removed_ids);
 
         let mut active_app_removed = false;
         for (window_id, rect, app_id) in &removed_windows {
@@ -2459,6 +2686,132 @@ impl Compositor {
         }
 
         self.full_redraw_needed = true;
+        true
+    }
+
+    fn set_ime_popup_window(
+        &mut self,
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
+    ) -> bool {
+        if self.window_manager.get_window(window_id).is_none() {
+            return false;
+        }
+
+        if let Some(popup) = self
+            .ime_popup_windows
+            .iter_mut()
+            .find(|popup| popup.window_id == window_id)
+        {
+            popup.context_id = context_id;
+            popup.offset_x = offset_x;
+            popup.offset_y = offset_y;
+            popup.visible = visible;
+        } else {
+            self.ime_popup_windows.push(ImePopupWindow {
+                context_id,
+                window_id,
+                offset_x,
+                offset_y,
+                visible,
+            });
+        }
+
+        self.position_ime_popup_window(window_id)
+    }
+
+    fn position_ime_popups_for_context(&mut self, context_id: u32) -> bool {
+        let popup_ids: Vec<u32> = self
+            .ime_popup_windows
+            .iter()
+            .filter(|popup| popup.context_id == context_id)
+            .map(|popup| popup.window_id)
+            .collect();
+        let mut changed = false;
+        for window_id in popup_ids {
+            changed |= self.position_ime_popup_window(window_id);
+        }
+        changed
+    }
+
+    fn remove_ime_popup_windows(&mut self, window_ids: &[u32]) {
+        self.ime_popup_windows
+            .retain(|popup| !window_ids.iter().any(|id| *id == popup.window_id));
+    }
+
+    fn position_ime_popup_window(&mut self, window_id: u32) -> bool {
+        let Some(popup) = self
+            .ime_popup_windows
+            .iter()
+            .find(|popup| popup.window_id == window_id)
+            .copied()
+        else {
+            return false;
+        };
+
+        let Some(cursor) = super::ipc::text_input_cursor_rect(popup.context_id) else {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.visible = false;
+            }
+            return true;
+        };
+        let Some(anchor_window) = self.window_manager.get_window(cursor.window_id) else {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.visible = false;
+            }
+            return true;
+        };
+        let anchor_x = anchor_window.x;
+        let anchor_y = anchor_window.y;
+
+        let Some(old_window) = self.window_manager.get_window(window_id) else {
+            return false;
+        };
+        let old_rect = (
+            old_window.x,
+            old_window.y,
+            old_window.width,
+            old_window.height,
+        );
+
+        if let Some(window) = self.window_manager.get_window_mut(window_id) {
+            window.visible = popup.visible;
+        }
+
+        let mut x = anchor_x
+            .saturating_add(cursor.x)
+            .saturating_add(popup.offset_x);
+        let mut y = anchor_y
+            .saturating_add(cursor.y)
+            .saturating_add(cursor.height as i32)
+            .saturating_add(popup.offset_y);
+
+        let max_x = (self.screen_width as i32).saturating_sub(old_rect.2 as i32);
+        let max_y = (self.screen_height as i32).saturating_sub(old_rect.3 as i32);
+        if x > max_x {
+            let anchor_right = anchor_x
+                .saturating_add(cursor.x)
+                .saturating_add(cursor.width as i32);
+            x = anchor_right.saturating_sub(old_rect.2 as i32);
+        }
+        x = x.max(0).min(max_x.max(0));
+        y = y.max(0).min(max_y.max(0));
+
+        self.window_manager.set_window_position(window_id, x, y);
+        self.window_manager.raise_to_top_with_type(window_id);
+
+        self.add_pending_damage(old_rect);
+        if let Some(new_window) = self.window_manager.get_window(window_id) {
+            self.add_pending_damage((
+                new_window.x,
+                new_window.y,
+                new_window.width,
+                new_window.height,
+            ));
+        }
         true
     }
 
@@ -2550,6 +2903,7 @@ impl Compositor {
                     window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
                     window_types::TASKBAR => super::window::WindowType::Taskbar,
                     window_types::DESKTOP => super::window::WindowType::Desktop,
+                    window_types::IME_POPUP => super::window::WindowType::ImePopup,
                     _ => super::window::WindowType::Normal,
                 };
 
@@ -2598,7 +2952,7 @@ impl Compositor {
                 }
 
                 // Focus is for input routing only; give focus to newly created windows.
-                if focus_on_create {
+                if focus_on_create && self.window_manager.window_accepts_focus(window_id) {
                     self.window_manager.set_focus(window_id);
                     self.broadcast_focus_change(window_id);
                 }
@@ -3068,6 +3422,7 @@ impl Compositor {
                     window_types::ALWAYS_ON_TOP => super::window::WindowType::AlwaysOnTop,
                     window_types::TASKBAR => super::window::WindowType::Taskbar,
                     window_types::DESKTOP => super::window::WindowType::Desktop,
+                    window_types::IME_POPUP => super::window::WindowType::ImePopup,
                     _ => {
                         println!("[Compositor] Invalid window type {}, ignoring", window_type);
                         return Ok(false);
@@ -3089,6 +3444,22 @@ impl Compositor {
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
                     }
+                }
+            }
+            IpcEvent::TextInputContextUpdated { context_id } => {
+                if self.position_ime_popups_for_context(context_id) {
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::ImeSetPopupWindow {
+                context_id,
+                window_id,
+                offset_x,
+                offset_y,
+                visible,
+            } => {
+                if self.set_ime_popup_window(context_id, window_id, offset_x, offset_y, visible) {
+                    self.full_redraw_needed = true;
                 }
             }
             IpcEvent::ExtensionRegistered {

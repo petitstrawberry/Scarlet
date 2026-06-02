@@ -312,6 +312,10 @@ impl RenderingPipeline {
     pub fn take_emitted_events(&mut self) -> Vec<crate::event::Event> {
         self.event_dispatcher.take_emitted_events()
     }
+
+    pub fn focused_text_input_state(&self) -> Option<crate::element::TextInputElementState> {
+        self.element_tree.focused_text_input_state()
+    }
 }
 
 impl Default for RenderingPipeline {

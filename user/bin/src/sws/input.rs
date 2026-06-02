@@ -84,8 +84,19 @@ pub mod key_codes {
     pub const BTN_LEFT: u16 = 0x110;
     pub const BTN_RIGHT: u16 = 0x111;
     pub const BTN_MIDDLE: u16 = 0x112;
+    pub const KEY_SPACE: u16 = 0x39;
     pub const KEY_LEFTCTRL: u16 = 0x1d;
     pub const KEY_RIGHTCTRL: u16 = 0x61;
+    pub const KEY_LEFTSHIFT: u16 = 0x2a;
+    pub const KEY_RIGHTSHIFT: u16 = 0x36;
+    pub const KEY_LEFTALT: u16 = 0x38;
+    pub const KEY_RIGHTALT: u16 = 0x64;
+    pub const KEY_ZENKAKUHANKAKU: u16 = 0x55;
+    pub const KEY_HENKAN: u16 = 0x5c;
+    pub const KEY_MUHENKAN: u16 = 0x5e;
+    pub const KEY_HANGUEL: u16 = 0x7a;
+    pub const KEY_LEFTMETA: u16 = 0x7d;
+    pub const KEY_RIGHTMETA: u16 = 0x7e;
     pub const KEY_BACKSLASH: u16 = 0x2b;
 }
 

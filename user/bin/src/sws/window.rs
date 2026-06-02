@@ -71,6 +71,8 @@ pub enum WindowType {
     Taskbar,
     /// Desktop background window (bottom layer)
     Desktop,
+    /// Input-method-owned popup surface.
+    ImePopup,
 }
 
 impl Default for WindowType {
@@ -645,6 +647,7 @@ impl WindowManager {
             WindowType::AlwaysOnTop => true,
             WindowType::Taskbar => true,
             WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
+            WindowType::ImePopup => false,
         }
     }
 
@@ -1029,7 +1032,7 @@ impl WindowManager {
             // Set default resizable behavior based on window type
             // Taskbar and Desktop windows should not be resizable by default
             match window_type {
-                WindowType::Taskbar | WindowType::Desktop => {
+                WindowType::Taskbar | WindowType::Desktop | WindowType::ImePopup => {
                     w.resizable = false;
                 }
                 WindowType::Normal | WindowType::AlwaysOnTop => {
@@ -1044,6 +1047,9 @@ impl WindowManager {
                 }
                 WindowType::Normal | WindowType::Taskbar | WindowType::AlwaysOnTop => {
                     w.raise_on_focus = true;
+                }
+                WindowType::ImePopup => {
+                    w.raise_on_focus = false;
                 }
             }
             println!(
@@ -1068,6 +1074,7 @@ impl WindowManager {
         let mut normal: Vec<Window> = Vec::new();
         let mut taskbar: Vec<Window> = Vec::new();
         let mut always_on_top: Vec<Window> = Vec::new();
+        let mut ime_popup: Vec<Window> = Vec::new();
 
         // Sort windows into layers by type
         for w in old {
@@ -1076,14 +1083,16 @@ impl WindowManager {
                 WindowType::Normal => normal.push(w),
                 WindowType::Taskbar => taskbar.push(w),
                 WindowType::AlwaysOnTop => always_on_top.push(w),
+                WindowType::ImePopup => ime_popup.push(w),
             }
         }
 
-        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top
+        // Reconstruct in proper Z-order: desktop -> normal -> taskbar -> always_on_top -> ime_popup
         self.windows = desktop;
         self.windows.extend(normal);
         self.windows.extend(taskbar);
         self.windows.extend(always_on_top);
+        self.windows.extend(ime_popup);
 
         println!("[WindowManager] Z-order rebuilt after type change");
         print!("[WindowManager] Current Z-order (bottom to top): ");
@@ -1172,6 +1181,7 @@ impl WindowManager {
         let mut normal: Vec<Window> = Vec::new();
         let mut taskbar: Vec<Window> = Vec::new();
         let mut always_on_top: Vec<Window> = Vec::new();
+        let mut ime_popup: Vec<Window> = Vec::new();
         let mut group: Vec<Window> = Vec::new();
 
         for w in old {
@@ -1183,6 +1193,7 @@ impl WindowManager {
                     WindowType::Normal => normal.push(w),
                     WindowType::Taskbar => taskbar.push(w),
                     WindowType::AlwaysOnTop => always_on_top.push(w),
+                    WindowType::ImePopup => ime_popup.push(w),
                 }
             }
         }
@@ -1204,6 +1215,7 @@ impl WindowManager {
                 self.windows.extend(normal);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
             }
             WindowType::Normal => {
                 // Normal: put desktop, then normal, then group at top of Normal layer
@@ -1212,6 +1224,7 @@ impl WindowManager {
                 self.windows.extend(group);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
             }
             WindowType::Taskbar => {
                 // Taskbar: desktop, normal, taskbar, group at top of Taskbar layer
@@ -1220,13 +1233,24 @@ impl WindowManager {
                 self.windows.extend(taskbar);
                 self.windows.extend(group);
                 self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
             }
             WindowType::AlwaysOnTop => {
-                // AlwaysOnTop: desktop, normal, taskbar, always_on_top, group at top
+                // AlwaysOnTop: desktop, normal, taskbar, always_on_top, group, ime_popup
                 self.windows = desktop;
                 self.windows.extend(normal);
                 self.windows.extend(taskbar);
                 self.windows.extend(always_on_top);
+                self.windows.extend(group);
+                self.windows.extend(ime_popup);
+            }
+            WindowType::ImePopup => {
+                // IME popup: always above application and shell UI.
+                self.windows = desktop;
+                self.windows.extend(normal);
+                self.windows.extend(taskbar);
+                self.windows.extend(always_on_top);
+                self.windows.extend(ime_popup);
                 self.windows.extend(group);
             }
         }
@@ -1280,7 +1304,10 @@ impl WindowManager {
         let mut result = Vec::new();
         for w in &self.windows {
             // Skip taskbar/desktop windows from the list
-            if matches!(w.window_type, WindowType::Taskbar | WindowType::Desktop) {
+            if matches!(
+                w.window_type,
+                WindowType::Taskbar | WindowType::Desktop | WindowType::ImePopup
+            ) {
                 continue;
             }
 
@@ -1303,6 +1330,7 @@ impl WindowManager {
                 WindowType::AlwaysOnTop => 1,
                 WindowType::Taskbar => 2,
                 WindowType::Desktop => 3,
+                WindowType::ImePopup => 4,
             };
 
             result.push((

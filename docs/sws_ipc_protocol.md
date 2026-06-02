@@ -15,6 +15,25 @@ Client-side reference implementations:
 - Default path: `/tmp/sws.sock`
 - Byte order: little-endian for all integer fields
 
+## Configuration
+
+SWS reads `/etc/sws/config.toml` at startup. The current implementation accepts
+`[output] scale` / `scale_milli` and common SWS-level `[keybindings]`.
+
+`keybindings.ime_toggle` is a compositor shortcut that emits `IME_TRIGGER` to
+the active IME for the focused text-input context. It is not an IME-specific
+setting and SWS still does not implement conversion behavior. The value may be a
+single key binding string or an array of strings, for example:
+
+```toml
+[keybindings]
+ime_toggle = ["Ctrl+Backslash", "Ctrl+Space", "Zenkaku_Hankaku"]
+```
+
+Supported modifiers are `Ctrl`, `Shift`, `Alt`, and `Meta`; supported named keys
+include `Backslash`, `Space`, `Zenkaku_Hankaku`, `Henkan`, `Muhenkan`, and
+`Hangul`. A numeric event code may be written as `keycode:N`.
+
 ## Framing
 
 All messages are framed.
@@ -252,7 +271,8 @@ Semantics:
 	- `ALWAYS_ON_TOP = 1`: Always stays above normal windows
 	- `TASKBAR = 2`: Taskbar/panel window
 	- `DESKTOP = 3`: Desktop background window
-- Default Z-order grouping (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop.
+	- `IME_POPUP = 4`: Input-method-owned popup surface
+- Default Z-order grouping (bottom to top): Desktop → Normal → Taskbar → AlwaysOnTop → ImePopup.
 - The effective Z-order is dynamically adjusted by the window server when windows are raised (see `raise_to_top_with_type` in the implementation); depending on which type is raised, windows of other types may end up above or below it.
 - Within each type, windows generally maintain relative order, except when explicitly changed by focus and raise operations.
 
@@ -388,11 +408,11 @@ State is double-buffered. Clients may send cursor rect, surrounding text, conten
 
 An IME service registers on a normal SWS connection and receives focused text-input contexts, trigger events, and key events while it has requested keyboard arbitration. It replies with handled/pass-through decisions and text operations.
 
-`TEXT_INPUT_ENABLE` means the application has an editable focused text-input context; it is not an IME on/off mode. Keyboard arbitration is separate. The active IME receives `IME_ACTIVATE` for the enabled focused context, receives trigger events such as Ctrl-Backslash via `IME_TRIGGER`, and may then request `IME_GRAB_KEYBOARD` or `IME_RELEASE_KEYBOARD`. SWS forwards ordinary key events to the IME only while the active context is grabbed.
+`TEXT_INPUT_ENABLE` means the application has an editable focused text-input context; it is not an IME on/off mode. Keyboard arbitration is separate. The active IME receives `IME_ACTIVATE` for the enabled focused context, receives configured trigger events such as Ctrl-Backslash via `IME_TRIGGER`, and may then request `IME_GRAB_KEYBOARD` or `IME_RELEASE_KEYBOARD`. SWS forwards ordinary key events to the IME only while the active context is grabbed.
 
 SWS does not define language-specific input modes. An IME may report an opaque `mode_id` and a UTF-8 `mode_label` through `IME_SET_STATUS`; the id is stable only within that IME, and SWS must not interpret it. This follows the practical model used by existing IME stacks: the compositor/toolkit brokers composition, surrounding text, candidates, and display attributes, while engine-specific modes and properties remain owned by the IME.
 
-`user/bin/src/simple_ime.rs` is a minimal external IME service for exercising this protocol. It registers as `simple-skk`, requests active IME status, and keeps an SKK state machine in the IME process: lower-case romaji commits kana directly, `Shift` + letter starts `▽` midashi input, `Shift` + letter inside midashi starts an okuri marker, `Space` enters or advances `▼` candidate selection, `Backspace` moves backward through candidates while `▼` conversion is active, `Enter` commits, and `Esc` cancels or returns to midashi input. It loads a UTF-8 SKK dictionary from `/system/scarlet/share/skk/SKK-JISYO.L`, `/usr/share/skk/SKK-JISYO.L`, `/usr/local/share/skk/SKK-JISYO.L`, or `/etc/skk/SKK-JISYO.L`, falling back to a tiny built-in dictionary only when no usable file exists. `tools/fetch_skk_dictionary.sh` downloads the upstream SKK dictionary and converts it from EUC-JP to UTF-8 for the Scarlet rootfs. This sample is not part of SWS compositor behavior; SWS remains only a broker for text-input state, trigger delivery, key arbitration, preedit, commit, deletion, and candidate messages.
+`user/bin/src/simple_ime.rs` is a minimal external IME service for exercising this protocol. It registers as `simple-skk`, requests active IME status, and keeps an SKK state machine in the IME process: lower-case romaji commits kana directly, `Shift` + letter starts `▽` midashi input, `Shift` + letter inside midashi starts an okuri marker, printable number and symbol keys are interpreted by the IME itself as fullwidth characters and are added to the current preedit when composing, `Space` enters or advances `▼` candidate selection, `Backspace` moves backward through candidates while `▼` conversion is active, `Enter` commits, and `Esc` cancels or returns to midashi input. It loads a UTF-8 SKK dictionary from `/system/scarlet/share/skk/SKK-JISYO.L`, `/usr/share/skk/SKK-JISYO.L`, `/usr/local/share/skk/SKK-JISYO.L`, or `/etc/skk/SKK-JISYO.L`, falling back to a tiny built-in dictionary only when no usable file exists. `tools/fetch_skk_dictionary.sh` downloads the upstream SKK dictionary and converts it from EUC-JP to UTF-8 for the Scarlet rootfs. This sample is not part of SWS compositor behavior; SWS remains only a broker for text-input state, trigger delivery, key arbitration, preedit, commit, deletion, and input-method-owned popup placement.
 
 `IME_REGISTER` (220), variable payload:
 
@@ -411,9 +431,10 @@ Fixed-size IME messages:
 | `IME_SET_ACTIVE` | 221 | `ime_id: u32` |
 | `IME_KEY_HANDLED` | 222 | `key_serial: u32`, `handled: u32` |
 | `IME_DELETE_SURROUNDING_TEXT` | 225 | `context_id: u32`, `before_bytes: u32`, `after_bytes: u32` |
-| `IME_HIDE_CANDIDATES` | 227 | `context_id: u32` |
-| `IME_GRAB_KEYBOARD` | 228 | `context_id: u32` |
-| `IME_RELEASE_KEYBOARD` | 229 | `context_id: u32` |
+| `IME_GRAB_KEYBOARD` | 226 | `context_id: u32` |
+| `IME_RELEASE_KEYBOARD` | 227 | `context_id: u32` |
+| `IME_SET_STATUS` | 228 | variable, described below |
+| `IME_SET_POPUP_WINDOW` | 229 | `context_id`, `window_id`, `offset_x`, `offset_y`, `visible` |
 
 `IME_SET_PREEDIT` (223), variable payload:
 
@@ -445,39 +466,28 @@ Style flags: `UNDERLINE`, `THICK_UNDERLINE`, `HIGHLIGHT`, `SELECTED`, `CONVERTED
 | 4      | 4    | `text_len`   | u32  |
 | 8      | N    | `text`       | bytes |
 
-`IME_SET_CANDIDATES` (226), variable payload:
+`IME_SET_POPUP_WINDOW` (229), payload 20 bytes:
 
-| Offset | Size | Field            | Type  |
-|--------|------|------------------|-------|
-| 0      | 4    | `context_id`     | u32   |
-| 4      | 4    | `selected_index` | u32   |
-| 8      | 4    | `page_start`     | u32   |
-| 12     | 4    | `page_size`      | u32   |
-| 16     | 4    | `anchor_byte`    | u32   |
-| 20     | 4    | `candidates_len` | u32   |
-| 24     | N    | `candidates`     | bytes |
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `window_id`  | u32  |
+| 8      | 4    | `offset_x`   | i32  |
+| 12     | 4    | `offset_y`   | i32  |
+| 16     | 4    | `visible`    | u32  |
 
-`candidates` is a structured blob:
+This assigns an existing IME-owned SWS window the `input-method popup` role for
+the text-input context. The IME creates and renders this window itself, usually
+with window type `IME_POPUP`, then registers it here. SWS positions the popup at
+the active text-input cursor rectangle plus the supplied offset, keeps it above
+normal and shell windows, and hides it when the context is unavailable. SWS does
+not inspect or render candidate contents.
 
-| Offset | Size | Field             | Type |
-|--------|------|-------------------|------|
-| 0      | 4    | `candidate_count` | u32  |
-| 4      | ...  | candidate entries |      |
+This mirrors the modern Wayland model: applications provide text-input state and
+cursor rectangles, the input method owns its UI surface, and the compositor only
+anchors and stacks that surface.
 
-Each candidate entry is:
-
-| Field | Encoding |
-|-------|----------|
-| `id` | `u32` |
-| `label` | `u32 byte_len` + UTF-8 bytes |
-| `text` | `u32 byte_len` + UTF-8 bytes |
-| `annotation` | `u32 byte_len` + UTF-8 bytes |
-| `comment` | `u32 byte_len` + UTF-8 bytes |
-| `flags` | `u32` |
-
-IME services may also display their own candidate window; this message exists for clients or toolkits that want to render candidates inline.
-
-`IME_SET_STATUS` (230), variable payload:
+`IME_SET_STATUS` (228), variable payload:
 
 | Offset | Size | Field            | Type  |
 |--------|------|------------------|-------|
@@ -639,8 +649,7 @@ Variable text events:
 |---------|------|---------------|-------|
 | `TEXT_INPUT_PREEDIT` | 201 | `context_id`, `serial`, `cursor_byte`, `anchor_byte`, `text_len`, `spans_len` | UTF-8 preedit + span records |
 | `TEXT_INPUT_COMMIT` | 202 | `context_id`, `serial`, `text_len` | UTF-8 committed text |
-| `TEXT_INPUT_CANDIDATES` | 205 | `context_id`, `serial`, `selected_index`, `page_start`, `page_size`, `anchor_byte`, `candidates_len` | structured candidate blob |
-| `TEXT_INPUT_STATUS` | 207 | `context_id`, `serial`, `state`, `mode_id`, `flags`, `mode_label_len` | UTF-8 mode label |
+| `TEXT_INPUT_STATUS` | 205 | `context_id`, `serial`, `state`, `mode_id`, `flags`, `mode_label_len` | UTF-8 mode label |
 
 Fixed-size text events:
 
@@ -648,7 +657,6 @@ Fixed-size text events:
 |---------|------|---------|
 | `TEXT_INPUT_DELETE_SURROUNDING_TEXT` | 203 | `context_id`, `serial`, `before_bytes`, `after_bytes` |
 | `TEXT_INPUT_DONE` | 204 | `context_id`, `serial` |
-| `TEXT_INPUT_HIDE_CANDIDATES` | 206 | `context_id`, `serial` |
 
 Toolkits should apply preedit/commit/delete messages in order and treat `TEXT_INPUT_DONE` as the end of an update batch.
 
@@ -692,7 +700,7 @@ Current trigger IDs:
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `TOGGLE` | 1 | A compositor-recognized IME trigger key, currently Ctrl-Backslash. |
+| `TOGGLE` | 1 | A compositor-recognized IME trigger key from `keybindings.ime_toggle`. |
 
 `IME_KEY_EVENT` (224), payload 28 bytes:
 

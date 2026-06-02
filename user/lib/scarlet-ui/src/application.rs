@@ -253,6 +253,7 @@ pub trait Application: View {
                 let _ = platform_window.set_resizable(false);
             }
         }
+        sync_text_input(&mut platform_window, &pipeline);
 
         // 6. Main event loop
         loop {
@@ -270,6 +271,7 @@ pub trait Application: View {
                         if platform_window.resize(width, height).is_ok() {
                             pipeline.resize(new_size);
                             self.on_resize(width, height);
+                            sync_text_input(&mut platform_window, &pipeline);
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
                                 presented_this_cycle = true;
@@ -283,6 +285,7 @@ pub trait Application: View {
                             let new_height = new_size.height.max(1.0) as u32;
                             if platform_window.resize(new_width, new_height).is_ok() {
                                 pipeline.resize(new_size);
+                                sync_text_input(&mut platform_window, &pipeline);
                             }
                         }
                         if !presented_this_cycle && (resize_to.is_some() || pipeline.has_dirty()) {
@@ -303,17 +306,64 @@ pub trait Application: View {
                         serial,
                         text,
                     } => {
-                        self.on_text_input_commit(context_id, serial, &text);
+                        let event = Event::TextInputCommit {
+                            context_id,
+                            serial,
+                            text,
+                        };
+                        if !pipeline.handle_event(&event)
+                            && let Event::TextInputCommit {
+                                context_id,
+                                serial,
+                                text,
+                            } = &event
+                        {
+                            self.on_text_input_commit(*context_id, *serial, text);
+                        }
+                        sync_text_input(&mut platform_window, &pipeline);
+                        if !presented_this_cycle
+                            && pipeline.has_dirty()
+                            && let Some(buffer) = pipeline.render()
+                        {
+                            platform_window.present(buffer);
+                            presented_this_cycle = true;
+                        }
                     }
                     Event::TextInputPreedit {
                         context_id,
                         serial,
                         cursor_byte,
-                        anchor_byte: _,
+                        anchor_byte,
                         text,
-                        spans: _,
+                        spans,
                     } => {
-                        self.on_text_input_preedit(context_id, serial, cursor_byte, &text);
+                        let event = Event::TextInputPreedit {
+                            context_id,
+                            serial,
+                            cursor_byte,
+                            anchor_byte,
+                            text,
+                            spans,
+                        };
+                        if !pipeline.handle_event(&event)
+                            && let Event::TextInputPreedit {
+                                context_id,
+                                serial,
+                                cursor_byte,
+                                text,
+                                ..
+                            } = &event
+                        {
+                            self.on_text_input_preedit(*context_id, *serial, *cursor_byte, text);
+                        }
+                        sync_text_input(&mut platform_window, &pipeline);
+                        if !presented_this_cycle
+                            && pipeline.has_dirty()
+                            && let Some(buffer) = pipeline.render()
+                        {
+                            platform_window.present(buffer);
+                            presented_this_cycle = true;
+                        }
                     }
                     Event::TextInputDeleteSurroundingText {
                         context_id,
@@ -321,14 +371,40 @@ pub trait Application: View {
                         before_bytes,
                         after_bytes,
                     } => {
-                        self.on_text_input_delete_surrounding_text(
+                        let event = Event::TextInputDeleteSurroundingText {
                             context_id,
                             serial,
                             before_bytes,
                             after_bytes,
-                        );
+                        };
+                        if !pipeline.handle_event(&event)
+                            && let Event::TextInputDeleteSurroundingText {
+                                context_id,
+                                serial,
+                                before_bytes,
+                                after_bytes,
+                            } = event
+                        {
+                            self.on_text_input_delete_surrounding_text(
+                                context_id,
+                                serial,
+                                before_bytes,
+                                after_bytes,
+                            );
+                        }
+                        sync_text_input(&mut platform_window, &pipeline);
+                        if !presented_this_cycle
+                            && pipeline.has_dirty()
+                            && let Some(buffer) = pipeline.render()
+                        {
+                            platform_window.present(buffer);
+                            presented_this_cycle = true;
+                        }
                     }
-                    Event::TextInputDone { .. } => {}
+                    Event::TextInputDone { context_id, serial } => {
+                        let event = Event::TextInputDone { context_id, serial };
+                        let _ = pipeline.handle_event(&event);
+                    }
                     Event::Custom { event_type, data } if event_type == 0xF0C0F => {
                         // FocusChanged event from SWS
                         // Decode the data: window_id (u32) + app_id_len (u32) + app_id + app_name_len (u32) + app_name + title_len (u32) + title + menu_titles_len (u32) + menu_titles
@@ -433,6 +509,7 @@ pub trait Application: View {
                     _ => {
                         // Other events are handled by the pipeline
                         let _ = pipeline.handle_event(&event);
+                        sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle && pipeline.has_dirty() {
                             if let Some(buffer) = pipeline.render() {
                                 platform_window.present(buffer);
@@ -472,6 +549,7 @@ pub trait Application: View {
             //     platform_window.present(buffer);
             // }
             self.on_idle();
+            sync_text_input(&mut platform_window, &pipeline);
             if !presented_this_cycle && pipeline.has_dirty() {
                 if crate::debug::is_enabled() {
                     println!("[Application] has_dirty=true, calling render()");
@@ -498,6 +576,11 @@ fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
         }
     }
     None
+}
+
+fn sync_text_input(window: &mut SWSPlatformWindow, pipeline: &RenderingPipeline) {
+    let state = pipeline.focused_text_input_state();
+    window.sync_text_input(state.as_ref());
 }
 
 struct ApplicationRootElement<A: Application + Clone> {
@@ -561,8 +644,15 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         if let Some(app) = new_view.as_any().downcast_ref::<A>() {
+            let focused_path = self
+                .child
+                .as_ref()
+                .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
             self.app = app.clone();
             self.child = Some(self.app.body().create_element());
+            if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
             UpdateResult::Updated
         } else {
             UpdateResult::Replaced
@@ -576,12 +666,19 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
                 self.id.get()
             );
         }
+        let focused_path = self
+            .child
+            .as_ref()
+            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
         self.child = Some(self.app.body().create_element());
         if let Some(ref mut child) = self.child {
             child.mount();
+            if let Some(path) = focused_path.as_deref() {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
         }
         UpdateResult::Updated
     }

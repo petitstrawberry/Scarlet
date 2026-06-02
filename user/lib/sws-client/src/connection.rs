@@ -489,30 +489,6 @@ impl Connection {
         )
     }
 
-    pub fn ime_set_candidates(
-        &mut self,
-        context_id: u32,
-        selected_index: u32,
-        page_start: u32,
-        page_size: u32,
-        anchor_byte: u32,
-        candidates: &[u8],
-    ) -> Result<(), Error> {
-        let payload = protocol::payload_ime_set_candidates(
-            context_id,
-            selected_index,
-            page_start,
-            page_size,
-            anchor_byte,
-            candidates,
-        );
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::IME_SET_CANDIDATES,
-            &payload,
-        )
-    }
-
     pub fn ime_set_status(
         &mut self,
         context_id: u32,
@@ -535,11 +511,19 @@ impl Connection {
         )
     }
 
-    pub fn ime_hide_candidates(&mut self, context_id: u32) -> Result<(), Error> {
-        let payload = protocol::payload_ime_hide_candidates(context_id);
+    pub fn ime_set_popup_window(
+        &mut self,
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
+    ) -> Result<(), Error> {
+        let payload =
+            protocol::payload_ime_set_popup_window(context_id, window_id, offset_x, offset_y, visible);
         write_frame(
             &mut self.socket,
-            protocol::client_msg::IME_HIDE_CANDIDATES,
+            protocol::client_msg::IME_SET_POPUP_WINDOW,
             &payload,
         )
     }
@@ -1570,32 +1554,6 @@ impl Connection {
             ServerMessage::TextInputDone { context_id, serial } => {
                 self.pending_events
                     .push(Event::TextInputDone { context_id, serial });
-                true
-            }
-            ServerMessage::TextInputCandidates {
-                context_id,
-                serial,
-                selected_index,
-                page_start,
-                page_size,
-                anchor_byte,
-                candidates,
-                candidates_len,
-            } => {
-                self.pending_events.push(Event::TextInputCandidates {
-                    context_id,
-                    serial,
-                    selected_index,
-                    page_start,
-                    page_size,
-                    anchor_byte,
-                    candidates: candidates[..candidates_len as usize].to_vec(),
-                });
-                true
-            }
-            ServerMessage::TextInputHideCandidates { context_id, serial } => {
-                self.pending_events
-                    .push(Event::TextInputHideCandidates { context_id, serial });
                 true
             }
             ServerMessage::TextInputStatus {

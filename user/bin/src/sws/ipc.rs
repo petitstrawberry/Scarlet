@@ -149,6 +149,15 @@ struct PendingImeKey {
     value: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TextInputCursorRect {
+    pub window_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 static NEXT_TEXT_INPUT_CONTEXT_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_IME_ID: AtomicU32 = AtomicU32::new(1);
 static NEXT_IME_KEY_SERIAL: AtomicU32 = AtomicU32::new(1);
@@ -945,6 +954,7 @@ fn commit_text_input_state(client_id: usize, context_id: u32, client_serial: u32
     if *ACTIVE_TEXT_INPUT_CONTEXT.lock() == Some(context_id) && context.enabled {
         send_ime_context_frame(sws_protocol::server_msg::IME_CONTEXT_STATE, &context);
     }
+    push_ipc_event(IpcEvent::TextInputContextUpdated { context_id });
 }
 
 fn register_input_method(client_id: usize, name: &[u8], capabilities: u32) -> InputMethodService {
@@ -1185,6 +1195,26 @@ fn context_serial_and_window(context_id: u32) -> Option<(u32, u32)> {
     text_input_context(context_id).map(|context| (context.serial, context.window_id))
 }
 
+pub fn text_input_cursor_rect(context_id: u32) -> Option<TextInputCursorRect> {
+    text_input_context(context_id).map(|context| TextInputCursorRect {
+        window_id: context.window_id,
+        x: context.current.cursor_x,
+        y: context.current.cursor_y,
+        width: context.current.cursor_width,
+        height: context.current.cursor_height,
+    })
+}
+
+fn client_is_active_input_method(client_id: usize) -> bool {
+    let Some(ime_id) = *ACTIVE_IME_ID.lock() else {
+        return false;
+    };
+    INPUT_METHODS
+        .lock()
+        .get(&ime_id)
+        .is_some_and(|service| service.client_id == client_id)
+}
+
 fn send_text_input_done(window_id: u32, context_id: u32, serial: u32) {
     let payload = sws_protocol::payload_text_input_done(context_id, serial);
     send_message_to_window(
@@ -1258,33 +1288,6 @@ fn forward_ime_delete_surrounding_text(context_id: u32, before_bytes: u32, after
     send_text_input_done(window_id, context_id, serial);
 }
 
-fn forward_ime_candidates(
-    context_id: u32,
-    selected_index: u32,
-    page_start: u32,
-    page_size: u32,
-    anchor_byte: u32,
-    candidates: &[u8],
-) {
-    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
-        return;
-    };
-    let payload = sws_protocol::payload_text_input_candidates(
-        context_id,
-        serial,
-        selected_index,
-        page_start,
-        page_size,
-        anchor_byte,
-        candidates,
-    );
-    send_message_to_window(
-        window_id,
-        sws_protocol::server_msg::TEXT_INPUT_CANDIDATES,
-        payload,
-    );
-}
-
 fn forward_ime_status(context_id: u32, state: u32, mode_id: u32, flags: u32, mode_label: &[u8]) {
     let Some((serial, window_id)) = context_serial_and_window(context_id) else {
         return;
@@ -1296,18 +1299,6 @@ fn forward_ime_status(context_id: u32, state: u32, mode_id: u32, flags: u32, mod
         window_id,
         sws_protocol::server_msg::TEXT_INPUT_STATUS,
         payload,
-    );
-}
-
-fn forward_ime_hide_candidates(context_id: u32) {
-    let Some((serial, window_id)) = context_serial_and_window(context_id) else {
-        return;
-    };
-    let payload = sws_protocol::payload_text_input_hide_candidates(context_id, serial);
-    send_message_to_window(
-        window_id,
-        sws_protocol::server_msg::TEXT_INPUT_HIDE_CANDIDATES,
-        payload.to_vec(),
     );
 }
 
@@ -2590,26 +2581,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }) => {
                 forward_ime_delete_surrounding_text(context_id, before_bytes, after_bytes);
             }
-            Ok(ClientMessageRef::ImeSetCandidates {
-                context_id,
-                selected_index,
-                page_start,
-                page_size,
-                anchor_byte,
-                candidates,
-            }) => {
-                forward_ime_candidates(
-                    context_id,
-                    selected_index,
-                    page_start,
-                    page_size,
-                    anchor_byte,
-                    candidates,
-                );
-            }
-            Ok(ClientMessageRef::ImeHideCandidates { context_id }) => {
-                forward_ime_hide_candidates(context_id);
-            }
             Ok(ClientMessageRef::ImeSetStatus {
                 context_id,
                 state,
@@ -2618,6 +2589,35 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 mode_label,
             }) => {
                 forward_ime_status(context_id, state, mode_id, flags, mode_label);
+            }
+            Ok(ClientMessageRef::ImeSetPopupWindow {
+                context_id,
+                window_id,
+                offset_x,
+                offset_y,
+                visible,
+            }) => {
+                if !client_is_active_input_method(client_id) {
+                    println!(
+                        "[ClientThread {}] Ignoring IME popup from non-active IME client",
+                        client_id
+                    );
+                    continue;
+                }
+                if !managed_windows.iter().any(|id| *id == window_id) {
+                    println!(
+                        "[ClientThread {}] Ignoring IME popup for foreign window {}",
+                        client_id, window_id
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ImeSetPopupWindow {
+                    context_id,
+                    window_id,
+                    offset_x,
+                    offset_y,
+                    visible,
+                });
             }
             Ok(ClientMessageRef::ImeGrabKeyboard { context_id }) => {
                 set_ime_keyboard_grabbed(client_id, context_id, true);
@@ -2812,6 +2812,18 @@ pub enum IpcEvent {
     SetWindowOpacity {
         window_id: u32,
         opacity: u8,
+    },
+
+    TextInputContextUpdated {
+        context_id: u32,
+    },
+
+    ImeSetPopupWindow {
+        context_id: u32,
+        window_id: u32,
+        offset_x: i32,
+        offset_y: i32,
+        visible: bool,
     },
 
     // Extension API events
