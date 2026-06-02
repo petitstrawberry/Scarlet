@@ -1,10 +1,14 @@
-# VirtIO Video Decode Prototype
+# Video Decode Device API
 
 ## Overview
 
-Scarlet exposes the VirtIO video decoder as a character device such as
-`/dev/vvideo0`. The current driver is a prototype for hardware-assisted video
-decode and is intentionally small:
+Scarlet exposes video decode hardware as a character device such as
+`/dev/vvideo0`. The API described here is the Scarlet video decode device
+contract used by userspace. It is not inherently tied to VirtIO, although the
+current implementation in this PR is backed by the VirtIO video driver and a
+vhost-user-video host process.
+
+The current API is intentionally small:
 
 - `write()` / `read()` provide a compatibility path for one H.264 Annex B access
   unit at a time.
@@ -19,11 +23,16 @@ reference.
 
 ## Device Model
 
-The PCI VirtIO video driver registers each device as `vvideoN`, starting at
-`vvideo0`. The driver negotiates `VIRTIO_F_VERSION_1` and the VirtIO video
-`RESOURCE_GUEST_PAGES` feature. The host backend added with this work is
-`tools/vhost_video_videotoolbox.swift`, which decodes through Apple's
-VideoToolbox when the QEMU vhost-user-video path is enabled.
+Video decode devices are exposed as `vvideoN`, starting at `vvideo0`. Userspace
+talks to the device through normal file operations, `mmap()`, and `control()`.
+A future non-VirtIO implementation should be able to expose the same device
+contract.
+
+The current backend is a PCI VirtIO video device. That driver negotiates
+`VIRTIO_F_VERSION_1` and the VirtIO video `RESOURCE_GUEST_PAGES` feature. The
+host backend added with this work is `tools/vhost_video_videotoolbox.swift`,
+which decodes through Apple's VideoToolbox when the QEMU vhost-user-video path
+is enabled.
 
 The kernel side accepts these coded stream formats:
 
@@ -86,8 +95,11 @@ supports at most four sessions.
 ## Control Commands
 
 All commands use raw `#[repr(C)]` structures copied between Scarlet userspace
-and the kernel. All current Scarlet targets are little-endian; do not treat these
-layouts as a portable cross-OS ABI.
+and the kernel. The command names currently use the `VVIDEO_` prefix because
+they were introduced with the `vvideoN` device. They should be read as video
+decode device commands, not as a VirtIO-only userspace ABI. All current Scarlet
+targets are little-endian; do not treat these layouts as a portable cross-OS
+ABI.
 
 | Command | Value | Argument | Return |
 | --- | ---: | --- | --- |
@@ -199,5 +211,6 @@ as "not ready yet" and retry with their own timeout.
 - The output path currently assumes a single-buffer NV12 frame.
 - Error reporting is mostly string-based through kernel `Result<&'static str>`
   and status reads.
-- Backend support depends on the host vhost-user-video process and VideoToolbox
+- The only implementation today is the VirtIO/vhost-user-video backend, so
+  backend support depends on the host vhost-user-video process and VideoToolbox
   capabilities.
