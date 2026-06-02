@@ -9,14 +9,16 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::time::Duration;
+use scarlet_ui::{Buffer, Canvas, Color};
 use std::fs::File;
 use std::println;
 use std::thread;
-use sws_client::{Connection, Error, Event, event_type, key_code};
-use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger};
+use sws_client::{Connection, Error, Event, SurfaceBuilder, event_type, key_code};
+use sws_protocol::{ime_capabilities, ime_state, ime_status_flags, ime_trigger, window_types};
 
 const IME_NAME: &str = "simple-skk";
 const MODE_DIRECT_ID: u32 = 0;
@@ -30,6 +32,14 @@ const SKK_DICTIONARY_PATHS: &[&str] = &[
     "/etc/skk/SKK-JISYO.L",
 ];
 const MAX_SKK_DICTIONARY_BYTES: usize = 16 * 1024 * 1024;
+const CANDIDATE_POPUP_WIDTH: u32 = 360;
+const CANDIDATE_POPUP_HEIGHT: u32 = 148;
+const CANDIDATE_POPUP_PAGE_SIZE: usize = 5;
+const CANDIDATE_POPUP_OFFSET_X: i32 = 0;
+const CANDIDATE_POPUP_OFFSET_Y: i32 = 4;
+const CANDIDATE_POPUP_PADDING_X: i32 = 4;
+const CANDIDATE_ROW_HEIGHT: i32 = 28;
+const CANDIDATE_POPUP_PADDING_Y: i32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SkkPhase {
@@ -51,10 +61,13 @@ struct SimpleIme {
     left_shift_down: bool,
     right_shift_down: bool,
     eaten_keys: Vec<u16>,
+    candidate_popup: Option<CandidatePopup>,
+    candidate_popup_requested: bool,
+    scale_milli: u32,
 }
 
 impl SimpleIme {
-    fn new() -> Self {
+    fn new(scale_milli: u32) -> Self {
         let dictionary = load_skk_dictionary();
         Self {
             active_context_id: None,
@@ -69,6 +82,9 @@ impl SimpleIme {
             left_shift_down: false,
             right_shift_down: false,
             eaten_keys: Vec::new(),
+            candidate_popup: None,
+            candidate_popup_requested: false,
+            scale_milli: scale_milli.max(1),
         }
     }
 
@@ -80,6 +96,7 @@ impl SimpleIme {
         self.okuri.clear();
         self.selected_index = 0;
         self.eaten_keys.clear();
+        self.candidate_popup_requested = false;
     }
 
     fn handle_event(&mut self, conn: &mut Connection, event: Event) -> Result<(), Error> {
@@ -89,6 +106,7 @@ impl SimpleIme {
                 self.active_context_id = Some(state.context_id);
                 self.grabbing = false;
                 conn.ime_set_preedit(state.context_id, 0, 0, "", &[])?;
+                self.sync_candidate_popup(conn, state.context_id)?;
                 self.emit_status(conn, state.context_id)?;
                 println!(
                     "[simple_ime] activated context={} window={}",
@@ -97,6 +115,7 @@ impl SimpleIme {
             }
             Event::ImeDeactivate { context_id, .. } => {
                 if self.active_context_id == Some(context_id) {
+                    self.hide_candidate_popup(conn, context_id)?;
                     self.active_context_id = None;
                     self.grabbing = false;
                     self.reset_context();
@@ -122,6 +141,7 @@ impl SimpleIme {
                     self.grabbing = false;
                     self.reset_context();
                     conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+                    self.sync_candidate_popup(conn, context_id)?;
                     self.emit_status(conn, context_id)?;
                 }
             }
@@ -167,6 +187,18 @@ impl SimpleIme {
                     handled,
                     self.debug_text()
                 );
+            }
+            Event::SurfaceDestroyed { surface_id } => {
+                if self
+                    .candidate_popup
+                    .is_some_and(|popup| popup.window_id == surface_id)
+                {
+                    println!(
+                        "[simple_ime] candidate popup destroyed window={}",
+                        surface_id
+                    );
+                    self.candidate_popup = None;
+                }
             }
             _ => {}
         }
@@ -249,6 +281,7 @@ impl SimpleIme {
             self.grabbing = false;
             self.reset_context();
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
+            self.sync_candidate_popup(conn, context_id)?;
             self.emit_status(conn, context_id)?;
             println!("[simple_ime] released keyboard context={}", context_id);
             return Ok(());
@@ -451,6 +484,7 @@ impl SimpleIme {
             SkkPhase::Candidate => {
                 self.phase = SkkPhase::Preedit;
                 self.selected_index = 0;
+                self.candidate_popup_requested = false;
                 self.update_preedit(conn, context_id)?;
                 Ok(true)
             }
@@ -482,6 +516,7 @@ impl SimpleIme {
             }
             self.phase = SkkPhase::Candidate;
             self.selected_index = 0;
+            self.candidate_popup_requested = false;
         }
         self.update_preedit(conn, context_id)
     }
@@ -497,11 +532,12 @@ impl SimpleIme {
         self.update_preedit(conn, context_id)
     }
 
-    fn update_preedit(&self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
+    fn update_preedit(&mut self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
         let preedit = self.preedit_text();
         println!("[simple_ime] preedit '{}'", preedit);
         let spans = preedit_spans(&preedit, self.phase);
         conn.ime_set_preedit(context_id, preedit.len() as u32, 0, &preedit, &spans)?;
+        self.sync_candidate_popup(conn, context_id)?;
         self.emit_status(conn, context_id)?;
         Ok(())
     }
@@ -600,6 +636,7 @@ impl SimpleIme {
         self.okuri_marker = None;
         self.okuri.clear();
         self.selected_index = 0;
+        self.candidate_popup_requested = false;
     }
 
     fn candidates(&self) -> Vec<&str> {
@@ -695,6 +732,7 @@ impl SimpleIme {
         let len = self.candidates().len();
         if len > 0 {
             self.selected_index = (self.selected_index + 1) % len;
+            self.candidate_popup_requested = true;
         }
     }
 
@@ -706,6 +744,7 @@ impl SimpleIme {
             } else {
                 self.selected_index - 1
             };
+            self.candidate_popup_requested = true;
         }
     }
 
@@ -716,6 +755,206 @@ impl SimpleIme {
         self.eaten_keys.remove(index);
         true
     }
+
+    fn ensure_candidate_popup(&mut self, conn: &mut Connection) -> Result<u32, Error> {
+        if let Some(popup) = self.candidate_popup {
+            return Ok(popup.window_id);
+        }
+
+        let window_id = SurfaceBuilder::new()
+            .app_id("org.scarlet.simple-ime.candidates")
+            .app_name("Simple IME Candidates")
+            .menu_titles("")
+            .size(
+                scale_len(CANDIDATE_POPUP_WIDTH, self.scale_milli),
+                scale_len(CANDIDATE_POPUP_HEIGHT, self.scale_milli),
+            )
+            .window_type(window_types::IME_POPUP)
+            .resizable(false)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .position(0, 0)
+            .build(conn)?;
+        self.candidate_popup = Some(CandidatePopup {
+            window_id,
+            visible: false,
+        });
+        println!("[simple_ime] created candidate popup window={}", window_id);
+        Ok(window_id)
+    }
+
+    fn hide_candidate_popup(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+    ) -> Result<(), Error> {
+        let Some(mut popup) = self.candidate_popup else {
+            return Ok(());
+        };
+        if popup.visible {
+            conn.ime_set_popup_window(context_id, popup.window_id, 0, 0, false)?;
+            popup.visible = false;
+            self.candidate_popup = Some(popup);
+            println!("[simple_ime] candidate popup hidden context={}", context_id);
+        }
+        Ok(())
+    }
+
+    fn sync_candidate_popup(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+    ) -> Result<(), Error> {
+        if self.phase != SkkPhase::Candidate {
+            return self.hide_candidate_popup(conn, context_id);
+        }
+        if !self.candidate_popup_requested {
+            return self.hide_candidate_popup(conn, context_id);
+        }
+
+        let rows = self.candidate_popup_rows();
+        if rows.is_empty() {
+            return self.hide_candidate_popup(conn, context_id);
+        }
+
+        let window_id = self.ensure_candidate_popup(conn)?;
+        draw_candidate_popup(conn, window_id, &rows, self.scale_milli)?;
+        conn.ime_set_popup_window(
+            context_id,
+            window_id,
+            CANDIDATE_POPUP_OFFSET_X,
+            CANDIDATE_POPUP_OFFSET_Y,
+            true,
+        )?;
+        self.candidate_popup = Some(CandidatePopup {
+            window_id,
+            visible: true,
+        });
+        println!(
+            "[simple_ime] candidate popup shown context={} window={} selected={}",
+            context_id, window_id, self.selected_index
+        );
+        Ok(())
+    }
+
+    fn candidate_popup_rows(&self) -> Vec<CandidatePopupRow> {
+        let candidates = self.candidates();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let page_start = (self.selected_index / CANDIDATE_POPUP_PAGE_SIZE)
+            .saturating_mul(CANDIDATE_POPUP_PAGE_SIZE);
+        let mut rows = Vec::new();
+        for (index, candidate) in candidates
+            .iter()
+            .enumerate()
+            .skip(page_start)
+            .take(CANDIDATE_POPUP_PAGE_SIZE)
+        {
+            rows.push(CandidatePopupRow {
+                index,
+                text: candidate.to_string(),
+                selected: index == self.selected_index,
+            });
+        }
+        rows
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CandidatePopup {
+    window_id: u32,
+    visible: bool,
+}
+
+struct CandidatePopupRow {
+    index: usize,
+    text: String,
+    selected: bool,
+}
+
+fn draw_candidate_popup(
+    conn: &mut Connection,
+    window_id: u32,
+    rows: &[CandidatePopupRow],
+    scale_milli: u32,
+) -> Result<(), Error> {
+    let mut ui_buffer = Buffer::from_logical_dimensions_with_scale(
+        CANDIDATE_POPUP_WIDTH,
+        CANDIDATE_POPUP_HEIGHT,
+        scale_milli,
+    );
+    {
+        let mut canvas = Canvas::for_buffer(&mut ui_buffer);
+        draw_candidate_popup_ui(&mut canvas, rows);
+    }
+
+    let Some(surface) = conn.surface_mut(window_id) else {
+        return Err(Error::SurfaceNotFound);
+    };
+
+    surface.with_buffer(|buffer, width, height| {
+        for byte in buffer.iter_mut() {
+            *byte = 0;
+        }
+
+        let src = ui_buffer.data();
+        let src_stride = ui_buffer.width() as usize * 4;
+        let dst_stride = width as usize * 4;
+        let copy_stride = src_stride.min(dst_stride);
+        let copy_rows = ui_buffer.height().min(height) as usize;
+        for row in 0..copy_rows {
+            let src_start = row * src_stride;
+            let dst_start = row * dst_stride;
+            buffer[dst_start..dst_start + copy_stride]
+                .copy_from_slice(&src[src_start..src_start + copy_stride]);
+        }
+    });
+    conn.commit(window_id)
+}
+
+fn draw_candidate_popup_ui(canvas: &mut Canvas<'_>, rows: &[CandidatePopupRow]) {
+    let bg = Color::rgb(250u8, 250u8, 252u8);
+    let border = Color::rgb(106u8, 112u8, 124u8);
+    let text = Color::rgb(24u8, 26u8, 32u8);
+    let selected_bg = Color::rgb(40u8, 96u8, 180u8);
+    let selected_text = Color::WHITE;
+
+    canvas.fill_rect(0, 0, CANDIDATE_POPUP_WIDTH, CANDIDATE_POPUP_HEIGHT, bg);
+    canvas.draw_rect(0, 0, CANDIDATE_POPUP_WIDTH, CANDIDATE_POPUP_HEIGHT, border);
+
+    for (row_pos, row) in rows.iter().enumerate() {
+        let y = CANDIDATE_POPUP_PADDING_Y + (row_pos as i32 * CANDIDATE_ROW_HEIGHT);
+        let row_h = CANDIDATE_ROW_HEIGHT as u32;
+        if row.selected {
+            canvas.fill_rect(
+                CANDIDATE_POPUP_PADDING_X,
+                y,
+                CANDIDATE_POPUP_WIDTH.saturating_sub((CANDIDATE_POPUP_PADDING_X * 2) as u32),
+                row_h,
+                selected_bg,
+            );
+        }
+
+        let row_text = format!("{}  {}", row.index.saturating_add(1), row.text);
+        let color = if row.selected { selected_text } else { text };
+        canvas.draw_text_sized(
+            CANDIDATE_POPUP_PADDING_X + 10,
+            y + 6,
+            &row_text,
+            color,
+            17.0,
+        );
+    }
+}
+
+fn scale_len(value: u32, scale_milli: u32) -> u32 {
+    ((value as u64)
+        .saturating_mul(scale_milli.max(1) as u64)
+        .saturating_add(999)
+        / 1000)
+        .max(1) as u32
 }
 
 fn drain_committable(pending: &mut Vec<u8>) -> String {
@@ -1352,10 +1591,12 @@ fn main() -> i32 {
             return 1;
         }
     };
+    let scale_milli = conn.get_output_scale().unwrap_or(1000).max(1);
 
     let capabilities = ime_capabilities::KEYBOARD_GRAB
         | ime_capabilities::STYLED_PREEDIT
-        | ime_capabilities::STATUS;
+        | ime_capabilities::STATUS
+        | ime_capabilities::OWN_CANDIDATE_UI;
     let ime_id = match conn.register_input_method(IME_NAME, capabilities) {
         Ok(ime_id) => ime_id,
         Err(err) => {
@@ -1371,7 +1612,7 @@ fn main() -> i32 {
 
     println!("[simple_ime] registered {} as id={}", IME_NAME, ime_id);
 
-    let mut ime = SimpleIme::new();
+    let mut ime = SimpleIme::new(scale_milli);
     loop {
         match conn.dispatch() {
             Ok(_) => {

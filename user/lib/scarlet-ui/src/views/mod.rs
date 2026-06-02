@@ -20,7 +20,9 @@ pub mod containers;
 pub mod menu;
 pub mod navigation;
 
-pub use window::{Window, WindowRenderObject, WindowRenderElement, WindowInfo};
+pub use window::{
+    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject,
+};
 pub use window::window_type;
 pub use text::{Text, TextRenderObject};
 pub use button::{Button, ButtonRenderObject, ButtonCallback};

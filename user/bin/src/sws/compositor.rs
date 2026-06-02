@@ -2791,6 +2791,19 @@ impl Compositor {
 
         let max_x = (self.screen_width as i32).saturating_sub(old_rect.2 as i32);
         let max_y = (self.screen_height as i32).saturating_sub(old_rect.3 as i32);
+        if y > max_y {
+            let cursor_top = anchor_y.saturating_add(cursor.y);
+            let cursor_bottom = cursor_top.saturating_add(cursor.height as i32);
+            let below_space = (self.screen_height as i32).saturating_sub(cursor_bottom);
+            let above_space = cursor_top.max(0);
+            let above_y = anchor_y
+                .saturating_add(cursor.y)
+                .saturating_sub(old_rect.3 as i32)
+                .saturating_sub(popup.offset_y);
+            if above_space >= below_space {
+                y = above_y;
+            }
+        }
         if x > max_x {
             let anchor_right = anchor_x
                 .saturating_add(cursor.x)

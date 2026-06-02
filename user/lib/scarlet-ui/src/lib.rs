@@ -80,7 +80,10 @@ pub use buffer::Buffer;
 pub use compositor::Compositor;
 pub use render::{RenderTree, RenderNode};
 pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
-pub use views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+pub use views::{
+    Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
+    WindowContentLayout, ZStack,
+};
 pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
 pub use views::{NavigationView, NavigationLink};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
@@ -110,7 +113,10 @@ pub mod prelude {
     pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
     pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
     pub use crate::application::Application;
-    pub use crate::views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
+    pub use crate::views::{
+        Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
+        WindowContentLayout, ZStack,
+    };
     pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
     pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};

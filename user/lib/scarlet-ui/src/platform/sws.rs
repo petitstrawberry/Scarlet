@@ -312,6 +312,30 @@ impl SWSPlatformWindow {
         }
     }
 
+    /// Set a text-input cursor rectangle using ScarletUI logical coordinates.
+    pub fn set_text_input_cursor_rect(
+        &mut self,
+        context_id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> core::result::Result<(), sws::Error> {
+        let cursor_rect = self.logical_rect_to_physical(Rect::from_xywh(
+            x as f32,
+            y as f32,
+            width.max(1) as f32,
+            height.max(1) as f32,
+        ));
+        self.conn.set_text_input_cursor_rect(
+            context_id,
+            cursor_rect.origin.x as i32,
+            cursor_rect.origin.y as i32,
+            cursor_rect.size.width.max(1.0) as u32,
+            cursor_rect.size.height.max(1.0) as u32,
+        )
+    }
+
     fn logical_rect_to_physical(&self, rect: Rect) -> Rect {
         Rect::from_xywh(
             self.logical_to_physical_pos(rect.origin.x as i32) as f32,

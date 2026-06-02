@@ -20,7 +20,7 @@ use core::time::Duration;
 use scarlet_ui::{
     Application, Color, ComponentElement, Element, KeyCode, KeyEvent, PlatformWindow,
     SWSPlatformWindow, Size, State, StateId, TextGrid, TextGridBuffer, TextGridCell,
-    TextGridCursor, View, ViewExt, Window, text_grid_cell_width,
+    TextGridCursor, View, ViewExt, Window, WindowContentLayout, text_grid_cell_width,
 };
 use std::fs::File;
 use std::handle::Handle;
@@ -42,8 +42,7 @@ const DEFAULT_CELL_HEIGHT: f32 = 18.0;
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 const MIN_FONT_SIZE: f32 = 10.0;
 const MAX_FONT_SIZE: f32 = 28.0;
-const WINDOW_HORIZONTAL_DECORATION: f32 = 4.0;
-const WINDOW_VERTICAL_DECORATION: f32 = 34.0;
+const TERMINAL_WINDOW_DECORATED: bool = true;
 const TERM_ENV: &str = "TERM=xterm-256color";
 
 #[derive(Clone, Copy, Debug)]
@@ -195,13 +194,14 @@ impl TerminalApp {
         };
         let cursor = self.cursor.get();
         let metrics = self.metrics.get();
-        let x = (cursor.column as f32 * metrics.cell_width) as i32;
-        let y = (cursor.row as f32 * metrics.cell_height) as i32;
+        let content_offset = WindowContentLayout::new(TERMINAL_WINDOW_DECORATED).offset();
+        let x = (content_offset.x + cursor.column as f32 * metrics.cell_width) as i32;
+        let y = (content_offset.y + cursor.row as f32 * metrics.cell_height) as i32;
         let width = metrics.cell_width.max(1.0) as u32;
         let height = metrics.cell_height.max(1.0) as u32;
 
+        let _ = window.set_text_input_cursor_rect(state.context_id, x, y, width, height);
         let conn = window.connection_mut();
-        let _ = conn.set_text_input_cursor_rect(state.context_id, x, y, width, height);
         let _ = conn.set_text_input_surrounding_text(state.context_id, 0, 0, "");
         let _ = conn.set_text_input_content_type(
             state.context_id,
@@ -304,6 +304,7 @@ impl Application for TerminalApp {
                 .frame(f32::INFINITY, f32::INFINITY),
         )
         .app_id("org.scarlet-os.desktop.terminal")
+        .decorated(TERMINAL_WINDOW_DECORATED)
         .size(Size::new(
             DEFAULT_WINDOW_WIDTH as f32,
             DEFAULT_WINDOW_HEIGHT as f32,
@@ -787,8 +788,9 @@ fn preedit_cursor_offset(text: &str, cursor_byte: u32) -> usize {
 }
 
 fn grid_dimensions(width: u32, height: u32, metrics: TerminalMetrics) -> (usize, usize) {
-    let content_width = (width as f32 - WINDOW_HORIZONTAL_DECORATION).max(metrics.cell_width);
-    let content_height = (height as f32 - WINDOW_VERTICAL_DECORATION).max(metrics.cell_height);
+    let decoration_size = WindowContentLayout::new(TERMINAL_WINDOW_DECORATED).decoration_size();
+    let content_width = (width as f32 - decoration_size.width).max(metrics.cell_width);
+    let content_height = (height as f32 - decoration_size.height).max(metrics.cell_height);
     (
         (content_width / metrics.cell_width).max(1.0) as usize,
         (content_height / metrics.cell_height).max(1.0) as usize,
