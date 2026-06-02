@@ -286,6 +286,10 @@ impl ScarletMozc {
             }
             Err(err) => {
                 println!("[scarlet_mozc] Mozc SEND_KEY failed: {:?}", err);
+                if !self.preedit.is_empty() {
+                    self.eat_key(code);
+                    return Ok(true);
+                }
                 Ok(false)
             }
         }
@@ -1256,7 +1260,11 @@ mod proto {
                     let status = cursor.read_bytes()?;
                     output.status = Some(decode_status(status)?);
                 }
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(output)
@@ -1274,7 +1282,11 @@ mod proto {
                         window.candidates.push(candidate);
                     }
                 }
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(window)
@@ -1288,7 +1300,11 @@ mod proto {
                 (3, WIRE_END_GROUP) => break,
                 (4, WIRE_VARINT) => index = cursor.read_varint().map(|v| v as usize),
                 (5, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string),
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(MozcCandidate {
@@ -1303,7 +1319,11 @@ mod proto {
         while let Some((field, wire)) = cursor.read_key() {
             match (field, wire) {
                 (2, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string),
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(value)
@@ -1319,7 +1339,11 @@ mod proto {
                 (2, WIRE_START_GROUP) => {
                     text.push_str(&decode_preedit_segment(&mut cursor)?);
                 }
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(MozcPreedit { text, cursor_chars })
@@ -1331,10 +1355,14 @@ mod proto {
             match (field, wire) {
                 (2, WIRE_END_GROUP) => return Some(value),
                 (4, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string)?,
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        return Some(value);
+                    }
+                }
             }
         }
-        None
+        Some(value)
     }
 
     fn decode_status(data: &[u8]) -> Option<MozcStatus> {
@@ -1344,7 +1372,11 @@ mod proto {
             match (field, wire) {
                 (1, WIRE_VARINT) => status.activated = cursor.read_varint().map(|v| v != 0),
                 (2, WIRE_VARINT) => status.mode = cursor.read_varint().map(|v| v as u32),
-                _ => cursor.skip(wire)?,
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
             }
         }
         Some(status)
