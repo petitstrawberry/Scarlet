@@ -870,7 +870,18 @@ impl VfsNode for TmpNode {
     }
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        Ok(self.metadata.read().clone())
+        let mut metadata = self.metadata.read().clone();
+        if matches!(metadata.file_type, FileType::RegularFile)
+            && let Some(fs) = self.filesystem().and_then(|weak| weak.upgrade())
+        {
+            let cache_id = crate::fs::vfs_v2::cache::CacheId::new(
+                (fs.fs_id().get() << 32) | (metadata.file_id & 0xFFFF_FFFF),
+            );
+            if let Some(size) = PageCacheManager::global().cached_object_size(cache_id) {
+                metadata.size = size;
+            }
+        }
+        Ok(metadata)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1115,13 +1126,15 @@ impl TmpFileObject {
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         let mut pos = *self.position.read();
-        let file_size = self.node.metadata.read().size as u64;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size) as u64;
         if pos >= file_size {
             return Ok(0);
         }
 
         let mut total_read = 0usize;
-        let cache_id = self.cache_id();
         while total_read < buffer.len() && pos < file_size {
             let page_index = (pos as usize / PAGE_SIZE) as u64;
             let offset_in_page = (pos as usize) % PAGE_SIZE;
@@ -1264,6 +1277,7 @@ impl TmpFileObject {
             if pos > meta.size {
                 meta.size = pos;
             }
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
         Ok(written)
@@ -1420,7 +1434,10 @@ impl MemoryMappingOps for TmpFileObject {
             return Err("Offset not page aligned");
         }
 
-        let file_size = self.node.metadata.read().size;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size);
         if file_size == 0 || offset >= file_size {
             return Err("Offset beyond file size");
         }
@@ -1559,13 +1576,15 @@ impl FileObject for TmpFileObject {
         }
 
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let file_size = self.node.metadata.read().size;
+        let cache_id = self.cache_id();
+        let file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| self.node.metadata.read().size);
         if offset >= file_size {
             return Ok(0);
         }
 
         let mut total_read = 0usize;
-        let cache_id = self.cache_id();
         while total_read < buffer.len() && offset + total_read < file_size {
             let absolute = offset + total_read;
             let page_index = (absolute / PAGE_SIZE) as u64;
@@ -1637,6 +1656,7 @@ impl FileObject for TmpFileObject {
             if new_end > meta.size {
                 meta.size = new_end;
             }
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
 
         Ok(written)
@@ -1680,7 +1700,11 @@ impl FileObject for TmpFileObject {
     }
 
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        self.node.metadata().map_err(StreamError::from)
+        let mut metadata = self.node.metadata().map_err(StreamError::from)?;
+        if let Some(size) = PageCacheManager::global().cached_object_size(self.cache_id()) {
+            metadata.size = size;
+        }
+        Ok(metadata)
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
@@ -1729,6 +1753,7 @@ impl FileObject for TmpFileObject {
         {
             let mut meta = self.node.metadata.write();
             meta.size = new_size;
+            PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
         Ok(())
     }

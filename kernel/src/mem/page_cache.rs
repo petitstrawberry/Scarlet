@@ -110,6 +110,8 @@ impl PageCacheEntry {
 pub struct PageCacheManager {
     /// Map from (CacheId, PageIndex) to cached page entry
     entries: RwLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
+    /// Best-known object sizes for dirty page-cache-backed files.
+    object_sizes: RwLock<BTreeMap<CacheId, usize>>,
     /// Object-level lock counts for eviction prevention
     /// Maps CacheId to lock count (>0 means object is unevictable)
     object_locks: RwLock<BTreeMap<CacheId, usize>>,
@@ -120,6 +122,7 @@ impl PageCacheManager {
     pub const fn new() -> Self {
         Self {
             entries: RwLock::new(BTreeMap::new()),
+            object_sizes: RwLock::new(BTreeMap::new()),
             object_locks: RwLock::new(BTreeMap::new()),
         }
     }
@@ -213,6 +216,16 @@ impl PageCacheManager {
         if let Some(entry) = self.entries.read().get(&(id, index)) {
             entry.mark_dirty();
         }
+    }
+
+    /// Record the current cached size for an object.
+    pub fn record_object_size(&self, id: CacheId, size: usize) {
+        self.object_sizes.write().insert(id, size);
+    }
+
+    /// Return the current cached size for an object if one has been recorded.
+    pub fn cached_object_size(&self, id: CacheId) -> Option<usize> {
+        self.object_sizes.read().get(&id).copied()
     }
 
     /// Set object-level lock (prevents eviction of all pages for this object)
@@ -316,6 +329,7 @@ impl PageCacheManager {
         for key in to_remove.into_iter() {
             map.remove(&key);
         }
+        self.object_sizes.write().remove(&id);
     }
 }
 

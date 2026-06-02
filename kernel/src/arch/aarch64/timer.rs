@@ -10,6 +10,28 @@ pub fn timer_init() {
     // Local controller registration happens via early initcall.
 }
 
+/// Allow EL0 code to read architectural counter registers.
+///
+/// Linux AArch64 userspace commonly reads `CNTVCT_EL0` directly for fast time
+/// sampling. Keep timer control registers trapped, but expose virtual and
+/// physical counter reads so libc/runtime code does not fault on `mrs`.
+pub fn enable_el0_counter_access() {
+    const CNTKCTL_EL1_EL0PCTEN: u64 = 1 << 0;
+    const CNTKCTL_EL1_EL0VCTEN: u64 = 1 << 1;
+
+    let mut cntkctl: u64;
+    unsafe {
+        asm!("mrs {0}, cntkctl_el1", out(reg) cntkctl, options(nostack));
+        cntkctl |= CNTKCTL_EL1_EL0PCTEN | CNTKCTL_EL1_EL0VCTEN;
+        asm!(
+            "msr cntkctl_el1, {0}",
+            "isb",
+            in(reg) cntkctl,
+            options(nostack)
+        );
+    }
+}
+
 pub fn get_time() -> u64 {
     let cpu_id = get_cpu().get_cpuid() as u32;
     crate::interrupt::InterruptManager::global()

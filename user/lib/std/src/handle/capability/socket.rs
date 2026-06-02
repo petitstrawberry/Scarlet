@@ -125,6 +125,34 @@ impl<'a> SocketObject<'a> {
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }
 
+    /// Bind socket to an abstract local name.
+    ///
+    /// Abstract local names are not represented as filesystem entries. This is
+    /// the Scarlet-native equivalent of Linux `sockaddr_un` names whose
+    /// `sun_path` starts with a NUL byte.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Abstract socket name without the leading NUL byte
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if the socket cannot be bound.
+    pub fn bind_abstract(&self, name: &str) -> SocketObjectResult<()> {
+        let mut address = [0u8; 108];
+        if name.len() > address.len() - 1 {
+            return Err(SocketObjectError::SystemError(-1));
+        }
+        address[1..1 + name.len()].copy_from_slice(name.as_bytes());
+        let result = syscall3(
+            Syscall::SocketBind,
+            self.handle.as_raw() as usize,
+            address.as_ptr() as usize,
+            name.len() + 1,
+        );
+        SocketObjectError::from_syscall_result(result).map(|_| ())
+    }
+
     /// Bind socket to an IPv4 address
     pub fn bind_inet(&self, addr: &Inet4SocketAddress) -> SocketObjectResult<()> {
         let result = syscall3(
@@ -153,6 +181,30 @@ impl<'a> SocketObject<'a> {
             self.handle.as_raw() as usize,
             path.as_ptr() as usize,
             path.len(),
+        );
+        SocketObjectError::from_syscall_result(result).map(|_| ())
+    }
+
+    /// Connect to an abstract local socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Abstract socket name without the leading NUL byte
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if the target socket is not listening.
+    pub fn connect_abstract(&self, name: &str) -> SocketObjectResult<()> {
+        let mut address = [0u8; 108];
+        if name.len() > address.len() - 1 {
+            return Err(SocketObjectError::SystemError(-1));
+        }
+        address[1..1 + name.len()].copy_from_slice(name.as_bytes());
+        let result = syscall3(
+            Syscall::SocketConnect,
+            self.handle.as_raw() as usize,
+            address.as_ptr() as usize,
+            name.len() + 1,
         );
         SocketObjectError::from_syscall_result(result).map(|_| ())
     }

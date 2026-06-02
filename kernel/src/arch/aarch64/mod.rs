@@ -409,6 +409,9 @@ fn trap_init(aarch64: &mut Aarch64) {
     // Tasks that actually use FP/SIMD will enable EL0 access on-demand.
     fpu::set_user_fpu_enabled(false);
 
+    // Linux AArch64 user code may read CNTVCT_EL0 directly for timekeeping.
+    timer::enable_el0_counter_access();
+
     // Default to kernel vector while executing in EL1.
     set_trapvector(get_kernel_trapvector_paddr());
 }

@@ -14,6 +14,7 @@ use crate::{
     sched::scheduler::schedule,
     task::mytask,
 };
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -59,7 +60,16 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SCM_RIGHTS: i32 = 1;
+pub const SO_PEERCRED: i32 = 17;
 pub const MSG_DONTWAIT: i32 = 0x40;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxUcred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
 
 fn socket_error_to_errno(error: SocketError) -> usize {
     match error {
@@ -113,14 +123,32 @@ fn write_socket_address_to_user(
                 *sockaddr = AF_UNIX_U16;
 
                 let available_path_len = (addrlen - 2) as usize;
-                let path = addr.path().as_bytes();
-                let path_len = path.len().min(available_path_len);
-                if path_len > 0 {
-                    let path_start = (addr_paddr + 2) as *mut u8;
-                    core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, path_len);
-                    if path_len < available_path_len {
-                        *(path_start.add(path_len)) = 0;
+                let path_start = (addr_paddr + 2) as *mut u8;
+                let path_len = if addr.is_abstract() {
+                    if available_path_len == 0 {
+                        return Err(errno::EINVAL);
                     }
+                    *path_start = 0;
+                    let path = addr.path().as_bytes();
+                    let copied = path.len().min(available_path_len - 1);
+                    if copied > 0 {
+                        core::ptr::copy_nonoverlapping(path.as_ptr(), path_start.add(1), copied);
+                    }
+                    copied + 1
+                } else {
+                    let path = addr.path().as_bytes();
+                    let copied = path.len().min(available_path_len);
+                    if copied > 0 {
+                        core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, copied);
+                    }
+                    if copied < available_path_len {
+                        *(path_start.add(copied)) = 0;
+                    }
+                    copied
+                };
+
+                if path_len < available_path_len && addr.is_abstract() {
+                    *(path_start.add(path_len)) = 0;
                 }
 
                 *(addrlen_paddr as *mut u32) = 2 + path_len as u32;
@@ -142,6 +170,62 @@ fn write_socket_address_to_user(
             }
             _ => Err(errno::EAFNOSUPPORT),
         }
+    }
+}
+
+fn linux_local_sockaddr_from_user(
+    path_start: *const u8,
+    max_path_len: usize,
+) -> Result<(crate::network::SocketAddress, String, bool), usize> {
+    if max_path_len == 0 {
+        return Err(errno::EINVAL);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_start, max_path_len) };
+
+    if path_bytes[0] == 0 {
+        let mut name_len = max_path_len.saturating_sub(1);
+        while name_len > 0 && path_bytes[1 + name_len - 1] == 0 {
+            name_len -= 1;
+        }
+        if name_len == 0 || name_len > 107 {
+            crate::early_println!("[linux socket] invalid abstract socket length {}", name_len);
+            return Err(errno::EINVAL);
+        }
+        let name = core::str::from_utf8(&path_bytes[1..1 + name_len]).map_err(|_| {
+            crate::early_println!("[linux socket] abstract socket name utf8 error");
+            errno::EINVAL
+        })?;
+        let addr = crate::network::LocalSocketAddress::from_abstract(name)
+            .map_err(socket_error_to_errno)?;
+        let mut registry_name = String::new();
+        registry_name.push('\0');
+        registry_name.push_str(addr.path());
+        Ok((
+            crate::network::SocketAddress::Local(addr),
+            registry_name,
+            true,
+        ))
+    } else {
+        let mut path_len = 0;
+        while path_len < max_path_len && path_bytes[path_len] != 0 {
+            path_len += 1;
+        }
+        if path_len == 0 || path_len > 108 {
+            crate::early_println!("[linux socket] invalid socket path length {}", path_len);
+            return Err(errno::EINVAL);
+        }
+        let path = core::str::from_utf8(&path_bytes[..path_len]).map_err(|_| {
+            crate::early_println!("[linux socket] socket path utf8 error");
+            errno::EINVAL
+        })?;
+        let addr =
+            crate::network::LocalSocketAddress::from_path(path).map_err(socket_error_to_errno)?;
+        Ok((
+            crate::network::SocketAddress::Local(addr),
+            String::from(path),
+            false,
+        ))
     }
 }
 
@@ -406,45 +490,40 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let path_start = (addr_paddr + 2) as *const u8;
                 let max_path_len = (addrlen - 2) as usize;
 
-                // Find the null terminator or max length
-                let mut path_len = 0;
-                while path_len < max_path_len && *path_start.add(path_len) != 0 {
-                    path_len += 1;
-                }
-
-                if path_len == 0 || path_len > 108 {
-                    crate::early_println!("[linux socket] bind invalid path length {}", path_len);
-                    return usize::MAX;
-                }
-
-                // Convert to string
-                let path_bytes = core::slice::from_raw_parts(path_start, path_len);
-                let path = match core::str::from_utf8(path_bytes) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        crate::early_println!("[linux socket] bind path utf8 error");
-                        return usize::MAX;
-                    }
-                };
-
-                // Bind the socket to the address
-                let socket_addr = match crate::network::LocalSocketAddress::from_path(path) {
-                    Ok(addr) => crate::network::SocketAddress::Local(addr),
-                    Err(_) => return usize::MAX,
-                };
+                let (socket_addr, registry_name, is_abstract) =
+                    match linux_local_sockaddr_from_user(path_start, max_path_len) {
+                        Ok(addr) => addr,
+                        Err(errno) => return errno::to_result(errno),
+                    };
 
                 if socket_arc.bind(&socket_addr).is_err() {
-                    crate::early_println!("[linux socket] bind failed for {}", path);
+                    crate::early_println!("[linux socket] bind failed for AF_UNIX");
                     return usize::MAX;
+                }
+
+                let log_name = registry_name
+                    .strip_prefix('\0')
+                    .unwrap_or(registry_name.as_str());
+                if is_abstract && log_name.contains(".mozc.") {
+                    crate::println!("[linux mozc-ipc] bind abstract '{}'", log_name);
                 }
 
                 if NetworkManager::get_manager()
-                    .register_named_socket(path, socket_arc.clone())
+                    .register_named_socket(&registry_name, socket_arc.clone())
                     .is_err()
                 {
-                    crate::early_println!("[linux socket] register_named_socket failed {}", path);
+                    crate::early_println!("[linux socket] register_named_socket failed");
                     return usize::MAX;
                 }
+
+                if is_abstract {
+                    return 0;
+                }
+
+                let path = match socket_addr {
+                    crate::network::SocketAddress::Local(ref addr) => addr.path(),
+                    _ => return usize::MAX,
+                };
 
                 // Get the socket ID from NetworkManager
                 let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
@@ -741,36 +820,15 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             AF_UNIX_U16 => {
                 let path_start = (addr_paddr + 2) as *const u8;
                 let max_path_len = (addrlen - 2) as usize;
-                let mut path_len = 0;
-                while path_len < max_path_len && *path_start.add(path_len) != 0 {
-                    path_len += 1;
-                }
-
-                if path_len == 0 || path_len > 108 {
-                    crate::early_println!(
-                        "[linux socket] connect invalid path length {}",
-                        path_len
-                    );
-                    return usize::MAX;
-                }
-
-                let path_bytes = core::slice::from_raw_parts(path_start, path_len);
-                let path = match core::str::from_utf8(path_bytes) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        crate::early_println!("[linux socket] connect path utf8 error");
-                        return usize::MAX;
-                    }
-                };
-
-                let socket_addr = match crate::network::LocalSocketAddress::from_path(path) {
-                    Ok(addr) => crate::network::SocketAddress::Local(addr),
-                    Err(error) => return errno::to_result(socket_error_to_errno(error)),
-                };
+                let (socket_addr, _, _) =
+                    match linux_local_sockaddr_from_user(path_start, max_path_len) {
+                        Ok(addr) => addr,
+                        Err(errno) => return errno::to_result(errno),
+                    };
 
                 if let Err(error) = socket_arc.connect(&socket_addr) {
                     return errno::to_result(socket_error_to_errno(error));
-                }
+                };
             }
             AF_INET_U16 => {
                 let addr_struct = &*(addr_paddr as *const SockaddrIn);
@@ -845,16 +903,16 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let (addr_paddr, addrlen_paddr) = match (
-        task.vm_manager.translate_to_kva(addr_ptr),
-        task.vm_manager.translate_to_kva(addrlen_ptr),
+    if !matches!(
+        (
+            task.vm_manager.translate_to_kva(addr_ptr),
+            task.vm_manager.translate_to_kva(addrlen_ptr),
+        ),
+        (Some(_), Some(_))
     ) {
-        (Some(addr), Some(len)) => (addr, len),
-        _ => {
-            crate::early_println!("[linux socket] getsockname invalid pointers");
-            return usize::MAX;
-        }
-    };
+        crate::early_println!("[linux socket] getsockname invalid pointers");
+        return usize::MAX;
+    }
 
     let socket_addr = match socket_arc.getsockname() {
         Ok(addr) => addr,
@@ -864,44 +922,9 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    unsafe {
-        let addrlen = *(addrlen_paddr as *const u32);
-
-        match socket_addr {
-            crate::network::SocketAddress::Local(addr) => {
-                if addrlen >= 2 {
-                    let sockaddr = addr_paddr as *mut u16;
-                    *sockaddr = AF_UNIX_U16;
-
-                    let path_start = (addr_paddr + 2) as *mut u8;
-                    let path = addr.path().as_bytes();
-                    let path_len = path.len().min((addrlen - 2) as usize);
-                    core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, path_len);
-                    if path_len < (addrlen - 2) as usize {
-                        *(path_start.add(path_len)) = 0;
-                    }
-
-                    *(addrlen_paddr as *mut u32) = (2 + path_len as u32).min(addrlen);
-                    0
-                } else {
-                    usize::MAX
-                }
-            }
-            crate::network::SocketAddress::Inet(inet) => {
-                if addrlen >= size_of::<SockaddrIn>() as u32 {
-                    let sockaddr = addr_paddr as *mut SockaddrIn;
-                    (*sockaddr).sin_family = AF_INET_U16;
-                    (*sockaddr).sin_port = u16::to_be(inet.port);
-                    (*sockaddr).sin_addr = u32::from_be_bytes(inet.addr);
-
-                    *(addrlen_paddr as *mut u32) = size_of::<SockaddrIn>() as u32;
-                    0
-                } else {
-                    usize::MAX
-                }
-            }
-            _ => usize::MAX,
-        }
+    match write_socket_address_to_user(task, addr_ptr, addrlen_ptr, socket_addr) {
+        Ok(()) => 0,
+        Err(errno) => errno::to_result(errno),
     }
 }
 
@@ -950,16 +973,16 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let (addr_paddr, addrlen_paddr) = match (
-        task.vm_manager.translate_to_kva(addr_ptr),
-        task.vm_manager.translate_to_kva(addrlen_ptr),
+    if !matches!(
+        (
+            task.vm_manager.translate_to_kva(addr_ptr),
+            task.vm_manager.translate_to_kva(addrlen_ptr),
+        ),
+        (Some(_), Some(_))
     ) {
-        (Some(addr), Some(len)) => (addr, len),
-        _ => {
-            crate::early_println!("[linux socket] getpeername invalid pointers");
-            return usize::MAX;
-        }
-    };
+        crate::early_println!("[linux socket] getpeername invalid pointers");
+        return usize::MAX;
+    }
 
     let socket_addr = match socket_arc.getpeername() {
         Ok(addr) => addr,
@@ -969,51 +992,16 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    unsafe {
-        let addrlen = *(addrlen_paddr as *const u32);
-
-        match socket_addr {
-            crate::network::SocketAddress::Local(addr) => {
-                if addrlen >= 2 {
-                    let sockaddr = addr_paddr as *mut u16;
-                    *sockaddr = AF_UNIX_U16;
-
-                    let path_start = (addr_paddr + 2) as *mut u8;
-                    let path = addr.path().as_bytes();
-                    let path_len = path.len().min((addrlen - 2) as usize);
-                    core::ptr::copy_nonoverlapping(path.as_ptr(), path_start, path_len);
-                    if path_len < (addrlen - 2) as usize {
-                        *(path_start.add(path_len)) = 0;
-                    }
-
-                    *(addrlen_paddr as *mut u32) = (2 + path_len as u32).min(addrlen);
-                    0
-                } else {
-                    usize::MAX
-                }
-            }
-            crate::network::SocketAddress::Inet(inet) => {
-                if addrlen >= size_of::<SockaddrIn>() as u32 {
-                    let sockaddr = addr_paddr as *mut SockaddrIn;
-                    (*sockaddr).sin_family = AF_INET_U16;
-                    (*sockaddr).sin_port = u16::to_be(inet.port);
-                    (*sockaddr).sin_addr = u32::from_be_bytes(inet.addr);
-
-                    *(addrlen_paddr as *mut u32) = size_of::<SockaddrIn>() as u32;
-                    0
-                } else {
-                    usize::MAX
-                }
-            }
-            _ => usize::MAX,
-        }
+    match write_socket_address_to_user(task, addr_ptr, addrlen_ptr, socket_addr) {
+        Ok(()) => 0,
+        Err(errno) => errno::to_result(errno),
     }
 }
 
-/// Linux sys_getsockopt implementation (mock)
+/// Linux sys_getsockopt implementation
 ///
-/// Gets socket options. This is a mock implementation that
-/// writes dummy data and succeeds to allow applications to proceed.
+/// Gets socket options. Currently implements `SO_PEERCRED` for Unix-domain
+/// sockets and falls back to a small generic integer value for other options.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -1027,43 +1015,71 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_getsockopt(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
     let _sockfd = trapframe.get_arg(0) as i32;
-    let _level = trapframe.get_arg(1) as i32;
-    let _optname = trapframe.get_arg(2) as i32;
+    let level = trapframe.get_arg(1) as i32;
+    let optname = trapframe.get_arg(2) as i32;
     let optval_ptr = trapframe.get_arg(3);
     let optlen_ptr = trapframe.get_arg(4);
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Mock implementation - write minimal valid data and return success
-    if let (Some(optval_paddr), Some(optlen_paddr)) = (
+    let (Some(optval_paddr), Some(optlen_paddr)) = (
         task.vm_manager.translate_to_kva(optval_ptr),
         task.vm_manager.translate_to_kva(optlen_ptr),
-    ) {
-        unsafe {
-            // Read the provided length
-            let optlen = *(optlen_paddr as *const u32);
+    ) else {
+        return errno::to_result(errno::EFAULT);
+    };
 
-            // Write dummy option value (typically an integer)
-            if optlen >= 4 && optval_ptr != 0 {
-                let optval = optval_paddr as *mut u32;
-                *optval = 1; // Generic "enabled" value
+    let optlen = unsafe { *(optlen_paddr as *const u32) };
 
-                // Update the actual length used
-                *(optlen_paddr as *mut u32) = 4;
-            }
+    if level == SOL_SOCKET && optname == SO_PEERCRED {
+        if optlen < size_of::<LinuxUcred>() as u32 {
+            return errno::to_result(errno::EINVAL);
         }
-        0 // Success
-    } else {
-        usize::MAX // Invalid pointers
+        let pid = {
+            let tgid = abi.thread_state().tgid;
+            if tgid != 0 {
+                tgid
+            } else {
+                task.get_namespace_id()
+            }
+        };
+        let cred = LinuxUcred {
+            pid: pid as i32,
+            uid: 0,
+            gid: 0,
+        };
+        if copy_to_user(task, optval_ptr, unsafe {
+            core::slice::from_raw_parts(
+                (&cred as *const LinuxUcred).cast::<u8>(),
+                size_of::<LinuxUcred>(),
+            )
+        })
+        .is_err()
+        {
+            return errno::to_result(errno::EFAULT);
+        }
+        unsafe {
+            *(optlen_paddr as *mut u32) = size_of::<LinuxUcred>() as u32;
+        }
+        return 0;
     }
+
+    // Fallback for options that are not semantically important yet.
+    if optlen >= 4 && optval_ptr != 0 {
+        unsafe {
+            *(optval_paddr as *mut u32) = 1;
+            *(optlen_paddr as *mut u32) = 4;
+        }
+    }
+    0
 }
 
 /// Linux sys_setsockopt implementation (mock)

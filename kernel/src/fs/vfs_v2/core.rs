@@ -529,6 +529,10 @@ impl FileObject for VfsFileObject {
         self.inner.truncate(size)
     }
 
+    fn sync(&self) -> Result<(), StreamError> {
+        self.inner.sync()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

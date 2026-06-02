@@ -1255,8 +1255,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 let random_char_dev: Arc<dyn Device> =
                     Arc::new(crate::random::RandomCharDevice::new());
                 DeviceManager::get_manager()
-                    .register_device_with_name("random".to_string(), random_char_dev);
-                crate::early_println!("[Virtio] Registered /dev/random character device");
+                    .register_device_with_name("random".to_string(), random_char_dev.clone());
+                DeviceManager::get_manager()
+                    .register_device_with_name("urandom".to_string(), random_char_dev);
+                crate::early_println!(
+                    "[Virtio] Registered /dev/random and /dev/urandom character devices"
+                );
             }
         }
         VirtioDeviceType::Sound => {
