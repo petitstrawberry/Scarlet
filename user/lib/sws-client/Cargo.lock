@@ -42,9 +42,10 @@ dependencies = [
 
 [[package]]
 name = "scarlet_std"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "hashbrown",
+ "lock_api",
  "spin",
  "talc",
 ]
@@ -74,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "sws_protocol"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "scarlet_std",
 ]

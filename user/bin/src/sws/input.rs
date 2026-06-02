@@ -84,6 +84,9 @@ pub mod key_codes {
     pub const BTN_LEFT: u16 = 0x110;
     pub const BTN_RIGHT: u16 = 0x111;
     pub const BTN_MIDDLE: u16 = 0x112;
+    pub const KEY_LEFTCTRL: u16 = 0x1d;
+    pub const KEY_RIGHTCTRL: u16 = 0x61;
+    pub const KEY_BACKSLASH: u16 = 0x2b;
 }
 
 /// Input manager - handles input devices and event reading

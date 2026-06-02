@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_message_to_window};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_client};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
@@ -207,6 +207,9 @@ pub struct Compositor {
     active_app_id: Option<Vec<u8>>,
     /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
     last_focused_window_id: Option<u32>,
+    left_control_down: bool,
+    right_control_down: bool,
+    ime_trigger_key_down: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -321,6 +324,9 @@ impl Compositor {
             workarea: None,
             active_app_id: None,
             last_focused_window_id: None,
+            left_control_down: false,
+            right_control_down: false,
+            ime_trigger_key_down: false,
         })
     }
 
@@ -1610,6 +1616,7 @@ impl Compositor {
 
             // Update last focused window ID
             self.last_focused_window_id = Some(window_id);
+            super::ipc::set_focused_window(window_id);
 
             // Broadcast FOCUS_CHANGED for all windows
             let payload = sws_protocol::payload_focus_changed(
@@ -2255,6 +2262,12 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::Keyboard { code, pressed } => {
+                match code {
+                    key_codes::KEY_LEFTCTRL => self.left_control_down = pressed,
+                    key_codes::KEY_RIGHTCTRL => self.right_control_down = pressed,
+                    _ => {}
+                }
+
                 // Route keyboard events to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
@@ -2279,20 +2292,42 @@ impl Compositor {
                                 0,
                             );
                         } else {
-                            super::ipc::send_input_to_window(
+                            if code == key_codes::KEY_BACKSLASH {
+                                if !pressed && self.ime_trigger_key_down {
+                                    self.ime_trigger_key_down = false;
+                                    return Ok(false);
+                                }
+                                if pressed && (self.left_control_down || self.right_control_down) {
+                                    if super::ipc::send_input_method_trigger(focused_id, 0, code) {
+                                        self.ime_trigger_key_down = true;
+                                        return Ok(false);
+                                    }
+                                }
+                            }
+
+                            let value = if pressed { 1 } else { 0 };
+                            if !super::ipc::send_key_to_input_method(
                                 focused_id,
                                 0,
                                 super::input::event_types::EV_KEY,
                                 code,
-                                if pressed { 1 } else { 0 },
-                            );
-                            super::ipc::send_input_to_window(
-                                focused_id,
-                                0,
-                                super::input::event_types::EV_SYN,
-                                0,
-                                0,
-                            );
+                                value,
+                            ) {
+                                super::ipc::send_input_to_window(
+                                    focused_id,
+                                    0,
+                                    super::input::event_types::EV_KEY,
+                                    code,
+                                    value,
+                                );
+                                super::ipc::send_input_to_window(
+                                    focused_id,
+                                    0,
+                                    super::input::event_types::EV_SYN,
+                                    0,
+                                    0,
+                                );
+                            }
                         }
                     }
                 }

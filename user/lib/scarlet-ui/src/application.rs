@@ -50,6 +50,65 @@ pub trait Application: View {
         // Default: do nothing
     }
 
+    /// Configure the created platform window before the main loop starts.
+    ///
+    /// Applications can override this to register optional window-scoped
+    /// protocols such as text-input contexts.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The SWS platform window created for this application.
+    fn on_window_created(&mut self, _window: &mut SWSPlatformWindow) {
+        // Default: do nothing
+    }
+
+    /// Handle committed text from an input method.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Text-input context that received the commit.
+    /// * `serial` - Server serial for the text-input update.
+    /// * `text` - UTF-8 text committed by the input method.
+    fn on_text_input_commit(&mut self, _context_id: u32, _serial: u32, _text: &str) {
+        // Default: do nothing
+    }
+
+    /// Handle preedit text from an input method.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Text-input context that received the preedit update.
+    /// * `serial` - Server serial for the text-input update.
+    /// * `cursor_byte` - UTF-8 byte offset of the preedit cursor.
+    /// * `text` - UTF-8 preedit text.
+    fn on_text_input_preedit(
+        &mut self,
+        _context_id: u32,
+        _serial: u32,
+        _cursor_byte: u32,
+        _text: &str,
+    ) {
+        // Default: do nothing
+    }
+
+    /// Handle a request to delete text around the cursor from an input method.
+    ///
+    /// # Arguments
+    ///
+    /// * `context_id` - Text-input context that received the request.
+    /// * `serial` - Server serial for the text-input update.
+    /// * `before_bytes` - Bytes before the cursor to delete.
+    /// * `after_bytes` - Bytes after the cursor to delete.
+    fn on_text_input_delete_surrounding_text(
+        &mut self,
+        _context_id: u32,
+        _serial: u32,
+        _before_bytes: u32,
+        _after_bytes: u32,
+    ) {
+        // Default: do nothing
+    }
+
     /// Handle window resize event
     ///
     /// Called when the window is resized. Applications like TaskBar
@@ -182,6 +241,8 @@ pub trait Application: View {
             }
         }
 
+        self.on_window_created(&mut platform_window);
+
         // Apply window size limits (resizable, etc.) from Window view
         if let Some(limits) = pipeline
             .element_tree()
@@ -237,6 +298,37 @@ pub trait Application: View {
                     } => {
                         let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
                     }
+                    Event::TextInputCommit {
+                        context_id,
+                        serial,
+                        text,
+                    } => {
+                        self.on_text_input_commit(context_id, serial, &text);
+                    }
+                    Event::TextInputPreedit {
+                        context_id,
+                        serial,
+                        cursor_byte,
+                        anchor_byte: _,
+                        text,
+                        spans: _,
+                    } => {
+                        self.on_text_input_preedit(context_id, serial, cursor_byte, &text);
+                    }
+                    Event::TextInputDeleteSurroundingText {
+                        context_id,
+                        serial,
+                        before_bytes,
+                        after_bytes,
+                    } => {
+                        self.on_text_input_delete_surrounding_text(
+                            context_id,
+                            serial,
+                            before_bytes,
+                            after_bytes,
+                        );
+                    }
+                    Event::TextInputDone { .. } => {}
                     Event::Custom { event_type, data } if event_type == 0xF0C0F => {
                         // FocusChanged event from SWS
                         // Decode the data: window_id (u32) + app_id_len (u32) + app_id + app_name_len (u32) + app_name + title_len (u32) + title + menu_titles_len (u32) + menu_titles
@@ -511,11 +603,9 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
                     element_id.get()
                 );
             }
-            let callback = alloc::sync::Arc::new(move || {
-                match invalidation_kind {
-                    InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
-                    InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
-                }
+            let callback = alloc::sync::Arc::new(move || match invalidation_kind {
+                InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
+                InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);

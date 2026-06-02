@@ -35,6 +35,7 @@ pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
+    text_grid_cell_width,
 };
 pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
 pub use navigation::{NavigationView, NavigationLink};

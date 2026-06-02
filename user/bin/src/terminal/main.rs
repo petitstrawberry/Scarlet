@@ -18,8 +18,9 @@ use core::f32;
 use core::time::Duration;
 
 use scarlet_ui::{
-    Application, Color, ComponentElement, Element, KeyCode, KeyEvent, Size, State, StateId,
-    TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, View, ViewExt, Window,
+    Application, Color, ComponentElement, Element, KeyCode, KeyEvent, PlatformWindow,
+    SWSPlatformWindow, Size, State, StateId, TextGrid, TextGridBuffer, TextGridCell,
+    TextGridCursor, View, ViewExt, Window, text_grid_cell_width,
 };
 use std::fs::File;
 use std::handle::Handle;
@@ -44,6 +45,19 @@ const MAX_FONT_SIZE: f32 = 28.0;
 const WINDOW_HORIZONTAL_DECORATION: f32 = 4.0;
 const WINDOW_VERTICAL_DECORATION: f32 = 34.0;
 const TERM_ENV: &str = "TERM=xterm-256color";
+
+#[derive(Clone, Copy, Debug)]
+struct TerminalTextInput {
+    window_id: u32,
+    context_id: u32,
+    serial: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalPreedit {
+    text: String,
+    cursor_byte: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalMetrics {
@@ -80,6 +94,8 @@ struct TerminalApp {
     screen: Arc<Mutex<VtScreen>>,
     master_writer: Arc<Mutex<Option<File>>>,
     window_size: Arc<Mutex<(u32, u32)>>,
+    text_input: Arc<Mutex<Option<TerminalTextInput>>>,
+    preedit: Arc<Mutex<Option<TerminalPreedit>>>,
     child_task: Arc<OwnedChildTask>,
 }
 
@@ -99,6 +115,8 @@ impl TerminalApp {
             screen,
             master_writer: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))),
+            text_input: Arc::new(Mutex::new(None)),
+            preedit: Arc::new(Mutex::new(None)),
             child_task: Arc::new(OwnedChildTask::new()),
         }
     }
@@ -162,11 +180,40 @@ impl TerminalApp {
             self.screen.clone(),
             self.grid.clone(),
             self.cursor.clone(),
+            self.preedit.clone(),
         );
     }
 
     fn finish_child_task(&self) {
         self.child_task.finish();
+    }
+
+    fn refresh_text_input_state(&self, window: &mut SWSPlatformWindow) {
+        let mut text_input = self.text_input.lock();
+        let Some(state) = text_input.as_mut() else {
+            return;
+        };
+        let cursor = self.cursor.get();
+        let metrics = self.metrics.get();
+        let x = (cursor.column as f32 * metrics.cell_width) as i32;
+        let y = (cursor.row as f32 * metrics.cell_height) as i32;
+        let width = metrics.cell_width.max(1.0) as u32;
+        let height = metrics.cell_height.max(1.0) as u32;
+
+        let conn = window.connection_mut();
+        let _ = conn.set_text_input_cursor_rect(state.context_id, x, y, width, height);
+        let _ = conn.set_text_input_surrounding_text(state.context_id, 0, 0, "");
+        let _ = conn.set_text_input_content_type(
+            state.context_id,
+            sws_protocol::text_input_content_hints::MULTILINE,
+            sws_protocol::text_input_content_purpose::TERMINAL,
+        );
+        if conn
+            .commit_text_input_state(state.context_id, state.serial)
+            .is_ok()
+        {
+            state.serial = state.serial.saturating_add(1);
+        }
     }
 }
 
@@ -232,6 +279,7 @@ impl Application for TerminalApp {
         let cursor = self.cursor.clone();
         let metrics_state = self.metrics.clone();
         let window_size = self.window_size.clone();
+        let preedit = self.preedit.clone();
         let metrics = self.metrics.get();
         Window::new(
             "Terminal",
@@ -249,6 +297,7 @@ impl Application for TerminalApp {
                         &cursor,
                         &metrics_state,
                         &window_size,
+                        &preedit,
                         event,
                     )
                 })
@@ -265,6 +314,98 @@ impl Application for TerminalApp {
         self.start_pty_session();
     }
 
+    fn on_window_created(&mut self, window: &mut SWSPlatformWindow) {
+        let window_id = window.surface_id();
+        let Ok((context_id, serial)) = window
+            .connection_mut()
+            .create_text_input_context(window_id, 0)
+        else {
+            println!("[terminal] failed to create text-input context");
+            return;
+        };
+
+        *self.text_input.lock() = Some(TerminalTextInput {
+            window_id,
+            context_id,
+            serial,
+        });
+
+        self.refresh_text_input_state(window);
+
+        if let Err(error) = window.connection_mut().enable_text_input(context_id) {
+            println!("[terminal] failed to enable text-input: {:?}", error);
+        } else {
+            println!(
+                "[terminal] text-input enabled context={} window={}",
+                context_id, window_id
+            );
+        }
+    }
+
+    fn on_focus_changed(&mut self, window_id: u32, _app_name: &str, _menu_titles: &str) {
+        let Some(text_input) = *self.text_input.lock() else {
+            return;
+        };
+        if text_input.window_id != window_id {
+            return;
+        }
+        println!(
+            "[terminal] focused text-input context={}",
+            text_input.context_id
+        );
+    }
+
+    fn on_text_input_commit(&mut self, context_id: u32, _serial: u32, text: &str) {
+        let Some(text_input) = *self.text_input.lock() else {
+            return;
+        };
+        if text_input.context_id != context_id {
+            return;
+        }
+        self.clear_preedit();
+        println!("[terminal] text-input commit: {}", text);
+        write_bytes(&self.master_writer, text.as_bytes());
+    }
+
+    fn on_text_input_preedit(
+        &mut self,
+        context_id: u32,
+        _serial: u32,
+        cursor_byte: u32,
+        text: &str,
+    ) {
+        let Some(text_input) = *self.text_input.lock() else {
+            return;
+        };
+        if text_input.context_id != context_id {
+            return;
+        }
+        if text.is_empty() {
+            self.clear_preedit();
+        } else {
+            *self.preedit.lock() = Some(TerminalPreedit {
+                text: String::from(text),
+                cursor_byte,
+            });
+            refresh_terminal_view(&self.screen, &self.grid, &self.cursor, &self.preedit);
+        }
+    }
+
+    fn on_text_input_delete_surrounding_text(
+        &mut self,
+        context_id: u32,
+        _serial: u32,
+        _before_bytes: u32,
+        _after_bytes: u32,
+    ) {
+        let Some(text_input) = *self.text_input.lock() else {
+            return;
+        };
+        if text_input.context_id == context_id {
+            self.clear_preedit();
+        }
+    }
+
     fn on_resize(&mut self, width: u32, height: u32) {
         *self.window_size.lock() = (width, height);
         resize_terminal(
@@ -272,6 +413,7 @@ impl Application for TerminalApp {
             &self.grid,
             &self.cursor,
             &self.master_writer,
+            &self.preedit,
             width,
             height,
             self.metrics.get(),
@@ -280,6 +422,14 @@ impl Application for TerminalApp {
 
     fn debug_logging(&self) -> bool {
         false
+    }
+}
+
+impl TerminalApp {
+    fn clear_preedit(&self) {
+        if self.preedit.lock().take().is_some() {
+            refresh_terminal_view(&self.screen, &self.grid, &self.cursor, &self.preedit);
+        }
     }
 }
 
@@ -392,12 +542,11 @@ fn start_reader_thread(
     screen: Arc<Mutex<VtScreen>>,
     grid: State<TextGridBuffer>,
     cursor: State<TextGridCursor>,
+    preedit: Arc<Mutex<Option<TerminalPreedit>>>,
 ) {
     thread::spawn(move || {
         {
-            let screen = screen.lock();
-            grid.set(screen.view_grid());
-            cursor.set(screen.cursor());
+            refresh_terminal_view(&screen, &grid, &cursor, &preedit);
         }
 
         let mut buffer = [0u8; 512];
@@ -410,8 +559,7 @@ fn start_reader_thread(
                 Ok(count) => {
                     let mut screen = screen.lock();
                     screen.feed(&buffer[..count]);
-                    grid.set(screen.view_grid());
-                    cursor.set(screen.cursor());
+                    publish_terminal_view(&screen, &grid, &cursor, &preedit);
                 }
                 Err(error) => {
                     println!("[terminal] PTY read failed: {}", error);
@@ -429,6 +577,7 @@ fn write_key_event(
     cursor: &State<TextGridCursor>,
     metrics: &State<TerminalMetrics>,
     window_size: &Arc<Mutex<(u32, u32)>>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     event: KeyEvent,
 ) -> bool {
     match event {
@@ -453,20 +602,34 @@ fn write_key_event(
                 KeyCode::Down => write_bytes(writer, b"\x1b[B"),
                 KeyCode::Home => write_bytes(writer, b"\x1b[H"),
                 KeyCode::End => write_bytes(writer, b"\x1b[F"),
-                KeyCode::PageUp => scroll_view(screen, grid, cursor, 10),
-                KeyCode::PageDown => scroll_view(screen, grid, cursor, -10),
+                KeyCode::PageUp => scroll_view(screen, grid, cursor, preedit, 10),
+                KeyCode::PageDown => scroll_view(screen, grid, cursor, preedit, -10),
                 KeyCode::Insert => write_bytes(writer, b"\x1b[2~"),
                 KeyCode::Delete => write_bytes(writer, b"\x1b[3~"),
                 KeyCode::F(1) => write_bytes(writer, b"\x1bOP"),
                 KeyCode::F(2) => write_bytes(writer, b"\x1bOQ"),
                 KeyCode::F(3) => write_bytes(writer, b"\x1bOR"),
                 KeyCode::F(4) => write_bytes(writer, b"\x1bOS"),
-                KeyCode::F(11) => {
-                    adjust_font_size(metrics, screen, grid, cursor, writer, window_size, -1.0)
-                }
-                KeyCode::F(12) => {
-                    adjust_font_size(metrics, screen, grid, cursor, writer, window_size, 1.0)
-                }
+                KeyCode::F(11) => adjust_font_size(
+                    metrics,
+                    screen,
+                    grid,
+                    cursor,
+                    writer,
+                    window_size,
+                    preedit,
+                    -1.0,
+                ),
+                KeyCode::F(12) => adjust_font_size(
+                    metrics,
+                    screen,
+                    grid,
+                    cursor,
+                    writer,
+                    window_size,
+                    preedit,
+                    1.0,
+                ),
                 _ => {}
             }
             true
@@ -479,12 +642,12 @@ fn scroll_view(
     screen: &Arc<Mutex<VtScreen>>,
     grid: &State<TextGridBuffer>,
     cursor: &State<TextGridCursor>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     lines: isize,
 ) {
     let mut screen = screen.lock();
     screen.scroll_view(lines);
-    grid.set(screen.view_grid());
-    cursor.set(screen.cursor());
+    publish_terminal_view(&screen, grid, cursor, preedit);
 }
 
 fn adjust_font_size(
@@ -494,6 +657,7 @@ fn adjust_font_size(
     cursor: &State<TextGridCursor>,
     writer: &Arc<Mutex<Option<File>>>,
     window_size: &Arc<Mutex<(u32, u32)>>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     delta: f32,
 ) {
     let next = metrics.get().with_font_delta(delta);
@@ -502,7 +666,7 @@ fn adjust_font_size(
     }
     metrics.set(next);
     let (width, height) = *window_size.lock();
-    resize_terminal(screen, grid, cursor, writer, width, height, next);
+    resize_terminal(screen, grid, cursor, writer, preedit, width, height, next);
 }
 
 fn resize_terminal(
@@ -510,6 +674,7 @@ fn resize_terminal(
     grid: &State<TextGridBuffer>,
     cursor: &State<TextGridCursor>,
     writer: &Arc<Mutex<Option<File>>>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
     width: u32,
     height: u32,
     metrics: TerminalMetrics,
@@ -518,14 +683,107 @@ fn resize_terminal(
     {
         let mut screen = screen.lock();
         screen.resize(columns, rows);
-        grid.set(screen.view_grid());
-        cursor.set(screen.cursor());
+        publish_terminal_view(&screen, grid, cursor, preedit);
     }
     let mut guard = writer.lock();
     if let Some(master) = guard.as_mut() {
         let _ = std::tty::Terminal::from_file(master)
             .set_winsize(std::tty::WindowSize::new(columns as u16, rows as u16));
     }
+}
+
+fn refresh_terminal_view(
+    screen: &Arc<Mutex<VtScreen>>,
+    grid: &State<TextGridBuffer>,
+    cursor: &State<TextGridCursor>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
+) {
+    let screen = screen.lock();
+    publish_terminal_view(&screen, grid, cursor, preedit);
+}
+
+fn publish_terminal_view(
+    screen: &VtScreen,
+    grid: &State<TextGridBuffer>,
+    cursor: &State<TextGridCursor>,
+    preedit: &Arc<Mutex<Option<TerminalPreedit>>>,
+) {
+    let base_cursor = screen.cursor();
+    let mut view = screen.view_grid();
+    let mut display_cursor = base_cursor;
+
+    if let Some(preedit) = preedit.lock().clone() {
+        display_cursor = draw_preedit(&mut view, base_cursor, &preedit);
+    }
+
+    grid.set(view);
+    cursor.set(display_cursor);
+}
+
+fn draw_preedit(
+    grid: &mut TextGridBuffer,
+    base_cursor: TextGridCursor,
+    preedit: &TerminalPreedit,
+) -> TextGridCursor {
+    let foreground = Color::rgb(245, 248, 255);
+    let background = Color::rgb(44, 55, 70);
+    let mut column = base_cursor.column;
+    let mut row = base_cursor.row;
+    let cursor_offset = preedit_cursor_offset(&preedit.text, preedit.cursor_byte);
+    let mut display_cursor = base_cursor;
+
+    for (offset, ch) in preedit.text.chars().enumerate() {
+        if row >= grid.rows() {
+            break;
+        }
+        if offset == cursor_offset {
+            display_cursor = TextGridCursor {
+                column,
+                row,
+                visible: true,
+            };
+        }
+        let width = text_grid_cell_width(ch);
+        if width == 2 && column + 1 >= grid.columns() {
+            column = 0;
+            row += 1;
+            if row >= grid.rows() {
+                break;
+            }
+        }
+
+        let mut cell = TextGridCell::new(ch, foreground, background);
+        cell.underline = true;
+        let _ = grid.set_cell(column, row, cell);
+        if width == 2 {
+            let mut continuation = TextGridCell::new('\0', foreground, background);
+            continuation.underline = true;
+            let _ = grid.set_cell(column + 1, row, continuation);
+        }
+
+        column += width;
+        if column >= grid.columns() {
+            column = 0;
+            row += 1;
+        }
+    }
+
+    if cursor_offset >= preedit.text.chars().count() {
+        display_cursor = TextGridCursor {
+            column: column.min(grid.columns().saturating_sub(1)),
+            row: row.min(grid.rows().saturating_sub(1)),
+            visible: true,
+        };
+    }
+
+    display_cursor
+}
+
+fn preedit_cursor_offset(text: &str, cursor_byte: u32) -> usize {
+    let cursor_byte = cursor_byte as usize;
+    text.char_indices()
+        .take_while(|(byte_offset, _)| *byte_offset < cursor_byte)
+        .count()
 }
 
 fn grid_dimensions(width: u32, height: u32, metrics: TerminalMetrics) -> (usize, usize) {

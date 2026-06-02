@@ -15,11 +15,100 @@ pub struct InputEvent {
     pub value: i32,
 }
 
+/// Text-input context state sent to an input method service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImeContextState {
+    pub context_id: u32,
+    pub window_id: u32,
+    pub serial: u32,
+    pub cursor_x: i32,
+    pub cursor_y: i32,
+    pub cursor_width: u32,
+    pub cursor_height: u32,
+    pub content_hint: u32,
+    pub content_purpose: u32,
+    pub text_change_cause: u32,
+    pub cursor_byte: u32,
+    pub anchor_byte: u32,
+    pub surrounding_text: std::string::String,
+}
+
 /// Events from the SWS server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Input event (keyboard, mouse, etc.)
     Input(InputEvent),
+    /// IME preedit text for a text-input context.
+    TextInputPreedit {
+        context_id: u32,
+        serial: u32,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        text: std::string::String,
+        spans: std::vec::Vec<u8>,
+    },
+    /// IME committed text for a text-input context.
+    TextInputCommit {
+        context_id: u32,
+        serial: u32,
+        text: std::string::String,
+    },
+    /// Request to delete surrounding text before applying the next commit.
+    TextInputDeleteSurroundingText {
+        context_id: u32,
+        serial: u32,
+        before_bytes: u32,
+        after_bytes: u32,
+    },
+    /// End of a text-input update batch.
+    TextInputDone { context_id: u32, serial: u32 },
+    /// Structured candidate list for a text-input context.
+    TextInputCandidates {
+        context_id: u32,
+        serial: u32,
+        selected_index: u32,
+        page_start: u32,
+        page_size: u32,
+        anchor_byte: u32,
+        candidates: std::vec::Vec<u8>,
+    },
+    /// Hide candidate UI for a text-input context.
+    TextInputHideCandidates { context_id: u32, serial: u32 },
+    /// IME status for a text-input context.
+    TextInputStatus {
+        context_id: u32,
+        serial: u32,
+        state: u32,
+        mode_id: u32,
+        flags: u32,
+        mode_label: std::string::String,
+    },
+    /// A text-input context became active for this IME service.
+    ImeActivate(ImeContextState),
+    /// A text-input context became inactive for this IME service.
+    ImeDeactivate { context_id: u32, serial: u32 },
+    /// A text-input context updated state for this IME service.
+    ImeContextState(ImeContextState),
+    /// Key event routed to this IME service.
+    ImeKeyEvent {
+        context_id: u32,
+        key_serial: u32,
+        window_id: u32,
+        time: u64,
+        type_: u16,
+        code: u16,
+        value: i32,
+    },
+    /// Reset request for this IME service.
+    ImeReset { context_id: u32, serial: u32 },
+    /// Trigger key or compositor action addressed to this IME service.
+    ImeTrigger {
+        context_id: u32,
+        serial: u32,
+        trigger_id: u32,
+        code: u16,
+        time: u64,
+    },
     /// Compositor requests the surface to resize.
     ///
     /// Clients should respond by resizing the surface buffer (e.g. via

@@ -135,6 +135,10 @@ impl EventDispatcher {
                 false
             }
             Event::MenuItemActivated { .. } => false,
+            Event::TextInputPreedit { .. }
+            | Event::TextInputCommit { .. }
+            | Event::TextInputDeleteSurroundingText { .. }
+            | Event::TextInputDone { .. } => false,
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false
@@ -281,10 +285,7 @@ impl EventDispatcher {
                 }
             }
 
-            if let crate::event::MouseEvent::ButtonPressed {
-                ..
-            } = event
-            {
+            if let crate::event::MouseEvent::ButtonPressed { .. } = event {
                 if let Some(focus_id) = element_tree.nearest_focusable_in_path(&path) {
                     if let Some(focus_path) = element_tree.find_path_ids(focus_id) {
                         self.set_focused_element(element_tree, focus_id, &focus_path);
@@ -730,10 +731,8 @@ impl EventDispatcher {
                 && let Some(old_target_id) = old_path.last().copied()
                 && let Some(old_target) = element_tree.find_element_mut(old_target_id)
             {
-                let _ = old_target.handle_event(
-                    &Event::Focus(crate::event::FocusEvent::Lost),
-                    Phase::Target,
-                );
+                let _ = old_target
+                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
             }
         }
 
@@ -751,10 +750,8 @@ impl EventDispatcher {
         if let Some(old_id) = self.focused_id
             && let Some(old_target) = element_tree.find_element_mut(old_id)
         {
-            let _ = old_target.handle_event(
-                &Event::Focus(crate::event::FocusEvent::Lost),
-                Phase::Target,
-            );
+            let _ = old_target
+                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
         }
         self.focused_id = None;
         self.focused_path.clear();

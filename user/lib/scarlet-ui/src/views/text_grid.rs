@@ -92,6 +92,41 @@ fn font_stack_id(font_stack: Option<&FontStack>) -> Option<usize> {
     font_stack.map(FontStack::cache_id)
 }
 
+/// Return the fixed-grid cell width for a Unicode scalar value.
+///
+/// This follows the terminal convention that East Asian wide/fullwidth glyphs
+/// occupy two cells. Combining marks are intentionally left as one cell for now
+/// because `TextGridBuffer` stores one scalar per cell and has no grapheme
+/// clustering layer yet.
+///
+/// # Arguments
+///
+/// * `ch` - Character to classify.
+///
+/// # Returns
+///
+/// Number of fixed grid cells occupied by `ch`.
+pub fn text_grid_cell_width(ch: char) -> usize {
+    let code = ch as u32;
+    if matches!(
+        code,
+        0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe19
+            | 0xfe30..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x20000..=0x3fffd
+    ) {
+        2
+    } else {
+        1
+    }
+}
+
 /// Fixed-size text grid contents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextGridBuffer {
@@ -248,15 +283,29 @@ impl TextGridBuffer {
         foreground: Color,
         background: Color,
     ) {
-        for (offset, ch) in text.chars().enumerate() {
-            if column + offset >= self.columns {
+        let mut target_column = column;
+        for ch in text.chars() {
+            let width = text_grid_cell_width(ch);
+            if target_column >= self.columns {
                 break;
             }
+            if width == 2 && target_column + 1 >= self.columns {
+                break;
+            }
+
             let _ = self.set_cell(
-                column + offset,
+                target_column,
                 row,
                 TextGridCell::new(ch, foreground, background),
             );
+            if width == 2 {
+                let _ = self.set_cell(
+                    target_column + 1,
+                    row,
+                    TextGridCell::new('\0', foreground, background),
+                );
+            }
+            target_column = target_column.saturating_add(width);
         }
     }
 
@@ -558,8 +607,13 @@ impl TextGridRenderObject {
         let Some(cell) = self.grid.cells().get(index).copied() else {
             return;
         };
+        if cell.ch == '\0' {
+            return;
+        }
 
-        let w = libm::ceilf(self.cell_width) as u32;
+        let cell_span = text_grid_cell_width(cell.ch)
+            .min(self.grid.columns().saturating_sub(column).max(1));
+        let w = libm::ceilf(self.cell_width * cell_span as f32) as u32;
         let h = libm::ceilf(self.cell_height) as u32;
         let (mut foreground, background) = if cell.inverse {
             (cell.background, cell.foreground)

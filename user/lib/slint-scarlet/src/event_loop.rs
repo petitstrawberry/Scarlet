@@ -186,6 +186,22 @@ impl EventLoop {
             SwsEvent::MenuItemActivated { .. } => {
                 // Menu item activated - not used in slint apps
             }
+            SwsEvent::TextInputPreedit { .. }
+            | SwsEvent::TextInputCommit { .. }
+            | SwsEvent::TextInputDeleteSurroundingText { .. }
+            | SwsEvent::TextInputDone { .. }
+            | SwsEvent::TextInputCandidates { .. }
+            | SwsEvent::TextInputHideCandidates { .. }
+            | SwsEvent::TextInputStatus { .. }
+            | SwsEvent::ImeActivate(_)
+            | SwsEvent::ImeDeactivate { .. }
+            | SwsEvent::ImeContextState(_)
+            | SwsEvent::ImeKeyEvent { .. }
+            | SwsEvent::ImeReset { .. }
+            | SwsEvent::ImeTrigger { .. } => {
+                // Text-input/IME events are handled by clients that opt into
+                // the SWS text-input protocol.
+            }
         }
 
         Ok(())

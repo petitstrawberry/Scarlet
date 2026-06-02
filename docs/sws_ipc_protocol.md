@@ -329,6 +329,167 @@ Semantics:
 - Updates the buffer for a window created via `EXTENSION_CREATE_WINDOW`.
 - Similar to `UPDATE_BUFFER` but includes the external client ID.
 
+#### Text Input Client API (types = 200-208)
+
+Text input contexts let applications describe editable text state to SWS. SWS brokers the active focused context to a separately registered input method service. SWS does not implement conversion engines or dictionaries.
+
+All text is UTF-8. Offsets are byte offsets into that UTF-8 text.
+
+`TEXT_INPUT_CREATE` (200), payload 8 bytes:
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `seat_id`   | u32  |
+
+The server responds with `TEXT_INPUT_CREATED`.
+
+Fixed-size context messages:
+
+| Message | Type | Payload |
+|---------|------|---------|
+| `TEXT_INPUT_DESTROY` | 201 | `context_id: u32` |
+| `TEXT_INPUT_ENABLE` | 202 | `context_id: u32` |
+| `TEXT_INPUT_DISABLE` | 203 | `context_id: u32` |
+| `TEXT_INPUT_SET_TEXT_CHANGE_CAUSE` | 207 | `context_id: u32`, `cause: u32` |
+| `TEXT_INPUT_COMMIT_STATE` | 208 | `context_id: u32`, `serial: u32` |
+
+`TEXT_INPUT_SET_CURSOR_RECT` (204), payload 20 bytes:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `x`          | i32  |
+| 8      | 4    | `y`          | i32  |
+| 12     | 4    | `width`      | u32  |
+| 16     | 4    | `height`     | u32  |
+
+`TEXT_INPUT_SET_SURROUNDING_TEXT` (205), variable payload:
+
+| Offset | Size | Field          | Type |
+|--------|------|----------------|------|
+| 0      | 4    | `context_id`   | u32  |
+| 4      | 4    | `cursor_byte`  | u32  |
+| 8      | 4    | `anchor_byte`  | u32  |
+| 12     | 4    | `text_len`     | u32  |
+| 16     | N    | `text`         | bytes |
+
+`TEXT_INPUT_SET_CONTENT_TYPE` (206), payload 12 bytes:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `hint`       | u32  |
+| 8      | 4    | `purpose`    | u32  |
+
+State is double-buffered. Clients may send cursor rect, surrounding text, content type, and change cause in any order, then publish them atomically with `TEXT_INPUT_COMMIT_STATE`. The `serial` must match the current context serial.
+
+#### Input Method Service API (types = 220-230)
+
+An IME service registers on a normal SWS connection and receives focused text-input contexts, trigger events, and key events while it has requested keyboard arbitration. It replies with handled/pass-through decisions and text operations.
+
+`TEXT_INPUT_ENABLE` means the application has an editable focused text-input context; it is not an IME on/off mode. Keyboard arbitration is separate. The active IME receives `IME_ACTIVATE` for the enabled focused context, receives trigger events such as Ctrl-Backslash via `IME_TRIGGER`, and may then request `IME_GRAB_KEYBOARD` or `IME_RELEASE_KEYBOARD`. SWS forwards ordinary key events to the IME only while the active context is grabbed.
+
+SWS does not define language-specific input modes. An IME may report an opaque `mode_id` and a UTF-8 `mode_label` through `IME_SET_STATUS`; the id is stable only within that IME, and SWS must not interpret it. This follows the practical model used by existing IME stacks: the compositor/toolkit brokers composition, surrounding text, candidates, and display attributes, while engine-specific modes and properties remain owned by the IME.
+
+`user/bin/src/simple_ime.rs` is a minimal external IME service for exercising this protocol. It registers as `simple-kana`, requests active IME status, and performs a small romaji-to-hiragana conversion table in the IME process itself. This sample is not part of SWS compositor behavior; SWS remains only a broker for text-input state, trigger delivery, key arbitration, preedit, commit, deletion, and candidate messages.
+
+`IME_REGISTER` (220), variable payload:
+
+| Offset | Size | Field          | Type |
+|--------|------|----------------|------|
+| 0      | 4    | `capabilities` | u32  |
+| 4      | 4    | `name_len`     | u32  |
+| 8      | N    | `name`         | bytes |
+
+The server responds with `IME_REGISTERED`. The first registered IME becomes active automatically; `IME_SET_ACTIVE` can switch the active IME.
+
+Fixed-size IME messages:
+
+| Message | Type | Payload |
+|---------|------|---------|
+| `IME_SET_ACTIVE` | 221 | `ime_id: u32` |
+| `IME_KEY_HANDLED` | 222 | `key_serial: u32`, `handled: u32` |
+| `IME_DELETE_SURROUNDING_TEXT` | 225 | `context_id: u32`, `before_bytes: u32`, `after_bytes: u32` |
+| `IME_HIDE_CANDIDATES` | 227 | `context_id: u32` |
+| `IME_GRAB_KEYBOARD` | 228 | `context_id: u32` |
+| `IME_RELEASE_KEYBOARD` | 229 | `context_id: u32` |
+
+`IME_SET_PREEDIT` (223), variable payload:
+
+| Offset | Size | Field         | Type  |
+|--------|------|---------------|-------|
+| 0      | 4    | `context_id`  | u32   |
+| 4      | 4    | `cursor_byte` | u32   |
+| 8      | 4    | `anchor_byte` | u32   |
+| 12     | 4    | `text_len`    | u32   |
+| 16     | N    | `text`        | bytes |
+| 16+N   | 4    | `spans_len`   | u32   |
+| 20+N   | M    | `spans`       | bytes |
+
+`cursor_byte`, `anchor_byte`, and span offsets are UTF-8 byte offsets into `text`. `spans` is a packed list of 12-byte records:
+
+| Offset | Size | Field         | Type |
+|--------|------|---------------|------|
+| 0      | 4    | `start_byte`  | u32  |
+| 4      | 4    | `end_byte`    | u32  |
+| 8      | 4    | `style_flags` | u32  |
+
+Style flags: `UNDERLINE`, `THICK_UNDERLINE`, `HIGHLIGHT`, `SELECTED`, `CONVERTED`, `TARGET_CONVERTING`, `ERROR`.
+
+`IME_COMMIT_TEXT` (224), variable payload:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `text_len`   | u32  |
+| 8      | N    | `text`       | bytes |
+
+`IME_SET_CANDIDATES` (226), variable payload:
+
+| Offset | Size | Field            | Type  |
+|--------|------|------------------|-------|
+| 0      | 4    | `context_id`     | u32   |
+| 4      | 4    | `selected_index` | u32   |
+| 8      | 4    | `page_start`     | u32   |
+| 12     | 4    | `page_size`      | u32   |
+| 16     | 4    | `anchor_byte`    | u32   |
+| 20     | 4    | `candidates_len` | u32   |
+| 24     | N    | `candidates`     | bytes |
+
+`candidates` is a structured blob:
+
+| Offset | Size | Field             | Type |
+|--------|------|-------------------|------|
+| 0      | 4    | `candidate_count` | u32  |
+| 4      | ...  | candidate entries |      |
+
+Each candidate entry is:
+
+| Field | Encoding |
+|-------|----------|
+| `id` | `u32` |
+| `label` | `u32 byte_len` + UTF-8 bytes |
+| `text` | `u32 byte_len` + UTF-8 bytes |
+| `annotation` | `u32 byte_len` + UTF-8 bytes |
+| `comment` | `u32 byte_len` + UTF-8 bytes |
+| `flags` | `u32` |
+
+IME services may also display their own candidate window; this message exists for clients or toolkits that want to render candidates inline.
+
+`IME_SET_STATUS` (230), variable payload:
+
+| Offset | Size | Field            | Type  |
+|--------|------|------------------|-------|
+| 0      | 4    | `context_id`     | u32   |
+| 4      | 4    | `state`          | u32   |
+| 8      | 4    | `mode_id`        | u32   |
+| 12     | 4    | `flags`          | u32   |
+| 16     | 4    | `mode_label_len` | u32   |
+| 20     | N    | `mode_label`     | bytes |
+
+Composition states: `DISABLED`, `DIRECT`, `COMPOSING`, `CANDIDATES`. Status flags include `MODE_ACTIVE`, `PRIVATE_MODE`, `PREDICTION_ENABLED`, and `CANDIDATES_VISIBLE`.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)
@@ -462,6 +623,90 @@ Semantics:
 - Forwards input events for windows created by an extension.
 - Similar to `INPUT_EVENT` but includes the external client ID.
 - Allows the extension to route events to the appropriate external client.
+
+#### Text Input Client Events (types = 200-207)
+
+`TEXT_INPUT_CREATED` (200), payload 8 bytes:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `serial`     | u32  |
+
+Variable text events:
+
+| Message | Type | Header Fields | Bytes |
+|---------|------|---------------|-------|
+| `TEXT_INPUT_PREEDIT` | 201 | `context_id`, `serial`, `cursor_byte`, `anchor_byte`, `text_len`, `spans_len` | UTF-8 preedit + span records |
+| `TEXT_INPUT_COMMIT` | 202 | `context_id`, `serial`, `text_len` | UTF-8 committed text |
+| `TEXT_INPUT_CANDIDATES` | 205 | `context_id`, `serial`, `selected_index`, `page_start`, `page_size`, `anchor_byte`, `candidates_len` | structured candidate blob |
+| `TEXT_INPUT_STATUS` | 207 | `context_id`, `serial`, `state`, `mode_id`, `flags`, `mode_label_len` | UTF-8 mode label |
+
+Fixed-size text events:
+
+| Message | Type | Payload |
+|---------|------|---------|
+| `TEXT_INPUT_DELETE_SURROUNDING_TEXT` | 203 | `context_id`, `serial`, `before_bytes`, `after_bytes` |
+| `TEXT_INPUT_DONE` | 204 | `context_id`, `serial` |
+| `TEXT_INPUT_HIDE_CANDIDATES` | 206 | `context_id`, `serial` |
+
+Toolkits should apply preedit/commit/delete messages in order and treat `TEXT_INPUT_DONE` as the end of an update batch.
+
+#### Input Method Service Events (types = 220-226)
+
+`IME_REGISTERED` (220), payload 4 bytes: `ime_id: u32`.
+
+`IME_ACTIVATE` (221) and `IME_CONTEXT_STATE` (223) share the same variable payload:
+
+| Offset | Size | Field                | Type |
+|--------|------|----------------------|------|
+| 0      | 4    | `context_id`         | u32  |
+| 4      | 4    | `window_id`          | u32  |
+| 8      | 4    | `serial`             | u32  |
+| 12     | 4    | `cursor_x`           | i32  |
+| 16     | 4    | `cursor_y`           | i32  |
+| 20     | 4    | `cursor_width`       | u32  |
+| 24     | 4    | `cursor_height`      | u32  |
+| 28     | 4    | `content_hint`       | u32  |
+| 32     | 4    | `content_purpose`    | u32  |
+| 36     | 4    | `text_change_cause`  | u32  |
+| 40     | 4    | `cursor_byte`        | u32  |
+| 44     | 4    | `anchor_byte`        | u32  |
+| 48     | 4    | `surrounding_len`    | u32  |
+| 52     | N    | `surrounding_text`   | bytes |
+
+`IME_DEACTIVATE` (222) and `IME_RESET` (225), payload 8 bytes: `context_id: u32`, `serial: u32`.
+
+`IME_TRIGGER` (226), payload 24 bytes:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `serial`     | u32  |
+| 8      | 4    | `trigger_id` | u32  |
+| 12     | 2    | `code`       | u16  |
+| 14     | 2    | `reserved`   | u16  |
+| 16     | 8    | `time`       | u64  |
+
+Current trigger IDs:
+
+| Name | Value | Meaning |
+|------|-------|---------|
+| `TOGGLE` | 1 | A compositor-recognized IME trigger key, currently Ctrl-Backslash. |
+
+`IME_KEY_EVENT` (224), payload 28 bytes:
+
+| Offset | Size | Field        | Type |
+|--------|------|--------------|------|
+| 0      | 4    | `context_id` | u32  |
+| 4      | 4    | `key_serial` | u32  |
+| 8      | 4    | `window_id`  | u32  |
+| 12     | 8    | `time`       | u64  |
+| 20     | 2    | `type_`      | u16  |
+| 22     | 2    | `code`       | u16  |
+| 24     | 4    | `value`      | i32  |
+
+SWS withholds a key event from the application while it is pending IME arbitration. This only happens after the active IME has sent `IME_GRAB_KEYBOARD` for the active enabled text-input context. The IME must respond with `IME_KEY_HANDLED`. If `handled != 0`, SWS drops the raw key. If `handled == 0`, SWS forwards the original raw key event to the focused application. When the IME sends `IME_RELEASE_KEYBOARD`, SWS stops routing ordinary key events to the IME and releases any still-pending raw key events back to the application.
 
 ## Extension API
 

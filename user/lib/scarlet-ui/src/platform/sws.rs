@@ -523,7 +523,10 @@ impl PlatformWindow for SWSPlatformWindow {
                             .saturating_mul(dst_width)
                             .saturating_add(copy_width)
                             .saturating_mul(4);
-                        let row_end = y.saturating_add(1).saturating_mul(dst_width).saturating_mul(4);
+                        let row_end = y
+                            .saturating_add(1)
+                            .saturating_mul(dst_width)
+                            .saturating_mul(4);
                         if row_start < row_end && row_end <= dst_data.len() {
                             dst_data[row_start..row_end].fill(0);
                         }
@@ -1007,6 +1010,50 @@ impl SWSPlatformWindow {
                         menu_item_id,
                     });
                 }
+            }
+            SwsEvent::TextInputPreedit {
+                context_id,
+                serial,
+                cursor_byte,
+                anchor_byte,
+                text,
+                spans,
+            } => {
+                self.push_event(Event::TextInputPreedit {
+                    context_id,
+                    serial,
+                    cursor_byte,
+                    anchor_byte,
+                    text,
+                    spans,
+                });
+            }
+            SwsEvent::TextInputCommit {
+                context_id,
+                serial,
+                text,
+            } => {
+                self.push_event(Event::TextInputCommit {
+                    context_id,
+                    serial,
+                    text,
+                });
+            }
+            SwsEvent::TextInputDeleteSurroundingText {
+                context_id,
+                serial,
+                before_bytes,
+                after_bytes,
+            } => {
+                self.push_event(Event::TextInputDeleteSurroundingText {
+                    context_id,
+                    serial,
+                    before_bytes,
+                    after_bytes,
+                });
+            }
+            SwsEvent::TextInputDone { context_id, serial } => {
+                self.push_event(Event::TextInputDone { context_id, serial });
             }
             SwsEvent::FocusChanged {
                 window_id,

@@ -83,7 +83,7 @@ pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
 pub use views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
 pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
 pub use views::{NavigationView, NavigationLink};
-pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor};
+pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 pub use views::navigation::Icon;
 pub use views::modifiers::{
     AlignmentFrame, Background, Clip, Focusable, Frame, OnKey, Padding, SetSize,
@@ -112,7 +112,7 @@ pub mod prelude {
     pub use crate::application::Application;
     pub use crate::views::{Window, Text, TextField, Button, Rectangle, Spacer, Image, VStack, HStack, ZStack};
     pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
-    pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor};
+    pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
     pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
