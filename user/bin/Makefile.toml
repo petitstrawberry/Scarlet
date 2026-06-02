@@ -41,11 +41,11 @@ dependencies = ["build-only-debug"]
 
 [tasks.build-only-debug]
 description = "Build user programs in debug mode without OSABI setting (internal)"
-script = 'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = 'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 
 [tasks.build-only-release]
 description = "Build user programs in release mode without OSABI setting (internal)"
-script = 'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = 'CC_riscv64gc_unknown_scarlet_elf="${PWD}/../../tools/riscv64-clang" cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
 
 [tasks.build-aarch64]
 description = "Build all user programs for AArch64 with OSABI=83 (debug mode)"

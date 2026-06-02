@@ -512,9 +512,28 @@ impl crate::io::Write for Socket {
         let stream = self.handle.as_stream().map_err(|_| {
             crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
         })?;
-        stream
-            .write(buf)
-            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to write"))
+        stream.write(buf).map_err(|e| {
+            use crate::handle::capability::StreamError;
+            match e {
+                StreamError::WouldBlock => {
+                    crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
+                }
+                StreamError::EndOfStream => {
+                    crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "End of stream")
+                }
+                StreamError::PermissionDenied => crate::io::Error::new(
+                    crate::io::ErrorKind::PermissionDenied,
+                    "Permission denied",
+                ),
+                StreamError::InvalidParameter => {
+                    crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "Invalid parameter")
+                }
+                StreamError::Unsupported => {
+                    crate::io::Error::new(crate::io::ErrorKind::Unsupported, "Unsupported")
+                }
+                _ => crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to write"),
+            }
+        })
     }
 
     fn flush(&mut self) -> crate::io::Result<()> {

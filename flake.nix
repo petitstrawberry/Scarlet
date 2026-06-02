@@ -163,6 +163,10 @@
               url = "https://download.qemu.org/qemu-10.2.2.tar.xz";
               hash = "sha256-eEspb/KcFBeqcjI6vLLS6pq5dxck9Xfc14XDsE8h4XY=";
             };
+            configureFlags = (_prevAttrs.configureFlags or [ ]) ++ [
+              "--enable-vhost-user"
+              "--disable-vhost-net"
+            ];
             patches = (_prevAttrs.patches or [ ]) ++ [
               ./nix/patches/qemu-10-cocoa-retina-toggle.patch
             ];

@@ -33,7 +33,7 @@ use crate::{
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
-    object::handle::HandleTable,
+    object::{capability::memory_mapping::anon_owner::ForkCowPageOwner, handle::HandleTable},
     sched::scheduler::{
         cleanup_zombie, current_task, finalize_zombie, get_all_task_ids, get_task_by_id,
         remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
@@ -52,6 +52,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize
 use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
+const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -1264,6 +1265,18 @@ impl Task {
         Ok(mmap)
     }
 
+    fn take_exact_page_allocation(
+        &self,
+        paddr: usize,
+        page_count: usize,
+    ) -> Option<ContiguousPages> {
+        let mut allocations = self.page_allocations.write();
+        let index = allocations
+            .iter()
+            .position(|alloc| alloc.as_paddr() == paddr && alloc.len() == page_count)?;
+        Some(allocations.swap_remove(index))
+    }
+
     // Set the entry point
     pub fn set_entry_point(&self, entry: usize) {
         self.vcpu.lock().set_pc(entry as u64);
@@ -1514,153 +1527,193 @@ impl Task {
 
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child without cloning lists
-            self.vm_manager.memmaps_iter_with(|iter| {
-                for mmap in iter {
-                    let num_pages =
-                        (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                    if num_pages == 0 {
-                        continue;
-                    }
+            let memmaps = self
+                .vm_manager
+                .with_memmaps(|maps| maps.values().cloned().collect::<Vec<_>>());
+            for mmap in memmaps {
+                let num_pages =
+                    (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                if num_pages == 0 {
+                    continue;
+                }
 
-                    let vaddr = mmap.vmarea.start;
-                    if mmap.is_shared {
-                        // Shared memory regions: just reference the same physical pages
-                        let shared_mmap = VirtualMemoryMap {
-                            pmarea: mmap.pmarea,
+                let vaddr = mmap.vmarea.start;
+                if mmap.is_shared {
+                    // Shared memory regions: just reference the same physical pages
+                    let shared_mmap = VirtualMemoryMap {
+                        pmarea: mmap.pmarea,
+                        vmarea: mmap.vmarea,
+                        vm_start: mmap.vm_start,
+                        permissions: mmap.permissions,
+                        is_shared: true,
+                        owner: mmap.owner.clone(),
+                    };
+                    child
+                        .vm_manager
+                        .add_memory_map(shared_mmap.clone())
+                        .map_err(|_| "Failed to add shared memory map to child task")?;
+
+                    // Pre-map trampoline page if applicable
+                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                        if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
+                            root_pagetable
+                                .map_memory_area(
+                                    child.vm_manager.get_asid(),
+                                    shared_mmap,
+                                    true,
+                                    true,
+                                )
+                                .map_err(|_| "Failed to map trampoline page")?;
+                        }
+                    }
+                } else if let Some(owner) = &mmap.owner {
+                    if let Some(cloned_owner) = owner.fork_clone() {
+                        let new_mmap = VirtualMemoryMap {
+                            pmarea: MemoryArea { start: 0, end: 0 },
                             vmarea: mmap.vmarea,
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
-                            is_shared: true,
-                            owner: mmap.owner.clone(),
+                            is_shared: false,
+                            owner: Some(cloned_owner),
                         };
                         child
                             .vm_manager
-                            .add_memory_map(shared_mmap.clone())
-                            .map_err(|_| "Failed to add shared memory map to child task")?;
-
-                        // Pre-map trampoline page if applicable
-                        if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                            if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
-                                root_pagetable
-                                    .map_memory_area(
-                                        child.vm_manager.get_asid(),
-                                        shared_mmap,
-                                        true,
-                                        true,
-                                    )
-                                    .map_err(|_| "Failed to map trampoline page")?;
-                            }
-                        }
-                    } else if let Some(owner) = &mmap.owner {
-                        if let Some(cloned_owner) = owner.fork_clone() {
+                            .add_memory_map(new_mmap)
+                            .map_err(|_| "Failed to add owner-based map to child task")?;
+                    } else {
+                        if mmap.pmarea.start == 0 {
+                            // Lazy: clone Arc, child COWs independently on fault
                             let new_mmap = VirtualMemoryMap {
                                 pmarea: MemoryArea { start: 0, end: 0 },
                                 vmarea: mmap.vmarea,
                                 vm_start: mmap.vm_start,
                                 permissions: mmap.permissions,
                                 is_shared: false,
-                                owner: Some(cloned_owner),
+                                owner: Some(Arc::clone(owner)),
                             };
                             child
                                 .vm_manager
                                 .add_memory_map(new_mmap)
                                 .map_err(|_| "Failed to add owner-based map to child task")?;
                         } else {
-                            if mmap.pmarea.start == 0 {
-                                // Lazy: clone Arc, child COWs independently on fault
-                                let new_mmap = VirtualMemoryMap {
-                                    pmarea: MemoryArea { start: 0, end: 0 },
-                                    vmarea: mmap.vmarea,
-                                    vm_start: mmap.vm_start,
-                                    permissions: mmap.permissions,
-                                    is_shared: false,
-                                    owner: Some(Arc::clone(owner)),
-                                };
-                                child
-                                    .vm_manager
-                                    .add_memory_map(new_mmap)
-                                    .map_err(|_| "Failed to add owner-based map to child task")?;
-                            } else {
-                                // Eager: copy physical pages
-                                let permissions = mmap.permissions;
-                                let page_alloc = ContiguousPages::new(num_pages)
-                                    .ok_or("Failed to allocate pages for clone")?;
-                                let size = num_pages * PAGE_SIZE;
-                                let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
-                                let new_mmap = VirtualMemoryMap {
-                                    pmarea: MemoryArea {
-                                        start: paddr,
-                                        end: paddr + (size - 1),
-                                    },
-                                    vmarea: MemoryArea {
-                                        start: vaddr,
-                                        end: vaddr + (size - 1),
-                                    },
-                                    vm_start: vaddr,
-                                    permissions,
-                                    is_shared: false,
-                                    owner: None,
-                                };
-                                // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
-                                unsafe {
-                                    let src_start = phys_to_virt(mmap.pmarea.start);
-                                    let dst_start = phys_to_virt(paddr);
-                                    core::ptr::copy_nonoverlapping(
-                                        src_start as *const u8,
-                                        dst_start as *mut u8,
-                                        size,
-                                    );
-                                }
-                                child.page_allocations.write().push(page_alloc);
-                                child
-                                    .vm_manager
-                                    .add_memory_map(new_mmap)
-                                    .map_err(|_| "Failed to add memory map to child task")?;
+                            // Eager: copy physical pages
+                            let permissions = mmap.permissions;
+                            let page_alloc = ContiguousPages::new(num_pages)
+                                .ok_or("Failed to allocate pages for clone")?;
+                            let size = num_pages * PAGE_SIZE;
+                            let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                            let new_mmap = VirtualMemoryMap {
+                                pmarea: MemoryArea {
+                                    start: paddr,
+                                    end: paddr + (size - 1),
+                                },
+                                vmarea: MemoryArea {
+                                    start: vaddr,
+                                    end: vaddr + (size - 1),
+                                },
+                                vm_start: vaddr,
+                                permissions,
+                                is_shared: false,
+                                owner: None,
+                            };
+                            // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
+                            unsafe {
+                                let src_start = phys_to_virt(mmap.pmarea.start);
+                                let dst_start = phys_to_virt(paddr);
+                                core::ptr::copy_nonoverlapping(
+                                    src_start as *const u8,
+                                    dst_start as *mut u8,
+                                    size,
+                                );
                             }
+                            child.page_allocations.write().push(page_alloc);
+                            child
+                                .vm_manager
+                                .add_memory_map(new_mmap)
+                                .map_err(|_| "Failed to add memory map to child task")?;
                         }
-                    } else {
-                        // Private memory regions: allocate new pages and copy contents
-                        let permissions = mmap.permissions;
-                        let page_alloc = ContiguousPages::new(num_pages)
-                            .ok_or("Failed to allocate pages for clone")?;
-                        let size = num_pages * PAGE_SIZE;
-                        let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
-                        let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + (size - 1),
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr,
-                                end: vaddr + (size - 1),
-                            },
-                            vm_start: vaddr,
-                            permissions,
+                    }
+                } else if mmap.pmarea.start != 0 {
+                    if let Some(page_alloc) =
+                        self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
+                    {
+                        let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
+                        let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
+                        let cow_map = VirtualMemoryMap {
+                            pmarea: MemoryArea { start: 0, end: 0 },
+                            vmarea: mmap.vmarea,
+                            vm_start: mmap.vm_start,
+                            permissions: mmap.permissions,
                             is_shared: false,
-                            owner: None,
+                            owner: Some(cow_owner),
                         };
-
-                        // Copy original contents
-                        unsafe {
-                            let src_start = phys_to_virt(mmap.pmarea.start);
-                            let dst_start = phys_to_virt(paddr);
-                            core::ptr::copy_nonoverlapping(
-                                src_start as *const u8,
-                                dst_start as *mut u8,
-                                size,
-                            );
-                        }
-
-                        child.page_allocations.write().push(page_alloc);
-
+                        self.vm_manager.with_memmaps_mut(|maps| {
+                            if let Some(parent_map) = maps.get_mut(&mmap.vmarea.start) {
+                                *parent_map = cow_map.clone();
+                            }
+                        });
+                        self.vm_manager
+                            .unmap_range_from_mmu(mmap.vmarea.start, mmap.vmarea.end);
                         child
                             .vm_manager
-                            .add_memory_map(new_mmap)
-                            .map_err(|_| "Failed to add memory map to child task")?;
+                            .add_memory_map(cow_map)
+                            .map_err(|_| "Failed to add COW memory map to child task")?;
+                        continue;
                     }
+
+                    // Private memory regions: allocate new pages and copy contents
+                    let permissions = mmap.permissions;
+                    let page_alloc = ContiguousPages::new(num_pages)
+                        .ok_or("Failed to allocate pages for clone")?;
+                    let size = num_pages * PAGE_SIZE;
+                    let paddr = virt_to_phys(page_alloc.as_ptr() as usize);
+                    let new_mmap = VirtualMemoryMap {
+                        pmarea: MemoryArea {
+                            start: paddr,
+                            end: paddr + (size - 1),
+                        },
+                        vmarea: MemoryArea {
+                            start: vaddr,
+                            end: vaddr + (size - 1),
+                        },
+                        vm_start: vaddr,
+                        permissions,
+                        is_shared: false,
+                        owner: None,
+                    };
+
+                    // Copy original contents
+                    unsafe {
+                        let src_start = phys_to_virt(mmap.pmarea.start);
+                        let dst_start = phys_to_virt(paddr);
+                        core::ptr::copy_nonoverlapping(
+                            src_start as *const u8,
+                            dst_start as *mut u8,
+                            size,
+                        );
+                    }
+
+                    child.page_allocations.write().push(page_alloc);
+
+                    child
+                        .vm_manager
+                        .add_memory_map(new_mmap)
+                        .map_err(|_| "Failed to add memory map to child task")?;
+                } else {
+                    let new_mmap = VirtualMemoryMap {
+                        pmarea: mmap.pmarea,
+                        vmarea: mmap.vmarea,
+                        vm_start: mmap.vm_start,
+                        permissions: mmap.permissions,
+                        is_shared: false,
+                        owner: None,
+                    };
+                    child
+                        .vm_manager
+                        .add_memory_map(new_mmap)
+                        .map_err(|_| "Failed to add unbacked memory map to child task")?;
                 }
-                Ok::<(), &'static str>(())
-            })?;
+            }
         }
 
         // Copy register states (architecture-specific VCPU state)
@@ -1791,6 +1844,13 @@ impl Task {
     /// * `status` - The exit status
     ///
     pub fn exit(&self, status: i32) {
+        self.exit_with_cleanup(status, |_| {});
+    }
+
+    pub(crate) fn exit_with_cleanup<F>(&self, status: i32, cleanup: F)
+    where
+        F: FnOnce(&Task),
+    {
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -1802,6 +1862,7 @@ impl Task {
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        cleanup(self);
         self.reparent_children();
 
         match self.get_parent_id() {
@@ -1886,12 +1947,14 @@ impl Task {
                     }
 
                     task.reparent_children();
-                    crate::println!(
-                        "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
-                        my_id,
-                        task_id,
-                        thread_group_id
-                    );
+                    if LOG_EXIT_GROUP_SIBLINGS {
+                        crate::println!(
+                            "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
+                            my_id,
+                            task_id,
+                            thread_group_id
+                        );
+                    }
                     // Set state to Terminated directly (bypass normal exit)
                     // Use unsafe to modify state through immutable reference
                     // This is safe because we are in a termination context
@@ -2414,6 +2477,7 @@ mod tests {
     use core::sync::atomic::Ordering;
 
     use super::INIT_TASK_ID;
+    use crate::object::capability::memory_mapping::AccessOp;
     use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
     use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
@@ -2761,7 +2825,6 @@ mod tests {
         let child_pc = child_task.vcpu.lock().get_pc();
         let child_entry = child_task.entry;
         let child_state = child_task.state.load(Ordering::SeqCst);
-        let child_page_allocations_len = child_task.page_allocations.read().len();
 
         // Add both tasks to scheduler to establish parent-child relationship
         let parent_id = add_task(parent_task, 0);
@@ -2818,7 +2881,22 @@ mod tests {
         assert_eq!(child_data_size, parent_data_size);
         assert_eq!(child_text_size, parent_text_size);
 
-        // Find the corresponding memory map in child that matches our test allocation
+        // Find the corresponding memory maps that match our test allocation.
+        let parent_mmap_after_fork = {
+            let mut found = None;
+            let parent = get_task_by_id(parent_id).unwrap();
+            parent.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr
+                        && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
+                    {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in parent task")
+        };
         let child_mmap = {
             let mut found = None;
             let child = get_task_by_id(child_id).unwrap();
@@ -2839,39 +2917,66 @@ mod tests {
         assert_eq!(child_mmap.vmarea.start, parent_vaddr_start);
         assert_eq!(child_mmap.vmarea.end, parent_vaddr_end);
         assert_eq!(child_mmap.permissions, parent_perms);
+        assert_eq!(parent_mmap_after_fork.pmarea.start, 0);
+        assert!(parent_mmap_after_fork.owner.is_some());
+        assert_eq!(child_mmap.pmarea.start, 0);
+        assert!(child_mmap.owner.is_some());
 
-        // Verify the data was copied correctly
-        unsafe {
-            let parent_ptr = phys_to_virt(parent_paddr) as *const u8;
-            let child_ptr = phys_to_virt(child_mmap.pmarea.start) as *const u8;
+        use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        parent
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Load,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
+        child
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Load,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
 
-            // Check that physical addresses are different (separate memory)
-            assert_ne!(
-                parent_ptr, child_ptr,
-                "Parent and child should have different physical memory"
-            );
+        assert_eq!(
+            parent.vm_manager.translate_to_phys(vaddr),
+            Some(parent_paddr)
+        );
+        assert_eq!(
+            child.vm_manager.translate_to_phys(vaddr),
+            Some(parent_paddr)
+        );
 
-            // Check that the data content is identical
-            for i in 0..test_data.len() {
-                let parent_byte = *parent_ptr.offset(i as isize);
-                let child_byte = *child_ptr.offset(i as isize);
-                assert_eq!(parent_byte, child_byte, "Data mismatch at offset {}", i);
-            }
-        }
+        child
+            .vm_manager
+            .lazy_map_page_with(AccessKind {
+                op: AccessOp::Store,
+                vaddr,
+                size: None,
+            })
+            .unwrap();
+        let child_private_paddr = child.vm_manager.translate_to_phys(vaddr).unwrap();
+        assert_ne!(
+            child_private_paddr, parent_paddr,
+            "Child store fault should allocate a private page"
+        );
 
-        // Verify that modifying parent's memory doesn't affect child's memory
+        // Verify that modifying child's private page doesn't affect parent's COW backing.
         unsafe {
             let parent_ptr = phys_to_virt(mmap.pmarea.start) as *mut u8;
             let original_value = *parent_ptr;
-            *parent_ptr = 0xFF; // Modify first byte in parent
 
-            let child_ptr = phys_to_virt(child_mmap.pmarea.start) as *const u8;
-            let child_first_byte = *child_ptr;
+            let child_ptr = phys_to_virt(child_private_paddr) as *mut u8;
+            *child_ptr = 0xFF;
 
-            // Child's first byte should still be the original value
+            let parent_first_byte = *parent_ptr;
             assert_eq!(
-                child_first_byte, original_value,
-                "Child memory should be independent from parent"
+                parent_first_byte, original_value,
+                "Child private write should not modify parent backing"
             );
         }
 
@@ -2884,10 +2989,16 @@ mod tests {
         // Verify state was copied
         assert_eq!(child_state, parent_state);
 
-        // Verify that both tasks have the correct number of page allocations
+        let child_private_mmap = child.vm_manager.search_memory_map(vaddr).unwrap();
+        assert_eq!(child_private_mmap.pmarea.start, child_private_paddr);
+        assert!(child_private_mmap.owner.is_none());
         assert!(
-            child_page_allocations_len >= num_pages,
-            "Child should have at least the test pages in page allocations"
+            child
+                .page_allocations
+                .read()
+                .iter()
+                .any(|alloc| { alloc.as_paddr() == child_private_paddr && alloc.len() == 1 }),
+            "Child COW private page should be tracked for reclaim"
         );
     }
 
@@ -2917,7 +3028,10 @@ mod tests {
             found.expect("Stack memory map not found in parent task")
         };
 
-        // Write test data to parent's stack
+        let stack_data_vaddr = stack_mmap.vmarea.start + crate::environment::PAGE_SIZE;
+
+        // Write test data to parent's stack before clone. At this point the
+        // parent owns the physical stack allocation directly.
         let stack_test_data: [u8; 16] = [
             0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
             0x99, 0x00,
@@ -2953,19 +3067,33 @@ mod tests {
             found.expect("Stack memory map not found in child task")
         };
 
-        // Verify that stack content was copied correctly
-        unsafe {
-            let parent_stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
-            let child_stack_ptr =
-                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
-                    as *const u8;
+        // Fork converts private stack pages to a COW owner. Reads in parent and
+        // child should resolve to the same backing page until one side stores.
+        let parent_shared_paddr = parent_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Parent stack COW backing not resolved");
+        let child_shared_paddr = child_task
+            .vm_manager
+            .translate_to_phys(stack_data_vaddr)
+            .expect("Child stack COW backing not resolved");
+        assert_eq!(
+            parent_shared_paddr, child_shared_paddr,
+            "Parent and child should share stack backing before a COW store"
+        );
+        assert_eq!(
+            child_stack_mmap.pmarea.start, 0,
+            "Child COW stack map should not expose a direct physical range"
+        );
+        assert!(
+            child_stack_mmap.owner.is_some(),
+            "Child COW stack map should keep an owner for fault resolution"
+        );
 
-            // Check that physical addresses are different (separate memory)
-            assert_ne!(
-                parent_stack_ptr, child_stack_ptr,
-                "Parent and child should have different stack physical memory"
-            );
+        // Verify that stack content is visible through the COW backing.
+        unsafe {
+            let parent_stack_ptr = phys_to_virt(parent_shared_paddr) as *const u8;
+            let child_stack_ptr = phys_to_virt(child_shared_paddr) as *const u8;
 
             // Check that the stack data content is identical
             for i in 0..stack_test_data.len() {
@@ -2979,16 +3107,26 @@ mod tests {
             }
         }
 
-        // Verify that modifying parent's stack doesn't affect child's stack
+        // Verify that modifying parent's stack triggers COW and doesn't affect child's stack.
+        let parent_private_paddr = parent_task
+            .vm_manager
+            .translate_to_phys_with_access(stack_data_vaddr, AccessOp::Store)
+            .expect("Parent stack store COW did not allocate a private page");
+        assert_ne!(
+            parent_private_paddr, child_shared_paddr,
+            "Parent store should allocate a private stack page"
+        );
+
         unsafe {
-            let parent_stack_ptr =
-                phys_to_virt(stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let parent_stack_ptr = phys_to_virt(parent_private_paddr) as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
-            let child_stack_ptr =
-                phys_to_virt(child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE)
-                    as *const u8;
+            let child_stack_paddr = child_task
+                .vm_manager
+                .translate_to_phys(stack_data_vaddr)
+                .expect("Child stack backing disappeared after parent COW");
+            let child_stack_ptr = phys_to_virt(child_stack_paddr) as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value

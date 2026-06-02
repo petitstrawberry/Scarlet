@@ -3,12 +3,15 @@ FROM ubuntu:25.04
 ENV PATH=/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CC_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-gcc
+ENV CFLAGS_riscv64gc_unknown_scarlet_elf="-march=rv64gc -mabi=lp64d -DRING_CORE_NOSTDLIBINC -fno-stack-protector"
+ENV AR_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-ar
 
 ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
+	apt install -y build-essential clang llvm autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
     mtools dosfstools sleuthkit libslirp-dev qemu-efi-riscv64 qemu-efi-aarch64
 
 # # # Install QEMU

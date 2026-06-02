@@ -76,7 +76,14 @@ pub fn clone(flags: CloneFlags) -> i32 {
 /// - On error: -1
 pub fn fork() -> i32 {
     let clone_flags = CloneFlags::default();
-    clone(clone_flags)
+    crate::allocator::fork_prepare();
+    let result = clone(clone_flags);
+    if result == 0 {
+        crate::allocator::fork_child();
+    } else {
+        crate::allocator::fork_parent();
+    }
+    result
 }
 
 /// Exits the current process (all threads).
@@ -136,8 +143,7 @@ pub fn exit(code: i32) -> ! {
 /// loop {}
 /// ```
 pub fn exit_thread(code: i32) -> ! {
-    syscall1(Syscall::Exit, code as usize);
-    unreachable!("exit_thread syscall should not return");
+    crate::thread::exit_current_thread(code);
 }
 
 /// Exits all tasks in the current thread group

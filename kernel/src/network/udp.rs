@@ -409,7 +409,15 @@ impl crate::object::capability::StreamOps for UdpSocket {
             .clone()
             .unwrap_or(SocketAddress::Unspecified);
         self.sendto(data, &remote_addr, 0)
-            .map_err(|_| crate::object::capability::StreamError::Other("udp send error".into()))?;
+            .map_err(|err| match err {
+                SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::InvalidAddress => {
+                    crate::object::capability::StreamError::InvalidArgument
+                }
+                SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
+                SocketError::NotSupported => crate::object::capability::StreamError::NotSupported,
+                _ => crate::object::capability::StreamError::Other("udp send error".into()),
+            })?;
         Ok(data.len())
     }
 }

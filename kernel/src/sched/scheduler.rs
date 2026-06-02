@@ -201,6 +201,7 @@ impl TaskPool {
         // Set IDs on the task
         task.set_id(task_id);
         task.set_namespace_id(namespace_id);
+        task.vm_manager.set_owner_task_id_if_unset(task_id);
 
         let generation = self.slot_generations[task_id]
             .fetch_add(1, Ordering::SeqCst)

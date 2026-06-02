@@ -139,6 +139,24 @@ if [ ! -f "$ROOTFS_IMAGE" ]; then
 fi
 
 TEMP_OUTPUT=$(mktemp)
+EFI_VARS_RUNTIME_CLEANUP=""
+VHOST_USER_VIDEO_PID=""
+VHOST_USER_VIDEO_SOCKET_CLEANUP=""
+
+cleanup() {
+    if [ -n "$VHOST_USER_VIDEO_PID" ]; then
+        kill "$VHOST_USER_VIDEO_PID" 2>/dev/null || true
+        wait "$VHOST_USER_VIDEO_PID" 2>/dev/null || true
+    fi
+    if [ -n "$VHOST_USER_VIDEO_SOCKET_CLEANUP" ]; then
+        rm -f "$VHOST_USER_VIDEO_SOCKET_CLEANUP"
+    fi
+    if [ -n "$EFI_VARS_RUNTIME_CLEANUP" ]; then
+        rm -f "$EFI_VARS_RUNTIME_CLEANUP"
+    fi
+}
+
+trap cleanup EXIT
 
 find_efi_code() {
     if [ "$QEMU_ACCEL" = "hvf" ] && [ -n "${SCARLET_EFI_CODE_ARM64_HVF:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64_HVF}" ]; then
@@ -230,7 +248,7 @@ elif [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST
 else
     EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
-    trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
+    EFI_VARS_RUNTIME_CLEANUP="$EFI_VARS_RUNTIME"
 fi
 
 ensure_efi_vars_writable "$EFI_VARS_RUNTIME"
@@ -317,6 +335,7 @@ if [ "$QEMU_INPUT" = "1" ] || [ "$QEMU_INPUT" = "true" ]; then
     QEMU_INPUT_ARGS=(-device virtio-keyboard-device,bus=virtio-mmio-bus.4 -device virtio-mouse-device,bus=virtio-mmio-bus.5)
 fi
 
+QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY")
 QEMU_AUDIO="${SCARLET_QEMU_AUDIO:-0}"
 QEMU_AUDIO_DRIVER="${SCARLET_QEMU_AUDIO_DRIVER:-coreaudio}"
 QEMU_AUDIO_ARGS=()
@@ -324,11 +343,66 @@ if [ "$QEMU_AUDIO" = "1" ] || [ "$QEMU_AUDIO" = "true" ]; then
     QEMU_AUDIO_ARGS=(-audiodev "$QEMU_AUDIO_DRIVER,id=audio0" -device virtio-sound-pci,audiodev=audio0,bus=pcie.0)
 fi
 
+QEMU_VHOST_USER_VIDEO_ARGS=()
+if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-}" = "true" ]; then
+    VHOST_USER_VIDEO_SOCKET="${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
+    VHOST_USER_VIDEO_DAEMON="${SCARLET_VHOST_USER_VIDEO_DAEMON:-$PROJECT_ROOT/dist/host/vhost_video_videotoolbox}"
+    VHOST_USER_VIDEO_LOG="${SCARLET_VHOST_USER_VIDEO_LOG:-/private/tmp/scarlet-video.log}"
+    VHOST_USER_VIDEO_ID="${SCARLET_VHOST_USER_VIDEO_ID:-31}"
+    VHOST_USER_VIDEO_QUEUES="${SCARLET_VHOST_USER_VIDEO_QUEUES:-2}"
+    VHOST_USER_VIDEO_QUEUE_SIZE="${SCARLET_VHOST_USER_VIDEO_QUEUE_SIZE:-256}"
+    VHOST_USER_VIDEO_CONFIG_SIZE="${SCARLET_VHOST_USER_VIDEO_CONFIG_SIZE:-64}"
+
+    echo "Enabling vhost-user video PCI device: socket=$VHOST_USER_VIDEO_SOCKET virtio-id=$VHOST_USER_VIDEO_ID"
+    QEMU_MEMORY_ARGS=(
+        -m "$QEMU_MEMORY"
+        -object memory-backend-shm,id=scarlet-mem,size="$QEMU_MEMORY",share=on
+        -numa node,memdev=scarlet-mem
+    )
+    QEMU_VHOST_USER_VIDEO_ARGS=(
+        -chardev socket,id=vuvid,path="$VHOST_USER_VIDEO_SOCKET"
+        -device vhost-user-test-device-pci,bus=pcie.0,chardev=vuvid,virtio-id="$VHOST_USER_VIDEO_ID",num_vqs="$VHOST_USER_VIDEO_QUEUES",vq_size="$VHOST_USER_VIDEO_QUEUE_SIZE",config_size="$VHOST_USER_VIDEO_CONFIG_SIZE"
+    )
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if [ ! -x "$VHOST_USER_VIDEO_DAEMON" ]; then
+            echo "Error: vhost-user video daemon not found or not executable: $VHOST_USER_VIDEO_DAEMON"
+            echo "       Run cargo make build-vhost-video-videotoolbox or set SCARLET_VHOST_USER_VIDEO_DAEMON."
+            exit 1
+        fi
+        rm -f "$VHOST_USER_VIDEO_SOCKET"
+        VHOST_USER_VIDEO_SOCKET_CLEANUP="$VHOST_USER_VIDEO_SOCKET"
+        echo "Starting vhost-user video daemon: $VHOST_USER_VIDEO_DAEMON --socket $VHOST_USER_VIDEO_SOCKET"
+        if [ "$VHOST_USER_VIDEO_LOG" = "stderr" ]; then
+            "$VHOST_USER_VIDEO_DAEMON" --socket "$VHOST_USER_VIDEO_SOCKET" &
+        else
+            mkdir -p "$(dirname "$VHOST_USER_VIDEO_LOG")"
+            echo "vhost-user video daemon log: $VHOST_USER_VIDEO_LOG"
+            "$VHOST_USER_VIDEO_DAEMON" --socket "$VHOST_USER_VIDEO_SOCKET" >"$VHOST_USER_VIDEO_LOG" 2>&1 &
+        fi
+        VHOST_USER_VIDEO_PID=$!
+        for _ in {1..100}; do
+            if [ -S "$VHOST_USER_VIDEO_SOCKET" ]; then
+                break
+            fi
+            if ! kill -0 "$VHOST_USER_VIDEO_PID" 2>/dev/null; then
+                echo "Error: vhost-user video daemon exited before creating $VHOST_USER_VIDEO_SOCKET"
+                exit 1
+            fi
+            sleep 0.05
+        done
+        if [ ! -S "$VHOST_USER_VIDEO_SOCKET" ]; then
+            echo "Error: timed out waiting for vhost-user video daemon socket: $VHOST_USER_VIDEO_SOCKET"
+            exit 1
+        fi
+    fi
+fi
+
 qemu-system-aarch64 \
     -machine "$QEMU_MACHINE" \
     -cpu "$QEMU_CPU" \
     -accel "$QEMU_ACCEL" \
-    -m "$QEMU_MEMORY" \
+    "${QEMU_MEMORY_ARGS[@]}" \
     -smp "$QEMU_SMP" \
     "${QEMU_DISPLAY_ARGS[@]}" \
     --no-reboot \
@@ -343,6 +417,7 @@ qemu-system-aarch64 \
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \
     "${QEMU_AUDIO_ARGS[@]}" \
+    "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"

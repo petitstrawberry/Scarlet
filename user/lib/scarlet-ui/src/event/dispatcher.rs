@@ -285,8 +285,13 @@ impl EventDispatcher {
                 ..
             } = event
             {
-                self.focused_id = Some(target_id);
-                self.focused_path = path.clone();
+                if let Some(focus_id) = element_tree.nearest_focusable_in_path(&path) {
+                    if let Some(focus_path) = element_tree.find_path_ids(focus_id) {
+                        self.set_focused_element(element_tree, focus_id, &focus_path);
+                    }
+                } else {
+                    self.clear_focused_element(element_tree);
+                }
                 if let crate::event::MouseEvent::ButtonPressed {
                     button: crate::event::MouseButton::Left,
                     ..
@@ -407,19 +412,22 @@ impl EventDispatcher {
     ) -> bool {
         let path = self
             .focused_id
-            .and_then(|focused_id| element_tree.find_path_ids(focused_id))
-            .or_else(|| {
-                if self.focused_path.is_empty() {
-                    None
-                } else {
-                    Some(self.focused_path.clone())
-                }
+            .and_then(|focused_id| {
+                element_tree
+                    .element_wants_keyboard_focus(focused_id)
+                    .then(|| element_tree.find_path_ids(focused_id))
+                    .flatten()
             })
+            .or_else(|| element_tree.find_keyboard_focus_path_ids())
             .or_else(|| {
-                if self.hovered_path.is_empty() {
-                    None
+                if self
+                    .focused_path
+                    .last()
+                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
+                {
+                    Some(self.focused_path.clone())
                 } else {
-                    Some(self.hovered_path.clone())
+                    None
                 }
             })
             .or_else(|| element_tree.root().map(|root| alloc::vec![root.id()]));
@@ -430,6 +438,8 @@ impl EventDispatcher {
         let Some(target_id) = path.last().copied() else {
             return false;
         };
+        self.focused_id = Some(target_id);
+        self.focused_path = path.clone();
 
         if crate::debug::is_enabled() {
             scarlet_std::println!(
@@ -699,6 +709,55 @@ impl EventDispatcher {
             x: absolute_origin.x + bounds.width / 2.0,
             y: absolute_origin.y + bounds.height / 2.0,
         });
+    }
+
+    fn set_focused_element(
+        &mut self,
+        element_tree: &mut ElementTree,
+        target_id: ElementId,
+        path: &[ElementId],
+    ) {
+        if self.focused_id == Some(target_id) {
+            self.focused_path = path.to_vec();
+            return;
+        }
+
+        if let Some(old_id) = self.focused_id {
+            let old_path = element_tree
+                .find_path_ids(old_id)
+                .or_else(|| (!self.focused_path.is_empty()).then(|| self.focused_path.clone()));
+            if let Some(old_path) = old_path
+                && let Some(old_target_id) = old_path.last().copied()
+                && let Some(old_target) = element_tree.find_element_mut(old_target_id)
+            {
+                let _ = old_target.handle_event(
+                    &Event::Focus(crate::event::FocusEvent::Lost),
+                    Phase::Target,
+                );
+            }
+        }
+
+        self.focused_id = Some(target_id);
+        self.focused_path = path.to_vec();
+        if let Some(target) = element_tree.find_element_mut(target_id) {
+            let _ = target.handle_event(
+                &Event::Focus(crate::event::FocusEvent::Gained),
+                Phase::Target,
+            );
+        }
+    }
+
+    fn clear_focused_element(&mut self, element_tree: &mut ElementTree) {
+        if let Some(old_id) = self.focused_id
+            && let Some(old_target) = element_tree.find_element_mut(old_id)
+        {
+            let _ = old_target.handle_event(
+                &Event::Focus(crate::event::FocusEvent::Lost),
+                Phase::Target,
+            );
+        }
+        self.focused_id = None;
+        self.focused_path.clear();
     }
 
     fn path_origins(element_tree: &mut ElementTree, path: &[ElementId]) -> Vec<Point> {

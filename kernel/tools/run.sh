@@ -109,9 +109,30 @@ else
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi
 
+QEMU_MEMORY_SIZE="${SCARLET_QEMU_MEMORY:-8G}"
+QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY_SIZE")
+QEMU_VHOST_USER_VIDEO_ARGS=()
+if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-}" = "true" ]; then
+    VHOST_USER_VIDEO_SOCKET="${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
+    VHOST_USER_VIDEO_ID="${SCARLET_VHOST_USER_VIDEO_ID:-31}"
+    VHOST_USER_VIDEO_QUEUES="${SCARLET_VHOST_USER_VIDEO_QUEUES:-2}"
+    VHOST_USER_VIDEO_QUEUE_SIZE="${SCARLET_VHOST_USER_VIDEO_QUEUE_SIZE:-256}"
+    VHOST_USER_VIDEO_CONFIG_SIZE="${SCARLET_VHOST_USER_VIDEO_CONFIG_SIZE:-64}"
+
+    QEMU_MEMORY_ARGS=(
+        -m "$QEMU_MEMORY_SIZE"
+        -object memory-backend-shm,id=scarlet-mem,size="$QEMU_MEMORY_SIZE",share=on
+        -numa node,memdev=scarlet-mem
+    )
+    QEMU_VHOST_USER_VIDEO_ARGS=(
+        -chardev socket,id=vuvid,path="$VHOST_USER_VIDEO_SOCKET"
+        -device vhost-user-test-device-pci,bus=pcie.0,chardev=vuvid,virtio-id="$VHOST_USER_VIDEO_ID",num_vqs="$VHOST_USER_VIDEO_QUEUES",vq_size="$VHOST_USER_VIDEO_QUEUE_SIZE",config_size="$VHOST_USER_VIDEO_CONFIG_SIZE"
+    )
+fi
+
 qemu-system-riscv64 \
     -machine virt,acpi=off \
-    -m 8G \
+    "${QEMU_MEMORY_ARGS[@]}" \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
@@ -125,6 +146,7 @@ qemu-system-riscv64 \
     -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.0 \
     -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=udp::8080-:8080,hostfwd=udp::1234-:1234 \
     -device virtio-net-pci,netdev=net0,bus=pcie.0 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \

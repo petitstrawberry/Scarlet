@@ -377,8 +377,6 @@ impl VirtioNetDevice {
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
 
-        crate::println!("[virtio-net] TX: payload={} bytes", packet.len);
-
         // Allocate from PMM for DMA
         let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
         let buffer_alloc =

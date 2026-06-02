@@ -4,6 +4,11 @@ opt-level = 3
 [build]
 target = "../targets/riscv64gc-unknown-scarlet-elf.json"
 
+[env]
+CC_aarch64_unknown_scarlet_elf = "clang"
+CFLAGS_aarch64_unknown_scarlet_elf = "--target=aarch64-unknown-none-elf -DRING_CORE_NOSTDLIBINC -fno-stack-protector -Wno-unused-command-line-argument"
+AR_aarch64_unknown_scarlet_elf = "llvm-ar"
+
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]

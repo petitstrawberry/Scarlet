@@ -23,8 +23,10 @@ use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
+use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
 
 use crate::arch::Trapframe;
+use crate::environment::PAGE_SIZE;
 use crate::sched::scheduler::{
     cleanup_zombie, enqueue_task, get_all_task_ids, get_task_by_id, register_task,
     remove_task_from_queues, schedule,
@@ -107,6 +109,54 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     usize::MAX // -1 (If exit is successful, this will not be reached)
+}
+
+fn unmap_thread_cleanup_range(task: &crate::task::Task, vaddr: usize, length: usize) {
+    if length == 0 || vaddr % PAGE_SIZE != 0 {
+        return;
+    }
+
+    let removed_maps = task.vm_manager.remove_memory_map_range(vaddr, length);
+    for removed_map in &removed_maps {
+        if let Some(owner) = &removed_map.owner {
+            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+        }
+        reclaim_private_removed_mapping(task, removed_map);
+    }
+}
+
+/// Exit the current thread and release libc-owned thread mappings.
+///
+/// This is the Scarlet equivalent of libc's final thread-exit path: the kernel
+/// is already running on the task's kernel stack, so it can safely unmap the
+/// user stack/TLS mappings that the exiting thread was using.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Thread exit status.
+/// * `trapframe.arg(1)` - Stack mapping base.
+/// * `trapframe.arg(2)` - Stack mapping length.
+/// * `trapframe.arg(3)` - TLS mapping base.
+/// * `trapframe.arg(4)` - TLS mapping length.
+///
+/// # Returns
+///
+/// This syscall does not return on success.
+pub fn sys_thread_exit_cleanup(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    task.vcpu.lock().store(trapframe);
+
+    let exit_code = trapframe.get_arg(0) as i32;
+    let stack_mapping_base = trapframe.get_arg(1);
+    let stack_mapping_len = trapframe.get_arg(2);
+    let tls_mapping_base = trapframe.get_arg(3);
+    let tls_mapping_len = trapframe.get_arg(4);
+
+    task.exit_with_cleanup(exit_code, |task| {
+        unmap_thread_cleanup_range(task, stack_mapping_base, stack_mapping_len);
+        unmap_thread_cleanup_range(task, tls_mapping_base, tls_mapping_len);
+    });
+    usize::MAX
 }
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {

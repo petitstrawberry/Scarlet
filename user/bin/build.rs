@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=ui/slint_demo.slint");
+    println!("cargo:rerun-if-changed=build.rs");
 
     let config = slint_build::CompilerConfiguration::new()
         .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer);

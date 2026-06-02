@@ -108,6 +108,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
 
     match stream.write(&buffer) {
         Ok(bytes_written) => bytes_written,
+        Err(super::StreamError::WouldBlock) => (-(11i32)) as usize,
         Err(_) => usize::MAX, // Write error
     }
 }
