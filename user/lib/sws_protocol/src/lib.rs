@@ -436,9 +436,7 @@ pub fn parse_ime_methods_payload(payload: &[u8]) -> Result<Vec<InputMethodEntry>
 /// # Returns
 ///
 /// The active input method, or `None` when no input method is active.
-pub fn parse_ime_active_payload(
-    payload: &[u8],
-) -> Result<Option<InputMethodEntry>, ProtocolError> {
+pub fn parse_ime_active_payload(payload: &[u8]) -> Result<Option<InputMethodEntry>, ProtocolError> {
     let entries = parse_ime_methods_payload(payload)?;
     match entries.len() {
         0 => Ok(None),

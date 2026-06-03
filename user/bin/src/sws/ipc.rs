@@ -2591,7 +2591,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::ImeGetMethods {}) => {
                 let payload = input_methods_payload();
-                if let Err(e) = write_frame(&mut socket, protocol::server_msg::IME_METHODS, &payload)
+                if let Err(e) =
+                    write_frame(&mut socket, protocol::server_msg::IME_METHODS, &payload)
                 {
                     println!(
                         "[ClientThread {}] Failed to send IME_METHODS: {:?}",
