@@ -660,6 +660,10 @@ impl StreamOps for LocalSocket {
         let peer_buffer = self.peer_read_buffer.read();
         match peer_buffer.as_ref() {
             Some(peer_sock_buffer) => {
+                if *peer_sock_buffer.closed.read() {
+                    return Err(StreamError::Closed);
+                }
+
                 let mut peer_data = peer_sock_buffer.data.write();
 
                 // Check if buffer has space
@@ -1119,7 +1123,17 @@ impl Selectable for LocalSocket {
                         .wait_with_timeout(task_id, trapframe, timeout_ticks)
                 }
             }
-            SocketState::Connected if interest.write => true,
+            SocketState::Connected if interest.write => {
+                let write_closed = match self.peer_read_buffer.read().as_ref() {
+                    Some(peer_buffer) => *peer_buffer.closed.read(),
+                    None => true,
+                };
+                return if write_closed {
+                    SelectWaitOutcome::TimedOut
+                } else {
+                    SelectWaitOutcome::Ready
+                };
+            }
             _ => true,
         };
 
@@ -1260,6 +1274,31 @@ mod tests {
         assert!(
             sock2.write(b"closed").is_err(),
             "peer write should fail after remote drop"
+        );
+    }
+
+    #[test_case]
+    fn test_shutdown_write_rejects_later_writes() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        sock1.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "peer read should observe EOF after SHUT_WR");
+        assert!(
+            sock1.write(b"after-shutdown").is_err(),
+            "write should fail after SHUT_WR"
+        );
+        assert!(
+            !sock1
+                .current_ready(ReadyInterest {
+                    read: false,
+                    write: true
+                })
+                .write,
+            "socket should not report writable after SHUT_WR"
         );
     }
 

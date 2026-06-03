@@ -166,7 +166,7 @@ impl View for Select {
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
-        alloc::vec![&self.selected_index]
+        alloc::vec![&self.selected_index, &self.expanded]
     }
 
     fn as_any(&self) -> &dyn Any {

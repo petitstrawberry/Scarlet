@@ -348,7 +348,14 @@ impl ScarletMozc {
 
     fn ensure_candidate_popup(&mut self, conn: &mut Connection) -> Result<u32, Error> {
         if let Some(popup) = self.candidate_popup {
-            return Ok(popup.window_id);
+            if conn.surface_mut(popup.window_id).is_some() {
+                return Ok(popup.window_id);
+            }
+            println!(
+                "[scarlet_mozc] candidate popup surface missing window={}",
+                popup.window_id
+            );
+            self.candidate_popup = None;
         }
 
         let window_id = SurfaceBuilder::new()
@@ -371,6 +378,17 @@ impl ScarletMozc {
             window_id
         );
         Ok(window_id)
+    }
+
+    fn discard_candidate_popup(&mut self, conn: &mut Connection, reason: &str) {
+        let Some(popup) = self.candidate_popup.take() else {
+            return;
+        };
+        println!(
+            "[scarlet_mozc] candidate popup discarded window={} reason={}",
+            popup.window_id, reason
+        );
+        let _ = conn.destroy_surface(popup.window_id);
     }
 
     fn close_candidate_popup(&mut self, conn: &mut Connection) -> Result<(), Error> {
@@ -420,36 +438,61 @@ impl ScarletMozc {
             return self.close_candidate_popup(conn);
         }
 
-        let window_id = match self.ensure_candidate_popup(conn) {
-            Ok(window_id) => window_id,
-            Err(err) => {
-                println!("[scarlet_mozc] candidate popup create failed: {:?}", err);
-                self.candidate_popup = None;
-                return Ok(());
-            }
+        let Some(window_id) = self.show_candidate_popup(conn, context_id, &rows)? else {
+            return Ok(());
         };
-        if let Err(err) = draw_candidate_popup(conn, window_id, &rows, self.scale_milli) {
-            println!("[scarlet_mozc] candidate popup draw failed: {:?}", err);
-            self.candidate_popup = None;
-            return Ok(());
-        }
-        if let Err(err) = conn.ime_set_popup_window(
-            context_id,
-            window_id,
-            CANDIDATE_POPUP_OFFSET_X,
-            CANDIDATE_POPUP_OFFSET_Y,
-            true,
-        ) {
-            println!("[scarlet_mozc] candidate popup show failed: {:?}", err);
-            self.candidate_popup = None;
-            return Ok(());
-        }
         self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
             "[scarlet_mozc] candidate popup shown context={} window={} focused={:?} size={}",
             context_id, window_id, candidate_window.focused_index, candidate_window.size
         );
         Ok(())
+    }
+
+    fn show_candidate_popup(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+        rows: &[CandidatePopupRow],
+    ) -> Result<Option<u32>, Error> {
+        for attempt in 0..2 {
+            let window_id = match self.ensure_candidate_popup(conn) {
+                Ok(window_id) => window_id,
+                Err(err) => {
+                    println!("[scarlet_mozc] candidate popup create failed: {:?}", err);
+                    self.candidate_popup = None;
+                    return Ok(None);
+                }
+            };
+
+            if let Err(err) = draw_candidate_popup(conn, window_id, rows, self.scale_milli) {
+                println!("[scarlet_mozc] candidate popup draw failed: {:?}", err);
+                self.discard_candidate_popup(conn, "draw-failed");
+                if attempt == 0 {
+                    continue;
+                }
+                return Ok(None);
+            }
+
+            if let Err(err) = conn.ime_set_popup_window(
+                context_id,
+                window_id,
+                CANDIDATE_POPUP_OFFSET_X,
+                CANDIDATE_POPUP_OFFSET_Y,
+                true,
+            ) {
+                println!("[scarlet_mozc] candidate popup show failed: {:?}", err);
+                self.discard_candidate_popup(conn, "show-failed");
+                if attempt == 0 {
+                    continue;
+                }
+                return Ok(None);
+            }
+
+            return Ok(Some(window_id));
+        }
+
+        Ok(None)
     }
 
     fn keep_candidate_popup_visible(
@@ -460,6 +503,10 @@ impl ScarletMozc {
         let Some(popup) = self.candidate_popup else {
             return Ok(());
         };
+        if conn.surface_mut(popup.window_id).is_none() {
+            self.discard_candidate_popup(conn, "keep-local-surface-missing");
+            return Ok(());
+        }
         match conn.ime_set_popup_window(
             context_id,
             popup.window_id,
@@ -475,12 +522,12 @@ impl ScarletMozc {
                 Ok(())
             }
             Err(Error::SurfaceNotFound) => {
-                self.candidate_popup = None;
+                self.discard_candidate_popup(conn, "keep-surface-not-found");
                 Ok(())
             }
             Err(err) => {
                 println!("[scarlet_mozc] candidate popup keep failed: {:?}", err);
-                self.candidate_popup = None;
+                self.discard_candidate_popup(conn, "keep-failed");
                 Ok(())
             }
         }
@@ -625,6 +672,12 @@ struct MozcCandidateWindow {
     focused_index: Option<usize>,
     size: u32,
     candidates: Vec<MozcCandidate>,
+}
+
+impl MozcCandidateWindow {
+    fn can_show_popup(&self) -> bool {
+        self.focused_index.is_some() && !self.candidates.is_empty()
+    }
 }
 
 struct MozcCandidate {
@@ -827,7 +880,9 @@ impl MozcOutput {
     fn candidate_source(&self) -> Option<&MozcCandidateWindow> {
         self.all_candidate_words
             .as_ref()
+            .filter(|window| window.can_show_popup())
             .or(self.candidate_window.as_ref())
+            .filter(|window| window.can_show_popup())
     }
 }
 

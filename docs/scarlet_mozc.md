@@ -28,8 +28,8 @@ Current implemented path:
   - `result.value` as committed text
   - `preedit.segment.value` as preedit text
   - `status.mode` as IME status
-
-Candidate-window protobuf decoding and popup rendering are not implemented yet.
+  - `candidate_window` / `all_candidate_words` as an IME-owned popup window
+  - preedit segment annotations as styled preedit spans
 
 To try it, start a Linux ABI `mozc_server` first, then run:
 
@@ -108,6 +108,6 @@ Scarlet's local socket registry now preserves abstract socket names separately f
 ## Next Steps
 
 1. Exercise `scarlet_mozc` against the real server and fill ABI gaps surfaced by `mozc_server`.
-2. Decode Mozc candidate-window protobuf output.
-3. Render candidate UI as an IME-owned popup window, matching the SWS candidate-popup model used by `scarlet_skk`.
-4. Add session commands for explicit composition-mode switching and clean session deletion.
+2. Refine Mozc candidate-popup behavior and placement across focused clients and window movement.
+3. Add session commands for explicit composition-mode switching and clean session deletion.
+4. Add stronger diagnostics around Mozc IPC/profile discovery failures.

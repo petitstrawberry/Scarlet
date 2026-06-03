@@ -240,6 +240,24 @@ pub struct Connection {
 }
 
 impl Connection {
+    fn restore_nonblocking<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
+        let restore_result = self
+            .socket
+            .set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig);
+
+        match result {
+            Ok(value) => {
+                restore_result?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = restore_result;
+                Err(error)
+            }
+        }
+    }
+
     /// Connect to SWS at the default socket path (/tmp/sws.sock)
     pub fn connect_default() -> Result<Self, Error> {
         Self::connect("/tmp/sws.sock")
@@ -285,7 +303,7 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
+        let result = (|| loop {
             let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
                 .map_err(|_| Error::ReceiveFailed)?;
             let response = protocol::parse_server_message(msg_type, &self.read_payload)
@@ -293,16 +311,16 @@ impl Connection {
 
             match response {
                 ServerMessage::TextInputCreated { context_id, serial } => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Ok((context_id, serial));
                 }
                 message if self.queue_async_message(message) => {}
                 _ => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Err(Error::InvalidResponse);
                 }
             }
-        }
+        })();
+
+        self.restore_nonblocking(result)
     }
 
     pub fn destroy_text_input_context(&mut self, context_id: u32) -> Result<(), Error> {
@@ -418,7 +436,7 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
+        let result = (|| loop {
             let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
                 .map_err(|_| Error::ReceiveFailed)?;
             let response = protocol::parse_server_message(msg_type, &self.read_payload)
@@ -426,16 +444,16 @@ impl Connection {
 
             match response {
                 ServerMessage::ImeRegistered { ime_id } => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Ok(ime_id);
                 }
                 message if self.queue_async_message(message) => {}
                 _ => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Err(Error::InvalidResponse);
                 }
             }
-        }
+        })();
+
+        self.restore_nonblocking(result)
     }
 
     pub fn set_active_input_method(&mut self, ime_id: u32) -> Result<(), Error> {
@@ -460,7 +478,7 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
+        let result = (|| loop {
             let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
                 .map_err(|_| Error::ReceiveFailed)?;
             let response = protocol::parse_server_message(msg_type, &self.read_payload)
@@ -470,7 +488,6 @@ impl Connection {
                 ServerMessage::ImeMethods => {
                     let methods = protocol::parse_ime_methods_payload(&self.read_payload)
                         .map_err(|_| Error::InvalidResponse)?;
-                    let _ = self.socket.set_nonblocking(true);
                     return Ok(methods
                         .into_iter()
                         .map(|method| InputMethodInfo {
@@ -486,11 +503,12 @@ impl Connection {
                 }
                 message if self.queue_async_message(message) => {}
                 _ => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Err(Error::InvalidResponse);
                 }
             }
-        }
+        })();
+
+        self.restore_nonblocking(result)
     }
 
     /// Get the active input method.
@@ -506,7 +524,7 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
+        let result = (|| loop {
             let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
                 .map_err(|_| Error::ReceiveFailed)?;
             let response = protocol::parse_server_message(msg_type, &self.read_payload)
@@ -516,7 +534,6 @@ impl Connection {
                 ServerMessage::ImeActive => {
                     let method = protocol::parse_ime_active_payload(&self.read_payload)
                         .map_err(|_| Error::InvalidResponse)?;
-                    let _ = self.socket.set_nonblocking(true);
                     return Ok(method.map(|method| InputMethodInfo {
                         ime_id: method.ime_id,
                         name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
@@ -527,11 +544,12 @@ impl Connection {
                 }
                 message if self.queue_async_message(message) => {}
                 _ => {
-                    let _ = self.socket.set_nonblocking(true);
                     return Err(Error::InvalidResponse);
                 }
             }
-        }
+        })();
+
+        self.restore_nonblocking(result)
     }
 
     pub fn ime_key_handled(&mut self, key_serial: u32, handled: bool) -> Result<(), Error> {
@@ -762,38 +780,40 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-            .map_err(|_| Error::ReceiveFailed)?;
+        let result = (|| {
+            let (surface_id, _shm_size) = loop {
+                let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                    .map_err(|_| Error::ReceiveFailed)?;
 
-        let response = protocol::parse_server_message(msg_type, &self.read_payload)
-            .map_err(|_| Error::InvalidResponse)?;
+                let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
 
-        let (surface_id, _shm_size) = match response {
-            ServerMessage::WindowCreated {
-                window_id,
-                shm_size,
-            } => (window_id, shm_size),
-            _ => return Err(Error::InvalidResponse),
-        };
+                match response {
+                    ServerMessage::WindowCreated {
+                        window_id,
+                        shm_size,
+                    } => break (window_id, shm_size),
+                    message if self.queue_async_message(message) => {}
+                    _ => return Err(Error::InvalidResponse),
+                }
+            };
 
-        // Receive SHM handle (out-of-band)
-        let shm_handle = self
-            .socket
-            .recv_handle()
-            .map_err(|_| Error::ShmHandleFailed)?;
+            // Receive SHM handle (out-of-band)
+            let shm_handle = self
+                .socket
+                .recv_handle()
+                .map_err(|_| Error::ShmHandleFailed)?;
 
-        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+            let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
 
-        // Restore non-blocking mode
-        self.socket
-            .set_nonblocking(true)
-            .map_err(|_| Error::SocketConfig)?;
+            // Create surface object
+            let surface = Surface::new(surface_id, width, height, shm)?;
+            self.surfaces.insert(surface_id, surface);
 
-        // Create surface object
-        let surface = Surface::new(surface_id, width, height, shm)?;
-        self.surfaces.insert(surface_id, surface);
+            Ok(surface_id)
+        })();
 
-        Ok(surface_id)
+        self.restore_nonblocking(result)
     }
 
     /// Create a new surface (window) with explicit focus/active policies and initial position.
@@ -836,35 +856,38 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-            .map_err(|_| Error::ReceiveFailed)?;
+        let result = (|| {
+            let (surface_id, _shm_size) = loop {
+                let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                    .map_err(|_| Error::ReceiveFailed)?;
 
-        let response = protocol::parse_server_message(msg_type, &self.read_payload)
-            .map_err(|_| Error::InvalidResponse)?;
+                let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
 
-        let (surface_id, _shm_size) = match response {
-            ServerMessage::WindowCreated {
-                window_id,
-                shm_size,
-            } => (window_id, shm_size),
-            _ => return Err(Error::InvalidResponse),
-        };
+                match response {
+                    ServerMessage::WindowCreated {
+                        window_id,
+                        shm_size,
+                    } => break (window_id, shm_size),
+                    message if self.queue_async_message(message) => {}
+                    _ => return Err(Error::InvalidResponse),
+                }
+            };
 
-        let shm_handle = self
-            .socket
-            .recv_handle()
-            .map_err(|_| Error::ShmHandleFailed)?;
+            let shm_handle = self
+                .socket
+                .recv_handle()
+                .map_err(|_| Error::ShmHandleFailed)?;
 
-        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+            let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
 
-        self.socket
-            .set_nonblocking(true)
-            .map_err(|_| Error::SocketConfig)?;
+            let surface = Surface::new(surface_id, width, height, shm)?;
+            self.surfaces.insert(surface_id, surface);
 
-        let surface = Surface::new(surface_id, width, height, shm)?;
-        self.surfaces.insert(surface_id, surface);
+            Ok(surface_id)
+        })();
 
-        Ok(surface_id)
+        self.restore_nonblocking(result)
     }
 
     /// Destroy a surface
