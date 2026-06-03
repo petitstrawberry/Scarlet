@@ -420,15 +420,30 @@ impl ScarletMozc {
             return self.close_candidate_popup(conn);
         }
 
-        let window_id = self.ensure_candidate_popup(conn)?;
-        draw_candidate_popup(conn, window_id, &rows, self.scale_milli)?;
-        conn.ime_set_popup_window(
+        let window_id = match self.ensure_candidate_popup(conn) {
+            Ok(window_id) => window_id,
+            Err(err) => {
+                println!("[scarlet_mozc] candidate popup create failed: {:?}", err);
+                self.candidate_popup = None;
+                return Ok(());
+            }
+        };
+        if let Err(err) = draw_candidate_popup(conn, window_id, &rows, self.scale_milli) {
+            println!("[scarlet_mozc] candidate popup draw failed: {:?}", err);
+            self.candidate_popup = None;
+            return Ok(());
+        }
+        if let Err(err) = conn.ime_set_popup_window(
             context_id,
             window_id,
             CANDIDATE_POPUP_OFFSET_X,
             CANDIDATE_POPUP_OFFSET_Y,
             true,
-        )?;
+        ) {
+            println!("[scarlet_mozc] candidate popup show failed: {:?}", err);
+            self.candidate_popup = None;
+            return Ok(());
+        }
         self.candidate_popup = Some(CandidatePopup { window_id });
         println!(
             "[scarlet_mozc] candidate popup shown context={} window={} focused={:?} size={}",
@@ -463,7 +478,11 @@ impl ScarletMozc {
                 self.candidate_popup = None;
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                println!("[scarlet_mozc] candidate popup keep failed: {:?}", err);
+                self.candidate_popup = None;
+                Ok(())
+            }
         }
     }
 
