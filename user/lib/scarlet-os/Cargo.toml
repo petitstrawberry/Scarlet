@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-os"
+version = "0.16.0"
+edition = "2024"
+
+[lib]
+name = "scarlet_os"
+path = "src/lib.rs"
+
+[dependencies]
+scarlet-std = { path = "../std" }
