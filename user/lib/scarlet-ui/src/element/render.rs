@@ -387,7 +387,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .downcast_ref::<crate::views::TextFieldRenderObject>()?;
         render_object
             .is_focused()
-            .then(|| field.text_input_state(render_object.preedit()))
+            .then(|| field.text_input_state(render_object.preedit(), render_object.preedit_anchor_byte()))
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
@@ -643,6 +643,51 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 let state = toggle.get_is_on().clone();
                 state.update(|value| *value = !*value);
                 return true;
+            }
+        }
+
+        if let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>() {
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::SelectRenderObject>()
+            {
+                match mouse_event {
+                    MouseEvent::Entered { x: _, y } | MouseEvent::Moved { x: _, y } => {
+                        let hovered = render_object.option_index_at_y(*y as f32);
+                        render_object.set_hovered_index(hovered);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        render_object.set_hovered_index(None);
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        y,
+                        ..
+                    } => {
+                        if render_object.is_expanded() {
+                            if let Some(index) = render_object.option_index_at_y(*y as f32) {
+                                let selected_state = select.selected_index().clone();
+                                if selected_state.get() != index {
+                                    selected_state.set(index);
+                                    select.invoke_on_change(index);
+                                }
+                            }
+                            select.expanded().set(false);
+                            render_object.set_expanded(false);
+                        } else if select.option_count() > 0 {
+                            select.expanded().set(true);
+                            render_object.set_expanded(true);
+                        }
+                        crate::pipeline::mark_element_needs_paint(self.id);
+                        return true;
+                    }
+                    _ => {}
+                }
             }
         }
 

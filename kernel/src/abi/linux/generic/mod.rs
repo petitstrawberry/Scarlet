@@ -331,9 +331,15 @@ pub(crate) fn close_kernel_object_for_linux(object: &crate::object::KernelObject
         if matches!(state, SocketState::Bound | SocketState::Listening)
             && let Ok(SocketAddress::Local(addr)) = socket.getsockname()
         {
-            let path = addr.path();
-            if !path.is_empty() {
-                manager.unregister_named_socket(path);
+            if !addr.path().is_empty() {
+                if addr.is_abstract() {
+                    let mut name = alloc::string::String::new();
+                    name.push('\0');
+                    name.push_str(addr.path());
+                    manager.unregister_named_socket(&name);
+                } else {
+                    manager.unregister_named_socket(addr.path());
+                }
             }
         }
 
@@ -370,6 +376,7 @@ syscall_table! {
     FaccessAt = 48 => fs::sys_faccessat,
     Chdir = 49 => fs::sys_chdir,
     Fchmod = 52 => fs::sys_fchmod,
+    FchmodAt = 53 => fs::sys_fchmodat,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
     Pipe2 = 59 => pipe::sys_pipe2,
@@ -405,6 +412,8 @@ syscall_table! {
     TimerDelete = 111 => time::sys_timer_delete,
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
+    SchedGetscheduler = 120 => proc::sys_sched_getscheduler,
+    SchedGetparam = 121 => proc::sys_sched_getparam,
     SchedGetaffinity = 123 => proc::sys_sched_getaffinity,
     SchedYield = 124 => proc::sys_sched_yield,
     Sigaltstack = 132 => signal::sys_sigaltstack,
@@ -439,8 +448,14 @@ syscall_table! {
     Execve = 221 => fs::sys_execve,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
-    EpollWait = 232 => fs::sys_epoll_wait,
+    Msync = 227 => mm::sys_msync,
+    Mlock = 228 => mm::sys_mlock,
+    Munlock = 229 => mm::sys_munlock,
+    Mlockall = 230 => mm::sys_mlockall,
+    Munlockall = 231 => mm::sys_munlockall,
+    Mincore = 232 => mm::sys_mincore,
     Madvise = 233 => mm::sys_madvise,
+    Mlock2 = 284 => mm::sys_mlock2,
     Accept4 = 242 => socket::sys_accept4,
     Getrandom = 278 => fs::sys_getrandom,
     MemfdCreate = 279 => proc::sys_memfd_create,

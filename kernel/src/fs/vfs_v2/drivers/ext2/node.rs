@@ -119,9 +119,15 @@ impl VfsNode for Ext2Node {
             execute: (mode & 0o111) != 0,
         };
 
+        let cache_id =
+            crate::fs::vfs_v2::cache::CacheId::new((ext2_fs.fs_id().get() << 32) | self.file_id);
+        let size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| inode.get_size() as usize);
+
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
-            size: inode.get_size() as usize,
+            size,
             permissions,
             created_time: inode.get_ctime() as u64,
             modified_time: inode.get_mtime() as u64,
@@ -401,7 +407,10 @@ impl StreamOps for Ext2FileObject {
         let inode = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
-        let mut file_size = inode.size as usize;
+        let cache_id = self.cache_id();
+        let mut file_size = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or(inode.size as usize);
         if let Some(override_size) = *self.size_override.lock() {
             if override_size > file_size {
                 file_size = override_size;
@@ -420,7 +429,6 @@ impl StreamOps for Ext2FileObject {
             return Ok(0);
         }
 
-        let cache_id = self.cache_id();
         let mut bytes_read = 0usize;
         let mut buf_offset = 0usize;
         let mut pos = current_pos;
@@ -527,6 +535,13 @@ impl StreamOps for Ext2FileObject {
                 }
             }
         }
+        drop(override_size);
+
+        let inode_size = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?
+            .size as usize;
+        PageCacheManager::global().record_object_size(cache_id, self.effective_size(inode_size));
 
         Ok(written)
     }
@@ -813,9 +828,14 @@ impl FileObject for Ext2FileObject {
             FileType::RegularFile // Default fallback
         };
 
+        let inode_size = inode.size as usize;
+        let size = PageCacheManager::global()
+            .cached_object_size(self.cache_id())
+            .unwrap_or_else(|| self.effective_size(inode_size));
+
         Ok(FileMetadata {
             file_type,
-            size: inode.size as usize,
+            size,
             permissions,
             created_time: inode.ctime as u64,
             modified_time: inode.mtime as u64,
@@ -826,6 +846,7 @@ impl FileObject for Ext2FileObject {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let cache_id = self.cache_id();
         let file_size = {
             let fs = self
                 .filesystem
@@ -837,10 +858,13 @@ impl FileObject for Ext2FileObject {
                 .as_any()
                 .downcast_ref::<Ext2FileSystem>()
                 .ok_or(StreamError::NotSupported)?;
-            ext2_fs
+            let inode_size = ext2_fs
                 .read_inode(self.inode_number)
                 .map_err(|_| StreamError::IoError)?
-                .size as usize
+                .size as usize;
+            PageCacheManager::global()
+                .cached_object_size(cache_id)
+                .unwrap_or(inode_size)
         };
 
         let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
@@ -849,7 +873,6 @@ impl FileObject for Ext2FileObject {
         }
 
         let mut total_read = 0usize;
-        let cache_id = self.cache_id();
         while total_read < buffer.len() && off + total_read < file_size {
             let absolute = off + total_read;
             let page_index = (absolute / PAGE_SIZE) as PageIndex;
@@ -945,6 +968,7 @@ impl FileObject for Ext2FileObject {
                 *size_override = Some(new_end);
             }
         }
+        PageCacheManager::global().record_object_size(cache_id, self.effective_size(new_end));
 
         *self.dirty.lock() = true;
 
@@ -1007,6 +1031,7 @@ impl FileObject for Ext2FileObject {
         PageCacheManager::global().invalidate(self.cache_id());
         *self.size_override.lock() = None;
         *self.dirty.lock() = false;
+        PageCacheManager::global().record_object_size(self.cache_id(), new_size);
 
         let mut position = self.position.lock();
         if *position > size {

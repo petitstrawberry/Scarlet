@@ -57,6 +57,26 @@ const MAX_BUFFER_SIZE: usize = 65536;
 /// This prevents unbounded memory growth from DoS attacks
 const MAX_HANDLE_QUEUE_SIZE: usize = 64;
 
+fn local_socket_registry_name(addr: &LocalSocketAddress) -> String {
+    if addr.is_abstract() {
+        let mut name = String::new();
+        name.push('\0');
+        name.push_str(addr.path());
+        name
+    } else {
+        addr.path().to_string()
+    }
+}
+
+fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
+    if let Some(abstract_name) = name.strip_prefix('\0') {
+        LocalSocketAddress::from_abstract(abstract_name)
+            .unwrap_or_else(|_| LocalSocketAddress::unnamed())
+    } else {
+        LocalSocketAddress::from_path(name).unwrap_or_else(|_| LocalSocketAddress::unnamed())
+    }
+}
+
 /// Shared buffer structure for socket data
 struct SocketBuffer {
     /// Data buffer
@@ -633,9 +653,17 @@ impl StreamOps for LocalSocket {
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
+        if *self.state.read() == SocketState::Closed {
+            return Err(StreamError::Closed);
+        }
+
         let peer_buffer = self.peer_read_buffer.read();
         match peer_buffer.as_ref() {
             Some(peer_sock_buffer) => {
+                if *peer_sock_buffer.closed.read() {
+                    return Err(StreamError::Closed);
+                }
+
                 let mut peer_data = peer_sock_buffer.data.write();
 
                 // Check if buffer has space
@@ -729,16 +757,16 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::AlreadyConnected);
         }
 
-        // Extract path from address
-        let path = match address {
-            SocketAddress::Local(addr) => addr.path(),
+        // Extract registry name from address.
+        let name = match address {
+            SocketAddress::Local(addr) => local_socket_registry_name(addr),
             _ => return Err(SocketError::InvalidAddress),
         };
 
         // Update state
         // Note: NetworkManager registration is done by the syscall layer
         // to ensure the same Arc<Self> is registered that's in the handle table
-        *self.local_addr.write() = Some(path.to_string());
+        *self.local_addr.write() = Some(name);
         *state = SocketState::Bound;
 
         Ok(())
@@ -782,15 +810,15 @@ impl SocketControl for LocalSocket {
         }
         drop(state);
 
-        // Extract path from address
-        let path = match address {
-            SocketAddress::Local(addr) => addr.path(),
+        // Extract registry name from address.
+        let name = match address {
+            SocketAddress::Local(addr) => local_socket_registry_name(addr),
             _ => return Err(SocketError::InvalidAddress),
         };
 
         // Lookup listening socket in NetworkManager
         let manager = NetworkManager::get_manager();
-        let server_socket = match manager.lookup_named_socket(path) {
+        let server_socket = match manager.lookup_named_socket(&name) {
             Ok(socket) => socket,
             Err(e) => return Err(e),
         };
@@ -816,7 +844,7 @@ impl SocketControl for LocalSocket {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
             state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(path.to_string())),
+            local_addr: RwLock::new(Some(name.clone())),
             peer_addr: RwLock::new(Some(local_addr.clone())),
             read_buffer: RwLock::new(server_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(client_read_buffer.clone())),
@@ -837,7 +865,7 @@ impl SocketControl for LocalSocket {
         *self.read_buffer.write() = client_read_buffer.clone();
         *self.peer_read_buffer.write() = Some(server_read_buffer.clone());
         *self.local_addr.write() = Some(local_addr);
-        *self.peer_addr.write() = Some(path.to_string());
+        *self.peer_addr.write() = Some(name.clone());
         *self.state.write() = SocketState::Connected;
 
         // Set peer_socket references - IMPORTANT for shutdown()
@@ -889,10 +917,15 @@ impl SocketControl for LocalSocket {
         // crate::println!("[LocalSocket] shutdown({:?}) called", how);
 
         match how {
-            ShutdownHow::Read | ShutdownHow::Write | ShutdownHow::Both => {
-                *state = SocketState::Closed;
-
-                // Mark peer's read buffer as closed so they detect EOF
+            ShutdownHow::Read => {
+                *self.read_buffer.read().closed.write() = true;
+                self.read_waker.wake_all();
+                self.handle_waker.wake_all();
+                Ok(())
+            }
+            ShutdownHow::Write => {
+                // Mark peer's read buffer as closed so they detect EOF, while
+                // keeping our read side open for the peer's response.
                 if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
                     // crate::println!("[LocalSocket] shutdown: marking peer_read_buffer as closed");
                     *peer_buf.closed.write() = true;
@@ -919,6 +952,25 @@ impl SocketControl for LocalSocket {
 
                 Ok(())
             }
+            ShutdownHow::Both => {
+                *state = SocketState::Closed;
+                *self.read_buffer.read().closed.write() = true;
+
+                if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
+                    *peer_buf.closed.write() = true;
+                }
+
+                if let Some(peer_weak) = self.peer_socket.read().as_ref()
+                    && let Some(peer) = peer_weak.upgrade()
+                {
+                    peer.read_waker.wake_one();
+                    peer.handle_waker.wake_all();
+                }
+                self.read_waker.wake_all();
+                self.handle_waker.wake_all();
+
+                Ok(())
+            }
         }
     }
 
@@ -934,8 +986,7 @@ impl SocketControl for LocalSocket {
         let peer = self.peer_addr.read();
         match peer.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path)
-                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                local_socket_address_from_registry_name(path),
             )),
             None => Err(SocketError::NotConnected),
         }
@@ -945,8 +996,7 @@ impl SocketControl for LocalSocket {
         let local = self.local_addr.read();
         match local.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path)
-                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                local_socket_address_from_registry_name(path),
             )),
             None => Err(SocketError::InvalidOperation),
         }
@@ -1073,7 +1123,17 @@ impl Selectable for LocalSocket {
                         .wait_with_timeout(task_id, trapframe, timeout_ticks)
                 }
             }
-            SocketState::Connected if interest.write => true,
+            SocketState::Connected if interest.write => {
+                let write_closed = match self.peer_read_buffer.read().as_ref() {
+                    Some(peer_buffer) => *peer_buffer.closed.read(),
+                    None => true,
+                };
+                return if write_closed {
+                    SelectWaitOutcome::TimedOut
+                } else {
+                    SelectWaitOutcome::Ready
+                };
+            }
             _ => true,
         };
 
@@ -1214,6 +1274,32 @@ mod tests {
         assert!(
             sock2.write(b"closed").is_err(),
             "peer write should fail after remote drop"
+        );
+    }
+
+    #[test_case]
+    fn test_shutdown_write_rejects_later_writes() {
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        sock1.shutdown(ShutdownHow::Write).unwrap();
+
+        let mut buffer = [0u8; 8];
+        let read = sock2.read(&mut buffer).unwrap();
+        assert_eq!(read, 0, "peer read should observe EOF after SHUT_WR");
+        assert!(
+            sock1.write(b"after-shutdown").is_err(),
+            "write should fail after SHUT_WR"
+        );
+        assert!(
+            !sock1
+                .current_ready(ReadyInterest {
+                    read: false,
+                    write: true,
+                    except: false,
+                })
+                .write,
+            "socket should not report writable after SHUT_WR"
         );
     }
 

@@ -3,10 +3,25 @@
 //! NavigationView provides a sidebar navigation interface where users can select
 //! different items to display different content views.
 
-use core::any::Any;
-use crate::view::View;
-use crate::state::{State, Listenable};
+use alloc::collections::BTreeMap;
+use std::sync::Mutex;
+
+use crate::state::State;
 use crate::views::navigation::tuple::NavigationLinkTuple;
+
+static NAVIGATION_SELECTED_REGISTRY: Mutex<BTreeMap<usize, State<usize>>> =
+    Mutex::new(BTreeMap::new());
+
+fn navigation_selected_state(key: usize) -> State<usize> {
+    let mut registry = NAVIGATION_SELECTED_REGISTRY.lock();
+    if let Some(state) = registry.get(&key) {
+        return state.clone();
+    }
+
+    let state = State::new(crate::state::generate_state_id(), 0);
+    registry.insert(key, state.clone());
+    state
+}
 
 /// NavigationView - Sidebar navigation with dynamic content switching
 ///
@@ -23,7 +38,8 @@ use crate::views::navigation::tuple::NavigationLinkTuple;
 ///
 /// - NavigationView does NOT implement Clone (closures don't support Clone)
 /// - When selected_index changes, the entire view tree is rebuilt
-/// - For state preservation across navigation, use external State<T> passed to closures
+/// - The `navigation!` macro preserves selected item state across rebuilds
+/// - For page state preservation, use State<T> passed to link closures
 ///
 /// # Examples
 ///
@@ -83,6 +99,28 @@ where
         Self {
             links,
             selected_index: State::new(state_id, 0),
+            sidebar_width: 200.0,
+        }
+    }
+
+    /// Create a new NavigationView with an internal state key.
+    ///
+    /// This is used by the `navigation!` macro so a NavigationView can preserve
+    /// its selected item across view rebuilds without requiring application code
+    /// to own the navigation state.
+    ///
+    /// # Arguments
+    ///
+    /// * `links` - Tuple of NavigationLink items
+    /// * `state_key` - Stable key for this NavigationView call site
+    ///
+    /// # Returns
+    ///
+    /// A NavigationView whose selected item state is stored internally.
+    pub fn new_with_state_key(links: T, state_key: usize) -> Self {
+        Self {
+            links,
+            selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
         }
     }

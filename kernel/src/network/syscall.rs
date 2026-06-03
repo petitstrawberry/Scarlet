@@ -52,6 +52,41 @@ use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
 use crate::task::mytask;
 
+fn local_socket_address_from_user_bytes(
+    bytes: &[u8],
+) -> Result<(LocalSocketAddress, String, bool), ()> {
+    if bytes.is_empty() {
+        return Err(());
+    }
+
+    if bytes[0] == 0 {
+        let mut name_len = bytes.len().saturating_sub(1);
+        while name_len > 0 && bytes[1 + name_len - 1] == 0 {
+            name_len -= 1;
+        }
+        if name_len == 0 {
+            return Err(());
+        }
+        let name = core::str::from_utf8(&bytes[1..1 + name_len]).map_err(|_| ())?;
+        let addr = LocalSocketAddress::from_abstract(name).map_err(|_| ())?;
+        let mut registry_name = String::new();
+        registry_name.push('\0');
+        registry_name.push_str(addr.path());
+        Ok((addr, registry_name, true))
+    } else {
+        let mut path_len = 0;
+        while path_len < bytes.len() && bytes[path_len] != 0 {
+            path_len += 1;
+        }
+        if path_len == 0 {
+            return Err(());
+        }
+        let path = core::str::from_utf8(&bytes[..path_len]).map_err(|_| ())?;
+        let addr = LocalSocketAddress::from_path(path).map_err(|_| ())?;
+        Ok((addr, String::from(path), false))
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NetworkSetIpv4Request {
@@ -465,32 +500,31 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
         return usize::MAX;
     }
-    if let Some(pos) = path_bytes.iter().position(|&b| b == 0) {
-        path_bytes.truncate(pos);
-    }
-    let path = match alloc::string::String::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX,
-    };
-
-    // Bind the socket to the path
-    let local_addr = match LocalSocketAddress::from_path(path.clone()) {
-        Ok(addr) => addr,
-        Err(_) => return usize::MAX,
-    };
+    let (local_addr, registry_name, is_abstract) =
+        match local_socket_address_from_user_bytes(&path_bytes) {
+            Ok(addr) => addr,
+            Err(()) => return usize::MAX,
+        };
 
     // Bind updates the socket's internal state
-    if socket_arc.bind(&SocketAddress::Local(local_addr)).is_err() {
+    if socket_arc
+        .bind(&SocketAddress::Local(local_addr.clone()))
+        .is_err()
+    {
         return usize::MAX;
     }
 
     // Register the same Arc in NetworkManager's named socket namespace
     // This ensures the registered socket and the one in handle_table are identical
     if NetworkManager::get_manager()
-        .register_named_socket(&path, socket_arc.clone())
+        .register_named_socket(&registry_name, socket_arc.clone())
         .is_err()
     {
         return usize::MAX;
+    }
+
+    if is_abstract {
+        return 0;
     }
 
     // Get the socket ID from NetworkManager for VFS integration
@@ -520,11 +554,11 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     // - Filesystem doesn't support socket files
     // Since the socket is already bound and registered in named_sockets,
     // we treat VFS file creation as optional and don't fail the bind operation
-    if let Err(e) = vfs.create_file(&path, socket_file_type) {
+    if let Err(e) = vfs.create_file(local_addr.path(), socket_file_type) {
         // Log the error for debugging but continue - socket is still usable
         crate::println!(
             "[socket_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
-            path,
+            local_addr.path(),
             e
         );
     }
@@ -648,18 +682,9 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
     if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
         return usize::MAX;
     }
-    if let Some(pos) = path_bytes.iter().position(|&b| b == 0) {
-        path_bytes.truncate(pos);
-    }
-    let path = match alloc::string::String::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX,
-    };
-
-    // Create socket address and connect
-    let peer_addr = match LocalSocketAddress::from_path(&path) {
+    let (peer_addr, _, _) = match local_socket_address_from_user_bytes(&path_bytes) {
         Ok(addr) => addr,
-        Err(_) => return usize::MAX,
+        Err(()) => return usize::MAX,
     };
 
     // Connect the socket - this updates its internal state

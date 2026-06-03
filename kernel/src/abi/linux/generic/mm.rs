@@ -486,6 +486,181 @@ pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
+fn user_range_is_mapped(task: &crate::task::Task, addr: usize, length: usize) -> bool {
+    if length == 0 {
+        return true;
+    }
+
+    let Some(end) = addr.checked_add(length - 1) else {
+        return false;
+    };
+
+    let mut page = addr & !(PAGE_SIZE - 1);
+    loop {
+        if task.vm_manager.translate_to_kva(page).is_none() {
+            return false;
+        }
+        if page >= end {
+            break;
+        }
+        let Some(next) = page.checked_add(PAGE_SIZE) else {
+            return false;
+        };
+        page = next;
+    }
+
+    true
+}
+
+/// Linux `msync` implementation.
+///
+/// Scarlet does not currently expose dirty-page writeback controls for Linux
+/// mappings, so this validates the requested mapped range and treats the sync
+/// request as already complete.
+pub fn sys_msync(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+    let _flags = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if length != 0 && !user_range_is_mapped(task, addr, length) {
+        return to_result(errno::ENOMEM);
+    }
+
+    0
+}
+
+/// Linux `mlock` implementation.
+///
+/// TODO: Track pinned user pages if Scarlet adds swapping or pageable memory.
+/// For now, locking is a no-op after range validation because user mappings are
+/// not swapped out.
+pub fn sys_mlock(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    if length != 0 && !user_range_is_mapped(task, addr, length) {
+        return to_result(errno::ENOMEM);
+    }
+
+    0
+}
+
+/// Linux `munlock` implementation.
+///
+/// This mirrors `mlock`: there is no page pin state to release yet, but the
+/// syscall succeeds for mapped ranges.
+pub fn sys_munlock(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    if length != 0 && !user_range_is_mapped(task, addr, length) {
+        return to_result(errno::ENOMEM);
+    }
+
+    0
+}
+
+/// Linux `mlockall` implementation.
+///
+/// TODO: Implement process-wide page pin accounting if Scarlet gains pageable
+/// anonymous memory. Current mappings are effectively resident, so this is a
+/// compatibility no-op.
+pub fn sys_mlockall(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let _flags = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    0
+}
+
+/// Linux `munlockall` implementation.
+pub fn sys_munlockall(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    trapframe.increment_pc_next(task);
+
+    0
+}
+
+/// Linux `mincore` implementation.
+///
+/// Reports mapped pages as resident. Scarlet does not track eviction state for
+/// Linux mappings, so residency is equivalent to being mapped.
+pub fn sys_mincore(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+    let vec_ptr = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if addr % PAGE_SIZE != 0 {
+        return to_result(errno::EINVAL);
+    }
+    if length == 0 {
+        return 0;
+    }
+    if !user_range_is_mapped(task, addr, length) {
+        return to_result(errno::ENOMEM);
+    }
+
+    let pages = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    for i in 0..pages {
+        let Some(byte_ptr) = task.vm_manager.translate_to_kva(vec_ptr + i) else {
+            return to_result(errno::EFAULT);
+        };
+        unsafe {
+            // SAFETY: `byte_ptr` is the kernel mapping for one writable user byte
+            // obtained through the current task's VM manager.
+            *(byte_ptr as *mut u8) = 1;
+        }
+    }
+
+    0
+}
+
+/// Linux `mlock2` implementation.
+///
+/// `MLOCK_ONFAULT` has no observable difference without page eviction support,
+/// so this shares the same compatibility behavior as `mlock`.
+pub fn sys_mlock2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let _flags = trapframe.get_arg(2);
+    sys_mlock(abi, trapframe)
+}
+
 pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,

@@ -489,16 +489,39 @@ pub fn default_font_stack() -> Option<FontStack> {
     })
 }
 
-fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, u8) {
+fn fullwidth_ascii_fallback(ch: char) -> Option<char> {
+    let code = ch as u32;
+    if (0xff01..=0xff5e).contains(&code) {
+        core::char::from_u32(code - 0xfee0)
+    } else if code == 0x3000 {
+        Some(' ')
+    } else {
+        None
+    }
+}
+
+fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, u8, char) {
     if font_stack.primary.glyph_id(ch).0 != 0 {
-        return (font_stack.primary.clone(), 0);
+        return (font_stack.primary.clone(), 0, ch);
     }
     for (index, font) in font_stack.fallbacks.iter().enumerate() {
         if font.glyph_id(ch).0 != 0 {
-            return (font.clone(), index.saturating_add(1) as u8);
+            return (font.clone(), index.saturating_add(1) as u8, ch);
         }
     }
-    (font_stack.primary.clone(), 0)
+
+    if let Some(fallback_ch) = fullwidth_ascii_fallback(ch) {
+        if font_stack.primary.glyph_id(fallback_ch).0 != 0 {
+            return (font_stack.primary.clone(), 0, fallback_ch);
+        }
+        for (index, font) in font_stack.fallbacks.iter().enumerate() {
+            if font.glyph_id(fallback_ch).0 != 0 {
+                return (font.clone(), index.saturating_add(1) as u8, fallback_ch);
+            }
+        }
+    }
+
+    (font_stack.primary.clone(), 0, ch)
 }
 
 /// Measure text using the global default vector font
@@ -561,9 +584,9 @@ fn measure_text_uncached(text: &str, font_size_px: f32, font_stack: &FontStack) 
             lines = lines.saturating_add(1);
             continue;
         }
-        let selected = select_font_for_char(ch, font_stack).0;
+        let (selected, _, render_ch) = select_font_for_char(ch, font_stack);
         let selected_scaled = selected.as_scaled(scale);
-        let glyph_id = selected_scaled.glyph_id(ch);
+        let glyph_id = selected_scaled.glyph_id(render_ch);
         line_w += selected_scaled.h_advance(glyph_id);
     }
 
@@ -822,11 +845,11 @@ impl<'a> Canvas<'a> {
                 continue;
             }
 
-            let (selected_font, font_slot) = select_font_for_char(ch, font_stack);
+            let (selected_font, font_slot, render_ch) = select_font_for_char(ch, font_stack);
             let scaled = selected_font.as_scaled(scale);
-            let glyph_id = scaled.glyph_id(ch);
+            let glyph_id = scaled.glyph_id(render_ch);
             if let Some((ox, oy, w, h, ptr)) =
-                glyph_cache_get_or_rasterize(&scaled, ch, font_stack.cache_id(), font_slot)
+                glyph_cache_get_or_rasterize(&scaled, render_ch, font_stack.cache_id(), font_slot)
             {
                 let base_x = caret_x as i32;
                 let base_y = caret_y as i32;

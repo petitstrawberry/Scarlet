@@ -145,6 +145,45 @@ pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     core::mem::size_of::<usize>()
 }
 
+#[repr(C)]
+struct LinuxSchedParam {
+    sched_priority: i32,
+}
+
+pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    0 // SCHED_OTHER
+}
+
+pub fn sys_sched_getparam(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+    let param_ptr = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    if param_ptr == 0 {
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let kva = match task.vm_manager.translate_to_kva(param_ptr) {
+        Some(kva) => kva,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    unsafe {
+        // SAFETY: `kva` is the translated address for the user-provided
+        // `struct sched_param *` in the current task.
+        *(kva as *mut LinuxSchedParam) = LinuxSchedParam { sched_priority: 0 };
+    }
+
+    0
+}
+
 pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 

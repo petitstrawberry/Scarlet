@@ -15,10 +15,13 @@ use scarlet_desktop_config::BackgroundStyle;
 use scarlet_std::format;
 use scarlet_std::fs;
 use scarlet_std::println;
+use scarlet_std::string::String;
+use scarlet_std::vec::Vec;
 use scarlet_ui::{
     Icon, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack, zstack,
 };
 use scarlet_ui_macros::View;
+use sws_client::{Connection, InputMethodInfo};
 
 // Preset colors - Apple system-style palette
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +98,8 @@ struct SettingsApp {
     red_value: State<f32>,
     green_value: State<f32>,
     blue_value: State<f32>,
+    input_methods: State<Vec<InputMethodInfo>>,
+    selected_ime_index: State<usize>,
 }
 
 impl SettingsApp {
@@ -102,11 +107,18 @@ impl SettingsApp {
         let config = scarlet_desktop_config::load_desktop_config();
         let style = config.theme.background_style.unwrap_or(DEFAULT_STYLE);
         let color = config.theme.background.unwrap_or(DEFAULT_BG_PREVIEW);
+        let input_methods = load_input_methods();
+        let selected_ime_index = input_methods
+            .iter()
+            .position(|method| method.active)
+            .unwrap_or(0);
         Self {
             background_style: State::new(StateId::new(0), style),
             red_value: State::new(StateId::new(1), color[0] as f32),
             green_value: State::new(StateId::new(2), color[1] as f32),
             blue_value: State::new(StateId::new(3), color[2] as f32),
+            input_methods: State::new(StateId::new(4), input_methods),
+            selected_ime_index: State::new(StateId::new(5), selected_ime_index),
         }
     }
 
@@ -157,6 +169,53 @@ impl SettingsApp {
         }
         None
     }
+
+    fn select_input_method(&self, index: usize) {
+        let methods = self.input_methods.get();
+        let Some(method) = methods.get(index) else {
+            println!("[settings] Invalid input method index: {}", index);
+            return;
+        };
+
+        match Connection::connect_default() {
+            Ok(mut connection) => match connection.set_active_input_method(method.ime_id) {
+                Ok(()) => {
+                    println!(
+                        "[settings] Selected input method: {} ({})",
+                        method.name, method.ime_id
+                    );
+                    self.selected_ime_index.set(index);
+                    self.input_methods.update(|input_methods| {
+                        for item in input_methods {
+                            item.active = item.ime_id == method.ime_id;
+                        }
+                    });
+                }
+                Err(e) => println!("[settings] Failed to select input method: {:?}", e),
+            },
+            Err(e) => println!("[settings] Failed to connect to SWS: {:?}", e),
+        }
+    }
+}
+
+fn load_input_methods() -> Vec<InputMethodInfo> {
+    match Connection::connect_default() {
+        Ok(mut connection) => match connection.get_input_methods() {
+            Ok(methods) => methods,
+            Err(e) => {
+                println!("[settings] Failed to get input methods: {:?}", e);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            println!("[settings] Failed to connect to SWS: {:?}", e);
+            Vec::new()
+        }
+    }
+}
+
+fn input_method_labels(methods: &[InputMethodInfo]) -> Vec<String> {
+    methods.iter().map(|method| method.name.clone()).collect()
 }
 
 fn appearance_page(
@@ -501,9 +560,48 @@ fn display_page() -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+fn input_page(app: SettingsApp) -> impl View {
+    let methods = app.input_methods.get();
+    let labels = input_method_labels(&methods);
+    let selected = app.selected_ime_index.clone();
+    let selected_method = methods.get(selected.get());
+    let selected_name = selected_method
+        .map(|method| method.name.clone())
+        .unwrap_or_else(|| String::from("None"));
+    let selected_id = selected_method.map(|method| method.ime_id).unwrap_or(0);
+
+    vstack! {
+        Text::new("Input").font_size(28.0),
+        Text::new("Input Method").font_size(13.0),
+        Divider::new(),
+
+        vstack! {
+            Text::new("IME").font_size(14.0),
+            hstack! {
+                Text::new("Input Method").font_size(13.0).frame_width(120.0),
+                Select::new(labels, selected)
+                    .width(300.0)
+                    .on_change({
+                        let app = app.clone();
+                        move |index| {
+                            app.select_input_method(index);
+                        }
+                    }),
+            }
+            .padding(10.0),
+            Text::new(format!("Active: {} ({})", selected_name, selected_id)).font_size(12.0),
+            Text::new(format!("Registered IMEs: {}", methods.len())).font_size(12.0),
+        }
+        .padding(10.0),
+    }
+    .padding(10.0)
+    .frame(f32::INFINITY, f32::INFINITY)
+}
+
 impl Application for SettingsApp {
     fn body(&self) -> impl View {
         let app = self.clone();
+        let input_app = self.clone();
         let r0 = self.red_value.clone();
         let g0 = self.green_value.clone();
         let b0 = self.blue_value.clone();
@@ -571,6 +669,7 @@ impl Application for SettingsApp {
                     )
                 }),
                 NavigationLink::new("Display", Icon::Search, display_page),
+                NavigationLink::new("Input", Icon::Settings, move || input_page(input_app.clone())),
                 NavigationLink::new("Network", Icon::Search, network_page),
                 NavigationLink::new("About", Icon::Info, about_page),
             }

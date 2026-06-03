@@ -559,7 +559,8 @@ impl EventDispatcher {
         point: Point,
     ) -> Option<&'a dyn Element> {
         let root = element_tree.root()?;
-        self.hit_test_recursive(root, point)
+        self.hit_test_select_overlay_recursive(root, point)
+            .or_else(|| self.hit_test_recursive(root, point))
             .map(|(target, _)| target)
     }
 
@@ -573,7 +574,8 @@ impl EventDispatcher {
         point: Point,
     ) -> Option<HitResult<'a>> {
         let root = element_tree.root()?;
-        self.hit_test_recursive(root, point)
+        self.hit_test_select_overlay_recursive(root, point)
+            .or_else(|| self.hit_test_recursive(root, point))
             .map(|(target, path)| HitResult::new(target, path))
     }
 
@@ -613,7 +615,9 @@ impl EventDispatcher {
         point: Point,
     ) -> Option<Vec<ElementId>> {
         let root = element_tree.root()?;
-        let mut path = self.hit_test_recursive_ids(root, point)?;
+        let mut path = self
+            .hit_test_select_overlay_recursive_ids(root, point)
+            .or_else(|| self.hit_test_recursive_ids(root, point))?;
         path.reverse();
         Some(path)
     }
@@ -639,6 +643,69 @@ impl EventDispatcher {
         }
 
         None
+    }
+
+    fn hit_test_select_overlay_recursive<'a>(
+        &'a self,
+        element: &'a dyn Element,
+        point: Point,
+    ) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
+        let local_point = Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
+
+        for child in element.children().iter().rev() {
+            if let Some((found, mut path)) =
+                self.hit_test_select_overlay_recursive(child.as_ref(), local_point)
+            {
+                path.push(element);
+                return Some((found, path));
+            }
+        }
+
+        if Self::is_expanded_select(element) && element.hit_test(point) {
+            return Some((element, alloc::vec![element]));
+        }
+
+        None
+    }
+
+    fn hit_test_select_overlay_recursive_ids(
+        &self,
+        element: &dyn Element,
+        point: Point,
+    ) -> Option<Vec<ElementId>> {
+        let local_point = Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
+
+        for child in element.children().iter().rev() {
+            if let Some(mut path) =
+                self.hit_test_select_overlay_recursive_ids(child.as_ref(), local_point)
+            {
+                path.push(element.id());
+                return Some(path);
+            }
+        }
+
+        if Self::is_expanded_select(element) && element.hit_test(point) {
+            return Some(alloc::vec![element.id()]);
+        }
+
+        None
+    }
+
+    fn is_expanded_select(element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::SelectRenderObject>()
+            })
+            .is_some_and(|select| select.is_expanded())
     }
 
     /// Extract point from a mouse event

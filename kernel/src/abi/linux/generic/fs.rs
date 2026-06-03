@@ -25,6 +25,32 @@ static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
 static EPOLL_INTERESTS: Once<RwLock<Vec<EpollInterest>>> = Once::new();
 
+fn mozc_ipc_path(file: &dyn crate::object::capability::FileObject) -> Option<&str> {
+    let vfs_file = file
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?;
+    let path = vfs_file.get_original_path();
+    if path.contains(".session.ipc") || path.contains(".server.lock") {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn log_mozc_ipc_file(file: &dyn crate::object::capability::FileObject, op: &str, n: usize) {
+    let Some(path) = mozc_ipc_path(file) else {
+        return;
+    };
+    let size = file.metadata().ok().map(|meta| meta.size);
+    crate::println!(
+        "[linux mozc-ipc] {} path='{}' n={} size={:?}",
+        op,
+        path,
+        n,
+        size
+    );
+}
+
 const EPOLL_HANDLE_BASE: u32 = 0x3000_0000;
 const EPOLLIN: u32 = 0x0001;
 const EPOLLPRI: u32 = 0x0002;
@@ -876,6 +902,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         if let Some(sel) = obj.as_selectable() {
                             sel.set_nonblocking(((status_flags as i32) & O_NONBLOCK) != 0);
                         }
+                        if let Some(file) = obj.as_file() {
+                            log_mozc_ipc_file(file, "openat", fd);
+                        }
                     }
                     fd
                 }
@@ -1163,7 +1192,12 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
         let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
         match stream.write(buffer) {
-            Ok(n) => n,
+            Ok(n) => {
+                if let Some(file) = kernel_obj.as_file() {
+                    log_mozc_ipc_file(file, "write", n);
+                }
+                n
+            }
             Err(StreamError::WouldBlock) => {
                 if nonblocking {
                     return errno::to_result(errno::EAGAIN);
@@ -1212,6 +1246,9 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             cur_user += n;
         }
 
+        if let Some(file) = kernel_obj.as_file() {
+            log_mozc_ipc_file(file, "write", total_written);
+        }
         total_written
     }
 }
@@ -1602,6 +1639,9 @@ pub fn sys_writev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     }
 
+    if let Some(file) = kernel_obj.as_file() {
+        log_mozc_ipc_file(file, "writev", total_written);
+    }
     total_written
 }
 
@@ -2680,7 +2720,13 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     arg
                 );
             }
-            // TODO: Implement file locking
+            // TODO: Implement Linux/POSIX advisory byte-range locks. This compatibility
+            // path accepts lock requests for a valid fd so programs using lock files can
+            // continue when no competing Scarlet task observes those locks yet.
+            if abi.get_handle(fd).is_some() {
+                return 0;
+            }
+            return errno::to_result(errno::EBADF);
         }
         F_SETLKW => {
             if LOG_FCNTL {
@@ -2690,7 +2736,11 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     arg
                 );
             }
-            // TODO: Implement file locking
+            // TODO: Implement the blocking variant once advisory byte-range locks exist.
+            if abi.get_handle(fd).is_some() {
+                return 0;
+            }
+            return errno::to_result(errno::EBADF);
         }
         F_SETOWN => {
             if LOG_FCNTL {
@@ -3123,7 +3173,7 @@ pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     total_read
 }
 
-/// Linux sys_fsync system call implementation (stub)
+/// Linux sys_fsync system call implementation
 /// Synchronize a file's in-core state with storage device
 ///
 /// Arguments:
@@ -3132,14 +3182,33 @@ pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - 0 on success
 /// - usize::MAX on error
-pub fn sys_fsync(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fsync(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let _fd = trapframe.get_arg(0);
+    let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
 
-    // TODO: Implement actual file synchronization
-    // For now, return success as a stub implementation
-    0
+    let handle = match abi.get_handle(fd) {
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(object) => object,
+        None => return errno::to_result(errno::EBADF),
+    };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return errno::to_result(errno::EINVAL),
+    };
+
+    match file.sync() {
+        Ok(()) => {
+            log_mozc_ipc_file(file, "fsync", 0);
+            0
+        }
+        Err(_) => errno::to_result(errno::EIO),
+    }
 }
 
 /// Linux sys_ftruncate implementation
@@ -4306,6 +4375,49 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             0 // Success
         }
         None => usize::MAX, // Handle not found
+    }
+}
+
+/// Linux sys_fchmodat implementation (compatibility stub)
+///
+/// Changes the permissions of a file relative to a directory file descriptor.
+/// VFS v2 does not currently persist Unix permission changes for every backing
+/// filesystem, so this validates that the path string is readable and accepts
+/// the request. This matches `sys_fchmod`'s current compatibility behavior and
+/// is sufficient for Linux programs that use `chmod` to adjust temporary lock
+/// file permissions.
+/// TODO: Persist mode changes when VFS permission mutation is implemented.
+///
+/// Arguments:
+/// - abi: LinuxAbi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: dirfd (directory file descriptor, or AT_FDCWD)
+///   - arg1: pathname
+///   - arg2: mode (new file permissions)
+///   - arg3: flags
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) if the path pointer is invalid
+pub fn sys_fchmodat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let _dirfd = trapframe.get_arg(0) as i32;
+    trapframe.increment_pc_next(task);
+
+    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let _mode = trapframe.get_arg(2) as u32;
+    let _flags = trapframe.get_arg(3) as i32;
+
+    match get_path_str_v2(path_ptr) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX,
     }
 }
 

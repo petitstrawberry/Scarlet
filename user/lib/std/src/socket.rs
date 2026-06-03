@@ -302,6 +302,28 @@ impl Socket {
         sock.bind(path).map_err(|_| SocketError::AlreadyBound)
     }
 
+    /// Bind socket to an abstract local name.
+    ///
+    /// Abstract local sockets do not create filesystem entries. This is useful
+    /// for interoperating with Linux programs that use `sockaddr_un` abstract
+    /// namespace sockets.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Abstract socket name without the leading NUL byte
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if the socket is already bound or the name is invalid.
+    pub fn bind_abstract(&self, name: &str) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.bind_abstract(name)
+            .map_err(|_| SocketError::AlreadyBound)
+    }
+
     /// Start listening for connections
     ///
     /// # Arguments
@@ -349,6 +371,24 @@ impl Socket {
             .as_socket()
             .map_err(|_| SocketError::InvalidHandle)?;
         sock.connect(path)
+            .map_err(|_| SocketError::ConnectionRefused)
+    }
+
+    /// Connect to an abstract local socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Abstract socket name without the leading NUL byte
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if the target socket is not found or not listening.
+    pub fn connect_abstract(&self, name: &str) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.connect_abstract(name)
             .map_err(|_| SocketError::ConnectionRefused)
     }
 

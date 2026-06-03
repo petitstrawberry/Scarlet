@@ -46,6 +46,28 @@ impl Compositor {
         libm::ceilf(value.max(0.0) * self.scale_milli as f32 / 1000.0) as i32
     }
 
+    fn element_paint_bounds(&self, element: &dyn Element, absolute_origin: Point) -> Rect {
+        let bounds = element.bounds();
+        let mut width = bounds.size.width;
+        let mut height = bounds.size.height;
+        if let Some(buffer) = element.get_buffer() {
+            width = width.max(buffer.logical_width() as f32);
+            height = height.max(buffer.logical_height() as f32);
+        }
+        Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
+    }
+
+    fn is_expanded_select(&self, element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::SelectRenderObject>()
+            })
+            .is_some_and(|select| select.is_expanded())
+    }
+
     /// Set the output scale and recreate the physical window buffer.
     pub fn set_scale_milli(&mut self, scale_milli: u32, logical_size: Size) {
         self.scale_milli = scale_milli.max(1);
@@ -110,6 +132,7 @@ impl Compositor {
         }
 
         self.composite_element_clipped(root, Point::ZERO, &rects);
+        self.composite_select_overlays_clipped(root, Point::ZERO, &rects, None);
     }
 
     /// Composite an Element tree into the window buffer.
@@ -121,6 +144,7 @@ impl Compositor {
 
         self.clear(Color::WHITE);
         self.composite_element_with_clip(root, Point::ZERO, None);
+        self.composite_select_overlays(root, Point::ZERO, None);
     }
 
     /// Composite a RenderTree into the window buffer using dirty rectangles.
@@ -230,7 +254,8 @@ impl Compositor {
             bounds.size.width,
             bounds.size.height,
         );
-        self.last_bounds.insert(element.id(), absolute_bounds);
+        let paint_bounds = self.element_paint_bounds(element, absolute_origin);
+        self.last_bounds.insert(element.id(), paint_bounds);
 
         let mut next_clip = clip;
         if let Some(render_object) = element.render_object() {
@@ -301,9 +326,10 @@ impl Compositor {
             bounds.size.width,
             bounds.size.height,
         );
-        self.last_bounds.insert(element.id(), absolute_bounds);
+        let paint_bounds = self.element_paint_bounds(element, absolute_origin);
+        self.last_bounds.insert(element.id(), paint_bounds);
 
-        if !self.overlaps_any(absolute_bounds, dirty_rects) {
+        if !self.overlaps_any(paint_bounds, dirty_rects) {
             return;
         }
 
@@ -330,7 +356,7 @@ impl Compositor {
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
             for rect in dirty_rects.iter() {
-                if !absolute_bounds.overlaps(rect) {
+                if !paint_bounds.overlaps(rect) {
                     continue;
                 }
                 let mut clip_rect = *rect;
@@ -373,6 +399,184 @@ impl Compositor {
 
         for child in element.children() {
             self.composite_element_with_clip_dirty(child.as_ref(), absolute_origin, dirty_rects, next_clip);
+        }
+    }
+
+    fn composite_select_overlays(
+        &mut self,
+        element: &dyn Element,
+        origin: Point,
+        clip: Option<ClipRegion>,
+    ) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+        let bounds = element.bounds();
+        let absolute_bounds = Rect::from_xywh(
+            absolute_origin.x,
+            absolute_origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        );
+
+        let mut next_clip = clip;
+        if let Some(render_object) = element.render_object() {
+            if let Some(clip_render) = render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
+            {
+                let current = ClipRegion {
+                    rect: absolute_bounds,
+                    radius: clip_render.radius(),
+                };
+                next_clip = match next_clip {
+                    Some(existing) => self.intersect_clip(existing, current),
+                    None => Some(current),
+                };
+                if next_clip.is_none() {
+                    return;
+                }
+            }
+        }
+
+        for child in element.children() {
+            self.composite_select_overlays(child.as_ref(), absolute_origin, next_clip);
+        }
+
+        if self.is_expanded_select(element) {
+            if let Some(buffer) = element.get_buffer() {
+                let opacity = 1.0;
+                if let Some(active_clip) = next_clip {
+                    let paint_bounds = self.element_paint_bounds(element, absolute_origin);
+                    if let Some(clip_rect) = self.intersect_rect(paint_bounds, active_clip.rect) {
+                        let (x, y, w, h) = self.rect_to_i32(clip_rect);
+                        self.window_buffer.composite_clipped_rounded(
+                            buffer,
+                            self.scale_pos(absolute_origin.x),
+                            self.scale_pos(absolute_origin.y),
+                            opacity,
+                            x,
+                            y,
+                            w,
+                            h,
+                            self.scale_len(active_clip.radius) as f32,
+                        );
+                    }
+                } else {
+                    self.window_buffer.composite(
+                        buffer,
+                        self.scale_pos(absolute_origin.x),
+                        self.scale_pos(absolute_origin.y),
+                        opacity,
+                    );
+                }
+            }
+        }
+    }
+
+    fn composite_select_overlays_clipped(
+        &mut self,
+        element: &dyn Element,
+        origin: Point,
+        dirty_rects: &[Rect],
+        clip: Option<ClipRegion>,
+    ) {
+        let position = element.position();
+        let absolute_origin = Point {
+            x: origin.x + position.x,
+            y: origin.y + position.y,
+        };
+        let bounds = element.bounds();
+        let absolute_bounds = Rect::from_xywh(
+            absolute_origin.x,
+            absolute_origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        );
+
+        let mut next_clip = clip;
+        if let Some(render_object) = element.render_object() {
+            if let Some(clip_render) = render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
+            {
+                let current = ClipRegion {
+                    rect: absolute_bounds,
+                    radius: clip_render.radius(),
+                };
+                next_clip = match next_clip {
+                    Some(existing) => self.intersect_clip(existing, current),
+                    None => Some(current),
+                };
+                if next_clip.is_none() {
+                    return;
+                }
+            }
+        }
+
+        for child in element.children() {
+            self.composite_select_overlays_clipped(
+                child.as_ref(),
+                absolute_origin,
+                dirty_rects,
+                next_clip,
+            );
+        }
+
+        if self.is_expanded_select(element) {
+            let paint_bounds = self.element_paint_bounds(element, absolute_origin);
+            if !self.overlaps_any(paint_bounds, dirty_rects) {
+                return;
+            }
+
+            if let Some(buffer) = element.get_buffer() {
+                let opacity = 1.0;
+                for rect in dirty_rects.iter() {
+                    if !paint_bounds.overlaps(rect) {
+                        continue;
+                    }
+
+                    let mut clip_rect = *rect;
+                    let mut clip_radius = 0.0;
+                    if let Some(active_clip) = next_clip {
+                        if let Some(intersection) =
+                            self.intersect_rect(clip_rect, active_clip.rect)
+                        {
+                            clip_rect = intersection;
+                            clip_radius = active_clip.radius;
+                        } else {
+                            continue;
+                        }
+                    }
+                    let (x, y, w, h) = self.rect_to_i32(clip_rect);
+                    if clip_radius > 0.0 {
+                        self.window_buffer.composite_clipped_rounded(
+                            buffer,
+                            self.scale_pos(absolute_origin.x),
+                            self.scale_pos(absolute_origin.y),
+                            opacity,
+                            x,
+                            y,
+                            w,
+                            h,
+                            self.scale_len(clip_radius) as f32,
+                        );
+                    } else {
+                        self.window_buffer.composite_clipped(
+                            buffer,
+                            self.scale_pos(absolute_origin.x),
+                            self.scale_pos(absolute_origin.y),
+                            opacity,
+                            x,
+                            y,
+                            w,
+                            h,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -455,13 +659,7 @@ impl Compositor {
         };
 
         if dirty_ids.contains(&element.id()) {
-            let bounds = element.bounds();
-            rects.push(Rect::from_xywh(
-                absolute_origin.x,
-                absolute_origin.y,
-                bounds.size.width,
-                bounds.size.height,
-            ));
+            rects.push(self.element_paint_bounds(element, absolute_origin));
             if let Some(old_bounds) = self.last_bounds.get(&element.id()) {
                 rects.push(*old_bounds);
             }
