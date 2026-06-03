@@ -16,7 +16,7 @@ The key insight is the separation of **ephemeral trap frames** (stack-based) fro
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        USER SPACE (Violet)                       │
+│                        USER SPACE (U-SHV)                       │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                      vcpu_loop()                             ││
 │  │  loop {                                                      ││
