@@ -15,6 +15,12 @@ set -euo pipefail
 #  MOZC_REPO - Mozc source repository
 #  MOZC_REV - optional branch, tag, or commit to check out
 #  MOZC_DIR - Mozc checkout directory
+#  MOZC_DICTIONARY - dictionary set to build with (oss or ut), defaults to oss
+#  MOZC_UT_REPO - merge-ut-dictionaries source repository
+#  MOZC_UT_REV - optional branch, tag, or commit to check out
+#  MOZC_UT_DIR - merge-ut-dictionaries checkout directory
+#  MOZC_UT_GENERATE_LATEST - generate latest UT dictionaries, defaults to 0
+#  MOZC_HOST_PYTHON - host Python used for Mozc source patches and UT dictionary generation
 #  MUSL_FTS_REPO - musl-fts source repository
 #  MUSL_FTS_DIR - musl-fts checkout directory
 #  MOZC_UPDATE_DEPS_ARGS - if set, run build_tools/update_deps.py with these arguments
@@ -27,11 +33,15 @@ set -euo pipefail
 : "${PREBUILT_DIR:=/opt/prebuilt}"
 : "${WORKDIR:=/opt}"
 : "${MOZC_REPO:=https://github.com/google/mozc.git}"
+: "${MOZC_DICTIONARY:=oss}"
+: "${MOZC_UT_REPO:=https://github.com/utuhiro78/merge-ut-dictionaries.git}"
+: "${MOZC_UT_GENERATE_LATEST:=0}"
 : "${MUSL_FTS_REPO:=https://github.com/void-linux/musl-fts.git}"
 : "${MOZC_UPDATE_DEPS_ARGS:=}"
 : "${MOZC_ALLOW_ROOT_SERVER:=1}"
 : "${MOZC_TRACE_SERVER:=1}"
 : "${MOZC_DIR:=${WORKDIR}/mozc-${ARCH}}"
+: "${MOZC_UT_DIR:=${WORKDIR}/merge-ut-dictionaries}"
 : "${MUSL_FTS_DIR:=${WORKDIR}/musl-fts}"
 
 require_supported_host() {
@@ -99,6 +109,31 @@ if [[ ! -d "${toolchain_sysroot}" ]]; then
     exit 1
 fi
 
+find_host_python() {
+    local candidate
+
+    while IFS= read -r candidate; do
+        if [[ -x "${candidate}" ]] && "${candidate}" -c 'import bz2' >/dev/null 2>&1; then
+            echo "${candidate}"
+            return
+        fi
+    done < <(which -a python3 2>/dev/null || true)
+}
+
+if [[ -z "${MOZC_HOST_PYTHON:-}" ]]; then
+    MOZC_HOST_PYTHON="$(find_host_python)"
+fi
+if [[ -z "${MOZC_HOST_PYTHON}" || ! -x "${MOZC_HOST_PYTHON}" ]]; then
+    echo "Host python3 with bz2 support is not available." >&2
+    echo "Set MOZC_HOST_PYTHON=/path/to/python3." >&2
+    exit 1
+fi
+if ! "${MOZC_HOST_PYTHON}" -c 'import bz2' >/dev/null 2>&1; then
+    echo "Host Python at ${MOZC_HOST_PYTHON} cannot import bz2." >&2
+    echo "Set MOZC_HOST_PYTHON to a Python with bz2 support." >&2
+    exit 1
+fi
+
 export PATH="${toolchain_bindir}:${PATH}"
 
 if [[ -z "${MOZC_BAZEL:-}" ]]; then
@@ -122,6 +157,18 @@ clone_or_update() {
     else
         git clone --depth=1 "${repo_url}" "${dest_dir}"
     fi
+}
+
+checkout_optional_rev() {
+    local dest_dir="$1"
+    local rev="$2"
+
+    if [[ -z "${rev}" ]]; then
+        return
+    fi
+
+    git -C "${dest_dir}" fetch --depth=1 origin "${rev}" || true
+    git -C "${dest_dir}" checkout "${rev}"
 }
 
 build_musl_fts_if_needed() {
@@ -185,11 +232,7 @@ ensure_host_can_run_target_musl_tools
 
 echo "==> Fetching Mozc source..."
 clone_or_update "${MOZC_REPO}" "${MOZC_DIR}"
-
-if [[ -n "${MOZC_REV:-}" ]]; then
-    git -C "${MOZC_DIR}" fetch --depth=1 origin "${MOZC_REV}" || true
-    git -C "${MOZC_DIR}" checkout "${MOZC_REV}"
-fi
+checkout_optional_rev "${MOZC_DIR}" "${MOZC_REV:-}"
 
 src_dir="${MOZC_DIR}/src"
 if [[ ! -d "${src_dir}" ]]; then
@@ -197,10 +240,96 @@ if [[ ! -d "${src_dir}" ]]; then
     exit 1
 fi
 
+prepare_dictionary() {
+    local dictionary_file="${src_dir}/data/dictionary_oss/dictionary00.txt"
+    local merge_dir="${MOZC_UT_DIR}/src/merge"
+    local expected_mozc_link
+
+    if [[ ! -f "${dictionary_file}" ]]; then
+        echo "Mozc OSS dictionary was not found at ${dictionary_file}" >&2
+        exit 1
+    fi
+
+    # The Mozc checkout is a script-owned working tree. Restore the base OSS
+    # dictionary before each build so repeated UT builds do not append twice.
+    git -C "${MOZC_DIR}" checkout -- src/data/dictionary_oss/dictionary00.txt
+
+    case "${MOZC_DICTIONARY}" in
+        oss)
+            echo "==> Using Mozc OSS dictionary."
+            return
+            ;;
+        ut)
+            ;;
+        *)
+            echo "Unsupported MOZC_DICTIONARY=${MOZC_DICTIONARY}. Use oss or ut." >&2
+            exit 1
+            ;;
+    esac
+
+    echo "==> Fetching merge-ut-dictionaries..."
+    clone_or_update "${MOZC_UT_REPO}" "${MOZC_UT_DIR}"
+    checkout_optional_rev "${MOZC_UT_DIR}" "${MOZC_UT_REV:-}"
+
+    if [[ ! -d "${merge_dir}" ]]; then
+        echo "merge-ut-dictionaries merge directory not found at ${merge_dir}" >&2
+        exit 1
+    fi
+    git -C "${MOZC_UT_DIR}" checkout -- src/merge/make.sh
+
+    "${MOZC_HOST_PYTHON}" - "${merge_dir}/make.sh" "${MOZC_HOST_PYTHON}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+host_python = sys.argv[2]
+text = path.read_text()
+text = text.replace(
+    'python merge_dictionaries.py mozcdic-ut.txt',
+    f'"{host_python}" merge_dictionaries.py mozcdic-ut.txt',
+)
+path.write_text(text)
+PY
+
+    expected_mozc_link="$(dirname "${MOZC_UT_DIR}")/mozc-master"
+    if [[ -e "${expected_mozc_link}" && ! -L "${expected_mozc_link}" ]]; then
+        echo "Expected ${expected_mozc_link} to be absent or a symlink." >&2
+        echo "Set MOZC_UT_DIR so merge-ut-dictionaries can see Mozc as ../mozc-master." >&2
+        exit 1
+    fi
+    ln -sfn "${MOZC_DIR}" "${expected_mozc_link}"
+
+    if [[ "${MOZC_UT_GENERATE_LATEST}" == "1" ]]; then
+        "${MOZC_HOST_PYTHON}" - "${merge_dir}/make.sh" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+path.write_text(text.replace('#generate_latest="true"', 'generate_latest="true"'))
+PY
+    fi
+
+    echo "==> Generating Mozc UT dictionary..."
+    pushd "${merge_dir}" >/dev/null
+    PATH="$(dirname "${MOZC_HOST_PYTHON}"):${PATH}" bash make.sh
+    popd >/dev/null
+
+    if [[ ! -f "${merge_dir}/mozcdic-ut.txt" ]]; then
+        echo "Mozc UT dictionary was not produced at ${merge_dir}/mozcdic-ut.txt" >&2
+        exit 1
+    fi
+
+    echo "==> Merging Mozc UT dictionary into Mozc OSS dictionary..."
+    cat "${merge_dir}/mozcdic-ut.txt" >> "${dictionary_file}"
+}
+
+prepare_dictionary
+
 if [[ "${MOZC_ALLOW_ROOT_SERVER}" == "1" ]]; then
     run_level_cc="${src_dir}/base/run_level.cc"
     if ! grep -q "Scarlet Linux ABI runs mozc_server as uid 0" "${run_level_cc}"; then
-        python3 - "${run_level_cc}" <<'PY'
+        "${MOZC_HOST_PYTHON}" - "${run_level_cc}" <<'PY'
 import pathlib
 import sys
 
@@ -244,7 +373,7 @@ fi
 if [[ "${MOZC_TRACE_SERVER}" == "1" ]]; then
     server_cc="${src_dir}/server/mozc_server.cc"
     if ! grep -q "ScarletTrace" "${server_cc}"; then
-        python3 - "${server_cc}" <<'PY'
+        "${MOZC_HOST_PYTHON}" - "${server_cc}" <<'PY'
 import pathlib
 import sys
 
@@ -311,7 +440,7 @@ PY
 
     unix_ipc_cc="${src_dir}/ipc/unix_ipc.cc"
     if ! grep -q "ScarletIPCTrace" "${unix_ipc_cc}"; then
-        python3 - "${unix_ipc_cc}" <<'PY'
+        "${MOZC_HOST_PYTHON}" - "${unix_ipc_cc}" <<'PY'
 import pathlib
 import sys
 
@@ -400,7 +529,7 @@ pushd "${src_dir}" >/dev/null
 if [[ -n "${MOZC_UPDATE_DEPS_ARGS}" ]]; then
     echo "==> Updating Mozc dependencies..."
     # shellcheck disable=SC2086
-    python3 build_tools/update_deps.py ${MOZC_UPDATE_DEPS_ARGS}
+    "${MOZC_HOST_PYTHON}" build_tools/update_deps.py ${MOZC_UPDATE_DEPS_ARGS}
 fi
 
 mkdir -p "${WORKDIR}/bazel-${ARCH}"
