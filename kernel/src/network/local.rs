@@ -1295,7 +1295,8 @@ mod tests {
             !sock1
                 .current_ready(ReadyInterest {
                     read: false,
-                    write: true
+                    write: true,
+                    except: false,
                 })
                 .write,
             "socket should not report writable after SHUT_WR"
