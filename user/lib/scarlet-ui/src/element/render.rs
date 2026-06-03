@@ -387,7 +387,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .downcast_ref::<crate::views::TextFieldRenderObject>()?;
         render_object
             .is_focused()
-            .then(|| field.text_input_state(render_object.preedit()))
+            .then(|| field.text_input_state(render_object.preedit(), render_object.preedit_anchor_byte()))
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {

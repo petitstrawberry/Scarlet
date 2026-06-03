@@ -92,13 +92,17 @@ pub trait Application: View {
     /// * `context_id` - Text-input context that received the preedit update.
     /// * `serial` - Server serial for the text-input update.
     /// * `cursor_byte` - UTF-8 byte offset of the preedit cursor.
+    /// * `anchor_byte` - UTF-8 byte offset of the active preedit segment.
     /// * `text` - UTF-8 preedit text.
+    /// * `spans` - Encoded preedit style spans.
     fn on_text_input_preedit(
         &mut self,
         _context_id: u32,
         _serial: u32,
         _cursor_byte: u32,
+        _anchor_byte: u32,
         _text: &str,
+        _spans: &[u8],
     ) {
         // Default: do nothing
     }
@@ -362,11 +366,20 @@ pub trait Application: View {
                                 context_id,
                                 serial,
                                 cursor_byte,
+                                anchor_byte,
                                 text,
+                                spans,
                                 ..
                             } = &event
                         {
-                            self.on_text_input_preedit(*context_id, *serial, *cursor_byte, text);
+                            self.on_text_input_preedit(
+                                *context_id,
+                                *serial,
+                                *cursor_byte,
+                                *anchor_byte,
+                                text,
+                                spans,
+                            );
                         }
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle

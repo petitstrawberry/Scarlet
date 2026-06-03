@@ -31,6 +31,10 @@ pub struct TextGridCell {
     pub italic: bool,
     /// Whether the cell should draw an underline.
     pub underline: bool,
+    /// Optional underline color override.
+    pub underline_color: Option<Color>,
+    /// Optional underline thickness override in pixels.
+    pub underline_thickness: u8,
     /// Whether foreground and background should be swapped.
     pub inverse: bool,
     /// Whether the cell should draw a strike-through line.
@@ -58,6 +62,8 @@ impl TextGridCell {
             faint: false,
             italic: false,
             underline: false,
+            underline_color: None,
+            underline_thickness: 0,
             inverse: false,
             strikethrough: false,
         }
@@ -671,9 +677,17 @@ impl TextGridRenderObject {
         }
         let line_thickness = (libm::ceilf(self.font_size / 12.0) as u32).max(1);
         if cell.underline {
+            let underline_thickness = line_thickness.max(cell.underline_thickness as u32);
             let line_y = y
-                + h.saturating_sub(line_thickness).saturating_sub(1) as i32;
-            canvas.fill_rect(x, line_y.max(y), w, line_thickness, foreground);
+                + h.saturating_sub(underline_thickness)
+                    .saturating_sub(1) as i32;
+            canvas.fill_rect(
+                x,
+                line_y.max(y),
+                w,
+                underline_thickness,
+                cell.underline_color.unwrap_or(foreground),
+            );
         }
         if cell.strikethrough {
             let line_y = y + (h / 2) as i32;

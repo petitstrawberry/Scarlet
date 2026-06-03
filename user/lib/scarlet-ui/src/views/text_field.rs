@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::buffer::Buffer;
@@ -95,10 +96,10 @@ impl TextField {
         }
     }
 
-    pub(crate) fn text_input_state(&self, preedit: &str) -> TextInputElementState {
+    pub(crate) fn text_input_state(&self, preedit: &str, anchor_byte: u32) -> TextInputElementState {
         let text = self.text.get();
         let mut display = text.clone();
-        display.push_str(preedit);
+        display.push_str(preedit_prefix(preedit, anchor_byte));
         let (text_width, _) = graphics::measure_text_sized(&display, self.font_size);
         TextInputElementState {
             cursor_rect: Rect::from_xywh(
@@ -133,6 +134,9 @@ impl View for TextField {
 pub struct TextFieldRenderObject {
     text: String,
     preedit: String,
+    preedit_cursor_byte: u32,
+    preedit_anchor_byte: u32,
+    preedit_spans: Vec<u8>,
     focused: bool,
     placeholder: String,
     background_color: Color,
@@ -152,6 +156,9 @@ impl TextFieldRenderObject {
         Self {
             text: view.text.get(),
             preedit: String::new(),
+            preedit_cursor_byte: 0,
+            preedit_anchor_byte: 0,
+            preedit_spans: Vec::new(),
             focused: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
@@ -215,9 +222,10 @@ impl ElementRenderObject for TextFieldRenderObject {
 
             let display = if self.text.is_empty() && self.preedit.is_empty() {
                 self.placeholder.clone()
+            } else if self.focused && !self.preedit.is_empty() {
+                text_with_preedit_cursor(&self.text, &self.preedit, self.preedit_cursor_byte)
             } else if self.focused {
                 let mut display = self.text.clone();
-                display.push_str(&self.preedit);
                 display.push('|');
                 display
             } else {
@@ -230,20 +238,19 @@ impl ElementRenderObject for TextFieldRenderObject {
             };
             let x = self.padding as i32;
             let y = ((height as f32 - self.font_size * 1.2) / 2.0).max(0.0) as i32;
-            canvas.draw_text_sized(x, y, &display, color, self.font_size);
             if self.focused && !self.preedit.is_empty() {
-                let (committed_width, _) = graphics::measure_text_sized(&self.text, self.font_size);
-                let (preedit_width, _) = graphics::measure_text_sized(&self.preedit, self.font_size);
-                let underline_y = (y as f32 + self.font_size * 1.15).max(0.0) as i32;
-                let underline_x = x + committed_width as i32;
-                canvas.draw_line(
-                    underline_x,
-                    underline_y,
-                    underline_x + preedit_width as i32,
-                    underline_y,
+                draw_preedit_marks(
+                    &mut canvas,
+                    x,
+                    y,
+                    &self.text,
+                    &self.preedit,
+                    &self.preedit_spans,
+                    self.font_size,
                     self.focused_border_color,
                 );
             }
+            canvas.draw_text_sized(x, y, &display, color, self.font_size);
         }
     }
 
@@ -269,9 +276,15 @@ impl ElementRenderObject for TextFieldRenderObject {
         };
         let focused = self.focused;
         let preedit = self.preedit.clone();
+        let preedit_cursor_byte = self.preedit_cursor_byte;
+        let preedit_anchor_byte = self.preedit_anchor_byte;
+        let preedit_spans = self.preedit_spans.clone();
         *self = TextFieldRenderObject::from_view(view);
         self.focused = focused;
         self.preedit = preedit;
+        self.preedit_cursor_byte = preedit_cursor_byte;
+        self.preedit_anchor_byte = preedit_anchor_byte;
+        self.preedit_spans = preedit_spans;
         crate::element::UpdateResult::Updated
     }
 }
@@ -284,7 +297,7 @@ impl TextFieldRenderObject {
     pub(crate) fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
         if !focused {
-            self.preedit.clear();
+            self.clear_preedit();
         }
     }
 
@@ -292,9 +305,30 @@ impl TextFieldRenderObject {
         &self.preedit
     }
 
-    pub(crate) fn set_preedit(&mut self, preedit: &str) {
+    pub(crate) fn preedit_anchor_byte(&self) -> u32 {
+        self.preedit_anchor_byte
+    }
+
+    pub(crate) fn set_preedit_state(
+        &mut self,
+        preedit: &str,
+        cursor_byte: u32,
+        anchor_byte: u32,
+        spans: &[u8],
+    ) {
         self.preedit.clear();
         self.preedit.push_str(preedit);
+        self.preedit_cursor_byte = clamp_byte_boundary(preedit, cursor_byte);
+        self.preedit_anchor_byte = clamp_byte_boundary(preedit, anchor_byte);
+        self.preedit_spans.clear();
+        self.preedit_spans.extend_from_slice(spans);
+    }
+
+    pub(crate) fn clear_preedit(&mut self) {
+        self.preedit.clear();
+        self.preedit_cursor_byte = 0;
+        self.preedit_anchor_byte = 0;
+        self.preedit_spans.clear();
     }
 }
 
@@ -308,7 +342,7 @@ pub(crate) fn handle_text_field_keyboard(
     }
     match event {
         KeyEvent::Char { c } if !c.is_control() => {
-            render_object.set_preedit("");
+            render_object.clear_preedit();
             let mut text = field.text.get();
             text.push(c);
             field.text.set(text);
@@ -366,14 +400,20 @@ pub(crate) fn handle_text_field_text_input(
 
     match event {
         crate::event::Event::TextInputCommit { text, .. } => {
-            render_object.set_preedit("");
+            render_object.clear_preedit();
             let mut current = field.text.get();
             current.push_str(text);
             field.text.set(current);
             true
         }
-        crate::event::Event::TextInputPreedit { text, .. } => {
-            render_object.set_preedit(text);
+        crate::event::Event::TextInputPreedit {
+            cursor_byte,
+            anchor_byte,
+            text,
+            spans,
+            ..
+        } => {
+            render_object.set_preedit_state(text, *cursor_byte, *anchor_byte, spans);
             true
         }
         crate::event::Event::TextInputDeleteSurroundingText {
@@ -381,13 +421,151 @@ pub(crate) fn handle_text_field_text_input(
             after_bytes,
             ..
         } => {
-            render_object.set_preedit("");
+            render_object.clear_preedit();
             delete_surrounding_text_at_end(field, *before_bytes, *after_bytes);
             true
         }
         crate::event::Event::TextInputDone { .. } => true,
         _ => false,
     }
+}
+
+fn text_with_preedit_cursor(text: &str, preedit: &str, cursor_byte: u32) -> String {
+    let cursor_byte = clamp_byte_boundary(preedit, cursor_byte) as usize;
+    let mut display = String::new();
+    display.push_str(text);
+    display.push_str(&preedit[..cursor_byte]);
+    display.push('|');
+    display.push_str(&preedit[cursor_byte..]);
+    display
+}
+
+fn preedit_prefix(preedit: &str, byte: u32) -> &str {
+    let byte = clamp_byte_boundary(preedit, byte) as usize;
+    &preedit[..byte]
+}
+
+fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
+    let mut byte = (byte as usize).min(text.len());
+    while byte > 0 && !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte as u32
+}
+
+fn draw_preedit_marks(
+    canvas: &mut graphics::Canvas<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    preedit: &str,
+    spans: &[u8],
+    font_size: f32,
+    active_color: Color,
+) {
+    if spans.is_empty() {
+        draw_preedit_mark_span(
+            canvas,
+            x,
+            y,
+            text,
+            preedit,
+            0,
+            preedit.len(),
+            false,
+            font_size,
+            active_color,
+        );
+        return;
+    }
+
+    let mut offset = 0usize;
+    while offset + 12 <= spans.len() {
+        let start = u32::from_le_bytes([
+            spans[offset],
+            spans[offset + 1],
+            spans[offset + 2],
+            spans[offset + 3],
+        ]);
+        let length = u32::from_le_bytes([
+            spans[offset + 4],
+            spans[offset + 5],
+            spans[offset + 6],
+            spans[offset + 7],
+        ]);
+        let style = u32::from_le_bytes([
+            spans[offset + 8],
+            spans[offset + 9],
+            spans[offset + 10],
+            spans[offset + 11],
+        ]);
+        let start = clamp_byte_boundary(preedit, start) as usize;
+        let end = clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32)
+            as usize;
+        if start < end {
+            let active = style
+                & (sws_protocol::preedit_style::HIGHLIGHT
+                    | sws_protocol::preedit_style::SELECTED
+                    | sws_protocol::preedit_style::TARGET_CONVERTING)
+                != 0;
+            draw_preedit_mark_span(
+                canvas,
+                x,
+                y,
+                text,
+                preedit,
+                start,
+                end,
+                active,
+                font_size,
+                active_color,
+            );
+        }
+        offset += 12;
+    }
+}
+
+fn draw_preedit_mark_span(
+    canvas: &mut graphics::Canvas<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    preedit: &str,
+    start: usize,
+    end: usize,
+    active: bool,
+    font_size: f32,
+    active_color: Color,
+) {
+    let mut prefix = String::new();
+    prefix.push_str(text);
+    prefix.push_str(&preedit[..start]);
+    let (prefix_width, _) = graphics::measure_text_sized(&prefix, font_size);
+    let (span_width, _) = graphics::measure_text_sized(&preedit[start..end], font_size);
+    let underline_x = x + prefix_width as i32;
+    let underline_y = (y as f32 + font_size * 1.15).max(0.0) as i32;
+    let thickness = if active { 3 } else { 1 };
+    let color = if active {
+        active_color
+    } else {
+        Color::rgb(150u8, 158u8, 170u8)
+    };
+    if active {
+        canvas.fill_rect(
+            underline_x,
+            y.saturating_sub(1),
+            span_width.max(1) as u32,
+            (font_size * 1.25).max(1.0) as u32,
+            Color::rgba(218u8, 232u8, 255u8, 0.95),
+        );
+    }
+    canvas.fill_rect(
+        underline_x,
+        underline_y,
+        span_width.max(1) as u32,
+        thickness,
+        color,
+    );
 }
 
 fn delete_surrounding_text_at_end(field: &TextField, before_bytes: u32, after_bytes: u32) {

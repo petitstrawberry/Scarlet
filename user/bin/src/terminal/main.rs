@@ -57,6 +57,8 @@ struct TerminalTextInput {
 struct TerminalPreedit {
     text: String,
     cursor_byte: u32,
+    anchor_byte: u32,
+    spans: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,8 +195,14 @@ impl TerminalApp {
         let Some(state) = text_input.as_mut() else {
             return;
         };
-        let cursor = if self.preedit.lock().is_some() {
-            self.screen.lock().cursor()
+        let cursor = if let Some(preedit) = self.preedit.lock().clone() {
+            let columns = self.grid.get().columns();
+            preedit_cursor_for_byte(
+                self.screen.lock().cursor(),
+                &preedit.text,
+                preedit.anchor_byte,
+                columns,
+            )
         } else {
             self.cursor.get()
         };
@@ -388,7 +396,9 @@ impl Application for TerminalApp {
         context_id: u32,
         _serial: u32,
         cursor_byte: u32,
+        anchor_byte: u32,
         text: &str,
+        spans: &[u8],
     ) {
         let Some(text_input) = *self.text_input.lock() else {
             return;
@@ -402,6 +412,8 @@ impl Application for TerminalApp {
             *self.preedit.lock() = Some(TerminalPreedit {
                 text: String::from(text),
                 cursor_byte,
+                anchor_byte,
+                spans: spans.to_vec(),
             });
             refresh_terminal_view(&self.screen, &self.grid, &self.cursor, &self.preedit);
         }
@@ -749,22 +761,16 @@ fn draw_preedit(
     preedit: &TerminalPreedit,
 ) -> TextGridCursor {
     let foreground = Color::rgb(245, 248, 255);
-    let background = Color::rgb(44, 55, 70);
+    let underline_color = Color::rgb(168, 183, 204);
+    let active_underline_color = Color::rgb(88, 166, 255);
     let mut column = base_cursor.column;
     let mut row = base_cursor.row;
     let cursor_offset = preedit_cursor_offset(&preedit.text, preedit.cursor_byte);
     let mut display_cursor = base_cursor;
 
-    for (offset, ch) in preedit.text.chars().enumerate() {
+    for (offset, (byte_offset, ch)) in preedit.text.char_indices().enumerate() {
         if row >= grid.rows() {
             break;
-        }
-        if offset == cursor_offset {
-            display_cursor = TextGridCursor {
-                column,
-                row,
-                visible: true,
-            };
         }
         let width = text_grid_cell_width(ch);
         if width == 2 && column + 1 >= grid.columns() {
@@ -774,13 +780,45 @@ fn draw_preedit(
                 break;
             }
         }
+        if offset == cursor_offset {
+            display_cursor = TextGridCursor {
+                column,
+                row,
+                visible: true,
+            };
+        }
 
-        let mut cell = TextGridCell::new(ch, foreground, background);
-        cell.underline = true;
+        let style = preedit_style_at_byte(&preedit.spans, byte_offset);
+        let highlighted = style
+            & (sws_protocol::preedit_style::HIGHLIGHT
+                | sws_protocol::preedit_style::SELECTED
+                | sws_protocol::preedit_style::TARGET_CONVERTING)
+            != 0;
+        let cell_background = grid
+            .cell(column, row)
+            .map(|cell| cell.background)
+            .unwrap_or(Color::BLACK);
+
+        let mut cell = TextGridCell::new(ch, foreground, cell_background);
+        cell.underline = style
+            & (sws_protocol::preedit_style::UNDERLINE
+                | sws_protocol::preedit_style::THICK_UNDERLINE
+                | sws_protocol::preedit_style::HIGHLIGHT
+                | sws_protocol::preedit_style::SELECTED
+                | sws_protocol::preedit_style::TARGET_CONVERTING)
+            != 0;
+        cell.underline_color = Some(if highlighted {
+            active_underline_color
+        } else {
+            underline_color
+        });
+        cell.underline_thickness = if highlighted { 3 } else { 1 };
         let _ = grid.set_cell(column, row, cell);
         if width == 2 {
-            let mut continuation = TextGridCell::new('\0', foreground, background);
-            continuation.underline = true;
+            let mut continuation = TextGridCell::new('\0', foreground, cell_background);
+            continuation.underline = cell.underline;
+            continuation.underline_color = cell.underline_color;
+            continuation.underline_thickness = cell.underline_thickness;
             let _ = grid.set_cell(column + 1, row, continuation);
         }
 
@@ -802,11 +840,81 @@ fn draw_preedit(
     display_cursor
 }
 
+fn preedit_cursor_for_byte(
+    base_cursor: TextGridCursor,
+    text: &str,
+    cursor_byte: u32,
+    columns: usize,
+) -> TextGridCursor {
+    let columns = columns.max(1);
+    let mut column = base_cursor.column.min(columns - 1);
+    let mut row = base_cursor.row;
+    let cursor_byte = cursor_byte as usize;
+
+    for (byte_offset, ch) in text.char_indices() {
+        if byte_offset >= cursor_byte {
+            break;
+        }
+        let width = text_grid_cell_width(ch);
+        if width == 2 && column + 1 >= columns {
+            column = 0;
+            row += 1;
+        }
+        column += width;
+        if column >= columns {
+            column = 0;
+            row += 1;
+        }
+    }
+
+    TextGridCursor {
+        column,
+        row,
+        visible: true,
+    }
+}
+
 fn preedit_cursor_offset(text: &str, cursor_byte: u32) -> usize {
     let cursor_byte = cursor_byte as usize;
     text.char_indices()
         .take_while(|(byte_offset, _)| *byte_offset < cursor_byte)
         .count()
+}
+
+fn preedit_style_at_byte(spans: &[u8], byte_offset: usize) -> u32 {
+    let mut style = 0;
+    let mut offset = 0usize;
+
+    while offset + 12 <= spans.len() {
+        let start = u32::from_le_bytes([
+            spans[offset],
+            spans[offset + 1],
+            spans[offset + 2],
+            spans[offset + 3],
+        ]) as usize;
+        let length = u32::from_le_bytes([
+            spans[offset + 4],
+            spans[offset + 5],
+            spans[offset + 6],
+            spans[offset + 7],
+        ]) as usize;
+        let span_style = u32::from_le_bytes([
+            spans[offset + 8],
+            spans[offset + 9],
+            spans[offset + 10],
+            spans[offset + 11],
+        ]);
+        if byte_offset >= start && byte_offset < start.saturating_add(length) {
+            style |= span_style;
+        }
+        offset += 12;
+    }
+
+    if style == 0 {
+        sws_protocol::preedit_style::UNDERLINE
+    } else {
+        style
+    }
 }
 
 fn grid_dimensions(width: u32, height: u32, metrics: TerminalMetrics) -> (usize, usize) {

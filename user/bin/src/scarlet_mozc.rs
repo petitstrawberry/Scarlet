@@ -263,6 +263,7 @@ impl ScarletMozc {
             println!("[scarlet_mozc] no Mozc session");
             return Ok(false);
         };
+
         let Some(key) = self.translate_key(code, time) else {
             println!("[scarlet_mozc] pass-through unsupported key {}", code);
             return Ok(false);
@@ -304,7 +305,7 @@ impl ScarletMozc {
         if let Some(mode) = output.mode {
             self.active_mode = mode;
         }
-        if let Some(status) = output.status {
+        if let Some(status) = output.status.as_ref() {
             if let Some(mode) = status.mode {
                 self.active_mode = mode;
             }
@@ -312,32 +313,36 @@ impl ScarletMozc {
                 self.active_mode = proto::COMPOSITION_DIRECT;
             }
         }
-        if let Some(commit) = output.result {
+        let committed = output.result.as_ref().is_some_and(|text| !text.is_empty());
+        if let Some(commit) = output.result.as_ref() {
             if !commit.is_empty() {
                 println!("[scarlet_mozc] commit '{}'", commit);
-                conn.ime_commit_text(context_id, &commit)?;
+                conn.ime_commit_text(context_id, commit)?;
             }
         }
-        if let Some(preedit) = output.preedit {
-            self.preedit = preedit.text;
-            let cursor_byte = char_to_byte_index(&self.preedit, preedit.cursor_chars);
+
+        if let Some(preedit) = output.preedit.as_ref() {
+            let cursor_byte = char_to_byte_index(&preedit.text, preedit.cursor_chars);
+            let anchor_byte = active_preedit_anchor_byte(preedit);
+            let spans = preedit_spans(preedit);
+            self.preedit = preedit.text.clone();
             println!(
-                "[scarlet_mozc] preedit '{}' cursor_byte={}",
-                self.preedit, cursor_byte
+                "[scarlet_mozc] preedit '{}' cursor_byte={} anchor_byte={}",
+                self.preedit, cursor_byte, anchor_byte
             );
             conn.ime_set_preedit(
                 context_id,
                 cursor_byte as u32,
-                cursor_byte as u32,
+                anchor_byte as u32,
                 &self.preedit,
-                &preedit_spans(&self.preedit),
+                &spans,
             )?;
         } else if !self.preedit.is_empty() {
             self.preedit.clear();
             println!("[scarlet_mozc] preedit ''");
             conn.ime_set_preedit(context_id, 0, 0, "", &[])?;
         }
-        self.sync_candidate_popup(conn, context_id, output.candidate_window.as_ref())?;
+        self.sync_candidate_popup(conn, context_id, output.candidate_source(), !committed)?;
         self.emit_status(conn, context_id)
     }
 
@@ -390,16 +395,28 @@ impl ScarletMozc {
         conn: &mut Connection,
         context_id: u32,
         candidate_window: Option<&MozcCandidateWindow>,
+        allow_keep_existing: bool,
     ) -> Result<(), Error> {
+        let keep_existing_popup =
+            allow_keep_existing && self.candidate_popup.is_some() && !self.preedit.is_empty();
         let Some(candidate_window) = candidate_window else {
+            if keep_existing_popup {
+                return self.keep_candidate_popup_visible(conn, context_id);
+            }
             return self.close_candidate_popup(conn);
         };
         if candidate_window.focused_index.is_none() || candidate_window.candidates.is_empty() {
+            if keep_existing_popup {
+                return self.keep_candidate_popup_visible(conn, context_id);
+            }
             return self.close_candidate_popup(conn);
         }
 
         let rows = candidate_popup_rows(candidate_window);
         if rows.is_empty() {
+            if keep_existing_popup {
+                return self.keep_candidate_popup_visible(conn, context_id);
+            }
             return self.close_candidate_popup(conn);
         }
 
@@ -418,6 +435,36 @@ impl ScarletMozc {
             context_id, window_id, candidate_window.focused_index, candidate_window.size
         );
         Ok(())
+    }
+
+    fn keep_candidate_popup_visible(
+        &mut self,
+        conn: &mut Connection,
+        context_id: u32,
+    ) -> Result<(), Error> {
+        let Some(popup) = self.candidate_popup else {
+            return Ok(());
+        };
+        match conn.ime_set_popup_window(
+            context_id,
+            popup.window_id,
+            CANDIDATE_POPUP_OFFSET_X,
+            CANDIDATE_POPUP_OFFSET_Y,
+            true,
+        ) {
+            Ok(()) => {
+                println!(
+                    "[scarlet_mozc] candidate popup kept visible context={} window={}",
+                    context_id, popup.window_id
+                );
+                Ok(())
+            }
+            Err(Error::SurfaceNotFound) => {
+                self.candidate_popup = None;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn emit_status(&self, conn: &mut Connection, context_id: u32) -> Result<(), Error> {
@@ -746,19 +793,34 @@ struct MozcOutput {
     result: Option<String>,
     preedit: Option<MozcPreedit>,
     candidate_window: Option<MozcCandidateWindow>,
+    all_candidate_words: Option<MozcCandidateWindow>,
     status: Option<MozcStatus>,
     mode: Option<u32>,
 }
 
 impl MozcOutput {
     fn has_visible_update(&self) -> bool {
-        self.result.as_ref().is_some_and(|text| !text.is_empty()) || self.preedit.is_some()
+        self.result.as_ref().is_some_and(|text| !text.is_empty())
+            || self.preedit.is_some()
+            || self.candidate_source().is_some()
+    }
+
+    fn candidate_source(&self) -> Option<&MozcCandidateWindow> {
+        self.all_candidate_words
+            .as_ref()
+            .or(self.candidate_window.as_ref())
     }
 }
 
 struct MozcPreedit {
     text: String,
     cursor_chars: usize,
+    segments: Vec<MozcPreeditSegment>,
+}
+
+struct MozcPreeditSegment {
+    value: String,
+    annotation: u32,
 }
 
 #[derive(Default)]
@@ -847,15 +909,52 @@ fn socket_write_all(socket: &mut Socket, mut data: &[u8]) -> std::io::Result<()>
     Ok(())
 }
 
-fn preedit_spans(text: &str) -> Vec<u8> {
-    if text.is_empty() {
+fn preedit_spans(preedit: &MozcPreedit) -> Vec<u8> {
+    if preedit.text.is_empty() {
         return Vec::new();
     }
     let mut spans = Vec::new();
-    spans.extend_from_slice(&0u32.to_le_bytes());
-    spans.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    spans.extend_from_slice(&sws_protocol::preedit_style::UNDERLINE.to_le_bytes());
+    let mut start = 0usize;
+
+    for segment in &preedit.segments {
+        let length = segment.value.len();
+        if length > 0 {
+            spans.extend_from_slice(&(start as u32).to_le_bytes());
+            spans.extend_from_slice(&(length as u32).to_le_bytes());
+            spans.extend_from_slice(&mozc_preedit_style(segment.annotation).to_le_bytes());
+        }
+        start += length;
+    }
+
+    if spans.is_empty() {
+        spans.extend_from_slice(&0u32.to_le_bytes());
+        spans.extend_from_slice(&(preedit.text.len() as u32).to_le_bytes());
+        spans.extend_from_slice(&sws_protocol::preedit_style::UNDERLINE.to_le_bytes());
+    }
+
     spans
+}
+
+fn active_preedit_anchor_byte(preedit: &MozcPreedit) -> usize {
+    let mut start = 0usize;
+    for segment in &preedit.segments {
+        if segment.annotation == proto::MOZC_PREEDIT_HIGHLIGHT {
+            return start;
+        }
+        start += segment.value.len();
+    }
+    0
+}
+
+fn mozc_preedit_style(annotation: u32) -> u32 {
+    match annotation {
+        proto::MOZC_PREEDIT_HIGHLIGHT => {
+            sws_protocol::preedit_style::UNDERLINE
+                | sws_protocol::preedit_style::HIGHLIGHT
+                | sws_protocol::preedit_style::TARGET_CONVERTING
+        }
+        _ => sws_protocol::preedit_style::UNDERLINE,
+    }
 }
 
 fn char_to_byte_index(text: &str, char_index: usize) -> usize {
@@ -1129,7 +1228,9 @@ fn key_name(code: u16) -> &'static str {
 }
 
 mod proto {
-    use super::{MozcCandidate, MozcCandidateWindow, MozcOutput, MozcPreedit, MozcStatus};
+    use super::{
+        MozcCandidate, MozcCandidateWindow, MozcOutput, MozcPreedit, MozcPreeditSegment, MozcStatus,
+    };
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
@@ -1141,6 +1242,9 @@ mod proto {
     pub const COMPOSITION_FULL_KATAKANA: u32 = 2;
     pub const COMPOSITION_HALF_ASCII: u32 = 3;
     pub const COMPOSITION_FULL_ASCII: u32 = 4;
+
+    pub const MOZC_PREEDIT_UNDERLINE: u32 = 1;
+    pub const MOZC_PREEDIT_HIGHLIGHT: u32 = 2;
 
     pub const SPECIAL_SPACE: u32 = 4;
     pub const SPECIAL_ENTER: u32 = 5;
@@ -1260,6 +1364,10 @@ mod proto {
                     let status = cursor.read_bytes()?;
                     output.status = Some(decode_status(status)?);
                 }
+                (14, WIRE_BYTES) => {
+                    let candidate_list = cursor.read_bytes()?;
+                    output.all_candidate_words = decode_candidate_list(candidate_list);
+                }
                 _ => {
                     if cursor.skip(wire).is_none() {
                         break;
@@ -1292,6 +1400,29 @@ mod proto {
         Some(window)
     }
 
+    fn decode_candidate_list(data: &[u8]) -> Option<MozcCandidateWindow> {
+        let mut window = MozcCandidateWindow::default();
+        let mut cursor = Cursor::new(data);
+        while let Some((field, wire)) = cursor.read_key() {
+            match (field, wire) {
+                (1, WIRE_VARINT) => window.focused_index = cursor.read_varint().map(|v| v as usize),
+                (2, WIRE_BYTES) => {
+                    let candidate = cursor.read_bytes()?;
+                    if let Some(candidate) = decode_candidate_word(candidate) {
+                        window.candidates.push(candidate);
+                    }
+                }
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        window.size = window.candidates.len() as u32;
+        Some(window)
+    }
+
     fn decode_candidate(cursor: &mut Cursor<'_>) -> Option<MozcCandidate> {
         let mut index = None;
         let mut value = None;
@@ -1300,6 +1431,27 @@ mod proto {
                 (3, WIRE_END_GROUP) => break,
                 (4, WIRE_VARINT) => index = cursor.read_varint().map(|v| v as usize),
                 (5, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string),
+                _ => {
+                    if cursor.skip(wire).is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        Some(MozcCandidate {
+            index: index?,
+            value: value?,
+        })
+    }
+
+    fn decode_candidate_word(data: &[u8]) -> Option<MozcCandidate> {
+        let mut index = None;
+        let mut value = None;
+        let mut cursor = Cursor::new(data);
+        while let Some((field, wire)) = cursor.read_key() {
+            match (field, wire) {
+                (2, WIRE_VARINT) => index = cursor.read_varint().map(|v| v as usize),
+                (4, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string),
                 _ => {
                     if cursor.skip(wire).is_none() {
                         break;
@@ -1332,12 +1484,15 @@ mod proto {
     fn decode_preedit(data: &[u8]) -> Option<MozcPreedit> {
         let mut cursor_chars = 0usize;
         let mut text = String::new();
+        let mut segments = Vec::new();
         let mut cursor = Cursor::new(data);
         while let Some((field, wire)) = cursor.read_key() {
             match (field, wire) {
                 (1, WIRE_VARINT) => cursor_chars = cursor.read_varint()? as usize,
                 (2, WIRE_START_GROUP) => {
-                    text.push_str(&decode_preedit_segment(&mut cursor)?);
+                    let segment = decode_preedit_segment(&mut cursor)?;
+                    text.push_str(&segment.value);
+                    segments.push(segment);
                 }
                 _ => {
                     if cursor.skip(wire).is_none() {
@@ -1346,23 +1501,31 @@ mod proto {
                 }
             }
         }
-        Some(MozcPreedit { text, cursor_chars })
+        Some(MozcPreedit {
+            text,
+            cursor_chars,
+            segments,
+        })
     }
 
-    fn decode_preedit_segment(cursor: &mut Cursor<'_>) -> Option<String> {
+    fn decode_preedit_segment(cursor: &mut Cursor<'_>) -> Option<MozcPreeditSegment> {
         let mut value = String::new();
+        let mut annotation = MOZC_PREEDIT_UNDERLINE;
         while let Some((field, wire)) = cursor.read_key() {
             match (field, wire) {
-                (2, WIRE_END_GROUP) => return Some(value),
+                (2, WIRE_END_GROUP) => {
+                    return Some(MozcPreeditSegment { value, annotation });
+                }
                 (4, WIRE_BYTES) => value = cursor.read_bytes().and_then(bytes_to_string)?,
+                (3, WIRE_VARINT) => annotation = cursor.read_varint()? as u32,
                 _ => {
                     if cursor.skip(wire).is_none() {
-                        return Some(value);
+                        return Some(MozcPreeditSegment { value, annotation });
                     }
                 }
             }
         }
-        Some(value)
+        Some(MozcPreeditSegment { value, annotation })
     }
 
     fn decode_status(data: &[u8]) -> Option<MozcStatus> {
