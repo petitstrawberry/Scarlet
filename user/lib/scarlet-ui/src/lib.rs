@@ -84,7 +84,7 @@ pub use views::{
     Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
     WindowContentLayout, ZStack,
 };
-pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, Select, ProgressView, CanvasView};
 pub use views::{NavigationView, NavigationLink};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 pub use views::navigation::Icon;
@@ -117,7 +117,7 @@ pub mod prelude {
         Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
         WindowContentLayout, ZStack,
     };
-    pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, ProgressView, CanvasView};
+    pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, Select, ProgressView, CanvasView};
     pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
     pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
     pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};

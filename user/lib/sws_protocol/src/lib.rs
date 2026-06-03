@@ -73,6 +73,8 @@ pub mod client_msg {
     pub const TEXT_INPUT_SET_CONTENT_TYPE: u32 = 206;
     pub const TEXT_INPUT_SET_TEXT_CHANGE_CAUSE: u32 = 207;
     pub const TEXT_INPUT_COMMIT_STATE: u32 = 208;
+    pub const IME_GET_METHODS: u32 = 209;
+    pub const IME_GET_ACTIVE: u32 = 210;
 
     // Input method service messages (220-239)
     pub const IME_REGISTER: u32 = 220;
@@ -118,6 +120,8 @@ pub mod server_msg {
     pub const TEXT_INPUT_DELETE_SURROUNDING_TEXT: u32 = 203;
     pub const TEXT_INPUT_DONE: u32 = 204;
     pub const TEXT_INPUT_STATUS: u32 = 205;
+    pub const IME_METHODS: u32 = 206;
+    pub const IME_ACTIVE: u32 = 207;
 
     // Input method service events (220-239)
     pub const IME_REGISTERED: u32 = 220;
@@ -175,6 +179,21 @@ pub mod ime_status_flags {
     pub const PRIVATE_MODE: u32 = 1 << 1;
     pub const PREDICTION_ENABLED: u32 = 1 << 2;
     pub const CANDIDATES_VISIBLE: u32 = 1 << 3;
+}
+
+/// Registered input method entry serialized in `IME_METHODS` payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputMethodEntry {
+    /// Server-assigned input method ID.
+    pub ime_id: u32,
+    /// Capability flags advertised by the input method.
+    pub capabilities: u32,
+    /// Whether this input method is currently active.
+    pub active: bool,
+    /// UTF-8 name bytes padded to the protocol maximum.
+    pub name: [u8; TEXT_INPUT_MAX_BYTES],
+    /// Number of valid bytes in `name`.
+    pub name_len: u32,
 }
 
 /// Text input content hints.
@@ -358,6 +377,74 @@ fn copy_bounded<const N: usize>(bytes: &[u8]) -> Result<([u8; N], u32), Protocol
         out[..bytes.len()].copy_from_slice(bytes);
     }
     Ok((out, bytes.len() as u32))
+}
+
+/// Parse an `IME_METHODS` payload.
+///
+/// # Arguments
+///
+/// * `payload` - Serialized input method list payload.
+///
+/// # Returns
+///
+/// Parsed input method entries.
+pub fn parse_ime_methods_payload(payload: &[u8]) -> Result<Vec<InputMethodEntry>, ProtocolError> {
+    if payload.len() < 4 {
+        return Err(ProtocolError::MalformedPayload);
+    }
+
+    let count = read_u32(payload, 0)? as usize;
+    let mut offset = 4;
+    let mut entries = Vec::new();
+
+    for _ in 0..count {
+        let ime_id = read_u32(payload, offset)?;
+        let capabilities = read_u32(payload, offset + 4)?;
+        let active = read_u32(payload, offset + 8)? != 0;
+        let name_len = read_u32(payload, offset + 12)? as usize;
+        offset += 16;
+
+        if name_len > TEXT_INPUT_MAX_BYTES || payload.len() < offset + name_len {
+            return Err(ProtocolError::MalformedPayload);
+        }
+
+        let name_len_usize = name_len;
+        let (name, name_len) = copy_bounded(&payload[offset..offset + name_len_usize])?;
+        entries.push(InputMethodEntry {
+            ime_id,
+            capabilities,
+            active,
+            name,
+            name_len,
+        });
+        offset += name_len_usize;
+    }
+
+    if offset != payload.len() {
+        return Err(ProtocolError::MalformedPayload);
+    }
+
+    Ok(entries)
+}
+
+/// Parse an `IME_ACTIVE` payload.
+///
+/// # Arguments
+///
+/// * `payload` - Serialized active input method payload.
+///
+/// # Returns
+///
+/// The active input method, or `None` when no input method is active.
+pub fn parse_ime_active_payload(
+    payload: &[u8],
+) -> Result<Option<InputMethodEntry>, ProtocolError> {
+    let entries = parse_ime_methods_payload(payload)?;
+    match entries.len() {
+        0 => Ok(None),
+        1 => Ok(Some(entries[0])),
+        _ => Err(ProtocolError::MalformedPayload),
+    }
 }
 
 /// Borrowed client->server messages (payload may be borrowed).
@@ -600,6 +687,8 @@ pub enum ClientMessageRef<'a> {
         context_id: u32,
         serial: u32,
     },
+    ImeGetMethods {},
+    ImeGetActive {},
     ImeRegister {
         name: &'a [u8],
         capabilities: u32,
@@ -726,6 +815,10 @@ pub enum ServerMessage {
     ImeRegistered {
         ime_id: u32,
     },
+    /// Contains a serialized list of registered input methods.
+    ImeMethods,
+    /// Contains either no active input method or one serialized entry.
+    ImeActive,
     ImeActivate {
         context_id: u32,
         window_id: u32,
@@ -1430,6 +1523,18 @@ pub fn parse_client_message<'a>(
                 serial: read_u32(payload, 4)?,
             })
         }
+        client_msg::IME_GET_METHODS => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeGetMethods {})
+        }
+        client_msg::IME_GET_ACTIVE => {
+            if !payload.is_empty() {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ImeGetActive {})
+        }
         client_msg::IME_REGISTER => {
             if payload.len() < 8 {
                 return Err(ProtocolError::MalformedPayload);
@@ -1807,6 +1912,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 ime_id: read_u32(payload, 0)?,
             })
         }
+        server_msg::IME_METHODS => Ok(ServerMessage::ImeMethods),
+        server_msg::IME_ACTIVE => Ok(ServerMessage::ImeActive),
         server_msg::IME_ACTIVATE => parse_ime_context_message(payload, true),
         server_msg::IME_CONTEXT_STATE => parse_ime_context_message(payload, false),
         server_msg::IME_DEACTIVATE => {

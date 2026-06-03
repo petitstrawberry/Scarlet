@@ -81,7 +81,9 @@ macro_rules! zstack {
 #[macro_export]
 macro_rules! navigation {
     ($($link:expr),* $(,)?) => {{
-        $crate::views::NavigationView::new(($($link,)*))
+        static NAVIGATION_STATE_KEY: u8 = 0;
+        let state_key = (&NAVIGATION_STATE_KEY as *const u8) as usize;
+        $crate::views::NavigationView::new_with_state_key(($($link,)*), state_key)
     }};
 }
 

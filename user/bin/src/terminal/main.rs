@@ -50,6 +50,7 @@ struct TerminalTextInput {
     window_id: u32,
     context_id: u32,
     serial: u32,
+    last_cursor_rect: Option<(i32, i32, u32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,13 +193,22 @@ impl TerminalApp {
         let Some(state) = text_input.as_mut() else {
             return;
         };
-        let cursor = self.cursor.get();
+        let cursor = if self.preedit.lock().is_some() {
+            self.screen.lock().cursor()
+        } else {
+            self.cursor.get()
+        };
         let metrics = self.metrics.get();
         let content_offset = WindowContentLayout::new(TERMINAL_WINDOW_DECORATED).offset();
         let x = (content_offset.x + cursor.column as f32 * metrics.cell_width) as i32;
         let y = (content_offset.y + cursor.row as f32 * metrics.cell_height) as i32;
         let width = metrics.cell_width.max(1.0) as u32;
         let height = metrics.cell_height.max(1.0) as u32;
+        let cursor_rect = (x, y, width, height);
+
+        if state.last_cursor_rect == Some(cursor_rect) {
+            return;
+        }
 
         let _ = window.set_text_input_cursor_rect(state.context_id, x, y, width, height);
         let conn = window.connection_mut();
@@ -213,6 +223,7 @@ impl TerminalApp {
             .is_ok()
         {
             state.serial = state.serial.saturating_add(1);
+            state.last_cursor_rect = Some(cursor_rect);
         }
     }
 }
@@ -329,6 +340,7 @@ impl Application for TerminalApp {
             window_id,
             context_id,
             serial,
+            last_cursor_rect: None,
         });
 
         self.refresh_text_input_state(window);
@@ -354,6 +366,9 @@ impl Application for TerminalApp {
             "[terminal] focused text-input context={}",
             text_input.context_id
         );
+        if let Some(state) = self.text_input.lock().as_mut() {
+            state.last_cursor_rect = None;
+        }
     }
 
     fn on_text_input_commit(&mut self, context_id: u32, _serial: u32, text: &str) {
@@ -409,6 +424,9 @@ impl Application for TerminalApp {
 
     fn on_resize(&mut self, width: u32, height: u32) {
         *self.window_size.lock() = (width, height);
+        if let Some(state) = self.text_input.lock().as_mut() {
+            state.last_cursor_rect = None;
+        }
         resize_terminal(
             &self.screen,
             &self.grid,
@@ -423,6 +441,10 @@ impl Application for TerminalApp {
 
     fn debug_logging(&self) -> bool {
         false
+    }
+
+    fn on_window_sync(&mut self, window: &mut SWSPlatformWindow) {
+        self.refresh_text_input_state(window);
     }
 }
 

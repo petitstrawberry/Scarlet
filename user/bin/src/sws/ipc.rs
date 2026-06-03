@@ -989,6 +989,46 @@ fn set_active_input_method(ime_id: u32) {
     }
 }
 
+fn append_input_method_payload(
+    payload: &mut Vec<u8>,
+    method: &InputMethodService,
+    active_ime_id: Option<u32>,
+) {
+    let name = method.name.as_bytes();
+    let name_len = name.len().min(sws_protocol::TEXT_INPUT_MAX_BYTES);
+    payload.extend_from_slice(&method.ime_id.to_le_bytes());
+    payload.extend_from_slice(&method.capabilities.to_le_bytes());
+    payload.extend_from_slice(&((active_ime_id == Some(method.ime_id)) as u32).to_le_bytes());
+    payload.extend_from_slice(&(name_len as u32).to_le_bytes());
+    payload.extend_from_slice(&name[..name_len]);
+}
+
+fn input_methods_payload() -> Vec<u8> {
+    let active_ime_id = *ACTIVE_IME_ID.lock();
+    let methods = INPUT_METHODS.lock();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(methods.len() as u32).to_le_bytes());
+    for method in methods.values() {
+        append_input_method_payload(&mut payload, method, active_ime_id);
+    }
+    payload
+}
+
+fn active_input_method_payload() -> Vec<u8> {
+    let active_ime_id = *ACTIVE_IME_ID.lock();
+    let methods = INPUT_METHODS.lock();
+    let mut payload = Vec::new();
+    if let Some(ime_id) = active_ime_id
+        && let Some(method) = methods.get(&ime_id)
+    {
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        append_input_method_payload(&mut payload, method, active_ime_id);
+        return payload;
+    }
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload
+}
+
 fn clear_keyboard_grabs() {
     let mut contexts = TEXT_INPUT_CONTEXTS.lock();
     for context in contexts.values_mut() {
@@ -2548,6 +2588,28 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::TextInputCommitState { context_id, serial }) => {
                 commit_text_input_state(client_id, context_id, serial);
+            }
+            Ok(ClientMessageRef::ImeGetMethods {}) => {
+                let payload = input_methods_payload();
+                if let Err(e) = write_frame(&mut socket, protocol::server_msg::IME_METHODS, &payload)
+                {
+                    println!(
+                        "[ClientThread {}] Failed to send IME_METHODS: {:?}",
+                        client_id, e
+                    );
+                    break;
+                }
+            }
+            Ok(ClientMessageRef::ImeGetActive {}) => {
+                let payload = active_input_method_payload();
+                if let Err(e) = write_frame(&mut socket, protocol::server_msg::IME_ACTIVE, &payload)
+                {
+                    println!(
+                        "[ClientThread {}] Failed to send IME_ACTIVE: {:?}",
+                        client_id, e
+                    );
+                    break;
+                }
             }
             Ok(ClientMessageRef::ImeRegister { name, capabilities }) => {
                 let service = register_input_method(client_id, name, capabilities);

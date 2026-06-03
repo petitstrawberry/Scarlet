@@ -97,7 +97,7 @@ mod surface;
 mod builder;
 
 pub use builder::SurfaceBuilder;
-pub use connection::Connection;
+pub use connection::{Connection, InputMethodInfo};
 pub use error::Error;
 pub use event::{Event, ImeContextState, InputEvent};
 pub use event::event_type;

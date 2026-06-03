@@ -12,6 +12,7 @@ mod image;
 mod divider;
 mod toggle;
 mod slider;
+mod select;
 mod progress;
 mod canvas;
 mod text_grid;
@@ -33,6 +34,7 @@ pub use image::{BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource};
 pub use divider::{Divider, DividerRenderObject, DividerOrientation};
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use slider::{Slider, SliderRenderObject};
+pub use select::{Select, SelectChangeCallback, SelectRenderObject};
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
 pub use text_grid::{

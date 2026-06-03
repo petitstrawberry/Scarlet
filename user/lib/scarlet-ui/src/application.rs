@@ -62,6 +62,18 @@ pub trait Application: View {
         // Default: do nothing
     }
 
+    /// Synchronize application-managed window state.
+    ///
+    /// Applications that manage window-scoped protocols directly can override
+    /// this hook to update those protocol states during the main loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The SWS platform window for this application.
+    fn on_window_sync(&mut self, _window: &mut SWSPlatformWindow) {
+        // Default: do nothing
+    }
+
     /// Handle committed text from an input method.
     ///
     /// # Arguments
@@ -549,6 +561,7 @@ pub trait Application: View {
             //     platform_window.present(buffer);
             // }
             self.on_idle();
+            self.on_window_sync(&mut platform_window);
             sync_text_input(&mut platform_window, &pipeline);
             if !presented_this_cycle && pipeline.has_dirty() {
                 if crate::debug::is_enabled() {

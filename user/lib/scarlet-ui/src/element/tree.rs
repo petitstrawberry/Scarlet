@@ -108,7 +108,8 @@ impl ElementTree {
     /// Perform a hit test to find the element at a point
     pub fn hit_test(&self, point: crate::geometry::Point) -> Option<&dyn Element> {
         let root = self.root.as_deref()?;
-        self.hit_test_recursive(root, point)
+        self.hit_test_select_overlay_recursive(root, point)
+            .or_else(|| self.hit_test_recursive(root, point))
     }
 
     /// Find an element by its ID
@@ -166,6 +167,39 @@ impl ElementTree {
 
         // Check this element
         if element.hit_test(point) {
+            return Some(element);
+        }
+
+        None
+    }
+
+    fn hit_test_select_overlay_recursive<'a>(
+        &'a self,
+        element: &'a dyn Element,
+        point: crate::geometry::Point,
+    ) -> Option<&'a dyn Element> {
+        let local_point = crate::geometry::Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
+
+        for child in element.children().iter().rev() {
+            if let Some(found) =
+                self.hit_test_select_overlay_recursive(child.as_ref(), local_point)
+            {
+                return Some(found);
+            }
+        }
+
+        let is_expanded_select = element
+            .render_object()
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::SelectRenderObject>()
+            })
+            .is_some_and(|select| select.is_expanded());
+        if is_expanded_select && element.hit_test(point) {
             return Some(element);
         }
 

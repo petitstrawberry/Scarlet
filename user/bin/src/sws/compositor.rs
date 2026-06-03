@@ -2209,6 +2209,9 @@ impl Compositor {
                     );
                     self.window_manager
                         .set_window_position(state.window_id, new_x, new_y);
+                    if self.position_all_ime_popup_windows() {
+                        self.full_redraw_needed = true;
+                    }
 
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
@@ -2286,6 +2289,9 @@ impl Compositor {
                     let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
                     self.window_manager
                         .set_window_position(state.window_id, new_x, new_y);
+                    if self.position_all_ime_popup_windows() {
+                        self.full_redraw_needed = true;
+                    }
 
                     if let Some(r) = old_rect {
                         self.add_pending_damage(r);
@@ -2737,6 +2743,19 @@ impl Compositor {
         changed
     }
 
+    fn position_all_ime_popup_windows(&mut self) -> bool {
+        let popup_ids: Vec<u32> = self
+            .ime_popup_windows
+            .iter()
+            .map(|popup| popup.window_id)
+            .collect();
+        let mut changed = false;
+        for window_id in popup_ids {
+            changed |= self.position_ime_popup_window(window_id);
+        }
+        changed
+    }
+
     fn remove_ime_popup_windows(&mut self, window_ids: &[u32]) {
         self.ime_popup_windows
             .retain(|popup| !window_ids.iter().any(|id| *id == popup.window_id));
@@ -2805,10 +2824,7 @@ impl Compositor {
             }
         }
         if x > max_x {
-            let anchor_right = anchor_x
-                .saturating_add(cursor.x)
-                .saturating_add(cursor.width as i32);
-            x = anchor_right.saturating_sub(old_rect.2 as i32);
+            x = max_x;
         }
         x = x.max(0).min(max_x.max(0));
         y = y.max(0).min(max_y.max(0));

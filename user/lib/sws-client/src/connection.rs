@@ -25,6 +25,19 @@ pub struct WindowListEntry {
     pub minimized: bool,
 }
 
+/// Registered input method information.
+#[derive(Debug, Clone)]
+pub struct InputMethodInfo {
+    /// Server-assigned input method ID.
+    pub ime_id: u32,
+    /// Human-readable input method name.
+    pub name: String,
+    /// Capability flags advertised by the input method.
+    pub capabilities: u32,
+    /// Whether this input method is currently active.
+    pub active: bool,
+}
+
 fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
     use scarlet_std::io::Read;
 
@@ -432,6 +445,93 @@ impl Connection {
             protocol::client_msg::IME_SET_ACTIVE,
             &payload,
         )
+    }
+
+    /// Get registered input methods.
+    ///
+    /// # Returns
+    ///
+    /// List of input methods currently registered with SWS.
+    pub fn get_input_methods(&mut self) -> Result<Vec<InputMethodInfo>, Error> {
+        write_frame(&mut self.socket, protocol::client_msg::IME_GET_METHODS, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            match response {
+                ServerMessage::ImeMethods => {
+                    let methods = protocol::parse_ime_methods_payload(&self.read_payload)
+                        .map_err(|_| Error::InvalidResponse)?;
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok(methods
+                        .into_iter()
+                        .map(|method| InputMethodInfo {
+                            ime_id: method.ime_id,
+                            name: String::from_utf8_lossy(
+                                &method.name[..method.name_len as usize],
+                            )
+                            .into_owned(),
+                            capabilities: method.capabilities,
+                            active: method.active,
+                        })
+                        .collect());
+                }
+                message if self.queue_async_message(message) => {}
+                _ => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
+            }
+        }
+    }
+
+    /// Get the active input method.
+    ///
+    /// # Returns
+    ///
+    /// Active input method information, or `None` when no IME is active.
+    pub fn get_active_input_method(&mut self) -> Result<Option<InputMethodInfo>, Error> {
+        write_frame(&mut self.socket, protocol::client_msg::IME_GET_ACTIVE, &[])
+            .map_err(|_| Error::SendFailed)?;
+
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        loop {
+            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let response = protocol::parse_server_message(msg_type, &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            match response {
+                ServerMessage::ImeActive => {
+                    let method = protocol::parse_ime_active_payload(&self.read_payload)
+                        .map_err(|_| Error::InvalidResponse)?;
+                    let _ = self.socket.set_nonblocking(true);
+                    return Ok(method.map(|method| InputMethodInfo {
+                        ime_id: method.ime_id,
+                        name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
+                            .into_owned(),
+                        capabilities: method.capabilities,
+                        active: method.active,
+                    }));
+                }
+                message if self.queue_async_message(message) => {}
+                _ => {
+                    let _ = self.socket.set_nonblocking(true);
+                    return Err(Error::InvalidResponse);
+                }
+            }
+        }
     }
 
     pub fn ime_key_handled(&mut self, key_serial: u32, handled: bool) -> Result<(), Error> {

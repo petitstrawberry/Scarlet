@@ -212,3 +212,51 @@ impl NavigationLinkTuple
         }
     }
 }
+
+// Implement NavigationLinkTuple for 5-tuple
+impl NavigationLinkTuple
+    for (
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+    )
+{
+    fn count(&self) -> usize {
+        5
+    }
+
+    fn get_label(&self, index: usize) -> &str {
+        match index {
+            0 => self.0.label(),
+            1 => self.1.label(),
+            2 => self.2.label(),
+            3 => self.3.label(),
+            4 => self.4.label(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
+        }
+    }
+
+    fn get_icon(&self, index: usize) -> &Icon {
+        match index {
+            0 => self.0.icon(),
+            1 => self.1.icon(),
+            2 => self.2.icon(),
+            3 => self.3.icon(),
+            4 => self.4.icon(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
+        }
+    }
+
+    fn build_content(&self, index: usize) -> Box<dyn View> {
+        match index {
+            0 => self.0.build_content(),
+            1 => self.1.build_content(),
+            2 => self.2.build_content(),
+            3 => self.3.build_content(),
+            4 => self.4.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
+        }
+    }
+}
