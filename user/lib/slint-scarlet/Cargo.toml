@@ -8,10 +8,10 @@ name = "slint_scarlet"
 path = "src/lib.rs"
 
 [dependencies]
-scarlet_std = { path = "../std" }
+scarlet-std = { path = "../std" }
 scarlet-ui = { path = "../scarlet-ui" }
 sws-client = { path = "../sws-client" }
-sws_protocol = { path = "../sws_protocol" }
+sws-protocol = { path = "../sws-protocol" }
 
 # Slint with no_std support
 slint = { version = "1.14", default-features = false, features = [

@@ -83,13 +83,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet_std"
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
+name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
  "lock_api",
+ "scarlet-abi",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]
@@ -103,7 +116,7 @@ name = "scpm"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
- "scarlet_std",
+ "scarlet-std",
  "tar-no-std",
 ]
 

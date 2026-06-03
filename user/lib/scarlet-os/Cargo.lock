@@ -41,23 +41,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "sbus"
-version = "0.1.0"
-dependencies = [
- "scarlet-std",
-]
-
-[[package]]
-name = "sbus-client"
-version = "0.1.0"
-dependencies = [
- "sbus",
- "scarlet-std",
-]
-
-[[package]]
 name = "scarlet-abi"
 version = "0.16.0"
+
+[[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-std",
+]
 
 [[package]]
 name = "scarlet-std"

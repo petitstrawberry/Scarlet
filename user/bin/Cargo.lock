@@ -1257,7 +1257,7 @@ dependencies = [
 name = "framebuffer"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -1468,7 +1468,7 @@ dependencies = [
 name = "gpu"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -3499,7 +3499,7 @@ dependencies = [
 name = "sbus"
 version = "0.1.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -3507,14 +3507,37 @@ name = "sbus-client"
 version = "0.1.0"
 dependencies = [
  "sbus",
- "scarlet_std",
+ "scarlet-std",
 ]
+
+[[package]]
+name = "scarlet-abi"
+version = "0.16.0"
 
 [[package]]
 name = "scarlet-desktop-config"
 version = "0.1.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "0.16.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "lock_api",
+ "scarlet-abi",
+ "scarlet-sys",
+ "spin 0.10.0",
+ "talc",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]
@@ -3525,10 +3548,10 @@ dependencies = [
  "bitflags 2.10.0",
  "framebuffer",
  "libm",
+ "scarlet-std",
  "scarlet-ui-macros",
- "scarlet_std",
  "sws-client",
- "sws_protocol",
+ "sws-protocol",
  "zune-jpeg 0.5.8",
 ]
 
@@ -3539,16 +3562,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "scarlet_std"
-version = "0.16.0"
-dependencies = [
- "hashbrown 0.15.5",
- "lock_api",
- "spin 0.10.0",
- "talc",
 ]
 
 [[package]]
@@ -3568,7 +3581,7 @@ name = "scpm"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide 0.7.4",
- "scarlet_std",
+ "scarlet-std",
  "tar-no-std",
 ]
 
@@ -3787,12 +3800,12 @@ dependencies = [
 name = "slint-scarlet"
 version = "0.1.0"
 dependencies = [
+ "scarlet-std",
  "scarlet-ui",
- "scarlet_std",
  "slint",
  "slint-build",
  "sws-client",
- "sws_protocol",
+ "sws-protocol",
 ]
 
 [[package]]
@@ -3936,15 +3949,15 @@ dependencies = [
 name = "sws-client"
 version = "0.1.0"
 dependencies = [
- "scarlet_std",
- "sws_protocol",
+ "scarlet-std",
+ "sws-protocol",
 ]
 
 [[package]]
-name = "sws_protocol"
+name = "sws-protocol"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -4407,9 +4420,9 @@ dependencies = [
  "sbus",
  "sbus-client",
  "scarlet-desktop-config",
+ "scarlet-std",
  "scarlet-ui",
  "scarlet-ui-macros",
- "scarlet_std",
  "scpm",
  "serde",
  "serde-json-core",
@@ -4417,7 +4430,7 @@ dependencies = [
  "slint-build",
  "slint-scarlet",
  "sws-client",
- "sws_protocol",
+ "sws-protocol",
  "symphonia-codec-aac",
  "symphonia-core",
  "vm-fdt",

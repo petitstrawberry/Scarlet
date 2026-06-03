@@ -4,7 +4,7 @@ version = "0.16.0"
 edition = "2024"
 
 [dependencies]
-scarlet_std = { path = "../std" }
+scarlet-std = { path = "../std" }
 
 [lib]
 name = "gpu"

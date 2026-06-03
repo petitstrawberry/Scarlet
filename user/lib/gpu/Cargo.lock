@@ -24,7 +24,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 name = "gpu"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -48,13 +48,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet_std"
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
+name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
  "lock_api",
+ "scarlet-abi",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]

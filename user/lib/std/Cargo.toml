@@ -1,5 +1,5 @@
 [package]
-name = "scarlet_std"
+name = "scarlet-std"
 version = "0.16.0"
 edition = "2024"
 
@@ -12,6 +12,8 @@ path = "src/lib.rs"
 alloc_debug = []
 
 [dependencies]
+scarlet-abi = { path = "../scarlet-abi" }
+scarlet-sys = { path = "../scarlet-sys" }
 talc = { version = "4.4", default-features = false, features = ["lock_api"] }
 spin = { version = "0.10.0", default-features = false, features = ["lock_api", "mutex", "spin_mutex", "rwlock"] }
 lock_api = "0.4"

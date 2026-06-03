@@ -35,12 +35,7 @@ use introspection::{KernelObjectInfo, KernelObjectType};
 /// Result type for handle operations
 pub type HandleResult<T> = Result<T, HandleError>;
 
-/// Raw kernel handle type used throughout userlib.
-///
-/// This is the canonical representation of a kernel object handle at the
-/// userlib boundary. Public APIs may expose other integer widths for
-/// compatibility (e.g., `u32`), but internally we normalize to `RawHandle`.
-pub type RawHandle = i32;
+pub use scarlet_abi::RawHandle;
 
 /// Errors that can occur during handle operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

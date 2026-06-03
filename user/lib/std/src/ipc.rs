@@ -412,5 +412,5 @@ pub fn event_mask_clear_all() -> EventResult<()> {
 /// Return from event handler (should be called by handler trampoline)
 pub fn event_return() {
     use crate::syscall::Syscall;
-    crate::arch::arch_syscall0(Syscall::EventReturn);
+    crate::syscall::syscall0(Syscall::EventReturn);
 }

@@ -1,9 +1,10 @@
 [package]
-name = "scarlet-desktop-config"
-version = "0.1.0"
+name = "scarlet-os"
+version = "0.16.0"
 edition = "2024"
 
 [lib]
+name = "scarlet_os"
 path = "src/lib.rs"
 
 [dependencies]
