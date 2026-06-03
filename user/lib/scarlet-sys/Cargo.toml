@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-sys"
+version = "0.16.0"
+edition = "2024"
+
+[lib]
+name = "scarlet_sys"
+path = "src/lib.rs"
+
+[dependencies]
+scarlet-abi = { path = "../scarlet-abi" }

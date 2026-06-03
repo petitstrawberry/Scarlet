@@ -1,19 +1,17 @@
 use core::arch::{asm, naked_asm};
 
-use crate::{env, syscall::Syscall, task::exit};
+use crate::{env, task::exit};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _entry() {
-    unsafe {
-        naked_asm!(
-            "
+    naked_asm!(
+        "
         .align 8
                 b       _start
         ",
-        );
-    }
+    );
 }
 
 unsafe extern "Rust" {
@@ -46,140 +44,6 @@ pub extern "C" fn _start(x0: usize, x1: usize) -> ! {
         let ret = main();
         exit(ret as i32);
     }
-}
-
-pub fn arch_syscall0(syscall: Syscall) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            out("x0") ret,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall1(syscall: Syscall, arg1: usize) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            in("x1") arg2,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            in("x1") arg2,
-            in("x2") arg3,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall4(
-    syscall: Syscall,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            in("x1") arg2,
-            in("x2") arg3,
-            in("x3") arg4,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall5(
-    syscall: Syscall,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            in("x1") arg2,
-            in("x2") arg3,
-            in("x3") arg4,
-            in("x4") arg5,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
-}
-
-pub fn arch_syscall6(
-    syscall: Syscall,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-    arg6: usize,
-) -> usize {
-    let ret: usize;
-    unsafe {
-        asm!(
-            "svc #0",
-            in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            in("x1") arg2,
-            in("x2") arg3,
-            in("x3") arg4,
-            in("x4") arg5,
-            in("x5") arg6,
-            clobber_abi("C"),
-            options(nostack)
-        );
-    }
-    ret
 }
 
 /// Get the current thread's TLS (Thread Local Storage) pointer

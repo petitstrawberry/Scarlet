@@ -7,4 +7,4 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-scarlet_std = { path = "../std" }
+scarlet-std = { path = "../std" }

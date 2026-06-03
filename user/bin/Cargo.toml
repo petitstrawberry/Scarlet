@@ -247,11 +247,11 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
-scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
+scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
 gpu = { path = "../lib/gpu" }
-sws_protocol = { path = "../lib/sws_protocol" }
+sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-ui = { path = "../lib/scarlet-ui" }
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }

@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scarlet_std = { path = "../std" }
+scarlet-std = { path = "../std" }
 sws-client = { path = "../sws-client" }
-sws_protocol = { path = "../sws_protocol" }
+sws-protocol = { path = "../sws-protocol" }
 framebuffer = { path = "../framebuffer" }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }

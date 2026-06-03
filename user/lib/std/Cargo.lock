@@ -41,13 +41,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet_std"
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
+name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
  "lock_api",
+ "scarlet-abi",
+ "scarlet-sys",
  "spin",
  "talc",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
 ]
 
 [[package]]
