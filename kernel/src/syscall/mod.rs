@@ -12,7 +12,7 @@
 //! - **100-199**: Handle management operations (handle_query, handle_close, dup)
 //! - **200-299**: StreamOps capability (stream_read, stream_write operations)
 //! - **300-399**: FileObject capability (file_seek, file_truncate, file_metadata)
-//! - **400-499**: VFS operations (vfs_open, vfs_remove, vfs_create_directory, vfs_change_directory, vfs_truncate)
+//! - **400-499**: VFS operations (vfs_open, vfs_remove, vfs_create_directory, vfs_change_directory, vfs_truncate, vfs_metadata)
 //! - **500-599**: Filesystem operations (fs_mount, fs_umount, fs_pivot_root)
 //! - **600-699**: IPC operations (pipe, shared memory, message queues)
 //! - **700-799**: Memory mapping operations (memory_map, memory_unmap)
@@ -42,7 +42,7 @@
 //! - FileSeek (300), FileTruncate (301), FileMetadata (302)
 //!
 //! ### VFS Operations (400-499)
-//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405), VfsCreateSymlink (406), VfsReadlink (407), VfsGetCwdPath (408), VfsRename (409)
+//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405), VfsCreateSymlink (406), VfsReadlink (407), VfsGetCwdPath (408), VfsRename (409), VfsMetadata (410), VfsCreateHardlink (411)
 //!
 //! ### Filesystem Operations (500-599)
 //! - FsMount (500), FsUmount (501), FsPivotRoot (502)
@@ -80,8 +80,9 @@
 use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{
     sys_fs_mount, sys_fs_pivot_root, sys_fs_umount, sys_vfs_change_directory,
-    sys_vfs_create_directory, sys_vfs_create_file, sys_vfs_create_symlink, sys_vfs_get_cwd_path,
-    sys_vfs_open, sys_vfs_readlink, sys_vfs_remove, sys_vfs_rename, sys_vfs_truncate,
+    sys_vfs_create_directory, sys_vfs_create_file, sys_vfs_create_hardlink, sys_vfs_create_symlink,
+    sys_vfs_get_cwd_path, sys_vfs_metadata, sys_vfs_open, sys_vfs_readlink, sys_vfs_remove,
+    sys_vfs_rename, sys_vfs_truncate,
 };
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_handler_register_native,
@@ -99,7 +100,7 @@ use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
     sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
 };
-use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
+use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
 use crate::object::capability::selectable::syscall::sys_poll;
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
@@ -225,7 +226,7 @@ syscall_table! {
     // File operations for any KernelObject with FileObject capability
     FileSeek = 300 => sys_file_seek,       // FileObject::seek
     FileTruncate = 301 => sys_file_truncate, // FileObject::truncate
-    // FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
+    FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
 
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
@@ -238,6 +239,8 @@ syscall_table! {
     VfsReadlink = 407 => sys_vfs_readlink,     // Read symbolic link target through VFS
     VfsGetCwdPath = 408 => sys_vfs_get_cwd_path, // Get current working directory path
     VfsRename = 409 => sys_vfs_rename,         // Rename or move files/directories through VFS
+    VfsMetadata = 410 => sys_vfs_metadata,     // Get metadata for a VFS path
+    VfsCreateHardlink = 411 => sys_vfs_create_hardlink, // Create hard links through VFS
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

@@ -13,6 +13,8 @@
 //! - `sys_vfs_create_directory()`: Create directories (VfsCreateDirectory 403)
 //! - `sys_vfs_change_directory()`: Change working directory (VfsChangeDirectory 404)
 //! - `sys_vfs_truncate()`: Truncate files by path (VfsTruncate 405)
+//! - `sys_vfs_metadata()`: Get metadata for a filesystem path (VfsMetadata 410)
+//! - `sys_vfs_create_hardlink()`: Create a hard link (VfsCreateHardlink 411)
 //!
 //! ### Filesystem Operations (500-series)
 //! - `sys_fs_mount()`: Mount filesystems (FsMount 500)
@@ -37,8 +39,11 @@ use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 
 use crate::{
     arch::Trapframe,
-    fs::FileType,
-    library::std::string::{cstring_to_string, parse_c_string_from_userspace},
+    fs::{AbiFileMetadata, FileType},
+    library::std::{
+        string::{cstring_to_string, parse_c_string_from_userspace},
+        usercopy::copy_to_user,
+    },
     task::mytask,
 };
 
@@ -188,6 +193,102 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     match file.truncate(length) {
         Ok(_) => 0,
         Err(_) => usize::MAX, // -1
+    }
+}
+
+/// Get metadata for a filesystem path (VfsMetadata).
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - Pointer to an `AbiFileMetadata` output buffer
+///
+/// # Returns
+///
+/// * `0` on success
+/// * `usize::MAX` on error (file not found, invalid pointer, etc.)
+pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = trapframe.get_arg(0);
+    let metadata_ptr = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX,
+    };
+
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    let metadata = match vfs.metadata(&path_str) {
+        Ok(metadata) => AbiFileMetadata::from_metadata(&metadata),
+        Err(_) => return usize::MAX,
+    };
+
+    // SAFETY: `metadata` is a plain `repr(C)` byte record and is only read for
+    // the duration of this copy into the caller-provided buffer.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&metadata as *const AbiFileMetadata).cast::<u8>(),
+            core::mem::size_of::<AbiFileMetadata>(),
+        )
+    };
+
+    match copy_to_user(task, metadata_ptr, bytes) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Create a hard link through VFS (VfsCreateHardlink).
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated source path string
+/// * `trapframe.get_arg(1)` - Pointer to the null-terminated target path string
+///
+/// # Returns
+///
+/// * `0` on success
+/// * `usize::MAX` on error
+pub fn sys_vfs_create_hardlink(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let source_path_ptr = trapframe.get_arg(0);
+    let target_path_ptr = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    let source_path = match parse_c_string_from_userspace(task, source_path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX,
+    };
+
+    let target_path = match parse_c_string_from_userspace(task, target_path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX,
+    };
+
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    match vfs.create_hardlink(&source_path, &target_path) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
     }
 }
 

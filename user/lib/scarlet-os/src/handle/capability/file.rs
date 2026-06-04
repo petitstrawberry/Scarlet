@@ -4,7 +4,10 @@
 //! KernelObjects that support the FileObject capability.
 
 use crate::handle::Handle;
-use scarlet_sys::{Syscall, syscall2, syscall3};
+use scarlet_sys::{
+    FILE_TYPE_DIRECTORY, FILE_TYPE_REGULAR, FILE_TYPE_SYMLINK, RawFileMetadata, Syscall, syscall2,
+    syscall3,
+};
 
 /// Result type for file operations
 pub type FileResult<T> = Result<T, FileError>;
@@ -76,22 +79,26 @@ pub struct FileMetadata {
     pub modified: u64,
     /// Last access timestamp
     pub accessed: u64,
+    /// Filesystem-local stable file identifier
+    pub file_id: u64,
+    /// Number of hard links to this file
+    pub link_count: u32,
 }
 
 impl FileMetadata {
     /// Check if this entry is a directory
     pub fn is_directory(&self) -> bool {
-        self.file_type == 1 // FileType::Directory as u8
+        self.file_type == FILE_TYPE_DIRECTORY
     }
 
     /// Check if this entry is a regular file
     pub fn is_file(&self) -> bool {
-        self.file_type == 0 // FileType::RegularFile as u8
+        self.file_type == FILE_TYPE_REGULAR
     }
 
     /// Check if this entry is a symbolic link
     pub fn is_symlink(&self) -> bool {
-        self.file_type == 2 // FileType::SymbolicLink as u8
+        self.file_type == FILE_TYPE_SYMLINK
     }
 
     /// Get file type as a human-readable string
@@ -104,6 +111,21 @@ impl FileMetadata {
             4 => "pipe",
             5 => "socket",
             _ => "unknown",
+        }
+    }
+}
+
+impl From<RawFileMetadata> for FileMetadata {
+    fn from(raw: RawFileMetadata) -> Self {
+        Self {
+            size: raw.size,
+            file_type: raw.file_type,
+            permissions: raw.permissions,
+            created: raw.created,
+            modified: raw.modified,
+            accessed: raw.accessed,
+            file_id: raw.file_id,
+            link_count: raw.link_count,
         }
     }
 }
@@ -158,37 +180,20 @@ impl<'a> FileObject<'a> {
         FileError::from_syscall_result(result).map(|_| ())
     }
 
-    // /// Get metadata about the file
-    // ///
-    // /// # Returns
-    // /// FileMetadata structure or FileError on failure
-    // pub fn metadata(&self) -> FileResult<FileMetadata> {
-    //     // For now, we'll use a simple implementation
-    //     // In the future, this could be enhanced to use a more sophisticated metadata syscall
+    /// Get metadata about the file
+    ///
+    /// # Returns
+    /// FileMetadata structure or FileError on failure
+    pub fn metadata(&self) -> FileResult<FileMetadata> {
+        let mut metadata = RawFileMetadata::default();
+        let result = syscall2(
+            Syscall::FileMetadata,
+            self.handle.as_raw() as usize,
+            (&mut metadata as *mut RawFileMetadata) as usize,
+        );
 
-    //     // Allocate space for metadata on the stack
-    //     let mut metadata_raw = [0u64; 8]; // Size to hold kernel FileMetadata
-
-    //     let result = syscall2(
-    //         Syscall::FileMetadata,
-    //         self.handle.as_raw() as usize,
-    //         metadata_raw.as_mut_ptr() as usize,
-    //     );
-
-    //     match FileError::from_syscall_result(result) {
-    //         Ok(_) => {
-    //             Ok(FileMetadata {
-    //                 size: metadata_raw[0],
-    //                 file_type: metadata_raw[1] as u32,
-    //                 permissions: metadata_raw[2] as u32,
-    //                 created: metadata_raw[3],
-    //                 modified: metadata_raw[4],
-    //                 accessed: metadata_raw[5],
-    //             })
-    //         }
-    //         Err(e) => Err(e),
-    //     }
-    // }
+        FileError::from_syscall_result(result).map(|_| metadata.into())
+    }
 
     /// Get the current position in the file
     ///
@@ -201,7 +206,6 @@ impl<'a> FileObject<'a> {
     ///
     /// This is a convenience method that gets metadata and returns just the size
     pub fn size(&self) -> FileResult<u64> {
-        // self.metadata().map(|meta| meta.size)
-        todo!("Implement size retrieval using metadata syscall")
+        self.metadata().map(|meta| meta.size)
     }
 }

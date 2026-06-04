@@ -297,7 +297,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
 
     match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
-        Err(_e) => {
+        Err(e) => {
             print_trap_info(trapframe, get_esr_el1());
             if let Some(task) = current_task(get_cpu().get_cpuid()) {
                 println!(
@@ -310,8 +310,8 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
                 );
             }
             panic!(
-                "Failed to map page for data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
-                vaddr, is_write, pc
+                "Failed to map page for data fault at vaddr: {:#x} (write={}) from PC: {:#x}: {}",
+                vaddr, is_write, pc, e
             );
         }
     }

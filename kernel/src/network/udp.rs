@@ -632,6 +632,27 @@ impl UdpLayer {
 
         let total_length = (8 + data.len()) as u16;
 
+        if dest_ip[0] == 127 {
+            let data_len = data.len() as u64;
+            {
+                let mut stats = self.stats.write();
+                stats.packets_sent += 1;
+                stats.bytes_sent += (8 + data_len) as u64;
+            }
+            self.receive_datagram(
+                Ipv4Address::new(
+                    src_ip_bytes[0],
+                    src_ip_bytes[1],
+                    src_ip_bytes[2],
+                    src_ip_bytes[3],
+                ),
+                src_port,
+                dest_port,
+                data,
+            );
+            return Ok(());
+        }
+
         let mut header = UdpHeader::new(src_port, dest_port, total_length);
 
         header.checksum = header.calculate_checksum(src_ip_bytes, dest_ip, &data);

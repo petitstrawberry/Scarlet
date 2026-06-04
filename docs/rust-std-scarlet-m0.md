@@ -4,6 +4,11 @@ Issue #449 tracks eventual Rust `std` support for Scarlet Native targets. This
 note records the first extraction boundary from the existing `scarlet_std`
 crate.
 
+This is a historical M0 extraction note. The current cross-milestone execution
+checklist lives in [`rust-std-scarlet-issue-449-todo.md`](rust-std-scarlet-issue-449-todo.md).
+Some items that were deferred during M0, notably `scarlet-rt`, have since been
+implemented as later milestone follow-up work.
+
 ## Current Split
 
 `scarlet-abi`:

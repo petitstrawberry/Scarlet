@@ -328,7 +328,8 @@ pub trait FileSystemOperations: Send + Sync {
         link_name: &String,
         target_node: &Arc<dyn VfsNode>,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        // Default implementation: not supported
+        // TODO(scarlet): implement hard links in filesystems that have stable
+        // inode/link-count mutation support. TmpFS overrides this today.
         let _ = (link_parent, link_name, target_node);
         Err(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
