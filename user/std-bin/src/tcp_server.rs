@@ -4,8 +4,6 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    println!("[tcp-server] Rust std version");
-
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
         println!("Usage: tcp_server <port>");

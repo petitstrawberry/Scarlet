@@ -10,6 +10,7 @@ panic = "abort"
 panic = "abort"
 
 [dependencies]
+scarlet-os = { path = "../lib/scarlet-os" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
 
@@ -76,3 +77,15 @@ path = "src/lsm_unload.rs"
 [[bin]]
 name = "lsm_load"
 path = "src/lsm_load.rs"
+
+[[bin]]
+name = "socket_pair"
+path = "src/socket_pair.rs"
+
+[[bin]]
+name = "socket_server"
+path = "src/socket_server.rs"
+
+[[bin]]
+name = "socket_client"
+path = "src/socket_client.rs"

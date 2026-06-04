@@ -3,8 +3,6 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    println!("[udp-server] Rust std version");
-
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
         println!("Usage: udp_server <port>");

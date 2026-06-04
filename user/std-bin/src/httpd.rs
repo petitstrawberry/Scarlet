@@ -5,8 +5,6 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    println!("[httpd] Rust std version");
-
     let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
         println!("Usage: httpd <port>");

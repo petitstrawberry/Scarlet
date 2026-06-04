@@ -12,10 +12,19 @@ name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
+]
+
+[[package]]
 name = "scarlet-std-bin"
 version = "0.1.0"
 dependencies = [
  "rust_h264",
+ "scarlet-os",
  "scarlet-sys",
 ]
 
