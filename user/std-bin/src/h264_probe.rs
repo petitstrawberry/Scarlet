@@ -1,28 +1,23 @@
-#![no_std]
-#![no_main]
-
-extern crate scarlet_std as std;
-
 use rust_h264::decoder::Decoder;
 use rust_h264::nal::parse_annex_b;
-use std::fs::File;
-use std::string::String;
-use std::vec::Vec;
-use std::{format, println};
+use std::env;
+use std::fs;
+use std::process::ExitCode;
 
-#[unsafe(no_mangle)]
-fn main() -> i32 {
-    let args: Vec<String> = std::env::args().collect();
+fn main() -> ExitCode {
+    println!("h264_probe: Rust std version");
+
+    let args = env::args().collect::<Vec<_>>();
     if args.len() != 2 {
         println!("usage: h264_probe FILE.h264");
-        return 1;
+        return ExitCode::from(1);
     }
 
-    let data = match read_file(&args[1]) {
+    let data = match fs::read(&args[1]) {
         Ok(data) => data,
         Err(err) => {
-            println!("h264_probe: {}: {}", args[1], err);
-            return 1;
+            println!("h264_probe: {}: {err}", args[1]);
+            return ExitCode::from(1);
         }
     };
 
@@ -45,8 +40,8 @@ fn main() -> i32 {
             }
             Ok(None) => {}
             Err(err) => {
-                println!("decode error at NAL {}: {}", index, err);
-                return 1;
+                println!("decode error at NAL {index}: {err}");
+                return ExitCode::from(1);
             }
         }
     }
@@ -61,26 +56,10 @@ fn main() -> i32 {
     }
 
     if let Some((width, height)) = first_size {
-        println!("decoded {} frames, first size {}x{}", frames, width, height);
+        println!("decoded {frames} frames, first size {width}x{height}");
     } else {
         println!("decoded 0 frames");
     }
 
-    0
-}
-
-fn read_file(path: &str) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|_| format!("open failed"))?;
-    let mut data = Vec::new();
-    let mut buffer = [0u8; 4096];
-
-    loop {
-        let read = file.read(&mut buffer).map_err(|_| format!("read failed"))?;
-        if read == 0 {
-            break;
-        }
-        data.extend_from_slice(&buffer[..read]);
-    }
-
-    Ok(data)
+    ExitCode::SUCCESS
 }

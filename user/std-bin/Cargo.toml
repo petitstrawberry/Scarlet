@@ -9,6 +9,10 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 
+[dependencies]
+scarlet-sys = { path = "../lib/scarlet-sys" }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
+
 [[bin]]
 name = "hello"
 path = "src/hello.rs"
@@ -52,3 +56,23 @@ path = "src/ansi_banner.rs"
 [[bin]]
 name = "httpd"
 path = "src/httpd.rs"
+
+[[bin]]
+name = "input_dump"
+path = "src/input_dump.rs"
+
+[[bin]]
+name = "h264_probe"
+path = "src/h264_probe.rs"
+
+[[bin]]
+name = "lsm_list"
+path = "src/lsm_list.rs"
+
+[[bin]]
+name = "lsm_unload"
+path = "src/lsm_unload.rs"
+
+[[bin]]
+name = "lsm_load"
+path = "src/lsm_load.rs"

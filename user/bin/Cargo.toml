@@ -38,10 +38,6 @@ name = "xv6"
 path = "src/xv6.rs"
 
 [[bin]]
-name = "env_test"
-path = "src/env_test.rs"
-
-[[bin]]
 name = "fb_test"
 path = "src/fb_test.rs"
 
@@ -52,14 +48,6 @@ path = "src/gpu_probe.rs"
  [[bin]]
  name = "socket_server"
  path = "src/socket_server.rs"
-
- [[bin]]
- name = "udp_server"
- path = "src/udp_server.rs"
-
- [[bin]]
- name = "udp_client"
- path = "src/udp_client.rs"
 
 [[bin]]
 name = "socket_client"
@@ -84,10 +72,6 @@ path = "src/netcfg.rs"
 [[bin]]
 name = "netcfgd"
 path = "src/netcfgd/main.rs"
-
-[[bin]]
-name = "httpd"
-path = "src/httpd.rs"
 
 [[bin]]
 name = "sws"
@@ -147,10 +131,6 @@ name = "event_demo"
 path = "src/event_demo.rs"
 
 [[bin]]
-name = "input_dump"
-path = "src/input_dump.rs"
-
-[[bin]]
 name = "scarlet_skk"
 path = "src/scarlet_skk.rs"
 
@@ -179,18 +159,6 @@ name = "ushv"
 path = "src/ushv/main.rs"
 
 [[bin]]
-name = "lsm_load"
-path = "src/lsm_load.rs"
-
-[[bin]]
-name = "lsm_unload"
-path = "src/lsm_unload.rs"
-
-[[bin]]
-name = "lsm_list"
-path = "src/lsm_list.rs"
-
-[[bin]]
 name = "ps"
 path = "src/ps.rs"
 
@@ -199,20 +167,12 @@ name = "pty_smoke"
 path = "src/pty_smoke.rs"
 
 [[bin]]
-name = "ansi_banner"
-path = "src/ansi_banner.rs"
-
-[[bin]]
 name = "top"
 path = "src/top.rs"
 
 [[bin]]
 name = "mplayer"
 path = "src/mplayer.rs"
-
-[[bin]]
-name = "h264_probe"
-path = "src/h264_probe.rs"
 
 [[bin]]
 name = "video_player"

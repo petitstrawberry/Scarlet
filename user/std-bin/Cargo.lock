@@ -3,5 +3,25 @@
 version = 4
 
 [[package]]
+name = "rust_h264"
+version = "0.4.0"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=edcf83ee2c99fa0087fa2d85a492a4c313e11ed0#edcf83ee2c99fa0087fa2d85a492a4c313e11ed0"
+
+[[package]]
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
 name = "scarlet-std-bin"
 version = "0.1.0"
+dependencies = [
+ "rust_h264",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+]

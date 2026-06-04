@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::process::ExitCode;
-use std::thread;
 
 fn main() -> ExitCode {
     println!("[httpd] Rust std version");
@@ -34,7 +33,7 @@ fn main() -> ExitCode {
 
     println!("[httpd] Listening on port {port}");
     loop {
-        let (stream, peer) = match listener.accept() {
+        let (stream, _peer) = match listener.accept() {
             Ok(client) => client,
             Err(err) => {
                 println!("[httpd] Accept failed: {err}");
@@ -42,8 +41,7 @@ fn main() -> ExitCode {
             }
         };
 
-        println!("[httpd] Client connected from {peer}");
-        thread::spawn(move || handle_client(stream));
+        handle_client(stream);
     }
 }
 
@@ -61,7 +59,6 @@ fn handle_client(mut stream: TcpStream) {
         }
     };
 
-    println!("[httpd] Received {n} bytes");
     let request = match std::str::from_utf8(&buf[..n]) {
         Ok(request) => request,
         Err(err) => {
@@ -79,23 +76,27 @@ fn handle_client(mut stream: TcpStream) {
 
     if method != "GET" {
         let response = "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-        let _ = stream.write_all(response.as_bytes());
+        if let Err(err) = stream.write_all(response.as_bytes()) {
+            println!("[httpd] Send 405 response failed: {err}");
+        }
         return;
     }
 
     println!("[httpd] GET {path}");
     match build_file_headers(path) {
         Some((headers, file_path, file_size)) => {
-            if stream.write_all(headers.as_bytes()).is_err() {
-                println!("[httpd] Send headers failed");
+            if let Err(err) = stream.write_all(headers.as_bytes()) {
+                println!("[httpd] Send headers failed: {err}");
+                return;
+            }
+            if let Err(err) = stream.flush() {
+                println!("[httpd] Flush headers failed: {err}");
                 return;
             }
             stream_file(&mut stream, &file_path, file_size);
         }
         None => send_not_found(&mut stream),
     }
-
-    println!("[httpd] Response sent");
 }
 
 fn build_file_headers(path: &str) -> Option<(String, String, u64)> {
@@ -141,8 +142,17 @@ fn stream_file(stream: &mut TcpStream, file_path: &str, file_size: u64) {
 fn send_not_found(stream: &mut TcpStream) {
     let body = b"Not Found";
     let response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 9\r\n\r\n";
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.write_all(body);
+    if let Err(err) = stream.write_all(response.as_bytes()) {
+        println!("[httpd] Send 404 headers failed: {err}");
+        return;
+    }
+    if let Err(err) = stream.write_all(body) {
+        println!("[httpd] Send 404 body failed: {err}");
+        return;
+    }
+    if let Err(err) = stream.flush() {
+        println!("[httpd] Flush 404 failed: {err}");
+    }
 }
 
 fn file_size(file_path: &str) -> Option<u64> {

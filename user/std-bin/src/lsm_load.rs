@@ -1,14 +1,8 @@
-#![no_std]
-#![no_main]
-
-extern crate scarlet_std as std;
-
+use scarlet_sys::{Syscall, syscall1, syscall2};
 use std::env;
-use std::fs::{File, list_directory};
-use std::string::{String, ToString};
-use std::syscall::{Syscall, syscall1, syscall2};
-use std::vec::Vec;
-use std::{format, println};
+use std::ffi::CString;
+use std::fs;
+use std::process::ExitCode;
 
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
@@ -21,6 +15,30 @@ const ELF64_SYM_SIZE: usize = 24;
 
 const LSM_LIST_ENTRY_SIZE: usize = 264;
 const LSM_LIST_MAX_MODULES: usize = 128;
+const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
+
+fn main() -> ExitCode {
+    println!("lsm_load: Rust std version");
+
+    let args = env::args().collect::<Vec<_>>();
+    if args.len() < 2 {
+        println!("usage: lsm_load <module.lsm>");
+        return ExitCode::from(1);
+    }
+
+    let mut visiting = Vec::new();
+    let mut loaded = list_loaded_module_names();
+    match load_module_recursive(&args[1], &mut visiting, &mut loaded) {
+        Ok(()) => {
+            println!("module loaded successfully");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            println!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
 
 fn lsm_error_name(code: usize) -> &'static str {
     match code {
@@ -41,28 +59,13 @@ fn lsm_error_name(code: usize) -> &'static str {
     }
 }
 
-const DEFAULT_MODULES_DIR: &str = "/scarlet/system/scarlet/modules";
-
 fn modules_dirs() -> Vec<String> {
-    let value = env::var("LSM_MODULES_PATH").unwrap_or_else(|| DEFAULT_MODULES_DIR.to_string());
-    let mut dirs = Vec::new();
-    let mut rest = value.as_str();
-    while !rest.is_empty() {
-        match rest.find(':') {
-            Some(pos) => {
-                if pos > 0 {
-                    dirs.push(rest[..pos].to_string());
-                }
-                rest = &rest[pos + 1..];
-            }
-            None => {
-                if !rest.is_empty() {
-                    dirs.push(rest.to_string());
-                }
-                break;
-            }
-        }
-    }
+    let value = env::var("LSM_MODULES_PATH").unwrap_or_else(|_| DEFAULT_MODULES_DIR.to_string());
+    let mut dirs = value
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if dirs.is_empty() {
         dirs.push(DEFAULT_MODULES_DIR.to_string());
     }
@@ -70,7 +73,7 @@ fn modules_dirs() -> Vec<String> {
 }
 
 fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
-    let bytes: [u8; 2] = data.get(offset..offset + 2)?.try_into().ok()?;
+    let bytes = data.get(offset..offset + 2)?.try_into().ok()?;
     Some(if little_endian {
         u16::from_le_bytes(bytes)
     } else {
@@ -79,7 +82,7 @@ fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
 }
 
 fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
-    let bytes: [u8; 4] = data.get(offset..offset + 4)?.try_into().ok()?;
+    let bytes = data.get(offset..offset + 4)?.try_into().ok()?;
     Some(if little_endian {
         u32::from_le_bytes(bytes)
     } else {
@@ -88,7 +91,7 @@ fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
 }
 
 fn read_u64(data: &[u8], offset: usize, little_endian: bool) -> Option<u64> {
-    let bytes: [u8; 8] = data.get(offset..offset + 8)?.try_into().ok()?;
+    let bytes = data.get(offset..offset + 8)?.try_into().ok()?;
     Some(if little_endian {
         u64::from_le_bytes(bytes)
     } else {
@@ -97,23 +100,7 @@ fn read_u64(data: &[u8], offset: usize, little_endian: bool) -> Option<u64> {
 }
 
 fn file_exists(path: &str) -> bool {
-    File::open(path).is_ok()
-}
-
-fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|_| format!("failed to open {}", path))?;
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|_| format!("failed to read {}", path))?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&buf[..n]);
-    }
-    Ok(data)
+    fs::metadata(path).is_ok()
 }
 
 fn section_header_offset(shoff: usize, shentsize: usize, index: usize) -> Option<usize> {
@@ -121,10 +108,7 @@ fn section_header_offset(shoff: usize, shentsize: usize, index: usize) -> Option
 }
 
 fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
-    if data.len() < ELF64_EHDR_SIZE {
-        return None;
-    }
-    if data.get(0..4)? != [0x7F, b'E', b'L', b'F'] {
+    if data.len() < ELF64_EHDR_SIZE || data.get(0..4)? != [0x7f, b'E', b'L', b'F'] {
         return None;
     }
     if *data.get(4)? != ELFCLASS64 {
@@ -140,7 +124,6 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
     let shoff = usize::try_from(read_u64(data, 40, little_endian)?).ok()?;
     let shentsize = usize::from(read_u16(data, 58, little_endian)?);
     let shnum = usize::from(read_u16(data, 60, little_endian)?);
-
     if shentsize != ELF64_SHDR_SIZE {
         return None;
     }
@@ -159,9 +142,8 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
             break;
         }
     }
-    let symtab_index = symtab_index?;
-    let symtab_shdr_off = section_header_offset(shoff, shentsize, symtab_index)?;
 
+    let symtab_shdr_off = section_header_offset(shoff, shentsize, symtab_index?)?;
     let symtab_offset =
         usize::try_from(read_u64(data, symtab_shdr_off + 24, little_endian)?).ok()?;
     let symtab_size = usize::try_from(read_u64(data, symtab_shdr_off + 32, little_endian)?).ok()?;
@@ -178,21 +160,19 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
     if strtab_index >= shnum {
         return None;
     }
+
     let strtab_shdr_off = section_header_offset(shoff, shentsize, strtab_index)?;
     let strtab_offset =
         usize::try_from(read_u64(data, strtab_shdr_off + 24, little_endian)?).ok()?;
     let strtab_size = usize::try_from(read_u64(data, strtab_shdr_off + 32, little_endian)?).ok()?;
-
     let strtab = data.get(strtab_offset..strtab_offset.checked_add(strtab_size)?)?;
     let symtab = data.get(symtab_offset..symtab_offset.checked_add(symtab_size)?)?;
 
-    let symbol_count = symtab_size / symtab_ent_size;
-    for idx in 0..symbol_count {
+    for idx in 0..(symtab_size / symtab_ent_size) {
         let sym_off = idx * symtab_ent_size;
         let st_name = usize::try_from(read_u32(symtab, sym_off, little_endian)?).ok()?;
         let st_shndx = read_u16(symtab, sym_off + 6, little_endian)?;
         let st_value = usize::try_from(read_u64(symtab, sym_off + 8, little_endian)?).ok()?;
-
         if st_name >= strtab.len() {
             continue;
         }
@@ -201,7 +181,7 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
         while end < strtab.len() && strtab[end] != 0 {
             end += 1;
         }
-        let name = core::str::from_utf8(&strtab[st_name..end]).ok()?;
+        let name = std::str::from_utf8(&strtab[st_name..end]).ok()?;
         if name != symbol_name || st_shndx == SHN_UNDEF {
             continue;
         }
@@ -210,10 +190,10 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
         if sec_index >= shnum {
             return None;
         }
+
         let sec_shdr_off = section_header_offset(shoff, shentsize, sec_index)?;
         let sec_offset = usize::try_from(read_u64(data, sec_shdr_off + 24, little_endian)?).ok()?;
         let sec_size = usize::try_from(read_u64(data, sec_shdr_off + 32, little_endian)?).ok()?;
-
         if st_value >= sec_size {
             return None;
         }
@@ -228,28 +208,27 @@ fn find_symbol_data<'a>(data: &'a [u8], symbol_name: &str) -> Option<&'a [u8]> {
 
 fn read_symbol_string(data: &[u8], symbol_name: &str, max_len: usize) -> Option<String> {
     let bytes = find_symbol_data(data, symbol_name)?;
-    let mut len = 0usize;
-    while len < bytes.len() && len < max_len && bytes[len] != 0 {
-        len += 1;
-    }
-    core::str::from_utf8(&bytes[..len]).ok().map(String::from)
+    let len = bytes
+        .iter()
+        .take(max_len)
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len().min(max_len));
+    std::str::from_utf8(&bytes[..len]).ok().map(String::from)
 }
 
 fn read_module_dependencies(data: &[u8]) -> Vec<String> {
-    let deps = read_symbol_string(data, "SCARLET_LSM_DEPENDS", 1024).unwrap_or_default();
-    deps.split(',')
+    read_symbol_string(data, "SCARLET_LSM_DEPENDS", 1024)
+        .unwrap_or_default()
+        .split(',')
         .map(str::trim)
         .filter(|dep| !dep.is_empty())
-        .map(ToString::to_string)
+        .map(str::to_string)
         .collect()
 }
 
 fn module_name_from_path(path: &str) -> String {
     let file_name = path.rsplit('/').next().unwrap_or(path);
-    if let Some(stem) = file_name.strip_suffix(".lsm") {
-        return stem.to_string();
-    }
-    file_name.to_string()
+    file_name.strip_suffix(".lsm").unwrap_or(file_name).to_string()
 }
 
 fn read_module_name(data: &[u8], path: &str) -> String {
@@ -258,27 +237,22 @@ fn read_module_name(data: &[u8], path: &str) -> String {
 
 fn parent_dir(path: &str) -> Option<&str> {
     let idx = path.rfind('/')?;
-    if idx == 0 {
-        Some("/")
-    } else {
-        Some(&path[..idx])
-    }
+    if idx == 0 { Some("/") } else { Some(&path[..idx]) }
 }
 
 fn list_loaded_module_names() -> Vec<String> {
-    let mut buf = [0u8; LSM_LIST_ENTRY_SIZE * LSM_LIST_MAX_MODULES];
+    let mut buf = [0; LSM_LIST_ENTRY_SIZE * LSM_LIST_MAX_MODULES];
     let count = syscall2(Syscall::LsmList, buf.as_mut_ptr() as usize, buf.len());
     if count == 0 {
         return Vec::new();
     }
 
     let mut names = Vec::new();
-    let max_count = core::cmp::min(count, LSM_LIST_MAX_MODULES);
-    for i in 0..max_count {
+    for i in 0..count.min(LSM_LIST_MAX_MODULES) {
         let offset = i * LSM_LIST_ENTRY_SIZE;
         let name_bytes = &buf[offset + 8..offset + 8 + 256];
         let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(256);
-        if let Ok(name) = core::str::from_utf8(&name_bytes[..name_len])
+        if let Ok(name) = std::str::from_utf8(&name_bytes[..name_len])
             && !name.is_empty()
             && !names.iter().any(|existing| existing == name)
         {
@@ -292,11 +266,11 @@ fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
     let mut candidates = Vec::new();
 
     for dir in modules_dirs() {
-        candidates.push(format!("{}/{}.lsm", dir, dep_name));
+        candidates.push(format!("{dir}/{dep_name}.lsm"));
     }
 
     if let Some(dir) = parent_dir(origin_path) {
-        candidates.push(format!("{}/{}.lsm", dir, dep_name));
+        candidates.push(format!("{dir}/{dep_name}.lsm"));
     }
 
     for candidate in candidates {
@@ -306,13 +280,11 @@ fn find_dependency_path(dep_name: &str, origin_path: &str) -> Option<String> {
     }
 
     for dir in modules_dirs() {
-        if let Ok(entries) = list_directory(&dir) {
-            for entry in entries {
-                if !entry.is_file() {
-                    continue;
-                }
-                if entry.name == format!("{}.lsm", dep_name) {
-                    return Some(format!("{}/{}", dir, entry.name));
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy() == format!("{dep_name}.lsm") {
+                    return Some(format!("{dir}/{}", name.to_string_lossy()));
                 }
             }
         }
@@ -330,17 +302,19 @@ fn resolve_to_absolute(path: &str) -> String {
         abs.push_str(path);
         return abs;
     }
+
     let filename = path.rsplit('/').next().unwrap_or(path);
     for dir in modules_dirs() {
-        let with_ext = if filename.ends_with(".lsm") {
-            format!("{}/{}", dir, filename)
+        let candidate = if filename.ends_with(".lsm") {
+            format!("{dir}/{filename}")
         } else {
-            format!("{}/{}.lsm", dir, filename)
+            format!("{dir}/{filename}.lsm")
         };
-        if file_exists(&with_ext) {
-            return with_ext;
+        if file_exists(&candidate) {
+            return candidate;
         }
     }
+
     path.to_string()
 }
 
@@ -350,21 +324,19 @@ fn load_module_recursive(
     loaded: &mut Vec<String>,
 ) -> Result<(), String> {
     let resolved = resolve_to_absolute(module_path);
-    let data = read_file_bytes(&resolved)?;
+    let data = fs::read(&resolved).map_err(|err| format!("failed to read {resolved}: {err}"))?;
     let module_name = read_module_name(&data, module_path);
 
     if loaded.iter().any(|name| name == &module_name) {
         return Ok(());
     }
-
     if visiting.iter().any(|name| name == &module_name) {
-        return Err(format!("dependency cycle detected at {}", module_name));
+        return Err(format!("dependency cycle detected at {module_name}"));
     }
 
     visiting.push(module_name.clone());
 
-    let dependencies = read_module_dependencies(&data);
-    for dep_name in dependencies {
+    for dep_name in read_module_dependencies(&data) {
         if loaded.iter().any(|name| name == &dep_name) {
             continue;
         }
@@ -373,15 +345,11 @@ fn load_module_recursive(
             Some(path) => path,
             None => {
                 visiting.pop();
-                return Err(format!(
-                    "dependency {} not found for {}",
-                    dep_name, module_name
-                ));
+                return Err(format!("dependency {dep_name} not found for {module_name}"));
             }
         };
 
         load_module_recursive(&dep_path, visiting, loaded)?;
-
         for loaded_name in list_loaded_module_names() {
             if !loaded.iter().any(|name| name == &loaded_name) {
                 loaded.push(loaded_name);
@@ -390,8 +358,11 @@ fn load_module_recursive(
     }
 
     let syscall_path = resolve_to_absolute(module_path);
-    println!("loading module: {}", syscall_path);
-    let ret = syscall1(Syscall::LsmLoad, syscall_path.as_ptr() as usize);
+    let c_syscall_path =
+        CString::new(syscall_path.as_str()).map_err(|_| format!("invalid path {syscall_path}"))?;
+
+    println!("loading module: {syscall_path}");
+    let ret = syscall1(Syscall::LsmLoad, c_syscall_path.as_ptr() as usize);
     visiting.pop();
 
     if ret == 0 {
@@ -402,34 +373,7 @@ fn load_module_recursive(
     }
 
     Err(format!(
-        "failed to load {}: {} ({})",
-        module_path,
-        lsm_error_name(ret),
-        ret
+        "failed to load {module_path}: {} ({ret})",
+        lsm_error_name(ret)
     ))
-}
-
-#[unsafe(no_mangle)]
-fn main() -> i32 {
-    let args: Vec<std::string::String> = env::args().collect();
-
-    if args.len() < 2 {
-        println!("usage: lsm_load <module.lsm>");
-        return 1;
-    }
-
-    let path_str = &args[1];
-    let mut visiting = Vec::new();
-    let mut loaded = list_loaded_module_names();
-
-    match load_module_recursive(path_str, &mut visiting, &mut loaded) {
-        Ok(()) => {
-            println!("module loaded successfully");
-            0
-        }
-        Err(e) => {
-            println!("{}", e);
-            1
-        }
-    }
 }
