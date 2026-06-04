@@ -4,7 +4,7 @@
 //! KernelObjects that support the FileObject capability.
 
 use crate::handle::Handle;
-use crate::syscall::{Syscall, syscall2, syscall3};
+use scarlet_sys::{Syscall, syscall2, syscall3};
 
 /// Result type for file operations
 pub type FileResult<T> = Result<T, FileError>;

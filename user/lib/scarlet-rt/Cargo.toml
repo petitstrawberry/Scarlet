@@ -9,3 +9,13 @@ path = "src/lib.rs"
 
 [dependencies]
 scarlet-sys = { path = "../scarlet-sys" }
+talc = { version = "4.4", default-features = false, features = ["lock_api"], optional = true }
+spin = { version = "0.10.0", default-features = false, features = ["lock_api", "mutex", "spin_mutex"], optional = true }
+lock_api = { version = "0.4", optional = true }
+
+[features]
+default = []
+legacy-no-std = ["allocator", "entry", "panic"]
+allocator = ["dep:lock_api", "dep:spin", "dep:talc"]
+entry = []
+panic = []

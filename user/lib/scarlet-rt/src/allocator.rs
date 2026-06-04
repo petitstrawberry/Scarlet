@@ -4,9 +4,9 @@
 //! no_std allocator. It uses a custom OOM handler that extends the heap via
 //! the `sbrk` system call when memory runs out.
 
-use crate::syscall;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
+use scarlet_sys::{Syscall, syscall1};
 use talc::{OomHandler, Span, Talc, Talck};
 
 /// Minimum extension size (4 KiB).
@@ -24,6 +24,12 @@ impl SbrkOomHandler {
         Self {
             heap: Span::empty(),
         }
+    }
+}
+
+impl Default for SbrkOomHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -109,7 +115,7 @@ static FORK_GUARD: ForkGuardSlot = ForkGuardSlot(UnsafeCell::new(None));
 /// thread, so it must not inherit allocator metadata in the middle of a
 /// mutation. Scarlet's `fork` wrapper follows libc practice and holds the
 /// allocator lock across the kernel clone operation.
-pub(crate) fn fork_prepare() {
+pub fn fork_prepare() {
     let guard = ALLOCATOR.lock();
     // SAFETY: Holding `ALLOCATOR` serializes all parent-side access to this
     // slot. The guard is stored without allocating so it can span the raw
@@ -120,33 +126,33 @@ pub(crate) fn fork_prepare() {
 }
 
 /// Release the allocator lock in the parent after `fork`.
-pub(crate) fn fork_parent() {
+pub fn fork_parent() {
     // SAFETY: This is paired with `fork_prepare` in the same parent process.
     // Taking the guard drops it and unlocks the allocator.
     unsafe {
-        let _ = (*FORK_GUARD.0.get()).take();
+        drop((*FORK_GUARD.0.get()).take());
     }
 }
 
 /// Release the copied allocator lock state in the child after `fork`.
-pub(crate) fn fork_child() {
+pub fn fork_child() {
     // SAFETY: After fork the child has its own copied address space and only
     // the calling thread exists. Dropping the copied guard unlocks the child's
     // copied allocator mutex state before any normal Rust code allocates.
     unsafe {
-        let _ = (*FORK_GUARD.0.get()).take();
+        drop((*FORK_GUARD.0.get()).take());
     }
 }
 
 /// Increase the program break by `size` bytes.
 /// Returns the previous break address, or `usize::MAX` on failure.
 pub fn sbrk(size: usize) -> usize {
-    syscall::syscall1(syscall::Syscall::Sbrk, size)
+    syscall1(Syscall::Sbrk, size)
 }
 
 /// Set the program break to `addr`.
 /// Returns the new break address, or `usize::MAX` on failure.
 #[allow(dead_code)]
 pub fn brk(addr: usize) -> usize {
-    syscall::syscall1(syscall::Syscall::Brk, addr)
+    syscall1(Syscall::Brk, addr)
 }

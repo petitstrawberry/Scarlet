@@ -1,36 +1,43 @@
-//! Scarlet Native runtime entry glue.
+//! Scarlet Native runtime support.
 //!
-//! This crate provides the `_start` symbol for Scarlet Native executables.
-//! Low-level ABI definitions and syscall assembly live in `scarlet-abi` and
-//! `scarlet-sys`.
+//! This crate owns the pieces that make Scarlet Native executables start and
+//! stop correctly.
+//!
+//! The default feature set is intentionally empty so Rust's upstream `std`
+//! port can reuse argument/environment and exit glue without importing a global
+//! allocator, entry symbol, panic handler, or allocation error handler.
 
 #![no_std]
+#![cfg_attr(feature = "panic", feature(alloc_error_handler))]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+#[cfg(feature = "allocator")]
+pub mod allocator;
+#[cfg(feature = "entry")]
+mod arch;
+pub mod env;
+
+#[cfg(feature = "allocator")]
+pub use allocator::{brk, sbrk};
+#[cfg(feature = "entry")]
+pub use arch::{arch_set_tls_pointer, arch_tls_pointer};
+
+#[cfg(feature = "panic")]
+use core::fmt::{self, Write};
 
 use scarlet_sys::{Syscall, syscall1};
 
-unsafe extern "C" {
-    fn main(argc: isize, argv: *const *const u8) -> isize;
-}
+#[cfg(feature = "panic")]
+struct RuntimeConsole;
 
-/// Scarlet Native process entry point.
-///
-/// # Arguments
-///
-/// * `argc` - Number of command-line arguments.
-/// * `argv` - Null-terminated command-line argument pointer array.
-///
-/// # Safety
-///
-/// This symbol is entered by the Scarlet kernel loader. The loader must provide
-/// `argc` and `argv` according to the Scarlet Native process-start ABI.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
-    // SAFETY: `_start` is only entered by the Scarlet loader, which sets up
-    // `argc`/`argv` before transferring control. Rustc provides the C ABI
-    // `main` shim for normal Rust executables.
-    let code = unsafe { main(argc, argv) };
-    exit(code as i32)
+#[cfg(feature = "panic")]
+impl Write for RuntimeConsole {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        for byte in value.bytes() {
+            let _ = scarlet_sys::syscall1(Syscall::Putchar, byte as usize);
+        }
+        Ok(())
+    }
 }
 
 /// Exit the current process using Scarlet Native `ExitGroup`.
@@ -45,112 +52,20 @@ pub fn exit(code: i32) -> ! {
     }
 }
 
-/// Copy bytes between non-overlapping buffers.
-///
-/// # Arguments
-///
-/// * `dest` - Destination buffer pointer.
-/// * `src` - Source buffer pointer.
-/// * `n` - Number of bytes to copy.
-///
-/// # Returns
-///
-/// The original `dest` pointer.
-///
-/// # Safety
-///
-/// The caller must uphold the C `memcpy` contract: `src` and `dest` must be
-/// valid for `n` bytes and must not overlap.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    // SAFETY: The caller guarantees the regions are valid for `n` bytes and do
-    // not overlap, matching `copy_nonoverlapping` requirements.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, dest, n);
+#[cfg(feature = "panic")]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    let _ = writeln!(RuntimeConsole, "Panic occurred: {info:?}");
+    loop {
+        core::hint::spin_loop();
     }
-    dest
 }
 
-/// Copy bytes between potentially overlapping buffers.
-///
-/// # Arguments
-///
-/// * `dest` - Destination buffer pointer.
-/// * `src` - Source buffer pointer.
-/// * `n` - Number of bytes to copy.
-///
-/// # Returns
-///
-/// The original `dest` pointer.
-///
-/// # Safety
-///
-/// The caller must uphold the C `memmove` contract: `src` and `dest` must be
-/// valid for `n` bytes. The regions may overlap.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    // SAFETY: The caller guarantees both regions are valid for `n` bytes.
-    // `copy` supports overlapping regions.
-    unsafe {
-        core::ptr::copy(src, dest, n);
+#[cfg(feature = "panic")]
+#[alloc_error_handler]
+fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    let _ = writeln!(RuntimeConsole, "Allocation failed: {layout:?}");
+    loop {
+        core::hint::spin_loop();
     }
-    dest
-}
-
-/// Fill a buffer with a byte value.
-///
-/// # Arguments
-///
-/// * `dest` - Destination buffer pointer.
-/// * `value` - Byte value, passed as a C `int`.
-/// * `n` - Number of bytes to write.
-///
-/// # Returns
-///
-/// The original `dest` pointer.
-///
-/// # Safety
-///
-/// The caller must uphold the C `memset` contract: `dest` must be valid for
-/// `n` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
-    // SAFETY: The caller guarantees `dest` is valid for `n` bytes.
-    unsafe {
-        core::ptr::write_bytes(dest, value as u8, n);
-    }
-    dest
-}
-
-/// Compare two byte buffers.
-///
-/// # Arguments
-///
-/// * `left` - First buffer pointer.
-/// * `right` - Second buffer pointer.
-/// * `n` - Number of bytes to compare.
-///
-/// # Returns
-///
-/// Zero if the buffers are equal, otherwise the signed byte difference at the
-/// first differing position.
-///
-/// # Safety
-///
-/// The caller must uphold the C `memcmp` contract: `left` and `right` must be
-/// valid for `n` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcmp(left: *const u8, right: *const u8, n: usize) -> i32 {
-    for index in 0..n {
-        // SAFETY: The caller guarantees both buffers are valid for `n` bytes,
-        // so every index in this loop is in bounds.
-        let left_byte = unsafe { *left.add(index) };
-        // SAFETY: Same as above for the right-hand buffer.
-        let right_byte = unsafe { *right.add(index) };
-
-        if left_byte != right_byte {
-            return left_byte as i32 - right_byte as i32;
-        }
-    }
-    0
 }

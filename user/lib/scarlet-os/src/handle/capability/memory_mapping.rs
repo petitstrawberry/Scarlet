@@ -4,7 +4,7 @@
 //! memory mapping operations.
 
 use crate::handle::Handle;
-use crate::syscall::{Syscall, syscall2, syscall6};
+use scarlet_sys::{Syscall, syscall2, syscall6};
 
 /// Memory mapping protection flags (PROT_*)
 pub mod prot {
@@ -86,7 +86,7 @@ impl<'a> MemoryMappingOps<'a> {
 ///
 /// # Examples
 /// ```no_run
-/// use scarlet_std::handle::capability::memory_mapping::munmap;
+/// use scarlet_os::handle::capability::memory_mapping::munmap;
 ///
 /// // Unmap a previously mapped region
 /// munmap(mapped_addr, 4096)?;

@@ -4,7 +4,7 @@
 //! that support the StreamOps capability.
 
 use crate::handle::Handle;
-use crate::syscall::{Syscall, syscall3};
+use scarlet_sys::{Syscall, syscall3};
 
 /// Result type for stream operations
 pub type StreamResult<T> = Result<T, StreamError>;

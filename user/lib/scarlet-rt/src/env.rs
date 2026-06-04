@@ -3,8 +3,12 @@
 //! This module provides functionality similar to std::env for accessing
 //! command line arguments and environment variables in a no_std environment.
 
-use crate::string::ToString;
-use crate::{collections::BTreeMap, string::String, vec::Vec};
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -28,11 +32,11 @@ pub unsafe fn init_env(argc: usize, argv: *const *const u8, envp: *const *const 
 
     unsafe {
         // Allocate storage for args and env map
-        let args_vec = crate::boxed::Box::new(Vec::new());
-        let env_map = crate::boxed::Box::new(BTreeMap::new());
+        let args_vec = Box::new(Vec::new());
+        let env_map = Box::new(BTreeMap::new());
 
-        ARGS_PTR = crate::boxed::Box::into_raw(args_vec);
-        ENV_MAP_PTR = crate::boxed::Box::into_raw(env_map);
+        ARGS_PTR = Box::into_raw(args_vec);
+        ENV_MAP_PTR = Box::into_raw(env_map);
 
         let args = &mut *ARGS_PTR;
         let env_map = &mut *ENV_MAP_PTR;
@@ -111,7 +115,7 @@ unsafe fn parse_c_string(ptr: *const u8) -> String {
 /// # Examples
 ///
 /// ```
-/// use scarlet_std::env;
+/// use scarlet_rt::env;
 ///
 /// for arg in env::args() {
 ///     println!("Argument: {}", arg);
@@ -152,7 +156,7 @@ pub fn args_vec() -> Vec<String> {
 /// # Examples
 ///
 /// ```
-/// use scarlet_std::env;
+/// use scarlet_rt::env;
 ///
 /// let path = env::var("PATH");
 /// match path {
@@ -178,7 +182,7 @@ pub fn var(key: &str) -> Option<String> {
 /// # Examples
 ///
 /// ```
-/// use scarlet_std::env;
+/// use scarlet_rt::env;
 ///
 /// for (key, value) in env::vars() {
 ///     println!("{}: {}", key, value);
@@ -204,7 +208,7 @@ pub fn vars() -> VarsIterator {
 /// # Examples
 ///
 /// ```
-/// use scarlet_std::env;
+/// use scarlet_rt::env;
 ///
 /// env::set_var("MY_VAR", "my_value");
 /// assert_eq!(env::var("MY_VAR"), Some("my_value".to_string()));
@@ -225,7 +229,7 @@ pub fn set_var<K: AsRef<str>, V: AsRef<str>>(key: K, value: V) {
 /// # Examples
 ///
 /// ```
-/// use scarlet_std::env;
+/// use scarlet_rt::env;
 ///
 /// env::set_var("MY_VAR", "my_value");
 /// env::remove_var("MY_VAR");
