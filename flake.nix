@@ -68,6 +68,15 @@
             ];
           };
 
+          rustHostTriple =
+            {
+              x86_64-linux = "x86_64-unknown-linux-gnu";
+              aarch64-linux = "aarch64-unknown-linux-gnu";
+              x86_64-darwin = "x86_64-apple-darwin";
+              aarch64-darwin = "aarch64-apple-darwin";
+            }
+            .${system};
+
           # Build UEFI firmware from edk2 source, cross-compiled via GCC5.
           # Patch out -Werror in the template before edksetup.sh generates tools_def.txt.
           buildOvmf =
@@ -235,9 +244,13 @@
             SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
+            SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
+            SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
 
             shellHook = ''
               export PATH="${rustToolchain}/bin:$PATH"
+              export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              source "$SCARLET_REPO_ROOT/scripts/setup-scarlet-rust-toolchain.sh"
             '';
           };
         }

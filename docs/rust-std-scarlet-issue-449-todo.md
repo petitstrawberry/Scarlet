@@ -22,9 +22,10 @@ M3 has an AArch64 QEMU smoke pass for a normal Rust `std` program covering file,
 I/O, argument, environment, current-directory, directory iteration, and hardlink
 behavior. M5 and M6 now also have AArch64 QEMU smoke passes for basic localhost
 networking and thread spawn/join behavior. M7 now has an AArch64 QEMU smoke
-pass for inherited-stdio `Command::spawn`, `Command::status`, `Child::wait`,
+pass for `Command::spawn`, `Command::status`, `Child::wait`,
 `Child::try_wait`, exit-code preservation, environment propagation, child
-`current_dir`, and stdout `Stdio::piped()`.
+`current_dir`, stdin/stdout/stderr pipes, `Command::output()`,
+`Stdio::null()`, file stdio, and parent stdout/stderr redirection.
 
 ## Milestone State
 
@@ -201,8 +202,8 @@ TODO:
 
 ### M7: process / pipe / Command
 
-Status: M7 process spawn/status and stdout pipe smoke-validated on AArch64;
-`Command::output`, null/file stdio, and kill remain follow-up work.
+Status: M7 process spawn/status and stdio redirection smoke-validated on
+AArch64; `Child::kill()` remains blocked on a Native kernel implementation.
 
 Implemented or partially implemented:
 
@@ -218,21 +219,26 @@ Implemented or partially implemented:
 - `Stdio::piped()` creates Scarlet Native pipes and remaps child stdio with the
   same close-then-duplicate handle pattern used by legacy Scarlet userland.
 - `From<ChildPipe> for Stdio` is wired for reusing a child pipe as child stdio.
+- `Stdio::null()` opens `/dev/null` with the stream-appropriate direction and
+  remaps it into child stdio.
+- `Stdio::from(File)` duplicates the file handle and remaps it into child
+  stdio.
+- `Stdio::from(io::Stdout)` and `Stdio::from(io::Stderr)` duplicate parent
+  handles before clone-side stdio remapping, so cross-stream cases avoid
+  sequential remap clobbering.
+- `Command::output()` captures stdout and stderr through Native pipes and drains
+  both concurrently with Scarlet std threads.
 - The Rust/LLVM fork emits Scarlet ELF OSABI directly; no post-link
   `set_osabi.py` step is required for the smoke binary.
 - M7 smoke source exists at `rust/scarlet-smoke/m7-std-process.rs`.
 - AArch64 QEMU M7 smoke passes when linked with the Rust fork std and installed
   as `/bin/scarlet-rust-std-m7-smoke`; it covers child status, explicit failure
   exit code 23, spawn plus try-wait/wait, env propagation, child `current_dir`,
-  and capturing child stdout through `Stdio::piped()`.
+  stdin pipe writes, stdout/stderr pipe reads, `Command::output()`,
+  `Stdio::null()`, `Stdio::from(File)`, and parent stdout/stderr redirection.
 
 TODO:
 
-- Extend M7 smoke coverage to child stdin pipe writes and stderr pipe reads.
-- `Command::output()` after concurrent stdout/stderr draining is implemented.
-- `Stdio::null()` after `/dev/null` or equivalent child stdio setup is defined.
-- `Stdio::from(File)` and cross-stream redirection such as stderr-to-stdout
-  after Native handle remapping semantics exist.
 - `Child::kill()` after Native syscall 6 is wired to a kernel implementation:
   <https://github.com/petitstrawberry/Scarlet/issues/454>.
 - Decide how `execve` errors should be reported to the parent. The current M7a

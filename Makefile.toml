@@ -404,6 +404,30 @@ command = "cargo"
 args = ["make", "build-release-aarch64"]
 dependencies = ["build-userlib-release-aarch64"]
 
+[tasks.build-userbin-std-debug-riscv64]
+description = "Build Rust std user programs for RISC-V in debug mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build"]
+
+[tasks.build-userbin-std-debug-aarch64]
+description = "Build Rust std user programs for AArch64 in debug mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build-aarch64"]
+
+[tasks.build-userbin-std-release-riscv64]
+description = "Build Rust std user programs for RISC-V in release mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build-release"]
+
+[tasks.build-userbin-std-release-aarch64]
+description = "Build Rust std user programs for AArch64 in release mode"
+cwd = "user/std-bin"
+command = "cargo"
+args = ["make", "build-release-aarch64"]
+
 [tasks.build-userbin-riscv64]
 description = "Build user programs (RISC-V, debug)"
 dependencies = ["build-userbin-debug-riscv64"]
@@ -577,7 +601,7 @@ description = "Create AArch64 initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-debug-aarch64", "build-modules-debug-aarch64"]
+dependencies = ["build-userbin-debug-aarch64", "build-userbin-std-debug-aarch64", "build-modules-debug-aarch64"]
 
 [tasks.build-initramfs-aarch64]
 description = "Create AArch64 initramfs archive (debug)"
@@ -588,7 +612,7 @@ description = "Create RISC-V initramfs archive (debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-debug-riscv64", "build-modules-debug-riscv64"]
+dependencies = ["build-userbin-debug-riscv64", "build-userbin-std-debug-riscv64", "build-modules-debug-riscv64"]
 
 [tasks.build-initramfs-riscv64]
 description = "Create RISC-V initramfs archive (debug)"
@@ -599,14 +623,14 @@ description = "Create AArch64 initramfs archive (release)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "aarch64"]
-dependencies = ["build-userbin-release-aarch64", "build-modules-release-aarch64"]
+dependencies = ["build-userbin-release-aarch64", "build-userbin-std-release-aarch64", "build-modules-release-aarch64"]
 
 [tasks.build-initramfs-release-riscv64]
 description = "Create RISC-V initramfs archive (release)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh", "riscv64"]
-dependencies = ["build-userbin-release-riscv64", "build-modules-release-riscv64"]
+dependencies = ["build-userbin-release-riscv64", "build-userbin-std-release-riscv64", "build-modules-release-riscv64"]
 
 [tasks.build-boot-image-riscv64]
 description = "Create boot image (RISC-V, debug kernel)"

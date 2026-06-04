@@ -1,0 +1,19 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[tasks.build]
+description = "Build Rust std user programs for RISC-V in debug mode"
+script = 'cargo build --target riscv64gc-unknown-scarlet --out-dir ../bin/dist/riscv64'
+
+[tasks.build-release]
+description = "Build Rust std user programs for RISC-V in release mode"
+script = 'cargo build --release --target riscv64gc-unknown-scarlet --out-dir ../bin/dist/riscv64'
+
+[tasks.build-aarch64]
+description = "Build Rust std user programs for AArch64 in debug mode"
+script = 'cargo build --target aarch64-unknown-scarlet --out-dir ../bin/dist/aarch64'
+
+[tasks.build-release-aarch64]
+description = "Build Rust std user programs for AArch64 in release mode"
+script = 'cargo build --release --target aarch64-unknown-scarlet --out-dir ../bin/dist/aarch64'
