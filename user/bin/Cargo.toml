@@ -30,18 +30,6 @@ name = "sh"
 path = "src/sh/main.rs"
 
 [[bin]]
-name = "ls"
-path = "src/ls.rs"
-
-[[bin]]
-name = "rm"
-path = "src/rm.rs"
-
-[[bin]]
-name = "hello"
-path = "src/hello.rs"
-
-[[bin]]
 name = "test"
 path = "src/test.rs"
 
@@ -52,10 +40,6 @@ path = "src/xv6.rs"
 [[bin]]
 name = "env_test"
 path = "src/env_test.rs"
-
-[[bin]]
-name = "cat"
-path = "src/cat.rs"
 
 [[bin]]
 name = "fb_test"
@@ -100,14 +84,6 @@ path = "src/netcfg.rs"
 [[bin]]
 name = "netcfgd"
 path = "src/netcfgd/main.rs"
-
-[[bin]]
-name = "tcp_client"
-path = "src/tcp_client.rs"
-
-[[bin]]
-name = "tcp_server"
-path = "src/tcp_server.rs"
 
 [[bin]]
 name = "httpd"
