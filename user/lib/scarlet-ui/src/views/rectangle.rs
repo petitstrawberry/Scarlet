@@ -165,7 +165,7 @@ impl RectangleRenderObject {
 impl ElementRenderObject for RectangleRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            crate::logln!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
                 constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         }
         // Rectangle takes the full available space, or min_size if specified
@@ -184,7 +184,7 @@ impl ElementRenderObject for RectangleRenderObject {
 
         self.size = Size { width, height };
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
+            crate::logln!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
         }
 
         // Create buffer for this rectangle
@@ -194,7 +194,7 @@ impl ElementRenderObject for RectangleRenderObject {
         // Sanity check to prevent overflow
         if w > 10000 || h > 10000 {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
+                crate::logln!("[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
                     w, h);
             }
             // Use min constraints as fallback
@@ -237,7 +237,7 @@ impl ElementRenderObject for RectangleRenderObject {
     fn render(&mut self) {
         // Render rectangle to buffer
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RectangleRenderObject] render START: color={:?}, buffer={}",
+            crate::logln!("[RectangleRenderObject] render START: color={:?}, buffer={}",
                 self.color, self.buffer.is_some());
         }
         if let Some(ref mut buffer) = self.buffer {
@@ -245,13 +245,13 @@ impl ElementRenderObject for RectangleRenderObject {
             let width = canvas.width();
             let height = canvas.height();
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RectangleRenderObject] buffer {}x{}", width, height);
+                crate::logln!("[RectangleRenderObject] buffer {}x{}", width, height);
             }
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RectangleRenderObject] creating canvas...");
+                crate::logln!("[RectangleRenderObject] creating canvas...");
             }
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RectangleRenderObject] filling rect...");
+                crate::logln!("[RectangleRenderObject] filling rect...");
             }
 
             if self.border_width > 0.0 {
@@ -280,7 +280,7 @@ impl ElementRenderObject for RectangleRenderObject {
             }
 
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RectangleRenderObject] render DONE");
+                crate::logln!("[RectangleRenderObject] render DONE");
             }
         }
     }

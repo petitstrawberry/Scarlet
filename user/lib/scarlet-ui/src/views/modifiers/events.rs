@@ -217,7 +217,7 @@ impl ElementRenderObject for OnClickRenderObject {
             let size = child.layout(constraints);
             self.size = size;
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[OnClickRenderObject::layout_with_children] size={}x{}", size.width, size.height);
+                crate::logln!("[OnClickRenderObject::layout_with_children] size={}x{}", size.width, size.height);
             }
             size
         } else {
@@ -233,7 +233,7 @@ impl ElementRenderObject for OnClickRenderObject {
     fn hit_test(&self, point: crate::geometry::Point) -> bool {
         let result = point.x >= 0.0 && point.x < self.size.width && point.y >= 0.0 && point.y < self.size.height;
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[OnClickRenderObject::hit_test] point=({:?}), size={:?}, result={}", point, self.size, result);
+            crate::logln!("[OnClickRenderObject::hit_test] point=({:?}), size={:?}, result={}", point, self.size, result);
         }
         result
     }
@@ -522,7 +522,7 @@ impl OnKeyRenderObject {
     /// `true` when the event was consumed.
     pub fn invoke_on_key(&self, event: KeyEvent) -> bool {
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[OnKeyRenderObject] invoke: event={:?} has_callback={}",
                 event,
                 self.callback.is_some()
@@ -534,7 +534,7 @@ impl OnKeyRenderObject {
             .map(|callback| callback(event))
             .unwrap_or(false);
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[OnKeyRenderObject] handled={}", handled);
+            crate::logln!("[OnKeyRenderObject] handled={}", handled);
         }
         handled
     }

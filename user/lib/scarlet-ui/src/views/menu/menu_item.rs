@@ -207,7 +207,7 @@ impl ElementRenderObject for MenuItemRenderObject {
         let intrinsic = self.estimate_size();
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[MenuItemRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+            crate::logln!("[MenuItemRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
                 self.label, intrinsic, constraints);
         }
 
@@ -236,7 +236,7 @@ impl ElementRenderObject for MenuItemRenderObject {
         let h = libm::ceilf(height) as u32;
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[MenuItemRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+            crate::logln!("[MenuItemRenderObject] layout: final size={}x{}, buffer needed={} bytes",
                 w, h, w * h * 4);
         }
 
@@ -278,7 +278,7 @@ impl ElementRenderObject for MenuItemRenderObject {
     fn render(&mut self) {
         // Render menu item to buffer
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[MenuItemRenderObject] render: label='{}', buffer={}",
+            crate::logln!("[MenuItemRenderObject] render: label='{}', buffer={}",
                 self.label, self.buffer.is_some());
         }
         let background = self.current_background();

@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use std::sync::Mutex;
+use crate::os::Mutex;
 
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};

@@ -113,14 +113,14 @@ impl TextRenderObject {
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            crate::logln!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
                 self.content, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         }
         // Use actual font measurement
         let (measured_width, measured_height) = graphics::measure_text_sized(&self.content, self.font_size);
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
+            crate::logln!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
         }
 
         // For text, use the measured size, but constrain within bounds
@@ -146,7 +146,7 @@ impl ElementRenderObject for TextRenderObject {
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+            crate::logln!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
                 w, h, w * h * 4);
         }
 
@@ -189,7 +189,7 @@ impl ElementRenderObject for TextRenderObject {
             let height = canvas.height();
 
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
+                crate::logln!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
                     width, height, width.saturating_mul(height).saturating_mul(4));
             }
 
@@ -200,7 +200,7 @@ impl ElementRenderObject for TextRenderObject {
             canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
         } else {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[TextRenderObject] render: NO BUFFER!");
+                crate::logln!("[TextRenderObject] render: NO BUFFER!");
             }
         }
     }

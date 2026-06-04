@@ -243,7 +243,7 @@ impl ElementRenderObject for ButtonRenderObject {
         let intrinsic = self.estimate_size();
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+            crate::logln!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
                 self.label, intrinsic, constraints);
         }
 
@@ -269,7 +269,7 @@ impl ElementRenderObject for ButtonRenderObject {
         let h = libm::ceilf(height) as u32;
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+            crate::logln!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
                 w, h, w * h * 4);
         }
 
@@ -299,7 +299,7 @@ impl ElementRenderObject for ButtonRenderObject {
     fn render(&mut self) {
         // Render button to buffer
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[ButtonRenderObject] render: label='{}', buffer={}",
+            crate::logln!("[ButtonRenderObject] render: label='{}', buffer={}",
                 self.label, self.buffer.is_some());
         }
         let background = self.current_background();

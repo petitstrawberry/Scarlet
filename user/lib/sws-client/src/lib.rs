@@ -86,24 +86,42 @@
 //! # }
 //! ```
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
+mod builder;
 mod connection;
 mod error;
 pub mod event;
+mod os;
 mod surface;
-mod builder;
+
+#[cfg(feature = "std")]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        std::println!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        scarlet_std::println!($($arg)*)
+    };
+}
+
+pub(crate) use logln;
 
 pub use builder::SurfaceBuilder;
 pub use connection::{Connection, InputMethodInfo};
 pub use error::Error;
-pub use event::{Event, ImeContextState, InputEvent};
-pub use event::event_type;
 pub use event::abs_code;
-pub use event::rel_code;
+pub use event::event_type;
 pub use event::key_code;
+pub use event::rel_code;
+pub use event::{Event, ImeContextState, InputEvent};
 pub use surface::Surface;
 
 /// Transient relationship policy flags for child windows.
@@ -114,52 +132,52 @@ pub use surface::Surface;
 pub struct TransientFlags(u32);
 
 impl TransientFlags {
-	pub const NONE: Self = Self(0);
-	pub const FOLLOW_PARENT_MOVE: Self = Self(sws_protocol::transient_flags::FOLLOW_PARENT_MOVE);
-	pub const RAISE_WITH_PARENT: Self = Self(sws_protocol::transient_flags::RAISE_WITH_PARENT);
+    pub const NONE: Self = Self(0);
+    pub const FOLLOW_PARENT_MOVE: Self = Self(sws_protocol::transient_flags::FOLLOW_PARENT_MOVE);
+    pub const RAISE_WITH_PARENT: Self = Self(sws_protocol::transient_flags::RAISE_WITH_PARENT);
 
-	pub const fn bits(self) -> u32 {
-		self.0
-	}
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
 
-	pub const fn contains(self, other: Self) -> bool {
-		(self.0 & other.0) == other.0
-	}
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
 }
 
 impl core::ops::BitOr for TransientFlags {
-	type Output = Self;
-	fn bitor(self, rhs: Self) -> Self::Output {
-		Self(self.0 | rhs.0)
-	}
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
 }
 
 impl core::ops::BitOrAssign for TransientFlags {
-	fn bitor_assign(&mut self, rhs: Self) {
-		self.0 |= rhs.0;
-	}
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 impl From<u32> for TransientFlags {
-	fn from(value: u32) -> Self {
-		Self(value)
-	}
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
 }
 
 impl From<TransientFlags> for u32 {
-	fn from(value: TransientFlags) -> Self {
-		value.0
-	}
+    fn from(value: TransientFlags) -> Self {
+        value.0
+    }
 }
 
 /// Backward-compatible raw constants (bits).
 ///
 /// Prefer using [`TransientFlags`] for new code.
 pub mod transient_flags {
-	use super::TransientFlags;
+    use super::TransientFlags;
 
-	pub const FOLLOW_PARENT_MOVE: u32 = TransientFlags::FOLLOW_PARENT_MOVE.bits();
-	pub const RAISE_WITH_PARENT: u32 = TransientFlags::RAISE_WITH_PARENT.bits();
+    pub const FOLLOW_PARENT_MOVE: u32 = TransientFlags::FOLLOW_PARENT_MOVE.bits();
+    pub const RAISE_WITH_PARENT: u32 = TransientFlags::RAISE_WITH_PARENT.bits();
 }
 
 /// Per-window size constraints.
@@ -168,17 +186,17 @@ pub mod transient_flags {
 /// - `0` means "unset".
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct WindowSizeLimits {
-	pub min_width: u32,
-	pub min_height: u32,
-	pub max_width: u32,
-	pub max_height: u32,
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_width: u32,
+    pub max_height: u32,
 }
 
 impl WindowSizeLimits {
-	pub const NONE: Self = Self {
-		min_width: 0,
-		min_height: 0,
-		max_width: 0,
-		max_height: 0,
-	};
+    pub const NONE: Self = Self {
+        min_width: 0,
+        min_height: 0,
+        max_width: 0,
+        max_height: 0,
+    };
 }

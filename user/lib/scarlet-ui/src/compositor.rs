@@ -87,7 +87,7 @@ impl Compositor {
     /// This traverses the tree depth-first and composites all buffers.
     pub fn composite_tree(&mut self, tree: &RenderTree) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Compositor] composite_tree: window_size={:?}x{:?}",
+            crate::logln!("[Compositor] composite_tree: window_size={:?}x{:?}",
                 self.window_buffer.width(), self.window_buffer.height());
         }
 
@@ -98,7 +98,7 @@ impl Compositor {
         self.composite_node(tree.root(), Point::ZERO);
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Compositor] composite_tree: complete");
+            crate::logln!("[Compositor] composite_tree: complete");
         }
     }
 
@@ -138,7 +138,7 @@ impl Compositor {
     /// Composite an Element tree into the window buffer.
     pub fn composite_elements(&mut self, root: &dyn Element) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Compositor] composite_elements: window_size={:?}x{:?}",
+            crate::logln!("[Compositor] composite_elements: window_size={:?}x{:?}",
                 self.window_buffer.width(), self.window_buffer.height());
         }
 
@@ -193,7 +193,7 @@ impl Compositor {
         let render_object = node.render_object();
         let has_buffer = render_object.and_then(|ro| ro.get_buffer()).is_some();
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[Compositor] visiting node id={} origin=({}, {}) local=({}, {}) buffer={}",
                 node.id().get(),
                 absolute_origin.x,
@@ -209,7 +209,7 @@ impl Compositor {
             if let Some(buffer) = render_object.get_buffer() {
                 let opacity = 1.0;
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
+                    crate::logln!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
                         absolute_origin, buffer.width(), buffer.height(), opacity);
                 }
 

@@ -250,36 +250,36 @@ impl RenderingPipeline {
     /// This flushes all dirty phases and renders to the window buffer.
     pub fn render(&mut self) -> Option<&Buffer> {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RenderingPipeline] render() starting...");
+            crate::logln!("[RenderingPipeline] render() starting...");
         }
         // Flush all dirty phases (build, layout, paint)
         crate::graphics::set_current_scale_milli(self.scale_milli);
         self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RenderingPipeline] flush() completed");
+            crate::logln!("[RenderingPipeline] flush() completed");
         }
 
         // Composite all elements into the window buffer
         if let Some(ref mut compositor) = self.compositor {
             if let Some(root) = self.element_tree.root() {
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!("[RenderingPipeline] building RenderTree...");
+                    crate::logln!("[RenderingPipeline] building RenderTree...");
                 }
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!("[RenderingPipeline] compositing element tree...");
+                    crate::logln!("[RenderingPipeline] compositing element tree...");
                 }
                 let dirty_ids = self.pipeline_owner.last_paint_ids();
                 compositor.composite_elements_with_dirty(root, dirty_ids);
             } else {
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!("[RenderingPipeline] No root element to render");
+                    crate::logln!("[RenderingPipeline] No root element to render");
                 }
             }
 
             Some(compositor.window_buffer())
         } else {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[RenderingPipeline] No compositor!");
+                crate::logln!("[RenderingPipeline] No compositor!");
             }
             None
         }

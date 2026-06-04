@@ -173,7 +173,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[NavigationViewRenderObject::layout] constraints=({:?}, {:?}) -> ({:?}, {:?})",
                 constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height
             );
@@ -181,7 +181,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
         // Expect exactly 2 children: sidebar and content
         if children.len() != 2 {
-            scarlet_std::println!(
+            crate::logln!(
                 "[NavigationViewRenderObject::layout] WARNING: Expected 2 children, got {}",
                 children.len()
             );
@@ -228,7 +228,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
         let sidebar_width_px = libm::ceilf(self.sidebar_width) as u32;
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[NavigationViewRenderObject::layout] sidebar size={}x{}, buffer needed={} bytes",
                 sidebar_width_px, sidebar_height_px, sidebar_width_px * sidebar_height_px * 4
             );
@@ -260,7 +260,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
     fn render(&mut self) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[NavigationViewRenderObject::render] buffer={}", self.buffer.is_some());
+            crate::logln!("[NavigationViewRenderObject::render] buffer={}", self.buffer.is_some());
         }
 
         if let Some(ref mut buffer) = self.buffer {

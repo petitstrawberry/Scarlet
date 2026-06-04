@@ -4,8 +4,8 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, DataStruct, Fields, TypePath};
 use syn::punctuated::Punctuated;
+use syn::{Data, DataStruct, DeriveInput, Fields, TypePath, parse_macro_input};
 
 /// Derive macro for View trait
 ///
@@ -26,7 +26,7 @@ use syn::punctuated::Punctuated;
 /// ```ignore
 /// #![no_std]
 ///
-/// extern crate alloc;
+/// extern crate scarlet_std;
 ///
 /// #[derive(View, Clone)]
 /// struct MyApp { ... }
@@ -34,8 +34,10 @@ use syn::punctuated::Punctuated;
 ///
 /// # Note for `#![no_std]` environments
 ///
-/// In `#![no_std]` contexts, you must add `extern crate alloc;` at the crate level:
+/// In `#![no_std]` Scarlet contexts, import the Scarlet runtime and UI crates:
 /// ```ignore
+/// extern crate scarlet_std;
+///
 /// impl CounterApp {
 ///     pub fn new(custom_value: i32) -> Self {
 ///         Self {
@@ -51,9 +53,7 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 
     // Parse struct fields to find State<T> fields
     let (state_fields, state_indices) = match &input.data {
-        Data::Struct(DataStruct { fields, .. }) => {
-            extract_state_fields_with_indices(fields)
-        }
+        Data::Struct(DataStruct { fields, .. }) => extract_state_fields_with_indices(fields),
         _ => {
             // For enums or other types, return empty
             (Punctuated::new(), Vec::new())
@@ -107,13 +107,13 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
         #default_impl
 
         impl ::scarlet_ui::view::View for #name {
-            fn create_element(&self) -> alloc::boxed::Box<dyn ::scarlet_ui::element::Element> {
+            fn create_element(&self) -> ::scarlet_ui::__private::Box<dyn ::scarlet_ui::element::Element> {
                 // Create a ComponentElement to wrap this View
-                alloc::boxed::Box::new(::scarlet_ui::element::ComponentElement::new(self.clone()))
+                ::scarlet_ui::__private::Box::new(::scarlet_ui::element::ComponentElement::new(self.clone()))
             }
 
-            fn listenables(&self) -> alloc::vec::Vec<&dyn ::scarlet_ui::state::Listenable> {
-                let mut vec = alloc::vec::Vec::new();
+            fn listenables(&self) -> ::scarlet_ui::__private::Vec<&dyn ::scarlet_ui::state::Listenable> {
+                let mut vec = ::scarlet_ui::__private::Vec::new();
                 #(#collect_state_fields)*
                 vec
             }
@@ -146,7 +146,9 @@ fn extract_state_fields(fields: &Fields) -> Punctuated<syn::Ident, syn::token::C
 }
 
 /// Extract field names and indices for State<T> fields (with auto-incrementing IDs)
-fn extract_state_fields_with_indices(fields: &Fields) -> (Punctuated<syn::Ident, syn::token::Comma>, Vec<usize>) {
+fn extract_state_fields_with_indices(
+    fields: &Fields,
+) -> (Punctuated<syn::Ident, syn::token::Comma>, Vec<usize>) {
     let mut state_fields = Punctuated::new();
     let mut state_indices = Vec::new();
     let mut counter = 0usize;

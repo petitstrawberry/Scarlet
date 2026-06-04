@@ -27,7 +27,7 @@ impl<'a> RenderNode<'a> {
         let has_ro = element.render_object().is_some();
         let position = element.position();
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[RenderTree] node id={} type={} render_object={} pos=({}, {}) children={}",
                 element.id().get(),
                 element.type_name_debug(),

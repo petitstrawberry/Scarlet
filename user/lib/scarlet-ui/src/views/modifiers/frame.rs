@@ -218,7 +218,7 @@ impl FrameRenderObject {
 impl ElementRenderObject for FrameRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[FrameRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?}), self.width={:?}, self.height={:?}",
+            crate::logln!("[FrameRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?}), self.width={:?}, self.height={:?}",
                 constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height, self.width, self.height);
         }
         // Determine the size based on explicit width/height and constraints
@@ -256,7 +256,7 @@ impl ElementRenderObject for FrameRenderObject {
 
         self.size = Size { width, height };
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[FrameRenderObject::layout] FINAL: size={}x{}", width, height);
+            crate::logln!("[FrameRenderObject::layout] FINAL: size={}x{}", width, height);
         }
         self.size
     }

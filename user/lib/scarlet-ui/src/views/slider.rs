@@ -13,7 +13,7 @@ use crate::buffer::Buffer;
 use crate::graphics;
 use crate::state::State;
 use alloc::vec::Vec;
-use std::sync::Mutex;
+use crate::os::Mutex;
 
 static SLIDER_DRAGGING_REGISTRY: Mutex<BTreeMap<crate::state::StateId, State<bool>>> =
     Mutex::new(BTreeMap::new());

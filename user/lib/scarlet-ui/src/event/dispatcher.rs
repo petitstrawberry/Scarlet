@@ -110,7 +110,7 @@ impl EventDispatcher {
     /// Dispatch an event to the appropriate element
     pub fn dispatch(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[EventDispatcher] dispatch: {:?}", event);
+            crate::logln!("[EventDispatcher] dispatch: {:?}", event);
         }
         match event {
             Event::Quit => {
@@ -212,7 +212,7 @@ impl EventDispatcher {
             let path_origins = Self::path_origins(element_tree, &path);
             let target_id = *path.last().unwrap();
             if crate::debug::is_enabled() {
-                scarlet_std::println!(
+                crate::logln!(
                     "[EventDispatcher] mouse: {:?} point=({:.1},{:.1}) target_id={:?} path_len={}",
                     event,
                     point.x,
@@ -223,7 +223,7 @@ impl EventDispatcher {
                 for (index, id) in path.iter().enumerate() {
                     if let Some(element) = element_tree.find_element_mut(*id) {
                         let bounds = element.bounds();
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[EventDispatcher] path[{}] id={:?} type={} bounds=({:.1},{:.1},{:.1},{:.1})",
                             index,
                             id,
@@ -234,7 +234,7 @@ impl EventDispatcher {
                             bounds.size.height
                         );
                     } else {
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[EventDispatcher] path[{}] id={:?} (not found)",
                             index,
                             id
@@ -248,7 +248,7 @@ impl EventDispatcher {
                     // Skip hover updates while dragging outside the element.
                 } else if self.hovered_id != Some(target_id) {
                     if crate::debug::is_enabled() {
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[EventDispatcher] hover change: {:?} -> {:?}",
                             self.hovered_id,
                             Some(target_id)
@@ -360,7 +360,7 @@ impl EventDispatcher {
             }
 
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[EventDispatcher] mouse handled={}", handled);
+                crate::logln!("[EventDispatcher] mouse handled={}", handled);
             }
             if let crate::event::MouseEvent::ButtonReleased {
                 button: crate::event::MouseButton::Left,
@@ -443,7 +443,7 @@ impl EventDispatcher {
         self.focused_path = path.clone();
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!(
+            crate::logln!(
                 "[EventDispatcher] keyboard: {:?} target_id={:?} path_len={}",
                 event,
                 target_id,
@@ -481,7 +481,7 @@ impl EventDispatcher {
         }
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[EventDispatcher] keyboard handled={}", handled);
+            crate::logln!("[EventDispatcher] keyboard handled={}", handled);
         }
         handled
     }

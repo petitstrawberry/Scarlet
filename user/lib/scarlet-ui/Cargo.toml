@@ -3,11 +3,21 @@ name = "scarlet-ui"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = [
+    "dep:scarlet-std",
+    "dep:framebuffer",
+    "sws-client/legacy-scarlet-std",
+    "sws-protocol/legacy-scarlet-std",
+]
+std = ["sws-client/std", "sws-protocol/std"]
+
 [dependencies]
-scarlet-std = { path = "../std" }
-sws-client = { path = "../sws-client" }
-sws-protocol = { path = "../sws-protocol" }
-framebuffer = { path = "../framebuffer" }
+scarlet-std = { path = "../std", optional = true }
+sws-client = { path = "../sws-client", default-features = false }
+sws-protocol = { path = "../sws-protocol", default-features = false }
+framebuffer = { path = "../framebuffer", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 bitflags = { version = "2.6", default-features = false }

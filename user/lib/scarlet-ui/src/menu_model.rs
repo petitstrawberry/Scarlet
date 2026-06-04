@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use scarlet_std::sync::Mutex;
+use crate::os::Mutex;
 use crate::views::{MenuBar, MenuItem};
 
 pub type MenuCallback = Arc<dyn Fn() + Send + Sync + 'static>;

@@ -272,13 +272,13 @@ impl ElementTree {
         if !crate::debug::is_enabled() {
             return;
         }
-        scarlet_std::println!("[ElementTree] Dumping element tree:");
+        crate::logln!("[ElementTree] Dumping element tree:");
         if let Some(root) = self.root.as_deref() {
             self.dump_element(root, 0);
         } else {
-            scarlet_std::println!("  (empty)");
+            crate::logln!("  (empty)");
         }
-        scarlet_std::println!("[ElementTree] End of tree dump");
+        crate::logln!("[ElementTree] End of tree dump");
     }
 
     fn dump_element(&self, element: &dyn Element, depth: usize) {
@@ -293,7 +293,7 @@ impl ElementTree {
         let children = element.children();
         let has_buffer = element.get_buffer().is_some();
 
-        scarlet_std::println!(
+        crate::logln!(
             "{}[{}] id={} (children={}, buffer={})",
             indent,
             type_name,
