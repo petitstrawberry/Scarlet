@@ -94,8 +94,8 @@ fn main() -> ExitCode {
         let mut response_buffer = [0u8; 256];
         match stream.read(&mut response_buffer) {
             Ok(n) if n > 0 => {
-                let received = std::str::from_utf8(&response_buffer[..n])
-                    .unwrap_or("<invalid utf8>");
+                let received =
+                    std::str::from_utf8(&response_buffer[..n]).unwrap_or("<invalid utf8>");
                 println!("{received}");
             }
             Ok(_) => {

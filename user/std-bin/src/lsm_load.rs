@@ -228,7 +228,10 @@ fn read_module_dependencies(data: &[u8]) -> Vec<String> {
 
 fn module_name_from_path(path: &str) -> String {
     let file_name = path.rsplit('/').next().unwrap_or(path);
-    file_name.strip_suffix(".lsm").unwrap_or(file_name).to_string()
+    file_name
+        .strip_suffix(".lsm")
+        .unwrap_or(file_name)
+        .to_string()
 }
 
 fn read_module_name(data: &[u8], path: &str) -> String {
@@ -237,7 +240,11 @@ fn read_module_name(data: &[u8], path: &str) -> String {
 
 fn parent_dir(path: &str) -> Option<&str> {
     let idx = path.rfind('/')?;
-    if idx == 0 { Some("/") } else { Some(&path[..idx]) }
+    if idx == 0 {
+        Some("/")
+    } else {
+        Some(&path[..idx])
+    }
 }
 
 fn list_loaded_module_names() -> Vec<String> {

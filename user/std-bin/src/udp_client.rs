@@ -24,7 +24,10 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let message = args.get(3).map(String::as_str).unwrap_or("Hello from UDP client!");
+    let message = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("Hello from UDP client!");
     let remote = SocketAddrV4::new(host, port);
 
     let socket = match UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)) {
