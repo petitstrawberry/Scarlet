@@ -10,7 +10,11 @@
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -76,6 +80,128 @@
               aarch64-darwin = "aarch64-apple-darwin";
             }
             .${system};
+
+          rustHostTripleEnv = builtins.replaceStrings [ "-" ] [ "_" ] rustHostTriple;
+
+          scarletRustSrc = pkgs.fetchFromGitHub {
+            owner = "petitstrawberry";
+            repo = "rust";
+            rev = "b9573d6cd0731d24486f77ddf24d502e2e6bef02";
+            hash = "sha256-KvC4l6i6LJ91acSJDZOklmASWYB6LAAY2QHGBVU4r0c=";
+            fetchSubmodules = true;
+          };
+
+          scarletRustCargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            name = "scarlet-rust-cargo-deps";
+            src = scarletRustSrc;
+            hash = "sha256-n9gzpaUkXa+8Yr8SqtRj0JD9YyVMXtOvk5NxLWrHJsA=";
+          };
+
+          scarletRustBootstrapCargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            name = "scarlet-rust-bootstrap-cargo-deps";
+            src = scarletRustSrc;
+            cargoRoot = "src/bootstrap";
+            hash = "sha256-xxaYOc4Xn3F3ghDEpFR2041gJ98t4lONJ9Ka1OkzGzI=";
+          };
+
+          scarletRustLibraryCargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            name = "scarlet-rust-library-cargo-deps";
+            src = scarletRustSrc;
+            cargoRoot = "library";
+            hash = "sha256-8XV6J9hMZ9cQ1I6GxEtF3WaOeqaE+WkMTc67mV6O60g=";
+          };
+
+          scarletRustToolchain = pkgs.stdenv.mkDerivation {
+            pname = "scarlet-rust-toolchain";
+            version = "b9573d6";
+            src = scarletRustSrc;
+
+            nativeBuildInputs = [
+              rustToolchain
+              pkgs.cmake
+              pkgs.git
+              pkgs.ninja
+              pkgs.pkg-config
+              pkgs.python3
+              pkgs.rsync
+            ];
+
+            buildInputs = [
+              pkgs.zlib
+            ];
+
+            dontConfigure = true;
+
+            buildPhase = ''
+              runHook preBuild
+
+              export HOME="$TMPDIR"
+              export CARGO_HOME="$TMPDIR/cargo"
+              export CXX_${rustHostTripleEnv}="${if pkgs.stdenv.isDarwin then "clang++" else "c++"}"
+
+              mkdir -p "$TMPDIR/vendor-registry" "$CARGO_HOME"
+              cp -R ${scarletRustCargoDeps}/source-registry-0/. "$TMPDIR/vendor-registry/"
+              chmod -R u+w "$TMPDIR/vendor-registry"
+              cp -R ${scarletRustBootstrapCargoDeps}/source-registry-0/. "$TMPDIR/vendor-registry/"
+              chmod -R u+w "$TMPDIR/vendor-registry"
+              cp -R ${scarletRustLibraryCargoDeps}/source-registry-0/. "$TMPDIR/vendor-registry/"
+              chmod -R u+w "$TMPDIR/vendor-registry"
+              mkdir -p .cargo
+              cat > .cargo/config.toml <<EOF
+              [source.crates-io]
+              replace-with = "vendored-sources"
+
+              [source.vendored-sources]
+              directory = "$TMPDIR/vendor-registry"
+
+              [net]
+              offline = true
+              EOF
+
+              cat > bootstrap.toml <<EOF
+              change-id = "ignore"
+              profile = "compiler"
+
+              [build]
+              build = "${rustHostTriple}"
+              host = ["${rustHostTriple}"]
+              target = ["${rustHostTriple}", "riscv64gc-unknown-scarlet", "aarch64-unknown-scarlet"]
+              cargo = "${rustToolchain}/bin/cargo"
+              rustc = "${rustToolchain}/bin/rustc"
+              rustfmt = "${rustToolchain}/bin/rustfmt"
+              docs = false
+              submodules = false
+
+              [llvm]
+              download-ci-llvm = false
+              targets = "AArch64;RISCV;X86"
+
+              [rust]
+              download-rustc = false
+              EOF
+
+              ./x build --config bootstrap.toml compiler/rustc library
+
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+
+              mkdir -p "$out"
+              cp -R "build/${rustHostTriple}/stage1/." "$out/"
+              ln -sfn ${rustToolchain}/bin/cargo "$out/bin/cargo"
+              ln -sfn ${rustToolchain}/bin/cargo-clippy "$out/bin/cargo-clippy"
+              ln -sfn ${rustToolchain}/bin/cargo-fmt "$out/bin/cargo-fmt"
+              ln -sfn ${rustToolchain}/bin/clippy-driver "$out/bin/clippy-driver"
+              ln -sfn ${rustToolchain}/bin/rustfmt "$out/bin/rustfmt"
+              ln -sfn ${scarletRustSrc} "$out/lib/rustlib/rustc-src/rust"
+              ln -sfn ${scarletRustSrc} "$out/lib/rustlib/src/rust"
+              "$out/bin/rustc" --print target-list | grep -E '^(riscv64gc|aarch64)-unknown-scarlet$'
+
+              runHook postInstall
+            '';
+          };
 
           # Build UEFI firmware from edk2 source, cross-compiled via GCC5.
           # Patch out -Werror in the template before edksetup.sh generates tools_def.txt.
@@ -186,7 +312,7 @@
           default = pkgs.mkShell {
             packages = [
               # Rust
-              rustToolchain
+              scarletRustToolchain
               pkgs.cargo-make
 
               # QEMU (system emulation for riscv64 and aarch64)
@@ -246,12 +372,7 @@
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
-
-            shellHook = ''
-              export PATH="${rustToolchain}/bin:$PATH"
-              export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-              source "$SCARLET_REPO_ROOT/scripts/setup-scarlet-rust-toolchain.sh"
-            '';
+            SCARLET_RUST_TOOLCHAIN = "${scarletRustToolchain}";
           };
         }
       );

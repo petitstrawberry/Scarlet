@@ -1,8 +1,10 @@
 FROM ubuntu:25.04
 
-ENV PATH=/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
+ENV PATH=/opt/scarlet-rust-toolchain/bin:/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV SCARLET_RUST_HOST_TRIPLE=x86_64-unknown-linux-gnu
+ENV SCARLET_RUST_TARGET_TRIPLES="riscv64gc-unknown-scarlet aarch64-unknown-scarlet"
 ENV CC_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-gcc
 ENV CFLAGS_riscv64gc_unknown_scarlet_elf="-march=rv64gc -mabi=lp64d -DRING_CORE_NOSTDLIBINC -fno-stack-protector"
 ENV AR_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-ar
@@ -54,6 +56,16 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 
 # Install cargo tools
 RUN cargo install cargo-make
+
+# Build the Scarlet Rust fork as the container toolchain.
+# The rustup nightly above is only a bootstrap compiler for this image build.
+COPY rust /opt/scarlet-rust-src
+RUN cd /opt/scarlet-rust-src && \
+    ./x build compiler/rustc && \
+    ./x build library --target x86_64-unknown-linux-gnu,riscv64gc-unknown-scarlet,aarch64-unknown-scarlet && \
+    mkdir -p /opt/scarlet-rust-toolchain && \
+    cp -a build/x86_64-unknown-linux-gnu/stage1/. /opt/scarlet-rust-toolchain/ && \
+    /opt/scarlet-rust-toolchain/bin/rustc --print target-list | grep -E '^(riscv64gc|aarch64)-unknown-scarlet$'
 
 # Build xv6 and the user programs
 RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
