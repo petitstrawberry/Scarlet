@@ -327,7 +327,17 @@ esac
 
 QEMU_NET_ARGS=()
 if [ "$QEMU_NET" = "1" ] || [ "$QEMU_NET" = "true" ]; then
-    QEMU_NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0,bus=pcie.0)
+    QEMU_NETDEV="user,id=net0"
+    QEMU_HOSTFWD="${SCARLET_QEMU_HOSTFWD:-tcp::8080-:8080,udp::8080-:8080,udp::1234-:1234}"
+    if [ -n "$QEMU_HOSTFWD" ]; then
+        IFS=',' read -ra QEMU_HOSTFWD_RULES <<< "$QEMU_HOSTFWD"
+        for QEMU_HOSTFWD_RULE in "${QEMU_HOSTFWD_RULES[@]}"; do
+            if [ -n "$QEMU_HOSTFWD_RULE" ]; then
+                QEMU_NETDEV="${QEMU_NETDEV},hostfwd=${QEMU_HOSTFWD_RULE}"
+            fi
+        done
+    fi
+    QEMU_NET_ARGS=(-netdev "$QEMU_NETDEV" -device virtio-net-pci,netdev=net0,bus=pcie.0)
 fi
 
 QEMU_INPUT_ARGS=()

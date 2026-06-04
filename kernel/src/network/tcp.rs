@@ -264,6 +264,8 @@ pub struct TcpSocket {
     self_weak: Weak<TcpSocket>,
     /// Pending accepted connections (listener only)
     pending_accept: Mutex<VecDeque<Arc<TcpSocket>>>,
+    /// Half-open connections waiting for the final ACK (listener only).
+    pending_syn: Mutex<VecDeque<Arc<TcpSocket>>>,
     /// Maximum backlog size (from listen())
     max_backlog: AtomicUsize,
 
@@ -388,6 +390,7 @@ impl TcpSocket {
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: Mutex::new(VecDeque::new()),
+            pending_syn: Mutex::new(VecDeque::new()),
             max_backlog: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
@@ -444,6 +447,12 @@ impl TcpSocket {
                 return;
             }
             pending.push_back(socket);
+        }
+
+        {
+            let self_ptr = self as *const TcpSocket;
+            let mut pending_syn = listener.pending_syn.lock();
+            pending_syn.retain(|socket| Arc::as_ptr(socket) != self_ptr);
         }
 
         if let Some(waker) = listener.accept_waker.lock().as_ref() {
@@ -665,9 +674,10 @@ impl TcpSocket {
                     }
 
                     child.local_port.store(local_port, Ordering::SeqCst);
-                    tcp_layer.register_port(local_port, child.self_weak.clone());
                     *child.accept_listener.lock() = self.self_weak.clone();
                     child.handle_syn_received(src_ip, header);
+                    tcp_layer.register_port(local_port, child.self_weak.clone());
+                    self.pending_syn.lock().push_back(Arc::clone(&child));
                 }
             }
             TcpState::SynSent => {
@@ -689,8 +699,9 @@ impl TcpSocket {
 
                 if header.flags() & tcp_flags::ACK != 0 {
                     let expected_ack = self.send_seq.load(Ordering::SeqCst);
-                    if header.ack_number == expected_ack {
-                        self.update_send_window(header.ack_number);
+                    let ack_number = header.ack_number;
+                    if ack_number == expected_ack {
+                        self.update_send_window(ack_number);
                         self.set_state(TcpState::Established);
                         self.queue_established_accept();
 
@@ -699,6 +710,12 @@ impl TcpSocket {
                         } else if header.flags() & tcp_flags::FIN != 0 {
                             self.handle_fin(src_ip, header);
                         }
+                    } else if should_log_tcp_https(src_port, dst_port) {
+                        crate::println!(
+                            "[tcp] syn-received ACK mismatch: ack={} expected={}",
+                            ack_number,
+                            expected_ack
+                        );
                     }
                 }
             }
@@ -730,7 +747,8 @@ impl TcpSocket {
 
         // Send SYN-ACK
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let mut syn_ack = TcpHeader::new(local_port, header.src_port);
+        let remote_port = header.src_port;
+        let mut syn_ack = TcpHeader::new(local_port, remote_port);
         syn_ack.seq_number = initial_seq;
         syn_ack.ack_number = next_recv;
         syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
