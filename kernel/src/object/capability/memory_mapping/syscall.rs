@@ -7,9 +7,10 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::mem::page::ContiguousPages;
+use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 pub(crate) fn reclaim_private_removed_mapping(
@@ -347,41 +348,22 @@ fn handle_anonymous_mapping(
         permissions |= 0x4;
     }
 
-    let page_alloc = if permissions & 0x7 == 0 {
-        None
-    } else {
-        Some(match ContiguousPages::new(num_pages) {
-            Some(pages) => pages,
-            None => return usize::MAX,
-        })
-    };
-    let pmarea = if let Some(pages) = page_alloc.as_ref() {
-        let paddr = pages.as_paddr();
-        MemoryArea::new(paddr, paddr + aligned_length - 1)
-    } else {
-        MemoryArea { start: 0, end: 0 }
-    };
+    let owner: Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
+        Arc::new(AnonymousPageOwner::new());
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
-        pmarea,
+        pmarea: MemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
         permissions,
         is_shared,
-        owner: None,
+        owner: Some(owner),
     };
 
-    let removed_mappings = if is_map_fixed {
-        match task.vm_manager.add_memory_map_fixed(vm_map.clone()) {
-            Ok(removed) => removed,
-            Err(_) => return usize::MAX,
-        }
-    } else {
-        if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
-            return usize::MAX;
-        }
-        Vec::new()
+    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(removed) => removed,
+        Err(_) => return usize::MAX,
     };
 
     for removed_map in &removed_mappings {
@@ -394,27 +376,6 @@ fn handle_anonymous_mapping(
     for removed_map in removed_mappings {
         reclaim_private_removed_mapping(task, &removed_map);
     }
-
-    if let Some(page_alloc) = page_alloc {
-        let map_result = if let Some(root_pagetable) = task.vm_manager.get_root_page_table() {
-            root_pagetable.map_memory_area(
-                task.vm_manager.get_asid(),
-                vm_map,
-                true,
-                permissions & 0x2 != 0,
-            )
-        } else {
-            Err("No root page table available")
-        };
-        if map_result.is_err() {
-            let _ = task
-                .vm_manager
-                .remove_memory_map_range(final_vaddr, aligned_length);
-            return usize::MAX;
-        }
-        task.page_allocations.write().push(page_alloc);
-    }
-
     final_vaddr
 }
 

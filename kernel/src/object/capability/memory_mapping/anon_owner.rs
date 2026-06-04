@@ -86,10 +86,6 @@ impl MemoryMappingOps for AnonymousPageOwner {
         }
     }
 
-    fn private_fault_requires_copy(&self, _access: &AccessKind) -> bool {
-        false
-    }
-
     fn fork_clone(&self) -> Option<Arc<dyn MemoryMappingOps>> {
         fork_clone_owner(self)
     }
