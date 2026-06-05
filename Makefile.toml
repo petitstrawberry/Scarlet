@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full", "projects/aarch64-limine-full", "projects/aarch64-limine-microvm", "user/lib/std", "user/bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full", "projects/aarch64-limine-full", "projects/aarch64-limine-microvm", "user/lib/std", "user/bin", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -438,7 +438,7 @@ dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-project-riscv64", "clean-project-aarch64", "clean-project-aarch64-microvm", "clean-userlib", "clean-userbin", "clean-modules", "clean-initramfs", "clean-rootfs", "clean-boot-image-riscv64", "clean-boot-image-aarch64"]
+dependencies = ["clean-kernel", "clean-project-riscv64", "clean-project-aarch64", "clean-project-aarch64-microvm", "clean-userlib", "clean-userbin", "clean-userbin-std", "clean-modules", "clean-initramfs", "clean-rootfs", "clean-boot-image-riscv64", "clean-boot-image-aarch64"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -473,6 +473,12 @@ args = ["make", "clean"]
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
 cwd = "user/bin"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-userbin-std]
+description = "Clean Rust std user program build artifacts"
+cwd = "user/std-bin"
 command = "cargo"
 args = ["clean"]
 
