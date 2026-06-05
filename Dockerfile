@@ -59,8 +59,10 @@ RUN cargo install cargo-make
 
 # Build the Scarlet Rust fork as the container toolchain.
 # The rustup nightly above is only a bootstrap compiler for this image build.
-COPY rust /opt/scarlet-rust-src
-RUN cd /opt/scarlet-rust-src && \
+RUN git clone https://github.com/petitstrawberry/rust.git /opt/scarlet-rust-src && \
+    cd /opt/scarlet-rust-src && \
+    git checkout b9573d6cd0731d24486f77ddf24d502e2e6bef02 && \
+    git submodule update --init --recursive && \
     ./x build compiler/rustc && \
     ./x build library --target x86_64-unknown-linux-gnu,riscv64gc-unknown-scarlet,aarch64-unknown-scarlet && \
     mkdir -p /opt/scarlet-rust-toolchain && \
