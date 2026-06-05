@@ -86,6 +86,9 @@
 
             [build]
             patch-binaries-for-nix = true
+
+            [llvm]
+            download-ci-llvm = false
           '';
 
           # Build UEFI firmware from edk2 source, cross-compiled via GCC5.
