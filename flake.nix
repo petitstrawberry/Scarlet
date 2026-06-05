@@ -81,6 +81,13 @@
             }
             .${system};
 
+          rustBootstrapConfig = pkgs.writeText "scarlet-rust-bootstrap.toml" ''
+            change-id = "ignore"
+
+            [build]
+            patch-binaries-for-nix = true
+          '';
+
           # Build UEFI firmware from edk2 source, cross-compiled via GCC5.
           # Patch out -Werror in the template before edksetup.sh generates tools_def.txt.
           buildOvmf =
@@ -275,6 +282,8 @@
             SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
+            NIX_PATH = "nixpkgs=${pkgs.path}";
+            RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
 
