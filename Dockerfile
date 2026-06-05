@@ -78,7 +78,7 @@ RUN mkdir -p /opt/scarlet-rust-src && \
       '[build]' \
       "build = \"${rust_host_triple}\"" \
       "host = [\"${rust_host_triple}\"]" \
-      'target = ["riscv64gc-unknown-scarlet", "aarch64-unknown-scarlet"]' \
+      "target = [\"${rust_host_triple}\", \"riscv64gc-unknown-scarlet\", \"aarch64-unknown-scarlet\"]" \
       "cargo = \"${rustup_toolchain}/bin/cargo\"" \
       "rustc = \"${rustup_toolchain}/bin/rustc\"" \
       "rustfmt = \"${rustup_toolchain}/bin/rustfmt\"" \
