@@ -282,6 +282,10 @@
             SCARLET_EFI_VARS_ARM64 = "${ovmf-aarch64-pflash}/FV/QEMU_VARS.fd";
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.xz
+              pkgs.zlib
+            ];
             NIX_PATH = "nixpkgs=${pkgs.path}";
             RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
