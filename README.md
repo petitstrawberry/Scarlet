@@ -202,10 +202,20 @@ Scarlet implements a modern Virtual File System (VFS v2) with support for multip
 
 ### Docker Environment
 
+The default Docker image is a thin Nix-backed wrapper around the same
+`flake.nix` development shell that `nix develop` uses. Mount the checkout at
+`/workspaces/Scarlet`; commands passed to `docker run` are executed through
+`nix develop`.
+
 ```bash
 # Build and run development container
 docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
+
+# CI image: prepares rust/build through the normal shellHook and stores it under /opt
+git submodule update --init --recursive
+docker build --target ci -t scarlet-ci .
+docker run --rm -v $(pwd):/workspaces/Scarlet scarlet-ci cargo make build-riscv64
 
 # Common commands:
 cargo make run-riscv64                        # Build (release) and run (RISC-V)
@@ -215,8 +225,8 @@ cargo make debug-riscv64              # Debug with GDB
 
 ### Nix Development Environment
 
-Use the Nix shell when you want to run QEMU on the host and use host virtualization
-support such as KVM or Apple Hypervisor Framework.
+Use the Nix shell directly when you want to run QEMU on the host and use host
+virtualization support such as KVM or Apple Hypervisor Framework.
 
 ```bash
 # Enter the development shell
@@ -228,15 +238,24 @@ cargo make test-riscv64               # Run tests (RISC-V)
 cargo make run-aarch64                # Build (release) and run (AArch64)
 ```
 
-The first `nix develop` may take time because it prepares the UEFI firmware used
-by the Limine workflows. AArch64 uses QEMU's pinned pc-bios EDK2 image as the
-macOS HVF + GICv3 baseline.
+The first `nix develop` or first CI image build may take time because it prepares
+the UEFI firmware used by the Limine workflows and prepares the Scarlet Rust
+fork. The Nix closure is intended to be served from Cachix in CI; configure the
+`CACHIX_CACHE_NAME` and `CACHIX_PUBLIC_KEY` repository variables and
+`CACHIX_AUTH_TOKEN` repository secret to pull and push it. Host-side `nix
+develop` keeps the actively developed Rust fork outside the Nix store so local
+edits can reuse normal incremental builds under `rust/build`. The CI image uses
+the same setup script once during image build, then exposes that build tree at
+`/opt/scarlet-rust-build` so runtime mounts do not hide it. AArch64 uses QEMU's
+pinned pc-bios EDK2 image as the macOS HVF + GICv3 baseline.
 
 ### Local Development
 
 Requirements without Docker or Nix: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 
-For the Limine workflows, the development environment needs the appropriate UEFI firmware packages (`qemu-efi-riscv64`, `qemu-efi-aarch64`). The provided Docker image includes distro packages, and the Nix shell exposes firmware paths through `SCARLET_EFI_*` environment variables.
+For the Limine workflows, the development environment needs the appropriate UEFI
+firmware. The Nix shell, including the Docker image entrypoint, exposes firmware
+paths through `SCARLET_EFI_*` environment variables.
 
 ### Build Commands
 

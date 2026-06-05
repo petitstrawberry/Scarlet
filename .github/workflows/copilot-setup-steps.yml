@@ -46,7 +46,7 @@ jobs:
       # Dockerfile と関連ファイルのハッシュを計算
       - name: Generate Docker cache key
         id: docker-cache-key
-        run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+        run: echo "key=docker-cache-${{ hashFiles('Dockerfile', 'docker/entrypoint.sh') }}" >> $GITHUB_OUTPUT
 
       # Docker キャッシュを復元
       - name: Cache Docker image
@@ -60,7 +60,9 @@ jobs:
       - name: Build the Docker image
         if: steps.docker-cache.outputs.cache-hit != 'true'
         run: |
-          docker build . --file Dockerfile --tag scarlet-dev
+          docker build . --file Dockerfile --tag scarlet-dev \
+            --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
+            --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
           docker save scarlet-dev > /tmp/docker-image
       
       # キャッシュがある場合はロード

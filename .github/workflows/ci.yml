@@ -23,10 +23,15 @@ jobs:
         swap-storage: true
 
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Generate Docker cache key
       id: docker-cache-key
-      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+      run: |
+        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
 
     - name: Cache Docker image
       id: docker-cache
@@ -38,8 +43,10 @@ jobs:
     - name: Build the Docker image
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
-        docker build . --file Dockerfile --tag scarlet-dev
-        docker save scarlet-dev > /tmp/docker-image
+        docker build . --file Dockerfile --target ci --tag scarlet-ci \
+          --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
+          --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
+        docker save scarlet-ci > /tmp/docker-image
 
   fmt:
     needs: docker
@@ -60,7 +67,10 @@ jobs:
 
     - name: Generate Docker cache key
       id: docker-cache-key
-      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+      run: |
+        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
 
     - name: Restore Docker image cache
       uses: actions/cache@v3
@@ -72,7 +82,10 @@ jobs:
       run: docker load < /tmp/docker-image
 
     - name: Run formatting check
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make fmt-check
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make fmt-check
 
   test-riscv64:
     needs: docker
@@ -93,7 +106,10 @@ jobs:
 
     - name: Generate Docker cache key
       id: docker-cache-key
-      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+      run: |
+        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
 
     - name: Restore Docker image cache
       uses: actions/cache@v3
@@ -105,10 +121,16 @@ jobs:
       run: docker load < /tmp/docker-image
 
     - name: Build scarlet kernel (riscv64)
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-riscv64
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make build-riscv64
 
     - name: Test scarlet kernel (riscv64)
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-riscv64
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make test-riscv64
       timeout-minutes: 10
 
   test-aarch64:
@@ -130,7 +152,10 @@ jobs:
 
     - name: Generate Docker cache key
       id: docker-cache-key
-      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+      run: |
+        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
 
     - name: Restore Docker image cache
       uses: actions/cache@v3
@@ -142,8 +167,14 @@ jobs:
       run: docker load < /tmp/docker-image
 
     - name: Build scarlet kernel (aarch64)
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-aarch64
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make build-aarch64
 
     - name: Test scarlet kernel (aarch64)
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-aarch64
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make test-aarch64
       timeout-minutes: 10

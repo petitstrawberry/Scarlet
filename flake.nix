@@ -202,7 +202,10 @@
               pkgs.llvmPackages.llvm
 
               # Build tools
+              pkgs.bashInteractive
               pkgs.gcc
+              pkgs.clang
+              pkgs.lld
               pkgs.gnumake
               pkgs.autoconf
               pkgs.automake
@@ -210,6 +213,24 @@
               pkgs.cmake
               pkgs.ninja
               pkgs.pkg-config
+              pkgs.bison
+              pkgs.flex
+              pkgs.meson
+              pkgs.texinfo
+              pkgs.which
+              pkgs.file
+              pkgs.patch
+              pkgs.perl
+              pkgs.gnused
+              pkgs.gnugrep
+              pkgs.gawk
+              pkgs.findutils
+              pkgs.diffutils
+              pkgs.gnutar
+              pkgs.gzip
+              pkgs.bzip2
+              pkgs.xz
+              pkgs.unzip
 
               # Filesystem / image tools
               pkgs.mtools
@@ -226,10 +247,16 @@
               # Other dependencies
               pkgs.git
               pkgs.curl
+              pkgs.wget
               pkgs.bc
               pkgs.sleuthkit
               pkgs.python3
               pkgs.rsync
+              pkgs.ncurses
+              pkgs.openssl
+              pkgs.libffi
+              pkgs.zlib
+              pkgs.vim
             ];
 
             # EFI firmware paths (consumed by run/test scripts via env vars)

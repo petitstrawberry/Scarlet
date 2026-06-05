@@ -24,10 +24,15 @@ jobs:
         docker-images: true
         swap-storage: true
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
     # Dockerfile と関連ファイルのハッシュを計算
     - name: Generate Docker cache key
       id: docker-cache-key
-      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+      run: |
+        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
     # Docker キャッシュを復元
     - name: Cache Docker image
       id: docker-cache
@@ -39,18 +44,23 @@ jobs:
     - name: Build the Docker image
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
-        docker build . --file Dockerfile --tag scarlet-dev
-        docker save scarlet-dev > /tmp/docker-image
+        docker build . --file Dockerfile --target ci --tag scarlet-ci \
+          --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
+          --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
+        docker save scarlet-ci > /tmp/docker-image
     # キャッシュがある場合はロード
     - name: Load cached Docker image
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
     - name: Build documentation
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make doc-riscv64
+      env:
+        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
+        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
+      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make doc-riscv64
     - name: Remove lock file
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-ci rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Add CNAME file
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-ci /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:

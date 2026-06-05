@@ -25,12 +25,18 @@ _setup_scarlet_rust_toolchain() {
     fi
 
     local rust_dir="${repo_root}/rust"
-    local stage_dir="${rust_dir}/build/${host_triple}/stage1"
-    local stage0_dir="${rust_dir}/build/${host_triple}/stage0"
-    local stage0_sysroot_dir="${rust_dir}/build/${host_triple}/stage0-sysroot"
+    local rust_build_root="${SCARLET_RUST_BUILD_ROOT:-${rust_dir}/build}"
+    local stage_dir="${rust_build_root}/${host_triple}/stage1"
+    local stage0_dir="${rust_build_root}/${host_triple}/stage0"
+    local stage0_sysroot_dir="${rust_build_root}/${host_triple}/stage0-sysroot"
     local target_triples="${SCARLET_RUST_TARGET_TRIPLES:-riscv64gc-unknown-scarlet aarch64-unknown-scarlet}"
 
     if [ ! -x "${stage_dir}/bin/rustc" ]; then
+        if [ -n "${SCARLET_RUST_BUILD_ROOT:-}" ]; then
+            echo "Scarlet Rust toolchain missing at ${stage_dir}." >&2
+            echo "The configured SCARLET_RUST_BUILD_ROOT must contain a prepared rust/build tree." >&2
+            return 1
+        fi
         (
             cd "${rust_dir}"
             ./x build compiler/rustc
@@ -78,6 +84,11 @@ _setup_scarlet_rust_toolchain() {
     done
 
     if [ "${needs_lib_build}" -eq 1 ]; then
+        if [ -n "${SCARLET_RUST_BUILD_ROOT:-}" ]; then
+            echo "Scarlet Rust library sysroot is incomplete under ${rust_build_root}." >&2
+            echo "The configured SCARLET_RUST_BUILD_ROOT must contain all requested target libraries." >&2
+            return 1
+        fi
         echo "Preparing Rust library sysroot for ${build_targets}..."
         (
             cd "${rust_dir}"

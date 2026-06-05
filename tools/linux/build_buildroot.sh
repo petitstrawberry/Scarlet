@@ -15,6 +15,9 @@ set -euo pipefail
 : "${PREBUILT_DIR:=/opt/prebuilt}"
 : "${IMAGES_DIR:=output/images}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
 require_supported_host() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
         return
@@ -213,12 +216,13 @@ configure_common_linux_userland() {
 }
 
 build_riscv64() {
-    if [[ ! -d "${BUILDROOT_DIR}" ]]; then
-        echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-        exit 1
-    fi
+    ensure_buildroot_release
 
     pushd "${BUILDROOT_DIR}" >/dev/null
+    if [[ ! -f .config ]]; then
+        cp "${REPO_ROOT}/docker/.config" .config
+    fi
+    make olddefconfig
     make -j "${MAKE_JOBS}"
 
     if [[ ! -d "${IMAGES_DIR}" ]]; then

@@ -1,0 +1,50 @@
+name: Nix Binary Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "dev" ]
+    paths:
+      - flake.nix
+      - flake.lock
+      - nix/**
+      - .github/workflows/nix-cache.yml
+  pull_request:
+    branches: [ "dev" ]
+    paths:
+      - flake.nix
+      - flake.lock
+      - nix/**
+      - .github/workflows/nix-cache.yml
+
+jobs:
+  devshell:
+    runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: actions/checkout@v5
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: cachix/cachix-action@v17
+        if: env.CACHIX_CACHE_NAME != ''
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build Linux devShell closure
+        run: nix build --no-link .#devShells.x86_64-linux.default
