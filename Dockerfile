@@ -3,13 +3,12 @@ FROM ubuntu:25.04
 ENV PATH=/opt/scarlet-rust-toolchain/bin:/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-ENV SCARLET_RUST_HOST_TRIPLE=x86_64-unknown-linux-gnu
 ENV SCARLET_RUST_TARGET_TRIPLES="riscv64gc-unknown-scarlet aarch64-unknown-scarlet"
 ENV CC_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-gcc
 ENV CFLAGS_riscv64gc_unknown_scarlet_elf="-march=rv64gc -mabi=lp64d -DRING_CORE_NOSTDLIBINC -fno-stack-protector"
 ENV AR_riscv64gc_unknown_scarlet_elf=riscv64-linux-gnu-ar
 
-ENV DEBIAN_FRONTEND noninteractive
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
@@ -50,7 +49,7 @@ RUN apt update && \
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup default nightly-2025-12-31 && \
     rustup install nightly-2025-12-31 && \
-    rustup component add rust-src --toolchain nightly-2025-12-31 && \
+    rustup component add rust-src rustfmt clippy llvm-tools-preview --toolchain nightly-2025-12-31 && \
     rustup target add riscv64gc-unknown-none-elf && \
     rustup target add aarch64-unknown-none
 
@@ -59,14 +58,57 @@ RUN cargo install cargo-make
 
 # Build the Scarlet Rust fork as the container toolchain.
 # The rustup nightly above is only a bootstrap compiler for this image build.
-RUN git clone https://github.com/petitstrawberry/rust.git /opt/scarlet-rust-src && \
+RUN mkdir -p /opt/scarlet-rust-src && \
     cd /opt/scarlet-rust-src && \
-    git checkout b9573d6cd0731d24486f77ddf24d502e2e6bef02 && \
-    git submodule update --init --recursive && \
-    ./x build compiler/rustc && \
-    ./x build library --target x86_64-unknown-linux-gnu,riscv64gc-unknown-scarlet,aarch64-unknown-scarlet && \
+    case "$(uname -m)" in \
+        x86_64) rust_host_triple="x86_64-unknown-linux-gnu" ;; \
+        aarch64|arm64) rust_host_triple="aarch64-unknown-linux-gnu" ;; \
+        *) echo "Unsupported Docker host architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    rustup_toolchain="/root/.rustup/toolchains/nightly-2025-12-31-${rust_host_triple}" && \
+    git init && \
+    git remote add origin https://github.com/petitstrawberry/rust.git && \
+    git fetch --depth 1 origin b9573d6cd0731d24486f77ddf24d502e2e6bef02 && \
+    git checkout FETCH_HEAD && \
+    git submodule update --init --recursive --depth 1 --jobs "$(nproc)" && \
+    printf '%s\n' \
+      'change-id = "ignore"' \
+      'profile = "compiler"' \
+      '' \
+      '[build]' \
+      "build = \"${rust_host_triple}\"" \
+      "host = [\"${rust_host_triple}\"]" \
+      'target = ["riscv64gc-unknown-scarlet", "aarch64-unknown-scarlet"]' \
+      "cargo = \"${rustup_toolchain}/bin/cargo\"" \
+      "rustc = \"${rustup_toolchain}/bin/rustc\"" \
+      "rustfmt = \"${rustup_toolchain}/bin/rustfmt\"" \
+      'docs = false' \
+      'submodules = false' \
+      '' \
+      '[llvm]' \
+      'download-ci-llvm = false' \
+      'targets = "AArch64;RISCV;X86"' \
+      '' \
+      '[rust]' \
+      'download-rustc = false' \
+      > bootstrap.toml && \
+    ./x build --config bootstrap.toml compiler/rustc library && \
     mkdir -p /opt/scarlet-rust-toolchain && \
-    cp -a build/x86_64-unknown-linux-gnu/stage1/. /opt/scarlet-rust-toolchain/ && \
+    cp -a "build/${rust_host_triple}/stage1/." /opt/scarlet-rust-toolchain/ && \
+    for tool_path in "${rustup_toolchain}"/bin/*; do \
+        tool="$(basename "$tool_path")"; \
+        if [ "$tool" != rustc ]; then \
+            ln -sfn "$tool_path" "/opt/scarlet-rust-toolchain/bin/$tool"; \
+        fi; \
+    done && \
+    mkdir -p "/opt/scarlet-rust-toolchain/lib/rustlib/${rust_host_triple}/bin" && \
+    for tool_path in "${rustup_toolchain}/lib/rustlib/${rust_host_triple}/bin"/*; do \
+        tool="$(basename "$tool_path")"; \
+        ln -sfn "$tool_path" "/opt/scarlet-rust-toolchain/lib/rustlib/${rust_host_triple}/bin/$tool"; \
+        if [ ! -d "$tool_path" ]; then \
+            ln -sfn "$tool_path" "/opt/scarlet-rust-toolchain/bin/$tool"; \
+        fi; \
+    done && \
     /opt/scarlet-rust-toolchain/bin/rustc --print target-list | grep -E '^(riscv64gc|aarch64)-unknown-scarlet$'
 
 # Build xv6 and the user programs
