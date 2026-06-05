@@ -31,12 +31,22 @@ CMD ["bash"]
 
 FROM base AS ci-build
 
+ARG SCARLET_RUST_REPOSITORY="https://github.com/petitstrawberry/rust.git"
+ARG SCARLET_RUST_REV=""
+
 COPY flake.nix flake.lock ./
 COPY nix ./nix
 COPY scripts ./scripts
-COPY rust ./rust
 
-RUN test -x rust/x.py || (echo "rust submodule is missing; run git submodule update --init --recursive before building the ci image" >&2; exit 1)
+RUN test -n "${SCARLET_RUST_REV}" || (echo "SCARLET_RUST_REV is required for the ci image" >&2; exit 1)
+
+RUN nix shell nixpkgs#git --command sh -c '\
+        git init rust && \
+        git -C rust remote add origin "${SCARLET_RUST_REPOSITORY}" && \
+        git -C rust fetch --depth 1 origin "${SCARLET_RUST_REV}" && \
+        git -C rust checkout --detach FETCH_HEAD && \
+        git -C rust submodule update --init --recursive --depth 1 \
+    '
 
 RUN nix develop .#default --command true && \
     mkdir -p /opt && \

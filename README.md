@@ -214,7 +214,8 @@ docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
 # CI image: prepares rust/build through the normal shellHook and stores it under /opt
 git submodule update --init --recursive
-docker build --target ci -t scarlet-ci .
+rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
+docker build --target ci -t scarlet-ci --build-arg SCARLET_RUST_REV="${rust_rev}" .
 docker run --rm -v $(pwd):/workspaces/Scarlet scarlet-ci cargo make build-riscv64
 
 # Common commands:

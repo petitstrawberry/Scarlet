@@ -45,6 +45,7 @@ jobs:
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
         docker build . --file Dockerfile --target ci --tag scarlet-ci \
+          --build-arg SCARLET_RUST_REV="${{ steps.docker-cache-key.outputs.rust-rev }}" \
           --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
           --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
         docker save scarlet-ci > /tmp/docker-image
