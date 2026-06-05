@@ -131,6 +131,7 @@
             ];
 
             dontConfigure = true;
+            dontStrip = true;
 
             buildPhase = ''
               runHook preBuild
@@ -190,11 +191,22 @@
 
               mkdir -p "$out"
               cp -R "build/${rustHostTriple}/stage1/." "$out/"
-              ln -sfn ${rustToolchain}/bin/cargo "$out/bin/cargo"
-              ln -sfn ${rustToolchain}/bin/cargo-clippy "$out/bin/cargo-clippy"
-              ln -sfn ${rustToolchain}/bin/cargo-fmt "$out/bin/cargo-fmt"
-              ln -sfn ${rustToolchain}/bin/clippy-driver "$out/bin/clippy-driver"
-              ln -sfn ${rustToolchain}/bin/rustfmt "$out/bin/rustfmt"
+
+              for tool_path in ${rustToolchain}/bin/*; do
+                tool="$(basename "$tool_path")"
+                if [ "$tool" != rustc ]; then
+                  ln -sfn "$tool_path" "$out/bin/$tool"
+                fi
+              done
+
+              mkdir -p "$out/lib/rustlib/${rustHostTriple}/bin"
+              for tool_path in ${rustToolchain}/lib/rustlib/${rustHostTriple}/bin/*; do
+                tool="$(basename "$tool_path")"
+                ln -sfn "$tool_path" "$out/lib/rustlib/${rustHostTriple}/bin/$tool"
+                if [ ! -d "$tool_path" ]; then
+                  ln -sfn "$tool_path" "$out/bin/$tool"
+                fi
+              done
               ln -sfn ${scarletRustSrc} "$out/lib/rustlib/rustc-src/rust"
               ln -sfn ${scarletRustSrc} "$out/lib/rustlib/src/rust"
               "$out/bin/rustc" --print target-list | grep -E '^(riscv64gc|aarch64)-unknown-scarlet$'
