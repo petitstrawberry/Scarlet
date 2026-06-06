@@ -82,6 +82,9 @@ jobs:
     - name: Load Docker image
       run: docker load < /tmp/docker-image
 
+    - name: Make checkout owned by container user
+      run: sudo chown -R 0:0 "$PWD"
+
     - name: Run formatting check
       env:
         SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
@@ -90,9 +93,6 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make fmt-check
 
@@ -129,6 +129,9 @@ jobs:
     - name: Load Docker image
       run: docker load < /tmp/docker-image
 
+    - name: Make checkout owned by container user
+      run: sudo chown -R 0:0 "$PWD"
+
     - name: Build scarlet kernel (riscv64)
       env:
         SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
@@ -137,9 +140,6 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make build-riscv64
 
@@ -151,9 +151,6 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make test-riscv64
       timeout-minutes: 10
@@ -191,6 +188,9 @@ jobs:
     - name: Load Docker image
       run: docker load < /tmp/docker-image
 
+    - name: Make checkout owned by container user
+      run: sudo chown -R 0:0 "$PWD"
+
     - name: Build scarlet kernel (aarch64)
       env:
         SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
@@ -199,9 +199,6 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make build-aarch64
 
@@ -213,9 +210,6 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make test-aarch64
       timeout-minutes: 10

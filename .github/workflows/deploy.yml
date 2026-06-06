@@ -53,6 +53,8 @@ jobs:
     - name: Load cached Docker image
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
+    - name: Make checkout owned by container user
+      run: sudo chown -R 0:0 "$PWD"
     - name: Build documentation
       env:
         SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
@@ -61,25 +63,16 @@ jobs:
         docker run \
           -e SCARLET_CACHIX_CACHE \
           -e SCARLET_CACHIX_PUBLIC_KEY \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make doc-riscv64
     - name: Remove lock file
       run: |
         docker run \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Add CNAME file
       run: |
         docker run \
-          -e GIT_CONFIG_COUNT=1 \
-          -e GIT_CONFIG_KEY_0=safe.directory \
-          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
     - name: Upload artifact
