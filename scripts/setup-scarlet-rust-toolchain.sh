@@ -70,12 +70,22 @@ _setup_scarlet_rust_toolchain() {
         return 1
     }
 
-    local missing_build_targets=""
-    if _rust_toolchain_libs_missing "${host_triple}"; then
-        missing_build_targets="${host_triple}"
-    fi
+    local required_build_targets=""
+    _append_unique_build_target() {
+        case " ${required_build_targets} " in
+            *" $1 "*) ;;
+            *) required_build_targets="${required_build_targets:+${required_build_targets} }$1" ;;
+        esac
+    }
+
+    _append_unique_build_target "${host_triple}"
     local target_triple
     for target_triple in ${target_triples}; do
+        _append_unique_build_target "${target_triple}"
+    done
+
+    local missing_build_targets=""
+    for target_triple in ${required_build_targets}; do
         if _rust_toolchain_libs_missing "${target_triple}"; then
             missing_build_targets="${missing_build_targets:+${missing_build_targets} }${target_triple}"
         fi
@@ -84,17 +94,19 @@ _setup_scarlet_rust_toolchain() {
     if [ -n "${missing_build_targets}" ]; then
         if [ -n "${SCARLET_RUST_BUILD_ROOT:-}" ]; then
             echo "Scarlet Rust library sysroot is incomplete under ${rust_build_root}." >&2
+            echo "Missing target libraries: ${missing_build_targets}" >&2
             echo "The configured SCARLET_RUST_BUILD_ROOT must contain all requested target libraries." >&2
             return 1
         fi
-        echo "Preparing Rust library sysroot for ${missing_build_targets}..."
+        local build_targets
+        build_targets="$(printf '%s' "${required_build_targets}" | tr ' ' ',')"
+
+        echo "Preparing Rust library sysroot for ${required_build_targets}..."
         (
             cd "${rust_dir}"
-            for target_triple in ${missing_build_targets}; do
-                env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build \
-                    library/std library/proc_macro library/test \
-                    --target "${target_triple}"
-            done
+            env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build \
+                library/std library/proc_macro library/test \
+                --target "${build_targets}"
         )
     fi
 
@@ -122,6 +134,7 @@ _setup_scarlet_rust_toolchain() {
     export SCARLET_RUST_TARGET_TRIPLES="${target_triples}"
     export SCARLET_RUST_TOOLCHAIN="${stage_dir}"
 
+    unset -f _append_unique_build_target
     unset -f _rust_toolchain_libs_missing
 }
 
