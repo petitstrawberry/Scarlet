@@ -70,29 +70,29 @@ _setup_scarlet_rust_toolchain() {
         return 1
     }
 
-    local build_targets="${host_triple}"
-    local needs_lib_build=0
+    local missing_build_targets=""
     if _rust_toolchain_libs_missing "${host_triple}"; then
-        needs_lib_build=1
+        missing_build_targets="${host_triple}"
     fi
     local target_triple
     for target_triple in ${target_triples}; do
-        build_targets="${build_targets},${target_triple}"
         if _rust_toolchain_libs_missing "${target_triple}"; then
-            needs_lib_build=1
+            missing_build_targets="${missing_build_targets:+${missing_build_targets} }${target_triple}"
         fi
     done
 
-    if [ "${needs_lib_build}" -eq 1 ]; then
+    if [ -n "${missing_build_targets}" ]; then
         if [ -n "${SCARLET_RUST_BUILD_ROOT:-}" ]; then
             echo "Scarlet Rust library sysroot is incomplete under ${rust_build_root}." >&2
             echo "The configured SCARLET_RUST_BUILD_ROOT must contain all requested target libraries." >&2
             return 1
         fi
-        echo "Preparing Rust library sysroot for ${build_targets}..."
+        echo "Preparing Rust library sysroot for ${missing_build_targets}..."
         (
             cd "${rust_dir}"
-            env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build library --target "${build_targets}"
+            for target_triple in ${missing_build_targets}; do
+                env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build library --target "${target_triple}"
+            done
         )
     fi
 
