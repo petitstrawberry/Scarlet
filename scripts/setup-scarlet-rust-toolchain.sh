@@ -91,7 +91,9 @@ _setup_scarlet_rust_toolchain() {
         (
             cd "${rust_dir}"
             for target_triple in ${missing_build_targets}; do
-                env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build library --target "${target_triple}"
+                env "${cxx_var}=${current_cxx:-${default_cxx}}" ./x build \
+                    library/std library/proc_macro library/test \
+                    --target "${target_triple}"
             done
         )
     fi
