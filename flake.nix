@@ -286,6 +286,7 @@
 
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.stdenv.cc.cc.lib
               pkgs.xz
               pkgs.zlib
             ];
