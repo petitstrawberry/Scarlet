@@ -57,11 +57,31 @@ jobs:
       env:
         SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
         SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: docker run -e SCARLET_CACHIX_CACHE -e SCARLET_CACHIX_PUBLIC_KEY -v $PWD:/workspaces/Scarlet scarlet-ci cargo make doc-riscv64
+      run: |
+        docker run \
+          -e SCARLET_CACHIX_CACHE \
+          -e SCARLET_CACHIX_PUBLIC_KEY \
+          -e GIT_CONFIG_COUNT=1 \
+          -e GIT_CONFIG_KEY_0=safe.directory \
+          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
+          -v $PWD:/workspaces/Scarlet \
+          scarlet-ci cargo make doc-riscv64
     - name: Remove lock file
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-ci rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
+      run: |
+        docker run \
+          -e GIT_CONFIG_COUNT=1 \
+          -e GIT_CONFIG_KEY_0=safe.directory \
+          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
+          -v $PWD:/workspaces/Scarlet \
+          scarlet-ci rm kernel/target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Add CNAME file
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-ci /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
+      run: |
+        docker run \
+          -e GIT_CONFIG_COUNT=1 \
+          -e GIT_CONFIG_KEY_0=safe.directory \
+          -e GIT_CONFIG_VALUE_0=/workspaces/Scarlet \
+          -v $PWD:/workspaces/Scarlet \
+          scarlet-ci /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
