@@ -48,7 +48,7 @@ RUN nix shell nixpkgs#git --command sh -c '\
         git -C rust submodule update --init --recursive --depth 1 \
     '
 
-RUN nix develop .#default --command true && \
+RUN nix develop .#default --command bash -lc 'source scripts/setup-scarlet-rust-toolchain.sh' && \
     mkdir -p /opt && \
     mv rust/build /opt/scarlet-rust-build
 

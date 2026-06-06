@@ -75,6 +75,9 @@ jobs:
         docker run \
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > kernel/target/riscv64gc-unknown-none-elf/doc/CNAME"
+    - name: Restore checkout ownership
+      if: always()
+      run: sudo chown -R "$USER:$USER" "$PWD"
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:

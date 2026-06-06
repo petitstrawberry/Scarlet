@@ -96,6 +96,10 @@ jobs:
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make fmt-check
 
+    - name: Restore checkout ownership
+      if: always()
+      run: sudo chown -R "$USER:$USER" "$PWD"
+
   test-riscv64:
     needs: docker
     runs-on: ubuntu-latest
@@ -155,6 +159,10 @@ jobs:
           scarlet-ci cargo make test-riscv64
       timeout-minutes: 10
 
+    - name: Restore checkout ownership
+      if: always()
+      run: sudo chown -R "$USER:$USER" "$PWD"
+
   test-aarch64:
     needs: docker
     runs-on: ubuntu-latest
@@ -213,3 +221,7 @@ jobs:
           -v $PWD:/workspaces/Scarlet \
           scarlet-ci cargo make test-aarch64
       timeout-minutes: 10
+
+    - name: Restore checkout ownership
+      if: always()
+      run: sudo chown -R "$USER:$USER" "$PWD"
