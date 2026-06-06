@@ -110,6 +110,26 @@ _setup_scarlet_rust_toolchain() {
         )
     fi
 
+    local rust_src_dir="${stage_dir}/lib/rustlib/src/rust"
+    if [ -n "${SCARLET_RUST_BUILD_ROOT:-}" ]; then
+        if [ ! -f "${rust_src_dir}/library/Cargo.lock" ]; then
+            echo "Scarlet Rust source component is missing under ${rust_src_dir}." >&2
+            echo "The configured SCARLET_RUST_BUILD_ROOT must contain rust-src for build-std." >&2
+            return 1
+        fi
+    elif [ -n "${SCARLET_RUST_EMBED_SRC:-}" ]; then
+        if [ ! -f "${rust_dir}/library/Cargo.lock" ]; then
+            echo "Scarlet Rust source library is missing under ${rust_dir}." >&2
+            return 1
+        fi
+
+        if [ ! -f "${rust_src_dir}/library/Cargo.lock" ] || [ -L "${rust_src_dir}" ]; then
+            rm -rf "${rust_src_dir}"
+            mkdir -p "${rust_src_dir}"
+            cp -a "${rust_dir}/library" "${rust_src_dir}/library"
+        fi
+    fi
+
     case ":${PATH}:" in
         *":${stage_dir}/bin:"*) ;;
         *) export PATH="${stage_dir}/bin:${PATH}" ;;
