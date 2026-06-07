@@ -1,4 +1,0 @@
-[submodule "rust"]
-	path = rust
-	url = https://github.com/petitstrawberry/rust.git
-	branch = scarlet-native-target

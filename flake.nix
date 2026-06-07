@@ -290,11 +290,14 @@
             RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
+            SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
             SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
 
             shellHook = ''
               export PATH="${rustToolchain}/bin:$PATH"
               export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              export SCARLET_RUST_ACTIVE_BIN="${rustToolchain}/bin"
+              source "$SCARLET_REPO_ROOT/scripts/scarlet-rust-dev.sh"
             '';
           };
         }

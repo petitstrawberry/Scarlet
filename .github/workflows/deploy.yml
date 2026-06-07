@@ -24,8 +24,6 @@ jobs:
         docker-images: true
         swap-storage: true
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
     # Dockerfile と関連ファイルのハッシュを計算
     - name: Generate Docker cache key
       id: docker-cache-key

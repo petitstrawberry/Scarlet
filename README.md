@@ -212,10 +212,8 @@ The default Docker image is a thin Nix-backed wrapper around the same
 docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
-# CI image: prepares rust/build through the normal shellHook and stores it under /opt
-git submodule update --init --recursive
-rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
-docker build --target ci -t scarlet-ci --build-arg SCARLET_RUST_REV="${rust_rev}" .
+# CI image: pre-realizes the Nix development shell and cached Scarlet Rust toolchain
+docker build --target ci -t scarlet-ci .
 docker run --rm -v $(pwd):/workspaces/Scarlet scarlet-ci cargo make build-riscv64
 
 # Common commands:
@@ -239,16 +237,35 @@ cargo make test-riscv64               # Run tests (RISC-V)
 cargo make run-aarch64                # Build (release) and run (AArch64)
 ```
 
-The first `nix develop` or first CI image build may take time because it prepares
-the UEFI firmware used by the Limine workflows and prepares the Scarlet Rust
-fork. The Nix closure is intended to be served from Cachix in CI; configure the
-`CACHIX_CACHE_NAME` and `CACHIX_PUBLIC_KEY` repository variables and
-`CACHIX_AUTH_TOKEN` repository secret to pull and push it. Host-side `nix
-develop` keeps the actively developed Rust fork outside the Nix store so local
-edits can reuse normal incremental builds under `rust/build`. The CI image uses
-the same setup script once during image build, then exposes that build tree at
-`/opt/scarlet-rust-build` so runtime mounts do not hide it. AArch64 uses QEMU's
-pinned pc-bios EDK2 image as the macOS HVF + GICv3 baseline.
+The default development shell uses the cached Scarlet Rust toolchain from
+`scarlet-rust-nix`. The Nix closure is intended to be served from Cachix in CI;
+configure the `CACHIX_CACHE_NAME` and `CACHIX_PUBLIC_KEY` repository variables
+and `CACHIX_AUTH_TOKEN` repository secret to pull and push it. AArch64 uses
+QEMU's pinned pc-bios EDK2 image as the macOS HVF + GICv3 baseline.
+
+For local Rust fork iteration, keep the fork outside this repository and switch
+only the active Rust path inside the shell:
+
+```bash
+# Recommended layout:
+# /Users/petitstrawberry/Development/Rust/Scarlet
+# /Users/petitstrawberry/Development/Rust/rust-scarlet
+
+cd /Users/petitstrawberry/Development/Rust/rust-scarlet
+./x build compiler/rustc library/std --target riscv64gc-unknown-scarlet,aarch64-unknown-scarlet
+
+cd /Users/petitstrawberry/Development/Rust/Scarlet
+nix develop
+scarlet-rust-use-local ../rust-scarlet
+scarlet-rust-show
+
+# Return to the cached toolchain.
+scarlet-rust-use-cached
+```
+
+This keeps the convenience of the Nix shell while allowing fast local stage1
+Rust compiler iteration. The Rust and LLVM forks should not be checked out under
+the Scarlet repository.
 
 ### Local Development
 

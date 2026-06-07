@@ -1,4 +1,9 @@
-rust/.git
-rust/build
-rust/target
-rust/scarlet-smoke
+.git
+.direnv
+.scarlet
+.build
+target
+dist
+result
+result-*
+librust_out.rlib

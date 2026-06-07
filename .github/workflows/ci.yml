@@ -23,8 +23,6 @@ jobs:
         swap-storage: true
 
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - name: Generate Docker cache key
       id: docker-cache-key
