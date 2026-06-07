@@ -1,26 +1,29 @@
 {
   description = "Scarlet OS kernel development environment";
 
+  nixConfig = {
+    extra-substituters = [ "https://scarlet-rust-toolchain.cachix.org" ];
+    extra-trusted-public-keys = [
+      "scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      rust-overlay,
+      scarlet-rust-toolchain,
     }:
     let
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: f system);
     in
@@ -58,19 +61,12 @@
 
           overlays = [
             edk2-202502-overlay
-            (import rust-overlay)
           ];
           pkgs = import nixpkgs {
             inherit system overlays;
           };
 
-          rustToolchain = pkgs.rust-bin.nightly."2025-12-31".default.override {
-            extensions = [ "rust-src" "llvm-tools-preview" ];
-            targets = [
-              "riscv64gc-unknown-none-elf"
-              "aarch64-unknown-none"
-            ];
-          };
+          rustToolchain = scarlet-rust-toolchain.packages.${system}.scarlet-rust-toolchain;
 
           rustHostTriple =
             {
@@ -294,11 +290,11 @@
             RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
+            SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
 
             shellHook = ''
               export PATH="${rustToolchain}/bin:$PATH"
               export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-              source "$SCARLET_REPO_ROOT/scripts/setup-scarlet-rust-toolchain.sh"
             '';
           };
         }

@@ -30,9 +30,7 @@ jobs:
     - name: Generate Docker cache key
       id: docker-cache-key
       run: |
-        rust_rev="$(git ls-tree HEAD rust | awk '{print $3}')"
-        echo "rust-rev=${rust_rev}" >> $GITHUB_OUTPUT
-        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'docker/entrypoint.sh', 'flake.nix', 'flake.lock', 'nix/**', 'scripts/setup-scarlet-rust-toolchain.sh') }}-${rust_rev}" >> $GITHUB_OUTPUT
+        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
     # Docker キャッシュを復元
     - name: Cache Docker image
       id: docker-cache
@@ -45,7 +43,6 @@ jobs:
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
         docker build . --file Dockerfile --target ci --tag scarlet-ci \
-          --build-arg SCARLET_RUST_REV="${{ steps.docker-cache-key.outputs.rust-rev }}" \
           --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
           --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
         docker save scarlet-ci > /tmp/docker-image
