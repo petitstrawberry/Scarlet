@@ -10,11 +10,15 @@ panic = "abort"
 panic = "abort"
 
 [dependencies]
+clap = { version = "4.5.32", features = ["derive"] }
+csv = "1.3"
+httparse = "1.9"
 scarlet-os = { path = "../lib/scarlet-os" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std"] }
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
+url = "2.5"
 
 [[bin]]
 name = "hello"
@@ -35,6 +39,18 @@ path = "src/rm.rs"
 [[bin]]
 name = "env_test"
 path = "src/env_test.rs"
+
+[[bin]]
+name = "clap_demo"
+path = "src/clap_demo.rs"
+
+[[bin]]
+name = "csv_demo"
+path = "src/csv_demo.rs"
+
+[[bin]]
+name = "http_get_demo"
+path = "src/http_get_demo.rs"
 
 [[bin]]
 name = "tcp_client"
