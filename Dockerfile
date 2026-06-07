@@ -1,7 +1,9 @@
 FROM nixos/nix:latest AS base
 
-ARG SCARLET_CACHIX_CACHE="scarlet-rust-toolchain"
-ARG SCARLET_CACHIX_PUBLIC_KEY="scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o="
+ARG SCARLET_RUST_TOOLCHAIN_CACHIX_CACHE="scarlet-rust-toolchain"
+ARG SCARLET_RUST_TOOLCHAIN_CACHIX_PUBLIC_KEY="scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o="
+ARG SCARLET_CACHIX_CACHE=""
+ARG SCARLET_CACHIX_PUBLIC_KEY=""
 
 RUN mkdir -p /etc/nix && \
     printf '%s\n' \
@@ -10,12 +12,18 @@ RUN mkdir -p /etc/nix && \
       'sandbox = false' \
       >> /etc/nix/nix.conf
 
-RUN cache="${SCARLET_CACHIX_CACHE:-scarlet-rust-toolchain}"; \
-    public_key="${SCARLET_CACHIX_PUBLIC_KEY:-scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=}"; \
-    if [ -n "${cache}" ] && [ -n "${public_key}" ]; then \
+RUN substituters="https://${SCARLET_RUST_TOOLCHAIN_CACHIX_CACHE}.cachix.org"; \
+    public_keys="${SCARLET_RUST_TOOLCHAIN_CACHIX_PUBLIC_KEY}"; \
+    if [ -n "${SCARLET_CACHIX_CACHE}" ] && [ "${SCARLET_CACHIX_CACHE}" != "${SCARLET_RUST_TOOLCHAIN_CACHIX_CACHE}" ]; then \
+        substituters="${substituters} https://${SCARLET_CACHIX_CACHE}.cachix.org"; \
+    fi; \
+    if [ -n "${SCARLET_CACHIX_PUBLIC_KEY}" ] && [ "${SCARLET_CACHIX_PUBLIC_KEY}" != "${SCARLET_RUST_TOOLCHAIN_CACHIX_PUBLIC_KEY}" ]; then \
+        public_keys="${public_keys} ${SCARLET_CACHIX_PUBLIC_KEY}"; \
+    fi; \
+    if [ -n "${substituters}" ] && [ -n "${public_keys}" ]; then \
         printf '%s\n' \
-          "extra-substituters = https://${cache}.cachix.org" \
-          "extra-trusted-public-keys = ${public_key}" \
+          "extra-substituters = ${substituters}" \
+          "extra-trusted-public-keys = ${public_keys}" \
           >> /etc/nix/nix.conf; \
     fi
 

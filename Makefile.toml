@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-drivers", "fmt-modules", "fmt-cargo-scarlet"]
+dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cargo-scarlet"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cargo-scarlet-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cargo-scarlet-check"]
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
@@ -48,6 +48,12 @@ args = ["make", "fmt-check"]
 [tasks.fmt-userbin-check]
 description = "Check user program formatting"
 cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.fmt-userbin-std-check]
+description = "Check Rust std user program formatting"
+cwd = "user/std-bin"
 command = "cargo"
 args = ["make", "fmt-check"]
 
@@ -142,6 +148,12 @@ args = ["make", "fmt"]
 [tasks.fmt-userbin]
 description = "Format user program code"
 cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-userbin-std]
+description = "Format Rust std user program code"
+cwd = "user/std-bin"
 command = "cargo"
 args = ["make", "fmt"]
 
