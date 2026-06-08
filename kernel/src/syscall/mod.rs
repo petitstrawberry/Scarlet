@@ -93,8 +93,8 @@ use crate::ipc::syscall::{
 };
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
 use crate::network::syscall::{
-    sys_network_list_interfaces, sys_network_set_dns, sys_network_set_gateway,
-    sys_network_set_ipv4, sys_network_set_netmask,
+    sys_network_list_interfaces, sys_network_set_gateway, sys_network_set_ipv4,
+    sys_network_set_netmask,
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
@@ -296,7 +296,6 @@ syscall_table! {
     // === Network Configuration ===
     NetworkSetIpv4 = 910 => sys_network_set_ipv4,       // Set interface IPv4 address
     NetworkSetGateway = 911 => sys_network_set_gateway, // Set default gateway
-    NetworkSetDns = 912 => sys_network_set_dns,         // Set DNS server
     NetworkSetNetmask = 913 => sys_network_set_netmask, // Set subnet mask
     NetworkListInterfaces = 914 => sys_network_list_interfaces, // List network interfaces
 

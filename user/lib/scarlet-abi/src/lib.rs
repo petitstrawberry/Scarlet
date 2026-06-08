@@ -186,7 +186,6 @@ pub enum Syscall {
     // Network configuration
     NetworkSetIpv4 = 910,
     NetworkSetGateway = 911,
-    NetworkSetDns = 912,
     NetworkSetNetmask = 913,
     NetworkListInterfaces = 914,
 

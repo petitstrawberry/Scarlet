@@ -97,7 +97,6 @@ pub struct InterfaceStats {
 pub struct NetworkConfig {
     pub default_gateway: Option<Ipv4Address>,
     pub gateway_mac: Option<MacAddress>,
-    pub dns_server: Option<Ipv4Address>,
     pub subnet_mask: Ipv4Address,
 }
 
@@ -106,7 +105,6 @@ impl Default for NetworkConfig {
         Self {
             default_gateway: None,
             gateway_mac: None,
-            dns_server: None,
             subnet_mask: Ipv4Address::new(255, 255, 255, 0),
         }
     }

@@ -2070,10 +2070,7 @@ fn cross_tools_for_target(target_triple: &str) -> (String, String) {
                 "aarch64-none-elf",
             ],
         ),
-        (
-            "x86_64",
-            &["x86_64-unknown-linux-gnu", "x86_64-linux-gnu"],
-        ),
+        ("x86_64", &["x86_64-unknown-linux-gnu", "x86_64-linux-gnu"]),
     ];
 
     let prefixes = candidates

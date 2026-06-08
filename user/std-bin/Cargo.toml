@@ -19,6 +19,11 @@ scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = 
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
 url = "2.5"
+ratatui = { version = "0.29", default-features = false }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = "0.12"
 
 [[bin]]
 name = "hello"
@@ -69,6 +74,14 @@ name = "udp_server"
 path = "src/udp_server.rs"
 
 [[bin]]
+name = "resolverd"
+path = "src/resolverd.rs"
+
+[[bin]]
+name = "resolve"
+path = "src/resolve.rs"
+
+[[bin]]
 name = "ansi_banner"
 path = "src/ansi_banner.rs"
 
@@ -111,3 +124,19 @@ path = "src/socket_client.rs"
 [[bin]]
 name = "ui_smoke"
 path = "src/ui_smoke.rs"
+
+[[bin]]
+name = "tui_demo"
+path = "src/tui_demo.rs"
+
+[[bin]]
+name = "regex_demo"
+path = "src/regex_demo.rs"
+
+[[bin]]
+name = "json_demo"
+path = "src/json_demo.rs"
+
+[[bin]]
+name = "markdown_demo"
+path = "src/markdown_demo.rs"
