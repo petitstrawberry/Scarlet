@@ -35,10 +35,7 @@ impl Backend for AnsiBackend {
             write!(self.stdout, "\x1b[{};{}H", y + 1, x + 1)?;
             write_style(&mut self.stdout, cell.fg, cell.bg, cell.modifier)?;
             write!(self.stdout, "{}", cell.symbol())?;
-            if !cell.modifier.is_empty()
-                || cell.fg != Color::Reset
-                || cell.bg != Color::Reset
-            {
+            if !cell.modifier.is_empty() || cell.fg != Color::Reset || cell.bg != Color::Reset {
                 write!(self.stdout, "\x1b[0m")?;
             }
         }
@@ -77,13 +74,22 @@ impl Backend for AnsiBackend {
     }
 
     fn size(&self) -> io::Result<Size> {
-        Ok(Size { width: self.width, height: self.height })
+        Ok(Size {
+            width: self.width,
+            height: self.height,
+        })
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
         Ok(WindowSize {
-            columns_rows: Size { width: self.width, height: self.height },
-            pixels: Size { width: 0, height: 0 },
+            columns_rows: Size {
+                width: self.width,
+                height: self.height,
+            },
+            pixels: Size {
+                width: 0,
+                height: 0,
+            },
         })
     }
 
@@ -92,12 +98,7 @@ impl Backend for AnsiBackend {
     }
 }
 
-fn write_style(
-    buf: &mut impl Write,
-    fg: Color,
-    bg: Color,
-    modifier: Modifier,
-) -> io::Result<()> {
+fn write_style(buf: &mut impl Write, fg: Color, bg: Color, modifier: Modifier) -> io::Result<()> {
     if fg != Color::Reset {
         match fg {
             Color::Rgb(r, g, b) => write!(buf, "\x1b[38;2;{r};{g};{b}m")?,
@@ -176,21 +177,16 @@ fn main() -> io::Result<()> {
             )),
             ratatui::text::Line::from(""),
             ratatui::text::Line::from("  Custom ANSI backend \u{2014} no crossterm needed"),
-            ratatui::text::Line::from(format!(
-                "  Terminal size: {}x{}",
-                area.width, area.height
-            )),
+            ratatui::text::Line::from(format!("  Terminal size: {}x{}", area.width, area.height)),
             ratatui::text::Line::from(""),
             ratatui::text::Line::from(ratatui::text::Span::styled(
                 "  Pure Rust TUI framework running on a custom OS",
-                ratatui::style::Style::default()
-                    .fg(ratatui::style::Color::Cyan),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Cyan),
             )),
             ratatui::text::Line::from(""),
             ratatui::text::Line::from(ratatui::text::Span::styled(
                 "  Press Enter to exit...",
-                ratatui::style::Style::default()
-                    .fg(ratatui::style::Color::Yellow),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
             )),
         ];
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
