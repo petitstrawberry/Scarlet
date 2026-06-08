@@ -238,6 +238,8 @@
             pkgs.bzip2
             pkgs.xz
             pkgs.unzip
+            pkgs.fontconfig
+            pkgs.dejavu_fonts
 
             # Filesystem / image tools
             pkgs.mtools
@@ -290,6 +292,7 @@
             ];
             NIX_PATH = "nixpkgs=${pkgs.path}";
             RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
+            FONTCONFIG_FILE = "${pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; }}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
             SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
@@ -346,6 +349,7 @@
                 "LD_LIBRARY_PATH=${devEnv.LD_LIBRARY_PATH}"
                 "NIX_PATH=${devEnv.NIX_PATH}"
                 "RUST_BOOTSTRAP_CONFIG=${devEnv.RUST_BOOTSTRAP_CONFIG}"
+                "FONTCONFIG_FILE=${devEnv.FONTCONFIG_FILE}"
                 "SCARLET_RUST_HOST_TRIPLE=${devEnv.SCARLET_RUST_HOST_TRIPLE}"
                 "SCARLET_RUST_TARGET_TRIPLES=${devEnv.SCARLET_RUST_TARGET_TRIPLES}"
                 "SCARLET_CACHED_RUST_TOOLCHAIN=${devEnv.SCARLET_CACHED_RUST_TOOLCHAIN}"
