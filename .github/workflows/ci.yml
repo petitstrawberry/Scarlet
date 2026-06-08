@@ -1,4 +1,4 @@
-name: Docker Image CI
+name: CI
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
     branches: [ "dev" ]
 
 jobs:
-
   nix-cache:
     runs-on: ubuntu-latest
     env:
@@ -43,95 +42,35 @@ jobs:
     - name: Build Linux devShell closure
       run: nix build --no-link .#devShells.x86_64-linux.default
 
-  docker:
+  fmt:
     needs: nix-cache
     runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
     steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
     - uses: actions/checkout@v4
 
-    - name: Generate Docker cache key
-      id: docker-cache-key
-      run: |
-        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
-
-    - name: Cache Docker image
-      id: docker-cache
-      uses: actions/cache@v3
+    - uses: cachix/install-nix-action@v31
       with:
-        path: /tmp/docker-image
-        key: ${{ steps.docker-cache-key.outputs.key }}
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
 
-    - name: Build the Docker image
-      if: steps.docker-cache.outputs.cache-hit != 'true'
-      run: |
-        docker build . --file Dockerfile --target ci --tag scarlet-ci \
-          --build-arg SCARLET_CACHIX_CACHE="${{ vars.CACHIX_CACHE_NAME }}" \
-          --build-arg SCARLET_CACHIX_PUBLIC_KEY="${{ vars.CACHIX_PUBLIC_KEY }}"
-        docker save scarlet-ci > /tmp/docker-image
-
-  fmt:
-    needs: docker
-    runs-on: ubuntu-latest
-    steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+    - uses: cachix/cachix-action@v17
+      if: env.CACHIX_CACHE_NAME != ''
       with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
-    - uses: actions/checkout@v4
-
-    - name: Generate Docker cache key
-      id: docker-cache-key
-      run: |
-        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
-
-    - name: Restore Docker image cache
-      uses: actions/cache@v3
-      with:
-        path: /tmp/docker-image
-        key: ${{ steps.docker-cache-key.outputs.key }}
-
-    - name: Load Docker image
-      run: docker load < /tmp/docker-image
-
-    - name: Make checkout owned by container user
-      run: sudo chown -R 0:0 "$PWD"
+        name: ${{ env.CACHIX_CACHE_NAME }}
 
     - name: Run formatting check
-      env:
-        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
-        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: |
-        docker run \
-          -e SCARLET_CACHIX_CACHE \
-          -e SCARLET_CACHIX_PUBLIC_KEY \
-          -v $PWD:/workspaces/Scarlet \
-          scarlet-ci cargo make fmt-check
-
-    - name: Restore checkout ownership
-      if: always()
-      run: sudo chown -R "$USER:$USER" "$PWD"
+      run: nix develop .#default --command cargo make fmt-check
 
   test-riscv64:
-    needs: docker
+    needs: nix-cache
     runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
     steps:
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
@@ -146,53 +85,31 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    - name: Generate Docker cache key
-      id: docker-cache-key
-      run: |
-        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
-
-    - name: Restore Docker image cache
-      uses: actions/cache@v3
+    - uses: cachix/install-nix-action@v31
       with:
-        path: /tmp/docker-image
-        key: ${{ steps.docker-cache-key.outputs.key }}
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
 
-    - name: Load Docker image
-      run: docker load < /tmp/docker-image
-
-    - name: Make checkout owned by container user
-      run: sudo chown -R 0:0 "$PWD"
+    - uses: cachix/cachix-action@v17
+      if: env.CACHIX_CACHE_NAME != ''
+      with:
+        name: ${{ env.CACHIX_CACHE_NAME }}
 
     - name: Build scarlet kernel (riscv64)
-      env:
-        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
-        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: |
-        docker run \
-          -e SCARLET_CACHIX_CACHE \
-          -e SCARLET_CACHIX_PUBLIC_KEY \
-          -v $PWD:/workspaces/Scarlet \
-          scarlet-ci cargo make build-riscv64
+      run: nix develop .#default --command cargo make build-riscv64
 
     - name: Test scarlet kernel (riscv64)
-      env:
-        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
-        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: |
-        docker run \
-          -e SCARLET_CACHIX_CACHE \
-          -e SCARLET_CACHIX_PUBLIC_KEY \
-          -v $PWD:/workspaces/Scarlet \
-          scarlet-ci cargo make test-riscv64
+      run: nix develop .#default --command cargo make test-riscv64
       timeout-minutes: 10
 
-    - name: Restore checkout ownership
-      if: always()
-      run: sudo chown -R "$USER:$USER" "$PWD"
-
   test-aarch64:
-    needs: docker
+    needs: nix-cache
     runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
     steps:
     - name: Free Disk Space (Ubuntu)
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
@@ -207,46 +124,22 @@ jobs:
 
     - uses: actions/checkout@v4
 
-    - name: Generate Docker cache key
-      id: docker-cache-key
-      run: |
-        echo "key=docker-cache-${{ hashFiles('Dockerfile', '.dockerignore', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
-
-    - name: Restore Docker image cache
-      uses: actions/cache@v3
+    - uses: cachix/install-nix-action@v31
       with:
-        path: /tmp/docker-image
-        key: ${{ steps.docker-cache-key.outputs.key }}
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
 
-    - name: Load Docker image
-      run: docker load < /tmp/docker-image
-
-    - name: Make checkout owned by container user
-      run: sudo chown -R 0:0 "$PWD"
+    - uses: cachix/cachix-action@v17
+      if: env.CACHIX_CACHE_NAME != ''
+      with:
+        name: ${{ env.CACHIX_CACHE_NAME }}
 
     - name: Build scarlet kernel (aarch64)
-      env:
-        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
-        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: |
-        docker run \
-          -e SCARLET_CACHIX_CACHE \
-          -e SCARLET_CACHIX_PUBLIC_KEY \
-          -v $PWD:/workspaces/Scarlet \
-          scarlet-ci cargo make build-aarch64
+      run: nix develop .#default --command cargo make build-aarch64
 
     - name: Test scarlet kernel (aarch64)
-      env:
-        SCARLET_CACHIX_CACHE: ${{ vars.CACHIX_CACHE_NAME }}
-        SCARLET_CACHIX_PUBLIC_KEY: ${{ vars.CACHIX_PUBLIC_KEY }}
-      run: |
-        docker run \
-          -e SCARLET_CACHIX_CACHE \
-          -e SCARLET_CACHIX_PUBLIC_KEY \
-          -v $PWD:/workspaces/Scarlet \
-          scarlet-ci cargo make test-aarch64
+      run: nix develop .#default --command cargo make test-aarch64
       timeout-minutes: 10
-
-    - name: Restore checkout ownership
-      if: always()
-      run: sudo chown -R "$USER:$USER" "$PWD"

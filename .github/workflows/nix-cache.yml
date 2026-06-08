@@ -9,13 +9,6 @@ on:
       - flake.lock
       - nix/**
       - .github/workflows/nix-cache.yml
-  pull_request:
-    branches: [ "dev" ]
-    paths:
-      - flake.nix
-      - flake.lock
-      - nix/**
-      - .github/workflows/nix-cache.yml
 
 jobs:
   devshell:
