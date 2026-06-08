@@ -237,6 +237,33 @@ cargo make test-riscv64               # Run tests (RISC-V)
 cargo make run-aarch64                # Build (release) and run (AArch64)
 ```
 
+With `direnv` and `nix-direnv`, entering the checkout should normally only
+require:
+
+```bash
+direnv allow
+```
+
+The flake declares the Scarlet Rust Cachix binary cache in `nixConfig`. Reading
+from that cache does not require a Cachix auth token, but multi-user Nix only
+honors flake-provided substituters when the current Unix user is trusted by the
+Nix daemon. On personal development machines, add your user to
+`trusted-users`, for example:
+
+```conf
+trusted-users = root your-user-name
+```
+
+Alternatively, register the Scarlet cache directly in the daemon configuration:
+
+```conf
+extra-substituters = https://scarlet-rust-toolchain.cachix.org
+extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+```
+
+If Nix prints `ignoring untrusted substituter`, it will ignore the Cachix cache
+and may start building the Rust toolchain locally.
+
 The default development shell uses the cached Scarlet Rust toolchain from
 `scarlet-rust-nix`. The Nix closure is intended to be served from Cachix in CI;
 configure the `CACHIX_CACHE_NAME` and `CACHIX_PUBLIC_KEY` repository variables

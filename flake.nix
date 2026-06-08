@@ -25,10 +25,14 @@
         "aarch64-linux"
         "aarch64-darwin"
       ];
+      linuxSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: f system);
-    in
-    {
-      devShells = forAllSystems (
+      forLinuxSystems = f: nixpkgs.lib.genAttrs linuxSystems (system: f system);
+
+      mkSystem =
         system:
         let
           edk2-202502-overlay = final: prev: {
@@ -191,80 +195,78 @@
             ];
           });
 
-        in
-        {
-          default = pkgs.mkShell {
-            packages = [
-              # Rust
-              rustToolchain
-              pkgs.cargo-make
+          devPackages = [
+            # Rust
+            rustToolchain
+            pkgs.cargo-make
 
-              # QEMU (system emulation for riscv64 and aarch64)
-              qemu
+            # QEMU (system emulation for riscv64 and aarch64)
+            qemu
 
-              # Cross-compilation toolchains
-              pkgs.pkgsCross.riscv64.buildPackages.gcc
-              pkgs.pkgsCross.aarch64-multiplatform.buildPackages.gcc
-              pkgs.llvmPackages.llvm
+            # Cross-compilation toolchains
+            pkgs.pkgsCross.riscv64.buildPackages.gcc
+            pkgs.pkgsCross.aarch64-multiplatform.buildPackages.gcc
+            pkgs.llvmPackages.llvm
 
-              # Build tools
-              pkgs.bashInteractive
-              pkgs.gcc
-              pkgs.clang
-              pkgs.lld
-              pkgs.gnumake
-              pkgs.autoconf
-              pkgs.automake
-              pkgs.libtool
-              pkgs.cmake
-              pkgs.ninja
-              pkgs.pkg-config
-              pkgs.bison
-              pkgs.flex
-              pkgs.meson
-              pkgs.texinfo
-              pkgs.which
-              pkgs.file
-              pkgs.patch
-              pkgs.perl
-              pkgs.gnused
-              pkgs.gnugrep
-              pkgs.gawk
-              pkgs.findutils
-              pkgs.diffutils
-              pkgs.gnutar
-              pkgs.gzip
-              pkgs.bzip2
-              pkgs.xz
-              pkgs.unzip
+            # Build tools
+            pkgs.bashInteractive
+            pkgs.gcc
+            pkgs.clang
+            pkgs.lld
+            pkgs.gnumake
+            pkgs.autoconf
+            pkgs.automake
+            pkgs.libtool
+            pkgs.cmake
+            pkgs.ninja
+            pkgs.pkg-config
+            pkgs.bison
+            pkgs.flex
+            pkgs.meson
+            pkgs.texinfo
+            pkgs.which
+            pkgs.file
+            pkgs.patch
+            pkgs.perl
+            pkgs.gnused
+            pkgs.gnugrep
+            pkgs.gawk
+            pkgs.findutils
+            pkgs.diffutils
+            pkgs.gnutar
+            pkgs.gzip
+            pkgs.bzip2
+            pkgs.xz
+            pkgs.unzip
 
-              # Filesystem / image tools
-              pkgs.mtools
-              pkgs.dosfstools
-              pkgs.e2fsprogs
-              pkgs.cpio
+            # Filesystem / image tools
+            pkgs.mtools
+            pkgs.dosfstools
+            pkgs.e2fsprogs
+            pkgs.cpio
 
-              # Device tree
-              pkgs.dtc
+            # Device tree
+            pkgs.dtc
 
-              # Debug
-              pkgs.gdb
+            # Debug
+            pkgs.gdb
 
-              # Other dependencies
-              pkgs.git
-              pkgs.curl
-              pkgs.wget
-              pkgs.bc
-              pkgs.sleuthkit
-              pkgs.python3
-              pkgs.rsync
-              pkgs.ncurses
-              pkgs.openssl
-              pkgs.libffi
-              pkgs.zlib
-              pkgs.vim
-            ];
+            # Other dependencies
+            pkgs.git
+            pkgs.curl
+            pkgs.wget
+            pkgs.bc
+            pkgs.sleuthkit
+            pkgs.python3
+            pkgs.rsync
+            pkgs.ncurses
+            pkgs.openssl
+            pkgs.libffi
+            pkgs.zlib
+            pkgs.vim
+          ];
 
+          devEnv = {
             # EFI firmware paths (consumed by run/test scripts via env vars)
             SCARLET_EFI_CODE_RV64 = "${ovmf-riscv64-pflash}/FV/RISCV_VIRT_CODE.fd";
             SCARLET_EFI_VARS_RV64 = "${ovmf-riscv64-pflash}/FV/RISCV_VIRT_VARS.fd";
@@ -292,15 +294,84 @@
             SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
             SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
             SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
+          };
 
+          dockerEntrypoint = pkgs.writeShellScriptBin "scarlet-dev-entrypoint" ''
+            set -e
+
+            if [ "$#" -eq 0 ]; then
+              set -- bash
+            fi
+
+            export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+            export SCARLET_RUST_ACTIVE_BIN="${rustToolchain}/bin"
+
+            if [ -f "$SCARLET_REPO_ROOT/scripts/scarlet-rust-dev.sh" ]; then
+              source "$SCARLET_REPO_ROOT/scripts/scarlet-rust-dev.sh"
+            fi
+
+            exec "$@"
+          '';
+        in
+        rec {
+          devShell = pkgs.mkShell (
+            devEnv
+            // {
+              packages = devPackages;
             shellHook = ''
               export PATH="${rustToolchain}/bin:$PATH"
               export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
               export SCARLET_RUST_ACTIVE_BIN="${rustToolchain}/bin"
               source "$SCARLET_REPO_ROOT/scripts/scarlet-rust-dev.sh"
             '';
+            }
+          );
+
+          dockerImage = pkgs.dockerTools.buildLayeredImage {
+            name = "scarlet-dev";
+            tag = "latest";
+            maxLayers = 120;
+            contents = devPackages ++ [
+              dockerEntrypoint
+              pkgs.coreutils
+              pkgs.cacert
+            ];
+            config = {
+              WorkingDir = "/workspaces/Scarlet";
+              Entrypoint = [ "/bin/scarlet-dev-entrypoint" ];
+              Cmd = [ "bash" ];
+              Env = [
+                "PATH=/bin"
+                "CARGO_NET_GIT_FETCH_WITH_CLI=${devEnv.CARGO_NET_GIT_FETCH_WITH_CLI}"
+                "LD_LIBRARY_PATH=${devEnv.LD_LIBRARY_PATH}"
+                "NIX_PATH=${devEnv.NIX_PATH}"
+                "RUST_BOOTSTRAP_CONFIG=${devEnv.RUST_BOOTSTRAP_CONFIG}"
+                "SCARLET_RUST_HOST_TRIPLE=${devEnv.SCARLET_RUST_HOST_TRIPLE}"
+                "SCARLET_RUST_TARGET_TRIPLES=${devEnv.SCARLET_RUST_TARGET_TRIPLES}"
+                "SCARLET_CACHED_RUST_TOOLCHAIN=${devEnv.SCARLET_CACHED_RUST_TOOLCHAIN}"
+                "SCARLET_RUST_TOOLCHAIN=${devEnv.SCARLET_RUST_TOOLCHAIN}"
+                "SCARLET_EFI_CODE_RV64=${devEnv.SCARLET_EFI_CODE_RV64}"
+                "SCARLET_EFI_VARS_RV64=${devEnv.SCARLET_EFI_VARS_RV64}"
+                "SCARLET_EFI_CODE_ARM64_HVF=${devEnv.SCARLET_EFI_CODE_ARM64_HVF}"
+                "SCARLET_EFI_VARS_ARM64_HVF=${devEnv.SCARLET_EFI_VARS_ARM64_HVF}"
+                "SCARLET_EFI_CODE_ARM64_EL2=${devEnv.SCARLET_EFI_CODE_ARM64_EL2}"
+                "SCARLET_EFI_VARS_ARM64_EL2=${devEnv.SCARLET_EFI_VARS_ARM64_EL2}"
+                "SCARLET_EFI_CODE_ARM64=${devEnv.SCARLET_EFI_CODE_ARM64}"
+                "SCARLET_EFI_VARS_ARM64=${devEnv.SCARLET_EFI_VARS_ARM64}"
+              ];
+            };
           };
-        }
-      );
+
+          packages = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            scarlet-dev-image = dockerImage;
+            default = dockerImage;
+          };
+        };
+    in
+    {
+      devShells = forAllSystems (system: {
+        default = (mkSystem system).devShell;
+      });
+      packages = forLinuxSystems (system: (mkSystem system).packages);
     };
 }
