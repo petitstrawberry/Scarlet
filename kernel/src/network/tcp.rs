@@ -264,6 +264,8 @@ pub struct TcpSocket {
     self_weak: Weak<TcpSocket>,
     /// Pending accepted connections (listener only)
     pending_accept: Mutex<VecDeque<Arc<TcpSocket>>>,
+    /// Half-open connections waiting for the final ACK (listener only).
+    pending_syn: Mutex<VecDeque<Arc<TcpSocket>>>,
     /// Maximum backlog size (from listen())
     max_backlog: AtomicUsize,
 
@@ -303,6 +305,12 @@ pub struct TcpSocket {
     send_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
     /// Block mode: true for blocking, false for non-blocking
     blocking_mode: AtomicBool,
+    /// Direct peer for in-kernel loopback connections.
+    loopback_peer: Mutex<Weak<TcpSocket>>,
+    /// Listening socket that should receive this socket once the handshake completes.
+    accept_listener: Mutex<Weak<TcpSocket>>,
+    /// Whether this socket has already been queued for accept().
+    accept_queued: AtomicBool,
 
     /// Duplicate ACK count for Fast Retransmit
     dup_ack_count: AtomicU16,
@@ -351,6 +359,14 @@ impl TcpSocket {
                     })
                     .clone()
             };
+
+            {
+                let mut pending = self.pending_accept.lock();
+                if let Some(socket) = pending.pop_front() {
+                    return Ok(socket as Arc<dyn SocketObject>);
+                }
+            }
+
             waker.wait(task_id, trapframe);
         }
     }
@@ -374,6 +390,7 @@ impl TcpSocket {
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: Mutex::new(VecDeque::new()),
+            pending_syn: Mutex::new(VecDeque::new()),
             max_backlog: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
@@ -400,11 +417,73 @@ impl TcpSocket {
             recv_waker: Mutex::new(None),
             send_waker: Mutex::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
+            loopback_peer: Mutex::new(Weak::new()),
+            accept_listener: Mutex::new(Weak::new()),
+            accept_queued: AtomicBool::new(false),
 
             // Fast Retransmit - duplicate ACK tracking
             dup_ack_count: AtomicU16::new(0),
             last_ack_seq: AtomicU32::new(0),
         })
+    }
+
+    fn queue_established_accept(&self) {
+        let listener = match self.accept_listener.lock().upgrade() {
+            Some(listener) => listener,
+            None => return,
+        };
+        let socket = match self.self_weak.upgrade() {
+            Some(socket) => socket,
+            None => return,
+        };
+
+        {
+            let max_backlog = listener.max_backlog.load(Ordering::SeqCst);
+            let mut pending = listener.pending_accept.lock();
+            if pending.len() >= max_backlog {
+                return;
+            }
+            if self.accept_queued.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            pending.push_back(socket);
+        }
+
+        {
+            let self_ptr = self as *const TcpSocket;
+            let mut pending_syn = listener.pending_syn.lock();
+            pending_syn.retain(|socket| Arc::as_ptr(socket) != self_ptr);
+        }
+
+        if let Some(waker) = listener.accept_waker.lock().as_ref() {
+            waker.wake_one();
+        }
+    }
+
+    fn deliver_loopback_data(&self, data: &[u8]) -> Result<Option<usize>, SocketError> {
+        let peer = match self.loopback_peer.lock().upgrade() {
+            Some(peer) => peer,
+            None => return Ok(None),
+        };
+
+        {
+            let mut recv_buf = peer.recv_buffer.lock();
+            if recv_buf.len() + data.len() > MAX_RECV_BUFFER_SIZE {
+                return Err(SocketError::WouldBlock);
+            }
+            recv_buf.extend(data);
+        }
+
+        peer.bytes_received
+            .fetch_add(data.len() as u64, Ordering::SeqCst);
+        self.bytes_sent
+            .fetch_add(data.len() as u64, Ordering::SeqCst);
+
+        if let Some(waker) = peer.recv_waker.lock().as_ref() {
+            waker.wake_one();
+        }
+
+        Ok(Some(data.len()))
     }
 
     fn matches_peer(&self, src_ip: Ipv4Address, src_port: u16) -> bool {
@@ -453,6 +532,74 @@ impl TcpSocket {
 
         tcp_layer.register_port(port, self.self_weak.clone());
         Ok(())
+    }
+
+    fn try_loopback_connect(&self, addr: Ipv4Address, port: u16) -> Result<bool, SocketError> {
+        if addr.0[0] != 127 {
+            return Ok(false);
+        }
+
+        let tcp_layer = self
+            .tcp_layer
+            .upgrade()
+            .ok_or(SocketError::InvalidOperation)?;
+        let listener = match tcp_layer.find_listening_socket(port) {
+            Some(listener) => listener,
+            None => return Ok(false),
+        };
+
+        let local_port = self.local_port.load(Ordering::SeqCst);
+        if local_port == 0 {
+            return Err(SocketError::InvalidOperation);
+        }
+
+        let local_ip = self
+            .local_ip
+            .lock()
+            .clone()
+            .unwrap_or(Ipv4Address::new(127, 0, 0, 1));
+        let listener_ip = listener
+            .local_ip
+            .lock()
+            .clone()
+            .unwrap_or(Ipv4Address::new(127, 0, 0, 1));
+
+        let child = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        *child.local_ip.lock() = Some(listener_ip);
+        child.local_port.store(port, Ordering::SeqCst);
+        *child.remote_ip.lock() = Some(local_ip);
+        child.remote_port.store(local_port, Ordering::SeqCst);
+        child.send_seq.store(1000, Ordering::SeqCst);
+        child.send_unacked.store(1000, Ordering::SeqCst);
+        child.recv_seq.store(1000, Ordering::SeqCst);
+        child.recv_ack.store(1000, Ordering::SeqCst);
+        child.set_state(TcpState::Established);
+        child.accept_queued.store(true, Ordering::SeqCst);
+        *child.loopback_peer.lock() = self.self_weak.clone();
+
+        *self.remote_ip.lock() = Some(listener_ip);
+        self.remote_port.store(port, Ordering::SeqCst);
+        self.send_seq.store(1000, Ordering::SeqCst);
+        self.send_unacked.store(1000, Ordering::SeqCst);
+        self.recv_seq.store(1000, Ordering::SeqCst);
+        self.recv_ack.store(1000, Ordering::SeqCst);
+        self.set_state(TcpState::Established);
+        *self.loopback_peer.lock() = child.self_weak.clone();
+
+        {
+            let max_backlog = listener.max_backlog.load(Ordering::SeqCst);
+            let mut pending = listener.pending_accept.lock();
+            if pending.len() >= max_backlog {
+                return Err(SocketError::ConnectionRefused);
+            }
+            pending.push_back(child);
+        }
+
+        if let Some(waker) = listener.accept_waker.lock().as_ref() {
+            waker.wake_one();
+        }
+
+        Ok(true)
     }
 
     fn allocate_ephemeral_port(&self) -> u16 {
@@ -527,34 +674,10 @@ impl TcpSocket {
                     }
 
                     child.local_port.store(local_port, Ordering::SeqCst);
-                    tcp_layer.register_port(local_port, child.self_weak.clone());
+                    *child.accept_listener.lock() = self.self_weak.clone();
                     child.handle_syn_received(src_ip, header);
-
-                    // Check backlog limit and enqueue atomically
-                    let max_backlog = self.max_backlog.load(Ordering::SeqCst);
-                    {
-                        let mut pending = self.pending_accept.lock();
-                        if pending.len() < max_backlog {
-                            pending.push_back(child);
-                        } else {
-                            // Must drop lock before sending RST (child borrows network)
-                            drop(pending);
-                            // Backlog full - send RST to reject connection
-                            let rst_port = self.local_port.load(Ordering::SeqCst);
-                            let rst_seq = self.send_seq.load(Ordering::SeqCst);
-                            let mut rst_header = TcpHeader::new(rst_port, header.src_port);
-                            rst_header.seq_number = rst_seq;
-                            rst_header.ack_number = child.recv_ack.load(Ordering::SeqCst);
-                            rst_header.set_flags(tcp_flags::RST);
-                            child.send_segment(src_ip, rst_header, &[], false, false);
-                            return;
-                        }
-                    }
-
-                    // Wake up any blocking accept() calls (lock released above)
-                    if let Some(waker) = self.accept_waker.lock().as_ref() {
-                        waker.wake_one();
-                    }
+                    tcp_layer.register_port(local_port, child.self_weak.clone());
+                    self.pending_syn.lock().push_back(Arc::clone(&child));
                 }
             }
             TcpState::SynSent => {
@@ -576,15 +699,23 @@ impl TcpSocket {
 
                 if header.flags() & tcp_flags::ACK != 0 {
                     let expected_ack = self.send_seq.load(Ordering::SeqCst);
-                    if header.ack_number == expected_ack {
-                        self.update_send_window(header.ack_number);
+                    let ack_number = header.ack_number;
+                    if ack_number == expected_ack {
+                        self.update_send_window(ack_number);
                         self.set_state(TcpState::Established);
+                        self.queue_established_accept();
 
                         if !data.is_empty() {
                             self.handle_data_segment(src_ip, header, data);
                         } else if header.flags() & tcp_flags::FIN != 0 {
                             self.handle_fin(src_ip, header);
                         }
+                    } else if should_log_tcp_https(src_port, dst_port) {
+                        crate::println!(
+                            "[tcp] syn-received ACK mismatch: ack={} expected={}",
+                            ack_number,
+                            expected_ack
+                        );
                     }
                 }
             }
@@ -606,21 +737,22 @@ impl TcpSocket {
         self.remote_port.store(header.src_port, Ordering::SeqCst);
 
         // Track peer sequence and our initial sequence
-        let initial_seq = 1000;
+        let initial_seq = 1000u32;
         let next_recv = header.seq_number.wrapping_add(1);
-        self.send_seq.store(initial_seq, Ordering::SeqCst);
+        self.send_seq
+            .store(initial_seq.wrapping_add(1), Ordering::SeqCst);
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
+        self.set_state(TcpState::SynReceived);
 
         // Send SYN-ACK
         let local_port = self.local_port.load(Ordering::SeqCst);
-        let mut syn_ack = TcpHeader::new(local_port, header.src_port);
+        let remote_port = header.src_port;
+        let mut syn_ack = TcpHeader::new(local_port, remote_port);
         syn_ack.seq_number = initial_seq;
         syn_ack.ack_number = next_recv;
         syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
         self.send_segment(src_ip, syn_ack, &[], false, false);
-        self.send_seq.fetch_add(1, Ordering::SeqCst);
-        self.set_state(TcpState::SynReceived);
     }
 
     /// Handle received SYN-ACK (move to ESTABLISHED)
@@ -1157,11 +1289,15 @@ impl TcpSocket {
         is_retransmit: bool,
     ) {
         self.ensure_local_ip();
-        let local_ip = self
+        let mut local_ip = self
             .local_ip
             .lock()
             .clone()
             .unwrap_or(Ipv4Address::new(0, 0, 0, 0));
+        if dest_ip.0[0] == 127 && local_ip.0 == [0, 0, 0, 0] {
+            local_ip = Ipv4Address::new(127, 0, 0, 1);
+            *self.local_ip.lock() = Some(local_ip);
+        }
 
         let total_len = header.data_offset() + data.len();
         header.window_size = self.recv_window.load(Ordering::SeqCst);
@@ -1176,6 +1312,42 @@ impl TcpSocket {
         let mut segment = Vec::with_capacity(total_len);
         segment.extend_from_slice(&header_bytes);
         segment.extend_from_slice(data);
+
+        if dest_ip.0[0] == 127 {
+            self.bytes_sent
+                .fetch_add(segment.len() as u64, Ordering::SeqCst);
+
+            if update_seq {
+                let mut advance = data.len() as u32;
+                let flags = header.flags();
+                if (flags & tcp_flags::SYN) != 0 {
+                    advance = advance.wrapping_add(1);
+                }
+                if (flags & tcp_flags::FIN) != 0 {
+                    advance = advance.wrapping_add(1);
+                }
+                if advance != 0 {
+                    self.send_seq.fetch_add(advance, Ordering::SeqCst);
+                }
+            }
+
+            if !is_retransmit {
+                let flags = header.flags();
+                let has_data = !data.is_empty();
+                let is_syn = (flags & tcp_flags::SYN) != 0;
+                let is_fin = (flags & tcp_flags::FIN) != 0;
+
+                if has_data || is_syn || is_fin {
+                    let seq = header.seq_number;
+                    self.add_unacked_segment(seq, data.to_vec(), flags);
+                }
+            }
+
+            if let Some(tcp_layer) = self.tcp_layer.upgrade() {
+                let _ = tcp_layer.receive_packet(local_ip, dest_ip, &segment);
+            }
+            return;
+        }
 
         // Create IP context
         let mut ip_context = LayerContext::new();
@@ -1227,6 +1399,10 @@ impl TcpSocket {
     pub fn send_data(&self, data: &[u8]) -> Result<usize, SocketError> {
         if self.get_state() != TcpState::Established {
             return Err(SocketError::NotConnected);
+        }
+
+        if let Some(len) = self.deliver_loopback_data(data)? {
+            return Ok(len);
         }
 
         let dest_ip = self
@@ -1291,6 +1467,25 @@ impl TcpSocket {
         let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
 
         loop {
+            match self.deliver_loopback_data(data) {
+                Ok(Some(len)) => return Ok(len),
+                Ok(None) => {}
+                Err(SocketError::WouldBlock) if nonblocking => return Err(SocketError::WouldBlock),
+                Err(SocketError::WouldBlock) => {
+                    let waker = {
+                        let mut waker_lock = self.send_waker.lock();
+                        waker_lock
+                            .get_or_insert_with(|| {
+                                Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
+                            })
+                            .clone()
+                    };
+                    waker.wait(task_id, trapframe);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+
             {
                 let mut send_buf = self.send_buffer.lock();
                 if send_buf.len() + data.len() <= MAX_SEND_BUFFER_SIZE {
@@ -1850,6 +2045,13 @@ impl SocketControl for TcpSocket {
         let max_backlog = backlog.max(1).min(128);
         self.max_backlog.store(max_backlog, Ordering::SeqCst);
 
+        {
+            let mut waker_lock = self.accept_waker.lock();
+            waker_lock.get_or_insert_with(|| {
+                Arc::new(crate::sync::Waker::new_interruptible("tcp_accept"))
+            });
+        }
+
         self.set_state(TcpState::Listen);
         Ok(())
     }
@@ -1869,7 +2071,18 @@ impl SocketControl for TcpSocket {
                     self.local_port.store(port, Ordering::SeqCst);
                 }
 
-                self.ensure_local_ip();
+                if addr.0[0] == 127 {
+                    let mut local_ip = self.local_ip.lock();
+                    if local_ip.as_ref().is_none_or(|ip| ip.0 == [0, 0, 0, 0]) {
+                        *local_ip = Some(Ipv4Address::new(127, 0, 0, 1));
+                    }
+                } else {
+                    self.ensure_local_ip();
+                }
+
+                if self.try_loopback_connect(addr, port)? {
+                    return Ok(());
+                }
 
                 // Start 3-way handshake
                 self.send_syn(addr, port);
@@ -1943,6 +2156,17 @@ impl SocketControl for TcpSocket {
     }
 
     fn shutdown(&self, how: crate::network::socket::ShutdownHow) -> Result<(), SocketError> {
+        if self.loopback_peer.lock().upgrade().is_some() {
+            self.set_state(TcpState::Closed);
+            if let Some(waker) = self.recv_waker.lock().as_ref() {
+                waker.wake_all();
+            }
+            if let Some(waker) = self.send_waker.lock().as_ref() {
+                waker.wake_all();
+            }
+            return Ok(());
+        }
+
         match how {
             crate::network::socket::ShutdownHow::Write
             | crate::network::socket::ShutdownHow::Both => {
@@ -2172,7 +2396,8 @@ impl Drop for TcpSocket {
             | TcpState::SynReceived
             | TcpState::SynSent
             | TcpState::CloseWait => {
-                if self.remote_ip.lock().is_some() {
+                if self.loopback_peer.lock().upgrade().is_none() && self.remote_ip.lock().is_some()
+                {
                     self.send_fin();
                 }
             }

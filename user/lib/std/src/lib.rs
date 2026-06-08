@@ -36,9 +36,10 @@
 //!
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
 #![feature(async_iterator)]
 #![feature(new_range_api)]
+
+extern crate scarlet_rt;
 
 mod core_exports {
     extern crate core;
@@ -93,11 +94,8 @@ mod alloc_exports {
     pub use alloc::vec;
 }
 
-mod allocator;
-mod arch;
 pub mod audio;
 pub mod collections;
-pub mod env;
 pub mod ffi;
 pub mod fs;
 pub mod handle;
@@ -113,6 +111,21 @@ pub mod syscall;
 pub mod task;
 pub mod thread;
 pub mod tty;
+
+/// Runtime allocator hooks used by process-control wrappers.
+pub mod allocator {
+    pub use scarlet_rt::allocator::*;
+}
+
+/// Architecture-specific runtime helpers.
+pub mod arch {
+    pub use scarlet_rt::{arch_set_tls_pointer, arch_tls_pointer};
+}
+
+/// Process argument and environment storage initialized by `scarlet-rt`.
+pub mod env {
+    pub use scarlet_rt::env::*;
+}
 
 // Re-export LocalKey type for convenience
 // Note: thread_local! macro is automatically exported at crate root by #[macro_export]
@@ -134,14 +147,3 @@ pub mod profiler {
 
 pub use alloc_exports::*;
 pub use core_exports::*;
-
-#[panic_handler]
-pub fn panic(_info: &core::panic::PanicInfo) -> ! {
-    crate::println!("Panic occurred: {:?}", _info);
-    loop {}
-}
-
-#[alloc_error_handler]
-fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
-    loop {}
-}

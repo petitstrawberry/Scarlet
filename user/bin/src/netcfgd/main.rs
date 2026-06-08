@@ -12,10 +12,7 @@ extern crate scarlet_std as std;
 use std::{
     env,
     fs::File,
-    network::{
-        Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
-        set_netmask,
-    },
+    network::{Ipv4Address, list_interfaces, set_default_gateway, set_interface_ipv4, set_netmask},
     println,
     string::{String, ToString},
     vec::Vec,
@@ -28,7 +25,6 @@ struct InterfaceConfig {
     address: Option<Ipv4Address>,
     netmask: Option<Ipv4Address>,
     gateway: Option<Ipv4Address>,
-    dns: Option<Ipv4Address>,
 }
 
 /// Parse IPv4 address from string
@@ -73,7 +69,6 @@ impl ConfigParser {
                 let mut address = None;
                 let mut netmask = None;
                 let mut gateway = None;
-                let mut dns = None;
 
                 i += 1;
                 while i < lines.len() {
@@ -111,11 +106,6 @@ impl ConfigParser {
                                     gateway = parse_ipv4(&v);
                                 }
                             }
-                            "dns" => {
-                                if let Ok(v) = Self::unquote(value).parse::<String>() {
-                                    dns = parse_ipv4(&v);
-                                }
-                            }
                             _ => {}
                         }
                     }
@@ -129,7 +119,6 @@ impl ConfigParser {
                         address,
                         netmask,
                         gateway,
-                        dns,
                     });
                 }
 
@@ -267,18 +256,6 @@ fn apply_interface_config(config: &InterfaceConfig) -> Result<(), &'static str> 
             println!(
                 "netcfgd: Set gateway: {}.{}.{}.{}",
                 gw.0[0], gw.0[1], gw.0[2], gw.0[3]
-            );
-        }
-    }
-
-    if let Some(dns) = config.dns {
-        if set_dns_server(dns).is_err() {
-            println!("netcfgd: Failed to set DNS server");
-            failed = true;
-        } else {
-            println!(
-                "netcfgd: Set DNS: {}.{}.{}.{}",
-                dns.0[0], dns.0[1], dns.0[2], dns.0[3]
             );
         }
     }

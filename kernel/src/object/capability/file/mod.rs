@@ -12,7 +12,7 @@ use crate::object::capability::stream::{StreamError, StreamOps};
 
 pub mod syscall;
 
-pub use syscall::{sys_file_seek, sys_file_truncate};
+pub use syscall::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 
 /// Seek operations for file positioning
 #[derive(Debug, Clone, Copy)]

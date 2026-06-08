@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use crate::os::Mutex;
 use std::println;
 
 /// Unique identifier for State instances

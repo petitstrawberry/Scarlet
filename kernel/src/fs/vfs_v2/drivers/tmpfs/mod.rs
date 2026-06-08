@@ -603,13 +603,18 @@ impl FileSystemOperations for TmpFS {
                 // Update memory usage for regular files and symbolic links
                 match tmp_node.file_type() {
                     FileType::RegularFile => {
-                        let size = tmp_node.metadata.read().size;
-                        self.subtract_memory_usage(size);
-                        let fs_id = self.fs_id().get();
-                        let file_id = tmp_node.metadata.read().file_id;
-                        let cache_key = (fs_id << 32) | (file_id & 0xFFFF_FFFF);
-                        PageCacheManager::global()
-                            .invalidate(crate::fs::vfs_v2::cache::CacheId::new(cache_key));
+                        let mut metadata = tmp_node.metadata.write();
+                        if metadata.link_count > 1 {
+                            metadata.link_count -= 1;
+                        } else {
+                            let size = metadata.size;
+                            self.subtract_memory_usage(size);
+                            let fs_id = self.fs_id().get();
+                            let file_id = metadata.file_id;
+                            let cache_key = (fs_id << 32) | (file_id & 0xFFFF_FFFF);
+                            PageCacheManager::global()
+                                .invalidate(crate::fs::vfs_v2::cache::CacheId::new(cache_key));
+                        }
                     }
                     FileType::SymbolicLink(target) => {
                         self.subtract_memory_usage(target.len());

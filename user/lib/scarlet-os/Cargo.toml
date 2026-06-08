@@ -8,4 +8,5 @@ name = "scarlet_os"
 path = "src/lib.rs"
 
 [dependencies]
-scarlet-std = { path = "../std" }
+scarlet-abi = { path = "../scarlet-abi" }
+scarlet-sys = { path = "../scarlet-sys" }

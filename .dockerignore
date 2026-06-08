@@ -1,0 +1,9 @@
+.git
+.direnv
+.scarlet
+.build
+target
+dist
+result
+result-*
+librust_out.rlib

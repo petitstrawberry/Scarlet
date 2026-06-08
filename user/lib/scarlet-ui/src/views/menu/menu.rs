@@ -280,7 +280,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
     fn render(&mut self) {
         // Render menu to buffer
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[MenuRenderObject] render: buffer={}",
+            crate::logln!("[MenuRenderObject] render: buffer={}",
                 self.buffer.is_some());
         }
 

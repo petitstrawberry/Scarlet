@@ -6,7 +6,12 @@
 
 #![no_std]
 
-pub use scarlet_abi::{Pid, RawHandle, Syscall, Tid};
+pub use scarlet_abi::{
+    FILE_PERMISSION_EXECUTE, FILE_PERMISSION_READ, FILE_PERMISSION_WRITE, FILE_TYPE_BLOCK_DEVICE,
+    FILE_TYPE_CHAR_DEVICE, FILE_TYPE_DIRECTORY, FILE_TYPE_PIPE, FILE_TYPE_REGULAR,
+    FILE_TYPE_SOCKET, FILE_TYPE_SYMLINK, FILE_TYPE_UNKNOWN, Pid, RawFileMetadata, RawHandle,
+    Syscall, Tid,
+};
 
 #[cfg(target_arch = "aarch64")]
 #[path = "arch/aarch64.rs"]

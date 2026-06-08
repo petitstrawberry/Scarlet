@@ -302,14 +302,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            crate::logln!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
                 type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         }
         let size = self
             .render_object
             .layout_with_children(constraints, &mut self.children);
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
+            crate::logln!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
         }
 
         size
@@ -514,7 +514,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .downcast_mut::<crate::views::ButtonRenderObject>()
             {
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[RenderElement] Button event id={:?}: {:?}",
                         self.id,
                         mouse_event
@@ -635,7 +635,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
             if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[RenderElement] Toggle click id={:?}",
                         self.id
                     );
@@ -699,7 +699,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             {
                 let dragging_state = slider.get_dragging().clone();
                 if crate::debug::is_enabled() {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[RenderElement] Slider event id={:?}: {:?} dragging={} size=({:.1},{:.1}) pos=({:.1},{:.1})",
                         self.id,
                         mouse_event,
@@ -721,7 +721,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     let new_value = render_object.value_from_local_x(local_x);
                     let state_value = slider.get_value().get();
                     if crate::debug::is_enabled() {
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[RenderElement] Slider update: local_x={:.1} new_value={:.3} state={:.3}",
                             local_x,
                             new_value,

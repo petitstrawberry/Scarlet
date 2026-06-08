@@ -3,8 +3,13 @@ name = "sws-protocol"
 version = "0.16.0"
 edition = "2024"
 
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+
 [dependencies]
-scarlet-std = { path = "../std" }
+scarlet-std = { path = "../std", optional = true }
 
 [lib]
 name = "sws_protocol"

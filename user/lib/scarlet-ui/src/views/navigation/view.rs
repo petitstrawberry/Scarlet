@@ -4,7 +4,7 @@
 //! different items to display different content views.
 
 use alloc::collections::BTreeMap;
-use std::sync::Mutex;
+use crate::os::Mutex;
 
 use crate::state::State;
 use crate::views::navigation::tuple::NavigationLinkTuple;

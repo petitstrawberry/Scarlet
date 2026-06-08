@@ -1,6 +1,7 @@
 /kernel/target
 /user/lib/*/target
 /user/bin/target
+/user/std-bin/target
 /mkfs/rootfs/system/*
 /mkfs/initramfs/bin/*
 /mkfs/initramfs/system/scarlet/bin/*

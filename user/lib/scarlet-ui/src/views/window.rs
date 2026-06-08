@@ -915,7 +915,7 @@ impl WindowRenderObject {
             .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
         if needs_resize {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[WindowRenderObject] Creating buffer: {}x{}", width, height);
+                crate::logln!("[WindowRenderObject] Creating buffer: {}x{}", width, height);
             }
             self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
@@ -993,7 +993,7 @@ impl WindowRenderObject {
         minimize_button_state: u8,
     ) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
+            crate::logln!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
         }
 
         // Title bar base color (exact Scarlet_old: rgb(235, 235, 238))
@@ -1004,7 +1004,7 @@ impl WindowRenderObject {
         let minimize_rect = Self::control_button_rect_static(width, 2);
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject] close_rect: origin={:?}, size={:?}", close_rect.origin, close_rect.size);
+            crate::logln!("[WindowRenderObject] close_rect: origin={:?}, size={:?}", close_rect.origin, close_rect.size);
         }
 
         // Button colors based on hover/pressed state
@@ -1081,7 +1081,7 @@ impl WindowRenderObject {
     /// Draw window border (exact Scarlet_old design)
     fn draw_border_canvas(canvas: &mut crate::graphics::Canvas, width: u32, height: u32) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject] draw_border_canvas: {}x{}", width, height);
+            crate::logln!("[WindowRenderObject] draw_border_canvas: {}x{}", width, height);
         }
 
         // Modern border with subtle shadow effect
@@ -1130,13 +1130,13 @@ impl ElementRenderObject for WindowRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+            crate::logln!("[WindowRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
                 constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
         }
 
         let size = self.layout(constraints);
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject::layout] size={}x{}", size.width, size.height);
+            crate::logln!("[WindowRenderObject::layout] size={}x{}", size.width, size.height);
         }
 
         let content_layout = WindowContentLayout::new(self.decorated);
@@ -1148,19 +1148,19 @@ impl ElementRenderObject for WindowRenderObject {
         let content_height = libm::ceilf(size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject::layout] content_area: x={}, y={}, size={}x{}",
+            crate::logln!("[WindowRenderObject::layout] content_area: x={}, y={}, size={}x{}",
                 content_x, content_y, content_width, content_height);
         }
 
         for child in children {
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[WindowRenderObject::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                crate::logln!("[WindowRenderObject::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
                     child_constraints.min_width, child_constraints.min_height, child_constraints.max_width, child_constraints.max_height);
             }
             let child_size = child.layout(child_constraints);
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[WindowRenderObject::layout] child size={}x{}", child_size.width, child_size.height);
+                crate::logln!("[WindowRenderObject::layout] child size={}x{}", child_size.width, child_size.height);
             }
             child.set_position(Point::new(content_x, content_y));
         }
@@ -1174,12 +1174,12 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn render(&mut self) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject] render: size={}x{}, decorated={}",
+            crate::logln!("[WindowRenderObject] render: size={}x{}, decorated={}",
                 self.size.width, self.size.height, self.decorated);
         }
         self.draw();
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[WindowRenderObject] render: complete, buffer={}",
+            crate::logln!("[WindowRenderObject] render: complete, buffer={}",
                 self.buffer.is_some());
         }
     }

@@ -10,7 +10,10 @@ use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, S
 
 use crate::color::Color;
 use crate::buffer::Buffer;
-use scarlet_std::{println, sync::Mutex, fs::File};
+use crate::logln as println;
+#[cfg(feature = "std")]
+use crate::os::Read;
+use crate::os::{File, Mutex};
 
 static CURRENT_SCALE_MILLI: AtomicU32 = AtomicU32::new(1000);
 

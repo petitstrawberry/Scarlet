@@ -582,7 +582,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.pending_head = 0;
             }
             if debug {
-                scarlet_std::println!("[SWSPlatformWindow] poll_event: {:?}", ev);
+                crate::logln!("[SWSPlatformWindow] poll_event: {:?}", ev);
             }
             Some(ev)
         } else {
@@ -879,12 +879,12 @@ impl SWSPlatformWindow {
     fn handle_sws_event(&mut self, ev: SwsEvent) {
         let debug = crate::debug::is_enabled();
         if debug {
-            scarlet_std::println!("[SWSPlatformWindow] sws_event: {:?}", ev);
+            crate::logln!("[SWSPlatformWindow] sws_event: {:?}", ev);
         }
         match ev {
             SwsEvent::Input(input) => {
                 if debug && input.type_ == event_type::EV_KEY {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[SWSPlatformWindow] raw key: input_surface={} window_surface={} code={} value={}",
                         input.surface_id,
                         self.surface_id,
@@ -894,7 +894,7 @@ impl SWSPlatformWindow {
                 }
                 if input.surface_id != self.surface_id {
                     if debug && input.type_ == event_type::EV_KEY {
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[SWSPlatformWindow] ignored key for another surface: input_surface={} window_surface={}",
                             input.surface_id,
                             self.surface_id
@@ -908,14 +908,14 @@ impl SWSPlatformWindow {
                         self.pointer_x = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
-                            scarlet_std::println!("[SWSPlatformWindow] ABS_X: {}", input.value);
+                            crate::logln!("[SWSPlatformWindow] ABS_X: {}", input.value);
                         }
                     }
                     (event_type::EV_ABS, abs_code::ABS_Y) => {
                         self.pointer_y = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
-                            scarlet_std::println!("[SWSPlatformWindow] ABS_Y: {}", input.value);
+                            crate::logln!("[SWSPlatformWindow] ABS_Y: {}", input.value);
                         }
                     }
                     (event_type::EV_SYN, _) => {
@@ -925,7 +925,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseMoved: x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -943,7 +943,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseDown: left x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -956,7 +956,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseUp: left x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -973,7 +973,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseDown: right x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -986,7 +986,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseUp: right x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1003,7 +1003,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseDown: middle x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1016,7 +1016,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                scarlet_std::println!(
+                                crate::logln!(
                                     "[SWSPlatformWindow] MouseUp: middle x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1037,7 +1037,7 @@ impl SWSPlatformWindow {
                             Self::map_key_code(code)
                         };
                         if debug {
-                            scarlet_std::println!(
+                            crate::logln!(
                                 "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
                                 code,
                                 input.value,
@@ -1074,7 +1074,7 @@ impl SWSPlatformWindow {
                         height: logical_height,
                     });
                     if debug {
-                        scarlet_std::println!(
+                        crate::logln!(
                             "[SWSPlatformWindow] SurfaceConfigure: physical={}x{} logical={}x{}",
                             width,
                             height,
@@ -1101,7 +1101,7 @@ impl SWSPlatformWindow {
                 if surface_id == self.surface_id {
                     self.push_event(Event::Quit);
                     if debug {
-                        scarlet_std::println!("[SWSPlatformWindow] SurfaceDestroyed");
+                        crate::logln!("[SWSPlatformWindow] SurfaceDestroyed");
                     }
                 }
             }
@@ -1174,7 +1174,7 @@ impl SWSPlatformWindow {
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
                 if debug {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}",
                         window_id,
                         app_name,
@@ -1211,7 +1211,7 @@ impl SWSPlatformWindow {
                 // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
                 // and only when the active APPLICATION changes (same app, different window = no broadcast)
                 if debug {
-                    scarlet_std::println!(
+                    crate::logln!(
                         "[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
                         window_id,
                         app_name,

@@ -1,8 +1,7 @@
 //! Surface (window buffer) management
 
 use crate::Error;
-use scarlet_std::ipc::SharedMemory;
-use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
+use crate::os::{SharedMemory, mmap_flags, permissions};
 
 /// A surface represents a drawable window buffer
 ///
@@ -27,12 +26,7 @@ pub struct Surface {
 
 impl Surface {
     /// Create a new surface from server-provided resources
-    pub(crate) fn new(
-        id: u32,
-        width: u32,
-        height: u32,
-        shm: SharedMemory,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(id: u32, width: u32, height: u32, shm: SharedMemory) -> Result<Self, Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
 
         Ok(Self {
@@ -60,7 +54,7 @@ impl Surface {
             .mmap(
                 0,
                 buffer_size,
-                scarlet_std::ipc::permissions::READ_WRITE,
+                permissions::READ_WRITE,
                 mmap_flags::SHARED,
                 0,
             )
@@ -69,7 +63,12 @@ impl Surface {
         Ok((addr as *mut u8, buffer_size, addr))
     }
 
-    pub(crate) fn remap(&mut self, width: u32, height: u32, shm: SharedMemory) -> Result<(), Error> {
+    pub(crate) fn remap(
+        &mut self,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+    ) -> Result<(), Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
         self.width = width;
         self.height = height;

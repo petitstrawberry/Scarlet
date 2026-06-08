@@ -9,6 +9,7 @@
 extern crate scarlet_std;
 
 use core::time::Duration;
+use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
 use scarlet_std::ipc::{SharedMemory, permissions};
 use scarlet_std::socket::{ShutdownHow, Socket};
 use scarlet_std::task::{exit, fork, getpid, waitpid};
@@ -88,7 +89,7 @@ fn main() -> i32 {
                         exit(1);
                     }
                 };
-                match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
+                match mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
                     Ok(addr) => {
                         println!("[Child] Mapped shared memory at: {:#x}", addr);
 
@@ -194,7 +195,7 @@ fn main() -> i32 {
                 exit(1);
             }
         };
-        match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
+        match mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
             Ok(addr) => {
                 println!("[Parent] Mapped shared memory at: {:#x}", addr);
 
@@ -240,7 +241,7 @@ fn main() -> i32 {
                 return 1;
             }
         };
-        if let Ok(addr) = mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
+        if let Ok(addr) = mapper.mmap(0, 4096, permissions::READ_WRITE, mmap_flags::SHARED, 0) {
             unsafe {
                 let ptr = addr as *const u8;
                 response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;

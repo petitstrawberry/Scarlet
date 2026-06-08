@@ -15,6 +15,54 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Raw regular file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_REGULAR: u32 = 0;
+/// Raw directory file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_DIRECTORY: u32 = 1;
+/// Raw symbolic link file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_SYMLINK: u32 = 2;
+/// Raw character device file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_CHAR_DEVICE: u32 = 3;
+/// Raw block device file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_BLOCK_DEVICE: u32 = 4;
+/// Raw pipe file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_PIPE: u32 = 5;
+/// Raw socket file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_SOCKET: u32 = 6;
+/// Raw unknown file type value used in [`RawFileMetadata::file_type`].
+pub const FILE_TYPE_UNKNOWN: u32 = 7;
+
+/// Raw read permission bit used in [`RawFileMetadata::permissions`].
+pub const FILE_PERMISSION_READ: u32 = 1 << 0;
+/// Raw write permission bit used in [`RawFileMetadata::permissions`].
+pub const FILE_PERMISSION_WRITE: u32 = 1 << 1;
+/// Raw execute permission bit used in [`RawFileMetadata::permissions`].
+pub const FILE_PERMISSION_EXECUTE: u32 = 1 << 2;
+
+/// Fixed-layout file metadata returned by Scarlet Native metadata syscalls.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawFileMetadata {
+    /// File size in bytes.
+    pub size: u64,
+    /// File type encoded as one of the `FILE_TYPE_*` constants.
+    pub file_type: u32,
+    /// Permission bits encoded as `FILE_PERMISSION_*` flags.
+    pub permissions: u32,
+    /// Creation timestamp in seconds.
+    pub created: u64,
+    /// Last modification timestamp in seconds.
+    pub modified: u64,
+    /// Last access timestamp in seconds.
+    pub accessed: u64,
+    /// Filesystem-local stable file identifier.
+    pub file_id: u64,
+    /// Number of hard links to this file.
+    pub link_count: u32,
+    /// Reserved for future ABI expansion.
+    pub _reserved: u32,
+}
+
 /// Scarlet Native syscall numbers.
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +124,7 @@ pub enum Syscall {
     // FileObject capability
     FileSeek = 300,
     FileTruncate = 301,
+    FileMetadata = 302,
 
     // VFS operations
     VfsOpen = 400,
@@ -88,6 +137,8 @@ pub enum Syscall {
     VfsReadlink = 407,
     VfsGetCwdPath = 408,
     VfsRename = 409,
+    VfsMetadata = 410,
+    VfsCreateHardlink = 411,
 
     // Filesystem operations
     FsMount = 500,
@@ -135,7 +186,6 @@ pub enum Syscall {
     // Network configuration
     NetworkSetIpv4 = 910,
     NetworkSetGateway = 911,
-    NetworkSetDns = 912,
     NetworkSetNetmask = 913,
     NetworkListInterfaces = 914,
 

@@ -169,7 +169,7 @@ impl Buffer {
         opacity: f32,
     ) {
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
+            crate::logln!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
                 src.width, src.height, dst_x, dst_y, opacity);
         }
 
@@ -201,7 +201,7 @@ impl Buffer {
         }
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Buffer] composite: {} pixels composited", pixels_composited);
+            crate::logln!("[Buffer] composite: {} pixels composited", pixels_composited);
         }
     }
 
@@ -250,7 +250,7 @@ impl Buffer {
         }
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[Buffer] composite_clipped: {} pixels composited", pixels_composited);
+            crate::logln!("[Buffer] composite_clipped: {} pixels composited", pixels_composited);
         }
     }
 

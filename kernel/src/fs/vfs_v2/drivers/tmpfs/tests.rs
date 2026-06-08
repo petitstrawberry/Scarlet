@@ -73,6 +73,34 @@ mod tests {
         }
     }
 
+    /// Test that removing one hardlink preserves the shared file content.
+    #[test_case]
+    fn test_hardlink_remove_preserves_content() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/original.txt", FileType::RegularFile)
+            .unwrap();
+        let original = vfs.open("/original.txt", 0x02).unwrap();
+        if let crate::object::KernelObject::File(file_obj) = original {
+            file_obj.write(b"content survives unlink").unwrap();
+        }
+
+        vfs.create_hardlink("/original.txt", "/link.txt").unwrap();
+        vfs.remove("/original.txt").unwrap();
+
+        let link = vfs.open("/link.txt", 0x01).unwrap();
+        if let crate::object::KernelObject::File(file_obj) = link {
+            let mut buf = [0u8; 64];
+            let len = file_obj.read(&mut buf).unwrap();
+            assert_eq!(&buf[..len], b"content survives unlink");
+        }
+
+        let (entry, _) = vfs.mount_tree.resolve_path("/link.txt").unwrap();
+        let metadata = entry.node().metadata().unwrap();
+        assert_eq!(metadata.link_count, 1);
+    }
+
     /// Test hardlink link count metadata
     #[test_case]
     fn test_hardlink_link_count() {

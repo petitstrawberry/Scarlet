@@ -109,8 +109,6 @@ struct NetworkInterfaceInfo {
 struct NetworkStatus {
     gateway: [u8; 4],
     gateway_set: u8,
-    dns_server: [u8; 4],
-    dns_set: u8,
     netmask: [u8; 4],
     interface_count: u32,
     interfaces_ptr: usize,
@@ -191,25 +189,6 @@ pub fn sys_network_set_gateway(tf: &mut Trapframe) -> usize {
     0
 }
 
-pub fn sys_network_set_dns(tf: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
-    tf.increment_pc_next(task);
-
-    let addr_ptr = tf.get_arg(0);
-    let dns = match read_user_ipv4(addr_ptr) {
-        Some(addr) => addr,
-        None => return usize::MAX,
-    };
-    let manager = crate::network::get_network_manager();
-    let mut config = manager.get_config();
-    config.dns_server = Some(dns);
-    manager.set_config(config);
-    0
-}
-
 pub fn sys_network_set_netmask(tf: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -251,8 +230,6 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
     let mut status = NetworkStatus {
         gateway: config.default_gateway.map_or([0u8; 4], |ip| ip.as_bytes()),
         gateway_set: config.default_gateway.map_or(0, |_| 1),
-        dns_server: config.dns_server.map_or([0u8; 4], |ip| ip.as_bytes()),
-        dns_set: config.dns_server.map_or(0, |_| 1),
         netmask: config.subnet_mask.as_bytes(),
         interface_count: 0,
         interfaces_ptr: interfaces_ptr as usize,

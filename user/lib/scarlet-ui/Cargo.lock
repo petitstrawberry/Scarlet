@@ -59,7 +59,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 name = "framebuffer"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -116,6 +116,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-abi"
+version = "0.16.0"
+
+[[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "0.16.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
+ "spin",
+ "talc",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "0.16.0"
+dependencies = [
+ "hashbrown",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+]
+
+[[package]]
 name = "scarlet-ui"
 version = "0.1.0"
 dependencies = [
@@ -125,10 +166,10 @@ dependencies = [
  "libm",
  "proc-macro2",
  "quote",
+ "scarlet-std",
  "scarlet-ui-macros",
- "scarlet_std",
  "sws-client",
- "sws_protocol",
+ "sws-protocol",
  "syn",
  "zune-jpeg",
 ]
@@ -140,16 +181,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "scarlet_std"
-version = "0.16.0"
-dependencies = [
- "hashbrown",
- "lock_api",
- "spin",
- "talc",
 ]
 
 [[package]]
@@ -171,15 +202,16 @@ dependencies = [
 name = "sws-client"
 version = "0.1.0"
 dependencies = [
- "scarlet_std",
- "sws_protocol",
+ "scarlet-os",
+ "scarlet-std",
+ "sws-protocol",
 ]
 
 [[package]]
-name = "sws_protocol"
+name = "sws-protocol"
 version = "0.16.0"
 dependencies = [
- "scarlet_std",
+ "scarlet-std",
 ]
 
 [[package]]

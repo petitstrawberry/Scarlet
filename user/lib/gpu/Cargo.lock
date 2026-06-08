@@ -52,15 +52,33 @@ name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
+name = "scarlet-os"
+version = "0.16.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
+]
+
+[[package]]
+name = "scarlet-rt"
+version = "0.16.0"
+dependencies = [
+ "lock_api",
+ "scarlet-sys",
+ "spin",
+ "talc",
+]
+
+[[package]]
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
  "hashbrown",
- "lock_api",
  "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
  "scarlet-sys",
  "spin",
- "talc",
 ]
 
 [[package]]

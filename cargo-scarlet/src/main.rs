@@ -2053,26 +2053,42 @@ fn inject_ksym_section(
 }
 
 fn cross_tools_for_target(target_triple: &str) -> (String, String) {
-    let candidates = [
-        ("riscv64", "riscv64-linux-gnu"),
-        ("aarch64", "aarch64-linux-gnu"),
-        ("x86_64", "x86_64-linux-gnu"),
+    let candidates: &[(&str, &[&str])] = &[
+        (
+            "riscv64",
+            &[
+                "riscv64-unknown-linux-gnu",
+                "riscv64-linux-gnu",
+                "riscv64-unknown-elf",
+            ],
+        ),
+        (
+            "aarch64",
+            &[
+                "aarch64-unknown-linux-gnu",
+                "aarch64-linux-gnu",
+                "aarch64-none-elf",
+            ],
+        ),
+        ("x86_64", &["x86_64-unknown-linux-gnu", "x86_64-linux-gnu"]),
     ];
 
-    let prefix = candidates
+    let prefixes = candidates
         .iter()
         .find(|(arch, _)| target_triple.starts_with(arch))
-        .map(|(_, prefix)| *prefix);
+        .map(|(_, prefixes)| *prefixes)
+        .unwrap_or(&[]);
 
-    match prefix {
-        Some(p) => {
-            let nm = format!("{p}-nm");
-            let objcopy = format!("{p}-objcopy");
-            if which(&nm) && which(&objcopy) {
-                return (nm, objcopy);
-            }
+    for prefix in prefixes {
+        let nm = format!("{prefix}-nm");
+        let objcopy = format!("{prefix}-objcopy");
+        if which(&nm) && which(&objcopy) {
+            return (nm, objcopy);
         }
-        None => {}
+    }
+
+    if which("llvm-nm") && which("llvm-objcopy") {
+        return ("llvm-nm".to_string(), "llvm-objcopy".to_string());
     }
 
     ("nm".to_string(), "objcopy".to_string())

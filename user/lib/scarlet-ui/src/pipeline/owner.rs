@@ -12,7 +12,7 @@ use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
-use scarlet_std::sync::Mutex;
+use crate::os::Mutex;
 use std::println;
 
 /// Global dirty element IDs for State change callbacks
@@ -288,12 +288,12 @@ impl PipelineOwner {
         self.last_paint_ids.extend(dirty_paint.iter().copied());
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
+            crate::logln!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
         }
 
         for id in dirty_paint {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
+                crate::logln!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
             }
             // Find the element and call render()
             if let Some(element) = element_tree.find_element_mut(id) {
@@ -311,7 +311,7 @@ impl PipelineOwner {
         let has_buffer = element.get_buffer().is_some();
 
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
+            crate::logln!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
         }
 
         // Render this element
@@ -320,12 +320,12 @@ impl PipelineOwner {
         // Render children (containers might not have buffers, but their children do)
         let children = element.children();
         if crate::debug::is_enabled() {
-            scarlet_std::println!("[PipelineOwner] {}has {} children", indent, children.len());
+            crate::logln!("[PipelineOwner] {}has {} children", indent, children.len());
         }
 
         for (i, child) in element.children_mut().iter_mut().enumerate() {
             if crate::debug::is_enabled() {
-                scarlet_std::println!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
+                crate::logln!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
             }
             Self::render_recursive(child, depth + 1);
         }

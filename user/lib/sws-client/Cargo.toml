@@ -3,9 +3,15 @@ name = "sws-client"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["legacy-scarlet-std"]
+legacy-scarlet-std = ["dep:scarlet-std", "sws-protocol/legacy-scarlet-std"]
+std = ["dep:scarlet-os", "sws-protocol/std"]
+
 [dependencies]
-scarlet-std = { path = "../std" }
-sws-protocol = { path = "../sws-protocol" }
+scarlet-std = { path = "../std", optional = true }
+scarlet-os = { path = "../scarlet-os", optional = true }
+sws-protocol = { path = "../sws-protocol", default-features = false }
 
 [lib]
 name = "sws_client"

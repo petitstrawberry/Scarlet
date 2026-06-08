@@ -1,7 +1,7 @@
 //!
 //! Network configuration helpers.
 //!
-//! Applies IP/gateway/DNS/netmask settings and handles deferred IP assignment
+//! Applies IP/gateway/netmask settings and handles deferred IP assignment
 //! until an interface is registered.
 
 use alloc::string::String;
@@ -66,7 +66,6 @@ pub fn apply_cmdline_config(cmdline: &str) {
     let mut ip = None;
     let mut iface = None;
     let mut gw = None;
-    let mut dns = None;
     let mut mask = None;
 
     for token in cmdline.split_whitespace() {
@@ -82,9 +81,6 @@ pub fn apply_cmdline_config(cmdline: &str) {
             }
             "gw" | "net.gw" => {
                 gw = parse_ipv4(value);
-            }
-            "dns" | "net.dns" => {
-                dns = parse_ipv4(value);
             }
             "mask" | "net.mask" | "net.netmask" => {
                 mask = parse_ipv4(value);
@@ -107,9 +103,6 @@ pub fn apply_cmdline_config(cmdline: &str) {
     let mut config = network_manager.get_config();
     if let Some(mask) = mask {
         config.subnet_mask = mask;
-    }
-    if let Some(dns) = dns {
-        config.dns_server = Some(dns);
     }
     network_manager.set_config(config);
     if let Some(gw) = gw {

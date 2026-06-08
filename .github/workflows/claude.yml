@@ -46,7 +46,7 @@ jobs:
       # Dockerfile と関連ファイルのハッシュを計算
       - name: Generate Docker cache key
         id: docker-cache-key
-        run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+        run: echo "key=docker-cache-${{ hashFiles('Dockerfile', 'flake.nix', 'flake.lock', 'nix/**') }}" >> $GITHUB_OUTPUT
 
       # Docker キャッシュを復元
       - name: Cache Docker image

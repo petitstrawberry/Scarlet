@@ -1183,6 +1183,10 @@ impl VirtualMemoryManager {
 impl Drop for VirtualMemoryManager {
     /// Drops the virtual memory manager, freeing the address space if it is still in use.
     fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) != 1 {
+            return;
+        }
+
         let asid = self.get_asid();
         if asid != 0 && is_asid_used(asid) {
             free_virtual_address_space(asid);

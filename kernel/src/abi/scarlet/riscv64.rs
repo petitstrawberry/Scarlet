@@ -876,6 +876,7 @@ impl AbiModule for ScarletAbi {
 
                         // Reset task's registers for clean start
                         task.vcpu.lock().reset_iregs();
+                        task.vcpu.lock().set_tls_pointer(0);
                         task.vcpu.lock().set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions

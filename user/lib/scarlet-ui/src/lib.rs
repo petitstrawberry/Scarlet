@@ -40,9 +40,10 @@
 //! }
 //! ```
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+#[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
 // Import procedural macros crate (derives work automatically)
@@ -66,6 +67,29 @@ pub mod macros;
 pub mod graphics;
 pub mod debug;
 pub mod menu_model;
+mod os;
+
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::boxed::Box;
+    pub use alloc::vec::Vec;
+}
+
+#[cfg(feature = "std")]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        std::println!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        scarlet_std::println!($($arg)*)
+    };
+}
+
+pub(crate) use logln;
 
 // Re-exports for convenience
 pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};

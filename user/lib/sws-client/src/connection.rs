@@ -4,13 +4,9 @@ use crate::TransientFlags;
 use crate::WindowSizeLimits;
 use crate::error::Error;
 use crate::event::{Event, ImeContextState, InputEvent};
+use crate::os::{BTreeMap, SharedMemory, Socket, String, Vec};
+use crate::os::{socket_flush, socket_read, socket_write};
 use crate::surface::Surface;
-use scarlet_std::collections::BTreeMap;
-use scarlet_std::ipc::SharedMemory;
-use scarlet_std::println;
-use scarlet_std::socket::Socket;
-use scarlet_std::string::String;
-use scarlet_std::vec::Vec;
 use sws_protocol::{self as protocol, ServerMessage};
 
 /// Window list entry
@@ -39,26 +35,18 @@ pub struct InputMethodInfo {
 }
 
 fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
-    use scarlet_std::io::Read;
-
     let mut filled = 0;
     while filled < buf.len() {
-        match socket.read(&mut buf[filled..]) {
-            Ok(0) => {
-                // println!("[sws-client] read_exact: EOF (connection closed)");
-                return Err(Error::Disconnected);
-            }
+        match socket_read(socket, &mut buf[filled..]) {
             Ok(n) => {
                 filled += n;
             }
-            Err(e) => {
-                if e.kind() != scarlet_std::io::ErrorKind::WouldBlock {
-                    println!("[sws-client] read_exact: error (not WouldBlock): {:?}", e);
-                }
-                if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
-                    return Err(Error::WouldBlock);
-                }
-                return Err(Error::IoError);
+            Err(Error::WouldBlock) => {
+                return Err(Error::WouldBlock);
+            }
+            Err(error) => {
+                crate::logln!("[sws-client] read_exact: error: {:?}", error);
+                return Err(error);
             }
         }
     }
@@ -102,12 +90,9 @@ impl FrameReader {
         socket: &mut Socket,
         out_payload: &mut Vec<u8>,
     ) -> Result<Option<u32>, Error> {
-        use scarlet_std::io::Read;
-
         loop {
             if !self.header_parsed {
-                match socket.read(&mut self.header[self.header_filled..]) {
-                    Ok(0) => return Err(Error::Disconnected),
+                match socket_read(socket, &mut self.header[self.header_filled..]) {
                     Ok(n) => {
                         self.header_filled += n;
                         if self.header_filled < self.header.len() {
@@ -133,18 +118,13 @@ impl FrameReader {
                             return Ok(Some(msg_type));
                         }
                     }
-                    Err(e) => {
-                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
-                            return Ok(None);
-                        }
-                        return Err(Error::IoError);
-                    }
+                    Err(Error::WouldBlock) => return Ok(None),
+                    Err(error) => return Err(error),
                 }
             }
 
             if self.header_parsed {
-                match socket.read(&mut self.payload[self.payload_filled..]) {
-                    Ok(0) => return Err(Error::Disconnected),
+                match socket_read(socket, &mut self.payload[self.payload_filled..]) {
                     Ok(n) => {
                         self.payload_filled += n;
                         if self.payload_filled < self.payload_len {
@@ -156,12 +136,8 @@ impl FrameReader {
                         self.reset();
                         return Ok(Some(msg_type));
                     }
-                    Err(e) => {
-                        if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
-                            return Ok(None);
-                        }
-                        return Err(Error::IoError);
-                    }
+                    Err(Error::WouldBlock) => return Ok(None),
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -169,21 +145,16 @@ impl FrameReader {
 }
 
 fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
-    use scarlet_std::io::Write;
-
     let mut written = 0;
     while written < buf.len() {
-        match socket.write(&buf[written..]) {
-            Ok(0) => return Err(Error::Disconnected),
+        match socket_write(socket, &buf[written..]) {
             Ok(n) => written += n,
-            Err(e) => {
-                if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
-                    // Socket is non-blocking; retry a bit later.
-                    let _ = scarlet_std::thread::sleep(core::time::Duration::from_millis(1));
-                    continue;
-                }
-                return Err(Error::IoError);
+            Err(Error::WouldBlock) => {
+                // Socket is non-blocking; retry a bit later.
+                crate::os::sleep(core::time::Duration::from_millis(1));
+                continue;
             }
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -210,8 +181,6 @@ fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Er
 }
 
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), Error> {
-    use scarlet_std::io::Write;
-
     // Write header + payload directly to avoid allocating a temporary Vec.
     let header = protocol::MessageHeader {
         msg_type,
@@ -222,7 +191,7 @@ fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(),
     if !payload.is_empty() {
         write_all(socket, payload)?;
     }
-    socket.flush().map_err(|_| Error::IoError)?;
+    socket_flush(socket)?;
     Ok(())
 }
 
@@ -492,10 +461,8 @@ impl Connection {
                         .into_iter()
                         .map(|method| InputMethodInfo {
                             ime_id: method.ime_id,
-                            name: String::from_utf8_lossy(
-                                &method.name[..method.name_len as usize],
-                            )
-                            .into_owned(),
+                            name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
+                                .into_owned(),
                             capabilities: method.capabilities,
                             active: method.active,
                         })
@@ -637,8 +604,9 @@ impl Connection {
         offset_y: i32,
         visible: bool,
     ) -> Result<(), Error> {
-        let payload =
-            protocol::payload_ime_set_popup_window(context_id, window_id, offset_x, offset_y, visible);
+        let payload = protocol::payload_ime_set_popup_window(
+            context_id, window_id, offset_x, offset_y, visible,
+        );
         write_frame(
             &mut self.socket,
             protocol::client_msg::IME_SET_POPUP_WINDOW,
@@ -1063,8 +1031,7 @@ impl Connection {
 
     /// Flush pending writes to the socket
     pub fn flush(&mut self) -> Result<(), Error> {
-        use scarlet_std::io::Write;
-        self.socket.flush().map_err(|_| Error::IoError)
+        socket_flush(&mut self.socket)
     }
 
     /// Request that the window manager begins an interactive move for this surface.

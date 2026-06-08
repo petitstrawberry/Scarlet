@@ -32,8 +32,6 @@ pub struct NetworkInterfaceInfo {
 pub struct NetworkStatus {
     pub gateway: [u8; 4],
     pub gateway_set: u8,
-    pub dns_server: [u8; 4],
-    pub dns_set: u8,
     pub netmask: [u8; 4],
     pub interface_count: u32,
     pub interfaces_ptr: usize,
@@ -68,11 +66,6 @@ pub fn set_interface_ipv4(name: &str, addr: Ipv4Address) -> Result<(), HandleErr
 
 pub fn set_default_gateway(addr: Ipv4Address) -> Result<(), HandleError> {
     let result = syscall1(Syscall::NetworkSetGateway, addr.0.as_ptr() as usize);
-    HandleError::from_syscall_result(result).map(|_| ())
-}
-
-pub fn set_dns_server(addr: Ipv4Address) -> Result<(), HandleError> {
-    let result = syscall1(Syscall::NetworkSetDns, addr.0.as_ptr() as usize);
     HandleError::from_syscall_result(result).map(|_| ())
 }
 

@@ -202,10 +202,19 @@ Scarlet implements a modern Virtual File System (VFS v2) with support for multip
 
 ### Docker Environment
 
+The default Docker image is a thin Nix-backed wrapper around the same
+`flake.nix` development shell that `nix develop` uses. Mount the checkout at
+`/workspaces/Scarlet`; commands passed to `docker run` are executed through
+`nix develop`.
+
 ```bash
 # Build and run development container
 docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
+
+# CI image: pre-realizes the Nix development shell and cached Scarlet Rust toolchain
+docker build --target ci -t scarlet-ci .
+docker run --rm -v $(pwd):/workspaces/Scarlet scarlet-ci cargo make build-riscv64
 
 # Common commands:
 cargo make run-riscv64                        # Build (release) and run (RISC-V)
@@ -215,8 +224,8 @@ cargo make debug-riscv64              # Debug with GDB
 
 ### Nix Development Environment
 
-Use the Nix shell when you want to run QEMU on the host and use host virtualization
-support such as KVM or Apple Hypervisor Framework.
+Use the Nix shell directly when you want to run QEMU on the host and use host
+virtualization support such as KVM or Apple Hypervisor Framework.
 
 ```bash
 # Enter the development shell
@@ -228,15 +237,70 @@ cargo make test-riscv64               # Run tests (RISC-V)
 cargo make run-aarch64                # Build (release) and run (AArch64)
 ```
 
-The first `nix develop` may take time because it prepares the UEFI firmware used
-by the Limine workflows. AArch64 uses QEMU's pinned pc-bios EDK2 image as the
-macOS HVF + GICv3 baseline.
+With `direnv` and `nix-direnv`, entering the checkout should normally only
+require:
+
+```bash
+direnv allow
+```
+
+The flake declares the Scarlet Rust Cachix binary cache in `nixConfig`. Reading
+from that cache does not require a Cachix auth token, but multi-user Nix only
+honors flake-provided substituters when the current Unix user is trusted by the
+Nix daemon. On personal development machines, add your user to
+`trusted-users`, for example:
+
+```conf
+trusted-users = root your-user-name
+```
+
+Alternatively, register the Scarlet cache directly in the daemon configuration:
+
+```conf
+extra-substituters = https://scarlet-rust-toolchain.cachix.org
+extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+```
+
+If Nix prints `ignoring untrusted substituter`, it will ignore the Cachix cache
+and may start building the Rust toolchain locally.
+
+The default development shell uses the cached Scarlet Rust toolchain from
+`scarlet-rust-nix`. The Nix closure is intended to be served from Cachix in CI;
+configure the `CACHIX_CACHE_NAME` and `CACHIX_PUBLIC_KEY` repository variables
+and `CACHIX_AUTH_TOKEN` repository secret to pull and push it. AArch64 uses
+QEMU's pinned pc-bios EDK2 image as the macOS HVF + GICv3 baseline.
+
+For local Rust fork iteration, keep the fork outside this repository and switch
+only the active Rust path inside the shell:
+
+```bash
+# Recommended layout:
+# /Users/petitstrawberry/Development/Rust/Scarlet
+# /Users/petitstrawberry/Development/Rust/rust-scarlet
+
+cd /Users/petitstrawberry/Development/Rust/rust-scarlet
+./x build compiler/rustc library/std --target riscv64gc-unknown-scarlet,aarch64-unknown-scarlet
+
+cd /Users/petitstrawberry/Development/Rust/Scarlet
+nix develop
+scarlet-rust-use-local ../rust-scarlet
+scarlet-rust-show
+
+# Return to the cached toolchain.
+scarlet-rust-use-cached
+```
+
+This keeps the convenience of the Nix shell while allowing fast local stage1
+Rust compiler iteration. The Rust and LLVM forks should not be checked out under
+the Scarlet repository.
 
 ### Local Development
 
 Requirements without Docker or Nix: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 
-For the Limine workflows, the development environment needs the appropriate UEFI firmware packages (`qemu-efi-riscv64`, `qemu-efi-aarch64`). The provided Docker image includes distro packages, and the Nix shell exposes firmware paths through `SCARLET_EFI_*` environment variables.
+For the Limine workflows, the development environment needs the appropriate UEFI
+firmware. The Nix shell, including the Docker image entrypoint, exposes firmware
+paths through `SCARLET_EFI_*` environment variables.
 
 ### Build Commands
 

@@ -1,0 +1,142 @@
+[package]
+name = "scarlet-std-bin"
+version = "0.1.0"
+edition = "2024"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+clap = { version = "4.5.32", features = ["derive"] }
+csv = "1.3"
+httparse = "1.9"
+scarlet-os = { path = "../lib/scarlet-os" }
+scarlet-sys = { path = "../lib/scarlet-sys" }
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std"] }
+scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
+url = "2.5"
+ratatui = { version = "0.29", default-features = false }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = "0.12"
+
+[[bin]]
+name = "hello"
+path = "src/hello.rs"
+
+[[bin]]
+name = "cat"
+path = "src/cat.rs"
+
+[[bin]]
+name = "ls"
+path = "src/ls.rs"
+
+[[bin]]
+name = "rm"
+path = "src/rm.rs"
+
+[[bin]]
+name = "env_test"
+path = "src/env_test.rs"
+
+[[bin]]
+name = "clap_demo"
+path = "src/clap_demo.rs"
+
+[[bin]]
+name = "csv_demo"
+path = "src/csv_demo.rs"
+
+[[bin]]
+name = "http_get_demo"
+path = "src/http_get_demo.rs"
+
+[[bin]]
+name = "tcp_client"
+path = "src/tcp_client.rs"
+
+[[bin]]
+name = "tcp_server"
+path = "src/tcp_server.rs"
+
+[[bin]]
+name = "udp_client"
+path = "src/udp_client.rs"
+
+[[bin]]
+name = "udp_server"
+path = "src/udp_server.rs"
+
+[[bin]]
+name = "resolverd"
+path = "src/resolverd.rs"
+
+[[bin]]
+name = "resolve"
+path = "src/resolve.rs"
+
+[[bin]]
+name = "ansi_banner"
+path = "src/ansi_banner.rs"
+
+[[bin]]
+name = "httpd"
+path = "src/httpd.rs"
+
+[[bin]]
+name = "input_dump"
+path = "src/input_dump.rs"
+
+[[bin]]
+name = "h264_probe"
+path = "src/h264_probe.rs"
+
+[[bin]]
+name = "lsm_list"
+path = "src/lsm_list.rs"
+
+[[bin]]
+name = "lsm_unload"
+path = "src/lsm_unload.rs"
+
+[[bin]]
+name = "lsm_load"
+path = "src/lsm_load.rs"
+
+[[bin]]
+name = "socket_pair"
+path = "src/socket_pair.rs"
+
+[[bin]]
+name = "socket_server"
+path = "src/socket_server.rs"
+
+[[bin]]
+name = "socket_client"
+path = "src/socket_client.rs"
+
+[[bin]]
+name = "ui_smoke"
+path = "src/ui_smoke.rs"
+
+[[bin]]
+name = "tui_demo"
+path = "src/tui_demo.rs"
+
+[[bin]]
+name = "regex_demo"
+path = "src/regex_demo.rs"
+
+[[bin]]
+name = "json_demo"
+path = "src/json_demo.rs"
+
+[[bin]]
+name = "markdown_demo"
+path = "src/markdown_demo.rs"

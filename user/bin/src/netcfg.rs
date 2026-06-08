@@ -5,8 +5,7 @@ extern crate scarlet_std as std;
 
 use std::env;
 use std::network::{
-    Ipv4Address, list_interfaces, set_default_gateway, set_dns_server, set_interface_ipv4,
-    set_netmask,
+    Ipv4Address, list_interfaces, set_default_gateway, set_interface_ipv4, set_netmask,
 };
 use std::println;
 
@@ -28,9 +27,7 @@ fn parse_ipv4(value: &str) -> Option<Ipv4Address> {
 }
 
 fn print_usage() {
-    println!(
-        "Usage: netcfg --iface <name> [--ip <addr>] [--mask <addr>] [--gw <addr>] [--dns <addr>]"
-    );
+    println!("Usage: netcfg --iface <name> [--ip <addr>] [--mask <addr>] [--gw <addr>]");
     println!("       netcfg --list");
     println!();
     println!("Options:");
@@ -38,8 +35,7 @@ fn print_usage() {
     println!("  --ip <addr>     Set IPv4 address");
     println!("  --mask <addr>    Set netmask");
     println!("  --gw <addr>      Set default gateway");
-    println!("  --dns <addr>     Set DNS server");
-    println!("  --list           Show network configuration (interfaces, IP, gateway, DNS, MAC)");
+    println!("  --list           Show network configuration (interfaces, IP, gateway, MAC)");
     println!("  --help, -h       Show this help message");
 }
 
@@ -50,7 +46,6 @@ fn main() -> i32 {
     let mut ip: Option<Ipv4Address> = None;
     let mut mask: Option<Ipv4Address> = None;
     let mut gw: Option<Ipv4Address> = None;
-    let mut dns: Option<Ipv4Address> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -68,18 +63,6 @@ fn main() -> i32 {
                             );
                         } else {
                             println!("Gateway: (none)");
-                        }
-
-                        if status.dns_set == 1 {
-                            println!(
-                                "DNS: {}.{}.{}.{}",
-                                status.dns_server[0],
-                                status.dns_server[1],
-                                status.dns_server[2],
-                                status.dns_server[3]
-                            );
-                        } else {
-                            println!("DNS: (none)");
                         }
 
                         println!(
@@ -151,10 +134,6 @@ fn main() -> i32 {
                 i += 1;
                 gw = args.get(i).and_then(|s| parse_ipv4(s));
             }
-            "--dns" => {
-                i += 1;
-                dns = args.get(i).and_then(|s| parse_ipv4(s));
-            }
             "--help" | "-h" => {
                 print_usage();
                 return 0;
@@ -196,12 +175,5 @@ fn main() -> i32 {
         println!("netcfg: failed to set gateway");
         failed = true;
     }
-    if let Some(dns) = dns
-        && set_dns_server(dns).is_err()
-    {
-        println!("netcfg: failed to set dns");
-        failed = true;
-    }
-
     if failed { 1 } else { 0 }
 }
