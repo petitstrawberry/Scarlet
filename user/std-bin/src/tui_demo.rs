@@ -1,11 +1,11 @@
 use std::io::{self, BufWriter, Read, Write};
 
+use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Terminal;
 
 struct AnsiBackend {
     stdout: BufWriter<io::Stdout>,
