@@ -295,7 +295,11 @@ impl SocketControl for UdpSocket {
         match address {
             SocketAddress::Inet(inet) => {
                 let addr = inet.addr;
-                let port = inet.port;
+                let port = if inet.port == 0 {
+                    self.udp_layer.allocate_port()
+                } else {
+                    inet.port
+                };
                 let mut config = SocketConfig::new();
                 config.set("udp_local_port", &port.to_be_bytes());
                 config.set("ip_local", &addr);
@@ -304,7 +308,8 @@ impl SocketControl for UdpSocket {
                 self.udp_layer
                     .configure_socket(self.self_weak.clone(), &config)?;
 
-                *self.local_addr.write() = Some(address.clone());
+                *self.local_addr.write() =
+                    Some(SocketAddress::Inet(Inet4SocketAddress::new(addr, port)));
                 *self.state.write() = SocketState::Bound;
                 Ok(())
             }
@@ -553,17 +558,51 @@ impl UdpLayer {
 
     /// Allocate an ephemeral port
     pub fn allocate_port(&self) -> u16 {
+        const EPHEMERAL_START: u16 = 49152;
+        const EPHEMERAL_END: u16 = 65535;
+        const EPHEMERAL_COUNT: usize = (EPHEMERAL_END - EPHEMERAL_START + 1) as usize;
+
         let mut next_port = self.next_ephemeral_port.lock();
-        let port = *next_port;
+        for _ in 0..EPHEMERAL_COUNT {
+            let port = *next_port;
+            *next_port = if port == EPHEMERAL_END {
+                EPHEMERAL_START
+            } else {
+                port + 1
+            };
 
-        *next_port = if port == 65535 { 49152 } else { port + 1 };
+            if !self.port_map.read().contains_key(&port) {
+                return port;
+            }
+        }
 
-        port
+        EPHEMERAL_START
     }
 
     /// Register a socket for a specific port
-    pub fn register_port(&self, port: u16, socket: alloc::sync::Weak<UdpSocket>) {
-        self.port_map.write().insert(port, socket);
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - UDP local port to register.
+    /// * `socket` - Weak reference to the socket that owns the port.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the port was registered, or [`SocketError::AddressInUse`] if another live
+    /// socket already owns the port.
+    pub fn register_port(
+        &self,
+        port: u16,
+        socket: alloc::sync::Weak<UdpSocket>,
+    ) -> Result<(), SocketError> {
+        let mut map = self.port_map.write();
+        if let Some(existing) = map.get(&port) {
+            if existing.upgrade().is_some() && !existing.ptr_eq(&socket) {
+                return Err(SocketError::AddressInUse);
+            }
+        }
+        map.insert(port, socket);
+        Ok(())
     }
 
     /// Unregister a specific socket from a port
@@ -597,7 +636,7 @@ impl UdpLayer {
             .ok_or(SocketError::InvalidAddress)?;
 
         // Register the port
-        self.register_port(port, socket);
+        self.register_port(port, socket)?;
 
         // TODO: Configure IP layer with local address
         Ok(())
@@ -625,7 +664,9 @@ impl UdpLayer {
                 let ip = get_local_ip_bytes();
                 // Allocate ephemeral port for unbound socket
                 let port = self.allocate_port();
-                self.register_port(port, socket.self_weak.clone());
+                self.register_port(port, socket.self_weak.clone())?;
+                *socket.local_addr.write() =
+                    Some(SocketAddress::Inet(Inet4SocketAddress::new(ip, port)));
                 (ip, port)
             }
         };
@@ -677,7 +718,10 @@ impl UdpLayer {
         );
 
         if let Some(ip_layer) = get_network_manager().get_layer("ip") {
-            ip_layer.send(&udp_packet, &ip_context, &[])?;
+            match ip_layer.send(&udp_packet, &ip_context, &[]) {
+                Ok(()) | Err(SocketError::WouldBlock) => {}
+                Err(err) => return Err(err),
+            }
         }
 
         let mut stats = self.stats.write();
@@ -858,5 +902,42 @@ mod tests {
         assert!(port1 >= 49152 && port1 <= 65535);
         assert!(port2 >= 49152 && port2 <= 65535);
         assert_ne!(port1, port2);
+    }
+
+    #[test_case]
+    fn test_udp_bind_zero_allocates_ephemeral_port() {
+        let udp_layer = UdpLayer::new();
+        let socket = UdpSocket::new(udp_layer.clone());
+
+        socket
+            .bind(&SocketAddress::Inet(Inet4SocketAddress::new(
+                [0, 0, 0, 0],
+                0,
+            )))
+            .unwrap();
+
+        let local = socket.getsockname().unwrap();
+        let SocketAddress::Inet(inet) = local else {
+            panic!("UDP socket should have an IPv4 local address");
+        };
+
+        assert!(inet.port >= 49152);
+        assert!(udp_layer.find_socket(inet.port).is_some());
+    }
+
+    #[test_case]
+    fn test_udp_register_port_rejects_live_duplicate() {
+        let udp_layer = UdpLayer::new();
+        let socket1 = UdpSocket::new(udp_layer.clone());
+        let socket2 = UdpSocket::new(udp_layer.clone());
+
+        udp_layer
+            .register_port(53000, socket1.self_weak.clone())
+            .unwrap();
+
+        assert_eq!(
+            udp_layer.register_port(53000, socket2.self_weak.clone()),
+            Err(SocketError::AddressInUse)
+        );
     }
 }
