@@ -8,7 +8,43 @@ on:
 
 jobs:
 
+  nix-cache:
+    runs-on: ubuntu-latest
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - uses: actions/checkout@v4
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+
+    - uses: cachix/cachix-action@v17
+      if: env.CACHIX_CACHE_NAME != ''
+      with:
+        name: ${{ env.CACHIX_CACHE_NAME }}
+        authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+    - name: Build Linux devShell closure
+      run: nix build --no-link .#devShells.x86_64-linux.default
+
   docker:
+    needs: nix-cache
     runs-on: ubuntu-latest
     steps:
     - name: Free Disk Space (Ubuntu)

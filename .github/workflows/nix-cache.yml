@@ -19,11 +19,22 @@ on:
 
 jobs:
   devshell:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
     env:
       CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
     steps:
       - name: Free Disk Space (Ubuntu)
+        if: runner.os == 'Linux'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
         with:
           tool-cache: false
@@ -50,5 +61,5 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Build Linux devShell closure
-        run: nix build --no-link .#devShells.x86_64-linux.default
+      - name: Build devShell closure
+        run: nix build --no-link .#devShells.${{ matrix.system }}.default
