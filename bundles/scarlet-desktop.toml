@@ -4,77 +4,77 @@
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop_background"
 to = "/system/scarlet/bin/scarlet_desktop_background"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop_taskbar"
 to = "/system/scarlet/bin/scarlet_desktop_taskbar"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "terminal"
 to = "/system/scarlet/bin/terminal"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "sws"
 to = "/system/scarlet/bin/sws"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "fb_test"
 to = "/system/scarlet/bin/fb_test"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "ui-demo"
 to = "/system/scarlet/bin/ui-demo"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "pdfview"
 to = "/system/scarlet/bin/pdfview"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "settings"
 to = "/system/scarlet/bin/settings"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "scarlet_skk"
 to = "/system/scarlet/bin/scarlet_skk"
 
 [[packages]]
 kind = "cargo"
-source = "../../user/bin"
+source = "../user/bin"
 package = "user-bin"
 bin = "boxdraw"
 to = "/system/scarlet/bin/boxdraw"

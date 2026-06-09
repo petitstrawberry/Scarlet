@@ -250,6 +250,15 @@ fn expand_templates(s: &str, target_triple: &str, arch: &str) -> String {
         .replace("{arch}", arch)
 }
 
+fn userspace_target_triple(kernel_triple: &str) -> String {
+    let arch = kernel_triple.split('-').next().unwrap_or("unknown");
+    match arch {
+        "aarch64" => "aarch64-unknown-scarlet".to_string(),
+        v if v.starts_with("riscv64") => "riscv64gc-unknown-scarlet".to_string(),
+        _ => kernel_triple.to_string(),
+    }
+}
+
 fn expand_image_section(
     section: Option<&ManifestImageSection>,
     project_dir: &Path,
@@ -978,31 +987,34 @@ fn install_package(
             let package_name = pkg.package_name.as_deref().unwrap_or("user-bin");
             let bin_name = pkg.bin.as_deref().unwrap_or(package_name);
 
+            let userspace_triple = userspace_target_triple(target_triple);
+
             let binary = source
                 .join("target")
-                .join(target_triple)
+                .join(&userspace_triple)
                 .join("release")
                 .join(bin_name);
 
-            if !binary.exists() {
+            let binary = if binary.exists() {
+                binary
+            } else {
                 let debug_binary = source
                     .join("target")
-                    .join(target_triple)
+                    .join(&userspace_triple)
                     .join("debug")
                     .join(bin_name);
-                if !debug_binary.exists() {
+                if debug_binary.exists() {
+                    debug_binary
+                } else {
                     eprintln!(
-                        "cargo-scarlet: warning: cargo binary not found: {} (tried release and debug)",
-                        bin_name
+                        "cargo-scarlet: warning: cargo binary not found: {} (tried {} release and debug)",
+                        bin_name, userspace_triple
                     );
                     return Ok(());
                 }
-                fs::copy(&debug_binary, &dest)
-                    .map_err(|e| format!("failed to copy {}: {e}", debug_binary.display()))?;
-            } else {
-                fs::copy(&binary, &dest)
-                    .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
-            }
+            };
+            fs::copy(&binary, &dest)
+                .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
         }
         _ => {
             let from = pkg.from.as_ref().ok_or("package missing from path")?;
