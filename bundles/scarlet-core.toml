@@ -39,8 +39,7 @@ to = "/system/scarlet/bin/sbusd"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
-package = "user-bin"
+source = "../user/std-bin"
 bin = "hello"
 to = "/system/scarlet/bin/hello"
 

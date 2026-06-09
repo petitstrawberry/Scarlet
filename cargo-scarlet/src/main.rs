@@ -972,7 +972,7 @@ fn install_package(
     pkg: &ResolvedPackage,
     _project: &Path,
     target_triple: &str,
-    _profile: &str,
+    profile: &str,
 ) -> Result<(), String> {
     let dest = staging_dir.join(pkg.to.trim_start_matches('/'));
 
@@ -988,30 +988,59 @@ fn install_package(
             let bin_name = pkg.bin.as_deref().unwrap_or(package_name);
 
             let userspace_triple = userspace_target_triple(target_triple);
+            let profile_dir = if profile == "release" { "release" } else { "debug" };
 
             let binary = source
                 .join("target")
                 .join(&userspace_triple)
-                .join("release")
+                .join(profile_dir)
                 .join(bin_name);
 
             let binary = if binary.exists() {
                 binary
             } else {
-                let debug_binary = source
+                eprintln!(
+                    "cargo-scarlet: building {} ({}) for {}...",
+                    package_name, bin_name, userspace_triple
+                );
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build");
+                if profile == "release" {
+                    cmd.arg("--release");
+                }
+                cmd.arg("--manifest-path")
+                    .arg(source.join("Cargo.toml"))
+                    .arg("--target")
+                    .arg(&userspace_triple);
+
+                if let Some(bin) = pkg.bin.as_deref() {
+                    cmd.arg("--bin").arg(bin);
+                }
+
+                let status = cmd
+                    .current_dir(source)
+                    .status()
+                    .map_err(|e| format!("failed to run cargo build: {e}"))?;
+
+                if !status.success() {
+                    return Err(format!(
+                        "cargo build failed for {} (bin {})",
+                        package_name, bin_name
+                    ));
+                }
+
+                let built = source
                     .join("target")
                     .join(&userspace_triple)
-                    .join("debug")
+                    .join(profile_dir)
                     .join(bin_name);
-                if debug_binary.exists() {
-                    debug_binary
-                } else {
-                    eprintln!(
-                        "cargo-scarlet: warning: cargo binary not found: {} (tried {} release and debug)",
-                        bin_name, userspace_triple
-                    );
-                    return Ok(());
+                if !built.exists() {
+                    return Err(format!(
+                        "cargo build succeeded but binary not found: {}",
+                        built.display()
+                    ));
                 }
+                built
             };
             fs::copy(&binary, &dest)
                 .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
