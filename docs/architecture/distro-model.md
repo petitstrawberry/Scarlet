@@ -37,8 +37,8 @@ only the directories it needs. Missing directories are simply ignored.
 
 | Kind | Contains | Naming |
 |---|---|---|
-| BSP | `machines/`, `boot_targets/`, and optionally hardware-specific `recipes/` | `scarlet-bsp-<platform>` |
-| Distro | `distros/`, `images/`, and the `recipes/` that distro uses | `scarlet-distro-<name>` |
+| BSP | `machines/`, `boot_targets/`, and optionally hardware-specific `recipes/` | `bsp-<platform>` |
+| Distro | `distros/`, `images/`, and the `recipes/` that distro uses | `distro-<name>` |
 
 A layer may contain any subset of:
 
@@ -60,26 +60,26 @@ metadata from lower-priority layers by name.
 
 ```text
 layers/
-  scarlet-bsp-qemu-aarch64/
+  bsp-qemu-aarch64/
     layer.toml
     machines/
       qemu-aarch64-virt.toml
     boot_targets/
       limine-uefi-aarch64.toml
 
-  scarlet-distro-microvm/
+  distro-microvm/
     layer.toml
     distros/
-      scarlet-microvm.toml
+      microvm.toml
     images/
       microvm-host.toml
     recipes/
       microvm-init.toml
 
-  scarlet-distro-reference/        # future: full distro with shell, coreutils
+  distro-reference/        # future: full distro with shell, coreutils
     layer.toml
     distros/
-      scarlet-reference.toml
+      reference.toml
     images/
       reference-full.toml
     recipes/
@@ -100,8 +100,8 @@ Scarlet/
   user/
   cargo-scarlet/
   layers/
-    scarlet-bsp-qemu-aarch64/
-    scarlet-distro-microvm/
+    bsp-qemu-aarch64/
+    distro-microvm/
   projects/
     aarch64-microvm/
       scarlet.toml
@@ -116,10 +116,10 @@ Scarlet/
 After the repository split, each product repository is itself a project:
 
 ```text
-scarlet-microvm/                   # independent repo
+microvm/                        # independent repo
   scarlet.toml                     # at repo root
   layers/
-    scarlet-distro-microvm/
+    distro-microvm/
   .scarlet/
 ```
 
@@ -135,19 +135,19 @@ name = "aarch64-microvm"
 
 [defaults]
 machine = "qemu-aarch64-virt"
-distro = "scarlet-microvm"
+distro = "microvm"
 image = "microvm-host"
 # boot is optional: falls back to distro's default_boot_target
 profile = "release"
 
 [[layers]]
-name = "scarlet-bsp-qemu-aarch64"
-path = "../../layers/scarlet-bsp-qemu-aarch64"
+name = "bsp-qemu-aarch64"
+path = "../../layers/bsp-qemu-aarch64"
 priority = 50
 
 [[layers]]
-name = "scarlet-distro-microvm"
-path = "../../layers/scarlet-distro-microvm"
+name = "distro-microvm"
+path = "../../layers/distro-microvm"
 priority = 100
 ```
 
@@ -162,14 +162,14 @@ flags from the project directory.
 
 ```toml
 [[layers]]
-name = "scarlet-bsp-qemu-aarch64"
-git = "https://github.com/petitstrawberry/scarlet-bsp-qemu-aarch64"
+name = "bsp-qemu-aarch64"
+git = "https://github.com/petitstrawberry/bsp-qemu-aarch64"
 rev = "abc123"
-path = "layers/scarlet-bsp-qemu-aarch64"
+path = "layers/bsp-qemu-aarch64"
 
 [[layers]]
-name = "scarlet-distro-microvm"
-path = "layers/scarlet-distro-microvm"    # local layer in same repo
+name = "distro-microvm"
+path = "layers/distro-microvm"    # local layer in same repo
 ```
 
 ## scarlet.lock
@@ -183,7 +183,7 @@ Gitignored local overrides:
 
 ```toml
 [[overrides.layers]]
-name = "scarlet-bsp-qemu-aarch64"
+name = "bsp-qemu-aarch64"
 path = "../../../my-custom-bsp"
 ```
 
@@ -245,7 +245,7 @@ target. Does not choose a final package list or describe hardware.
 schema_version = 1
 
 [distro]
-name = "scarlet-microvm"
+name = "microvm"
 vendor = "petitstrawberry"
 version = "0.17.0"
 system_prefix = "/system/scarlet"
@@ -340,13 +340,13 @@ cargo scarlet run                            # build + QEMU
 # Explicit selection (overrides [defaults]):
 cargo scarlet image \
   --machine qemu-aarch64-virt \
-  --distro scarlet-microvm \
+  --distro microvm \
   --boot limine-uefi-aarch64 \
   --image microvm-host \
   --profile release
 
 # Plan generation:
-cargo scarlet plan --machine qemu-aarch64-virt --distro scarlet-microvm --image microvm-host
+cargo scarlet plan --machine qemu-aarch64-virt --distro microvm --image microvm-host
 
 # Lock generation:
 cargo scarlet lock
@@ -374,11 +374,11 @@ Scarlet/
   user/
   cargo-scarlet/
   layers/
-    scarlet-bsp-qemu-aarch64/
+    bsp-qemu-aarch64/
       layer.toml
       machines/
       boot_targets/
-    scarlet-distro-microvm/
+    distro-microvm/
       layer.toml
       distros/
       images/
@@ -395,14 +395,14 @@ its own project with `scarlet.toml` at the root.
 ## Migration Order
 
 1. Fix `cargo-scarlet` to allow layers with missing directories.
-2. Split `scarlet-reference` into `scarlet-bsp-qemu-aarch64` and
+2. Split `scarlet-reference` into `bsp-qemu-aarch64` and
    `scarlet-distro-microvm`.
 3. Move `scarlet.toml` into `projects/aarch64-microvm/` with `[defaults]`.
 4. Remove `build_adapter` and the `{project}` template variable.
 5. Implement native workspace build engine (no legacy project fallback).
 6. Implement `cargo scarlet run` for workspace mode.
-7. Add `scarlet-distro-reference` layer with shell, scarlet-init, etc.
-8. Add `scarlet-bsp-qemu-riscv64` layer for RISC-V support.
+7. Add `distro-reference` layer with shell, scarlet-init, etc.
+8. Add `bsp-qemu-riscv64` layer for RISC-V support.
 9. Split `user/bin` into individual recipe crates.
 10. Split physical repositories.
 

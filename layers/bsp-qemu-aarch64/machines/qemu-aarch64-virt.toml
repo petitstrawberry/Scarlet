@@ -11,6 +11,3 @@ serial = true
 virtio_mmio = true
 virtio_blk = true
 virtio_gpu = false
-
-[build_adapter]
-project = "../../../projects/aarch64-limine-microvm"

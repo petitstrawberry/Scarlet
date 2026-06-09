@@ -1,0 +1,5 @@
+schema_version = 1
+
+[layer]
+name = "bsp-qemu-aarch64"
+summary = "BSP for QEMU aarch64-virt machine"

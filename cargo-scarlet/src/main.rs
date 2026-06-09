@@ -86,15 +86,15 @@ enum Commands {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
         #[arg(long)]
-        machine: String,
+        machine: Option<String>,
         #[arg(long)]
-        distro: String,
+        distro: Option<String>,
         #[arg(long)]
         boot: Option<String>,
         #[arg(long)]
-        image: String,
-        #[arg(long, default_value = "debug")]
-        profile: String,
+        image: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -224,11 +224,23 @@ struct WorkspaceManifest {
     workspace: WorkspaceMetadata,
     #[serde(default)]
     layers: Vec<LayerSourceConfig>,
+    #[serde(default)]
+    defaults: Option<DefaultsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct WorkspaceMetadata {
     name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DefaultsConfig {
+    machine: Option<String>,
+    distro: Option<String>,
+    image: Option<String>,
+    boot: Option<String>,
+    #[serde(default = "default_profile")]
+    profile: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -320,7 +332,6 @@ struct ResolvedLayer {
 struct MachineDocument {
     schema_version: u32,
     machine: MachineMetadata,
-    build_adapter: Option<BuildAdapterConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,11 +342,6 @@ struct MachineMetadata {
     target_json: String,
     #[serde(default)]
     features: BTreeMap<String, bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuildAdapterConfig {
-    project: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,7 +567,6 @@ struct PlanMachine {
     target_json: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     features: BTreeMap<String, bool>,
-    build_adapter_project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -621,6 +626,10 @@ struct PlanSource {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_profile() -> String {
+    "release".to_string()
 }
 
 fn default_machines_path() -> String {
@@ -717,17 +726,29 @@ fn run() -> Result<(), String> {
             image_name,
         } => match project {
             Some(project) => build_project_image(&project, target, release, kernel_elf, no_build),
-            None => build_workspace_image(
-                &workspace,
-                machine.as_deref(),
-                distro.as_deref(),
-                boot.as_deref(),
-                image_name.as_deref(),
-                target,
-                release,
-                kernel_elf,
-                no_build,
-            ),
+            None => {
+                let workspace_root = normalize_project_path(&workspace)?;
+                let (manifest, _) = load_workspace_manifest(&workspace_root)?;
+                let (machine, distro, image, boot, _profile) = resolve_defaults(
+                    &manifest,
+                    machine.as_deref(),
+                    distro.as_deref(),
+                    image_name.as_deref(),
+                    boot.as_deref(),
+                    None,
+                )?;
+                build_workspace_image(
+                    &workspace,
+                    Some(&machine),
+                    Some(&distro),
+                    boot.as_deref(),
+                    Some(&image),
+                    target,
+                    release,
+                    kernel_elf,
+                    no_build,
+                )
+            }
         },
         Commands::Plan {
             workspace,
@@ -737,16 +758,28 @@ fn run() -> Result<(), String> {
             image,
             profile,
             output,
-        } => generate_image_plan(
-            &workspace,
-            &machine,
-            &distro,
-            boot.as_deref(),
-            &image,
-            &profile,
-            output.as_deref(),
-        )
-        .map(|_| ()),
+        } => {
+            let workspace_root = normalize_project_path(&workspace)?;
+            let (manifest, _) = load_workspace_manifest(&workspace_root)?;
+            let (machine, distro, image, boot, profile) = resolve_defaults(
+                &manifest,
+                machine.as_deref(),
+                distro.as_deref(),
+                image.as_deref(),
+                boot.as_deref(),
+                profile.as_deref(),
+            )?;
+            generate_image_plan(
+                &workspace,
+                &machine,
+                &distro,
+                boot.as_deref(),
+                &image,
+                &profile,
+                output.as_deref(),
+            )
+            .map(|_| ())
+        }
         Commands::Lock { workspace, output } => generate_lock(&workspace, output.as_deref()),
         Commands::New {
             module,
@@ -955,6 +988,37 @@ fn load_workspace_manifest(
     let overridden_layers = apply_local_overrides(workspace_root, &mut manifest)?;
     validate_workspace_manifest(&manifest, &manifest_path)?;
     Ok((manifest, overridden_layers))
+}
+
+fn resolve_defaults(
+    manifest: &WorkspaceManifest,
+    cli_machine: Option<&str>,
+    cli_distro: Option<&str>,
+    cli_image: Option<&str>,
+    cli_boot: Option<&str>,
+    cli_profile: Option<&str>,
+) -> Result<(String, String, String, Option<String>, String), String> {
+    let defaults = manifest.defaults.as_ref();
+    let machine = cli_machine
+        .or_else(|| defaults.and_then(|d| d.machine.as_deref()))
+        .ok_or("--machine is required (not provided and no [defaults] in scarlet.toml)")?
+        .to_string();
+    let distro = cli_distro
+        .or_else(|| defaults.and_then(|d| d.distro.as_deref()))
+        .ok_or("--distro is required (not provided and no [defaults] in scarlet.toml)")?
+        .to_string();
+    let image = cli_image
+        .or_else(|| defaults.and_then(|d| d.image.as_deref()))
+        .ok_or("--image is required (not provided and no [defaults] in scarlet.toml)")?
+        .to_string();
+    let boot = cli_boot
+        .or_else(|| defaults.and_then(|d| d.boot.as_deref()))
+        .map(|s| s.to_string());
+    let profile = cli_profile
+        .or_else(|| defaults.map(|d| d.profile.as_str()))
+        .unwrap_or("release")
+        .to_string();
+    Ok((machine, distro, image, boot, profile))
 }
 
 fn apply_local_overrides(
@@ -1200,10 +1264,14 @@ fn validate_layer_paths(
             ));
         }
 
+        // Missing directories are allowed: the layer simply does not contain
+        // that kind of metadata. This follows the Yocto convention where a
+        // BSP layer may only have machines/ and boot_targets/, while a distro
+        // layer may only have distros/, images/, and recipes/.
         let full_path = root.join(path);
-        if !full_path.exists() {
+        if full_path.exists() && !full_path.is_dir() {
             return Err(format!(
-                "{}: {field} points to missing path {}",
+                "{}: {field} points to a non-directory {}",
                 manifest_path.display(),
                 full_path.display()
             ));
@@ -1689,10 +1757,6 @@ fn render_plan(
         workspace_root,
         machine_dir,
     );
-    let build_adapter_project =
-        machine.document.build_adapter.as_ref().map(|adapter| {
-            render_workspace_template(&adapter.project, workspace_root, machine_dir)
-        });
 
     let boot_target_dir = boot_target
         .path
@@ -1745,7 +1809,6 @@ fn render_plan(
             target_triple: machine.document.machine.target_triple.clone(),
             target_json,
             features: machine.document.machine.features.clone(),
-            build_adapter_project,
         },
         boot_target: PlanBootTarget {
             kind: boot_target.document.boot_target.kind.clone(),
@@ -2573,67 +2636,19 @@ fn build_workspace_image(
     distro: Option<&str>,
     boot: Option<&str>,
     image: Option<&str>,
-    target: Option<String>,
+    _target: Option<String>,
     release: bool,
-    kernel_elf: Option<PathBuf>,
-    no_build: bool,
+    _kernel_elf: Option<PathBuf>,
+    _no_build: bool,
 ) -> Result<(), String> {
     let machine = machine.ok_or("--machine is required when --project is not used")?;
     let distro = distro.ok_or("--distro is required when --project is not used")?;
     let image = image.ok_or("--image is required when --project is not used")?;
     let profile = if release { "release" } else { "debug" };
     let plan_path = generate_image_plan(workspace, machine, distro, boot, image, profile, None)?;
-    let plan: GeneratedImagePlan = read_toml_file(&plan_path)?;
 
-    if plan.schema_version != 1 {
-        return Err(format!(
-            "{} uses unsupported schema_version {} (expected 1)",
-            plan_path.display(),
-            plan.schema_version
-        ));
-    }
-
-    let project = plan
-        .machine
-        .build_adapter_project
-        .as_ref()
-        .ok_or("selected machine has no build_adapter_project; native workspace builds are not implemented yet")?;
-    let project = PathBuf::from(project);
-    let config = generate(&project)?;
-
-    if !no_build {
-        cargo_command(&project, &config, "build", target.clone(), release, &[])?;
-        inject_ksym_section(&project, &config, target.as_deref(), release)?;
-        build_loadable_modules(&project, &config, release)?;
-    }
-
-    let kernel_elf = match kernel_elf {
-        Some(path) => absolutize_from_current_dir(&path)?,
-        None => project_kernel_elf_path(&project, &config, target.as_deref(), release)?,
-    };
-
-    if !kernel_elf.exists() {
-        return Err(format!("kernel ELF not found: {}", kernel_elf.display()));
-    }
-
-    if plan.steps.is_empty() {
-        return Err(format!("{} has no image steps", plan_path.display()));
-    }
-
-    let target_triple = target_triple_for_project(&project, &config, target.as_deref())?;
-    for (index, step) in plan.steps.iter().enumerate() {
-        run_image_step(
-            &project,
-            &config,
-            step,
-            index,
-            &kernel_elf,
-            profile,
-            &target_triple,
-        )?;
-    }
-
-    Ok(())
+    eprintln!("cargo-scarlet: wrote image plan {}", plan_path.display());
+    Err("native workspace build is not implemented yet; use --project for the legacy build path".to_string())
 }
 
 fn run_image_step(
