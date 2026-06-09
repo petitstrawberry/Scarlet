@@ -14,6 +14,7 @@ opencode.json
 /cargo-scarlet/target
 /.build
 /.scarlet/
+/scarlet.local.toml
 /drivers/*/target
 /drivers/*/*/target
 /modules/*/target

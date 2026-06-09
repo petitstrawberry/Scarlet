@@ -1,0 +1,14 @@
+schema_version = 1
+generated_by = "cargo-scarlet lock"
+
+[workspace]
+name = "scarlet-reference"
+
+[[layers]]
+name = "scarlet-reference"
+source = "path"
+path = "layers/scarlet-reference"
+priority = 100
+resolved_rev = "64537ab773af6c345f57c8054871eae60c2872ce"
+dirty = true
+local_override = false

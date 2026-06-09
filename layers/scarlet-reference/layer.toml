@@ -1,0 +1,13 @@
+schema_version = 1
+
+[layer]
+name = "scarlet-reference"
+summary = "Official Scarlet reference distribution metadata"
+
+[paths]
+machines = "machines"
+boot_targets = "boot_targets"
+distros = "distros"
+images = "images"
+recipes = "recipes"
+packagegroups = "packagegroups"

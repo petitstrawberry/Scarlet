@@ -1,0 +1,10 @@
+schema_version = 1
+
+[boot_target]
+name = "limine-uefi-aarch64"
+kind = "limine-uefi"
+arch = "aarch64"
+output = "{project}/.scarlet/images/limine-aarch64-microvm.img"
+cmdline = "console=ttyAMA0"
+image_slack_mb = 8
+limine_version = "11.0.0"

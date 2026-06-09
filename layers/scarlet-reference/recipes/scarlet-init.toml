@@ -1,0 +1,10 @@
+schema_version = 1
+
+[recipe]
+name = "scarlet-init"
+source = { path = "../../../user/bin" }
+build = { kind = "cargo", package = "user-bin", bin = "init" }
+
+[[package]]
+name = "scarlet-init"
+files = [{ from = "dist/aarch64/init", to = "/system/scarlet/bin/init" }]

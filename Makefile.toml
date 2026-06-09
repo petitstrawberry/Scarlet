@@ -299,9 +299,9 @@ command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "check", "--project", "projects/aarch64-limine-microvm"]
 
 [tasks.image-aarch64-microvm]
-description = "Build AArch64 microvm project image from project-local image recipe"
+description = "Build AArch64 microvm image from Scarlet layer metadata"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--project", "projects/aarch64-limine-microvm", "--release"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--machine", "qemu-aarch64-virt", "--distro", "scarlet-microvm", "--image", "host", "--release"]
 dependencies = ["build-userbin-release-aarch64"]
 
 [tasks.build-userlib-debug-riscv64]
@@ -675,7 +675,7 @@ dependencies = ["build-kernel-debug-aarch64", "build-initramfs-debug-aarch64", "
 [tasks.build-boot-image-aarch64-microvm]
 description = "Create boot image (AArch64 microvm, debug kernel)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--project", "projects/aarch64-limine-microvm"]
+args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--machine", "qemu-aarch64-virt", "--distro", "scarlet-microvm", "--image", "host"]
 dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.build-boot-image-aarch64-release]

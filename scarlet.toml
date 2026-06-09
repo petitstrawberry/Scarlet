@@ -1,0 +1,9 @@
+schema_version = 1
+
+[workspace]
+name = "scarlet-reference"
+
+[[layers]]
+name = "scarlet-reference"
+path = "layers/scarlet-reference"
+priority = 100

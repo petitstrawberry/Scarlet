@@ -2,7 +2,16 @@
 
 ## Overview
 
-This section documents the direction for Scarlet's next-generation build system.
+This section documents the older project-local kernel build adapter. The current
+distro/image architecture is defined in
+[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+
+`scarlet-config.toml` is no longer the distro or image composition source of
+truth. It remains as a pre-split adapter input for project-local kernel builds.
+Userland image composition lives in layer metadata under `layers/*/images/` and
+is resolved through `cargo-scarlet plan` / `cargo-scarlet image --machine ...
+--distro ... --image ...`; boot packaging is selected with `--boot ...` or the
+distro default.
 
 The intended end-state is that a **project is the main user-facing Scarlet project**. The current repository layout is only the in-tree development baseline used to prototype that model.
 

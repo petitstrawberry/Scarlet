@@ -1,317 +1,430 @@
-# Scarlet Distro Architecture Design
+# Scarlet Distro Architecture
 
-> Refines and supersedes the original proposal in [GitHub Issue #461](https://github.com/petitstrawberry/Scarlet/issues/461).
+This document replaces the early `project` / `scarlet-config.toml` model with a
+scalable distribution model for Scarlet before the physical repository split.
 
-## Overview
+The goal is not to copy Yocto or Zephyr. The goal is to keep the useful
+separation they prove:
 
-Scarlet の構成管理を「すべて入りの monorepo」から「再利用可能なコンポーネントで構成される
-プラットフォーム」へ移行するためのアーキテクチャ設計。
+- workspace source revisions are not distribution policy
+- machine support is not an image recipe
+- a buildable program is not automatically installed into an image
+- generated execution plans are not user-authored configuration
 
-Zephyr `west`、Yocto/BSP のレイヤーモデル、FreeRTOS 配布形式を参考に、
-関心の分離 (Separation of Concerns) を基本原則とする。
+`petitstrawberry/Scarlet` is the official reference distribution of the Scarlet
+OS platform. It remains the easiest "clone and run" repository, but its checked
+in metadata must describe a known-good composition of kernel, tooling, libraries,
+packages, apps, machines, boot targets, and images rather than implying that all
+source trees in the repository are installed into every image.
 
-## Core Principle: Separation of Concerns
+## Problems in the Previous Model
 
-現在の `project` は 3 つの異なる関心を混在させている:
+The previous design still mixed several responsibilities:
 
-1. **どのハードウェアで動かすか** (Board Support Package)
-2. **どのユーザランドを入れるか** (Image Recipe)
-3. **どこからコンポーネントを取得するか** (Distro Manifest)
+- `Distro Manifest` meant both "where source repositories come from" and
+  "what the distro policy is".
+- `BSP` included kernel feature selection, even though those features can vary
+  by distro, image, or debug profile without changing the board.
+- `Image Recipe` pointed at a BSP directly, which makes images less reusable
+  across machines.
+- `package`, `component`, `app`, and `module` were used for source repos,
+  build recipes, installable outputs, and kernel loadable objects.
+- `image.steps` was treated as user-facing config even though it is really a
+  low-level execution plan.
 
-これらを独立したレイヤーに分離する。
+Those ambiguities make the split-repo direction hard to implement. The model
+below gives every file one job.
 
-## 3-Layer Architecture
+## Terms
 
+Use these terms consistently.
+
+| Term | Meaning |
+|---|---|
+| Workspace | A checked-out set of source repositories used by one build. |
+| Workspace manifest | `scarlet.toml`; declares source repos/layers and desired revisions. |
+| Lock file | `scarlet.lock`; pins the exact resolved revisions. |
+| Layer | A reusable metadata unit containing machines, boot targets, distros, recipes, package groups, and images. |
+| Machine | Hardware/virtual hardware contract. No boot image policy and no userland package list. |
+| Boot target | Boot packaging contract such as Limine UEFI, direct kernel boot, m1n1+U-Boot, or a signed device image. |
+| Distro | OS policy: default providers, feature policy, filesystem policy, ABI policy, release identity, and default boot target. |
+| Recipe | Build instructions for one source unit. A recipe can produce one or more packages. |
+| Package | Installable output selected by images or package groups. |
+| Package group | Named set of packages used to keep images small and readable. |
+| Image recipe | Root filesystem composition: package groups, packages, users, files, services. |
+| Build profile | Optimization/debug/signing/cache choices for a build invocation. |
+| Image plan | Generated `.scarlet/plans/.../image-plan.toml`; executable steps resolved from the above. |
+| Kernel module | Runtime-loadable kernel object. Do not call it a package or app. |
+| Source | A path or git checkout used by a layer or recipe. Source provenance is not package selection. |
+
+## Layers
+
+Scarlet should use layers as the unit that can later move to separate
+repositories. A layer can contain any of these directories:
+
+```text
+layers/<layer-name>/
+  layer.toml
+  machines/
+  boot_targets/
+  distros/
+  recipes/
+  packagegroups/
+  images/
 ```
-┌─────────────────────────────────────────────┐
-│          Distro Manifest (scarlet.toml)      │
-│  WHERE: コンポーネントのソースと revision     │
-│  kernel, SDK, packages, libraries            │
-│  scarlet.lock で pin                         │
-│  local override 可 (scarlet.local.toml)      │
-├─────────────────────────────────────────────┤
-│          Image Recipe (image.toml)           │
-│  WHAT: イメージに何を入れるか                  │
-│  ユーザランドの構成宣言                        │
-│  BSP を参照する                              │
-│  パッケージ・アプリの配置先を指定              │
-├─────────────────────────────────────────────┤
-│          Board Support Package (bsp.toml)    │
-│  HOW: このハードウェアでカーネルを動かす       │
-│  カーネル設定、ボード定義、ブート設定          │
-│  ユーザランドは触らない                       │
-│  実行計画は .scarlet/ 以下に自動生成          │
-└─────────────────────────────────────────────┘
-```
 
-## File Responsibilities
+Layer order is explicit in `scarlet.toml`. Higher-priority layers may override
+metadata from lower-priority layers by name, but overrides are whole-object
+overrides in the first implementation. Fine-grained append files can be added
+later if the need is real.
 
-### scarlet.toml — Distro Manifest
+## Top-Level Files
 
-リポジトリルートに配置。ディストリビューション全体の構成を定義する。
+### `scarlet.toml`: Workspace Manifest
+
+`scarlet.toml` answers only "which metadata/source layers are present in this
+workspace, and where do they come from?" It does not select a machine, boot
+target, distro, or image.
 
 ```toml
-# scarlet.toml
-[distro]
+schema_version = 1
+
+[workspace]
 name = "scarlet-reference"
+
+[[layers]]
+name = "scarlet-core"
+path = "layers/scarlet-core"
+
+[[layers]]
+name = "scarlet-reference"
+path = "layers/scarlet-reference"
+priority = 100
+```
+
+Future split-repo form:
+
+```toml
+[[layers]]
+name = "scarlet-core"
+git = "https://github.com/petitstrawberry/scarlet-core"
+rev = "..."
+path = "layers/scarlet-core"
+```
+
+### `scarlet.lock`: Workspace Lock
+
+`scarlet.lock` pins exact source revisions. It is generated from
+`scarlet.toml`, local overrides, and fetch results. It does not contain image
+package selection.
+
+### `scarlet.local.toml`: Local Overrides
+
+`scarlet.local.toml` is gitignored and only changes the developer workspace:
+
+```toml
+[[overrides.layers]]
+name = "scarlet-core"
+path = "../scarlet-core"
+```
+
+## Source Rules
+
+Layer and recipe sources use the same provenance model:
+
+- `path` points at a local checkout or in-tree source directory.
+- `git` records the canonical remote.
+- git sources must be pinned by `rev`, `branch`, or `tag`.
+- `scarlet.lock` records the effective resolved revision for local git
+  checkouts when available.
+- `scarlet.local.toml` may replace or add layer sources for local development
+  without changing the checked-in workspace manifest.
+
+The first pre-split implementation resolves local paths and records git
+provenance. Network fetch/update is a later SDK operation; the split boundary is
+already represented by source metadata and lock output.
+
+## Machine
+
+Machine metadata describes the target hardware or virtual hardware. It must not
+list userland packages and must not define a boot image. The same machine can
+boot through different boot targets when the hardware supports it.
+
+```toml
+schema_version = 1
+
+[machine]
+name = "qemu-aarch64-virt"
+arch = "aarch64"
+target_triple = "aarch64-unknown-none-elf"
+target_json = "../../../kernel/targets/aarch64-unknown-none-elf.json"
+
+[machine.features]
+serial = true
+virtio_mmio = true
+virtio_blk = true
+virtio_gpu = false
+
+[build_adapter]
+project = "../../../projects/aarch64-limine-microvm"
+```
+
+`build_adapter` is a pre-split migration bridge. It lets the new resolver point
+at the existing in-tree kernel binary project without making that project shape
+part of the final architecture.
+
+## Boot Target
+
+Boot targets describe how the already-built kernel and initramfs become a
+bootable artifact. Limine is a boot target because it abstracts a family of
+loader contracts, but the selected boot target is still distinct from the
+virtual or physical machine.
+
+```toml
+schema_version = 1
+
+[boot_target]
+name = "limine-uefi-aarch64"
+kind = "limine-uefi"
+arch = "aarch64"
+output = "{project}/.scarlet/images/limine-aarch64-microvm.img"
+cmdline = "console=ttyAMA0"
+image_slack_mb = 8
+limine_version = "11.0.0"
+```
+
+## Distro
+
+Distro metadata describes policy. It does not choose a final image package
+list and does not describe board wiring.
+
+```toml
+schema_version = 1
+
+[distro]
+name = "scarlet-microvm"
+vendor = "petitstrawberry"
 version = "0.17.0"
+system_prefix = "/system/scarlet"
+default_shell = "/system/scarlet/bin/sh"
+default_boot_target = "limine-uefi-aarch64"
 
-[kernel]
-source = { path = "kernel" }
-# or: source = { git = "https://github.com/petitstrawberry/scarlet-kernel", branch = "main" }
+[providers]
+kernel = "scarlet-kernel"
+init = "scarlet-init"
 
-[packages.coreutils]
-source = { path = "packages/coreutils" }
-
-[libs.std]
-source = { path = "user/lib/std" }
-
-[libs.ui]
-source = { path = "user/lib/scarlet-ui" }
-```
-
-```toml
-# scarlet.lock (自動生成)
-[kernel]
-rev = "abc1234"
-
-[packages.coreutils]
-rev = "def5678"
-```
-
-```toml
-# scarlet.local.toml (gitignored, 開発時の上書き)
-[kernel]
-source = { path = "../scarlet-kernel" }
-
-[apps.myapp]
-source = { path = "../my-scarlet-app" }
-```
-
-### bsp.toml + kernel.toml — Board Support Package
-
-`bsps/<name>/` に配置。ハードウェアでカーネルを動かすための設定。
-ユーザランドには関与しない。
-
-```toml
-# bsps/riscv64-limine/bsp.toml
-[board]
-name = "riscv64-limine"
-target = "riscv64gc-unknown-none-elf"
-target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
-boot_protocol = "limine"
-
-[boot]
-cmdline = "console=ttyS0"
-```
-
-```toml
-# bsps/riscv64-limine/kernel.toml
-[kernel]
-package = "scarlet"
-source = { path = "../../kernel" }
-
-[kernel.features]
+[features]
 network = true
-user-fpu = true
-user-vector = true
+desktop = true
 hypervisor = true
-limine = true
-
-[modules]
-"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = false }
 ```
 
-BSP ディレクトリ構成:
+## Recipe and Package
 
-```
-bsps/riscv64-limine/
-  bsp.toml           # ボード・ブート定義
-  kernel.toml        # カーネルビルド設定
-  src/main.rs        # カーネルエントリポイント
-  Cargo.toml         # カーネルバイナリ crate
-  lds/               # リンカスクリプト
-  .cargo/config.toml # Cargo ビルド設定
-```
+A recipe builds source. A package is an installable output from a recipe. The
+image selects packages, not repositories and not recipes directly.
 
-### image.toml — Image Recipe
-
-`images/` に配置。ユーザランドの構成を宣言する。
-BSP を名前で参照し、どのパッケージ・アプリを入れるかを指定する。
+The first implementation can keep recipe metadata small:
 
 ```toml
-# images/full.toml
-[bsp]
-name = "riscv64-limine"
-source = { path = "../bsps/riscv64-limine" }
+schema_version = 1
+
+[recipe]
+name = "coreutils"
+source = { path = "../../../user/bin" }
+build = { kind = "cargo", package = "user-bin" }
 
 [[package]]
-name = "coreutils"
+name = "coreutils-base"
 bins = ["cat", "ls", "cp", "mv", "rm", "mkdir", "echo", "uname"]
-install_dir = "/system/scarlet/bin"
-
-[[app]]
-name = "init"
-install = "/system/scarlet/bin/init"
-
-[[app]]
-name = "sh"
-install = "/system/scarlet/bin/sh"
-
-[[app]]
-name = "scarlet_desktop"
-install = "/system/scarlet/bin/scarlet_desktop"
-
-[[app]]
-name = "terminal"
-install = "/system/scarlet/bin/terminal"
-
-[[app]]
-name = "gpu_probe"
-install = "/system/scarlet/bin/gpu_probe"
 ```
+
+Later, when `user/bin` is split, each app can become its own recipe while
+images continue to select packages by name.
+
+Packages can also declare explicit installable files:
 
 ```toml
-# images/minimal.toml (同じ BSP、別の構成)
-[bsp]
-name = "riscv64-limine"
-source = { path = "../bsps/riscv64-limine" }
-
-[[app]]
-name = "init"
-install = "/system/scarlet/bin/init"
-
-[[app]]
-name = "sh"
-install = "/system/scarlet/bin/sh"
+[[package]]
+name = "shell"
+files = [{ from = "dist/aarch64/sh", to = "/system/scarlet/bin/sh" }]
 ```
 
-## Generated Artifacts
+`from` is relative to the recipe source path. The generated image plan expands
+these files into concrete inputs and writes an install manifest for rootfs
+staging. If a recipe exists but its package is not selected by the image, its
+files are not installed even if the source still builds as part of a larger
+in-tree Cargo workspace.
 
-`cargo-scarlet` は `.scarlet/` 以下にビルド成果物を生成する。
-現在の `image.steps` はこの生成物の一部となり、ユーザーは直接触らない。
+## Image Recipe
 
+Image recipes describe the root filesystem contents and image-specific
+configuration. They are machine-neutral unless they explicitly declare machine
+constraints.
+
+```toml
+schema_version = 1
+
+[image]
+name = "host"
+description = "Host root filesystem for the Scarlet microVM distribution."
+compatible_machines = ["qemu-aarch64-virt"]
+
+packagegroups = ["boot", "core"]
+packages = ["microvm-init"]
+
+[initramfs]
+format = "newc"
+output = "{project}/.scarlet/images/initramfs-aarch64-microvm.cpio"
+
+[rootfs]
+format = "ext2"
+output = "{project}/.scarlet/images/rootfs-aarch64-microvm.ext2"
+source = "{workspace}/mkfs/rootfs"
+user_bins = "{workspace}/user/bin/dist/aarch64"
+modules = "{workspace}/mkfs/dist/modules/{target_triple}"
+stage = "{project}/.scarlet/rootfs-stage"
+prebuilt = "{project}/prebuilt"
+
+[[files]]
+source = "{workspace}/projects/aarch64-limine-microvm/initramfs"
+destination = "/"
+
+[[files]]
+source = "{workspace}/user/bin/dist/aarch64/microvm_init"
+destination = "/system/scarlet/bin/init"
 ```
-.scarlet/
-  images/
-    <image-name>/
-      bsp.toml             # コピー/解決済みの BSP 設定
-      kernel.toml          # コピー/解決済みのカーネル設定
-      image-plan.toml      # image.toml から展開された実行計画
-      initramfs-*.cpio     # ビルド済み initramfs
-      rootfs-*.ext2        # ビルド済み rootfs
-      boot-*.img           # ビルド済みブートイメージ
+
+The image recipe says what should exist in the root filesystem. It does not say
+how to run `cpio`, `mkfs.ext2`, Limine, QEMU, or Cargo. Those are generated into
+an image plan.
+
+Image-level `[[files]]` entries are for image-specific static files and
+directories. Installable app/package payloads should normally come from selected
+recipe packages.
+
+## Image Plan
+
+The image plan is generated and tool-owned:
+
+```text
+.scarlet/plans/<machine>/<boot-target>/<distro>/<image>/<profile>/image-plan.toml
 ```
 
-## SDK Commands (cargo-scarlet)
+It is allowed to contain shell commands, expanded paths, build ordering,
+artifact names, and executor-specific details. Users may inspect it, but normal
+configuration should happen in machine/boot target/distro/image/recipe metadata.
+
+The existing `[[image.steps]]` executor should be retained as an executor for
+generated plans, not as the long-term user API.
+
+For rootfs images, the generated plan writes an install manifest from selected
+package files and passes it to the rootfs builder. This is the enforcement point
+that separates "this app can be built" from "this app is installed in this
+image".
+
+## Build Selection
+
+A complete build is selected by independent inputs. The boot target can be
+explicit or selected from the distro default:
 
 ```bash
-# コンポーネントの取得・更新
-cargo scarlet update
-
-# BSP + Image を指定してビルド
-cargo scarlet build --bsp bsps/riscv64-limine --image images/full
-
-# イメージの生成
-cargo scarlet image --bsp bsps/riscv64-limine --image images/full
-
-# 実行
-cargo scarlet run --bsp bsps/riscv64-limine --image images/full
-
-# 新規作成
-cargo scarlet new bsp my-board --target riscv64gc-unknown-none-elf
-cargo scarlet new image my-image --bsp bsps/riscv64-limine
-cargo scarlet new module my-module
-cargo scarlet new app my-app
-
-# ローカル開発用 override
-cargo scarlet local kernel ../scarlet-kernel
+cargo scarlet plan \
+  --machine qemu-aarch64-virt \
+  --distro scarlet-microvm \
+  --boot limine-uefi-aarch64 \
+  --image host \
+  --profile debug
 ```
 
-## Migration from Current Structure
+Building the selected image uses the same tuple:
 
-### Phase 1: Introduce image.toml and split scarlet-config.toml
+```bash
+cargo scarlet image \
+  --machine qemu-aarch64-virt \
+  --distro scarlet-microvm \
+  --image host
+```
 
-- Add `image.toml` support to `cargo-scarlet`
-- Split `scarlet-config.toml` into `bsp.toml` + `kernel.toml`
-- Migrate `mkfs/make_initramfs.sh` logic into `image.toml` driven composition
-- Keep backward compatibility with existing `scarlet-config.toml`
+The tuple is:
 
-### Phase 2: Restructure directories
+```text
+workspace manifest + machine + boot target + distro + image recipe + build profile
+```
 
-- `projects/` → `bsps/`
-- Add `images/` directory with image recipes
-- Keep `user/bin/` monolith for now (split separately)
+This avoids baking the machine into the image, the image into the machine, or
+the boot packaging flow into either one.
 
-### Phase 3: Split user/bin monolith
+## Pre-Split Repository Layout
 
-- Break `user/bin/Cargo.toml` into individual app crates
-- Enable per-app builds
-- `image.toml` can reference apps by name
+Before splitting repositories, keep the code in this repository but introduce
+the future metadata boundary:
 
-### Phase 4: Add scarlet.toml (Distro Manifest)
+```text
+Scarlet/
+  scarlet.toml
+  scarlet.lock
+  layers/
+    scarlet-reference/
+      layer.toml
+      machines/
+      boot_targets/
+      distros/
+      images/
+      recipes/
+      packagegroups/
+  kernel/
+  user/
+  cargo-scarlet/
+  projects/                 # temporary build adapters
+```
 
-- Introduce `scarlet.toml` for component source management
-- Add `scarlet.lock` for revision pinning
-- Add `scarlet.local.toml` for development overrides
-- Support external git/path sources
+`projects/` should shrink over time. It is not the final public model.
 
-### Phase 5: Repository split (when needed)
+## Migration Order
 
-- Move kernel to `petitstrawberry/scarlet-kernel` when external contributors need it
-- Move coreutils to `petitstrawberry/scarlet-coreutils`
-- Keep `petitstrawberry/Scarlet` as the reference distro
+1. Add `scarlet.toml`, layer metadata, and a resolver that generates an image
+   plan for one known machine/boot/distro/image tuple.
+2. Move user-authored image composition out of `scarlet-config.toml` and into
+   `layers/*/images/*.toml`.
+3. Make the existing `image.steps` runner consume generated
+   `.scarlet/plans/.../image-plan.toml`.
+4. Move kernel feature and module selection out of `scarlet-config.toml` into
+   distro/profile/recipe metadata.
+5. Split `user/bin` into recipes/packages so images can include or exclude
+   programs without changing whether they build.
+6. Add `scarlet.lock` generation and `scarlet.local.toml` overrides.
+7. Split physical repositories by moving layers/source trees out one at a
+   time. The reference `Scarlet` repo remains the official reference distro.
 
-## Relationship to Current Code
+## Non-Goals
 
-| Current | New | Notes |
-|---|---|---|
-| `scarlet-config.toml` | `bsp.toml` + `kernel.toml` | Split by concern |
-| `[[image.steps]]` | `image.toml` → generated plan | User writes recipe, system generates steps |
-| `mkfs/make_initramfs.sh` | `cargo-scarlet image` | Shell scripts → tool-driven |
-| `projects/<name>/` | `bsps/<name>/` + `images/<name>.toml` | BSP and Image separated |
-| `cargo-scarlet` (current) | Extended with new subcommands | Evolved, not replaced |
-| N/A | `scarlet.toml` + `scarlet.lock` | New: distro manifest |
+- Do not make `Scarlet` a kernel-only repository.
+- Do not use git submodules as the primary composition mechanism.
+- Do not require every app to be split before image composition becomes
+  manifest-driven.
+- Do not expose low-level image-plan commands as the normal user API.
 
-## Design Decisions
+## Acceptance Criteria Before Repository Split
 
-### Why BSP does not include userland
-
-BSP の責務は「カーネルをこのハードウェアで動かす」ことに限定する。
-ユーザランドの構成は image.toml 側で判断する。
-
-例: GPU 搭載ボードに `gpu_probe` を入れたい場合、
-BSP に gpu_probe を追加するのではなく、
-そのボード向けの image.toml に gpu_probe を含める。
-
-これにより、同じ BSP で「フル構成」と「最小構成」を自由に作れる。
-
-### Why image.steps stays as generated artifact
-
-`image.steps`（現 `[[image.steps]]`）の実行モデルは健全。
-問題は「ユーザーが直接書いている」こと。
-`image.toml` から自動生成される中間表現として `.scarlet/image-plan.toml` に配置する。
-エスケープハッチとして直接 `image-plan.toml` を編集することも可能にする。
-
-### Why kernel.toml is separate from bsp.toml
-
-同じボードで異なるカーネル設定を使うケースがある:
-
-- デバッグ用（profiler 有効）
-- リリース用（profiler 無効）
-- 実験用（特定機能の有効化/無効化）
-
-`bsp.toml`（ハードウェア定義）と `kernel.toml`（ビルド設定）の分離により、
-ハードウェア設定を変えずにカーネル設定だけ差し替えられる。
-
-### Why not Git submodules
-
-Git submodules は構成管理の基本メカニズムとしては不適:
-
-- ブランチ単位の追跡しかできない（revision pin が弱い）
-- ローカル override の仕組みがない
-- 複数の submodule にまたがる atomic な更新が困難
-- ユーザー体験が悪い（clone 時の --recursive、submodule update 等）
-
-代わりに `scarlet.toml` + `scarlet.lock` による manifest/lock モデルを採用する。
-これは Zephyr `west`、Bazel WORKSPACE、Cargo Cargo.lock と同じアプローチ。
+- `scarlet.toml` exists and only describes workspace/layer sources.
+- `scarlet.lock` can be generated and records effective layer revisions.
+- `scarlet.local.toml` is gitignored and can override or add local layer
+  sources.
+- At least one layer contains a machine, boot target, distro, image recipe,
+  package groups, and package recipes.
+- `cargo-scarlet` can resolve a machine/boot/distro/image tuple into a
+  generated image plan, with the boot target allowed to come from the distro
+  default.
+- `cargo-scarlet image --machine qemu-aarch64-virt --distro scarlet-microvm
+  --image host` builds the microvm initramfs, rootfs, and Limine boot image from
+  layer metadata.
+- The generated plan records all selected metadata paths and expanded file
+  inputs.
+- In-tree apps can be represented as packages selected by image metadata,
+  separate from whether `user/bin` builds, and unselected recipe files are not
+  copied into the manifest-driven rootfs stage.
+- Recipe sources support local `path` provenance and git provenance with an
+  explicit pin (`rev`, `branch`, or `tag`).
+- The old `project` model is treated as a temporary build adapter, not the
+  architecture.

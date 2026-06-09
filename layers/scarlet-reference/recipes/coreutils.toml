@@ -1,0 +1,10 @@
+schema_version = 1
+
+[recipe]
+name = "coreutils"
+source = { path = "../../../user/bin" }
+build = { kind = "cargo", package = "user-bin" }
+
+[[package]]
+name = "coreutils-base"
+bins = ["cat", "ls", "cp", "mv", "rm", "mkdir", "echo", "uname"]
