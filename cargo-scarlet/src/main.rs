@@ -893,7 +893,7 @@ fn build_manifest_image(
 
         let arch_name = match target_triple.split('-').next() {
             Some("aarch64") => "aarch64",
-            Some("riscv64") => "riscv64",
+            Some(v) if v.starts_with("riscv64") => "riscv64",
             _ => &target_triple,
         };
 
