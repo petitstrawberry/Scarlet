@@ -5,7 +5,7 @@ starts Firecracker from the Scarlet userspace rootfs.
 
 The project is intended to be driven primarily by `cargo-scarlet`: the boot
 image, initramfs, rootfs staging, and microVM guest artifacts are described
-by `scarlet-config.toml` and project-local helper tools. Avoid adding new
+by `scarlet.toml` and project-local helper tools. Avoid adding new
 dependencies on the repository top-level `cargo make` flow; keep new
 image-building logic in this project or in `cargo-scarlet` config.
 
@@ -73,7 +73,7 @@ microVM documentation should prefer the explicit project-local flow above.
 
 ## Project-local Image Flow
 
-The image configuration lives in `scarlet-config.toml`.
+The image configuration lives in `scarlet.toml`.
 
 - The Limine boot image is emitted under `.scarlet/images/`.
 - The initramfs is assembled from this project's `initramfs/` directory plus the
@@ -84,7 +84,7 @@ The image configuration lives in `scarlet-config.toml`.
   under `prebuilt/system/` are intentionally ignored by git.
 
 Current compatibility inputs come from repository-wide build outputs, declared
-in `scarlet-config.toml`:
+in `scarlet.toml`:
 
 - `user/bin/dist/aarch64`
 - `mkfs/rootfs`

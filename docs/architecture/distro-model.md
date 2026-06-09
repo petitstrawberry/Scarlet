@@ -24,11 +24,10 @@ This document describes the project-centric distribution model for Scarlet OS.
 
 ## Project Layout
 
-> **Note**: This section describes the target layout. The current implementation
-> uses `scarlet-config.toml` and `cargo-scarlet --project` without bundles or
-> `scarlet.toml`. See [Current Layout](#current-layout) below.
-
 ### Current Layout
+
+All projects now use `scarlet.toml` for configuration. The old `scarlet-config.toml`
+format has been removed.
 
 ```text
 Scarlet/
@@ -42,33 +41,30 @@ Scarlet/
     riscv64-limine-full/
       Cargo.toml, build.rs, src/main.rs
       lds/, .cargo/, tools/
-      scarlet-config.toml
+      scarlet.toml
       .scarlet/
     aarch64-limine-full/
       Cargo.toml, build.rs, src/main.rs
       lds/, .cargo/, tools/
-      scarlet-config.toml
+      scarlet.toml
       .scarlet/
     aarch64-limine-microvm/
       Cargo.toml, build.rs, src/main.rs
       lds/, .cargo/, tools/
-      scarlet-config.toml
+      scarlet.toml                 # Full: kernel + image composition
       initramfs/, prebuilt/
       .scarlet/
     aarch64-apple-limine-full/
       Cargo.toml, build.rs, src/main.rs
       lds/, .cargo/, tools/
-      scarlet-config.toml
+      scarlet.toml
       .scarlet/
 ```
 
-No `layers/`, `bundles/`, or `scarlet.toml` exist yet. All configuration is
-through `scarlet-config.toml` per project.
+All projects use `scarlet.toml` for configuration. The old `scarlet-config.toml`
+format has been removed.
 
-### Target Layout (Planned)
-
-Migration from current layout: `scarlet-config.toml` → `scarlet.toml`, add optional `bundles/`.
-Only the microvm project uses full image composition; other projects keep kernel build only.
+### Target Layout (With Bundles)
 
 ```text
 Scarlet/
@@ -82,7 +78,7 @@ Scarlet/
     microvm/
       bundle.toml
   projects/
-    aarch64-limine-microvm/            # scarlet.toml replaces scarlet-config.toml
+    aarch64-limine-microvm/            # scarlet.toml with image composition
       Cargo.toml, build.rs, src/main.rs
       lds/, .cargo/, tools/
       scarlet.toml                     # Full: kernel + image composition

@@ -2,17 +2,12 @@
 
 ## Overview
 
-`scarlet-config.toml` is the current project-local kernel build configuration.
-It declares the target board, kernel features, and module selection for a
+`scarlet.toml` is the project-local kernel build configuration. It declares the
+kernel source, target, features, module selection, and image composition for a
 specific project.
 
-The planned distro/image architecture is described in
+The distro/image architecture is described in
 [`docs/architecture/distro-model.md`](../architecture/distro-model.md).
-That document defines the future `scarlet.toml` model with project-centric
-BSP, packages, and optional bundles. The current implementation uses
-`scarlet-config.toml` and `cargo-scarlet` with `--project` flags.
-
-The intended end-state is that a **project is the main user-facing Scarlet project**. The current repository layout is only the in-tree development baseline used to prototype that model.
 
 The core design goals are:
 
@@ -22,42 +17,38 @@ The core design goals are:
 - generate the module selection layer from configuration instead of editing manifests by hand
 - keep generated state local to the project instead of scattering it across the repository
 
-## Current Repository Baseline
+## Repository Baseline
 
-Today, this repository builds through `cargo make` from the repository root.
+This repository builds through `cargo make` from the repository root, or through
+`cargo scarlet` for project-centric workflows.
 
-- `projects/riscv64-limine-full/Cargo.toml`, `projects/aarch64-limine-full/Cargo.toml`, `projects/aarch64-limine-microvm/Cargo.toml`, and `projects/aarch64-apple-limine-full/Cargo.toml` are the top-level kernel binaries
-- all projects currently depend directly on `../../kernel`
-- `projects/aarch64-limine-microvm/` also uses `scarlet-config.toml` for `cargo-scarlet` image composition
+- `projects/riscv64-limine-full/`, `projects/aarch64-limine-full/`, `projects/aarch64-limine-microvm/`, and `projects/aarch64-apple-limine-full/` are the top-level kernel binaries
+- each project has a `scarlet.toml` manifest for kernel build configuration
+- all projects depend on `../../kernel` via path dependencies
+- `projects/aarch64-limine-microvm/` additionally uses `scarlet.toml` for image composition (initramfs, rootfs, boot image)
 - the kernel crate is still the canonical `scarlet` crate
 - the kernel already uses linker-section-based initcalls (`.initcall.early`, `.initcall.driver`, `.initcall.late`)
 
-That means the new build system should extend the existing flow instead of replacing the kernel/project boot contract.
+The developer experience is project-rooted:
 
-However, the target developer experience is project-rooted:
-
-- the **project becomes the main project root**
-- `scarlet-config.toml` lives in that project
+- the **project is the main project root**
+- `scarlet.toml` lives in that project
 - the kernel crate and module crates are consumed as dependencies by that project
-- user-facing usage can assume registry/online distribution as a normal case
-- this development repository still uses local-path dependencies during implementation
 - `.scarlet/scarlet-modules` is generated inside that project
 
 ## Documents
 
-- [Project-Local Generated Modules Architecture](./project-local-generated-modules.md)
-- [`scarlet-config.toml` Specification](./scarlet-config-spec.md)
+- [`scarlet.toml` Specification](./scarlet-config-spec.md)
 - [Implementation Plan](./implementation-plan.md)
 - [`cargo-scarlet` Prototype](./cargo-scarlet-prototype.md)
+- [Project-Local Generated Modules Architecture](./project-local-generated-modules.md)
 
 ## Design Summary
-
-The preferred direction is:
 
 1. keep project manifests checked in and mostly static
 2. treat the project as the main project root
 3. add a static path dependency from the project to a project-local generated module crate
-4. generate that crate from `scarlet-config.toml` before any Cargo operation
+4. generate that crate from `scarlet.toml` before any Cargo operation
 5. keep generated files inside the project directory under `.scarlet/`
 6. keep the kernel crate focused on core kernel responsibilities
 
@@ -65,7 +56,7 @@ In short:
 
 ```text
 project (main project root)
- ├─ scarlet-config.toml
+ ├─ scarlet.toml
  ├─ kernel crate (`scarlet`) from registry / git / path source
  └─ generated .scarlet/scarlet-modules
         ├─ selected driver crates
@@ -77,6 +68,6 @@ This preserves the original philosophy:
 
 - **OS as a Library**: reusable kernel and module crates
 - **Infrastructure as a Tool**: configuration resolution lives in the build tool
-- **Full-Config Principle**: `scarlet-config.toml` is a full resolved `.config`-style file, not a mini package manifest
+- **Manifest Principle**: `scarlet.toml` declares kernel source, features, modules, and image composition
 
 In practice, module entries should still feel familiar: the preferred shape is a single `[modules]` table that reuses normal Cargo dependency syntax and adds an explicit `enabled = true/false` state.
