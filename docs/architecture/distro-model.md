@@ -1,66 +1,46 @@
 # Scarlet Distro Architecture
 
-This document replaces the early `project` / `scarlet-config.toml` model with a
-scalable distribution model for Scarlet before the physical repository split.
+This document describes the layer-based distribution model for Scarlet OS,
+following patterns proven by Yocto, Buildroot, and Zephyr.
 
-The goal is not to copy Yocto or Zephyr. The goal is to keep the useful
-separation they prove:
+## Principles
 
 - workspace source revisions are not distribution policy
 - machine support is not an image recipe
 - a buildable program is not automatically installed into an image
 - generated execution plans are not user-authored configuration
-
-`petitstrawberry/Scarlet` is the official reference distribution of the Scarlet
-OS platform. It remains the easiest "clone and run" repository, but its checked
-in metadata must describe a known-good composition of kernel, tooling, libraries,
-packages, apps, machines, boot targets, and images rather than implying that all
-source trees in the repository are installed into every image.
-
-## Problems in the Previous Model
-
-The previous design still mixed several responsibilities:
-
-- `Distro Manifest` meant both "where source repositories come from" and
-  "what the distro policy is".
-- `BSP` included kernel feature selection, even though those features can vary
-  by distro, image, or debug profile without changing the board.
-- `Image Recipe` pointed at a BSP directly, which makes images less reusable
-  across machines.
-- `package`, `component`, `app`, and `module` were used for source repos,
-  build recipes, installable outputs, and kernel loadable objects.
-- `image.steps` was treated as user-facing config even though it is really a
-  low-level execution plan.
-
-Those ambiguities make the split-repo direction hard to implement. The model
-below gives every file one job.
+- each layer owns one concern: hardware, distribution policy, or both
 
 ## Terms
 
-Use these terms consistently.
-
 | Term | Meaning |
 |---|---|
-| Workspace | A checked-out set of source repositories used by one build. |
-| Workspace manifest | `scarlet.toml`; declares source repos/layers and desired revisions. |
-| Lock file | `scarlet.lock`; pins the exact resolved revisions. |
-| Layer | A reusable metadata unit containing machines, boot targets, distros, recipes, package groups, and images. |
-| Machine | Hardware/virtual hardware contract. No boot image policy and no userland package list. |
-| Boot target | Boot packaging contract such as Limine UEFI, direct kernel boot, m1n1+U-Boot, or a signed device image. |
-| Distro | OS policy: default providers, feature policy, filesystem policy, ABI policy, release identity, and default boot target. |
-| Recipe | Build instructions for one source unit. A recipe can produce one or more packages. |
+| Workspace | A directory containing a `scarlet.toml` manifest and its `.scarlet/` build output. |
+| Project | A workspace directory, typically under `projects/` in the monorepo or at the repository root after the split. |
+| Layer | A reusable metadata unit. Each layer contains only the directories it needs. |
+| Machine | Hardware or virtual hardware contract. No boot image policy, no userland package list. |
+| Boot target | Boot packaging contract (Limine UEFI, direct kernel boot, etc.). Lives in the BSP layer. |
+| Distro | OS policy: default providers, feature flags, filesystem layout, default boot target. |
+| Recipe | Build instructions for one source unit. Produces one or more packages. |
 | Package | Installable output selected by images or package groups. |
-| Package group | Named set of packages used to keep images small and readable. |
-| Image recipe | Root filesystem composition: package groups, packages, users, files, services. |
-| Build profile | Optimization/debug/signing/cache choices for a build invocation. |
-| Image plan | Generated `.scarlet/plans/.../image-plan.toml`; executable steps resolved from the above. |
-| Kernel module | Runtime-loadable kernel object. Do not call it a package or app. |
-| Source | A path or git checkout used by a layer or recipe. Source provenance is not package selection. |
+| Package group | Named set of packages to keep images small and readable. |
+| Image recipe | Root filesystem composition: package groups, packages, files. |
+| Build profile | Optimization/debug/cache choice for a build invocation (`debug` or `release`). |
+| Image plan | Generated `.scarlet/plans/.../image-plan.toml`. Tool-owned, not user-authored. |
 
 ## Layers
 
-Scarlet should use layers as the unit that can later move to separate
-repositories. A layer can contain any of these directories:
+Layers follow the Yocto convention: each layer owns one concern and contains
+only the directories it needs. Missing directories are simply ignored.
+
+### Layer kinds
+
+| Kind | Contains | Naming |
+|---|---|---|
+| BSP | `machines/`, `boot_targets/`, and optionally hardware-specific `recipes/` | `scarlet-bsp-<platform>` |
+| Distro | `distros/`, `images/`, and the `recipes/` that distro uses | `scarlet-distro-<name>` |
+
+A layer may contain any subset of:
 
 ```text
 layers/<layer-name>/
@@ -74,81 +54,151 @@ layers/<layer-name>/
 ```
 
 Layer order is explicit in `scarlet.toml`. Higher-priority layers may override
-metadata from lower-priority layers by name, but overrides are whole-object
-overrides in the first implementation. Fine-grained append files can be added
-later if the need is real.
+metadata from lower-priority layers by name.
 
-## Top-Level Files
+### Example layout
 
-### `scarlet.toml`: Workspace Manifest
+```text
+layers/
+  scarlet-bsp-qemu-aarch64/
+    layer.toml
+    machines/
+      qemu-aarch64-virt.toml
+    boot_targets/
+      limine-uefi-aarch64.toml
 
-`scarlet.toml` answers only "which metadata/source layers are present in this
-workspace, and where do they come from?" It does not select a machine, boot
-target, distro, or image.
+  scarlet-distro-microvm/
+    layer.toml
+    distros/
+      scarlet-microvm.toml
+    images/
+      microvm-host.toml
+    recipes/
+      microvm-init.toml
+
+  scarlet-distro-reference/        # future: full distro with shell, coreutils
+    layer.toml
+    distros/
+      scarlet-reference.toml
+    images/
+      reference-full.toml
+    recipes/
+      shell.toml
+      scarlet-init.toml
+```
+
+## Project
+
+A project is a directory with a `scarlet.toml`. It declares which layers to use
+and provides default build selection.
+
+### Monorepo (current)
+
+```text
+Scarlet/
+  kernel/
+  user/
+  cargo-scarlet/
+  layers/
+    scarlet-bsp-qemu-aarch64/
+    scarlet-distro-microvm/
+  projects/
+    aarch64-microvm/
+      scarlet.toml
+      .scarlet/
+    riscv64-default/
+      scarlet.toml
+      .scarlet/
+```
+
+### Split repo (future)
+
+After the repository split, each product repository is itself a project:
+
+```text
+scarlet-microvm/                   # independent repo
+  scarlet.toml                     # at repo root
+  layers/
+    scarlet-distro-microvm/
+  .scarlet/
+```
+
+## scarlet.toml
+
+The workspace manifest declares layers and optional build defaults.
 
 ```toml
 schema_version = 1
 
 [workspace]
-name = "scarlet-reference"
+name = "aarch64-microvm"
+
+[defaults]
+machine = "qemu-aarch64-virt"
+distro = "scarlet-microvm"
+image = "microvm-host"
+# boot is optional: falls back to distro's default_boot_target
+profile = "release"
 
 [[layers]]
-name = "scarlet-core"
-path = "layers/scarlet-core"
+name = "scarlet-bsp-qemu-aarch64"
+path = "../../layers/scarlet-bsp-qemu-aarch64"
+priority = 50
 
 [[layers]]
-name = "scarlet-reference"
-path = "layers/scarlet-reference"
+name = "scarlet-distro-microvm"
+path = "../../layers/scarlet-distro-microvm"
 priority = 100
 ```
 
-Future split-repo form:
+### Build selection priority
+
+CLI flags > `[defaults]` in `scarlet.toml` > distro `default_boot_target`
+
+When `[defaults]` is present, `cargo scarlet image` can be run without any
+flags from the project directory.
+
+### Future split-repo form
 
 ```toml
 [[layers]]
-name = "scarlet-core"
-git = "https://github.com/petitstrawberry/scarlet-core"
-rev = "..."
-path = "layers/scarlet-core"
+name = "scarlet-bsp-qemu-aarch64"
+git = "https://github.com/petitstrawberry/scarlet-bsp-qemu-aarch64"
+rev = "abc123"
+path = "layers/scarlet-bsp-qemu-aarch64"
+
+[[layers]]
+name = "scarlet-distro-microvm"
+path = "layers/scarlet-distro-microvm"    # local layer in same repo
 ```
 
-### `scarlet.lock`: Workspace Lock
+## scarlet.lock
 
-`scarlet.lock` pins exact source revisions. It is generated from
-`scarlet.toml`, local overrides, and fetch results. It does not contain image
-package selection.
+`scarlet.lock` pins exact source revisions. Generated by `cargo scarlet lock`.
+Does not contain image package selection.
 
-### `scarlet.local.toml`: Local Overrides
+## scarlet.local.toml
 
-`scarlet.local.toml` is gitignored and only changes the developer workspace:
+Gitignored local overrides:
 
 ```toml
 [[overrides.layers]]
-name = "scarlet-core"
-path = "../scarlet-core"
+name = "scarlet-bsp-qemu-aarch64"
+path = "../../../my-custom-bsp"
 ```
 
 ## Source Rules
 
-Layer and recipe sources use the same provenance model:
-
-- `path` points at a local checkout or in-tree source directory.
+- `path` points at a local directory.
 - `git` records the canonical remote.
-- git sources must be pinned by `rev`, `branch`, or `tag`.
-- `scarlet.lock` records the effective resolved revision for local git
-  checkouts when available.
-- `scarlet.local.toml` may replace or add layer sources for local development
-  without changing the checked-in workspace manifest.
-
-The first pre-split implementation resolves local paths and records git
-provenance. Network fetch/update is a later SDK operation; the split boundary is
-already represented by source metadata and lock output.
+- Git sources must be pinned by `rev`, `branch`, or `tag`.
+- `scarlet.lock` records the effective resolved revision.
+- `scarlet.local.toml` may override layer paths for local development.
 
 ## Machine
 
-Machine metadata describes the target hardware or virtual hardware. It must not
-list userland packages and must not define a boot image. The same machine can
-boot through different boot targets when the hardware supports it.
+Hardware or virtual hardware contract. No boot image policy, no userland
+packages, no kernel features.
 
 ```toml
 schema_version = 1
@@ -164,21 +214,12 @@ serial = true
 virtio_mmio = true
 virtio_blk = true
 virtio_gpu = false
-
-[build_adapter]
-project = "../../../projects/aarch64-limine-microvm"
 ```
-
-`build_adapter` is a pre-split migration bridge. It lets the new resolver point
-at the existing in-tree kernel binary project without making that project shape
-part of the final architecture.
 
 ## Boot Target
 
-Boot targets describe how the already-built kernel and initramfs become a
-bootable artifact. Limine is a boot target because it abstracts a family of
-loader contracts, but the selected boot target is still distinct from the
-virtual or physical machine.
+Describes how a built kernel and initramfs become a bootable artifact. Lives in
+the BSP layer alongside the machines it supports.
 
 ```toml
 schema_version = 1
@@ -187,16 +228,18 @@ schema_version = 1
 name = "limine-uefi-aarch64"
 kind = "limine-uefi"
 arch = "aarch64"
-output = "{project}/.scarlet/images/limine-aarch64-microvm.img"
+output = ".scarlet/images/limine-aarch64.img"
 cmdline = "console=ttyAMA0"
 image_slack_mb = 8
 limine_version = "11.0.0"
 ```
 
+Output paths are relative to the project directory (where `scarlet.toml` lives).
+
 ## Distro
 
-Distro metadata describes policy. It does not choose a final image package
-list and does not describe board wiring.
+OS policy: default providers, features, filesystem layout, and default boot
+target. Does not choose a final package list or describe hardware.
 
 ```toml
 schema_version = 1
@@ -211,220 +254,176 @@ default_boot_target = "limine-uefi-aarch64"
 
 [providers]
 kernel = "scarlet-kernel"
-init = "scarlet-init"
+init = "microvm-init"
 
 [features]
 network = true
-desktop = true
 hypervisor = true
 ```
+
+The same distro can produce multiple images (`microvm-host`, `microvm-minimal`,
+etc.) that share the same policy but differ in package selection.
 
 ## Recipe and Package
 
 A recipe builds source. A package is an installable output from a recipe. The
-image selects packages, not repositories and not recipes directly.
-
-The first implementation can keep recipe metadata small:
+image selects packages, not recipes.
 
 ```toml
 schema_version = 1
 
 [recipe]
-name = "coreutils"
+name = "microvm-init"
 source = { path = "../../../user/bin" }
-build = { kind = "cargo", package = "user-bin" }
+build = { kind = "cargo", package = "user-bin", bin = "microvm_init" }
 
 [[package]]
-name = "coreutils-base"
-bins = ["cat", "ls", "cp", "mv", "rm", "mkdir", "echo", "uname"]
+name = "microvm-init"
+files = [{ from = "dist/aarch64/microvm_init", to = "/system/scarlet/bin/init" }]
 ```
 
-Later, when `user/bin` is split, each app can become its own recipe while
-images continue to select packages by name.
-
-Packages can also declare explicit installable files:
-
-```toml
-[[package]]
-name = "shell"
-files = [{ from = "dist/aarch64/sh", to = "/system/scarlet/bin/sh" }]
-```
-
-`from` is relative to the recipe source path. The generated image plan expands
-these files into concrete inputs and writes an install manifest for rootfs
-staging. If a recipe exists but its package is not selected by the image, its
-files are not installed even if the source still builds as part of a larger
-in-tree Cargo workspace.
+`from` is relative to the recipe source path. If a recipe exists but its
+package is not selected by the image, its files are not installed.
 
 ## Image Recipe
 
-Image recipes describe the root filesystem contents and image-specific
-configuration. They are machine-neutral unless they explicitly declare machine
-constraints.
+Root filesystem composition. Machine-neutral unless explicitly constrained.
 
 ```toml
 schema_version = 1
 
 [image]
-name = "host"
-description = "Host root filesystem for the Scarlet microVM distribution."
+name = "microvm-host"
+description = "Host image for the Scarlet microVM."
 compatible_machines = ["qemu-aarch64-virt"]
 
-packagegroups = ["boot", "core"]
+packagegroups = ["boot"]
 packages = ["microvm-init"]
 
 [initramfs]
 format = "newc"
-output = "{project}/.scarlet/images/initramfs-aarch64-microvm.cpio"
+output = ".scarlet/images/initramfs-aarch64.cpio"
 
 [rootfs]
 format = "ext2"
-output = "{project}/.scarlet/images/rootfs-aarch64-microvm.ext2"
-source = "{workspace}/mkfs/rootfs"
-user_bins = "{workspace}/user/bin/dist/aarch64"
-modules = "{workspace}/mkfs/dist/modules/{target_triple}"
-stage = "{project}/.scarlet/rootfs-stage"
-prebuilt = "{project}/prebuilt"
+output = ".scarlet/images/rootfs-aarch64.ext2"
 
 [[files]]
-source = "{workspace}/projects/aarch64-limine-microvm/initramfs"
+source = "initramfs"
 destination = "/"
-
-[[files]]
-source = "{workspace}/user/bin/dist/aarch64/microvm_init"
-destination = "/system/scarlet/bin/init"
 ```
 
-The image recipe says what should exist in the root filesystem. It does not say
-how to run `cpio`, `mkfs.ext2`, Limine, QEMU, or Cargo. Those are generated into
-an image plan.
-
-Image-level `[[files]]` entries are for image-specific static files and
-directories. Installable app/package payloads should normally come from selected
-recipe packages.
+Output paths are relative to the project directory. Image-level `[[files]]` are
+for static files and directories specific to this image. Installable payloads
+should come from selected recipe packages.
 
 ## Image Plan
 
-The image plan is generated and tool-owned:
+Generated and tool-owned:
 
 ```text
 .scarlet/plans/<machine>/<boot-target>/<distro>/<image>/<profile>/image-plan.toml
 ```
 
-It is allowed to contain shell commands, expanded paths, build ordering,
-artifact names, and executor-specific details. Users may inspect it, but normal
-configuration should happen in machine/boot target/distro/image/recipe metadata.
+Contains expanded paths, build ordering, artifact names, and executor-specific
+details. Users may inspect it, but configuration should happen in
+machine/boot_target/distro/image/recipe metadata.
 
-The existing `[[image.steps]]` executor should be retained as an executor for
-generated plans, not as the long-term user API.
-
-For rootfs images, the generated plan writes an install manifest from selected
-package files and passes it to the rootfs builder. This is the enforcement point
-that separates "this app can be built" from "this app is installed in this
-image".
-
-## Build Selection
-
-A complete build is selected by independent inputs. The boot target can be
-explicit or selected from the distro default:
+## CLI
 
 ```bash
-cargo scarlet plan \
-  --machine qemu-aarch64-virt \
-  --distro scarlet-microvm \
-  --boot limine-uefi-aarch64 \
-  --image host \
-  --profile debug
-```
+# From a project directory with [defaults]:
+cargo scarlet image                          # build with defaults
+cargo scarlet image --profile debug          # override profile only
+cargo scarlet run                            # build + QEMU
 
-Building the selected image uses the same tuple:
-
-```bash
+# Explicit selection (overrides [defaults]):
 cargo scarlet image \
   --machine qemu-aarch64-virt \
   --distro scarlet-microvm \
-  --image host
+  --boot limine-uefi-aarch64 \
+  --image microvm-host \
+  --profile release
+
+# Plan generation:
+cargo scarlet plan --machine qemu-aarch64-virt --distro scarlet-microvm --image microvm-host
+
+# Lock generation:
+cargo scarlet lock
 ```
 
-The tuple is:
+## Template Variables
 
-```text
-workspace manifest + machine + boot target + distro + image recipe + build profile
-```
+Paths in metadata files support these template variables:
 
-This avoids baking the machine into the image, the image into the machine, or
-the boot packaging flow into either one.
+| Variable | Expands to |
+|---|---|
+| `{workspace}` | The directory containing `scarlet.toml` (project root) |
+| `{machine}` | Selected machine name |
+| `{distro}` | Selected distro name |
+| `{target_triple}` | Machine's target triple |
+
+There is no `{project}` variable. All output paths are relative to the project
+directory or use `{workspace}` for absolute references.
 
 ## Pre-Split Repository Layout
 
-Before splitting repositories, keep the code in this repository but introduce
-the future metadata boundary:
-
 ```text
 Scarlet/
-  scarlet.toml
-  scarlet.lock
-  layers/
-    scarlet-reference/
-      layer.toml
-      machines/
-      boot_targets/
-      distros/
-      images/
-      recipes/
-      packagegroups/
   kernel/
   user/
   cargo-scarlet/
-  projects/                 # temporary build adapters
+  layers/
+    scarlet-bsp-qemu-aarch64/
+      layer.toml
+      machines/
+      boot_targets/
+    scarlet-distro-microvm/
+      layer.toml
+      distros/
+      images/
+      recipes/
+  projects/
+    aarch64-microvm/
+      scarlet.toml
+      .scarlet/
 ```
 
-`projects/` should shrink over time. It is not the final public model.
+After the repository split, `projects/` disappears. Each product repo becomes
+its own project with `scarlet.toml` at the root.
 
 ## Migration Order
 
-1. Add `scarlet.toml`, layer metadata, and a resolver that generates an image
-   plan for one known machine/boot/distro/image tuple.
-2. Move user-authored image composition out of `scarlet-config.toml` and into
-   `layers/*/images/*.toml`.
-3. Make the existing `image.steps` runner consume generated
-   `.scarlet/plans/.../image-plan.toml`.
-4. Move kernel feature and module selection out of `scarlet-config.toml` into
-   distro/profile/recipe metadata.
-5. Split `user/bin` into recipes/packages so images can include or exclude
-   programs without changing whether they build.
-6. Add `scarlet.lock` generation and `scarlet.local.toml` overrides.
-7. Split physical repositories by moving layers/source trees out one at a
-   time. The reference `Scarlet` repo remains the official reference distro.
+1. Fix `cargo-scarlet` to allow layers with missing directories.
+2. Split `scarlet-reference` into `scarlet-bsp-qemu-aarch64` and
+   `scarlet-distro-microvm`.
+3. Move `scarlet.toml` into `projects/aarch64-microvm/` with `[defaults]`.
+4. Remove `build_adapter` and the `{project}` template variable.
+5. Implement native workspace build engine (no legacy project fallback).
+6. Implement `cargo scarlet run` for workspace mode.
+7. Add `scarlet-distro-reference` layer with shell, scarlet-init, etc.
+8. Add `scarlet-bsp-qemu-riscv64` layer for RISC-V support.
+9. Split `user/bin` into individual recipe crates.
+10. Split physical repositories.
 
 ## Non-Goals
 
 - Do not make `Scarlet` a kernel-only repository.
 - Do not use git submodules as the primary composition mechanism.
-- Do not require every app to be split before image composition becomes
-  manifest-driven.
+- Do not require every app to be split before image composition is useful.
 - Do not expose low-level image-plan commands as the normal user API.
+- Do not couple metadata to a specific project directory.
 
 ## Acceptance Criteria Before Repository Split
 
-- `scarlet.toml` exists and only describes workspace/layer sources.
+- `scarlet.toml` exists in each project directory with `[defaults]`.
 - `scarlet.lock` can be generated and records effective layer revisions.
-- `scarlet.local.toml` is gitignored and can override or add local layer
-  sources.
-- At least one layer contains a machine, boot target, distro, image recipe,
-  package groups, and package recipes.
-- `cargo-scarlet` can resolve a machine/boot/distro/image tuple into a
-  generated image plan, with the boot target allowed to come from the distro
-  default.
-- `cargo-scarlet image --machine qemu-aarch64-virt --distro scarlet-microvm
-  --image host` builds the microvm initramfs, rootfs, and Limine boot image from
-  layer metadata.
-- The generated plan records all selected metadata paths and expanded file
-  inputs.
-- In-tree apps can be represented as packages selected by image metadata,
-  separate from whether `user/bin` builds, and unselected recipe files are not
-  copied into the manifest-driven rootfs stage.
-- Recipe sources support local `path` provenance and git provenance with an
-  explicit pin (`rev`, `branch`, or `tag`).
-- The old `project` model is treated as a temporary build adapter, not the
-  architecture.
+- `scarlet.local.toml` is gitignored and can override layer paths.
+- Layers are split by concern: BSP layers contain machines/boot_targets,
+  distro layers contain distros/images/recipes.
+- `cargo scarlet image` (with no flags) builds from `[defaults]`.
+- `cargo scarlet run` boots the selected image in QEMU.
+- The generated image plan records all selected metadata and expanded paths.
+- Unselected recipe files are not copied into the rootfs.
+- Recipe sources support `path` and git provenance with explicit pins.
+- No `build_adapter`, no `{project}` variable, no legacy project fallback.
