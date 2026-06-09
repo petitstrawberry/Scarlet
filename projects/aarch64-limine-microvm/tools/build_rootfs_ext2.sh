@@ -3,8 +3,8 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [ "$#" -lt 5 ] || [ "$#" -gt 7 ]; then
-    echo "usage: $0 <rootfs-base> <scarlet-bin-dir> <modules-dir> <stage-dir> <output-image> [project-prebuilt-dir] [install-manifest]" >&2
+if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
+    echo "usage: $0 <rootfs-base> <scarlet-bin-dir> <modules-dir> <stage-dir> <output-image> [project-prebuilt-dir]" >&2
     exit 2
 fi
 
@@ -14,7 +14,6 @@ MODULES_DIR="$3"
 STAGE_DIR="$4"
 OUTPUT_IMAGE="$5"
 PROJECT_PREBUILT_DIR="${6:-}"
-INSTALL_MANIFEST="${7:-}"
 
 BLOCK_SIZE="${SCARLET_EXT2_BLOCK_SIZE:-4096}"
 LABEL="${SCARLET_EXT2_LABEL:-SCARLET_ROOT}"
@@ -29,7 +28,7 @@ if [ ! -d "$ROOTFS_BASE" ]; then
     exit 1
 fi
 
-if [ -z "$INSTALL_MANIFEST" ] && [ ! -d "$SCARLET_BIN_DIR" ]; then
+if [ ! -d "$SCARLET_BIN_DIR" ]; then
     echo "Scarlet binary directory not found: $SCARLET_BIN_DIR" >&2
     exit 1
 fi
@@ -39,38 +38,7 @@ mkdir -p "$STAGE_DIR"
 cp -a "$ROOTFS_BASE"/. "$STAGE_DIR"/
 
 mkdir -p "$STAGE_DIR/system/scarlet/bin"
-if [ -n "$INSTALL_MANIFEST" ]; then
-    if [ ! -f "$INSTALL_MANIFEST" ]; then
-        echo "install manifest not found: $INSTALL_MANIFEST" >&2
-        exit 1
-    fi
-    while IFS='	' read -r source destination; do
-        if [ -z "$source" ] || [ -z "$destination" ]; then
-            continue
-        fi
-        if [ ! -e "$source" ]; then
-            echo "install manifest source not found: $source" >&2
-            exit 1
-        fi
-        destination="${destination#/}"
-        target="$STAGE_DIR/$destination"
-        if [ -d "$source" ]; then
-            mkdir -p "$target"
-            cp -a "$source"/. "$target"/
-        else
-            mkdir -p "$(dirname "$target")"
-            cp -a "$source" "$target"
-        fi
-    done < "$INSTALL_MANIFEST"
-    if [ -d "$SCARLET_BIN_DIR" ]; then
-        # Keep large later artifacts at a stable ext2 layout while keeping
-        # unselected user binaries out of /system/scarlet/bin.
-        mkdir -p "$STAGE_DIR/.scarlet-layout-padding/user-bin"
-        find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/.scarlet-layout-padding/user-bin/" \;
-    fi
-else
-    find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/system/scarlet/bin/" \;
-fi
+find "$SCARLET_BIN_DIR" -maxdepth 1 -type f ! -name '*.debug' -exec cp -a {} "$STAGE_DIR/system/scarlet/bin/" \;
 
 if [ -d "$MODULES_DIR" ]; then
     mkdir -p "$STAGE_DIR/system/scarlet/modules"

@@ -69,9 +69,7 @@ echo "Rebuilding microvm images from $KERNEL_PATH"
 if ! (
     cd "$PROJECT_ROOT" &&
     cargo run --manifest-path "$PROJECT_ROOT/cargo-scarlet/Cargo.toml" -- image \
-        --machine qemu-aarch64-virt \
-        --distro scarlet-microvm \
-        --image host \
+        --project "$PROJECT_DIR" \
         --release \
         --no-build \
         --kernel-elf "$KERNEL_PATH"
