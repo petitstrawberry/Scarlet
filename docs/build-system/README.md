@@ -2,16 +2,15 @@
 
 ## Overview
 
-This section documents the older project-local kernel build adapter. The current
-distro/image architecture is defined in
-[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+`scarlet-config.toml` is the current project-local kernel build configuration.
+It declares the target board, kernel features, and module selection for a
+specific project.
 
-`scarlet-config.toml` is no longer the distro or image composition source of
-truth. It remains as a pre-split adapter input for project-local kernel builds.
-Userland image composition lives in layer metadata under `layers/*/images/` and
-is resolved through `cargo-scarlet plan` / `cargo-scarlet image --machine ...
---distro ... --image ...`; boot packaging is selected with `--boot ...` or the
-distro default.
+The planned distro/image architecture is described in
+[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+That document defines the future `scarlet.toml` model with project-centric
+BSP, packages, and optional bundles. The current implementation uses
+`scarlet-config.toml` and `cargo-scarlet` with `--project` flags.
 
 The intended end-state is that a **project is the main user-facing Scarlet project**. The current repository layout is only the in-tree development baseline used to prototype that model.
 
@@ -27,8 +26,9 @@ The core design goals are:
 
 Today, this repository builds through `cargo make` from the repository root.
 
-- `projects/riscv64-limine-full/Cargo.toml` and `projects/aarch64-limine-full/Cargo.toml` are the top-level kernel binaries
-- both projects currently depend directly on `../../kernel`
+- `projects/riscv64-limine-full/Cargo.toml`, `projects/aarch64-limine-full/Cargo.toml`, `projects/aarch64-limine-microvm/Cargo.toml`, and `projects/aarch64-apple-limine-full/Cargo.toml` are the top-level kernel binaries
+- all projects currently depend directly on `../../kernel`
+- `projects/aarch64-limine-microvm/` also uses `scarlet-config.toml` for `cargo-scarlet` image composition
 - the kernel crate is still the canonical `scarlet` crate
 - the kernel already uses linker-section-based initcalls (`.initcall.early`, `.initcall.driver`, `.initcall.late`)
 

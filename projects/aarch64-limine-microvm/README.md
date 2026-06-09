@@ -4,10 +4,10 @@ This project boots Scarlet with the built-in AArch64 hypervisor enabled, then
 starts Firecracker from the Scarlet userspace rootfs.
 
 The project is intended to be driven primarily by `cargo-scarlet`: the boot
-image, initramfs, rootfs staging, and microVM guest artifacts should be described
-by this project's recipe and helper tools. Avoid adding new dependencies on the
-repository top-level `cargo make` flow; keep new image-building logic in this
-project or in `cargo-scarlet` project recipes.
+image, initramfs, rootfs staging, and microVM guest artifacts are described
+by `scarlet-config.toml` and project-local helper tools. Avoid adding new
+dependencies on the repository top-level `cargo make` flow; keep new
+image-building logic in this project or in `cargo-scarlet` config.
 
 ## First-time setup
 
@@ -73,23 +73,23 @@ microVM documentation should prefer the explicit project-local flow above.
 
 ## Project-local Image Flow
 
-The image recipe lives in `scarlet-config.toml`.
+The image configuration lives in `scarlet-config.toml`.
 
 - The Limine boot image is emitted under `.scarlet/images/`.
 - The initramfs is assembled from this project's `initramfs/` directory plus the
-  project recipe inputs.
+  config inputs.
 - The rootfs is staged under `.scarlet/rootfs-stage/` by
   `tools/build_rootfs_ext2.sh`.
 - MicroVM-specific guest artifacts live under `prebuilt/`; the binary payloads
   under `prebuilt/system/` are intentionally ignored by git.
 
-Current compatibility inputs still come from repository-wide build outputs, but
-the locations are declared in `scarlet-config.toml`:
+Current compatibility inputs come from repository-wide build outputs, declared
+in `scarlet-config.toml`:
 
 - `user/bin/dist/aarch64`
 - `mkfs/rootfs`
 - `mkfs/dist/modules/aarch64-unknown-none-elf`
 
 When moving more build steps local, prefer replacing those inputs with explicit
-project-local helper scripts or `cargo-scarlet` recipe steps rather than adding
+project-local helper scripts or `cargo-scarlet` config rather than adding
 more top-level `cargo make` dependencies.

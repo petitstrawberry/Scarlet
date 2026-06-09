@@ -2,15 +2,15 @@
 
 ## Overview
 
-`scarlet-config.toml` is the legacy pre-split source of truth for project-local
-kernel build composition. It is not the distro or image composition model.
+`scarlet-config.toml` is the current project-local kernel build configuration.
+It defines the target board, kernel crate source, feature flags, and module
+selection for a specific project.
 
-The current distro model is documented in
-[`docs/architecture/distro-model.md`](../architecture/distro-model.md):
-`scarlet.toml` defines workspace/layer sources, layer machine metadata defines
-hardware contracts, layer boot target metadata defines boot packaging, layer
-distro metadata defines policy, and layer image metadata defines rootfs
-composition.
+The planned evolution to a unified `scarlet.toml` with distro/image composition
+is documented in
+[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+Until that model is implemented, `scarlet-config.toml` remains the active
+configuration format.
 
 It should be understood as a **full resolved `.config`-style file** in the Kconfig sense: every meaningful build option is written out explicitly, including options that are disabled.
 
