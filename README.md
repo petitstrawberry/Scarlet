@@ -165,7 +165,7 @@ Scarlet supports multiple CPU architectures with a unified codebase:
 - **RISC-V 64-bit** - Primary development platform, fully supported
 - **AArch64 (ARM 64-bit)** - In development, basic support available
 
-Scarlet is migrating its boot flow to **Limine**, with `riscv64` now serving as the primary higher-half boot path. See [Limine Boot Path](docs/system/limine-boot.md).
+Scarlet boots via the **Limine** UEFI protocol on both RISC-V and AArch64. See [Limine Boot](docs/boot/limine.md).
 
 The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
 
@@ -354,7 +354,7 @@ For more detailed information about the Scarlet kernel, visit our documentation:
 - [Linux userspace artifacts (Buildroot + optional binaries)](docs/abi/linux/userspace-artifacts.md)
 - [Linux rootfs deployment guide](docs/abi/linux/deployment.md)
 - [Linux ABI support status and roadmap](docs/abi/linux/status.md)
-- [Limine Boot Path](docs/system/limine-boot.md)
+- [Limine Boot](docs/boot/limine.md)
 
 ### Generating Documentation
 
