@@ -60,11 +60,6 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR" && cd .. && pwd)"
 BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-desktop.img"
 ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-desktop.ext2"
 
-if [ ! -f "$KERNEL_PATH" ]; then
-    echo "Error: kernel binary not found at $KERNEL_PATH"
-    exit 1
-fi
-
 QEMU_DEBUG_ARGS=""
 QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
 QEMU_SMP="${SCARLET_QEMU_SMP:-1}"

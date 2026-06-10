@@ -131,42 +131,42 @@ profiler = false
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = false }
 
-[image]
+[images]
 
-[image.initramfs]
+[images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs.cpio"
 
 # Include packages from a bundle
-[[image.initramfs.layers]]
+[[images.initramfs.layers]]
 path = "../../bundles/microvm/bundle.toml"
 
 # Project-local packages
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "microvm_init"
 to = "/system/scarlet/bin/init"
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 from = "initramfs"
 to = "/"
 
-[image.rootfs]
+[images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs.ext2"
 
 # Same bundle can be used in rootfs
-[[image.rootfs.layers]]
+[[images.rootfs.layers]]
 path = "../../bundles/microvm/bundle.toml"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 from = "prebuilt/firecracker"
 to = "/usr/bin/firecracker"
 
-[image.boot]
-kind = "limine-uefi"
+[images.boot]
+format = "limine-uefi"
 output = ".scarlet/images/limine-aarch64.img"
 cmdline = "console=ttyAMA0"
 ```
@@ -285,15 +285,15 @@ to = "/usr/bin/firecracker"
 
 ### Using Bundles
 
-Reference bundles from `scarlet.toml` via `[[image.*.layers]]`:
+Reference bundles from `scarlet.toml` via `[[images.*.layers]]`:
 
 ```toml
 # Use the same bundle for initramfs
-[[image.initramfs.layers]]
+[[images.initramfs.layers]]
 path = "../../bundles/microvm/bundle.toml"
 
 # And/or rootfs
-[[image.rootfs.layers]]
+[[images.rootfs.layers]]
 path = "../../bundles/microvm/bundle.toml"
 ```
 
@@ -304,7 +304,7 @@ Bundles are optional. Simple projects can define all packages directly in `scarl
 When `cargo-scarlet` processes `scarlet.toml`, it produces an expanded internal representation:
 
 1. Read `scarlet.toml`
-2. For each `[[image.*.layers]]`, read the bundle file
+2. For each `[[images.*.layers]]`, read the bundle file
 3. Resolve all relative paths from their source file to absolute paths
 4. Expand template variables (`{target_triple}`, `{arch}`)
 5. Merge bundle packages + project-local packages (bundle first, local after)
@@ -332,71 +332,71 @@ hypervisor = true
 limine = true
 profiler = false
 
-[image.initramfs]
+[images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs.cpio"
 
 # All paths resolved to absolute, templates expanded
 # Bundle packages come first, project-local packages after
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 kind = "cargo"
 source = "/absolute/path/to/user/bin"
 package = "user-bin"
 bin = "sh"
 to = "/system/scarlet/bin/sh"
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 kind = "cargo"
 source = "/absolute/path/to/user/bin"
 package = "user-bin"
 bin = "hello"
 to = "/system/scarlet/bin/hello"
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 from = "/absolute/path/to/bundles/microvm/prebuilt/aarch64/firecracker"
 to = "/usr/bin/firecracker"
 
 # Project-local packages (override bundle if conflict)
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 kind = "cargo"
 source = "/absolute/path/to/user/bin"
 package = "user-bin"
 bin = "microvm_init"
 to = "/system/scarlet/bin/init"
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 from = "/absolute/path/to/projects/aarch64-microvm/initramfs"
 to = "/"
 
-[image.rootfs]
+[images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs.ext2"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 kind = "cargo"
 source = "/absolute/path/to/user/bin"
 package = "user-bin"
 bin = "sh"
 to = "/system/scarlet/bin/sh"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 kind = "cargo"
 source = "/absolute/path/to/user/bin"
 package = "user-bin"
 bin = "hello"
 to = "/system/scarlet/bin/hello"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 from = "/absolute/path/to/bundles/microvm/prebuilt/aarch64/firecracker"
 to = "/usr/bin/firecracker"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 from = "/absolute/path/to/projects/aarch64-microvm/prebuilt/firecracker"
 to = "/usr/bin/firecracker"
 
-[image.boot]
-kind = "limine-uefi"
+[images.boot]
+format = "limine-uefi"
 output = ".scarlet/images/limine-aarch64.img"
 cmdline = "console=ttyAMA0"
 ```
@@ -416,7 +416,7 @@ cmdline = "console=ttyAMA0"
 2. Expand bundles and resolve paths
 3. Build initramfs: assemble files from expanded packages
 4. Build rootfs: assemble files from expanded packages
-5. Build boot image: package kernel + initramfs + rootfs per `[image.boot]` config
+5. Build boot image: package kernel + initramfs + rootfs per `[images.boot]` config
 
 ### `cargo scarlet run`
 
@@ -475,7 +475,7 @@ The old `scarlet-config.toml` format and the intermediate Yocto-style layer syst
 | BSP layer (`machines/`, `boot_targets/`) | Project directory itself (`Cargo.toml`, `lds/`, `src/`) |
 | Distro layer (`distros/`) | `[kernel.features]` in `scarlet.toml` |
 | Recipe (`recipes/`) | `[[packages]]` with `kind = "cargo"` |
-| Image recipe (`images/`) | `[image.initramfs]` / `[image.rootfs]` in `scarlet.toml` |
+| Image recipe (`images/`) | `[images.initramfs]` / `[images.rootfs]` in `scarlet.toml` |
 | Package group (`packagegroups/`) | Bundles (`bundles/*/bundle.toml`) |
 | `build_adapter` | Removed — project is the BSP |
 
@@ -490,7 +490,7 @@ The old `scarlet-config.toml` format and the intermediate Yocto-style layer syst
 
 ## Acceptance Criteria
 
-- [ ] `scarlet.toml` in each project with `[kernel]`, `[image]` sections
+- [ ] `scarlet.toml` in each project with `[kernel]`, `[images]` sections
 - [ ] `cargo scarlet build` compiles kernel via project `Cargo.toml`
 - [ ] `cargo scarlet image` generates initramfs, rootfs, and boot image
 - [ ] `cargo scarlet run` boots the image in QEMU

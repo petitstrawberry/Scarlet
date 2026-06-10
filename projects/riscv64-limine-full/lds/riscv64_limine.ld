@@ -48,7 +48,7 @@ SECTIONS {
       __INITCALL_DRIVER_START = .;
       *(.initcall.driver)
       __INITCALL_DRIVER_END = .;
-      __INICALL_LATE_START = .;
+      __INITCALL_LATE_START = .;
       *(.initcall.late)
       __INITCALL_END = .;
     } :rodata

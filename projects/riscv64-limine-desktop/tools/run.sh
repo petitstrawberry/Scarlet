@@ -145,11 +145,6 @@ fi
 echo "Using boot image: $BOOT_IMAGE"
 echo "Using rootfs image: $ROOTFS_IMAGE"
 
-if [ ! -f "$EFI_CODE" ]; then
-    echo "Error: RISC-V EFI firmware not found at $EFI_CODE"
-    exit 1
-fi
-
 if [ ! -f "$EFI_VARS_TEMPLATE" ]; then
     echo "Error: RISC-V EFI VARS template not found at $EFI_VARS_TEMPLATE"
     exit 1
