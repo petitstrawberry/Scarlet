@@ -12,11 +12,6 @@ path = "../cli-utils/bundle.toml"
 source = "fs"
 to = "/"
 
-[[files]]
-source = "templates/.shrc.tmpl"
-to = "/system/scarlet/root/.shrc"
-template = true
-
 [[packages]]
 kind = "cargo"
 source = "../../user/bin"
