@@ -161,6 +161,8 @@ struct ManifestPackage {
 struct ManifestFileEntry {
     source: String,
     to: String,
+    #[serde(default)]
+    template: bool,
 }
 
 struct ResolvedSection {
@@ -318,6 +320,20 @@ fn resolve_path(base: &Path, relative: &str) -> PathBuf {
     }
 }
 
+struct TemplateContext {
+    arch: String,
+    target_triple: String,
+    project: String,
+}
+
+impl TemplateContext {
+    fn expand(&self, s: &str) -> String {
+        s.replace("{target_triple}", &self.target_triple)
+            .replace("{arch}", &self.arch)
+            .replace("{project}", &self.project)
+    }
+}
+
 fn expand_templates(s: &str, target_triple: &str, arch: &str) -> String {
     s.replace("{target_triple}", target_triple)
         .replace("{arch}", arch)
@@ -332,37 +348,54 @@ fn userspace_target_triple(kernel_triple: &str) -> String {
     }
 }
 
-struct ResolvedFile {
-    source: PathBuf,
-    to: String,
+#[derive(Debug)]
+enum FileSource {
+    Local(PathBuf),
+    Url(String),
 }
 
-fn resolve_section(section: &ManifestImageSection, base_dir: &Path, target_triple: &str, images: &BTreeMap<String, ManifestImageSection>) -> ResolvedSection {
+struct ResolvedFile {
+    source: FileSource,
+    to: String,
+    template: bool,
+}
+
+fn resolve_section(section: &ManifestImageSection, base_dir: &Path, ctx: &TemplateContext, images: &BTreeMap<String, ManifestImageSection>) -> Result<ResolvedSection, String> {
     let mut packages = Vec::new();
     let mut files = Vec::new();
 
     for pkg in &section.packages {
-        packages.push(resolve_package(pkg, base_dir, target_triple, images));
+        packages.push(resolve_package(pkg, base_dir, &ctx.target_triple, images));
     }
 
     for f in &section.files {
+        let source = if f.source.starts_with("https://") || f.source.starts_with("http://") {
+            FileSource::Url(f.source.clone())
+        } else {
+            FileSource::Local(resolve_path(base_dir, &f.source))
+        };
         files.push(ResolvedFile {
-            source: resolve_path(base_dir, &f.source),
-            to: f.to.clone(),
+            source,
+            to: ctx.expand(&f.to),
+            template: f.template,
         });
     }
 
-    ResolvedSection { packages, files }
+    Ok(ResolvedSection { packages, files })
 }
 
 fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
     let manifest = load_manifest(project_dir)?;
     let target_triple = manifest.kernel.target.clone();
+    let arch = target_triple.split('-').next().unwrap_or("unknown").to_string();
+    let project = manifest.project.name.clone();
+
+    let ctx = TemplateContext { arch, target_triple, project };
 
     let mut sections = BTreeMap::new();
     let images_ref = &manifest.images;
     for (name, section) in images_ref {
-        sections.insert(name.clone(), resolve_section(section, project_dir, &target_triple, images_ref));
+        sections.insert(name.clone(), resolve_section(section, project_dir, &ctx, images_ref)?);
     }
 
     Ok(ExpandedManifest {
@@ -859,6 +892,19 @@ fn build_manifest_image(
         .to_string();
     let profile = if release { "release" } else { "debug" };
 
+    let raw_arch = target_triple.split('-').next().unwrap_or("unknown");
+    let arch = match raw_arch {
+        v if v.starts_with("riscv64") => "riscv64".to_string(),
+        v if v.starts_with("riscv32") => "riscv32".to_string(),
+        v if v.starts_with("aarch64") => "aarch64".to_string(),
+        v => v.to_string(),
+    };
+    let tpl_ctx = TemplateContext {
+        arch,
+        target_triple: target_triple.clone(),
+        project: expanded.manifest.project.name.clone(),
+    };
+
     let build_order = topo_sort_images(&expanded.manifest.images)?;
 
     for section_name in build_order {
@@ -881,17 +927,34 @@ fn build_manifest_image(
                 fs::create_dir_all(&staging_dir)
                     .map_err(|e| format!("failed to create staging: {e}"))?;
 
+                let cache_dir = project.join(".scarlet/cache/files");
+
                 for file in &resolved.files {
+                    let local_path = match &file.source {
+                        FileSource::Local(p) => p.clone(),
+                        FileSource::Url(u) => fetch_url_cached(u, &cache_dir)?,
+                    };
+
                     let dest = staging_dir.join(file.to.trim_start_matches('/'));
-                    if file.source.is_dir() {
-                        copy_dir_recursive(&file.source, &dest)?;
+                    if local_path.is_dir() {
+                        copy_dir_recursive(&local_path, &dest)?;
+                    } else if file.template {
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent)
+                                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                        }
+                        let content = fs::read_to_string(&local_path)
+                            .map_err(|e| format!("failed to read template {}: {e}", local_path.display()))?;
+                        let expanded = tpl_ctx.expand(&content);
+                        fs::write(&dest, expanded)
+                            .map_err(|e| format!("failed to write template {} -> {}: {e}", local_path.display(), dest.display()))?;
                     } else {
                         if let Some(parent) = dest.parent() {
                             fs::create_dir_all(parent)
                                 .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
                         }
-                        fs::copy(&file.source, &dest)
-                            .map_err(|e| format!("failed to copy {} -> {}: {e}", file.source.display(), dest.display()))?;
+                        fs::copy(&local_path, &dest)
+                            .map_err(|e| format!("failed to copy {} -> {}: {e}", local_path.display(), dest.display()))?;
                     }
                 }
 
@@ -1093,6 +1156,37 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn fetch_url_cached(url: &str, cache_dir: &Path) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+
+    let url_path = url.split('?').next().unwrap_or(url);
+    let basename = url_path.rsplit('/').next().unwrap_or("download");
+    let cached_name = format!("{}-{}", &hash[..12], basename);
+    let cached_path = cache_dir.join(&cached_name);
+
+    if cached_path.exists() {
+        return Ok(cached_path);
+    }
+
+    fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("failed to create cache dir {}: {e}", cache_dir.display()))?;
+
+    eprintln!("cargo-scarlet: fetching {}", url);
+    let status = Command::new("curl")
+        .args(["-fsSL", "-o", cached_path.to_str().unwrap_or(""), url])
+        .status()
+        .map_err(|e| format!("failed to run curl: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(&cached_path);
+        return Err(format!("curl failed to fetch {}", url));
+    }
+
+    Ok(cached_path)
+}
+
 fn install_package(
     staging_dir: &Path,
     pkg: &ResolvedPackage,
@@ -1171,8 +1265,35 @@ fn install_package(
             fs::copy(&binary, &dest)
                 .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
         }
+        Some("script") => {
+            let source = pkg.source.as_ref().ok_or("script package missing source")?;
+            let script_path = if source.is_absolute() {
+                source.clone()
+            } else {
+                _project.join(source)
+            };
+            if !script_path.exists() {
+                return Err(format!("script not found: {}", script_path.display()));
+            }
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+            let status = Command::new("sh")
+                .arg(&script_path)
+                .arg(&dest)
+                .current_dir(_project)
+                .status()
+                .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
+            if !status.success() {
+                return Err(format!("script failed: {}", script_path.display()));
+            }
+        }
         _ => {
-            let from = pkg.from.as_ref().ok_or("package missing from path")?;
+            let from = pkg.from.as_ref().ok_or_else(|| {
+                format!("package (to={}) missing 'from' path and has unknown kind {:?}",
+                    pkg.to, pkg.kind)
+            })?;
             if from.is_dir() {
                 copy_dir_contents(from, &dest, &[])?;
             } else if from.exists() {

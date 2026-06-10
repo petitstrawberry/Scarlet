@@ -1,4 +1,3 @@
-#!/usr/bin/env swift
 import CoreMedia
 import CoreVideo
 import Darwin

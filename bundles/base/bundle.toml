@@ -73,3 +73,16 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "scpm"
 to = "/system/scarlet/bin/scpm"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "netcfgd"
+to = "/system/scarlet/bin/netcfgd"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "resolverd"
+to = "/system/scarlet/bin/resolverd"

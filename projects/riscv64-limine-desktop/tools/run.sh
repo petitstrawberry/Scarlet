@@ -234,7 +234,7 @@ QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY")
 QEMU_VHOST_USER_VIDEO_ARGS=()
 if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-}" = "true" ]; then
     VHOST_USER_VIDEO_SOCKET="${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
-    VHOST_USER_VIDEO_DAEMON="${SCARLET_VHOST_USER_VIDEO_DAEMON:-$PROJECT_DIR/dist/host/vhost_video_videotoolbox}"
+    VHOST_USER_VIDEO_DAEMON="${SCARLET_VHOST_USER_VIDEO_DAEMON:-$PROJECT_ROOT/dist/host/vhost_video_videotoolbox}"
     VHOST_USER_VIDEO_LOG="${SCARLET_VHOST_USER_VIDEO_LOG:-/private/tmp/scarlet-video.log}"
     VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS="${SCARLET_VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS:-100}"
     VHOST_USER_VIDEO_ID="${SCARLET_VHOST_USER_VIDEO_ID:-31}"
@@ -268,18 +268,18 @@ if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-
             else
                 "$VHOST_USER_VIDEO_DAEMON" --socket "$VHOST_USER_VIDEO_SOCKET" >"$VHOST_USER_VIDEO_LOG" 2>&1 &
             fi
-        elif [ -f "$PROJECT_ROOT/Package.swift" ] && [ -x /usr/bin/xcrun ]; then
+        elif [ -f "$PROJECT_ROOT/tools/vhost-video-videotoolbox/Package.swift" ] && [ -x /usr/bin/xcrun ]; then
             echo "Starting vhost-user video daemon with swift run: $VHOST_USER_VIDEO_SOCKET"
             VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS="${SCARLET_VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS:-1200}"
             if [ "$VHOST_USER_VIDEO_LOG" = "stderr" ]; then
                 (
-                    cd "$PROJECT_ROOT" &&
+                    cd "$PROJECT_ROOT/tools/vhost-video-videotoolbox" &&
                     mkdir -p .build/clang-module-cache &&
                     env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift run --disable-sandbox vhost-video-videotoolbox --socket "$VHOST_USER_VIDEO_SOCKET"
                 ) &
             else
                 (
-                    cd "$PROJECT_ROOT" &&
+                    cd "$PROJECT_ROOT/tools/vhost-video-videotoolbox" &&
                     mkdir -p .build/clang-module-cache &&
                     env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift run --disable-sandbox vhost-video-videotoolbox --socket "$VHOST_USER_VIDEO_SOCKET"
                 ) >"$VHOST_USER_VIDEO_LOG" 2>&1 &

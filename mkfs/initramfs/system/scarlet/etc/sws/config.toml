@@ -1,0 +1,7 @@
+[output]
+scale = 2.0
+
+[keybindings]
+# SWS-level shortcuts are matched before the focused client receives the key.
+# Other useful values include "Ctrl+Space", "Zenkaku_Hankaku", "Henkan", and "Muhenkan".
+ime_toggle = "Ctrl+Backslash"

@@ -2,6 +2,15 @@
 # GUI and desktop environment components.
 # Layer on top of scarlet-base for a graphical desktop experience.
 
+[[files]]
+source = "fs"
+to = "/"
+
+[[files]]
+source = "templates/.shrc.tmpl"
+to = "/system/scarlet/root/.shrc"
+template = true
+
 [[packages]]
 kind = "cargo"
 source = "../../user/bin"
@@ -41,8 +50,8 @@ to = "/system/scarlet/bin/sws"
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "fb_test"
-to = "/system/scarlet/bin/fb_test"
+bin = "sas"
+to = "/system/scarlet/bin/sas"
 
 [[packages]]
 kind = "cargo"
@@ -73,8 +82,13 @@ bin = "scarlet_skk"
 to = "/system/scarlet/bin/scarlet_skk"
 
 [[packages]]
+kind = "script"
+source = "tools/fetch_skk_dictionary.sh"
+to = "/system/scarlet/share/skk/SKK-JISYO.L"
+
+[[packages]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
-bin = "boxdraw"
-to = "/system/scarlet/bin/boxdraw"
+bin = "wayland_bridge"
+to = "/system/scarlet/bin/wayland_bridge"

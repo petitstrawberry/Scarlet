@@ -30,7 +30,7 @@ contract.
 
 The current backend is a PCI VirtIO video device. That driver negotiates
 `VIRTIO_F_VERSION_1` and the VirtIO video `RESOURCE_GUEST_PAGES` feature. The
-host backend added with this work is `tools/vhost_video_videotoolbox.swift`,
+host backend added with this work is `tools/vhost-video-videotoolbox`,
 which decodes through Apple's VideoToolbox when the QEMU vhost-user-video path
 is enabled.
 

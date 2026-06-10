@@ -30,6 +30,9 @@ output = ".scarlet/images/initramfs-riscv64-desktop.cpio"
 path = "../../bundles/base/bundle.toml"
 
 [[images.initramfs.layers]]
+path = "../../bundles/cli-utils/bundle.toml"
+
+[[images.initramfs.layers]]
 path = "../../bundles/desktop/bundle.toml"
 
 [images.rootfs]
@@ -38,6 +41,9 @@ output = ".scarlet/images/rootfs-riscv64-desktop.ext2"
 
 [[images.rootfs.layers]]
 path = "../../bundles/base/bundle.toml"
+
+[[images.rootfs.layers]]
+path = "../../bundles/cli-utils/bundle.toml"
 
 [[images.rootfs.layers]]
 path = "../../bundles/desktop/bundle.toml"
