@@ -246,9 +246,9 @@ fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
     let manifest: ScarletManifest =
         toml::from_str(&merged_text).map_err(|e| format!("failed to deserialize manifest: {e}"))?;
 
-    if manifest.schema_version != 2 {
+    if manifest.schema_version != 1 {
         return Err(format!(
-            "unsupported schema_version {} (expected 2)",
+            "unsupported schema_version {} (expected 1)",
             manifest.schema_version
         ));
     }
@@ -2567,7 +2567,7 @@ scarlet_modules = {{ package = "scarlet-modules", path = ".scarlet/scarlet-modul
     write_if_changed(&project_dir.join("Cargo.toml"), &project_cargo_toml)?;
 
     let scarlet_manifest = format!(
-        r#"schema_version = 2
+        r#"schema_version = 1
 
 [project]
 name = "{name}"
