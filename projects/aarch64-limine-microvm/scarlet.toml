@@ -20,39 +20,42 @@ profiler = false
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = false }
 
-[image]
+[images]
 
-[image.initramfs]
+[images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs-aarch64-microvm.cpio"
 
-[[image.initramfs.packages]]
-from = "initramfs"
-to = "/"
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
 
-[[image.initramfs.packages]]
+[[images.initramfs.packages]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "microvm_init"
 to = "/system/scarlet/bin/init"
 
-[image.rootfs]
+[images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs-aarch64-microvm.ext2"
 
-[[image.rootfs.packages]]
-from = "initramfs"
-to = "/"
+[[images.rootfs.layers]]
+path = "../../bundles/base/bundle.toml"
 
-[[image.rootfs.packages]]
+[[images.rootfs.packages]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "microvm_init"
 to = "/system/scarlet/bin/init"
 
-[image.boot]
-kind = "limine-uefi"
+[images.boot]
+format = "limine-uefi"
 output = ".scarlet/images/limine-aarch64-microvm.img"
 cmdline = "console=ttyAMA0"
+deps = ["initramfs"]
+
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs-aarch64-microvm.cpio"
+to = "/boot/initramfs"

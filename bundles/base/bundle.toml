@@ -1,85 +1,75 @@
-# Scarlet Core Userspace Bundle
-# Essential system binaries needed for boot and basic shell access.
-# Architecture-independent: uses template variables for cross-arch support.
+# Scarlet Base Bundle
+# Essential system directories and binaries for boot and basic shell access.
 
-dirs = [
-    "/dev",
-    "/home",
-    "/mnt/newroot",
-    "/mnt/newroot/old_root",
-    "/proc",
-    "/sys",
-    "/tmp",
-    "/data",
-    "/data/config",
-    "/data/config/scarlet",
-]
+[[files]]
+source = "fs"
+to = "/"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "init"
 to = "/system/scarlet/bin/init"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
 to = "/system/scarlet/bin/sh"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "login"
 to = "/system/scarlet/bin/login"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "sbusd"
 to = "/system/scarlet/bin/sbusd"
 
 [[packages]]
 kind = "cargo"
-source = "../user/std-bin"
+source = "../../user/std-bin"
 bin = "hello"
 to = "/system/scarlet/bin/hello"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "ps"
 to = "/system/scarlet/bin/ps"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "shutdown"
 to = "/system/scarlet/bin/shutdown"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
 
 [[packages]]
 kind = "cargo"
-source = "../user/bin"
+source = "../../user/bin"
 package = "user-bin"
 bin = "scpm"
 to = "/system/scarlet/bin/scpm"

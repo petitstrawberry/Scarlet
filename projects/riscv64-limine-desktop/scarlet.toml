@@ -20,37 +20,34 @@ profiler = false
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
 
-[image]
+[images]
 
-[image.initramfs]
+[images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs-riscv64-desktop.cpio"
 
-[[image.initramfs.layers]]
-path = "../../bundles/scarlet-core.toml"
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
 
-[[image.initramfs.layers]]
-path = "../../bundles/scarlet-desktop.toml"
+[[images.initramfs.layers]]
+path = "../../bundles/desktop/bundle.toml"
 
-[[image.initramfs.packages]]
-from = "initramfs"
-to = "/"
-
-[image.rootfs]
+[images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs-riscv64-desktop.ext2"
 
-[[image.rootfs.layers]]
-path = "../../bundles/scarlet-core.toml"
+[[images.rootfs.layers]]
+path = "../../bundles/base/bundle.toml"
 
-[[image.rootfs.layers]]
-path = "../../bundles/scarlet-desktop.toml"
+[[images.rootfs.layers]]
+path = "../../bundles/desktop/bundle.toml"
 
-[[image.rootfs.packages]]
-from = "initramfs"
-to = "/"
-
-[image.boot]
-kind = "limine-uefi"
+[images.boot]
+format = "limine-uefi"
 output = ".scarlet/images/limine-riscv64-desktop.img"
-cmdline = "console=ttyS0"
+cmdline = "console=ttyS0 root=/dev/vblk1"
+deps = ["initramfs"]
+
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+to = "/boot/initramfs"

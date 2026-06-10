@@ -136,16 +136,15 @@ struct ManifestKernel {
 #[derive(Debug, Default, Deserialize)]
 struct ManifestImageSection {
     format: Option<String>,
-    kind: Option<String>,
     output: Option<String>,
     #[serde(default)]
     cmdline: String,
     #[serde(default)]
     packages: Vec<ManifestPackage>,
     #[serde(default)]
-    dirs: Vec<String>,
-    #[serde(default)]
     files: Vec<ManifestFileEntry>,
+    #[serde(default)]
+    deps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,7 +165,6 @@ struct ManifestFileEntry {
 
 struct ResolvedSection {
     packages: Vec<ResolvedPackage>,
-    dirs: Vec<String>,
     files: Vec<ResolvedFile>,
 }
 
@@ -183,6 +181,7 @@ struct ResolvedPackage {
     package_name: Option<String>,
     bin: Option<String>,
     from: Option<PathBuf>,
+    from_image: Option<String>,
     to: String,
 }
 
@@ -289,14 +288,23 @@ fn merge_layers_recursive(value: &mut toml::Value, base_dir: &Path) -> Result<()
     Ok(())
 }
 
-fn resolve_package(pkg: &ManifestPackage, base_dir: &Path, target_triple: &str) -> ResolvedPackage {
+fn resolve_package(pkg: &ManifestPackage, base_dir: &Path, target_triple: &str, images: &BTreeMap<String, ManifestImageSection>) -> ResolvedPackage {
     let arch = target_triple.split('-').next().unwrap_or("unknown");
     ResolvedPackage {
         kind: pkg.kind.clone(),
         source: pkg.source.as_ref().map(|s| resolve_path(base_dir, &expand_templates(s, target_triple, arch))),
         package_name: pkg.package.clone(),
         bin: pkg.bin.clone(),
-        from: pkg.from.as_ref().map(|s| resolve_path(base_dir, &expand_templates(s, target_triple, arch))),
+        from: pkg.from.as_ref().map(|s| {
+            if images.contains_key(s.as_str()) {
+                None
+            } else {
+                Some(resolve_path(base_dir, &expand_templates(s, target_triple, arch)))
+            }
+        }).flatten(),
+        from_image: pkg.from.as_ref()
+            .filter(|s| images.contains_key(s.as_str()))
+            .cloned(),
         to: expand_templates(&pkg.to, target_triple, arch),
     }
 }
@@ -329,15 +337,12 @@ struct ResolvedFile {
     to: String,
 }
 
-fn resolve_section(section: &ManifestImageSection, base_dir: &Path, target_triple: &str) -> ResolvedSection {
+fn resolve_section(section: &ManifestImageSection, base_dir: &Path, target_triple: &str, images: &BTreeMap<String, ManifestImageSection>) -> ResolvedSection {
     let mut packages = Vec::new();
-    let mut dirs = Vec::new();
     let mut files = Vec::new();
 
-    dirs.extend(section.dirs.iter().cloned());
-
     for pkg in &section.packages {
-        packages.push(resolve_package(pkg, base_dir, target_triple));
+        packages.push(resolve_package(pkg, base_dir, target_triple, images));
     }
 
     for f in &section.files {
@@ -347,7 +352,7 @@ fn resolve_section(section: &ManifestImageSection, base_dir: &Path, target_tripl
         });
     }
 
-    ResolvedSection { packages, dirs, files }
+    ResolvedSection { packages, files }
 }
 
 fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
@@ -355,8 +360,9 @@ fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
     let target_triple = manifest.kernel.target.clone();
 
     let mut sections = BTreeMap::new();
-    for (name, section) in &manifest.images {
-        sections.insert(name.clone(), resolve_section(section, project_dir, &target_triple));
+    let images_ref = &manifest.images;
+    for (name, section) in images_ref {
+        sections.insert(name.clone(), resolve_section(section, project_dir, &target_triple, images_ref));
     }
 
     Ok(ExpandedManifest {
@@ -853,158 +859,237 @@ fn build_manifest_image(
         .to_string();
     let profile = if release { "release" } else { "debug" };
 
-    for (section_name, section_cfg) in &expanded.manifest.images {
-        let resolved = expanded.sections.get(section_name)
+    let build_order = topo_sort_images(&expanded.manifest.images)?;
+
+    for section_name in build_order {
+        let section_cfg = expanded.manifest.images.get(&section_name)
+            .ok_or_else(|| format!("section '{}' not in manifest", section_name))?;
+        let resolved = expanded.sections.get(&section_name)
             .ok_or_else(|| format!("section '{}' not resolved", section_name))?;
 
         let output = section_cfg.output.as_deref().unwrap_or(".scarlet/images/output");
         let output_path = project.join(output);
         let staging_dir = project.join(format!(".scarlet/staging/{}", section_name));
-
         let format = section_cfg.format.as_deref().unwrap_or("");
-        let kind = section_cfg.kind.as_deref().unwrap_or("");
 
-        if kind == "limine-uefi" {
-            let arch_name = match target_triple.split('-').next() {
-                Some("aarch64") => "aarch64",
-                Some(v) if v.starts_with("riscv64") => "riscv64",
-                _ => &target_triple,
-            };
+        match format {
+            "newc" | "ext2" => {
+                if staging_dir.exists() {
+                    fs::remove_dir_all(&staging_dir)
+                        .map_err(|e| format!("failed to clean staging: {e}"))?;
+                }
+                fs::create_dir_all(&staging_dir)
+                    .map_err(|e| format!("failed to create staging: {e}"))?;
 
-            let initramfs_path = expanded
-                .manifest
-                .images
-                .get("initramfs")
-                .and_then(|s| s.output.as_deref())
-                .map(|p| project.join(p))
-                .unwrap_or_else(|| project.join(".scarlet/images/initramfs.cpio"));
+                for file in &resolved.files {
+                    let dest = staging_dir.join(file.to.trim_start_matches('/'));
+                    if file.source.is_dir() {
+                        copy_dir_recursive(&file.source, &dest)?;
+                    } else {
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent)
+                                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                        }
+                        fs::copy(&file.source, &dest)
+                            .map_err(|e| format!("failed to copy {} -> {}: {e}", file.source.display(), dest.display()))?;
+                    }
+                }
 
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                for pkg in &resolved.packages {
+                    if let Some(ref img_name) = pkg.from_image {
+                        let from_staging = project.join(format!(".scarlet/staging/{}", img_name));
+                        let dest = staging_dir.join(pkg.to.trim_start_matches('/'));
+                        if from_staging.is_dir() {
+                            copy_dir_recursive(&from_staging, &dest)?;
+                        }
+                    } else {
+                        install_package(&staging_dir, pkg, project, &target_triple, profile)?;
+                    }
+                }
+
+                if format == "newc" {
+                    build_initramfs_newc_from_staging(&staging_dir, &output_path)?;
+                    eprintln!("cargo-scarlet: wrote {} to {}", section_name, output_path.display());
+                } else {
+                    build_ext2_from_staging(&staging_dir, &output_path, &section_name)?;
+                }
             }
+            "limine-uefi" => {
+                let arch_name = match target_triple.split('-').next() {
+                    Some("aarch64") => "aarch64",
+                    Some(v) if v.starts_with("riscv64") => "riscv64",
+                    _ => &target_triple,
+                };
 
-            let plugin_manifest = project
-                .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
-                .canonicalize()
-                .unwrap_or_else(|_| project.join("../../cargo-scarlet-plugin-limine/Cargo.toml"));
+                let mut initramfs_path = project.join(".scarlet/images/initramfs.cpio");
+                for pkg in &resolved.packages {
+                    if let Some(source) = &pkg.source {
+                        let source_name = source.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        if source_name.contains("initramfs") || source_name.ends_with(".cpio") {
+                            initramfs_path = source.clone();
+                        }
+                    }
+                }
 
-            let mut cmd = Command::new("cargo");
-            cmd.arg("run")
-                .arg("--manifest-path")
-                .arg(&plugin_manifest)
-                .arg("--")
-                .arg("--arch")
-                .arg(arch_name)
-                .arg("--kernel")
-                .arg(&kernel_elf)
-                .arg("--initramfs")
-                .arg(&initramfs_path)
-                .arg("--output")
-                .arg(&output_path);
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                }
 
-            if !section_cfg.cmdline.is_empty() {
-                cmd.arg("--cmdline").arg(&section_cfg.cmdline);
+                let plugin_manifest = project
+                    .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
+                    .canonicalize()
+                    .unwrap_or_else(|_| project.join("../../cargo-scarlet-plugin-limine/Cargo.toml"));
+
+                let mut cmd = Command::new("cargo");
+                cmd.arg("run")
+                    .arg("--manifest-path")
+                    .arg(&plugin_manifest)
+                    .current_dir(plugin_manifest.parent().unwrap_or(Path::new(".")))
+                    .arg("--")
+                    .arg("--arch")
+                    .arg(arch_name)
+                    .arg("--kernel")
+                    .arg(&kernel_elf)
+                    .arg("--initramfs")
+                    .arg(&initramfs_path)
+                    .arg("--output")
+                    .arg(&output_path);
+
+                if !section_cfg.cmdline.is_empty() {
+                    cmd.arg("--cmdline").arg(&section_cfg.cmdline);
+                }
+
+                let status = cmd
+                    .status()
+                    .map_err(|e| format!("failed to run limine plugin: {e}"))?;
+
+                if !status.success() {
+                    return Err("limine plugin failed".to_string());
+                }
+
+                eprintln!("cargo-scarlet: wrote {} to {}", section_name, output_path.display());
             }
-
-            let status = cmd
-                .status()
-                .map_err(|e| format!("failed to run limine plugin: {e}"))?;
-
-            if !status.success() {
-                return Err("limine plugin failed".to_string());
+            _ => {
+                return Err(format!("unsupported format '{}' for section '{}'", format, section_name));
             }
-
-            eprintln!("cargo-scarlet: wrote boot image to {}", output_path.display());
-            continue;
-        }
-
-        if staging_dir.exists() {
-            fs::remove_dir_all(&staging_dir)
-                .map_err(|e| format!("failed to clean staging: {e}"))?;
-        }
-        fs::create_dir_all(&staging_dir)
-            .map_err(|e| format!("failed to create staging: {e}"))?;
-
-        for dir in &resolved.dirs {
-            let dir_path = staging_dir.join(dir.trim_start_matches('/'));
-            fs::create_dir_all(&dir_path)
-                .map_err(|e| format!("failed to create dir {}: {e}", dir_path.display()))?;
-        }
-
-        for file in &resolved.files {
-            let dest = staging_dir.join(file.to.trim_start_matches('/'));
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-            }
-            fs::copy(&file.source, &dest)
-                .map_err(|e| format!("failed to copy {} -> {}: {e}", file.source.display(), dest.display()))?;
-        }
-
-        for pkg in &resolved.packages {
-            install_package(&staging_dir, pkg, project, &target_triple, profile)?;
-        }
-
-        if format == "newc" {
-            build_initramfs_newc_from_staging(&staging_dir, &output_path)?;
-            eprintln!("cargo-scarlet: wrote {} to {}", section_name, output_path.display());
-        } else if format == "ext2" {
-            let source_kb_output = Command::new("du")
-                .args(["-sk", staging_dir.to_str().unwrap_or("")])
-                .output()
-                .map_err(|e| format!("failed to run du: {e}"))?;
-            let source_kb_str = String::from_utf8_lossy(&source_kb_output.stdout);
-            let source_kb: u64 = source_kb_str
-                .split_whitespace()
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
-            let extra_kb: u64 = 65536;
-            let size_kb = ((source_kb + source_kb / 3 + extra_kb + 16383) / 16384) * 16384;
-
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-            }
-
-            let _ = fs::remove_file(&output_path);
-            let truncate_status = Command::new("truncate")
-                .args(["-s", &format!("{size_kb}K"), output_path.to_str().unwrap_or("")])
-                .status()
-                .map_err(|e| format!("failed to run truncate: {e}"))?;
-            if !truncate_status.success() {
-                return Err("truncate failed".to_string());
-            }
-
-            let mke2fs_status = Command::new("mke2fs")
-                .args([
-                    "-q", "-F", "-t", "ext2", "-b", "4096", "-i", "2048",
-                    "-m", "1", "-L", "SCARLET_ROOT", "-E", "no_copy_xattrs",
-                    "-d", staging_dir.to_str().unwrap_or(""),
-                    output_path.to_str().unwrap_or(""),
-                ])
-                .status()
-                .map_err(|e| format!("failed to run mke2fs: {e}"))?;
-            if !mke2fs_status.success() {
-                return Err("mke2fs failed".to_string());
-            }
-
-            eprintln!(
-                "cargo-scarlet: wrote {} to {} ({}KB, source={}KB)",
-                section_name, output_path.display(), size_kb, source_kb
-            );
-        } else if !kind.is_empty() {
-            eprintln!(
-                "cargo-scarlet: image generation for kind '{}' not yet implemented",
-                kind
-            );
-        } else {
-            return Err(format!("unsupported format '{}' for section '{}'", format, section_name));
         }
     }
 
+    Ok(())
+}
+
+fn topo_sort_images(images: &BTreeMap<String, ManifestImageSection>) -> Result<Vec<String>, String> {
+    let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
+    let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for name in images.keys() {
+        in_degree.insert(name.clone(), 0);
+        dependents.insert(name.clone(), Vec::new());
+    }
+
+    for (name, section) in images {
+        for dep in &section.deps {
+            if !images.contains_key(dep) {
+                return Err(format!("image '{}' depends on unknown image '{}'", name, dep));
+            }
+            *in_degree.entry(name.clone()).or_insert(0) += 1;
+            dependents.entry(dep.clone()).or_default().push(name.clone());
+        }
+    }
+
+    let mut queue: Vec<String> = in_degree.iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut result = Vec::new();
+    while let Some(name) = queue.pop() {
+        result.push(name.clone());
+        for dep in dependents.get(&name).unwrap_or(&Vec::new()) {
+            let degree = in_degree.get_mut(dep).unwrap();
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push(dep.clone());
+            }
+        }
+    }
+
+    if result.len() != images.len() {
+        return Err("circular dependency detected in images".to_string());
+    }
+
+    Ok(result)
+}
+
+fn build_ext2_from_staging(staging_dir: &Path, output_path: &Path, section_name: &str) -> Result<(), String> {
+    let source_kb_output = Command::new("du")
+        .args(["-sk", staging_dir.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| format!("failed to run du: {e}"))?;
+    let source_kb_str = String::from_utf8_lossy(&source_kb_output.stdout);
+    let source_kb: u64 = source_kb_str
+        .split_whitespace()
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    let extra_kb: u64 = 65536;
+    let size_kb = ((source_kb + source_kb / 3 + extra_kb + 16383) / 16384) * 16384;
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+
+    let _ = fs::remove_file(output_path);
+    let truncate_status = Command::new("truncate")
+        .args(["-s", &format!("{size_kb}K"), output_path.to_str().unwrap_or("")])
+        .status()
+        .map_err(|e| format!("failed to run truncate: {e}"))?;
+    if !truncate_status.success() {
+        return Err("truncate failed".to_string());
+    }
+
+    let mke2fs_status = Command::new("mke2fs")
+        .args([
+            "-q", "-F", "-t", "ext2", "-b", "4096", "-i", "2048",
+            "-m", "1", "-L", "SCARLET_ROOT", "-E", "no_copy_xattrs",
+            "-d", staging_dir.to_str().unwrap_or(""),
+            output_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run mke2fs: {e}"))?;
+    if !mke2fs_status.success() {
+        return Err("mke2fs failed".to_string());
+    }
+
+    eprintln!(
+        "cargo-scarlet: wrote {} to {} ({}KB, source={}KB)",
+        section_name, output_path.display(), size_kb, source_kb
+    );
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst)
+        .map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
+    for entry in fs::read_dir(src)
+        .map_err(|e| format!("failed to read_dir {}: {e}", src.display()))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("failed to copy {} -> {}: {e}", src_path.display(), dst_path.display()))?;
+        }
+    }
     Ok(())
 }
 
