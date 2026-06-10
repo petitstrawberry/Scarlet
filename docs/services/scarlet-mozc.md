@@ -68,7 +68,7 @@ cache instead, use the same `PREBUILT_DIR` for both `build_buildroot.sh` and
 `build_mozc_server.sh` so `deploy_rootfs.sh` can find `rootfs.tar`.
 
 For an already deployed local rootfs, the staged binary can be copied into
-`mkfs/rootfs/system/linux-aarch64/usr/lib/mozc/mozc_server`.
+`bundles/linux/rootfs/linux-aarch64/usr/lib/mozc/mozc_server`.
 
 `build_mozc_server.sh` must be run on Linux. It intentionally does not import a
 distro `mozc_server`; the output is linked against the Buildroot musl sysroot so

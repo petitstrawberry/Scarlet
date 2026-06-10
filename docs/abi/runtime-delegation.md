@@ -178,5 +178,4 @@ When executing an x86-64 Linux binary on RISC-V:
 
 ## Related Documentation
 
-- [ABI Module System](./abi/)
-- [Linux ABI Status](./abi/linux/status.md)
+- [Linux ABI Status](./linux/status.md)

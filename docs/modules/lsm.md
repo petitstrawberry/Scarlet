@@ -152,8 +152,7 @@ unstable-options = true
 
 ```sh
 cargo scarlet build --module modules/loadable/lsm-test \
-  --target kernel/targets/riscv64gc-unknown-none-elf.json \
-  --output mkfs/dist/modules/riscv64gc-unknown-none-elf
+  --target kernel/targets/riscv64gc-unknown-none-elf.json
 ```
 
 What happens:
@@ -172,11 +171,11 @@ Module build tasks run cargo-scarlet for each module in dependency order:
 | `build-modules-release-riscv64` | lsm-test, lsm-dep-test | release |
 | `build-modules-release-aarch64` | lsm-test, lsm-dep-test | release |
 
-Output: `mkfs/dist/modules/<triple>/<name>.lsm`
+Output: `<project>/.scarlet/modules/<triple>/<name>.lsm`
 
 ### Initramfs
 
-`mkfs/make_initramfs.sh` copies all `*.lsm` from `dist/modules/<triple>/` to `initramfs/system/scarlet/modules/`.
+Initramfs generation copies all `*.lsm` from the project's module output directory to `initramfs/system/scarlet/modules/`.
 
 ## Userspace Tools
 

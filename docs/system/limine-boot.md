@@ -20,7 +20,7 @@ That makes RISC-V the correct place to establish the new boot contract first.
 cargo make build-riscv64
 ```
 
-This produces `mkfs/dist/limine-riscv64-boot.img` and refreshes the matching initramfs/rootfs artifacts.
+This produces the boot image and refreshes the matching initramfs/rootfs artifacts.
 
 ## Run it
 

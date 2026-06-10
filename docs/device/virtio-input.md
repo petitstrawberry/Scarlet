@@ -240,10 +240,10 @@ Status Queue (Queue 1):
 
 ## Related Files
 
-- [kernel/src/drivers/virtio_input.rs](../kernel/src/drivers/virtio_input.rs) - ドライバ実装
-- [kernel/src/device/input/mod.rs](../kernel/src/device/input/mod.rs) - イベント定義
-- [kernel/src/device/input/event_device.rs](../kernel/src/device/input/event_device.rs) - EventDevice実装
-- [docs/input_event_device.md](./input_event_device.md) - EventDevice利用ガイド
+- [kernel/src/drivers/virtio_input.rs](../../kernel/src/drivers/virtio_input.rs) - ドライバ実装
+- [kernel/src/device/input/mod.rs](../../kernel/src/device/input/mod.rs) - イベント定義
+- [kernel/src/device/input/event_device.rs](../../kernel/src/device/input/event_device.rs) - EventDevice実装
+- [Input Event Device](./input-event.md) - EventDevice利用ガイド
 
 ## References
 

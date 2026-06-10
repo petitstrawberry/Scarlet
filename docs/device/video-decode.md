@@ -5,7 +5,7 @@
 Scarlet exposes video decode hardware as a character device such as
 `/dev/vvideo0`. The API described here is the Scarlet video decode device
 contract used by userspace. It is not inherently tied to VirtIO, although the
-current implementation in this PR is backed by the VirtIO video driver and a
+current implementation is backed by the VirtIO video driver and a
 vhost-user-video host process.
 
 The current API is intentionally small:
@@ -18,7 +18,7 @@ The current API is intentionally small:
   streams on the same device.
 
 This interface is not a stable userspace ABI yet. The structures below document
-the current PR state so that callers and future driver changes have a shared
+the current state so that callers and future driver changes have a shared
 reference.
 
 ## Device Model

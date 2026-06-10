@@ -278,5 +278,4 @@ create_namespace(NS_CREATE_TASK, "job");
 ## References
 
 - Linux namespaces: man 7 namespaces
-- Scarlet task namespace design: docs/task_namespace_design.md
 - Container demo source: user/bin/src/container_demo.rs

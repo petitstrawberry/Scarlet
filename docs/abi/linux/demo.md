@@ -51,7 +51,7 @@ The build scripts create artifacts, but they need to be deployed into Scarlet's 
 For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
 
 ```bash
-# Deploy the Linux rootfs and binaries to mkfs/rootfs/system/linux-riscv64
+# Deploy the Linux rootfs and binaries to bundles/linux/rootfs/linux-riscv64
 bash tools/linux/deploy_rootfs.sh
 ```
 

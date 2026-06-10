@@ -104,7 +104,7 @@ ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
 
 After deployment, rootfs is organized by architecture:
 ```
-mkfs/rootfs/system/
+bundles/linux/rootfs/
   ├── linux-riscv64/
   └── linux-aarch64/
 ```
@@ -192,13 +192,17 @@ use arch::aarch64::*;
 
 Each architecture has dedicated linker scripts:
 
-**Kernel:**
-- `kernel/lds/riscv64_qemu_virt.ld`
-- `kernel/lds/aarch64_qemu_virt.ld`
+**Kernel (legacy, in `kernel/lds/`):**
+- `riscv64_qemu_virt.ld`
+- `aarch64_qemu_virt.ld`
 
-**User space:**
-- `user/lds/user.ld` (RISC-V)
-- `user/lds/user_aarch64.ld` (AArch64)
+**Kernel (project-based, in `projects/<project>/lds/`):**
+- `riscv64_limine.ld` (RISC-V Limine boot)
+- `aarch64_limine.ld` (AArch64 Limine boot)
+
+**User space (in `user/lds/`):**
+- `user.ld` (RISC-V)
+- `user_aarch64.ld` (AArch64)
 
 ## Device Tree Files
 
@@ -207,7 +211,7 @@ QEMU virt machine device trees:
 - `virt-riscv64.dts` / `virt-riscv64.dtb` - RISC-V device tree
 - `virt-aarch64.dts` - AArch64 device tree (generated on-the-fly by QEMU)
 
-The Limine AArch64 workflow materializes the generated QEMU `virt` DTB into `mkfs/dist/virt-aarch64-limine.dtb` so Scarlet can keep using its existing FDT-based `BootInfo` handoff.
+The Limine AArch64 workflow materializes the generated QEMU `virt` DTB so Scarlet can keep using its existing FDT-based `BootInfo` handoff.
 
 ## Key Differences Between Architectures
 

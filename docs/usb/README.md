@@ -75,4 +75,4 @@ These projects are references, not dependencies for the in-tree implementation:
 - Redox `xhcid`
 - CrabUSB
 
-See `xhci-implementation-plan.md` for the detailed phase plan.
+The milestones above outline the phased implementation plan.

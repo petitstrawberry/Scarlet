@@ -44,6 +44,17 @@ The following system calls are currently handled by the Linux ABI module.
 | `epoll_create1` | 🚧 Stub | Returns dummy file descriptor. |
 | `epoll_ctl`, `epoll_wait` | 🚧 Stub | Minimal/No-op implementation. |
 | `pselect6`, `ppoll` | ✅ Supported | `sigmask` ignored. `pselect6` limited to 64 FDs. |
+| `ftruncate` | ✅ Supported | |
+| `fallocate` | ✅ Supported | |
+| `flock` | ✅ Supported | |
+| `inotify_init1` | ✅ Supported | |
+| `eventfd2` | ✅ Supported | |
+| `timerfd_create` | ✅ Supported | |
+| `timerfd_settime`, `timerfd_gettime` | ✅ Supported | |
+| `statx` | ✅ Supported | |
+| `getrandom` | ✅ Supported | |
+| `memfd_create` | ✅ Supported | |
+| `mount` | ✅ Supported | |
 
 ### Process Management
 | Syscall | Status | Notes |
@@ -62,6 +73,18 @@ The following system calls are currently handled by the Linux ABI module.
 | `setuid`, `setgid`, `setpgid` | 🚧 Stub | Always succeeds. |
 | `getpgid` | ✅ Supported | Returns task ID. |
 | `membarrier` | 🚧 Stub | Always succeeds. |
+| `unshare` | ✅ Supported | |
+| `prctl` | ✅ Supported | |
+| `sysinfo` | ✅ Supported | |
+| `pidfd_open` | ✅ Supported | |
+| `waitid` | ✅ Supported | |
+| `sched_yield` | ✅ Supported | |
+| `sched_getscheduler`, `sched_getparam` | ✅ Supported | |
+| `sched_getaffinity` | ✅ Supported | |
+| `setsid`, `getsid` | ✅ Supported | |
+| `getresuid`, `getresgid` | ✅ Supported | |
+| `sigaltstack` | ✅ Supported | |
+| `kill`, `tkill`, `tgkill` | ✅ Supported | Signal delivery. |
 
 ### Memory Management
 | Syscall | Status | Notes |
@@ -69,6 +92,13 @@ The following system calls are currently handled by the Linux ABI module.
 | `mmap` | ✅ Supported | `MAP_ANONYMOUS`, `MAP_FIXED`, `MAP_SHARED`/`PRIVATE`, file-backed. |
 | `munmap` | ✅ Supported | |
 | `mprotect` | ✅ Supported | |
+| `mremap` | ✅ Supported | |
+| `msync` | ✅ Supported | |
+| `mlock`, `munlock` | ✅ Supported | |
+| `mlockall`, `munlockall` | ✅ Supported | |
+| `mlock2` | ✅ Supported | |
+| `mincore` | ✅ Supported | |
+| `madvise` | ✅ Supported | |
 
 ### Time & Timers
 | Syscall | Status | Notes |
@@ -88,14 +118,19 @@ The following system calls are currently handled by the Linux ABI module.
 | `futex` | ⚠️ Partial | `FUTEX_WAIT`, `FUTEX_WAKE` implemented. |
 
 ### Networking (Sockets)
-**Note:** Networking is currently mocked to allow applications to start without hanging.
+Socket syscalls have real implementations backed by the kernel network stack.
 | Syscall | Status | Notes |
 |---------|--------|-------|
-| `socket` | 🚧 Mock | Creates a pipe to simulate a socket fd. |
-| `bind`, `listen`, `connect` | 🚧 Mock | Always succeeds. |
-| `accept` | 🚧 Mock | Returns a new pipe fd. |
-| `getsockname` | 🚧 Mock | Returns `AF_UNIX`. |
-| `setsockopt`, `getsockopt` | 🚧 Mock | Success / Dummy values. |
+| `socket` | ✅ Supported | Creates socket via kernel network stack. |
+| `socketpair` | ✅ Supported | |
+| `bind`, `listen` | ✅ Supported | |
+| `connect` | ✅ Supported | |
+| `accept`, `accept4` | ✅ Supported | |
+| `getsockname`, `getpeername` | ✅ Supported | |
+| `sendto`, `recvfrom` | ✅ Supported | |
+| `sendmsg`, `recvmsg` | ✅ Supported | |
+| `setsockopt`, `getsockopt` | ✅ Supported | |
+| `shutdown` | ✅ Supported | |
 
 ## File System Implementation Notes
 
@@ -119,7 +154,7 @@ Refer to [userspace-artifacts.md](userspace-artifacts.md) for the exact build st
 
 ## Known Limitations
 
-- **Networking**: No real network stack integration yet; sockets are pipes.
+- **Networking**: Real socket syscalls backed by the kernel network stack; coverage of socket options and edge cases is still expanding.
 - **Signals**: Signal delivery logic is basic; complex signal handling (stacks, nesting) is WIP.
 - **User/Group**: Single-user (root) environment assumed.
 - **Permissions**: File permissions, ownership, and access modes (e.g. read-only enforcement) are currently ignored.

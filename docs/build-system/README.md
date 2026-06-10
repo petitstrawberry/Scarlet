@@ -2,72 +2,186 @@
 
 ## Overview
 
-`scarlet.toml` is the project-local kernel build configuration. It declares the
-kernel source, target, features, module selection, and image composition for a
-specific project.
+Scarlet uses a project-rooted build system centered on `scarlet.toml` manifests and the `cargo-scarlet` build tool.
 
-The distro/image architecture is described in
-[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+Each project under `projects/` is an independent kernel build target with its own `scarlet.toml`. The build tool reads this manifest, generates a module aggregation crate under `.scarlet/`, and invokes Cargo for the project.
 
-The core design goals are:
+## Quick Start
 
-- keep the checked-in projects stable and small
-- keep the kernel crate as the stable core crate
-- treat drivers, ABI layers, filesystems, and similar pieces as real reusable crates
-- generate the module selection layer from configuration instead of editing manifests by hand
-- keep generated state local to the project instead of scattering it across the repository
+```bash
+# Build (via cargo make, which delegates to cargo-scarlet)
+cargo make build-riscv64
 
-## Repository Baseline
-
-This repository builds through `cargo make` from the repository root, or through
-`cargo scarlet` for project-centric workflows.
-
-- `projects/riscv64-limine-full/`, `projects/aarch64-limine-full/`, `projects/aarch64-limine-microvm/`, and `projects/aarch64-apple-limine-full/` are the top-level kernel binaries
-- each project has a `scarlet.toml` manifest for kernel build configuration
-- all projects depend on `../../kernel` via path dependencies
-- `projects/aarch64-limine-microvm/` additionally uses `scarlet.toml` for image composition (initramfs, rootfs, boot image)
-- the kernel crate is still the canonical `scarlet` crate
-- the kernel already uses linker-section-based initcalls (`.initcall.early`, `.initcall.driver`, `.initcall.late`)
-
-The developer experience is project-rooted:
-
-- the **project is the main project root**
-- `scarlet.toml` lives in that project
-- the kernel crate and module crates are consumed as dependencies by that project
-- `.scarlet/scarlet-modules` is generated inside that project
-
-## Documents
-
-- [`scarlet.toml` Specification](./scarlet-config-spec.md)
-- [Implementation Plan](./implementation-plan.md)
-- [`cargo-scarlet` Prototype](./cargo-scarlet-prototype.md)
-- [Project-Local Generated Modules Architecture](./project-local-generated-modules.md)
-
-## Design Summary
-
-1. keep project manifests checked in and mostly static
-2. treat the project as the main project root
-3. add a static path dependency from the project to a project-local generated module crate
-4. generate that crate from `scarlet.toml` before any Cargo operation
-5. keep generated files inside the project directory under `.scarlet/`
-6. keep the kernel crate focused on core kernel responsibilities
-
-In short:
-
-```text
-project (main project root)
- ├─ scarlet.toml
- ├─ kernel crate (`scarlet`) from registry / git / path source
- └─ generated .scarlet/scarlet-modules
-        ├─ selected driver crates
-        ├─ selected ABI crates
-        └─ selected filesystem / subsystem crates
+# Run
+cargo make run-riscv64
 ```
 
-This preserves the original philosophy:
+## Projects
 
-- **OS as a Library**: reusable kernel and module crates
-- **Infrastructure as a Tool**: configuration resolution lives in the build tool
-- **Manifest Principle**: `scarlet.toml` declares kernel source, features, modules, and image composition
+```
+projects/
+├── riscv64-limine-full/       # Full RISC-V 64-bit (primary)
+├── riscv64-limine-desktop/    # RISC-V desktop variant
+├── aarch64-limine-full/       # Full AArch64
+├── aarch64-limine-desktop/    # AArch64 desktop variant
+├── aarch64-limine-microvm/    # AArch64 microvm (minimal)
+└── aarch64-apple-limine-full/ # AArch64 Apple Silicon
+```
 
-In practice, module entries should still feel familiar: the preferred shape is a single `[modules]` table that reuses normal Cargo dependency syntax and adds an explicit `enabled = true/false` state.
+Each project directory contains:
+- `scarlet.toml` — Build manifest
+- `src/main.rs` — Boot entry point
+- `Cargo.toml` — Cargo manifest (auto-managed)
+- `.scarlet/` — Generated module crate and build artifacts
+
+## scarlet.toml Format
+
+Current schema version: **1**
+
+```toml
+schema_version = 1
+
+[project]
+name = "scarlet-riscv64-limine-full"
+
+[kernel]
+package = "scarlet"
+source = "../../kernel"
+target = "riscv64gc-unknown-none-elf"
+target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-riscv64-full.cpio"
+
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-riscv64-full.ext2"
+
+[[images.rootfs.layers]]
+path = "../../bundles/full/bundle.toml"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-riscv64-full.img"
+cmdline = "console=ttyS0 root=/dev/vblk1"
+deps = ["initramfs"]
+
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs-riscv64-full.cpio"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run.sh"
+```
+
+### Top-Level Sections
+
+| Section | Purpose |
+|---------|---------|
+| `[project]` | Project name |
+| `[kernel]` | Kernel crate source, target, features |
+| `[modules]` | External module crates (path, git, registry) |
+| `[images]` | Image composition (initramfs, rootfs, boot) |
+| `[runner]` | QEMU run command |
+
+### Kernel Section
+
+| Field | Description |
+|-------|-------------|
+| `package` | Kernel crate name |
+| `source` | Path to kernel crate |
+| `target` | Rust target triple |
+| `target_json` | Custom target JSON file |
+| `features` | Feature flags (key = name, value = bool) |
+
+### Modules Section
+
+Module entries support Cargo-like dependency sources:
+
+```toml
+[modules]
+# Path dependency
+"my-module" = { path = "../../modules/my-module", enabled = true }
+# Git dependency
+"other-module" = { git = "https://github.com/...", rev = "abc123", enabled = true }
+# Registry dependency
+"published-module" = { version = "0.1.0", enabled = true }
+# With features
+"mod-with-features" = { path = "../mod", features = ["foo"], enabled = true }
+```
+
+### Images Section
+
+Images are composed from layers (bundle TOML files). Each image has a format and output path:
+
+| Format | Description |
+|--------|-------------|
+| `newc` | CPIO newc format (initramfs) |
+| `ext2` | ext2 filesystem (rootfs) |
+| `limine-uefi` | Limine UEFI boot image |
+
+Boot images can declare `deps` on other images and include `packages` that copy artifacts into the boot image.
+
+## cargo-scarlet
+
+`cargo-scarlet` is the build tool located at `cargo-scarlet/`. It is a Cargo subcommand that:
+
+1. Reads `scarlet.toml` from a project directory
+2. Generates `.scarlet/scarlet-modules/` crate with selected modules
+3. Invokes Cargo to build the project kernel binary
+4. Composes images (initramfs, rootfs, boot) from bundle layers
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `build` | Build kernel binary |
+| `check` | Type-check without building |
+| `clippy` | Run clippy on the project |
+| `run` | Build and run in QEMU |
+| `image` | Build images only |
+| `new` | Create new project or module |
+| `lock` | Lock image layer hashes |
+
+### Usage
+
+```bash
+# Via cargo-scarlet directly
+cargo scarlet build --project projects/riscv64-limine-full
+cargo scarlet run --project projects/riscv64-limine-full --release
+
+# Via cargo make (wraps cargo-scarlet)
+cargo make build-riscv64
+cargo make run-riscv64
+```
+
+## Repository Build Flow
+
+```
+cargo make build-riscv64
+    └─> cargo scarlet build --project projects/riscv64-limine-full
+         ├─> Read scarlet.toml
+         ├─> Generate .scarlet/scarlet-modules/
+         ├─> cargo build --target riscv64gc-unknown-none-elf
+         └─> Compose images (initramfs, rootfs, boot)
+```
+
+## See Also
+
+- [Distribution Model](../architecture/distro-model.md)

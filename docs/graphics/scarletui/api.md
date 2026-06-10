@@ -1370,5 +1370,5 @@ impl TodoApp {
 ## See Also
 
 - [ScarletUI Design Document](./design.md) - Architecture and design decisions
-- [VIEWEXT_USAGE.md](../../user/lib/scarlet-ui/VIEWEXT_USAGE.md) - ViewExt usage guide
-- [README.md](../../user/lib/scarlet-ui/README.md) - Project overview
+- [VIEWEXT_USAGE.md](../../../user/lib/scarlet-ui/VIEWEXT_USAGE.md) - ViewExt usage guide
+- [README.md](../../../user/lib/scarlet-ui/README.md) - Project overview

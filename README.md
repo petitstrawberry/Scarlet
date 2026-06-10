@@ -108,13 +108,13 @@ This interoperability is possible because all ABIs share the same underlying ker
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
 - **Built-in Hypervisor (SHV)**: Type-2 virtual machine monitor with RISC-V H-extension and AArch64 virtualization support - [Design](docs/hypervisor/type2-design.md)
-- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
-- **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/stemd.md)
+- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/abi/runtime-delegation.md)
+- **Service Management**: Stem daemon (stemd) provides systemd-like service management with dependency resolution - [Details](docs/services/stemd.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
 - **Graphics Support**: Framebuffer device support with graphics hardware abstraction
-- **Windowing / UI (in progress)**: SWS protocol + client libraries - [Protocol](docs/sws_ipc_protocol.md), [sws-client](docs/sws_client.md), [scarlet-ui](docs/scarletui/design.md)
+- **Windowing / UI (in progress)**: SWS protocol + client libraries - [Protocol](docs/graphics/sws-ipc-protocol.md), [sws-client](docs/graphics/sws-client.md), [scarlet-ui](docs/graphics/scarletui/design.md)
 - **System Integration**: TTY devices, interrupt handling, and comprehensive device management
 - **Task Management**: Full task lifecycle with environment variables and IPC pipes
 - **Event System**: Advanced IPC with event-driven communication and synchronization
@@ -165,7 +165,7 @@ Scarlet supports multiple CPU architectures with a unified codebase:
 - **RISC-V 64-bit** - Primary development platform, fully supported
 - **AArch64 (ARM 64-bit)** - In development, basic support available
 
-Scarlet is migrating its boot flow to **Limine**, with `riscv64` now serving as the primary higher-half boot path. See [Limine Boot Path](docs/limine-boot.md).
+Scarlet is migrating its boot flow to **Limine**, with `riscv64` now serving as the primary higher-half boot path. See [Limine Boot Path](docs/system/limine-boot.md).
 
 The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
 
@@ -181,7 +181,7 @@ cargo make build-aarch64
 cargo make run-aarch64
 ```
 
-See [Multi-Architecture Support documentation](docs/multi-architecture.md) for detailed information on cross-architecture development.
+See [Multi-Architecture Support documentation](docs/architecture/multi-architecture.md) for detailed information on cross-architecture development.
 
 ## Filesystem Support
 
@@ -354,7 +354,7 @@ For more detailed information about the Scarlet kernel, visit our documentation:
 - [Linux userspace artifacts (Buildroot + optional binaries)](docs/abi/linux/userspace-artifacts.md)
 - [Linux rootfs deployment guide](docs/abi/linux/deployment.md)
 - [Linux ABI support status and roadmap](docs/abi/linux/status.md)
-- [Limine Boot Path](docs/limine-boot.md)
+- [Limine Boot Path](docs/system/limine-boot.md)
 
 ### Generating Documentation
 
