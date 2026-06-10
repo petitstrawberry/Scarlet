@@ -56,19 +56,9 @@ else
 fi
 
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
-BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-aarch64-boot.img"
-ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
-
-if [ ! -f "$KERNEL_PATH" ]; then
-    echo "Error: kernel binary not found at $KERNEL_PATH"
-    exit 1
-fi
-
-echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
-if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
-    echo "Error: failed to rebuild Limine AArch64 boot image"
-    exit 1
-fi
+PROJECT_DIR="$(cd "$SCRIPT_DIR" && cd .. && pwd)"
+BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img"
+ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2"
 
 QEMU_DEBUG_ARGS=""
 QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
@@ -221,7 +211,7 @@ ensure_efi_vars_writable() {
 
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
-EFI_VARS_PERSISTENT="${SCARLET_EFI_VARS_RUNTIME_ARM64:-$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.fd}"
+EFI_VARS_PERSISTENT="${SCARLET_EFI_VARS_RUNTIME_ARM64:-$PROJECT_DIR/.scarlet/AAVMF_VARS.fd}"
 
 if [ -z "$EFI_CODE" ]; then
     echo "Error: AArch64 EFI firmware code image not found."
@@ -246,7 +236,7 @@ elif [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     fi
 else
-    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
+    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_DIR/.scarlet/AAVMF_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     EFI_VARS_RUNTIME_CLEANUP="$EFI_VARS_RUNTIME"
 fi
