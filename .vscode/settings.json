@@ -4,8 +4,21 @@
         "user/lib/std/Cargo.toml",
         "user/lib/framebuffer/Cargo.toml",
         "user/bin/Cargo.toml",
-        "bsp/riscv64-limine/Cargo.toml",
-        "bsp/aarch64-limine/Cargo.toml"
+        "user/std-bin/Cargo.toml",
+        "projects/riscv64-limine-full/Cargo.toml",
+        "projects/aarch64-limine-full/Cargo.toml"
     ],
-    "remote.localPortHost": "allInterfaces"
+    "remote.localPortHost": "allInterfaces",
+    "files.watcherExclude": {
+        "**/.build/**": true,
+        "**/dist/**": true,
+        "**/rust/**": true,
+        "**/target/**": true
+    },
+    "search.exclude": {
+        "**/.build/**": true,
+        "**/dist/**": true,
+        "**/rust/**": true,
+        "**/target/**": true
+    }
 }
