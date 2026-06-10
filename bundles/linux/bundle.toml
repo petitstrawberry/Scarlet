@@ -3,6 +3,6 @@
 # Uses {arch} template to select the correct architecture tree.
 
 [[files]]
-source = "../../mkfs/rootfs/system/linux-{arch}"
+source = "rootfs/linux-{arch}"
 to = "/system/linux-{arch}"
 template = true

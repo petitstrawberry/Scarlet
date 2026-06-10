@@ -19,13 +19,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-aarch64-boot.img"
+KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$KERNEL_DIR" && cd .. && pwd)"
+TEST_DIR="$KERNEL_DIR/.test"
+
+BOOT_IMAGE="$TEST_DIR/limine-aarch64-boot.img"
+LIMINE_CACHE="$TEST_DIR/.cache"
+
+mkdir -p "$TEST_DIR"
 
 echo "Test runner starting (aarch64)..."
 
 echo "Generating fresh FAT32 test image..."
-KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
 "$KERNEL_DIR/tools/create-fat32-image.sh"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create FAT32 test image"
@@ -43,7 +48,30 @@ if [ -n "$KERNEL_BINARY" ]; then
     LINK_PATH="$(dirname "$KERNEL_BINARY")/../test-kernel"
     ln -sf "$KERNEL_BINARY" "$LINK_PATH"
     echo "Created symbolic link: $LINK_PATH -> $KERNEL_BINARY"
-    KERNEL_ELF="$KERNEL_BINARY" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"
+
+    INITRAMFS="$TEST_DIR/initramfs-test.cpio"
+    echo "test" > "$TEST_DIR/test-marker"
+    (cd "$TEST_DIR" && echo "test-marker" | cpio -o -H newc > "$INITRAMFS" 2>/dev/null)
+
+    LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        echo "Error: cargo-scarlet-plugin-limine not found. Build with: cargo build --release --manifest-path cargo-scarlet-plugin-limine/Cargo.toml"
+        exit 1
+    fi
+
+    "$LIMINE_PLUGIN" \
+        --arch aarch64 \
+        --kernel "$KERNEL_BINARY" \
+        --initramfs "$INITRAMFS" \
+        --output "$BOOT_IMAGE" \
+        --cache-dir "$LIMINE_CACHE"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create limine boot image"
+        exit 1
+    fi
 fi
 
 if [ "$DEBUG_MODE" = true ]; then
@@ -87,7 +115,6 @@ find_efi_code() {
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64_EL2}"
         return 0
     fi
-    # Legacy environment variable takes priority for older devShells.
     if [ -n "${SCARLET_EFI_CODE_ARM64:-}" ] && [ -f "${SCARLET_EFI_CODE_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_CODE_ARM64}"
         return 0
@@ -110,7 +137,6 @@ find_efi_vars_template() {
         printf '%s\n' "${SCARLET_EFI_VARS_ARM64_EL2}"
         return 0
     fi
-    # Legacy environment variable takes priority for older devShells.
     if [ -n "${SCARLET_EFI_VARS_ARM64:-}" ] && [ -f "${SCARLET_EFI_VARS_ARM64}" ]; then
         printf '%s\n' "${SCARLET_EFI_VARS_ARM64}"
         return 0
@@ -139,7 +165,7 @@ ensure_efi_vars_writable() {
 
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
-EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
+EFI_VARS_RUNTIME="$(mktemp "$TEST_DIR/AAVMF_VARS.run.XXXXXX.fd")"
 
 if [ -z "$EFI_CODE" ]; then
     echo "Error: AArch64 EFI firmware code image not found."

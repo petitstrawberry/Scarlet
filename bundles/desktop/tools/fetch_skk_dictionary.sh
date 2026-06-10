@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SIZE=${SKK_JISYO_SIZE:-L}
 URL=${SKK_JISYO_URL:-https://skk-dev.github.io/dict/SKK-JISYO.${SIZE}.gz}
-OUT=${1:-"$ROOT_DIR/mkfs/rootfs/data/config/scarlet/share/skk/SKK-JISYO.${SIZE}"}
+OUT=${1:-"$ROOT_DIR/data/skk/SKK-JISYO.${SIZE}"}
 
 tmp_gz=$(mktemp)
 tmp_euc=$(mktemp)

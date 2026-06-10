@@ -56,19 +56,38 @@ else
 fi
 
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-aarch64-boot.img"
-ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
+RUN_DIR="$SCRIPT_DIR/../.run"
+mkdir -p "$RUN_DIR"
+BOOT_IMAGE="$RUN_DIR/limine-aarch64-boot.img"
+ROOTFS_IMAGE="$RUN_DIR/rootfs.img"
 
 if [ ! -f "$KERNEL_PATH" ]; then
     echo "Error: kernel binary not found at $KERNEL_PATH"
     exit 1
 fi
 
-echo "Rebuilding Limine AArch64 boot image from $KERNEL_PATH"
-if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_aarch64_image.sh"; then
-    echo "Error: failed to rebuild Limine AArch64 boot image"
+LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+if [ ! -f "$LIMINE_PLUGIN" ]; then
+    LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
+fi
+if [ ! -f "$LIMINE_PLUGIN" ]; then
+    echo "Error: cargo-scarlet-plugin-limine not found"
     exit 1
 fi
+
+echo "Building Limine AArch64 boot image from $KERNEL_PATH"
+INITRAMFS="$RUN_DIR/initramfs-aarch64.cpio"
+if [ ! -f "$INITRAMFS" ]; then
+    echo "test" > "$RUN_DIR/test-marker"
+    (cd "$RUN_DIR" && echo "test-marker" | cpio -o -H newc > "$INITRAMFS" 2>/dev/null)
+fi
+"$LIMINE_PLUGIN" \
+    --arch aarch64 \
+    --kernel "$KERNEL_PATH" \
+    --initramfs "$INITRAMFS" \
+    --output "$BOOT_IMAGE" \
+    --cache-dir "$RUN_DIR/.cache" \
+    || { echo "Error: failed to build Limine AArch64 boot image"; exit 1; }
 
 QEMU_DEBUG_ARGS=""
 QEMU_GPU="${SCARLET_QEMU_GPU:-virtio-gpu}"
@@ -137,7 +156,7 @@ find_efi_vars_template() {
 
 EFI_CODE="$(find_efi_code || true)"
 EFI_VARS_TEMPLATE="$(find_efi_vars_template || true)"
-EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.fd"
+EFI_VARS_PERSISTENT="$RUN_DIR/AAVMF_VARS.fd"
 
 if [ -z "$EFI_CODE" ]; then
     echo "Error: AArch64 EFI firmware code image not found."
@@ -155,7 +174,7 @@ if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     fi
 else
-    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/AAVMF_VARS.run.XXXXXX.fd")"
+    EFI_VARS_RUNTIME="$(mktemp "$RUN_DIR/AAVMF_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     trap 'rm -f "$EFI_VARS_RUNTIME"' EXIT
 fi

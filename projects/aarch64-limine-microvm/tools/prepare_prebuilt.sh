@@ -11,7 +11,7 @@ GUEST_BIN_DIR="${SCARLET_MICROVM_GUEST_BIN_DIR:-}"
 FIRECRACKER_VERSION="${SCARLET_FIRECRACKER_VERSION:-1.15.1}"
 FIRECRACKER_ARCHIVE="firecracker-v${FIRECRACKER_VERSION}-aarch64.tgz"
 FIRECRACKER_URL="${SCARLET_FIRECRACKER_URL:-https://github.com/firecracker-microvm/firecracker/releases/download/v${FIRECRACKER_VERSION}/${FIRECRACKER_ARCHIVE}}"
-FIRECRACKER_CACHE_DIR="${SCARLET_FIRECRACKER_CACHE_DIR:-$REPO_DIR/mkfs/cache/firecracker}"
+FIRECRACKER_CACHE_DIR="${SCARLET_FIRECRACKER_CACHE_DIR:-$PROJECT_DIR/.scarlet/cache/firecracker}"
 FIRECRACKER_ARCHIVE_SHA256="${SCARLET_FIRECRACKER_ARCHIVE_SHA256:-00654ac1e702a22744121ea9f10a4f792ebd7c3a744cba587dfac9fcb79b41a5}"
 
 target_bin="$PREBUILT_DIR/system/linux-aarch64/usr/bin"
@@ -24,7 +24,7 @@ find_guest_bin_dir() {
     fi
 
     for candidate in \
-        "$REPO_DIR/mkfs/rootfs/system/linux-aarch64/usr/bin" \
+        "$REPO_DIR/bundles/linux/rootfs/linux-aarch64/usr/bin" \
         "/opt/prebuilt/aarch64/bin"
     do
         if [ -f "$candidate/guest-Image" ] && [ -f "$candidate/guest-initramfs.cpio.gz" ]; then
