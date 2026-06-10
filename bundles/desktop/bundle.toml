@@ -85,6 +85,7 @@ to = "/system/scarlet/bin/scarlet_skk"
 [[packages]]
 kind = "script"
 source = "tools/fetch_skk_dictionary.sh"
+output = ".scarlet/cache/skk/SKK-JISYO.L"
 to = "/system/scarlet/share/skk/SKK-JISYO.L"
 
 [[packages]]

@@ -48,3 +48,6 @@ deps = ["initramfs"]
 [[images.boot.packages]]
 source = ".scarlet/images/initramfs-aarch64-desktop.cpio"
 to = "/boot/initramfs"
+
+[runner]
+command = "tools/run.sh"

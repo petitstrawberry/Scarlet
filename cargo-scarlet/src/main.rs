@@ -7,6 +7,7 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
+use sha2::{Sha256, Digest};
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-scarlet")]
@@ -56,6 +57,8 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         release: bool,
+        #[arg(long)]
+        no_image: bool,
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
@@ -115,6 +118,13 @@ struct ScarletManifest {
     modules: BTreeMap<String, ModuleConfig>,
     #[serde(default)]
     images: BTreeMap<String, ManifestImageSection>,
+    #[serde(default)]
+    runner: Option<ManifestRunner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestRunner {
+    command: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +165,7 @@ struct ManifestPackage {
     bin: Option<String>,
     from: Option<String>,
     to: String,
+    output: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +188,39 @@ struct ExpandedManifest {
     sections: BTreeMap<String, ResolvedSection>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ImageLock {
+    #[serde(default)]
+    sections: BTreeMap<String, SectionLock>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SectionLock {
+    hash: String,
+    #[serde(default)]
+    files: Vec<FileLock>,
+    #[serde(default)]
+    packages: Vec<PackageLock>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FileLock {
+    source: String,
+    hash: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PackageLock {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    hash: String,
+}
+
 struct ResolvedPackage {
     kind: Option<String>,
     source: Option<PathBuf>,
@@ -185,6 +229,7 @@ struct ResolvedPackage {
     from: Option<PathBuf>,
     from_image: Option<String>,
     to: String,
+    output: Option<PathBuf>,
 }
 
 fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
@@ -308,6 +353,7 @@ fn resolve_package(pkg: &ManifestPackage, base_dir: &Path, target_triple: &str, 
             .filter(|s| images.contains_key(s.as_str()))
             .cloned(),
         to: expand_templates(&pkg.to, target_triple, arch),
+        output: pkg.output.as_ref().map(|o| resolve_path(base_dir, o)),
     }
 }
 
@@ -372,7 +418,7 @@ fn resolve_section(section: &ManifestImageSection, base_dir: &Path, ctx: &Templa
         let source = if f.source.starts_with("https://") || f.source.starts_with("http://") {
             FileSource::Url(f.source.clone())
         } else {
-            FileSource::Local(resolve_path(base_dir, &f.source))
+            FileSource::Local(resolve_path(base_dir, &ctx.expand(&f.source)))
         };
         files.push(ResolvedFile {
             source,
@@ -387,7 +433,11 @@ fn resolve_section(section: &ManifestImageSection, base_dir: &Path, ctx: &Templa
 fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
     let manifest = load_manifest(project_dir)?;
     let target_triple = manifest.kernel.target.clone();
-    let arch = target_triple.split('-').next().unwrap_or("unknown").to_string();
+    let raw_arch = target_triple.split('-').next().unwrap_or("unknown");
+    let arch = match raw_arch {
+        "riscv64gc" => "riscv64".to_string(),
+        other => other.to_string(),
+    };
     let project = manifest.project.name.clone();
 
     let ctx = TemplateContext { arch, target_triple, project };
@@ -573,6 +623,79 @@ fn resolve_git_rev(git_url: &str, rev: Option<&str>, tag: Option<&str>, branch: 
     Ok(hash.to_string())
 }
 
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    let mut f = fs::File::open(path)
+        .map_err(|e| format!("failed to open {} for hashing: {e}", path.display()))?;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn sha256_dir(dir: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    sha256_dir_recursive(dir, &mut hasher)?;
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn load_lock(project_dir: &Path) -> ImageLock {
+    let lock_path = project_dir.join("scarlet.lock");
+    let text = match fs::read_to_string(&lock_path) {
+        Ok(t) => t,
+        Err(_) => return ImageLock::default(),
+    };
+    let image_lock: ImageLock = match toml::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return ImageLock::default(),
+    };
+    image_lock
+}
+
+fn save_lock(project_dir: &Path, lock: &ImageLock) -> Result<(), String> {
+    let lock_path = project_dir.join("scarlet.lock");
+    let mut text = String::from("# Generated by cargo-scarlet — do not edit\n\n");
+    let lock_toml = toml::to_string_pretty(lock)
+        .map_err(|e| format!("failed to serialize lock: {e}"))?;
+    text.push_str(&lock_toml);
+    fs::write(&lock_path, &text)
+        .map_err(|e| format!("failed to write {}: {e}", lock_path.display()))?;
+    eprintln!("cargo-scarlet: wrote {}", lock_path.display());
+    Ok(())
+}
+
+fn sha256_dir_recursive(dir: &Path, hasher: &mut Sha256) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read_dir {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|e| format!("failed to read symlink {}: {e}", path.display()))?;
+            hasher.update(format!("sym:{}:{}\n", entry.file_name().display(), target.display()).as_bytes());
+        } else if path.is_dir() {
+            hasher.update(format!("dir:{}\n", entry.file_name().display()).as_bytes());
+            sha256_dir_recursive(&path, hasher)?;
+        } else {
+            let mut f = fs::File::open(&path)
+                .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+            let mut content = Vec::new();
+            f.read_to_end(&mut content)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            let file_hash = format!("{:x}", sha2::Sha256::digest(&content));
+            hasher.update(format!("file:{}:{}\n", entry.file_name().display(), file_hash).as_bytes());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -627,11 +750,45 @@ fn run() -> Result<(), String> {
             project,
             target,
             release,
+            no_image,
             extra_args,
         } => {
             let project = normalize_project_path(&project)?;
             let expanded = generate_from_manifest(&project)?;
-            cargo_build_manifest(&project, &expanded, target.as_deref(), release, "run", &extra_args)
+
+            if !no_image {
+                build_manifest_image(&project, target, release, None, false)?;
+            }
+
+            match &expanded.manifest.runner {
+                Some(runner) => {
+                    let runner_path = if Path::new(&runner.command).is_absolute() {
+                        PathBuf::from(&runner.command)
+                    } else {
+                        project.join(&runner.command)
+                    };
+
+                    let mut cmd = Command::new(&runner_path);
+                    cmd.current_dir(&project);
+                    if release {
+                        cmd.env("SCARLET_RELEASE", "1");
+                    }
+                    cmd.args(&extra_args);
+
+                    let status = cmd
+                        .status()
+                        .map_err(|e| format!("failed to run runner: {e}"))?;
+
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err("runner exited with non-zero status".to_string())
+                    }
+                }
+                None => {
+                    Err("no [runner] defined in scarlet.toml; running is not supported for this project".to_string())
+                }
+            }
         }
         Commands::Image {
             project,
@@ -658,7 +815,7 @@ fn run() -> Result<(), String> {
         ),
         Commands::Lock { project } => {
             let project = normalize_project_path(&project)?;
-            generate_lockfile(&project)
+            build_manifest_image(&project, None, false, None, false)
         }
     }
 }
@@ -907,6 +1064,9 @@ fn build_manifest_image(
 
     let build_order = topo_sort_images(&expanded.manifest.images)?;
 
+    let existing_lock = load_lock(project);
+    let mut new_lock = ImageLock::default();
+
     for section_name in build_order {
         let section_cfg = expanded.manifest.images.get(&section_name)
             .ok_or_else(|| format!("section '{}' not in manifest", section_name))?;
@@ -917,6 +1077,8 @@ fn build_manifest_image(
         let output_path = project.join(output);
         let staging_dir = project.join(format!(".scarlet/staging/{}", section_name));
         let format = section_cfg.format.as_deref().unwrap_or("");
+
+        eprintln!("cargo-scarlet: staging {}...", section_name);
 
         match format {
             "newc" | "ext2" => {
@@ -958,6 +1120,7 @@ fn build_manifest_image(
                     }
                 }
 
+                let mut package_locks: Vec<PackageLock> = Vec::new();
                 for pkg in &resolved.packages {
                     if let Some(ref img_name) = pkg.from_image {
                         let from_staging = project.join(format!(".scarlet/staging/{}", img_name));
@@ -966,9 +1129,34 @@ fn build_manifest_image(
                             copy_dir_recursive(&from_staging, &dest)?;
                         }
                     } else {
-                        install_package(&staging_dir, pkg, project, &target_triple, profile)?;
+                        let prev_pkg = existing_lock
+                            .sections
+                            .get(&section_name)
+                            .and_then(|s| {
+                                s.packages.iter().find(|p| {
+                                    p.kind == pkg.kind.as_deref().unwrap_or("")
+                                        && p.source.as_deref() == pkg.source.as_ref().map(|s| s.to_string_lossy().to_string()).as_deref()
+                                })
+                            });
+                        if let Some(lock) = install_package(&staging_dir, pkg, project, &target_triple, profile, prev_pkg)? {
+                            package_locks.push(lock);
+                        }
                     }
                 }
+
+                let staging_hash = sha256_dir(&staging_dir)?;
+
+                if output_path.exists() {
+                    if let Some(existing) = existing_lock.sections.get(&section_name) {
+                        if existing.hash == staging_hash {
+                            eprintln!("cargo-scarlet: {} unchanged, skipping image generation", section_name);
+                            new_lock.sections.insert(section_name.clone(), existing.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                eprintln!("cargo-scarlet: generating {} image...", section_name);
 
                 if format == "newc" {
                     build_initramfs_newc_from_staging(&staging_dir, &output_path)?;
@@ -976,6 +1164,12 @@ fn build_manifest_image(
                 } else {
                     build_ext2_from_staging(&staging_dir, &output_path, &section_name)?;
                 }
+
+                new_lock.sections.insert(section_name.clone(), SectionLock {
+                    hash: staging_hash,
+                    files: Vec::new(),
+                    packages: package_locks,
+                });
             }
             "limine-uefi" => {
                 let arch_name = match target_triple.split('-').next() {
@@ -996,6 +1190,29 @@ fn build_manifest_image(
                         }
                     }
                 }
+
+                let mut limine_hasher = Sha256::new();
+                limine_hasher.update(format!("format=limine-uefi\n").as_bytes());
+                limine_hasher.update(format!("cmdline={}\n", section_cfg.cmdline).as_bytes());
+                if kernel_elf.exists() {
+                    limine_hasher.update(format!("kernel:{}:{}\n", kernel_elf.display(), sha256_file(&kernel_elf)?).as_bytes());
+                }
+                if initramfs_path.exists() {
+                    limine_hasher.update(format!("initramfs:{}:{}\n", initramfs_path.display(), sha256_file(&initramfs_path)?).as_bytes());
+                }
+                let limine_hash = format!("sha256:{}", hex::encode(limine_hasher.finalize()));
+
+                if output_path.exists() {
+                    if let Some(existing) = existing_lock.sections.get(&section_name) {
+                        if existing.hash == limine_hash {
+                            eprintln!("cargo-scarlet: {} unchanged, skipping", section_name);
+                            new_lock.sections.insert(section_name.clone(), existing.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                eprintln!("cargo-scarlet: building {}...", section_name);
 
                 if let Some(parent) = output_path.parent() {
                     fs::create_dir_all(parent)
@@ -1035,12 +1252,21 @@ fn build_manifest_image(
                 }
 
                 eprintln!("cargo-scarlet: wrote {} to {}", section_name, output_path.display());
+
+                new_lock.sections.insert(section_name.clone(), SectionLock {
+                    hash: limine_hash,
+                    files: Vec::new(),
+                    packages: Vec::new(),
+                });
             }
             _ => {
                 return Err(format!("unsupported format '{}' for section '{}'", format, section_name));
             }
         }
     }
+
+    eprintln!("cargo-scarlet: saving lock with {} sections", new_lock.sections.len());
+    save_lock(project, &new_lock)?;
 
     Ok(())
 }
@@ -1146,7 +1372,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        if src_path.is_symlink() {
+            let link_target = fs::read_link(&src_path)
+                .map_err(|e| format!("failed to read symlink {}: {e}", src_path.display()))?;
+            if dst_path.exists() {
+                fs::remove_file(&dst_path)
+                    .map_err(|e| format!("failed to remove {}: {e}", dst_path.display()))?;
+            }
+            std::os::unix::fs::symlink(&link_target, &dst_path)
+                .map_err(|e| format!("failed to create symlink {} -> {}: {e}", dst_path.display(), link_target.display()))?;
+        } else if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             fs::copy(&src_path, &dst_path)
@@ -1193,7 +1428,8 @@ fn install_package(
     _project: &Path,
     target_triple: &str,
     profile: &str,
-) -> Result<(), String> {
+    prev_lock: Option<&PackageLock>,
+) -> Result<Option<PackageLock>, String> {
     let dest = staging_dir.join(pkg.to.trim_start_matches('/'));
 
     if let Some(parent) = dest.parent() {
@@ -1256,6 +1492,15 @@ fn install_package(
             };
             fs::copy(&binary, &dest)
                 .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
+
+            let hash = sha256_file(&binary)?;
+            Ok(Some(PackageLock {
+                kind: "cargo".to_string(),
+                source: Some(source.to_string_lossy().to_string()),
+                bin: Some(bin_name.to_string()),
+                output: None,
+                hash,
+            }))
         }
         Some("script") => {
             let source = pkg.source.as_ref().ok_or("script package missing source")?;
@@ -1267,19 +1512,90 @@ fn install_package(
             if !script_path.exists() {
                 return Err(format!("script not found: {}", script_path.display()));
             }
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+
+            let (script_output, copy_dest) = match &pkg.output {
+                Some(output) => {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    (output.clone(), dest.clone())
+                }
+                None => {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    (dest.clone(), PathBuf::new())
+                }
+            };
+
+            if let (Some(output_path), Some(prev)) = (&pkg.output, prev_lock) {
+                if output_path.exists() {
+                    let current_hash = sha256_file(output_path)?;
+                    if current_hash == prev.hash {
+                        eprintln!("cargo-scarlet: script output {} unchanged, skipping", output_path.display());
+                    } else {
+                        let status = Command::new("sh")
+                            .arg(&script_path)
+                            .arg(&script_output)
+                            .current_dir(_project)
+                            .status()
+                            .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
+                        if !status.success() {
+                            return Err(format!("script failed: {}", script_path.display()));
+                        }
+                    }
+                } else {
+                    let status = Command::new("sh")
+                        .arg(&script_path)
+                        .arg(&script_output)
+                        .current_dir(_project)
+                        .status()
+                        .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
+                    if !status.success() {
+                        return Err(format!("script failed: {}", script_path.display()));
+                    }
+                }
+            } else {
+                let status = Command::new("sh")
+                    .arg(&script_path)
+                    .arg(&script_output)
+                    .current_dir(_project)
+                    .status()
+                    .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
+                if !status.success() {
+                    return Err(format!("script failed: {}", script_path.display()));
+                }
             }
-            let status = Command::new("sh")
-                .arg(&script_path)
-                .arg(&dest)
-                .current_dir(_project)
-                .status()
-                .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
-            if !status.success() {
-                return Err(format!("script failed: {}", script_path.display()));
+
+            if !copy_dest.as_os_str().is_empty() {
+                if script_output.is_dir() {
+                    copy_dir_recursive(&script_output, &copy_dest)?;
+                } else if script_output.exists() {
+                    if let Some(parent) = copy_dest.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    fs::copy(&script_output, &copy_dest)
+                        .map_err(|e| format!("failed to copy {} -> {}: {e}", script_output.display(), copy_dest.display()))?;
+                }
             }
+
+            let hash = if script_output.is_dir() {
+                sha256_dir(&script_output)?
+            } else if script_output.exists() {
+                sha256_file(&script_output)?
+            } else {
+                "missing".to_string()
+            };
+            Ok(Some(PackageLock {
+                kind: "script".to_string(),
+                source: Some(source.to_string_lossy().to_string()),
+                bin: None,
+                output: pkg.output.as_ref().map(|p| p.to_string_lossy().to_string()),
+                hash,
+            }))
         }
         _ => {
             let from = pkg.from.as_ref().ok_or_else(|| {
@@ -1297,10 +1613,9 @@ fn install_package(
                     from.display()
                 );
             }
+            Ok(None)
         }
     }
-
-    Ok(())
 }
 
 fn build_initramfs_newc_from_staging(staging_dir: &Path, output_path: &Path) -> Result<(), String> {

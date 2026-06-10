@@ -534,37 +534,31 @@ dependencies = ["build-initramfs-debug-aarch64", "build-rootfs-aarch64"]
 description = "Run the kernel in release mode (RISC-V)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/riscv64-limine-full", "--release"]
-dependencies = ["build-initramfs-release-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64-release"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-full", "--release"]
-dependencies = ["build-initramfs-release-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64-release"]
 
 [tasks.run-aarch64-microvm]
 description = "Run the kernel in release mode (AArch64 microvm)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-microvm", "--release"]
-dependencies = ["build-userbin-release-aarch64"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/riscv64-limine-full"]
-dependencies = ["build-initramfs-debug-riscv64", "build-rootfs-riscv64", "build-boot-image-riscv64"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-full"]
-dependencies = ["build-initramfs-debug-aarch64", "build-rootfs-aarch64", "build-boot-image-aarch64"]
 
 [tasks.run-debug-aarch64-microvm]
 description = "Run the kernel in debug mode (AArch64 microvm)"
 command = "cargo"
 args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-microvm"]
-dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"

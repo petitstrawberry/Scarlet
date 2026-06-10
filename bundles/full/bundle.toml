@@ -1,0 +1,8 @@
+# Scarlet Full Distribution Bundle
+# Complete system: desktop + linux ABI.
+
+[[layers]]
+path = "../desktop/bundle.toml"
+
+[[layers]]
+path = "../linux/bundle.toml"

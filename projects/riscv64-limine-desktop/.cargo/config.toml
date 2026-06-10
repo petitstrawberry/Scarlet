@@ -5,7 +5,6 @@ opt-level = 3
 opt-level = 3
 
 [target.riscv64gc-unknown-none-elf]
-runner = "tools/run.sh"
 
 [build]
 target = "../../kernel/targets/riscv64gc-unknown-none-elf.json"

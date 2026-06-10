@@ -59,3 +59,6 @@ deps = ["initramfs"]
 [[images.boot.packages]]
 source = ".scarlet/images/initramfs-aarch64-microvm.cpio"
 to = "/boot/initramfs"
+
+[runner]
+command = "tools/run_aarch64.sh"

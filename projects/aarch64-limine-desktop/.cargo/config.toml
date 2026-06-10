@@ -6,10 +6,8 @@ opt-level = 3
 
 [target.aarch64-unknown-none]
 rustflags = ["-T", "lds/aarch64_limine.ld"]
-runner = "tools/run.sh"
 
 [target.aarch64-unknown-none-elf]
-runner = "tools/run.sh"
 rustflags = [
 	"-C", "no-vectorize-loops",
 	"-C", "no-vectorize-slp",
