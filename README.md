@@ -155,8 +155,8 @@ The xv6 ABI implementation is currently available as an experimental feature:
 The Linux ABI implementation is currently in active development:
 
 - **Userspace Support**: Runs simple static binaries and Buildroot/BusyBox environments.
-- **Syscall Coverage**: Basic file I/O, process management, and memory operations are implemented.
-- **Limitations**: Many advanced syscalls (networking, complex signals) are stubbed or missing. See [`docs/abi/linux/status.md`](docs/abi/linux/status.md) for the compatibility matrix.
+- **Syscall Coverage**: File I/O, process management, memory operations, networking (socket API), and signals are implemented.
+- **Limitations**: Some advanced syscalls are stubbed or missing. See [`docs/abi/linux/status.md`](docs/abi/linux/status.md) for the compatibility matrix.
 
 ## Architecture Support
 
