@@ -1,6 +1,12 @@
 # Scarlet Desktop Bundle
 # GUI and desktop environment components.
-# Layer on top of scarlet-base for a graphical desktop experience.
+# Composes base + cli-utils + desktop-specific packages.
+
+[[layers]]
+path = "../base/bundle.toml"
+
+[[layers]]
+path = "../cli-utils/bundle.toml"
 
 [[files]]
 source = "fs"
@@ -92,3 +98,59 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "wayland_bridge"
 to = "/system/scarlet/bin/wayland_bridge"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ansi_banner"
+to = "/system/scarlet/bin/ansi_banner"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+bin = "video_player"
+to = "/system/scarlet/bin/video_player"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "gpu_probe"
+to = "/system/scarlet/bin/gpu_probe"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "httpd"
+to = "/system/scarlet/bin/httpd"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ushv"
+to = "/system/scarlet/bin/ushv"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm_list"
+to = "/system/scarlet/bin/lsm_list"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm_load"
+to = "/system/scarlet/bin/lsm_load"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "lsm_unload"
+to = "/system/scarlet/bin/lsm_unload"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "input_dump"
+to = "/system/scarlet/bin/input_dump"

@@ -1210,15 +1210,7 @@ fn install_package(
             let userspace_triple = userspace_target_triple(target_triple);
             let profile_dir = if profile == "release" { "release" } else { "debug" };
 
-            let binary = source
-                .join("target")
-                .join(&userspace_triple)
-                .join(profile_dir)
-                .join(bin_name);
-
-            let binary = if binary.exists() {
-                binary
-            } else {
+            let binary = {
                 eprintln!(
                     "cargo-scarlet: building {} ({}) for {}...",
                     package_name, bin_name, userspace_triple
