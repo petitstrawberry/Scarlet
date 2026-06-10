@@ -1,13 +1,13 @@
 schema_version = 2
 
 [project]
-name = "scarlet-riscv64-limine-desktop"
+name = "scarlet-aarch64-limine-desktop"
 
 [kernel]
 package = "scarlet"
 source = "../../kernel"
-target = "riscv64gc-unknown-none-elf"
-target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
+target = "aarch64-unknown-none-elf"
+target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
 
 [kernel.features]
 network = true
@@ -18,13 +18,13 @@ limine = true
 profiler = false
 
 [modules]
-"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = false }
 
 [images]
 
 [images.initramfs]
 format = "newc"
-output = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+output = ".scarlet/images/initramfs-aarch64-desktop.cpio"
 
 [[images.initramfs.layers]]
 path = "../../bundles/base/bundle.toml"
@@ -34,17 +34,17 @@ path = "../../bundles/cli-utils/bundle.toml"
 
 [images.rootfs]
 format = "ext2"
-output = ".scarlet/images/rootfs-riscv64-desktop.ext2"
+output = ".scarlet/images/rootfs-aarch64-desktop.ext2"
 
 [[images.rootfs.layers]]
 path = "../../bundles/desktop/bundle.toml"
 
 [images.boot]
 format = "limine-uefi"
-output = ".scarlet/images/limine-riscv64-desktop.img"
-cmdline = "console=ttyS0 root=/dev/vblk1"
+output = ".scarlet/images/limine-aarch64-desktop.img"
+cmdline = "console=ttyAMA0"
 deps = ["initramfs"]
 
 [[images.boot.packages]]
-source = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+source = ".scarlet/images/initramfs-aarch64-desktop.cpio"
 to = "/boot/initramfs"
