@@ -1,0 +1,53 @@
+schema_version = 1
+
+[project]
+name = "scarlet-riscv64-limine-desktop"
+
+[kernel]
+package = "scarlet"
+source = "../../kernel"
+target = "riscv64gc-unknown-none-elf"
+target_json = "../../kernel/targets/riscv64gc-unknown-none-elf.json"
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+path = "../../bundles/cli-utils/bundle.toml"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-riscv64-desktop.ext2"
+
+[[images.rootfs.layers]]
+path = "../../bundles/desktop/bundle.toml"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-riscv64-desktop.img"
+cmdline = "console=ttyS0 root=/dev/vblk1"
+deps = ["initramfs"]
+
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run.sh"

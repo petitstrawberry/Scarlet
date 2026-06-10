@@ -2,6 +2,7 @@
 
 # Test runner for Scarlet kernel
 # This script is called by cargo test and can also be used for debugging tests
+# All test artifacts are kept within kernel/.test/ — no dependency on mkfs/
 
 # Default values
 DEBUG_MODE=false
@@ -22,19 +23,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-riscv64.cpio"
-BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
+KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$KERNEL_DIR" && cd .. && pwd)"
+TEST_DIR="$KERNEL_DIR/.test"
+
+BOOT_IMAGE="$TEST_DIR/limine-riscv64-boot.img"
 EFI_CODE="${SCARLET_EFI_CODE_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}"
-EFI_VARS="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
+EFI_VARS="$TEST_DIR/RISCV_VIRT_VARS.fd"
+LIMINE_CACHE="$TEST_DIR/.cache"
+
+mkdir -p "$TEST_DIR"
 
 echo "Test runner starting..."
 
 # Generate fresh FAT32 test image before each test run
 echo "Generating fresh FAT32 test image..."
-KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
 "$KERNEL_DIR/tools/create-fat32-image.sh"
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create FAT32 test image"
@@ -54,7 +58,38 @@ if [ -n "$KERNEL_BINARY" ]; then
     LINK_PATH="$(dirname "$KERNEL_BINARY")/../test-kernel"
     ln -sf "$KERNEL_BINARY" "$LINK_PATH"
     echo "Created symbolic link: $LINK_PATH -> $KERNEL_BINARY"
-    KERNEL_ELF="$KERNEL_BINARY" sh "$PROJECT_ROOT/mkfs/make_limine_riscv64_image.sh"
+
+    # Create minimal initramfs for test boot
+    INITRAMFS="$TEST_DIR/initramfs-test.cpio"
+    echo "test" > "$TEST_DIR/test-marker"
+    (cd "$TEST_DIR" && echo "test-marker" | cpio -o -H newc > "$INITRAMFS" 2>/dev/null)
+
+    # Build limine boot image using cargo-scarlet-plugin-limine
+    LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/release/cargo-scarlet-plugin-limine"
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        echo "Error: cargo-scarlet-plugin-limine not found. Build with: cargo build --release --manifest-path cargo-scarlet-plugin-limine/Cargo.toml"
+        exit 1
+    fi
+
+    "$LIMINE_PLUGIN" \
+        --arch riscv64 \
+        --kernel "$KERNEL_BINARY" \
+        --initramfs "$INITRAMFS" \
+        --output "$BOOT_IMAGE" \
+        --cache-dir "$LIMINE_CACHE"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to create limine boot image"
+        exit 1
+    fi
 fi
 
 if [ "$DEBUG_MODE" = true ]; then

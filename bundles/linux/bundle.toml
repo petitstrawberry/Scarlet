@@ -1,0 +1,8 @@
+# Scarlet Linux ABI Bundle
+# Pre-built Buildroot rootfs for Linux ABI compatibility.
+# Uses {arch} template to select the correct architecture tree.
+
+[[files]]
+source = "rootfs/linux-{arch}"
+to = "/system/linux-{arch}"
+template = true

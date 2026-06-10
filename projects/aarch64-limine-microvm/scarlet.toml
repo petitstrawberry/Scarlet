@@ -1,0 +1,64 @@
+schema_version = 1
+
+[project]
+name = "scarlet-aarch64-limine-microvm"
+
+[kernel]
+package = "scarlet"
+source = "../../kernel"
+target = "aarch64-unknown-none-elf"
+target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = false }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-microvm.cpio"
+
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "microvm_init"
+to = "/system/scarlet/bin/init"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-microvm.ext2"
+
+[[images.rootfs.layers]]
+path = "../../bundles/base/bundle.toml"
+
+[[images.rootfs.packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "microvm_init"
+to = "/system/scarlet/bin/init"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-aarch64-microvm.img"
+cmdline = "console=ttyAMA0"
+deps = ["initramfs"]
+
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs-aarch64-microvm.cpio"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run_aarch64.sh"

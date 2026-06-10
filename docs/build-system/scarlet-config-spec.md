@@ -2,7 +2,15 @@
 
 ## Overview
 
-`scarlet-config.toml` is the source of truth for Scarlet build composition.
+`scarlet-config.toml` is the current project-local kernel build configuration.
+It defines the target board, kernel crate source, feature flags, and module
+selection for a specific project.
+
+The planned evolution to a unified `scarlet.toml` with distro/image composition
+is documented in
+[`docs/architecture/distro-model.md`](../architecture/distro-model.md).
+Until that model is implemented, `scarlet-config.toml` remains the active
+configuration format.
 
 It should be understood as a **full resolved `.config`-style file** in the Kconfig sense: every meaningful build option is written out explicitly, including options that are disabled.
 
@@ -313,9 +321,9 @@ args = [
 ]
 ```
 
-This keeps the artifact contract in the project recipe. If a project moves out
-of the monorepo, its own config should point at that repository's local artifact
-layout instead of relying on hidden global defaults.
+This keeps the artifact contract in the legacy project-local build adapter. New
+distro/image composition should declare installable files in layer recipes and
+let `cargo-scarlet plan` generate the image plan.
 
 ## Validation Rules
 

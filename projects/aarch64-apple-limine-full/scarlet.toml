@@ -1,0 +1,41 @@
+schema_version = 1
+
+[project]
+name = "scarlet-aarch64-apple-limine-full"
+
+[kernel]
+package = "scarlet"
+source = "../../kernel"
+target = "aarch64-unknown-none-elf"
+target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
+
+[kernel.features]
+network = true
+user-fpu = true
+user-vector = true
+hypervisor = true
+limine = true
+profiler = false
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+"scarlet-driver-apple-efuse" = { path = "../../drivers/nvmem/apple-efuse", enabled = true }
+"scarlet-driver-apple-wdt" = { path = "../../drivers/watchdog/apple-wdt", enabled = true }
+"scarlet-driver-apple-pinctrl" = { path = "../../drivers/gpio/apple-pinctrl", enabled = true }
+"scarlet-driver-apple-i2c" = { path = "../../drivers/i2c/apple-i2c", enabled = true }
+"scarlet-driver-s5l-uart" = { path = "../../drivers/uart/s5l-uart", enabled = true }
+"scarlet-driver-apple-aic" = { path = "../../drivers/pic/apple-aic", enabled = true }
+"scarlet-driver-apple-msi" = { path = "../../drivers/pic/apple-msi", enabled = true }
+"scarlet-driver-apple-atcphy" = { path = "../../drivers/phy/apple-atcphy", enabled = true }
+"scarlet-driver-apple-pmgr" = { path = "../../drivers/soc/apple-pmgr", enabled = true }
+"scarlet-driver-apple-asc" = { path = "../../drivers/soc/apple-asc", enabled = true }
+"scarlet-driver-apple-rtkit" = { path = "../../drivers/soc/apple-rtkit", enabled = true }
+"scarlet-driver-apple-afk" = { path = "../../drivers/soc/apple-afk", enabled = true }
+"scarlet-driver-apple-epic" = { path = "../../drivers/soc/apple-epic", enabled = true }
+"scarlet-driver-apple-dart" = { path = "../../drivers/iommu/apple-dart", enabled = true }
+"scarlet-driver-apple-dwc3" = { path = "../../drivers/usb/dwc3/apple-dwc3", enabled = true }
+"scarlet-driver-apple-pcie" = { path = "../../drivers/pcie/apple-pcie", enabled = true }
+"scarlet-driver-apple-spi" = { path = "../../drivers/spi/apple-spi", enabled = true }
+"scarlet-driver-apple-spi-hid" = { path = "../../drivers/spi/apple-spi-hid", enabled = true }
+"scarlet-driver-dpxbar" = { path = "../../drivers/display/dpxbar", enabled = true }
+"scarlet-driver-dcpext" = { path = "../../drivers/display/dcpext", enabled = true }

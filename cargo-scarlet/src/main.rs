@@ -7,6 +7,7 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-scarlet")]
@@ -56,6 +57,8 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         release: bool,
+        #[arg(long)]
+        no_image: bool,
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
@@ -83,51 +86,10 @@ enum Commands {
         #[arg(long)]
         target: Option<String>,
     },
-}
-
-#[derive(Debug, Deserialize)]
-struct ScarletConfig {
-    config_version: u32,
-    project: ProjectConfig,
-    board: BoardConfig,
-    kernel: KernelConfig,
-    #[serde(rename = "modules", default)]
-    modules: BTreeMap<String, ModuleConfig>,
-    #[serde(rename = "loadable_modules", default)]
-    loadable_modules: BTreeMap<String, LoadableModuleConfig>,
-    #[serde(default)]
-    image: Option<ImageConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectConfig {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BoardConfig {
-    name: String,
-    target: String,
-    target_json: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct KernelConfig {
-    package: String,
-    source: KernelSource,
-    #[serde(default)]
-    features: BTreeMap<String, bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KernelSource {
-    version: Option<String>,
-    path: Option<String>,
-    git: Option<String>,
-    rev: Option<String>,
-    branch: Option<String>,
-    tag: Option<String>,
-    registry: Option<String>,
+    Lock {
+        #[arg(long)]
+        project: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,46 +109,540 @@ struct ModuleConfig {
 }
 
 #[derive(Debug, Deserialize)]
-struct LoadableModuleConfig {
-    path: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    output: Option<String>,
+struct ScarletManifest {
+    schema_version: u32,
+    #[allow(dead_code)]
+    project: ManifestProject,
+    kernel: ManifestKernel,
+    #[serde(default)]
+    modules: BTreeMap<String, ModuleConfig>,
+    #[serde(default)]
+    images: BTreeMap<String, ManifestImageSection>,
+    #[serde(default)]
+    runner: Option<ManifestRunner>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ImageConfig {
-    #[serde(default)]
-    steps: Vec<ImageStepConfig>,
+struct ManifestRunner {
+    command: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ImageStepConfig {
-    name: Option<String>,
-    kind: Option<String>,
-    command: Option<String>,
-    #[serde(default)]
-    args: Vec<String>,
-    cwd: Option<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    inputs: Vec<ImageInputConfig>,
-    output: Option<String>,
+#[allow(dead_code)]
+struct ManifestProject {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ImageInputConfig {
+struct ManifestKernel {
+    package: String,
     source: String,
-    destination: String,
+    target: String,
+    target_json: String,
     #[serde(default)]
-    optional: bool,
-    #[serde(default)]
-    skip_suffixes: Vec<String>,
+    features: BTreeMap<String, bool>,
 }
 
-fn default_true() -> bool {
-    true
+#[derive(Debug, Default, Deserialize)]
+struct ManifestImageSection {
+    format: Option<String>,
+    output: Option<String>,
+    #[serde(default)]
+    cmdline: String,
+    #[serde(default)]
+    packages: Vec<ManifestPackage>,
+    #[serde(default)]
+    files: Vec<ManifestFileEntry>,
+    #[serde(default)]
+    deps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestPackage {
+    kind: Option<String>,
+    source: Option<String>,
+    package: Option<String>,
+    bin: Option<String>,
+    from: Option<String>,
+    to: String,
+    output: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestFileEntry {
+    source: String,
+    to: String,
+    #[serde(default)]
+    template: bool,
+}
+
+struct ResolvedSection {
+    packages: Vec<ResolvedPackage>,
+    files: Vec<ResolvedFile>,
+}
+
+struct ExpandedManifest {
+    #[allow(dead_code)]
+    project_dir: PathBuf,
+    manifest: ScarletManifest,
+    sections: BTreeMap<String, ResolvedSection>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ImageLock {
+    #[serde(default)]
+    sections: BTreeMap<String, SectionLock>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SectionLock {
+    hash: String,
+    #[serde(default)]
+    files: Vec<FileLock>,
+    #[serde(default)]
+    packages: Vec<PackageLock>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FileLock {
+    source: String,
+    hash: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PackageLock {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    hash: String,
+}
+
+struct ResolvedPackage {
+    kind: Option<String>,
+    source: Option<PathBuf>,
+    package_name: Option<String>,
+    bin: Option<String>,
+    from: Option<PathBuf>,
+    from_image: Option<String>,
+    to: String,
+    output: Option<PathBuf>,
+}
+
+fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
+    let manifest_path = project_dir.join("scarlet.toml");
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+    let mut root: toml::Value = toml::from_str(&text)
+        .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
+
+    merge_layers_recursive(&mut root, project_dir)?;
+
+    let merged_text = toml::to_string(&root)
+        .map_err(|e| format!("failed to re-serialize merged manifest: {e}"))?;
+    let manifest: ScarletManifest =
+        toml::from_str(&merged_text).map_err(|e| format!("failed to deserialize manifest: {e}"))?;
+
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported schema_version {} (expected 1)",
+            manifest.schema_version
+        ));
+    }
+
+    Ok(manifest)
+}
+
+fn merge_toml_into(parent: &mut toml::Value, child: toml::Value) {
+    let toml::Value::Table(parent_table) = parent else {
+        return;
+    };
+    let toml::Value::Table(child_table) = child else {
+        return;
+    };
+    for (key, child_val) in child_table {
+        match parent_table.get_mut(&key) {
+            Some(toml::Value::Array(parent_arr)) => {
+                if let toml::Value::Array(child_arr) = child_val {
+                    parent_arr.extend(child_arr);
+                }
+            }
+            Some(parent_existing) => {
+                let child_tables = matches!(parent_existing, toml::Value::Table(_))
+                    && matches!(&child_val, toml::Value::Table(_));
+                if child_tables {
+                    let mut taken = parent_existing.clone();
+                    merge_toml_into(&mut taken, child_val);
+                    parent_table.insert(key, taken);
+                }
+            }
+            _ => {
+                parent_table.insert(key, child_val);
+            }
+        }
+    }
+}
+
+fn resolve_toml_paths(value: &mut toml::Value, origin_dir: &Path) {
+    let toml::Value::Table(table) = value else {
+        return;
+    };
+    for (key, val) in table.iter_mut() {
+        match val {
+            toml::Value::String(s) if key == "source" || key == "path" => {
+                let resolved = resolve_path(origin_dir, s);
+                *s = resolved.to_string_lossy().to_string();
+            }
+            toml::Value::Table(_) => resolve_toml_paths(val, origin_dir),
+            toml::Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    resolve_toml_paths(item, origin_dir);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn merge_layers_recursive(value: &mut toml::Value, base_dir: &Path) -> Result<(), String> {
+    let layers = match value {
+        toml::Value::Table(table) => table.remove("layers"),
+        _ => None,
+    };
+
+    if let Some(toml::Value::Array(layers)) = layers {
+        for layer_entry in layers {
+            let toml::Value::Table(layer_tbl) = layer_entry else {
+                continue;
+            };
+            let Some(toml::Value::String(path_str)) = layer_tbl.get("path") else {
+                continue;
+            };
+            let layer_path = resolve_path(base_dir, path_str);
+            let layer_dir = layer_path.parent().unwrap_or(Path::new("."));
+            let layer_text = fs::read_to_string(&layer_path)
+                .map_err(|e| format!("failed to read layer {}: {e}", layer_path.display()))?;
+            let mut layer_value: toml::Value = toml::from_str(&layer_text)
+                .map_err(|e| format!("failed to parse layer {}: {e}", layer_path.display()))?;
+            merge_layers_recursive(&mut layer_value, layer_dir)?;
+            resolve_toml_paths(&mut layer_value, layer_dir);
+            merge_toml_into(value, layer_value);
+        }
+    }
+
+    if let toml::Value::Table(table) = value {
+        for (_key, sub_value) in table.iter_mut() {
+            if let toml::Value::Table(_sub_table) = sub_value {
+                let sub_dir = base_dir.to_path_buf();
+                merge_layers_recursive(sub_value, &sub_dir)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_package(
+    pkg: &ManifestPackage,
+    base_dir: &Path,
+    target_triple: &str,
+    images: &BTreeMap<String, ManifestImageSection>,
+) -> ResolvedPackage {
+    let arch = target_triple.split('-').next().unwrap_or("unknown");
+    ResolvedPackage {
+        kind: pkg.kind.clone(),
+        source: pkg
+            .source
+            .as_ref()
+            .map(|s| resolve_path(base_dir, &expand_templates(s, target_triple, arch))),
+        package_name: pkg.package.clone(),
+        bin: pkg.bin.clone(),
+        from: pkg
+            .from
+            .as_ref()
+            .map(|s| {
+                if images.contains_key(s.as_str()) {
+                    None
+                } else {
+                    Some(resolve_path(
+                        base_dir,
+                        &expand_templates(s, target_triple, arch),
+                    ))
+                }
+            })
+            .flatten(),
+        from_image: pkg
+            .from
+            .as_ref()
+            .filter(|s| images.contains_key(s.as_str()))
+            .cloned(),
+        to: expand_templates(&pkg.to, target_triple, arch),
+        output: pkg.output.as_ref().map(|o| resolve_path(base_dir, o)),
+    }
+}
+
+fn resolve_path(base: &Path, relative: &str) -> PathBuf {
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+struct TemplateContext {
+    arch: String,
+    target_triple: String,
+    project: String,
+}
+
+impl TemplateContext {
+    fn expand(&self, s: &str) -> String {
+        s.replace("{target_triple}", &self.target_triple)
+            .replace("{arch}", &self.arch)
+            .replace("{project}", &self.project)
+    }
+}
+
+fn expand_templates(s: &str, target_triple: &str, arch: &str) -> String {
+    s.replace("{target_triple}", target_triple)
+        .replace("{arch}", arch)
+}
+
+fn userspace_target_triple(kernel_triple: &str) -> String {
+    let arch = kernel_triple.split('-').next().unwrap_or("unknown");
+    match arch {
+        "aarch64" => "aarch64-unknown-scarlet".to_string(),
+        v if v.starts_with("riscv64") => "riscv64gc-unknown-scarlet".to_string(),
+        _ => kernel_triple.to_string(),
+    }
+}
+
+#[derive(Debug)]
+enum FileSource {
+    Local(PathBuf),
+    Url(String),
+}
+
+struct ResolvedFile {
+    source: FileSource,
+    to: String,
+    template: bool,
+}
+
+fn resolve_section(
+    section: &ManifestImageSection,
+    base_dir: &Path,
+    ctx: &TemplateContext,
+    images: &BTreeMap<String, ManifestImageSection>,
+) -> Result<ResolvedSection, String> {
+    let mut packages = Vec::new();
+    let mut files = Vec::new();
+
+    for pkg in &section.packages {
+        packages.push(resolve_package(pkg, base_dir, &ctx.target_triple, images));
+    }
+
+    for f in &section.files {
+        let source = if f.source.starts_with("https://") || f.source.starts_with("http://") {
+            FileSource::Url(f.source.clone())
+        } else {
+            FileSource::Local(resolve_path(base_dir, &ctx.expand(&f.source)))
+        };
+        files.push(ResolvedFile {
+            source,
+            to: ctx.expand(&f.to),
+            template: f.template,
+        });
+    }
+
+    Ok(ResolvedSection { packages, files })
+}
+
+fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
+    let manifest = load_manifest(project_dir)?;
+    let target_triple = manifest.kernel.target.clone();
+    let raw_arch = target_triple.split('-').next().unwrap_or("unknown");
+    let arch = match raw_arch {
+        "riscv64gc" => "riscv64".to_string(),
+        other => other.to_string(),
+    };
+    let project = manifest.project.name.clone();
+
+    let ctx = TemplateContext {
+        arch,
+        target_triple,
+        project,
+    };
+
+    let mut sections = BTreeMap::new();
+    let images_ref = &manifest.images;
+    for (name, section) in images_ref {
+        sections.insert(
+            name.clone(),
+            resolve_section(section, project_dir, &ctx, images_ref)?,
+        );
+    }
+
+    Ok(ExpandedManifest {
+        project_dir: project_dir.to_path_buf(),
+        manifest,
+        sections,
+    })
+}
+
+fn generate_from_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
+    let expanded = expand_manifest(project_dir)?;
+
+    let generated_root = project_dir.join(".scarlet/scarlet-modules");
+    let generated_src = generated_root.join("src");
+    fs::create_dir_all(&generated_src)
+        .map_err(|e| format!("failed to create {}: {e}", generated_src.display()))?;
+
+    let cargo_toml = render_manifest_cargo_toml(&expanded.manifest, project_dir)?;
+    let lib_rs = render_manifest_lib_rs(&expanded.manifest);
+
+    write_if_changed(&generated_root.join("Cargo.toml"), &cargo_toml)?;
+    write_if_changed(&generated_src.join("lib.rs"), &lib_rs)?;
+
+    Ok(expanded)
+}
+
+fn render_manifest_cargo_toml(
+    manifest: &ScarletManifest,
+    project_dir: &Path,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "# generated by cargo-scarlet");
+    out.push_str("[package]\n");
+    out.push_str("name = \"scarlet-modules\"\n");
+    out.push_str("version = \"0.1.0\"\n");
+    out.push_str("edition = \"2024\"\n\n");
+    out.push_str("[lib]\npath = \"src/lib.rs\"\n\n");
+    out.push_str("[dependencies]\n");
+
+    let kernel_abs = project_dir.join(&manifest.kernel.source);
+    let generated_root = project_dir.join(".scarlet/scarlet-modules");
+    let kernel_rel = pathdiff(&kernel_abs, &generated_root)?;
+    let features = render_enabled_kernel_features(&manifest.kernel.features);
+    let _ = writeln!(
+        &mut out,
+        "{} = {{ path = \"{}\", default-features = false, features = [{}] }}",
+        manifest.kernel.package,
+        kernel_rel.display(),
+        features
+    );
+
+    for (name, module) in &manifest.modules {
+        if !module.enabled {
+            continue;
+        }
+        let spec = render_dependency_spec(project_dir, module)?;
+        let _ = writeln!(&mut out, "{name} = {{ {spec} }}");
+    }
+
+    Ok(out)
+}
+
+fn render_manifest_lib_rs(manifest: &ScarletManifest) -> String {
+    let mut source = String::new();
+    source.push_str("#![no_std]\n\n");
+    source.push_str("pub use scarlet;\n\n");
+    source.push_str("#[inline(never)]\n");
+    source.push_str("pub fn force_link() {\n");
+    for name in manifest
+        .modules
+        .keys()
+        .filter(|n| manifest.modules[*n].enabled)
+    {
+        let identifier = cargo_key_to_rust_identifier(name);
+        let _ = writeln!(&mut source, "    {identifier}::force_link();");
+    }
+    source.push_str("}\n");
+    source
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    let mut f = fs::File::open(path)
+        .map_err(|e| format!("failed to open {} for hashing: {e}", path.display()))?;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn sha256_dir(dir: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    sha256_dir_recursive(dir, &mut hasher)?;
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn load_lock(project_dir: &Path) -> ImageLock {
+    let lock_path = project_dir.join("scarlet.lock");
+    let text = match fs::read_to_string(&lock_path) {
+        Ok(t) => t,
+        Err(_) => return ImageLock::default(),
+    };
+    let image_lock: ImageLock = match toml::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return ImageLock::default(),
+    };
+    image_lock
+}
+
+fn save_lock(project_dir: &Path, lock: &ImageLock) -> Result<(), String> {
+    let lock_path = project_dir.join("scarlet.lock");
+    let mut text = String::from("# Generated by cargo-scarlet — do not edit\n\n");
+    let lock_toml =
+        toml::to_string_pretty(lock).map_err(|e| format!("failed to serialize lock: {e}"))?;
+    text.push_str(&lock_toml);
+    fs::write(&lock_path, &text)
+        .map_err(|e| format!("failed to write {}: {e}", lock_path.display()))?;
+    eprintln!("cargo-scarlet: wrote {}", lock_path.display());
+    Ok(())
+}
+
+fn sha256_dir_recursive(dir: &Path, hasher: &mut Sha256) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read_dir {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if path.is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|e| format!("failed to read symlink {}: {e}", path.display()))?;
+            hasher.update(
+                format!("sym:{}:{}\n", entry.file_name().display(), target.display()).as_bytes(),
+            );
+        } else if path.is_dir() {
+            hasher.update(format!("dir:{}\n", entry.file_name().display()).as_bytes());
+            sha256_dir_recursive(&path, hasher)?;
+        } else {
+            let mut f = fs::File::open(&path)
+                .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+            let mut content = Vec::new();
+            f.read_to_end(&mut content)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            let file_hash = format!("{:x}", sha2::Sha256::digest(&content));
+            hasher
+                .update(format!("file:{}:{}\n", entry.file_name().display(), file_hash).as_bytes());
+        }
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -207,8 +663,16 @@ fn run() -> Result<(), String> {
             target,
             release,
         } => {
-            let config = generate(&project)?;
-            cargo_command(&project, &config, "check", target, release, &[])
+            let project = normalize_project_path(&project)?;
+            let expanded = generate_from_manifest(&project)?;
+            cargo_build_manifest(
+                &project,
+                &expanded,
+                target.as_deref(),
+                release,
+                "check",
+                &[],
+            )
         }
         Commands::Build {
             project,
@@ -222,10 +686,17 @@ fn run() -> Result<(), String> {
                 Ok(())
             } else {
                 let project = project.ok_or("--project is required when not using --module")?;
-                let config = generate(&project)?;
-                cargo_command(&project, &config, "build", target.clone(), release, &[])?;
-                inject_ksym_section(&project, &config, target.as_deref(), release)?;
-                build_loadable_modules(&project, &config, release)
+                let project = normalize_project_path(&project)?;
+                let expanded = generate_from_manifest(&project)?;
+                cargo_build_manifest(
+                    &project,
+                    &expanded,
+                    target.as_deref(),
+                    release,
+                    "build",
+                    &[],
+                )?;
+                inject_ksym_section_manifest(&project, &expanded, target.as_deref(), release)
             }
         }
         Commands::Clippy {
@@ -234,17 +705,60 @@ fn run() -> Result<(), String> {
             release,
             extra_args,
         } => {
-            let config = generate(&project)?;
-            cargo_command(&project, &config, "clippy", target, release, &extra_args)
+            let project = normalize_project_path(&project)?;
+            let expanded = generate_from_manifest(&project)?;
+            cargo_build_manifest(
+                &project,
+                &expanded,
+                target.as_deref(),
+                release,
+                "clippy",
+                &extra_args,
+            )
         }
         Commands::Run {
             project,
             target,
             release,
+            no_image,
             extra_args,
         } => {
-            let config = generate(&project)?;
-            cargo_command(&project, &config, "run", target, release, &extra_args)
+            let project = normalize_project_path(&project)?;
+            let expanded = generate_from_manifest(&project)?;
+
+            if !no_image {
+                build_manifest_image(&project, target, release, None, false)?;
+            }
+
+            match &expanded.manifest.runner {
+                Some(runner) => {
+                    let runner_path = if Path::new(&runner.command).is_absolute() {
+                        PathBuf::from(&runner.command)
+                    } else {
+                        project.join(&runner.command)
+                    };
+
+                    let mut cmd = Command::new(&runner_path);
+                    cmd.current_dir(&project);
+                    if release {
+                        cmd.env("SCARLET_RELEASE", "1");
+                    }
+                    cmd.args(&extra_args);
+
+                    let status = cmd
+                        .status()
+                        .map_err(|e| format!("failed to run runner: {e}"))?;
+
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err("runner exited with non-zero status".to_string())
+                    }
+                }
+                None => {
+                    Err("no [runner] defined in scarlet.toml; running is not supported for this project".to_string())
+                }
+            }
         }
         Commands::Image {
             project,
@@ -252,7 +766,10 @@ fn run() -> Result<(), String> {
             release,
             kernel_elf,
             no_build,
-        } => build_project_image(&project, target, release, kernel_elf, no_build),
+        } => {
+            let project = normalize_project_path(&project)?;
+            build_manifest_image(&project, target, release, kernel_elf, no_build)
+        }
         Commands::New {
             module,
             project,
@@ -266,50 +783,24 @@ fn run() -> Result<(), String> {
             kernel_rev.as_deref(),
             target.as_deref(),
         ),
+        Commands::Lock { project } => {
+            let project = normalize_project_path(&project)?;
+            build_manifest_image(&project, None, false, None, false)
+        }
     }
 }
 
-fn normalized_args() -> Vec<String> {
-    let mut args = std::env::args().collect::<Vec<_>>();
-    if args.get(1).is_some_and(|arg| arg == "scarlet") {
-        args.remove(1);
-    }
-    args
-}
-
-fn generate(project: &Path) -> Result<ScarletConfig, String> {
-    let project = normalize_project_path(project)?;
-    let config_path = project.join("scarlet-config.toml");
-    let config_text = fs::read_to_string(&config_path)
-        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
-    let config: ScarletConfig = toml::from_str(&config_text)
-        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
-
-    validate_config(&config)?;
-
-    let generated_root = project.join(".scarlet/scarlet-modules");
-    let generated_src = generated_root.join("src");
-    fs::create_dir_all(&generated_src)
-        .map_err(|error| format!("failed to create {}: {error}", generated_src.display()))?;
-
-    let cargo_toml = render_generated_manifest(&config, &project)?;
-    let lib_rs = render_generated_lib(&config);
-
-    write_if_changed(&generated_root.join("Cargo.toml"), &cargo_toml)?;
-    write_if_changed(&generated_src.join("lib.rs"), &lib_rs)?;
-
-    Ok(config)
-}
-
-fn cargo_command(
+fn cargo_build_manifest(
     project: &Path,
-    config: &ScarletConfig,
-    subcommand: &str,
-    target: Option<String>,
+    expanded: &ExpandedManifest,
+    target: Option<&str>,
     release: bool,
+    subcommand: &str,
     extra_args: &[String],
 ) -> Result<(), String> {
-    let resolved_target = target.unwrap_or_else(|| config.board.target_json.clone());
+    let resolved_target = target
+        .map(str::to_string)
+        .unwrap_or_else(|| expanded.manifest.kernel.target_json.clone());
 
     metadata_check(project, &resolved_target)?;
 
@@ -318,13 +809,10 @@ fn cargo_command(
     if release {
         command.arg("--release");
     }
-
-    command.arg("--target").arg(resolved_target);
+    command.arg("--target").arg(&resolved_target);
 
     if subcommand == "clippy" && !extra_args.iter().any(|arg| arg == "--") {
-        command.arg("--");
-        command.arg("-D");
-        command.arg("warnings");
+        command.arg("--").arg("-D").arg("warnings");
     }
 
     command.args(extra_args);
@@ -342,7 +830,7 @@ fn cargo_command(
 
     let status = command
         .status()
-        .map_err(|error| format!("failed to run cargo {subcommand}: {error}"))?;
+        .map_err(|e| format!("failed to run cargo {subcommand}: {e}"))?;
 
     if status.success() {
         Ok(())
@@ -351,218 +839,946 @@ fn cargo_command(
     }
 }
 
-fn normalize_project_path(path: &Path) -> Result<PathBuf, String> {
-    fs::canonicalize(path).map_err(|error| format!("failed to resolve {}: {error}", path.display()))
-}
+fn inject_ksym_section_manifest(
+    project: &Path,
+    expanded: &ExpandedManifest,
+    target: Option<&str>,
+    release: bool,
+) -> Result<(), String> {
+    let resolved_target = match target {
+        Some(t) => t.to_string(),
+        None => expanded.manifest.kernel.target_json.clone(),
+    };
+    let target_path = if Path::new(&resolved_target).is_absolute() {
+        PathBuf::from(&resolved_target)
+    } else {
+        project.join(&resolved_target)
+    };
+    let target_triple = target_path
+        .file_stem()
+        .ok_or("target path has no file stem")?
+        .to_string_lossy()
+        .to_string();
 
-fn validate_config(config: &ScarletConfig) -> Result<(), String> {
-    if config.config_version != 1 {
-        return Err(format!(
-            "unsupported config_version {} (expected 1)",
-            config.config_version
-        ));
+    let profile = if release { "release" } else { "debug" };
+    let binary_path = project
+        .join("target")
+        .join(&target_triple)
+        .join(profile)
+        .join("scarlet");
+
+    if !binary_path.exists() {
+        eprintln!(
+            "cargo-scarlet: ksym: binary not found at {}, skipping",
+            binary_path.display()
+        );
+        return Ok(());
     }
 
-    if config.project.name.trim().is_empty() {
-        return Err("project.name must not be empty".to_string());
+    let (nm_cmd, objcopy_cmd) = cross_tools_for_target(&target_triple);
+
+    let nm_output = Command::new(&nm_cmd)
+        .args([
+            "--defined-only",
+            "--extern-only",
+            "-g",
+            "--no-sort",
+            binary_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| format!("failed to run nm: {e}"))?;
+
+    if !nm_output.status.success() {
+        eprintln!("cargo-scarlet: ksym: nm failed, skipping section injection");
+        return Ok(());
     }
 
-    if config.board.name.trim().is_empty() {
-        return Err("board.name must not be empty".to_string());
-    }
+    let stdout = String::from_utf8_lossy(&nm_output.stdout);
+    let mut symbols: Vec<(u64, String)> = Vec::new();
 
-    if config.board.target.trim().is_empty() {
-        return Err("board.target must not be empty".to_string());
-    }
-
-    if config.board.target_json.trim().is_empty() {
-        return Err("board.target_json must not be empty".to_string());
-    }
-
-    if config.kernel.package.trim().is_empty() {
-        return Err("kernel.package must not be empty".to_string());
-    }
-
-    validate_kernel_source(&config.kernel.source)?;
-
-    for feature_name in config.kernel.features.keys() {
-        if feature_name.trim().is_empty() {
-            return Err("kernel.features keys must not be empty".to_string());
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
         }
-    }
+        let addr_str = parts[0];
+        let name = parts[2];
 
-    for (name, module) in &config.modules {
-        validate_module(name, module)?;
-    }
-
-    if let Some(image) = &config.image {
-        for (index, step) in image.steps.iter().enumerate() {
-            let has_kind = step
-                .kind
-                .as_deref()
-                .is_some_and(|kind| !kind.trim().is_empty());
-            let has_command = step
-                .command
-                .as_deref()
-                .is_some_and(|command| !command.trim().is_empty());
-            if has_kind == has_command {
-                return Err(format!(
-                    "image.steps[{index}] must use exactly one of kind or command"
-                ));
-            }
-            if matches!(
-                step.kind.as_deref(),
-                Some("archive.newc" | "initramfs-newc")
-            ) && step.output.is_none()
-            {
-                return Err(format!(
-                    "image.steps[{index}] kind archive.newc requires output"
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_kernel_source(source: &KernelSource) -> Result<(), String> {
-    let mut forms = 0;
-    if source.version.is_some() {
-        forms += 1;
-    }
-    if source.path.is_some() {
-        forms += 1;
-    }
-    if source.git.is_some() {
-        forms += 1;
-    }
-    if forms != 1 {
-        return Err("kernel.source must use exactly one of version, path, or git".to_string());
-    }
-
-    if source.git.is_some()
-        && source.rev.is_none()
-        && source.branch.is_none()
-        && source.tag.is_none()
-    {
-        return Err("kernel.source git entries must include rev, branch, or tag".to_string());
-    }
-
-    if source.registry.is_some() && source.version.is_none() {
-        return Err("kernel.source registry may only be used with version".to_string());
-    }
-
-    Ok(())
-}
-
-fn validate_module(name: &str, module: &ModuleConfig) -> Result<(), String> {
-    if name.trim().is_empty() {
-        return Err("module names must not be empty".to_string());
-    }
-
-    let mut forms = 0;
-    if module.version.is_some() {
-        forms += 1;
-    }
-    if module.path.is_some() {
-        forms += 1;
-    }
-    if module.git.is_some() {
-        forms += 1;
-    }
-
-    if forms != 1 {
-        return Err(format!(
-            "module `{name}` must use exactly one of version, path, or git"
-        ));
-    }
-
-    if module.git.is_some()
-        && module.rev.is_none()
-        && module.branch.is_none()
-        && module.tag.is_none()
-    {
-        return Err(format!(
-            "module `{name}` with git source must include rev, branch, or tag"
-        ));
-    }
-
-    Ok(())
-}
-
-fn render_generated_manifest(
-    config: &ScarletConfig,
-    project_root: &Path,
-) -> Result<String, String> {
-    let mut manifest = String::new();
-    let fingerprint = config_fingerprint(config);
-    writeln!(&mut manifest, "# generated by cargo-scarlet")
-        .map_err(|error| format!("failed to render header: {error}"))?;
-    writeln!(&mut manifest, "# config-fingerprint: {fingerprint}")
-        .map_err(|error| format!("failed to render fingerprint: {error}"))?;
-    manifest.push_str("[package]\n");
-    manifest.push_str("name = \"scarlet-modules\"\n");
-    manifest.push_str("version = \"0.1.0\"\n");
-    manifest.push_str("edition = \"2024\"\n\n");
-    manifest.push_str("[lib]\npath = \"src/lib.rs\"\n\n");
-    manifest.push_str("[dependencies]\n");
-
-    let kernel_spec = render_kernel_dependency_spec(project_root, &config.kernel)?;
-    writeln!(
-        &mut manifest,
-        "scarlet = {{ {kernel_spec}, default-features = false, features = [{}] }}",
-        render_enabled_kernel_features(&config.kernel.features)
-    )
-    .map_err(|error| format!("failed to render kernel dependency: {error}"))?;
-
-    for (name, module) in &config.modules {
-        if !module.enabled {
+        if name.is_empty() {
             continue;
         }
 
-        let dependency_name = module.package.as_deref().unwrap_or(name);
-        let spec = render_dependency_spec(project_root, module)?;
-        writeln!(&mut manifest, "{name} = {{ {spec} }}")
-            .map_err(|error| format!("failed to render dependency {dependency_name}: {error}"))?;
+        let skip = match name {
+            "_GLOBAL_OFFSET_TABLE_" | "_DYNAMIC" => true,
+            n if n.starts_with("__") && n.ends_with("_START") => true,
+            n if n.starts_with("__") && n.ends_with("_END") => true,
+            _ => false,
+        };
+
+        if skip {
+            continue;
+        }
+
+        let addr = u64::from_str_radix(addr_str, 16).unwrap_or(0);
+        symbols.push((addr, name.to_string()));
     }
 
-    Ok(manifest)
+    let count = symbols.len() as u64;
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&count.to_le_bytes());
+
+    for (addr, name) in &symbols {
+        blob.extend_from_slice(&addr.to_le_bytes());
+        let name_len = name.len() as u64;
+        blob.extend_from_slice(&name_len.to_le_bytes());
+        blob.extend_from_slice(name.as_bytes());
+    }
+
+    let tmp_dir = std::env::temp_dir().join("scarlet-ksym");
+    fs::create_dir_all(&tmp_dir).map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let blob_path = tmp_dir.join("ksym_blob.bin");
+
+    fs::write(&blob_path, &blob).map_err(|e| format!("failed to write ksym blob: {e}"))?;
+
+    let objcopy_status = Command::new(&objcopy_cmd)
+        .args([
+            "--add-section",
+            &format!(".ksym={}", blob_path.display()),
+            "--set-section-flags",
+            ".ksym=alloc,readonly",
+            binary_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run objcopy: {e}"))?;
+
+    if objcopy_status.success() {
+        eprintln!("cargo-scarlet: ksym: injected {} symbols", symbols.len());
+        Ok(())
+    } else {
+        eprintln!("cargo-scarlet: ksym: objcopy failed, skipping section injection");
+        Ok(())
+    }
 }
 
-fn render_kernel_dependency_spec(
-    project_root: &Path,
-    kernel: &KernelConfig,
-) -> Result<String, String> {
-    let mut parts = Vec::new();
+fn build_manifest_image(
+    project: &Path,
+    target: Option<String>,
+    release: bool,
+    kernel_elf: Option<PathBuf>,
+    no_build: bool,
+) -> Result<(), String> {
+    let expanded = generate_from_manifest(project)?;
 
-    if let Some(version) = &kernel.source.version {
-        parts.push(format!("version = \"{version}\""));
-        if let Some(registry) = &kernel.source.registry {
-            parts.push(format!("registry = \"{registry}\""));
+    if !no_build {
+        cargo_build_manifest(project, &expanded, target.as_deref(), release, "build", &[])?;
+        inject_ksym_section_manifest(project, &expanded, target.as_deref(), release)?;
+    }
+
+    let kernel_elf = match kernel_elf {
+        Some(path) => absolutize_from_current_dir(&path)?,
+        None => {
+            let target_json = &expanded.manifest.kernel.target_json;
+            let target_path = if Path::new(target_json).is_absolute() {
+                PathBuf::from(target_json)
+            } else {
+                project.join(target_json)
+            };
+            let target_triple = target_path
+                .file_stem()
+                .ok_or("target path has no file stem")?
+                .to_string_lossy()
+                .to_string();
+            let profile = if release { "release" } else { "debug" };
+            let path = project
+                .join("target")
+                .join(&target_triple)
+                .join(profile)
+                .join("scarlet");
+            if !path.exists() {
+                return Err(format!("kernel ELF not found: {}", path.display()));
+            }
+            path
+        }
+    };
+
+    let images_dir = project.join(".scarlet/images");
+    fs::create_dir_all(&images_dir)
+        .map_err(|e| format!("failed to create {}: {e}", images_dir.display()))?;
+
+    let target_json = &expanded.manifest.kernel.target_json;
+    let target_path = if Path::new(target_json).is_absolute() {
+        PathBuf::from(target_json)
+    } else {
+        project.join(target_json)
+    };
+    let target_triple = target_path
+        .file_stem()
+        .ok_or("target path has no file stem")?
+        .to_string_lossy()
+        .to_string();
+    let profile = if release { "release" } else { "debug" };
+
+    let raw_arch = target_triple.split('-').next().unwrap_or("unknown");
+    let arch = match raw_arch {
+        v if v.starts_with("riscv64") => "riscv64".to_string(),
+        v if v.starts_with("riscv32") => "riscv32".to_string(),
+        v if v.starts_with("aarch64") => "aarch64".to_string(),
+        v => v.to_string(),
+    };
+    let tpl_ctx = TemplateContext {
+        arch,
+        target_triple: target_triple.clone(),
+        project: expanded.manifest.project.name.clone(),
+    };
+
+    let build_order = topo_sort_images(&expanded.manifest.images)?;
+
+    let existing_lock = load_lock(project);
+    let mut new_lock = ImageLock::default();
+
+    for section_name in build_order {
+        let section_cfg = expanded
+            .manifest
+            .images
+            .get(&section_name)
+            .ok_or_else(|| format!("section '{}' not in manifest", section_name))?;
+        let resolved = expanded
+            .sections
+            .get(&section_name)
+            .ok_or_else(|| format!("section '{}' not resolved", section_name))?;
+
+        let output = section_cfg
+            .output
+            .as_deref()
+            .unwrap_or(".scarlet/images/output");
+        let output_path = project.join(output);
+        let staging_dir = project.join(format!(".scarlet/staging/{}", section_name));
+        let format = section_cfg.format.as_deref().unwrap_or("");
+
+        eprintln!("cargo-scarlet: staging {}...", section_name);
+
+        match format {
+            "newc" | "ext2" => {
+                if staging_dir.exists() {
+                    fs::remove_dir_all(&staging_dir)
+                        .map_err(|e| format!("failed to clean staging: {e}"))?;
+                }
+                fs::create_dir_all(&staging_dir)
+                    .map_err(|e| format!("failed to create staging: {e}"))?;
+
+                let cache_dir = project.join(".scarlet/cache/files");
+
+                for file in &resolved.files {
+                    let local_path = match &file.source {
+                        FileSource::Local(p) => p.clone(),
+                        FileSource::Url(u) => fetch_url_cached(u, &cache_dir)?,
+                    };
+
+                    let dest = staging_dir.join(file.to.trim_start_matches('/'));
+                    if local_path.is_dir() {
+                        copy_dir_recursive(&local_path, &dest)?;
+                    } else if file.template {
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent).map_err(|e| {
+                                format!("failed to create {}: {e}", parent.display())
+                            })?;
+                        }
+                        let content = fs::read_to_string(&local_path).map_err(|e| {
+                            format!("failed to read template {}: {e}", local_path.display())
+                        })?;
+                        let expanded = tpl_ctx.expand(&content);
+                        fs::write(&dest, expanded).map_err(|e| {
+                            format!(
+                                "failed to write template {} -> {}: {e}",
+                                local_path.display(),
+                                dest.display()
+                            )
+                        })?;
+                    } else {
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent).map_err(|e| {
+                                format!("failed to create {}: {e}", parent.display())
+                            })?;
+                        }
+                        fs::copy(&local_path, &dest).map_err(|e| {
+                            format!(
+                                "failed to copy {} -> {}: {e}",
+                                local_path.display(),
+                                dest.display()
+                            )
+                        })?;
+                    }
+                }
+
+                let mut package_locks: Vec<PackageLock> = Vec::new();
+                for pkg in &resolved.packages {
+                    if let Some(ref img_name) = pkg.from_image {
+                        let from_staging = project.join(format!(".scarlet/staging/{}", img_name));
+                        let dest = staging_dir.join(pkg.to.trim_start_matches('/'));
+                        if from_staging.is_dir() {
+                            copy_dir_recursive(&from_staging, &dest)?;
+                        }
+                    } else {
+                        let prev_pkg = existing_lock.sections.get(&section_name).and_then(|s| {
+                            s.packages.iter().find(|p| {
+                                p.kind == pkg.kind.as_deref().unwrap_or("")
+                                    && p.source.as_deref()
+                                        == pkg
+                                            .source
+                                            .as_ref()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .as_deref()
+                            })
+                        });
+                        if let Some(lock) = install_package(
+                            &staging_dir,
+                            pkg,
+                            project,
+                            &target_triple,
+                            profile,
+                            prev_pkg,
+                        )? {
+                            package_locks.push(lock);
+                        }
+                    }
+                }
+
+                let staging_hash = sha256_dir(&staging_dir)?;
+
+                if output_path.exists() {
+                    if let Some(existing) = existing_lock.sections.get(&section_name) {
+                        if existing.hash == staging_hash {
+                            eprintln!(
+                                "cargo-scarlet: {} unchanged, skipping image generation",
+                                section_name
+                            );
+                            new_lock
+                                .sections
+                                .insert(section_name.clone(), existing.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                eprintln!("cargo-scarlet: generating {} image...", section_name);
+
+                if format == "newc" {
+                    build_initramfs_newc_from_staging(&staging_dir, &output_path)?;
+                    eprintln!(
+                        "cargo-scarlet: wrote {} to {}",
+                        section_name,
+                        output_path.display()
+                    );
+                } else {
+                    build_ext2_from_staging(&staging_dir, &output_path, &section_name)?;
+                }
+
+                new_lock.sections.insert(
+                    section_name.clone(),
+                    SectionLock {
+                        hash: staging_hash,
+                        files: Vec::new(),
+                        packages: package_locks,
+                    },
+                );
+            }
+            "limine-uefi" => {
+                let arch_name = match target_triple.split('-').next() {
+                    Some("aarch64") => "aarch64",
+                    Some(v) if v.starts_with("riscv64") => "riscv64",
+                    _ => &target_triple,
+                };
+
+                let mut initramfs_path = project.join(".scarlet/images/initramfs.cpio");
+                for pkg in &resolved.packages {
+                    if let Some(source) = &pkg.source {
+                        let source_name = source
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        if source_name.contains("initramfs") || source_name.ends_with(".cpio") {
+                            initramfs_path = source.clone();
+                        }
+                    }
+                }
+
+                let mut limine_hasher = Sha256::new();
+                limine_hasher.update(format!("format=limine-uefi\n").as_bytes());
+                limine_hasher.update(format!("cmdline={}\n", section_cfg.cmdline).as_bytes());
+                if kernel_elf.exists() {
+                    limine_hasher.update(
+                        format!(
+                            "kernel:{}:{}\n",
+                            kernel_elf.display(),
+                            sha256_file(&kernel_elf)?
+                        )
+                        .as_bytes(),
+                    );
+                }
+                if initramfs_path.exists() {
+                    limine_hasher.update(
+                        format!(
+                            "initramfs:{}:{}\n",
+                            initramfs_path.display(),
+                            sha256_file(&initramfs_path)?
+                        )
+                        .as_bytes(),
+                    );
+                }
+                let limine_hash = format!("sha256:{}", hex::encode(limine_hasher.finalize()));
+
+                if output_path.exists() {
+                    if let Some(existing) = existing_lock.sections.get(&section_name) {
+                        if existing.hash == limine_hash {
+                            eprintln!("cargo-scarlet: {} unchanged, skipping", section_name);
+                            new_lock
+                                .sections
+                                .insert(section_name.clone(), existing.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                eprintln!("cargo-scarlet: building {}...", section_name);
+
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                }
+
+                let plugin_manifest = project
+                    .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
+                    .canonicalize()
+                    .unwrap_or_else(|_| {
+                        project.join("../../cargo-scarlet-plugin-limine/Cargo.toml")
+                    });
+
+                let mut cmd = Command::new("cargo");
+                cmd.arg("run")
+                    .arg("--manifest-path")
+                    .arg(&plugin_manifest)
+                    .current_dir(plugin_manifest.parent().unwrap_or(Path::new(".")))
+                    .arg("--")
+                    .arg("--arch")
+                    .arg(arch_name)
+                    .arg("--kernel")
+                    .arg(&kernel_elf)
+                    .arg("--initramfs")
+                    .arg(&initramfs_path)
+                    .arg("--output")
+                    .arg(&output_path);
+
+                if !section_cfg.cmdline.is_empty() {
+                    cmd.arg("--cmdline").arg(&section_cfg.cmdline);
+                }
+
+                let status = cmd
+                    .status()
+                    .map_err(|e| format!("failed to run limine plugin: {e}"))?;
+
+                if !status.success() {
+                    return Err("limine plugin failed".to_string());
+                }
+
+                eprintln!(
+                    "cargo-scarlet: wrote {} to {}",
+                    section_name,
+                    output_path.display()
+                );
+
+                new_lock.sections.insert(
+                    section_name.clone(),
+                    SectionLock {
+                        hash: limine_hash,
+                        files: Vec::new(),
+                        packages: Vec::new(),
+                    },
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported format '{}' for section '{}'",
+                    format, section_name
+                ));
+            }
         }
     }
 
-    if let Some(path) = &kernel.source.path {
-        let absolute = project_root.join(path);
-        let generated_root = project_root.join(".scarlet/scarlet-modules");
-        let relative = pathdiff(&absolute, &generated_root)?;
-        parts.push(format!("path = \"{}\"", relative.display()));
+    eprintln!(
+        "cargo-scarlet: saving lock with {} sections",
+        new_lock.sections.len()
+    );
+    save_lock(project, &new_lock)?;
+
+    Ok(())
+}
+
+fn topo_sort_images(
+    images: &BTreeMap<String, ManifestImageSection>,
+) -> Result<Vec<String>, String> {
+    let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
+    let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for name in images.keys() {
+        in_degree.insert(name.clone(), 0);
+        dependents.insert(name.clone(), Vec::new());
     }
 
-    if let Some(git) = &kernel.source.git {
-        parts.push(format!("git = \"{git}\""));
-    }
-    if let Some(rev) = &kernel.source.rev {
-        parts.push(format!("rev = \"{rev}\""));
-    }
-    if let Some(branch) = &kernel.source.branch {
-        parts.push(format!("branch = \"{branch}\""));
-    }
-    if let Some(tag) = &kernel.source.tag {
-        parts.push(format!("tag = \"{tag}\""));
+    for (name, section) in images {
+        for dep in &section.deps {
+            if !images.contains_key(dep) {
+                return Err(format!(
+                    "image '{}' depends on unknown image '{}'",
+                    name, dep
+                ));
+            }
+            *in_degree.entry(name.clone()).or_insert(0) += 1;
+            dependents
+                .entry(dep.clone())
+                .or_default()
+                .push(name.clone());
+        }
     }
 
-    Ok(parts.join(", "))
+    let mut queue: Vec<String> = in_degree
+        .iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut result = Vec::new();
+    while let Some(name) = queue.pop() {
+        result.push(name.clone());
+        for dep in dependents.get(&name).unwrap_or(&Vec::new()) {
+            let degree = in_degree.get_mut(dep).unwrap();
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push(dep.clone());
+            }
+        }
+    }
+
+    if result.len() != images.len() {
+        return Err("circular dependency detected in images".to_string());
+    }
+
+    Ok(result)
+}
+
+fn build_ext2_from_staging(
+    staging_dir: &Path,
+    output_path: &Path,
+    section_name: &str,
+) -> Result<(), String> {
+    let source_kb_output = Command::new("du")
+        .args(["-sk", staging_dir.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| format!("failed to run du: {e}"))?;
+    let source_kb_str = String::from_utf8_lossy(&source_kb_output.stdout);
+    let source_kb: u64 = source_kb_str
+        .split_whitespace()
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    let extra_kb: u64 = 65536;
+    let size_kb = ((source_kb + source_kb / 3 + extra_kb + 16383) / 16384) * 16384;
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+
+    let _ = fs::remove_file(output_path);
+    let truncate_status = Command::new("truncate")
+        .args([
+            "-s",
+            &format!("{size_kb}K"),
+            output_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run truncate: {e}"))?;
+    if !truncate_status.success() {
+        return Err("truncate failed".to_string());
+    }
+
+    let mke2fs_status = Command::new("mke2fs")
+        .args([
+            "-q",
+            "-F",
+            "-t",
+            "ext2",
+            "-b",
+            "4096",
+            "-i",
+            "2048",
+            "-m",
+            "1",
+            "-L",
+            "SCARLET_ROOT",
+            "-E",
+            "no_copy_xattrs",
+            "-d",
+            staging_dir.to_str().unwrap_or(""),
+            output_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run mke2fs: {e}"))?;
+    if !mke2fs_status.success() {
+        return Err("mke2fs failed".to_string());
+    }
+
+    eprintln!(
+        "cargo-scarlet: wrote {} to {} ({}KB, source={}KB)",
+        section_name,
+        output_path.display(),
+        size_kb,
+        source_kb
+    );
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("failed to read_dir {}: {e}", src.display()))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read dir entry: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_symlink() {
+            let link_target = fs::read_link(&src_path)
+                .map_err(|e| format!("failed to read symlink {}: {e}", src_path.display()))?;
+            if dst_path.exists() {
+                fs::remove_file(&dst_path)
+                    .map_err(|e| format!("failed to remove {}: {e}", dst_path.display()))?;
+            }
+            std::os::unix::fs::symlink(&link_target, &dst_path).map_err(|e| {
+                format!(
+                    "failed to create symlink {} -> {}: {e}",
+                    dst_path.display(),
+                    link_target.display()
+                )
+            })?;
+        } else if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!(
+                    "failed to copy {} -> {}: {e}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn fetch_url_cached(url: &str, cache_dir: &Path) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+
+    let url_path = url.split('?').next().unwrap_or(url);
+    let basename = url_path.rsplit('/').next().unwrap_or("download");
+    let cached_name = format!("{}-{}", &hash[..12], basename);
+    let cached_path = cache_dir.join(&cached_name);
+
+    if cached_path.exists() {
+        return Ok(cached_path);
+    }
+
+    fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("failed to create cache dir {}: {e}", cache_dir.display()))?;
+
+    eprintln!("cargo-scarlet: fetching {}", url);
+    let status = Command::new("curl")
+        .args(["-fsSL", "-o", cached_path.to_str().unwrap_or(""), url])
+        .status()
+        .map_err(|e| format!("failed to run curl: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(&cached_path);
+        return Err(format!("curl failed to fetch {}", url));
+    }
+
+    Ok(cached_path)
+}
+
+fn install_package(
+    staging_dir: &Path,
+    pkg: &ResolvedPackage,
+    _project: &Path,
+    target_triple: &str,
+    profile: &str,
+    prev_lock: Option<&PackageLock>,
+) -> Result<Option<PackageLock>, String> {
+    let dest = staging_dir.join(pkg.to.trim_start_matches('/'));
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+
+    match pkg.kind.as_deref() {
+        Some("cargo") => {
+            let source = pkg.source.as_ref().ok_or("cargo package missing source")?;
+            let package_name = pkg.package_name.as_deref().unwrap_or("user-bin");
+            let bin_name = pkg.bin.as_deref().unwrap_or(package_name);
+
+            let userspace_triple = userspace_target_triple(target_triple);
+            let profile_dir = if profile == "release" {
+                "release"
+            } else {
+                "debug"
+            };
+
+            let binary = {
+                eprintln!(
+                    "cargo-scarlet: building {} ({}) for {}...",
+                    package_name, bin_name, userspace_triple
+                );
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build");
+                if profile == "release" {
+                    cmd.arg("--release");
+                }
+                cmd.arg("--manifest-path")
+                    .arg(source.join("Cargo.toml"))
+                    .arg("--target")
+                    .arg(&userspace_triple);
+
+                if let Some(bin) = pkg.bin.as_deref() {
+                    cmd.arg("--bin").arg(bin);
+                }
+
+                let status = cmd
+                    .current_dir(source)
+                    .status()
+                    .map_err(|e| format!("failed to run cargo build: {e}"))?;
+
+                if !status.success() {
+                    return Err(format!(
+                        "cargo build failed for {} (bin {})",
+                        package_name, bin_name
+                    ));
+                }
+
+                let built = source
+                    .join("target")
+                    .join(&userspace_triple)
+                    .join(profile_dir)
+                    .join(bin_name);
+                if !built.exists() {
+                    return Err(format!(
+                        "cargo build succeeded but binary not found: {}",
+                        built.display()
+                    ));
+                }
+                built
+            };
+            fs::copy(&binary, &dest)
+                .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
+
+            let hash = sha256_file(&binary)?;
+            Ok(Some(PackageLock {
+                kind: "cargo".to_string(),
+                source: Some(source.to_string_lossy().to_string()),
+                bin: Some(bin_name.to_string()),
+                output: None,
+                hash,
+            }))
+        }
+        Some("script") => {
+            let source = pkg.source.as_ref().ok_or("script package missing source")?;
+            let script_path = if source.is_absolute() {
+                source.clone()
+            } else {
+                _project.join(source)
+            };
+            if !script_path.exists() {
+                return Err(format!("script not found: {}", script_path.display()));
+            }
+
+            let (script_output, copy_dest) = match &pkg.output {
+                Some(output) => {
+                    if let Some(parent) = output.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    (output.clone(), dest.clone())
+                }
+                None => {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    (dest.clone(), PathBuf::new())
+                }
+            };
+
+            if let (Some(output_path), Some(prev)) = (&pkg.output, prev_lock) {
+                if output_path.exists() {
+                    let current_hash = sha256_file(output_path)?;
+                    if current_hash == prev.hash {
+                        eprintln!(
+                            "cargo-scarlet: script output {} unchanged, skipping",
+                            output_path.display()
+                        );
+                    } else {
+                        let status = Command::new("sh")
+                            .arg(&script_path)
+                            .arg(&script_output)
+                            .current_dir(_project)
+                            .status()
+                            .map_err(|e| {
+                                format!("failed to run script {}: {e}", script_path.display())
+                            })?;
+                        if !status.success() {
+                            return Err(format!("script failed: {}", script_path.display()));
+                        }
+                    }
+                } else {
+                    let status = Command::new("sh")
+                        .arg(&script_path)
+                        .arg(&script_output)
+                        .current_dir(_project)
+                        .status()
+                        .map_err(|e| {
+                            format!("failed to run script {}: {e}", script_path.display())
+                        })?;
+                    if !status.success() {
+                        return Err(format!("script failed: {}", script_path.display()));
+                    }
+                }
+            } else {
+                let status = Command::new("sh")
+                    .arg(&script_path)
+                    .arg(&script_output)
+                    .current_dir(_project)
+                    .status()
+                    .map_err(|e| format!("failed to run script {}: {e}", script_path.display()))?;
+                if !status.success() {
+                    return Err(format!("script failed: {}", script_path.display()));
+                }
+            }
+
+            if !copy_dest.as_os_str().is_empty() {
+                if script_output.is_dir() {
+                    copy_dir_recursive(&script_output, &copy_dest)?;
+                } else if script_output.exists() {
+                    if let Some(parent) = copy_dest.parent() {
+                        fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+                    }
+                    fs::copy(&script_output, &copy_dest).map_err(|e| {
+                        format!(
+                            "failed to copy {} -> {}: {e}",
+                            script_output.display(),
+                            copy_dest.display()
+                        )
+                    })?;
+                }
+            }
+
+            let hash = if script_output.is_dir() {
+                sha256_dir(&script_output)?
+            } else if script_output.exists() {
+                sha256_file(&script_output)?
+            } else {
+                "missing".to_string()
+            };
+            Ok(Some(PackageLock {
+                kind: "script".to_string(),
+                source: Some(source.to_string_lossy().to_string()),
+                bin: None,
+                output: pkg.output.as_ref().map(|p| p.to_string_lossy().to_string()),
+                hash,
+            }))
+        }
+        _ => {
+            let from = pkg.from.as_ref().ok_or_else(|| {
+                format!(
+                    "package (to={}) missing 'from' path and has unknown kind {:?}",
+                    pkg.to, pkg.kind
+                )
+            })?;
+            if from.is_dir() {
+                copy_dir_contents(from, &dest, &[])?;
+            } else if from.exists() {
+                fs::copy(from, &dest)
+                    .map_err(|e| format!("failed to copy {}: {e}", from.display()))?;
+            } else {
+                eprintln!(
+                    "cargo-scarlet: warning: source not found: {}",
+                    from.display()
+                );
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn build_initramfs_newc_from_staging(staging_dir: &Path, output_path: &Path) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+
+    let mut output_file = fs::File::create(output_path)
+        .map_err(|e| format!("failed to create {}: {e}", output_path.display()))?;
+
+    write_newc_tree(&mut output_file, staging_dir, staging_dir)?;
+    write_newc_trailer(&mut output_file)?;
+
+    Ok(())
+}
+
+fn write_newc_trailer(output: &mut fs::File) -> Result<(), String> {
+    use std::io::Write;
+    let trailer_name = "TRAILER!!!";
+    let name_size = trailer_name.len() + 1;
+    let header = format!(
+        "070701{ino:08x}{mode:08x}{uid:08x}{gid:08x}{nlink:08x}{mtime:08x}{file_size:08x}{dev_major:08x}{dev_minor:08x}{rdev_major:08x}{rdev_minor:08x}{name_size:08x}{check:08x}",
+        ino = 0,
+        mode = 0,
+        uid = 0,
+        gid = 0,
+        nlink = 1,
+        mtime = 0,
+        file_size = 0,
+        dev_major = 0,
+        dev_minor = 0,
+        rdev_major = 0,
+        rdev_minor = 0,
+        name_size = name_size,
+        check = 0,
+    );
+    output
+        .write_all(header.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    output
+        .write_all(trailer_name.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    output
+        .write_all(&[0])
+        .map_err(|e| format!("write failed: {e}"))?;
+    pad4(output, 110 + name_size)?;
+    Ok(())
+}
+
+fn normalized_args() -> Vec<String> {
+    let mut args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|arg| arg == "scarlet") {
+        args.remove(1);
+    }
+    args
+}
+
+fn normalize_project_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| format!("failed to resolve {}: {error}", path.display()))
 }
 
 fn render_enabled_kernel_features(features: &BTreeMap<String, bool>) -> String {
@@ -621,33 +1837,6 @@ fn render_dependency_spec(project_root: &Path, module: &ModuleConfig) -> Result<
     Ok(parts.join(", "))
 }
 
-fn render_generated_lib(config: &ScarletConfig) -> String {
-    let mut source = String::new();
-    let _ = writeln!(&mut source, "#![no_std]");
-    let _ = writeln!(&mut source);
-    let _ = writeln!(
-        &mut source,
-        "// config-fingerprint: {}",
-        config_fingerprint(config)
-    );
-    let _ = writeln!(&mut source, "pub use scarlet;");
-    let _ = writeln!(&mut source);
-    let _ = writeln!(&mut source, "#[inline(never)]");
-    let _ = writeln!(&mut source, "pub fn force_link() {{");
-
-    for name in config
-        .modules
-        .keys()
-        .filter(|name| config.modules[*name].enabled)
-    {
-        let identifier = cargo_key_to_rust_identifier(name);
-        let _ = writeln!(&mut source, "    {identifier}::force_link();");
-    }
-
-    source.push_str("}\n");
-    source
-}
-
 fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
     if let Ok(existing) = fs::read_to_string(path)
         && existing == contents
@@ -657,73 +1846,6 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
 
     fs::write(path, contents)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
-}
-
-fn config_fingerprint(config: &ScarletConfig) -> String {
-    let mut fingerprint = String::new();
-    let _ = write!(
-        &mut fingerprint,
-        "v{}:{}:{}:{}:{}:{}",
-        config.config_version,
-        config.project.name,
-        config.board.name,
-        config.board.target,
-        config.board.target_json,
-        config.kernel.package,
-    );
-
-    if let Some(version) = &config.kernel.source.version {
-        let _ = write!(&mut fingerprint, ";ks:version={version}");
-    }
-    if let Some(path) = &config.kernel.source.path {
-        let _ = write!(&mut fingerprint, ";ks:path={path}");
-    }
-    if let Some(git) = &config.kernel.source.git {
-        let _ = write!(&mut fingerprint, ";ks:git={git}");
-    }
-    if let Some(rev) = &config.kernel.source.rev {
-        let _ = write!(&mut fingerprint, ";ks:rev={rev}");
-    }
-    if let Some(branch) = &config.kernel.source.branch {
-        let _ = write!(&mut fingerprint, ";ks:branch={branch}");
-    }
-    if let Some(tag) = &config.kernel.source.tag {
-        let _ = write!(&mut fingerprint, ";ks:tag={tag}");
-    }
-    if let Some(registry) = &config.kernel.source.registry {
-        let _ = write!(&mut fingerprint, ";ks:registry={registry}");
-    }
-
-    for (name, feature_enabled) in &config.kernel.features {
-        let _ = write!(&mut fingerprint, ";kf:{name}={feature_enabled}");
-    }
-
-    for (name, module) in &config.modules {
-        let _ = write!(&mut fingerprint, ";m:{name}:{}", module.enabled);
-        if let Some(version) = &module.version {
-            let _ = write!(&mut fingerprint, ":version={version}");
-        }
-        if let Some(path) = &module.path {
-            let _ = write!(&mut fingerprint, ":path={path}");
-        }
-        if let Some(git) = &module.git {
-            let _ = write!(&mut fingerprint, ":git={git}");
-        }
-        if let Some(rev) = &module.rev {
-            let _ = write!(&mut fingerprint, ":rev={rev}");
-        }
-        if let Some(branch) = &module.branch {
-            let _ = write!(&mut fingerprint, ":branch={branch}");
-        }
-        if let Some(tag) = &module.tag {
-            let _ = write!(&mut fingerprint, ":tag={tag}");
-        }
-        if let Some(registry) = &module.registry {
-            let _ = write!(&mut fingerprint, ":registry={registry}");
-        }
-    }
-
-    fingerprint
 }
 
 fn metadata_check(project: &Path, target: &str) -> Result<(), String> {
@@ -788,327 +1910,6 @@ fn pathdiff(path: &Path, base: &Path) -> Result<PathBuf, String> {
     Ok(result)
 }
 
-fn build_loadable_modules(
-    project: &Path,
-    config: &ScarletConfig,
-    release: bool,
-) -> Result<(), String> {
-    if config.loadable_modules.is_empty() {
-        return Ok(());
-    }
-
-    let project_dir = fs::canonicalize(project)
-        .map_err(|e| format!("failed to resolve project path {}: {e}", project.display()))?;
-
-    let target_json = &config.board.target_json;
-
-    for (name, module) in &config.loadable_modules {
-        if !module.enabled {
-            eprintln!("cargo-scarlet: skipping disabled loadable module '{name}'");
-            continue;
-        }
-
-        let module_path = project_dir.join(&module.path);
-        let target_path = project_dir.join(target_json);
-        let output_path = module.output.as_deref().map(Path::new);
-
-        eprintln!("cargo-scarlet: building loadable module '{name}'");
-        build_loadable_module(&module_path, target_path.to_str(), output_path, release)?;
-    }
-
-    Ok(())
-}
-
-fn build_project_image(
-    project: &Path,
-    target: Option<String>,
-    release: bool,
-    kernel_elf: Option<PathBuf>,
-    no_build: bool,
-) -> Result<(), String> {
-    let project = normalize_project_path(project)?;
-    let config = generate(&project)?;
-
-    if !no_build {
-        cargo_command(&project, &config, "build", target.clone(), release, &[])?;
-        inject_ksym_section(&project, &config, target.as_deref(), release)?;
-        build_loadable_modules(&project, &config, release)?;
-    }
-
-    let kernel_elf = match kernel_elf {
-        Some(path) => absolutize_from_current_dir(&path)?,
-        None => project_kernel_elf_path(&project, &config, target.as_deref(), release)?,
-    };
-
-    if !kernel_elf.exists() {
-        return Err(format!("kernel ELF not found: {}", kernel_elf.display()));
-    }
-
-    let image = config
-        .image
-        .as_ref()
-        .ok_or("project has no [image] configuration")?;
-    if image.steps.is_empty() {
-        return Err("project image configuration has no [[image.steps]] entries".to_string());
-    }
-
-    let images_dir = project.join(".scarlet/images");
-    fs::create_dir_all(&images_dir)
-        .map_err(|error| format!("failed to create {}: {error}", images_dir.display()))?;
-
-    let target_triple = target_triple_for_project(&project, &config, target.as_deref())?;
-    let profile = if release { "release" } else { "debug" };
-
-    for (index, step) in image.steps.iter().enumerate() {
-        run_image_step(
-            &project,
-            &config,
-            step,
-            index,
-            &kernel_elf,
-            profile,
-            &target_triple,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn run_image_step(
-    project: &Path,
-    config: &ScarletConfig,
-    step: &ImageStepConfig,
-    index: usize,
-    kernel_elf: &Path,
-    profile: &str,
-    target_triple: &str,
-) -> Result<(), String> {
-    let step_name = step
-        .name
-        .as_deref()
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("step-{index}"));
-    if let Some(kind) = step.kind.as_deref() {
-        return run_builtin_image_step(
-            project,
-            config,
-            step,
-            &step_name,
-            kind,
-            kernel_elf,
-            profile,
-            target_triple,
-        );
-    }
-
-    let cwd = match &step.cwd {
-        Some(cwd) => {
-            let rendered =
-                render_image_template(cwd, project, config, kernel_elf, profile, target_triple);
-            absolutize_from_base(project, Path::new(&rendered))?
-        }
-        None => project.to_path_buf(),
-    };
-
-    let rendered_args = step
-        .args
-        .iter()
-        .map(|arg| render_image_template(arg, project, config, kernel_elf, profile, target_triple))
-        .collect::<Vec<_>>();
-
-    let command_program = step
-        .command
-        .as_deref()
-        .ok_or("internal error: command image step without command")?;
-    let mut command = Command::new(render_image_template(
-        command_program,
-        project,
-        config,
-        kernel_elf,
-        profile,
-        target_triple,
-    ));
-    command.args(&rendered_args).current_dir(&cwd);
-
-    for (name, value) in &step.env {
-        command.env(
-            name,
-            render_image_template(value, project, config, kernel_elf, profile, target_triple),
-        );
-    }
-
-    eprintln!(
-        "cargo-scarlet: image {step_name}: running in {} -> {} {}",
-        cwd.display(),
-        command.get_program().to_string_lossy(),
-        command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-
-    let status = command
-        .status()
-        .map_err(|error| format!("failed to run image step {step_name}: {error}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "image step {step_name} failed with status {status}"
-        ))
-    }
-}
-
-fn run_builtin_image_step(
-    project: &Path,
-    config: &ScarletConfig,
-    step: &ImageStepConfig,
-    step_name: &str,
-    kind: &str,
-    kernel_elf: &Path,
-    profile: &str,
-    target_triple: &str,
-) -> Result<(), String> {
-    match kind {
-        "archive.newc" | "initramfs-newc" => build_initramfs_newc(
-            project,
-            config,
-            step,
-            step_name,
-            kernel_elf,
-            profile,
-            target_triple,
-        ),
-        _ => Err(format!("unknown image step kind `{kind}`")),
-    }
-}
-
-fn build_initramfs_newc(
-    project: &Path,
-    config: &ScarletConfig,
-    step: &ImageStepConfig,
-    step_name: &str,
-    kernel_elf: &Path,
-    profile: &str,
-    target_triple: &str,
-) -> Result<(), String> {
-    let output = render_required_path_template(
-        step.output.as_deref(),
-        "archive.newc output",
-        project,
-        config,
-        kernel_elf,
-        profile,
-        target_triple,
-    )?;
-    let stage_dir = project
-        .join(".scarlet/initramfs-stage")
-        .join(cargo_key_to_rust_identifier(step_name));
-    if stage_dir.exists() {
-        fs::remove_dir_all(&stage_dir)
-            .map_err(|error| format!("failed to remove {}: {error}", stage_dir.display()))?;
-    }
-    fs::create_dir_all(&stage_dir)
-        .map_err(|error| format!("failed to create {}: {error}", stage_dir.display()))?;
-
-    for input in &step.inputs {
-        let source = render_image_template(
-            &input.source,
-            project,
-            config,
-            kernel_elf,
-            profile,
-            target_triple,
-        );
-        let source = absolutize_from_base(project, Path::new(&source))?;
-        if !source.exists() {
-            if input.optional {
-                eprintln!(
-                    "cargo-scarlet: image {step_name}: skipping missing optional input {}",
-                    source.display()
-                );
-                continue;
-            }
-            return Err(format!("image input not found: {}", source.display()));
-        }
-
-        let destination = normalize_archive_path(&render_image_template(
-            &input.destination,
-            project,
-            config,
-            kernel_elf,
-            profile,
-            target_triple,
-        ))?;
-        let destination = stage_dir.join(destination);
-        copy_image_input(&source, &destination, &input.skip_suffixes)?;
-    }
-
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    }
-    write_newc_archive(&stage_dir, &output)?;
-    eprintln!(
-        "cargo-scarlet: image {step_name}: created newc archive {}",
-        output.display()
-    );
-    Ok(())
-}
-
-fn render_image_template(
-    value: &str,
-    project: &Path,
-    config: &ScarletConfig,
-    kernel_elf: &Path,
-    profile: &str,
-    target_triple: &str,
-) -> String {
-    let repo = std::env::current_dir().unwrap_or_else(|_| project.to_path_buf());
-    value
-        .replace("{project}", &project.display().to_string())
-        .replace("{repo}", &repo.display().to_string())
-        .replace("{kernel_elf}", &kernel_elf.display().to_string())
-        .replace("{profile}", profile)
-        .replace("{target_triple}", target_triple)
-        .replace("{board}", &config.board.name)
-}
-
-fn project_kernel_elf_path(
-    project: &Path,
-    config: &ScarletConfig,
-    target: Option<&str>,
-    release: bool,
-) -> Result<PathBuf, String> {
-    let target_triple = target_triple_for_project(project, config, target)?;
-    let profile = if release { "release" } else { "debug" };
-    Ok(project
-        .join("target")
-        .join(target_triple)
-        .join(profile)
-        .join("scarlet"))
-}
-
-fn target_triple_for_project(
-    project: &Path,
-    config: &ScarletConfig,
-    target: Option<&str>,
-) -> Result<String, String> {
-    let resolved_target = target.unwrap_or(&config.board.target_json);
-    let target_path = if Path::new(resolved_target).is_absolute() {
-        PathBuf::from(resolved_target)
-    } else {
-        project.join(resolved_target)
-    };
-    Ok(target_path
-        .file_stem()
-        .ok_or("target path has no file stem")?
-        .to_string_lossy()
-        .to_string())
-}
-
 fn absolutize_from_current_dir(path: &Path) -> Result<PathBuf, String> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -1116,79 +1917,6 @@ fn absolutize_from_current_dir(path: &Path) -> Result<PathBuf, String> {
         Ok(std::env::current_dir()
             .map_err(|error| format!("failed to get current directory: {error}"))?
             .join(path))
-    }
-}
-
-fn absolutize_from_base(base: &Path, path: &Path) -> Result<PathBuf, String> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(base.join(path))
-    }
-}
-
-fn render_required_path_template(
-    value: Option<&str>,
-    field_name: &str,
-    project: &Path,
-    config: &ScarletConfig,
-    kernel_elf: &Path,
-    profile: &str,
-    target_triple: &str,
-) -> Result<PathBuf, String> {
-    let value = value.ok_or_else(|| format!("{field_name} is required"))?;
-    let rendered =
-        render_image_template(value, project, config, kernel_elf, profile, target_triple);
-    absolutize_from_base(project, Path::new(&rendered))
-}
-
-fn normalize_archive_path(path: &str) -> Result<PathBuf, String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("archive destination must not be empty".to_string());
-    }
-    let trimmed = trimmed.trim_start_matches('/');
-    if trimmed.is_empty() {
-        Ok(PathBuf::new())
-    } else {
-        let path = Path::new(trimmed);
-        if path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
-            )
-        }) {
-            return Err(format!("invalid archive destination: {path:?}"));
-        }
-        Ok(path.to_path_buf())
-    }
-}
-
-fn copy_image_input(
-    source: &Path,
-    destination: &Path,
-    skip_suffixes: &[String],
-) -> Result<(), String> {
-    if source.is_dir() {
-        fs::create_dir_all(destination)
-            .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
-        copy_dir_contents(source, destination, skip_suffixes)
-    } else {
-        if should_skip_path(source, skip_suffixes) {
-            return Ok(());
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-        }
-        fs::copy(source, destination).map_err(|error| {
-            format!(
-                "failed to copy {} to {}: {error}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-        copy_permissions(source, destination)
     }
 }
 
@@ -1250,15 +1978,6 @@ fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>, String> {
         .map_err(|error| format!("failed to read dir entry in {}: {error}", path.display()))?;
     entries.sort_by_key(|entry| entry.path());
     Ok(entries)
-}
-
-fn write_newc_archive(source_root: &Path, output: &Path) -> Result<(), String> {
-    let mut file = fs::File::create(output)
-        .map_err(|error| format!("failed to create {}: {error}", output.display()))?;
-    write_newc_entry(&mut file, ".", 0o040755, &[])?;
-    write_newc_tree(&mut file, source_root, source_root)?;
-    write_newc_entry(&mut file, "TRAILER!!!", 0, &[])?;
-    Ok(())
 }
 
 fn write_newc_tree(output: &mut fs::File, root: &Path, path: &Path) -> Result<(), String> {
@@ -1593,16 +2312,15 @@ fn kernel_dependency_spec(
 
 fn kernel_source_toml(
     kernel_path: Option<&Path>,
-    kernel_rev: Option<&str>,
+    _kernel_rev: Option<&str>,
     base_dir: &Path,
 ) -> Result<String, String> {
     if let Some(path) = kernel_path {
         let abs_kernel = fs::canonicalize(path).map_err(|e| format!("{e}: {}", path.display()))?;
         let rel = pathdiff(&abs_kernel, base_dir)?;
-        Ok(format!("{{ path = \"{}\" }}", rel.display()))
+        Ok(rel.display().to_string())
     } else {
-        let rev = kernel_rev.unwrap_or(KERNEL_DEFAULT_REV);
-        Ok(format!("{{ git = \"{KERNEL_GIT_URL}\", rev = \"{rev}\" }}"))
+        Ok("../../kernel".to_string())
     }
 }
 
@@ -1848,27 +2566,20 @@ scarlet_modules = {{ package = "scarlet-modules", path = ".scarlet/scarlet-modul
     );
     write_if_changed(&project_dir.join("Cargo.toml"), &project_cargo_toml)?;
 
-    let scarlet_config = format!(
-        r#"config_version = 1
+    let scarlet_manifest = format!(
+        r#"schema_version = 1
 
 [project]
-name = "scarlet-{name}"
-
-[board]
 name = "{name}"
-target = "{target}"
-target_json = "{target_json_dir}"
 
 [kernel]
 package = "scarlet"
-source = {kernel_source}
-
-[kernel.features]
-
-[modules]
+source = "{kernel_source}"
+target = "{target}"
+target_json = "{target_json_dir}"
 "#
     );
-    write_if_changed(&project_dir.join("scarlet-config.toml"), &scarlet_config)?;
+    write_if_changed(&project_dir.join("scarlet.toml"), &scarlet_manifest)?;
 
     let cargo_config = format!(
         r#"[profile.dev]
@@ -1927,128 +2638,6 @@ pub fn force_link() {}
     eprintln!("cargo-scarlet: REQUIRED: add linker script to lds/");
     eprintln!("cargo-scarlet: REQUIRED: implement boot entry in src/main.rs (arch_start_kernel)");
 
-    Ok(())
-}
-
-fn inject_ksym_section(
-    project: &Path,
-    config: &ScarletConfig,
-    target: Option<&str>,
-    release: bool,
-) -> Result<(), String> {
-    let resolved_target = match target {
-        Some(t) => t.to_string(),
-        None => config.board.target_json.clone(),
-    };
-    let target_path = if Path::new(&resolved_target).is_absolute() {
-        PathBuf::from(&resolved_target)
-    } else {
-        project.join(&resolved_target)
-    };
-    let target_triple = target_path
-        .file_stem()
-        .ok_or("target path has no file stem")?
-        .to_string_lossy()
-        .to_string();
-
-    let profile = if release { "release" } else { "debug" };
-    let binary_path = project
-        .join("target")
-        .join(&target_triple)
-        .join(profile)
-        .join("scarlet");
-
-    if !binary_path.exists() {
-        eprintln!(
-            "cargo-scarlet: ksym: binary not found at {}, skipping",
-            binary_path.display()
-        );
-        return Ok(());
-    }
-
-    let (nm_cmd, objcopy_cmd) = cross_tools_for_target(&target_triple);
-
-    let nm_output = Command::new(&nm_cmd)
-        .args([
-            "--defined-only",
-            "--extern-only",
-            "-g",
-            "--no-sort",
-            binary_path.to_str().unwrap_or(""),
-        ])
-        .output()
-        .map_err(|e| format!("failed to run nm: {e}"))?;
-
-    if !nm_output.status.success() {
-        eprintln!("cargo-scarlet: ksym: nm failed, skipping section injection");
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&nm_output.stdout);
-    let mut symbols: Vec<(u64, String)> = Vec::new();
-
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let addr_str = parts[0];
-        let name = parts[2];
-
-        if name.is_empty() {
-            continue;
-        }
-
-        let skip = match name {
-            "_GLOBAL_OFFSET_TABLE_" | "_DYNAMIC" => true,
-            n if n.starts_with("__") && n.ends_with("_START") => true,
-            n if n.starts_with("__") && n.ends_with("_END") => true,
-            _ => false,
-        };
-
-        if skip {
-            continue;
-        }
-
-        let addr = u64::from_str_radix(addr_str, 16).unwrap_or(0);
-        symbols.push((addr, name.to_string()));
-    }
-
-    let count = symbols.len() as u64;
-    let mut blob = Vec::new();
-    blob.extend_from_slice(&count.to_le_bytes());
-
-    for (addr, name) in &symbols {
-        blob.extend_from_slice(&addr.to_le_bytes());
-        let name_len = name.len() as u64;
-        blob.extend_from_slice(&name_len.to_le_bytes());
-        blob.extend_from_slice(name.as_bytes());
-    }
-
-    let tmp_dir = std::env::temp_dir().join("scarlet-ksym");
-    fs::create_dir_all(&tmp_dir).map_err(|e| format!("failed to create temp dir: {e}"))?;
-    let blob_path = tmp_dir.join("ksym_blob.bin");
-    fs::write(&blob_path, &blob).map_err(|e| format!("failed to write ksym blob: {e}"))?;
-
-    let update_status = Command::new(&objcopy_cmd)
-        .args([
-            "--update-section",
-            &format!(".scarlet_ksyms={}", blob_path.display()),
-            binary_path.to_str().unwrap_or(""),
-        ])
-        .status()
-        .map_err(|e| format!("failed to run objcopy: {e}"))?;
-
-    if !update_status.success() {
-        return Err("objcopy failed to update .scarlet_ksyms section".to_string());
-    }
-
-    eprintln!(
-        "cargo-scarlet: ksym: injected {} symbols into .scarlet_ksyms",
-        count
-    );
-
-    let _ = fs::remove_file(&blob_path);
     Ok(())
 }
 

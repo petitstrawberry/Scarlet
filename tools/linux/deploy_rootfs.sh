@@ -14,7 +14,7 @@ TAR_SRC="${PREBUILT_DIR}/${ARCH}/rootfs.tar"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-DEST_DIR="${PROJECT_ROOT}/mkfs/rootfs/system/linux-${ARCH}"
+DEST_DIR="${PROJECT_ROOT}/bundles/linux/rootfs/linux-${ARCH}"
 
 if [ ! -f "$TAR_SRC" ]; then
   echo "Error: prebuilt tar not found at $TAR_SRC"

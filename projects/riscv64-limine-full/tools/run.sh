@@ -51,12 +51,13 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR" && cd .. && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
-BOOT_IMAGE="$PROJECT_ROOT/mkfs/dist/limine-riscv64-boot.img"
-ROOTFS_IMAGE="$PROJECT_ROOT/mkfs/dist/rootfs.img"
+BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-riscv64-full.img"
+ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-riscv64-full.ext2"
 EFI_CODE="${SCARLET_EFI_CODE_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}"
 EFI_VARS_TEMPLATE="${SCARLET_EFI_VARS_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}"
-EFI_VARS_PERSISTENT="$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.fd"
+EFI_VARS_PERSISTENT="$PROJECT_DIR/.scarlet/RISCV_VIRT_VARS.fd"
 
 QEMU_DEBUG_ARGS=""
 QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"
@@ -127,23 +128,12 @@ cleanup() {
 trap cleanup EXIT
 
 if [ ! -f "$BOOT_IMAGE" ]; then
-    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    echo "Error: Boot image not found at $BOOT_IMAGE"
     exit 1
 fi
 
 if [ ! -f "$ROOTFS_IMAGE" ]; then
-    echo "Error: rootfs image not found at $ROOTFS_IMAGE"
-    exit 1
-fi
-
-if [ ! -f "$KERNEL_PATH" ]; then
-    echo "Error: kernel binary not found at $KERNEL_PATH"
-    exit 1
-fi
-
-echo "Rebuilding Limine RISC-V boot image from $KERNEL_PATH"
-if ! KERNEL_ELF="$KERNEL_PATH" sh "$PROJECT_ROOT/mkfs/make_limine_riscv64_image.sh"; then
-    echo "Error: failed to rebuild Limine RISC-V boot image"
+    echo "Error: Rootfs image not found at $ROOTFS_IMAGE"
     exit 1
 fi
 
@@ -163,7 +153,7 @@ if [ "${SCARLET_EFI_VARS_PERSIST:-0}" = "1" ] || [ "${SCARLET_EFI_VARS_PERSIST:-
         cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     fi
 else
-    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_ROOT/mkfs/dist/RISCV_VIRT_VARS.run.XXXXXX.fd")"
+    EFI_VARS_RUNTIME="$(mktemp "$PROJECT_DIR/.scarlet/RISCV_VIRT_VARS.run.XXXXXX.fd")"
     cp "$EFI_VARS_TEMPLATE" "$EFI_VARS_RUNTIME"
     EFI_VARS_RUNTIME_CLEANUP="$EFI_VARS_RUNTIME"
 fi
@@ -270,18 +260,18 @@ if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-
             else
                 "$VHOST_USER_VIDEO_DAEMON" --socket "$VHOST_USER_VIDEO_SOCKET" >"$VHOST_USER_VIDEO_LOG" 2>&1 &
             fi
-        elif [ -f "$PROJECT_ROOT/Package.swift" ] && [ -x /usr/bin/xcrun ]; then
+        elif [ -f "$PROJECT_ROOT/tools/vhost-video-videotoolbox/Package.swift" ] && [ -x /usr/bin/xcrun ]; then
             echo "Starting vhost-user video daemon with swift run: $VHOST_USER_VIDEO_SOCKET"
             VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS="${SCARLET_VHOST_USER_VIDEO_SOCKET_WAIT_ATTEMPTS:-1200}"
             if [ "$VHOST_USER_VIDEO_LOG" = "stderr" ]; then
                 (
-                    cd "$PROJECT_ROOT" &&
+                    cd "$PROJECT_ROOT/tools/vhost-video-videotoolbox" &&
                     mkdir -p .build/clang-module-cache &&
                     env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift run --disable-sandbox vhost-video-videotoolbox --socket "$VHOST_USER_VIDEO_SOCKET"
                 ) &
             else
                 (
-                    cd "$PROJECT_ROOT" &&
+                    cd "$PROJECT_ROOT/tools/vhost-video-videotoolbox" &&
                     mkdir -p .build/clang-module-cache &&
                     env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift run --disable-sandbox vhost-video-videotoolbox --socket "$VHOST_USER_VIDEO_SOCKET"
                 ) >"$VHOST_USER_VIDEO_LOG" 2>&1 &

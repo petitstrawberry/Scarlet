@@ -1,0 +1,37 @@
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ls"
+to = "/system/scarlet/bin/ls"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "cat"
+to = "/system/scarlet/bin/cat"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "rm"
+to = "/system/scarlet/bin/rm"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "resolve"
+to = "/system/scarlet/bin/resolve"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "ping"
+to = "/system/scarlet/bin/ping"
+
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "netcfg"
+to = "/system/scarlet/bin/netcfg"
