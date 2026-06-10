@@ -2,6 +2,19 @@
 # Essential system binaries needed for boot and basic shell access.
 # Architecture-independent: uses template variables for cross-arch support.
 
+dirs = [
+    "/dev",
+    "/home",
+    "/mnt/newroot",
+    "/mnt/newroot/old_root",
+    "/proc",
+    "/sys",
+    "/tmp",
+    "/data",
+    "/data/config",
+    "/data/config/scarlet",
+]
+
 [[packages]]
 kind = "cargo"
 source = "../user/bin"

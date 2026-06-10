@@ -114,7 +114,7 @@ struct ScarletManifest {
     #[serde(default)]
     modules: BTreeMap<String, ModuleConfig>,
     #[serde(default)]
-    image: ManifestImage,
+    images: BTreeMap<String, ManifestImageSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,28 +134,18 @@ struct ManifestKernel {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ManifestImage {
-    #[serde(default)]
-    initramfs: Option<ManifestImageSection>,
-    #[serde(default)]
-    rootfs: Option<ManifestImageSection>,
-    #[serde(default)]
-    boot: Option<ManifestBoot>,
-}
-
-#[derive(Debug, Deserialize)]
 struct ManifestImageSection {
     format: Option<String>,
+    kind: Option<String>,
     output: Option<String>,
     #[serde(default)]
-    layers: Vec<ManifestLayer>,
+    cmdline: String,
     #[serde(default)]
     packages: Vec<ManifestPackage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestLayer {
-    path: String,
+    #[serde(default)]
+    dirs: Vec<String>,
+    #[serde(default)]
+    files: Vec<ManifestFileEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,25 +159,22 @@ struct ManifestPackage {
 }
 
 #[derive(Debug, Deserialize)]
-struct ManifestBoot {
-    kind: String,
-    output: Option<String>,
-    #[serde(default)]
-    cmdline: String,
+struct ManifestFileEntry {
+    source: String,
+    to: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct BundleFile {
-    #[serde(default)]
-    packages: Vec<ManifestPackage>,
+struct ResolvedSection {
+    packages: Vec<ResolvedPackage>,
+    dirs: Vec<String>,
+    files: Vec<ResolvedFile>,
 }
 
 struct ExpandedManifest {
     #[allow(dead_code)]
     project_dir: PathBuf,
     manifest: ScarletManifest,
-    expanded_initramfs: Vec<ResolvedPackage>,
-    expanded_rootfs: Vec<ResolvedPackage>,
+    sections: BTreeMap<String, ResolvedSection>,
 }
 
 struct ResolvedPackage {
@@ -203,8 +190,15 @@ fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
     let manifest_path = project_dir.join("scarlet.toml");
     let text = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
-    let manifest: ScarletManifest = toml::from_str(&text)
+    let mut root: toml::Value = toml::from_str(&text)
         .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
+
+    merge_layers_recursive(&mut root, project_dir)?;
+
+    let merged_text = toml::to_string(&root)
+        .map_err(|e| format!("failed to re-serialize merged manifest: {e}"))?;
+    let manifest: ScarletManifest = toml::from_str(&merged_text)
+        .map_err(|e| format!("failed to deserialize manifest: {e}"))?;
 
     if manifest.schema_version != 2 {
         return Err(format!(
@@ -216,12 +210,83 @@ fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
     Ok(manifest)
 }
 
-fn load_bundle(bundle_path: &Path) -> Result<Vec<ManifestPackage>, String> {
-    let text = fs::read_to_string(bundle_path)
-        .map_err(|e| format!("failed to read bundle {}: {e}", bundle_path.display()))?;
-    let bundle: BundleFile = toml::from_str(&text)
-        .map_err(|e| format!("failed to parse bundle {}: {e}", bundle_path.display()))?;
-    Ok(bundle.packages)
+fn merge_toml_into(parent: &mut toml::Value, child: toml::Value) {
+    let toml::Value::Table(parent_table) = parent else { return };
+    let toml::Value::Table(child_table) = child else { return };
+    for (key, child_val) in child_table {
+        match parent_table.get_mut(&key) {
+            Some(toml::Value::Array(parent_arr)) => {
+                if let toml::Value::Array(child_arr) = child_val {
+                    parent_arr.extend(child_arr);
+                }
+            }
+            Some(parent_existing) => {
+                let child_tables = matches!(parent_existing, toml::Value::Table(_))
+                    && matches!(&child_val, toml::Value::Table(_));
+                if child_tables {
+                    let mut taken = parent_existing.clone();
+                    merge_toml_into(&mut taken, child_val);
+                    parent_table.insert(key, taken);
+                }
+            }
+            _ => {
+                parent_table.insert(key, child_val);
+            }
+        }
+    }
+}
+
+fn resolve_toml_paths(value: &mut toml::Value, origin_dir: &Path) {
+    let toml::Value::Table(table) = value else { return };
+    for (key, val) in table.iter_mut() {
+        match val {
+            toml::Value::String(s) if key == "source" || key == "path" => {
+                let resolved = resolve_path(origin_dir, s);
+                *s = resolved.to_string_lossy().to_string();
+            }
+            toml::Value::Table(_) => resolve_toml_paths(val, origin_dir),
+            toml::Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    resolve_toml_paths(item, origin_dir);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn merge_layers_recursive(value: &mut toml::Value, base_dir: &Path) -> Result<(), String> {
+    let layers = match value {
+        toml::Value::Table(table) => table.remove("layers"),
+        _ => None,
+    };
+
+    if let Some(toml::Value::Array(layers)) = layers {
+        for layer_entry in layers {
+            let toml::Value::Table(layer_tbl) = layer_entry else { continue };
+            let Some(toml::Value::String(path_str)) = layer_tbl.get("path") else { continue };
+            let layer_path = resolve_path(base_dir, path_str);
+            let layer_dir = layer_path.parent().unwrap_or(Path::new("."));
+            let layer_text = fs::read_to_string(&layer_path)
+                .map_err(|e| format!("failed to read layer {}: {e}", layer_path.display()))?;
+            let mut layer_value: toml::Value = toml::from_str(&layer_text)
+                .map_err(|e| format!("failed to parse layer {}: {e}", layer_path.display()))?;
+            merge_layers_recursive(&mut layer_value, layer_dir)?;
+            resolve_toml_paths(&mut layer_value, layer_dir);
+            merge_toml_into(value, layer_value);
+        }
+    }
+
+    if let toml::Value::Table(table) = value {
+        for (_key, sub_value) in table.iter_mut() {
+            if let toml::Value::Table(_sub_table) = sub_value {
+                let sub_dir = base_dir.to_path_buf();
+                merge_layers_recursive(sub_value, &sub_dir)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_package(pkg: &ManifestPackage, base_dir: &Path, target_triple: &str) -> ResolvedPackage {
@@ -259,45 +324,45 @@ fn userspace_target_triple(kernel_triple: &str) -> String {
     }
 }
 
-fn expand_image_section(
-    section: Option<&ManifestImageSection>,
-    project_dir: &Path,
-    target_triple: &str,
-) -> Result<Vec<ResolvedPackage>, String> {
-    let Some(section) = section else {
-        return Ok(Vec::new());
-    };
+struct ResolvedFile {
+    source: PathBuf,
+    to: String,
+}
 
-    let mut resolved = Vec::new();
+fn resolve_section(section: &ManifestImageSection, base_dir: &Path, target_triple: &str) -> ResolvedSection {
+    let mut packages = Vec::new();
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
 
-    for layer in &section.layers {
-        let bundle_path = resolve_path(project_dir, &layer.path);
-        let packages = load_bundle(&bundle_path)?;
-        let bundle_dir = bundle_path.parent().unwrap_or(Path::new("."));
-        for pkg in &packages {
-            resolved.push(resolve_package(pkg, bundle_dir, target_triple));
-        }
-    }
+    dirs.extend(section.dirs.iter().cloned());
 
     for pkg in &section.packages {
-        resolved.push(resolve_package(pkg, project_dir, target_triple));
+        packages.push(resolve_package(pkg, base_dir, target_triple));
     }
 
-    Ok(resolved)
+    for f in &section.files {
+        files.push(ResolvedFile {
+            source: resolve_path(base_dir, &f.source),
+            to: f.to.clone(),
+        });
+    }
+
+    ResolvedSection { packages, dirs, files }
 }
 
 fn expand_manifest(project_dir: &Path) -> Result<ExpandedManifest, String> {
     let manifest = load_manifest(project_dir)?;
     let target_triple = manifest.kernel.target.clone();
 
-    let expanded_initramfs = expand_image_section(manifest.image.initramfs.as_ref(), project_dir, &target_triple)?;
-    let expanded_rootfs = expand_image_section(manifest.image.rootfs.as_ref(), project_dir, &target_triple)?;
+    let mut sections = BTreeMap::new();
+    for (name, section) in &manifest.images {
+        sections.insert(name.clone(), resolve_section(section, project_dir, &target_triple));
+    }
 
     Ok(ExpandedManifest {
         project_dir: project_dir.to_path_buf(),
         manifest,
-        expanded_initramfs,
-        expanded_rootfs,
+        sections,
     })
 }
 
@@ -408,9 +473,9 @@ fn generate_lockfile(project_dir: &Path) -> Result<(), String> {
 
     let mut seen_cargo_packages: Vec<(String, String)> = Vec::new();
     let all_packages: Vec<&ResolvedPackage> = expanded
-        .expanded_initramfs
-        .iter()
-        .chain(expanded.expanded_rootfs.iter())
+        .sections
+        .values()
+        .flat_map(|s| s.packages.iter())
         .collect();
 
     for pkg in all_packages {
@@ -788,10 +853,71 @@ fn build_manifest_image(
         .to_string();
     let profile = if release { "release" } else { "debug" };
 
-    if let Some(initramfs_cfg) = &expanded.manifest.image.initramfs {
-        let output = initramfs_cfg.output.as_deref().unwrap_or(".scarlet/images/initramfs.cpio");
+    for (section_name, section_cfg) in &expanded.manifest.images {
+        let resolved = expanded.sections.get(section_name)
+            .ok_or_else(|| format!("section '{}' not resolved", section_name))?;
+
+        let output = section_cfg.output.as_deref().unwrap_or(".scarlet/images/output");
         let output_path = project.join(output);
-        let staging_dir = project.join(".scarlet/staging/initramfs");
+        let staging_dir = project.join(format!(".scarlet/staging/{}", section_name));
+
+        let format = section_cfg.format.as_deref().unwrap_or("");
+        let kind = section_cfg.kind.as_deref().unwrap_or("");
+
+        if kind == "limine-uefi" {
+            let arch_name = match target_triple.split('-').next() {
+                Some("aarch64") => "aarch64",
+                Some(v) if v.starts_with("riscv64") => "riscv64",
+                _ => &target_triple,
+            };
+
+            let initramfs_path = expanded
+                .manifest
+                .images
+                .get("initramfs")
+                .and_then(|s| s.output.as_deref())
+                .map(|p| project.join(p))
+                .unwrap_or_else(|| project.join(".scarlet/images/initramfs.cpio"));
+
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+
+            let plugin_manifest = project
+                .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
+                .canonicalize()
+                .unwrap_or_else(|_| project.join("../../cargo-scarlet-plugin-limine/Cargo.toml"));
+
+            let mut cmd = Command::new("cargo");
+            cmd.arg("run")
+                .arg("--manifest-path")
+                .arg(&plugin_manifest)
+                .arg("--")
+                .arg("--arch")
+                .arg(arch_name)
+                .arg("--kernel")
+                .arg(&kernel_elf)
+                .arg("--initramfs")
+                .arg(&initramfs_path)
+                .arg("--output")
+                .arg(&output_path);
+
+            if !section_cfg.cmdline.is_empty() {
+                cmd.arg("--cmdline").arg(&section_cfg.cmdline);
+            }
+
+            let status = cmd
+                .status()
+                .map_err(|e| format!("failed to run limine plugin: {e}"))?;
+
+            if !status.success() {
+                return Err("limine plugin failed".to_string());
+            }
+
+            eprintln!("cargo-scarlet: wrote boot image to {}", output_path.display());
+            continue;
+        }
 
         if staging_dir.exists() {
             fs::remove_dir_all(&staging_dir)
@@ -800,37 +926,30 @@ fn build_manifest_image(
         fs::create_dir_all(&staging_dir)
             .map_err(|e| format!("failed to create staging: {e}"))?;
 
-        for pkg in &expanded.expanded_initramfs {
+        for dir in &resolved.dirs {
+            let dir_path = staging_dir.join(dir.trim_start_matches('/'));
+            fs::create_dir_all(&dir_path)
+                .map_err(|e| format!("failed to create dir {}: {e}", dir_path.display()))?;
+        }
+
+        for file in &resolved.files {
+            let dest = staging_dir.join(file.to.trim_start_matches('/'));
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+            fs::copy(&file.source, &dest)
+                .map_err(|e| format!("failed to copy {} -> {}: {e}", file.source.display(), dest.display()))?;
+        }
+
+        for pkg in &resolved.packages {
             install_package(&staging_dir, pkg, project, &target_triple, profile)?;
         }
 
-        let format = initramfs_cfg.format.as_deref().unwrap_or("newc");
         if format == "newc" {
             build_initramfs_newc_from_staging(&staging_dir, &output_path)?;
-            eprintln!("cargo-scarlet: wrote initramfs to {}", output_path.display());
-        } else {
-            return Err(format!("unsupported initramfs format: {format}"));
-        }
-    }
-
-    if let Some(rootfs_cfg) = &expanded.manifest.image.rootfs {
-        let output = rootfs_cfg.output.as_deref().unwrap_or(".scarlet/images/rootfs.ext2");
-        let output_path = project.join(output);
-        let staging_dir = project.join(".scarlet/staging/rootfs");
-
-        if staging_dir.exists() {
-            fs::remove_dir_all(&staging_dir)
-                .map_err(|e| format!("failed to clean staging: {e}"))?;
-        }
-        fs::create_dir_all(&staging_dir)
-            .map_err(|e| format!("failed to create staging: {e}"))?;
-
-        for pkg in &expanded.expanded_rootfs {
-            install_package(&staging_dir, pkg, project, &target_triple, profile)?;
-        }
-
-        let format = rootfs_cfg.format.as_deref().unwrap_or("ext2");
-        if format == "ext2" {
+            eprintln!("cargo-scarlet: wrote {} to {}", section_name, output_path.display());
+        } else if format == "ext2" {
             let source_kb_output = Command::new("du")
                 .args(["-sk", staging_dir.to_str().unwrap_or("")])
                 .output()
@@ -861,22 +980,9 @@ fn build_manifest_image(
 
             let mke2fs_status = Command::new("mke2fs")
                 .args([
-                    "-q",
-                    "-F",
-                    "-t",
-                    "ext2",
-                    "-b",
-                    "4096",
-                    "-i",
-                    "2048",
-                    "-m",
-                    "1",
-                    "-L",
-                    "SCARLET_ROOT",
-                    "-E",
-                    "no_copy_xattrs",
-                    "-d",
-                    staging_dir.to_str().unwrap_or(""),
+                    "-q", "-F", "-t", "ext2", "-b", "4096", "-i", "2048",
+                    "-m", "1", "-L", "SCARLET_ROOT", "-E", "no_copy_xattrs",
+                    "-d", staging_dir.to_str().unwrap_or(""),
                     output_path.to_str().unwrap_or(""),
                 ])
                 .status()
@@ -886,81 +992,16 @@ fn build_manifest_image(
             }
 
             eprintln!(
-                "cargo-scarlet: wrote rootfs to {} ({}KB, source={}KB)",
-                output_path.display(),
-                size_kb,
-                source_kb
+                "cargo-scarlet: wrote {} to {} ({}KB, source={}KB)",
+                section_name, output_path.display(), size_kb, source_kb
+            );
+        } else if !kind.is_empty() {
+            eprintln!(
+                "cargo-scarlet: image generation for kind '{}' not yet implemented",
+                kind
             );
         } else {
-            return Err(format!("unsupported rootfs format: {format}"));
-        }
-    }
-
-    if let Some(boot_cfg) = &expanded.manifest.image.boot {
-        let boot_output = boot_cfg.output.as_deref().unwrap_or(".scarlet/images/boot.img");
-        let boot_output_path = project.join(boot_output);
-
-        let arch_name = match target_triple.split('-').next() {
-            Some("aarch64") => "aarch64",
-            Some(v) if v.starts_with("riscv64") => "riscv64",
-            _ => &target_triple,
-        };
-
-        let initramfs_path = expanded
-            .manifest
-            .image
-            .initramfs
-            .as_ref()
-            .and_then(|s| s.output.as_deref())
-            .map(|p| project.join(p))
-            .unwrap_or_else(|| project.join(".scarlet/images/initramfs.cpio"));
-
-        if boot_cfg.kind == "limine-uefi" {
-            if let Some(parent) = boot_output_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-            }
-
-            let plugin_manifest = project
-                .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
-                .canonicalize()
-                .unwrap_or_else(|_| project.join("../../cargo-scarlet-plugin-limine/Cargo.toml"));
-
-            let mut cmd = Command::new("cargo");
-            cmd.arg("run")
-                .arg("--manifest-path")
-                .arg(&plugin_manifest)
-                .arg("--")
-                .arg("--arch")
-                .arg(arch_name)
-                .arg("--kernel")
-                .arg(&kernel_elf)
-                .arg("--initramfs")
-                .arg(&initramfs_path)
-                .arg("--output")
-                .arg(&boot_output_path);
-
-            if !boot_cfg.cmdline.is_empty() {
-                cmd.arg("--cmdline").arg(&boot_cfg.cmdline);
-            }
-
-            let status = cmd
-                .status()
-                .map_err(|e| format!("failed to run limine plugin: {e}"))?;
-
-            if !status.success() {
-                return Err("limine plugin failed".to_string());
-            }
-
-            eprintln!(
-                "cargo-scarlet: wrote boot image to {}",
-                boot_output_path.display()
-            );
-        } else {
-            eprintln!(
-                "cargo-scarlet: boot image generation for '{}' not yet implemented",
-                boot_cfg.kind
-            );
+            return Err(format!("unsupported format '{}' for section '{}'", format, section_name));
         }
     }
 
