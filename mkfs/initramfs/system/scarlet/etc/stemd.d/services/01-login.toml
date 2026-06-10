@@ -1,7 +1,0 @@
-# Stem Daemon Configuration File
-# Services are launched in dependency order
-
-[service.login]
-exec = "/bin/login"
-depends = []
-tty = "/dev/tty0"

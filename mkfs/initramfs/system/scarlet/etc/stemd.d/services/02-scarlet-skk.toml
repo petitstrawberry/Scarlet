@@ -1,6 +1,0 @@
-# Stem Daemon Configuration File
-
-[service.scarlet-skk]
-exec = "/bin/scarlet_skk"
-depends = ["sws"]
-order = 02

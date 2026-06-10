@@ -66,7 +66,13 @@ if [ ! -f "$KERNEL_PATH" ]; then
     exit 1
 fi
 
-LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/release/cargo-scarlet-plugin-limine"
+if [ ! -f "$LIMINE_PLUGIN" ]; then
+    LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/debug/cargo-scarlet-plugin-limine"
+fi
+if [ ! -f "$LIMINE_PLUGIN" ]; then
+    LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+fi
 if [ ! -f "$LIMINE_PLUGIN" ]; then
     LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
 fi

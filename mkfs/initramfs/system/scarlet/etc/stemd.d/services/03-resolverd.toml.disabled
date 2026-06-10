@@ -1,6 +1,0 @@
-# Stem Daemon Configuration File
-
-[service.resolverd]
-exec = "/bin/resolverd"
-depends = ["netcfgd"]
-order = 03

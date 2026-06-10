@@ -118,7 +118,7 @@ bin = "netcfg"
 hash = "sha256:4329ec741810b2d30c493c7697cc29ee0a837d300053ede81235e9bf550dea55"
 
 [sections.rootfs]
-hash = "sha256:decfd2540a306a54387dec8a71591b3bcd8c877843707b9538164314343971f2"
+hash = "sha256:6a3c01257878886e70d2353460c50788c1b6a020d3167d79f1089e653dda2250"
 files = []
 
 [[sections.rootfs.packages]]

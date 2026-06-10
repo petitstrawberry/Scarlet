@@ -1,7 +1,0 @@
-# Stem Daemon Configuration File
-# stemd registers itself as a service to manage its dependencies
-
-[service.sas]
-exec = "/bin/sas"
-order = 01
-depends = ["sbusd"]

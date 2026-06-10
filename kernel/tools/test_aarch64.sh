@@ -53,7 +53,13 @@ if [ -n "$KERNEL_BINARY" ]; then
     echo "test" > "$TEST_DIR/test-marker"
     (cd "$TEST_DIR" && echo "test-marker" | cpio -o -H newc > "$INITRAMFS" 2>/dev/null)
 
-    LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+    LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/release/cargo-scarlet-plugin-limine"
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/cargo-scarlet-plugin-limine/target/debug/cargo-scarlet-plugin-limine"
+    fi
+    if [ ! -f "$LIMINE_PLUGIN" ]; then
+        LIMINE_PLUGIN="$PROJECT_ROOT/target/release/cargo-scarlet-plugin-limine"
+    fi
     if [ ! -f "$LIMINE_PLUGIN" ]; then
         LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
     fi
