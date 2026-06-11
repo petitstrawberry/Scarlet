@@ -892,74 +892,66 @@ fn cmd_update(project: &Path) -> Result<(), String> {
     }
 
     for (section_name, section) in &expanded.sections {
-        let mut package_locks = Vec::new();
+        let section_lock = lock
+            .sections
+            .entry(section_name.clone())
+            .or_insert_with(|| SectionLock {
+                hash: String::new(),
+                files: Vec::new(),
+                packages: Vec::new(),
+            });
+
         for pkg in &section.packages {
             if pkg.source.as_ref().is_some_and(|s| s.is_git()) {
                 let source = pkg
                     .local_source
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string());
-                package_locks.push(PackageLock {
+                let git = pkg
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.git_url())
+                    .map(|s| s.to_string());
+                let new_pkg = PackageLock {
                     kind: pkg.kind.clone().unwrap_or_default(),
                     source,
-                    git: pkg
-                        .source
-                        .as_ref()
-                        .and_then(|s| s.git_url())
-                        .map(|s| s.to_string()),
+                    git: git.clone(),
                     resolved_rev: pkg.resolved_rev.clone(),
                     bin: pkg.bin.clone(),
                     output: None,
                     hash: String::new(),
-                });
-            }
-        }
-
-        let mut file_locks = Vec::new();
-        for file in &section.files {
-            if let FileSource::Url(url) = &file.source {
-                eprintln!("cargo-scarlet: fetching {}", url);
-                let (_, hash) = fetch_url_cached(url, &file_cache_dir, None)?;
-                file_locks.push(FileLock {
-                    source: url.clone(),
-                    hash,
-                });
-            }
-        }
-
-        if !package_locks.is_empty() || !file_locks.is_empty() {
-            let section_lock = lock
-                .sections
-                .entry(section_name.clone())
-                .or_insert_with(|| SectionLock {
-                    hash: String::new(),
-                    files: Vec::new(),
-                    packages: Vec::new(),
-                });
-            for new_pkg in package_locks {
+                };
                 if let Some(existing) = section_lock
                     .packages
                     .iter_mut()
-                    .find(|p| p.git == new_pkg.git && p.bin == new_pkg.bin)
+                    .find(|p| p.git == git && p.bin == new_pkg.bin)
                 {
                     existing.resolved_rev = new_pkg.resolved_rev;
+                    existing.source = new_pkg.source;
                 } else {
                     section_lock.packages.push(new_pkg);
                 }
             }
-            for new_file in file_locks {
-                if let Some(existing) = section_lock
-                    .files
-                    .iter_mut()
-                    .find(|f| f.source == new_file.source)
-                {
-                    existing.hash = new_file.hash;
+        }
+
+        for file in &section.files {
+            if let FileSource::Url(url) = &file.source {
+                eprintln!("cargo-scarlet: fetching {}", url);
+                let (_, hash) = fetch_url_cached(url, &file_cache_dir, None)?;
+                if let Some(existing) = section_lock.files.iter_mut().find(|f| f.source == *url) {
+                    existing.hash = hash;
                 } else {
-                    section_lock.files.push(new_file);
+                    section_lock.files.push(FileLock {
+                        source: url.clone(),
+                        hash,
+                    });
                 }
             }
         }
     }
+
+    let section_names: Vec<String> = expanded.sections.keys().cloned().collect();
+    lock.sections.retain(|name, _| section_names.contains(name));
 
     save_lock(project, &lock)?;
     eprintln!("cargo-scarlet: lock updated");
@@ -1490,9 +1482,10 @@ fn build_manifest_image(
                         "cargo-scarlet: {} unchanged, skipping image generation",
                         section_name
                     );
-                    new_lock
-                        .sections
-                        .insert(section_name.clone(), existing.clone());
+                    let mut updated = existing.clone();
+                    updated.packages = package_locks;
+                    updated.files = file_locks;
+                    new_lock.sections.insert(section_name.clone(), updated);
                     continue;
                 }
 
