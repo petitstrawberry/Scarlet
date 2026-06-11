@@ -4,6 +4,12 @@
 
 [[layers]]
 kind = "copy"
-source = "rootfs/linux-{arch}"
+source = "rootfs/system/linux-{arch}"
 to = "/system/linux-{arch}"
+template = true
+
+[[layers]]
+kind = "copy"
+source = "rootfs/data/config/linux-{arch}"
+to = "/data/config/linux-{arch}"
 template = true
