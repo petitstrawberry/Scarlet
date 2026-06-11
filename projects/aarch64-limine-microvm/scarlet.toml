@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 
 [project]
 name = "scarlet-aarch64-limine-microvm"
@@ -27,9 +27,10 @@ format = "newc"
 output = ".scarlet/images/initramfs-aarch64-microvm.cpio"
 
 [[images.initramfs.layers]]
+kind = "bundle"
 path = "../../bundles/base/bundle.toml"
 
-[[images.initramfs.packages]]
+[[images.initramfs.layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
@@ -41,9 +42,10 @@ format = "ext2"
 output = ".scarlet/images/rootfs-aarch64-microvm.ext2"
 
 [[images.rootfs.layers]]
+kind = "bundle"
 path = "../../bundles/base/bundle.toml"
 
-[[images.rootfs.packages]]
+[[images.rootfs.layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
@@ -56,8 +58,9 @@ output = ".scarlet/images/limine-aarch64-microvm.img"
 cmdline = "console=ttyAMA0"
 deps = ["initramfs"]
 
-[[images.boot.packages]]
-source = ".scarlet/images/initramfs-aarch64-microvm.cpio"
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
 to = "/boot/initramfs"
 
 [runner]

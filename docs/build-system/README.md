@@ -4,7 +4,7 @@
 
 Scarlet uses a project-rooted build system centered on `scarlet.toml` manifests and the `cargo-scarlet` CLI tool.
 
-Each project is an independent kernel build target with its own `scarlet.toml`. The build tool reads the manifest, generates a module aggregation crate under `<project>/.scarlet/`, invokes Cargo for the kernel build, and composes bootable images from packages and layers.
+Each project is an independent kernel build target with its own `scarlet.toml`. The build tool reads the manifest, generates a module aggregation crate under `<project>/.scarlet/`, invokes Cargo for the kernel build, and composes bootable images from ordered layers.
 
 ## Quick Start
 
@@ -102,12 +102,12 @@ cargo scarlet new --lsm my-module
 
 ## scarlet.toml Format
 
-Schema version: **1**
+Schema version: **2**
 
 ### Full Example
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [project]
 name = "scarlet-riscv64-limine-full"
@@ -135,6 +135,7 @@ format = "newc"
 output = ".scarlet/images/initramfs-riscv64-full.cpio"
 
 [[images.initramfs.layers]]
+kind = "bundle"
 path = "../../bundles/base/bundle.toml"
 
 [images.rootfs]
@@ -142,6 +143,7 @@ format = "ext2"
 output = ".scarlet/images/rootfs-riscv64-full.ext2"
 
 [[images.rootfs.layers]]
+kind = "bundle"
 path = "../../bundles/full/bundle.toml"
 
 [images.boot]
@@ -150,8 +152,9 @@ output = ".scarlet/images/limine-riscv64-full.img"
 cmdline = "console=ttyS0 root=/dev/vblk1"
 deps = ["initramfs"]
 
-[[images.boot.packages]]
-source = ".scarlet/images/initramfs-riscv64-full.cpio"
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
 to = "/boot/initramfs"
 
 [runner]
@@ -221,7 +224,7 @@ Module entries support Cargo-like dependency sources:
 
 ### Images Section
 
-Images are composed from layers and packages. Each image has a `format` and `output` path:
+Images are composed from ordered layers. Each image has a `format` and `output` path:
 
 | Format | Description |
 |--------|-------------|
@@ -231,9 +234,7 @@ Images are composed from layers and packages. Each image has a `format` and `out
 
 Images can declare:
 - `deps` — list of other image names that must be built first (topological sort)
-- `packages` — artifacts to include in the image
-- `files` — file entries (local path or URL) to copy into the image
-- `layers` — references to external bundle TOML files
+- `layers` — ordered filesystem/image composition operations
 - `cmdline` — kernel command line (for boot images)
 
 ### Runner Section
@@ -257,16 +258,37 @@ source = "../../my-fork/kernel"
 
 The merge is deep: tables are merged recursively, arrays are appended. This file should be `.gitignore`d.
 
-## Packages
+## Layers
 
-Packages are the unit of installable output in images.
+Layers are applied in declaration order. Later layers can overwrite files created by earlier layers.
 
-### Cargo Build (`kind = "cargo"`)
+### Bundle (`kind = "bundle"`)
+
+Expand another TOML file's `[[layers]]` at this exact position:
+
+```toml
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/full/bundle.toml"
+```
+
+### Copy (`kind = "copy"`)
+
+Copy files or directories into the image:
+
+```toml
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs"
+to = "/"
+```
+
+### Cargo (`kind = "cargo"`)
 
 Build a binary from a Cargo package and install it:
 
 ```toml
-[[images.initramfs.packages]]
+[[images.initramfs.layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
@@ -282,29 +304,32 @@ to = "/system/scarlet/bin/sh"
 | `bin` | Binary target name |
 | `to` | Install path inside the image |
 
-### File Copy
+### Script (`kind = "script"`)
 
-Copy files or directories into the image:
+Run a script and install its output:
 
 ```toml
-[[images.initramfs.packages]]
-from = "prebuilt/{arch}/firecracker"
-to = "/usr/bin/firecracker"
+[[images.rootfs.layers]]
+kind = "script"
+source = "tools/fetch_skk_dictionary.sh"
+output = ".scarlet/cache/skk/SKK-JISYO.L"
+to = "/system/scarlet/share/skk/SKK-JISYO.L"
 ```
 
-### Image Reference
+### Image (`kind = "image"`)
 
 Reference another image's output as input:
 
 ```toml
-[[images.boot.packages]]
-source = ".scarlet/images/initramfs.cpio"
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
 to = "/boot/initramfs"
 ```
 
 ### Template Variables
 
-Paths in `source`, `from`, and `to` support template expansion:
+Paths in `source`, `path`, `output`, and `to` support template expansion:
 
 | Variable | Expands to |
 |----------|-----------|
@@ -313,21 +338,22 @@ Paths in `source`, `from`, and `to` support template expansion:
 
 ### URL Sources
 
-Package and file sources can reference remote URLs. Fetched files are cached under `<project>/.scarlet/cache/files/` and verified against the lock file hash:
+Copy layer sources can reference remote URLs. Fetched files are cached under `<project>/.scarlet/cache/files/` and verified against the lock file hash:
 
 ```toml
-[[images.initramfs.files]]
+[[images.initramfs.layers]]
+kind = "copy"
 source = "https://example.com/firmware.bin"
 to = "/lib/firmware/example.bin"
 ```
 
 ## Bundles (Layers)
 
-Bundles are external TOML files containing `[[packages]]` and `[[files]]` definitions. They share the same format as the image section in `scarlet.toml` and are referenced via `[[images.*.layers]]`:
+Bundles are external TOML files containing ordered `[[layers]]` definitions. A `kind = "bundle"` layer expands a bundle in place:
 
 ```toml
 # bundles/base/bundle.toml
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
@@ -338,10 +364,11 @@ to = "/system/scarlet/bin/sh"
 ```toml
 # In scarlet.toml
 [[images.initramfs.layers]]
+kind = "bundle"
 path = "../../bundles/base/bundle.toml"
 ```
 
-All relative paths in a bundle are resolved from the bundle file's directory. Multiple layers are merged in declaration order; later entries override earlier ones on conflict.
+All relative paths in a bundle are resolved from the bundle file's directory. Layers are applied in declaration order; later entries override earlier ones on conflict.
 
 ## Lock File (`scarlet.lock`)
 
@@ -412,17 +439,13 @@ Image formats that require external tools are handled via plugins. The core buil
   "initramfs": "/path/to/initramfs.cpio",
   "output": "/path/to/output.img",
   "section": {
-    "format": "limine-uefi",
-    "output": ".scarlet/images/limine.img",
     "cmdline": "console=ttyS0",
-    "packages": [...],
-    "files": [...],
-    "deps": [...]
+    "packages": [...]
   }
 }
 ```
 
-The `section` field contains the full `ManifestImageSection` from the manifest, giving plugins access to all configuration (packages, cmdline, etc.) without needing dedicated CLI argument construction.
+The `section` field is a plugin-facing compatibility view containing the data a plugin needs after ordered layers have been resolved.
 
 ### Plugin Discovery
 
@@ -463,7 +486,7 @@ All files under `.scarlet/` are auto-generated by cargo-scarlet. Do not edit the
 cargo scarlet image --project projects/riscv64-limine-full
      │
      ├─ Read scarlet.toml + scarlet.local.toml
-     ├─ Expand layers (bundle TOML files)
+     ├─ Resolve ordered layers and expand bundle layers in place
      ├─ Generate .scarlet/scarlet-modules/
      │   ├─ Cargo.toml (kernel + module deps with correct source specs)
      │   ├─ src/lib.rs (force_link for enabled modules)
@@ -473,7 +496,7 @@ cargo scarlet image --project projects/riscv64-limine-full
      ├─ Resolve git sources (from lock or fresh resolve)
      ├─ Topological sort images by deps
      └─ For each image:
-         ├─ newc/ext2: stage packages + files → generate image
+         ├─ newc/ext2: apply ordered layers to staging → generate image
          └─ limine-uefi: run_plugin("limine", request) → generate image
 ```
 

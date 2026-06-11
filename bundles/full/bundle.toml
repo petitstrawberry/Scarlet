@@ -2,7 +2,9 @@
 # Complete system: desktop + linux ABI.
 
 [[layers]]
+kind = "bundle"
 path = "../desktop/bundle.toml"
 
 [[layers]]
+kind = "bundle"
 path = "../linux/bundle.toml"

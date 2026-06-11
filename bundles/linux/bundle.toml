@@ -2,7 +2,8 @@
 # Pre-built Buildroot rootfs for Linux ABI compatibility.
 # Uses {arch} template to select the correct architecture tree.
 
-[[files]]
+[[layers]]
+kind = "copy"
 source = "rootfs/linux-{arch}"
 to = "/system/linux-{arch}"
 template = true

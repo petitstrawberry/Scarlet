@@ -1,87 +1,88 @@
 # Scarlet Base Bundle
 # Essential system directories and binaries for boot and basic shell access.
 
-[[files]]
+[[layers]]
+kind = "copy"
 source = "fs"
 to = "/"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "init"
 to = "/system/scarlet/bin/init"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sh"
 to = "/system/scarlet/bin/sh"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "login"
 to = "/system/scarlet/bin/login"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "stemd"
 to = "/system/scarlet/bin/stemd"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sbusd"
 to = "/system/scarlet/bin/sbusd"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "hello"
 to = "/system/scarlet/bin/hello"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ps"
 to = "/system/scarlet/bin/ps"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "shutdown"
 to = "/system/scarlet/bin/shutdown"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scpm"
 to = "/system/scarlet/bin/scpm"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "netcfgd"
 to = "/system/scarlet/bin/netcfgd"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "resolverd"

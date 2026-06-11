@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 
 [project]
 name = "scarlet-riscv64-limine-desktop"
@@ -27,9 +27,11 @@ format = "newc"
 output = ".scarlet/images/initramfs-riscv64-desktop.cpio"
 
 [[images.initramfs.layers]]
+kind = "bundle"
 path = "../../bundles/base/bundle.toml"
 
 [[images.initramfs.layers]]
+kind = "bundle"
 path = "../../bundles/cli-utils/bundle.toml"
 
 [images.rootfs]
@@ -37,6 +39,7 @@ format = "ext2"
 output = ".scarlet/images/rootfs-riscv64-desktop.ext2"
 
 [[images.rootfs.layers]]
+kind = "bundle"
 path = "../../bundles/desktop/bundle.toml"
 
 [images.boot]
@@ -45,8 +48,9 @@ output = ".scarlet/images/limine-riscv64-desktop.img"
 cmdline = "console=ttyS0 root=/dev/vblk1"
 deps = ["initramfs"]
 
-[[images.boot.packages]]
-source = ".scarlet/images/initramfs-riscv64-desktop.cpio"
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
 to = "/boot/initramfs"
 
 [runner]

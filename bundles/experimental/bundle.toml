@@ -1,0 +1,16 @@
+# Scarlet Experimental Bundle
+# Experimental features and applications for testing and development.
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
+package = "yt"
+bin = "yt"
+to = "/system/scarlet/bin/yt"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
+package = "yt-gui"
+bin = "yt-gui"
+to = "/system/scarlet/bin/yt-gui"

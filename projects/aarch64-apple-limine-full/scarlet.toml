@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 
 [project]
 name = "scarlet-aarch64-apple-limine-full"

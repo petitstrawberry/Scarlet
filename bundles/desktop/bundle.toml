@@ -3,149 +3,152 @@
 # Composes base + cli-utils + desktop-specific packages.
 
 [[layers]]
+kind = "bundle"
 path = "../base/bundle.toml"
 
 [[layers]]
+kind = "bundle"
 path = "../cli-utils/bundle.toml"
 
-[[files]]
+[[layers]]
+kind = "copy"
 source = "fs"
 to = "/"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop_background"
 to = "/system/scarlet/bin/scarlet_desktop_background"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_desktop_taskbar"
 to = "/system/scarlet/bin/scarlet_desktop_taskbar"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "terminal"
 to = "/system/scarlet/bin/terminal"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sws"
 to = "/system/scarlet/bin/sws"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "sas"
 to = "/system/scarlet/bin/sas"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ui-demo"
 to = "/system/scarlet/bin/ui-demo"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "pdfview"
 to = "/system/scarlet/bin/pdfview"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "settings"
 to = "/system/scarlet/bin/settings"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_skk"
 to = "/system/scarlet/bin/scarlet_skk"
 
-[[packages]]
+[[layers]]
 kind = "script"
 source = "tools/fetch_skk_dictionary.sh"
 output = ".scarlet/cache/skk/SKK-JISYO.L"
 to = "/system/scarlet/share/skk/SKK-JISYO.L"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "wayland_bridge"
 to = "/system/scarlet/bin/wayland_bridge"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "ansi_banner"
 to = "/system/scarlet/bin/ansi_banner"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 bin = "video_player"
 to = "/system/scarlet/bin/video_player"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "gpu_probe"
 to = "/system/scarlet/bin/gpu_probe"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "httpd"
 to = "/system/scarlet/bin/httpd"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ushv"
 to = "/system/scarlet/bin/ushv"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm_list"
 to = "/system/scarlet/bin/lsm_list"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm_load"
 to = "/system/scarlet/bin/lsm_load"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "lsm_unload"
 to = "/system/scarlet/bin/lsm_unload"
 
-[[packages]]
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "input_dump"
