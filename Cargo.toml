@@ -1,0 +1,6 @@
+[workspace]
+resolver = "3"
+members = [
+    "cargo-scarlet",
+    "cargo-scarlet-plugin-limine",
+]
