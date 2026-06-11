@@ -11,346 +11,517 @@ files = []
 
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "init"
 hash = "sha256:6947049909c3faa3955d6383b5c02dc1731a5a17f18b8466ab985bc2471ba1f8"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "sh"
 hash = "sha256:0915afeff9aad60ec85bda574942f34c3073fac48f6fd22c02ff6f7e5f302d19"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "login"
 hash = "sha256:7bb5a759e9faf0776f4cef310aab99f2d49225755fb534ce81a94c240efcc643"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "stemd"
 hash = "sha256:30d4fdf6eb1d4433a22c37b66c3a79a18d6316617b41cf48262fffcd6812e7a0"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "sbusd"
 hash = "sha256:7bad028a7475cba51eff3c07bb02662c96b3766beb6be75b5f2594b4d113b57c"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/std-bin"
 bin = "hello"
 hash = "sha256:004dbaa18cb89830fd3e3a9e0a84a229fdc02932082d01bfe5fd3821f72eaa15"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "ps"
 hash = "sha256:97f805f770116d80856a1359cd7a8fb954f97d25f7937c6ac32d358524972f2a"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "shutdown"
 hash = "sha256:f310a73d23e3eddd185ed2d5960400f185cc1afb0205e5b52ca924d3c157d1d9"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "top"
 hash = "sha256:cc360ca268969f54494d77330fd29905c5f05704fca440575ea05a6758ea8bec"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "scpm"
 hash = "sha256:f7eb09eaa27f8da0a5ec62f6a7326a1389d53ded66457e4102d2e264fb039616"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/bin"
 bin = "netcfgd"
 hash = "sha256:3ea4dcc909f773df828597a0012ecc224ca54c8b758c184bec9a0f143297040f"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/base/../../user/std-bin"
 bin = "resolverd"
 hash = "sha256:c21e2e1fd4cf39cf7c4b715dcbb43c8e4d2cda54e51fd690690518ce3cf39404"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/std-bin"
 bin = "ls"
 hash = "sha256:dfd9185eebbeb89d505af44ce3b962d9d86e3d1056c1bc71467816e1b7552a03"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/std-bin"
 bin = "cat"
 hash = "sha256:6c195291f6e6a9f66eec68c31dadc8a15bf45dfc88e73f00c2fb8cecadde3b36"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/std-bin"
 bin = "rm"
 hash = "sha256:5619ce5122ea3e3ff464c94b94cc389b152d9c7054bfeeb608b66438c6b1a20c"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/std-bin"
 bin = "resolve"
 hash = "sha256:47e2712fe63bf869e16be3dd61ee3a3b97d04c0b8aa084cc3a109829c9ca3a04"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/bin"
 bin = "ping"
 hash = "sha256:e1b31ef95374868695739bf7a965872794d84f8ba406e15fd050ab653364328e"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.initramfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/cli-utils/../../user/bin"
 bin = "netcfg"
 hash = "sha256:4329ec741810b2d30c493c7697cc29ee0a837d300053ede81235e9bf550dea55"
 
+[sections.initramfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [sections.rootfs]
-hash = "sha256:6a3c01257878886e70d2353460c50788c1b6a020d3167d79f1089e653dda2250"
+hash = "sha256:97f62bf746a649d015291a30738160ed64df47ab869fdb534679bb5c3cd4adef"
 files = []
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "scarlet_desktop"
 hash = "sha256:4132cf038e1bccfaa2ff1de409e9397ae083d6de18c4d1a9dc823e8137b06e0c"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "scarlet_desktop_background"
-hash = "sha256:150f37adbd2b7c51818f0e3049547c73e07d899fd8163a65c19e11a95b83bd0f"
+hash = "sha256:27f6808d4118c40b8e2721772d897bb75997abb86c4958488f91b8f6936e9cab"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "scarlet_desktop_taskbar"
-hash = "sha256:3b90d413258023ffb78bf8d0a88c31e801e674d86ab87110e14f505147e64ffc"
+hash = "sha256:cedd8e231b0e53853374867d062d0b54ad1357c8e7da97905f8e0b40c27bbb62"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "terminal"
-hash = "sha256:e172d8ba52a845f12e9e66691fb8ebb8a9977a24d02ef47b2e26f982d57b0be6"
+hash = "sha256:302c6d223d0706cad23e6520596c2c16de5231117b196c1c184f40cf8edb204b"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "sws"
 hash = "sha256:8ac08ec63c9aee0bb51a682c88a34cb4d2c22a92b2248a4dde0a70fd4d786e04"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "sas"
 hash = "sha256:505c64ff250d679036aa80132330ba862342069810a484a1da15132aaa8176d0"
 
-[[sections.rootfs.packages]]
-kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
-bin = "ui-demo"
-hash = "sha256:a923a2510291ebc4b6d7da762a1ce8836257f23da8d94eea022c498dc05b6b73"
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
+bin = "ui-demo"
+hash = "sha256:a2c2ec7eae7ba083d9910be30508fc042aefc0178e92b0903f21be1dc1096522"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.packages]]
+kind = "cargo"
 bin = "pdfview"
 hash = "sha256:012477f3c74e8441c3e857765dff9e7bf7d1f503d581dc0bad35e71f54d4fce6"
 
-[[sections.rootfs.packages]]
-kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
-bin = "settings"
-hash = "sha256:21b3ff398e3122c89fd9f9fa9ec7e800c6ce6fe9baa31859f359de3ccdd06206"
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
+bin = "settings"
+hash = "sha256:59e23dc1daed0e35679965f573776ddaf51adb74cb52e320533e36598b5430b7"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.packages]]
+kind = "cargo"
 bin = "scarlet_skk"
-hash = "sha256:093316871945244c89fce22ed86352233f034345a5592bfe4214567cfe79715d"
+hash = "sha256:40cd4310023915f93c0bcb22fb563c2419f6cf05657363285b039f80cf62ceb2"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
 
 [[sections.rootfs.packages]]
 kind = "script"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/tools/fetch_skk_dictionary.sh"
 output = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/.scarlet/cache/skk/SKK-JISYO.L"
 hash = "sha256:cb3638df4cf621359db4e5aca385deae3cd0e681540da1c788d004374d261a42"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../bundles/desktop/tools/fetch_skk_dictionary.sh"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "wayland_bridge"
 hash = "sha256:1113480f8579a244da04955dd85a46fe944cb529b621c22635da76d60e5a2e5d"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "ansi_banner"
 hash = "sha256:b1c41594836b71d19ceaac92f523f807b1f27eaf811d732db9018c6d6d8c241e"
 
-[[sections.rootfs.packages]]
-kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
-bin = "video_player"
-hash = "sha256:ce3a62256b7bccf73489a8b89494ca6dbf69d31306e0367b1a43fdcae8f86c93"
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
+bin = "video_player"
+hash = "sha256:1064fab82e5c80e61d617a8f895db71c197f4259076ad65d5812458e49742c7e"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.packages]]
+kind = "cargo"
 bin = "gpu_probe"
 hash = "sha256:657431e52b6ecb90408ac74d0d23898299ae99ee7f6444fae5e1965e6c3790c4"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "httpd"
 hash = "sha256:c8cccd994ebd0b6e5ac923c69edaa6c9d1c1056cf6e9f092bfa2d1bf32b930ba"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/bin"
 bin = "ushv"
 hash = "sha256:9dc64be00612a981892d5272a2effc163b08f8cde7bdfdb420d1a4775b200059"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "lsm_list"
 hash = "sha256:9f74ea541fb6e856d3813c5d7243814b7c738528ff52070deba90e0d4dcd9973"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "lsm_load"
 hash = "sha256:e5c0e487af73f56c9179c111711b76dcbaaa8eb1f426588d08504a0b9e462a29"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "lsm_unload"
 hash = "sha256:49bcae67ae549e9de4e97448a281eb6dc37e3e516329854105315314c913ba9b"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../../user/std-bin"
 bin = "input_dump"
 hash = "sha256:74c641f65477e51e600ad4c0c62035f6f8030ee40813e737662a6893c5ece51e"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "init"
 hash = "sha256:6947049909c3faa3955d6383b5c02dc1731a5a17f18b8466ab985bc2471ba1f8"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "sh"
 hash = "sha256:0915afeff9aad60ec85bda574942f34c3073fac48f6fd22c02ff6f7e5f302d19"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "login"
 hash = "sha256:7bb5a759e9faf0776f4cef310aab99f2d49225755fb534ce81a94c240efcc643"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "stemd"
 hash = "sha256:30d4fdf6eb1d4433a22c37b66c3a79a18d6316617b41cf48262fffcd6812e7a0"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "sbusd"
 hash = "sha256:7bad028a7475cba51eff3c07bb02662c96b3766beb6be75b5f2594b4d113b57c"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/std-bin"
 bin = "hello"
 hash = "sha256:004dbaa18cb89830fd3e3a9e0a84a229fdc02932082d01bfe5fd3821f72eaa15"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "ps"
 hash = "sha256:97f805f770116d80856a1359cd7a8fb954f97d25f7937c6ac32d358524972f2a"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "shutdown"
 hash = "sha256:f310a73d23e3eddd185ed2d5960400f185cc1afb0205e5b52ca924d3c157d1d9"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "top"
 hash = "sha256:cc360ca268969f54494d77330fd29905c5f05704fca440575ea05a6758ea8bec"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "scpm"
 hash = "sha256:f7eb09eaa27f8da0a5ec62f6a7326a1389d53ded66457e4102d2e264fb039616"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/bin"
 bin = "netcfgd"
 hash = "sha256:3ea4dcc909f773df828597a0012ecc224ca54c8b758c184bec9a0f143297040f"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../base/../../user/std-bin"
 bin = "resolverd"
 hash = "sha256:c21e2e1fd4cf39cf7c4b715dcbb43c8e4d2cda54e51fd690690518ce3cf39404"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/std-bin"
 bin = "ls"
 hash = "sha256:dfd9185eebbeb89d505af44ce3b962d9d86e3d1056c1bc71467816e1b7552a03"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/std-bin"
 bin = "cat"
 hash = "sha256:6c195291f6e6a9f66eec68c31dadc8a15bf45dfc88e73f00c2fb8cecadde3b36"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/std-bin"
 bin = "rm"
 hash = "sha256:5619ce5122ea3e3ff464c94b94cc389b152d9c7054bfeeb608b66438c6b1a20c"
 
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
+
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/std-bin"
 bin = "resolve"
 hash = "sha256:47e2712fe63bf869e16be3dd61ee3a3b97d04c0b8aa084cc3a109829c9ca3a04"
 
-[[sections.rootfs.packages]]
-kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/bin"
-bin = "ping"
-hash = "sha256:e1b31ef95374868695739bf7a965872794d84f8ba406e15fd050ab653364328e"
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/std-bin"
 
 [[sections.rootfs.packages]]
 kind = "cargo"
-source = "/Users/petitstrawberry/Development/Rust/Scarlet/projects/aarch64-limine-full/../../bundles/full/../desktop/../cli-utils/../../user/bin"
+bin = "ping"
+hash = "sha256:e1b31ef95374868695739bf7a965872794d84f8ba406e15fd050ab653364328e"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.packages]]
+kind = "cargo"
 bin = "netcfg"
 hash = "sha256:4329ec741810b2d30c493c7697cc29ee0a837d300053ede81235e9bf550dea55"
+
+[sections.rootfs.packages.source]
+type = "path"
+path = "../../user/bin"

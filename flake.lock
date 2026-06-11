@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1780747962,
-        "narHash": "sha256-IX7G1dlKrOqPOImfbo7ADDfV5yU1+j+MRChI3TL4tAA=",
+        "lastModified": 1780930886,
+        "narHash": "sha256-rppURzHviaQN131F+nLiLdGfcb0uCd9gGP0E5+iw9MI=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "cbb5cf358f50aa6acc9efd6113b7bcfbc352cd73",
+        "rev": "8c3cede7ddc26bd659d2d383b5610efbd2c7a16e",
         "type": "github"
       },
       "original": {
@@ -82,11 +82,11 @@
     "scarlet-sdk": {
       "flake": false,
       "locked": {
-        "lastModified": 1781172864,
-        "narHash": "sha256-xSij0o0XcR1Up9YPHjMJPWrUsjkg3USnoUxwNoCSd2M=",
+        "lastModified": 1781178291,
+        "narHash": "sha256-hFYVY8A0JiFR1E4FwW89M8Ik7YQNmGFCbcj59MwZ/FA=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "1bf40e7b6de2d9febaa2e27a9081027aaa2ce28d",
+        "rev": "33d65f1b4b7b233b604c5244bf279615124e6fa2",
         "type": "github"
       },
       "original": {
