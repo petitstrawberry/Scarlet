@@ -2,41 +2,109 @@
 
 ## Overview
 
-Scarlet uses a project-rooted build system centered on `scarlet.toml` manifests and the `cargo-scarlet` build tool.
+Scarlet uses a project-rooted build system centered on `scarlet.toml` manifests and the `cargo-scarlet` CLI tool.
 
-Each project under `projects/` is an independent kernel build target with its own `scarlet.toml`. The build tool reads this manifest, generates a module aggregation crate under `.scarlet/`, and invokes Cargo for the project.
+Each project is an independent kernel build target with its own `scarlet.toml`. The build tool reads the manifest, generates a module aggregation crate under `<project>/.scarlet/`, invokes Cargo for the kernel build, and composes bootable images from packages and layers.
 
 ## Quick Start
 
 ```bash
-# Build (via cargo make, which delegates to cargo-scarlet)
-cargo make build-riscv64
+# Build kernel + compose all images
+cargo scarlet image --project projects/riscv64-limine-full
 
-# Run
+# Build and run
+cargo scarlet run --project projects/riscv64-limine-full --release
+
+# Equivalent via cargo make
+cargo make build-riscv64
 cargo make run-riscv64
 ```
 
-## Projects
+## Project Layout
 
 ```
 projects/
-├── riscv64-limine-full/       # Full RISC-V 64-bit (primary)
-├── riscv64-limine-desktop/    # RISC-V desktop variant
-├── aarch64-limine-full/       # Full AArch64
-├── aarch64-limine-desktop/    # AArch64 desktop variant
-├── aarch64-limine-microvm/    # AArch64 microvm (minimal)
-└── aarch64-apple-limine-full/ # AArch64 Apple Silicon
+├── riscv64-limine-full/
+│   ├── scarlet.toml              # Build manifest
+│   ├── Cargo.toml                # Auto-managed by cargo-scarlet
+│   ├── build.rs
+│   ├── src/main.rs               # Boot entry point
+│   ├── lds/                      # Linker scripts (BSP-managed)
+│   ├── .cargo/config.toml        # Cargo build config (BSP-managed)
+│   ├── .scarlet/
+│   │   ├── scarlet-modules/      # Generated module aggregation crate
+│   │   │   ├── Cargo.toml
+│   │   │   ├── src/lib.rs
+│   │   │   └── .cargo/config.toml # Cargo config (BSP-managed)
+│   │   ├── images/               # Generated image artifacts
+│   │   ├── staging/              # Temporary staging directories
+│   │   └── cache/                # Git/URL fetch cache
+│   └── scarlet.lock              # Pinned source revisions (auto-generated)
+├── riscv64-limine-desktop/
+├── aarch64-limine-full/
+├── aarch64-limine-desktop/
+├── aarch64-limine-microvm/
+└── aarch64-apple-limine-full/
 ```
 
-Each project directory contains:
-- `scarlet.toml` — Build manifest
-- `src/main.rs` — Boot entry point
-- `Cargo.toml` — Cargo manifest (auto-managed)
-- `.scarlet/` — Generated module crate and build artifacts
+## CLI Reference
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `build` | Build kernel binary and inject kernel symbol table |
+| `check` | Type-check without building |
+| `clippy` | Run clippy on the project |
+| `run` | Build images and launch via `[runner]` command |
+| `image` | Build kernel + compose all images |
+| `update` | Resolve git/URL sources and write `scarlet.lock` |
+| `new --project` | Scaffold a new project |
+| `new --module` | Scaffold a new loadable kernel module |
+
+### Common Flags
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--project <path>` | most commands | Project directory (defaults to current directory for `build`) |
+| `--release` | build, check, clippy, run, image | Build in release mode |
+| `--target <triple>` | build, check, clippy, run, image | Override kernel target |
+| `--no-build` | image | Skip kernel build, only compose images |
+| `--no-image` | run | Skip image composition |
+| `--kernel-elf <path>` | image | Use a specific kernel ELF instead of building |
+| `--module <path>` | build | Build a loadable kernel module instead of a project |
+
+### Usage
+
+```bash
+# Build
+cargo scarlet build --project projects/riscv64-limine-full
+cargo scarlet build --project projects/riscv64-limine-full --release
+
+# Check / Clippy
+cargo scarlet check --project projects/riscv64-limine-full
+cargo scarlet clippy --project projects/riscv64-limine-full
+
+# Image composition
+cargo scarlet image --project projects/riscv64-limine-full
+cargo scarlet image --project projects/riscv64-limine-full --no-build
+
+# Run
+cargo scarlet run --project projects/riscv64-limine-full --release
+
+# Resolve and pin sources
+cargo scarlet update --project projects/riscv64-limine-full
+
+# Scaffold
+cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
+cargo scarlet new --module my-module
+```
 
 ## scarlet.toml Format
 
-Current schema version: **1**
+Schema version: **1**
+
+### Full Example
 
 ```toml
 schema_version = 1
@@ -92,23 +160,39 @@ command = "tools/run.sh"
 
 ### Top-Level Sections
 
-| Section | Purpose |
-|---------|---------|
-| `[project]` | Project name |
-| `[kernel]` | Kernel crate source, target, features |
-| `[modules]` | External module crates (path, git, registry) |
-| `[images]` | Image composition (initramfs, rootfs, boot) |
-| `[runner]` | QEMU run command |
+| Section | Required | Purpose |
+|---------|----------|---------|
+| `[project]` | yes | Project name |
+| `[kernel]` | yes | Kernel crate source, target, features |
+| `[modules]` | no | Loadable kernel module crates |
+| `[images]` | no | Image composition (initramfs, rootfs, boot) |
+| `[runner]` | no | Run command (script or binary) |
 
 ### Kernel Section
 
-| Field | Description |
-|-------|-------------|
-| `package` | Kernel crate name |
-| `source` | Path to kernel crate |
-| `target` | Rust target triple |
-| `target_json` | Custom target JSON file |
-| `features` | Feature flags (key = name, value = bool) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `package` | string | Kernel crate name in Cargo |
+| `source` | string or table | Path or git source for the kernel crate |
+| `target` | string | Rust target triple (e.g., `riscv64gc-unknown-none-elf`) |
+| `target_json` | string | Path to custom target JSON file |
+| `features` | table | Feature flags (key = name, value = bool) |
+
+#### Kernel Source
+
+The `source` field supports path or git references:
+
+```toml
+# Path source (local development)
+source = "../../kernel"
+
+# Git source
+source = { git = "https://github.com/petitstrawberry/scarlet-kernel", branch = "main" }
+source = { git = "https://github.com/petitstrawberry/scarlet-kernel", tag = "v0.17.0" }
+source = { git = "https://github.com/petitstrawberry/scarlet-kernel", rev = "abc123def456" }
+```
+
+When using a git source, cargo-scarlet resolves the branch/tag to a commit revision and caches the checkout under `<project>/.scarlet/cache/git/`. The resolved revision is recorded in `scarlet.lock`.
 
 ### Modules Section
 
@@ -118,69 +202,324 @@ Module entries support Cargo-like dependency sources:
 [modules]
 # Path dependency
 "my-module" = { path = "../../modules/my-module", enabled = true }
+
 # Git dependency
-"other-module" = { git = "https://github.com/...", rev = "abc123", enabled = true }
+"other-module" = { git = "https://github.com/...", branch = "main", enabled = true }
+"pinned-module" = { git = "https://github.com/...", rev = "abc123", enabled = true }
+
 # Registry dependency
 "published-module" = { version = "0.1.0", enabled = true }
+
 # With features
 "mod-with-features" = { path = "../mod", features = ["foo"], enabled = true }
+
+# Disabled (included but not linked)
+"optional-mod" = { path = "../opt", enabled = false }
 ```
 
 ### Images Section
 
-Images are composed from layers (bundle TOML files). Each image has a format and output path:
+Images are composed from layers and packages. Each image has a `format` and `output` path:
 
 | Format | Description |
 |--------|-------------|
 | `newc` | CPIO newc format (initramfs) |
 | `ext2` | ext2 filesystem (rootfs) |
-| `limine-uefi` | Limine UEFI boot image |
+| `limine-uefi` | Limine UEFI boot image (delegated to plugin) |
 
-Boot images can declare `deps` on other images and include `packages` that copy artifacts into the boot image.
+Images can declare:
+- `deps` — list of other image names that must be built first (topological sort)
+- `packages` — artifacts to include in the image
+- `files` — file entries (local path or URL) to copy into the image
+- `layers` — references to external bundle TOML files
+- `cmdline` — kernel command line (for boot images)
 
-## cargo-scarlet
+### Runner Section
 
-`cargo-scarlet` is the build tool located at `cargo-scarlet/`. It is a Cargo subcommand that:
+```toml
+[runner]
+command = "tools/run.sh"
+```
 
-1. Reads `scarlet.toml` from a project directory
-2. Generates `.scarlet/scarlet-modules/` crate with selected modules
-3. Invokes Cargo to build the project kernel binary
-4. Composes images (initramfs, rootfs, boot) from bundle layers
+The runner command is executed from the project directory. When `--release` is passed, the environment variable `SCARLET_RELEASE=1` is set.
 
-### Subcommands
+### scarlet.local.toml (Override)
 
-| Command | Description |
-|---------|-------------|
-| `build` | Build kernel binary |
-| `check` | Type-check without building |
-| `clippy` | Run clippy on the project |
-| `run` | Build and run in QEMU |
-| `image` | Build images only |
-| `new` | Create new project or module |
-| `lock` | Lock image layer hashes |
+A `scarlet.local.toml` file in the project directory is automatically merged on top of `scarlet.toml`. This allows per-developer overrides without modifying the tracked manifest:
 
-### Usage
+```toml
+# scarlet.local.toml
+[kernel]
+source = "../../my-fork/kernel"
+```
+
+The merge is deep: tables are merged recursively, arrays are appended. This file should be `.gitignore`d.
+
+## Packages
+
+Packages are the unit of installable output in images.
+
+### Cargo Build (`kind = "cargo"`)
+
+Build a binary from a Cargo package and install it:
+
+```toml
+[[images.initramfs.packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sh"
+to = "/system/scarlet/bin/sh"
+```
+
+| Field | Description |
+|-------|-------------|
+| `kind` | Must be `"cargo"` |
+| `source` | Path or git source of the Cargo workspace |
+| `package` | Cargo package name |
+| `bin` | Binary target name |
+| `to` | Install path inside the image |
+
+### File Copy
+
+Copy files or directories into the image:
+
+```toml
+[[images.initramfs.packages]]
+from = "prebuilt/{arch}/firecracker"
+to = "/usr/bin/firecracker"
+```
+
+### Image Reference
+
+Reference another image's output as input:
+
+```toml
+[[images.boot.packages]]
+source = ".scarlet/images/initramfs.cpio"
+to = "/boot/initramfs"
+```
+
+### Template Variables
+
+Paths in `source`, `from`, and `to` support template expansion:
+
+| Variable | Expands to |
+|----------|-----------|
+| `{target_triple}` | Kernel target triple (e.g., `riscv64gc-unknown-none-elf`) |
+| `{arch}` | Architecture shorthand (e.g., `riscv64`, `aarch64`) |
+
+### URL Sources
+
+Package and file sources can reference remote URLs. Fetched files are cached under `<project>/.scarlet/cache/files/` and verified against the lock file hash:
+
+```toml
+[[images.initramfs.files]]
+source = "https://example.com/firmware.bin"
+to = "/lib/firmware/example.bin"
+```
+
+## Bundles (Layers)
+
+Bundles are external TOML files containing `[[packages]]` and `[[files]]` definitions. They share the same format as the image section in `scarlet.toml` and are referenced via `[[images.*.layers]]`:
+
+```toml
+# bundles/base/bundle.toml
+[[packages]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "sh"
+to = "/system/scarlet/bin/sh"
+```
+
+```toml
+# In scarlet.toml
+[[images.initramfs.layers]]
+path = "../../bundles/base/bundle.toml"
+```
+
+All relative paths in a bundle are resolved from the bundle file's directory. Multiple layers are merged in declaration order; later entries override earlier ones on conflict.
+
+## Lock File (`scarlet.lock`)
+
+The lock file pins exact source revisions for reproducible builds. It is auto-generated and should be committed to version control.
+
+### Behavior
+
+| Command | Network access | Reads lock | Writes lock |
+|---------|---------------|------------|-------------|
+| `build` | no | no | no |
+| `image` | no | yes | yes (updates hash/git revs from lock) |
+| `run` | no | yes | yes (via image) |
+| `update` | **yes** | yes | **yes** |
+
+- `update` is the only command that performs network access (git ls-remote, URL fetches)
+- `image` reads the lock for cached git revisions but never resolves new ones
+- If no lock exists, `image` resolves git sources from the manifest directly
+
+### Format
+
+```toml
+# Generated by cargo-scarlet — do not edit
+
+[sections.initramfs]
+hash = "sha256:abc123..."
+
+[[sections.initramfs.files]]
+source = "https://example.com/firmware.bin"
+hash = "sha256:def456..."
+
+[[sections.initramfs.packages]]
+kind = "cargo"
+git = "https://github.com/example/module"
+resolved_rev = "abc123def456"
+hash = "sha256:789..."
+
+[sections.boot]
+hash = "sha256:fed789..."
+```
+
+### Verification Rules
+
+| Source type | Verification |
+|------------|-------------|
+| Local path | No hash verification (content changes during development) |
+| Git (pinned rev) | No hash verification (rev is content-addressed) |
+| URL fetch | Hash verified against lock; error on mismatch |
+
+## Plugin System
+
+Image formats that require external tools are handled via plugins. The core build tool resolves `format` to a plugin name and communicates via stdin JSON.
+
+### Protocol
+
+1. `cargo-scarlet` resolves `format` to plugin binary name: `cargo-scarlet-plugin-{format-prefix}`
+2. Core builds a `PluginRequest` JSON and writes it to the plugin's stdin
+3. Plugin reads the request, performs its work, and exits with code 0 on success
+
+### PluginRequest Schema
+
+```json
+{
+  "project_dir": "/path/to/project",
+  "section_name": "boot",
+  "format": "limine-uefi",
+  "arch": "riscv64",
+  "kernel_elf": "/path/to/kernel/elf",
+  "initramfs": "/path/to/initramfs.cpio",
+  "output": "/path/to/output.img",
+  "section": {
+    "format": "limine-uefi",
+    "output": ".scarlet/images/limine.img",
+    "cmdline": "console=ttyS0",
+    "packages": [...],
+    "files": [...],
+    "deps": [...]
+  }
+}
+```
+
+The `section` field contains the full `ManifestImageSection` from the manifest, giving plugins access to all configuration (packages, cmdline, etc.) without needing dedicated CLI argument construction.
+
+### Plugin Discovery
+
+Plugins are discovered via `PATH`. Install them with:
 
 ```bash
-# Via cargo-scarlet directly
-cargo scarlet build --project projects/riscv64-limine-full
-cargo scarlet run --project projects/riscv64-limine-full --release
-
-# Via cargo make (wraps cargo-scarlet)
-cargo make build-riscv64
-cargo make run-riscv64
+cargo install --path cargo-scarlet-plugin-limine
 ```
 
-## Repository Build Flow
+### Available Plugins
+
+| Plugin | Format | Description |
+|--------|--------|-------------|
+| `cargo-scarlet-plugin-limine` | `limine-uefi` | Limine UEFI boot image generation |
+
+## Generated File Structure
+
+`cargo-scarlet` generates and manages files under `<project>/.scarlet/`:
 
 ```
-cargo make build-riscv64
-    └─> cargo scarlet build --project projects/riscv64-limine-full
-         ├─> Read scarlet.toml
-         ├─> Generate .scarlet/scarlet-modules/
-         ├─> cargo build --target riscv64gc-unknown-none-elf
-         └─> Compose images (initramfs, rootfs, boot)
+.scarlet/
+├── scarlet-modules/           # Module aggregation crate
+│   ├── Cargo.toml             # Generated with kernel + module dependencies
+│   ├── src/lib.rs             # Re-exports kernel + calls module force_link()
+│   └── .cargo/config.toml     # BSP-managed (cargo-scarlet generates template once)
+├── images/                    # Generated image artifacts
+├── staging/                   # Temporary staging for image composition
+└── cache/
+    ├── git/                   # Git checkout cache
+    └── files/                 # URL fetch cache
 ```
+
+### `.cargo/config.toml` (Generated Template)
+
+When `cargo-scarlet` generates the scarlet-modules crate, it creates `<project>/.scarlet/scarlet-modules/.cargo/config.toml` as a **commented template** if it does not already exist. The BSP author must fill in:
+
+- `[build]` target
+- `[unstable]` build-std settings
+- `[target.*]` rustflags (linker script)
+
+This file is never overwritten once it exists.
+
+## Build Flow
+
+```
+cargo scarlet image --project projects/riscv64-limine-full
+     │
+     ├─ Read scarlet.toml + scarlet.local.toml
+     ├─ Expand layers (bundle TOML files)
+     ├─ Generate .scarlet/scarlet-modules/
+     │   ├─ Cargo.toml (kernel + module deps with correct source specs)
+     │   ├─ src/lib.rs (force_link for enabled modules)
+     │   └─ .cargo/config.toml (template if not present)
+     ├─ cargo build --target <target_json>
+     ├─ Inject .ksym section into kernel ELF
+     ├─ Resolve git sources (from lock or fresh resolve)
+     ├─ Topological sort images by deps
+     └─ For each image:
+         ├─ newc/ext2: stage packages + files → generate image
+         └─ limine-uefi: run_plugin("limine", request) → generate image
+```
+
+## Scaffolding
+
+### New Project
+
+```bash
+cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf
+```
+
+Creates:
+- `my-board/Cargo.toml`, `build.rs`, `src/main.rs`
+- `my-board/scarlet.toml` (with kernel source pointing to `../../kernel`)
+- `my-board/.cargo/config.toml` (with target, build-std)
+- `my-board/.scarlet/scarlet-modules/` (initial generated crate)
+- `my-board/lds/` (empty, for linker scripts)
+
+With git source:
+```bash
+cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-rev v0.17.0
+```
+
+With explicit kernel path:
+```bash
+cargo scarlet new --project my-board --target riscv64gc-unknown-none-elf --kernel-path /path/to/kernel
+```
+
+Post-scaffold, the user must:
+1. Fill in `.scarlet/scarlet-modules/.cargo/config.toml` with target and build-std
+2. Add a linker script to `lds/`
+3. Implement the boot entry in `src/main.rs`
+
+### New Module
+
+```bash
+cargo scarlet new --module my-module
+```
+
+Creates a loadable kernel module with `Cargo.toml`, `module.toml`, `build.rs`, `src/lib.rs`, and `.cargo/config.toml`.
 
 ## See Also
 

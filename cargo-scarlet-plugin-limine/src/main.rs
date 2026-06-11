@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-scarlet-plugin-limine")]
@@ -28,7 +30,37 @@ struct Cli {
     cache_dir: Option<PathBuf>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Debug, Deserialize)]
+struct PluginRequest {
+    arch: Arch,
+    kernel_elf: PathBuf,
+    initramfs: Option<PathBuf>,
+    output: PathBuf,
+    section: PluginSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PluginSection {
+    cmdline: Option<String>,
+    #[serde(default)]
+    packages: Vec<PluginPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginPackage {
+    source: Option<PluginSource>,
+    to: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PluginSource {
+    Path(String),
+    Git { git: String },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum Arch {
     Aarch64,
     Riscv64,
@@ -77,12 +109,69 @@ impl Arch {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match build_limine_image(&cli) {
+    let result = if std::env::args_os().len() == 1 {
+        read_request().and_then(|request| build_limine_image(&request.into_cli()?))
+    } else {
+        let cli = Cli::parse();
+        build_limine_image(&cli)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("cargo-scarlet-plugin-limine: error: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn read_request() -> Result<PluginRequest, String> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|error| format!("failed to read plugin request: {error}"))?;
+    serde_json::from_str(&input).map_err(|error| format!("invalid plugin request: {error}"))
+}
+
+impl PluginRequest {
+    fn into_cli(self) -> Result<Cli, String> {
+        let initramfs = self
+            .initramfs
+            .or_else(|| self.section.initramfs_from_packages())
+            .ok_or("limine plugin request does not include an initramfs")?;
+        Ok(Cli {
+            arch: self.arch,
+            kernel: self.kernel_elf,
+            initramfs,
+            output: self.output,
+            cmdline: self.section.cmdline,
+            image_slack_mb: 32,
+            boot_image_size_mb: None,
+            limine_version: "11.0.0".to_string(),
+            cache_dir: None,
+        })
+    }
+}
+
+impl PluginSection {
+    fn initramfs_from_packages(&self) -> Option<PathBuf> {
+        self.packages.iter().find_map(|package| {
+            if package.to == "/boot/initramfs" {
+                package.source.as_ref().and_then(PluginSource::path)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl PluginSource {
+    fn path(&self) -> Option<PathBuf> {
+        match self {
+            PluginSource::Path(path) => Some(PathBuf::from(path)),
+            PluginSource::Git { git } => {
+                let _ = git;
+                None
+            }
         }
     }
 }

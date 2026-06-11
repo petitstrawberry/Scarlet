@@ -3,10 +3,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
@@ -189,7 +189,7 @@ struct ManifestKernel {
     features: BTreeMap<String, bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ManifestImageSection {
     format: Option<String>,
     output: Option<String>,
@@ -203,7 +203,7 @@ struct ManifestImageSection {
     deps: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ManifestPackage {
     kind: Option<String>,
     source: Option<PackageSource>,
@@ -214,7 +214,7 @@ struct ManifestPackage {
     output: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ManifestFileEntry {
     source: String,
     to: String,
@@ -232,6 +232,18 @@ struct ExpandedManifest {
     project_dir: PathBuf,
     manifest: ScarletManifest,
     sections: BTreeMap<String, ResolvedSection>,
+}
+
+#[derive(Serialize)]
+struct PluginRequest<'a> {
+    project_dir: String,
+    section_name: &'a str,
+    format: &'a str,
+    arch: String,
+    kernel_elf: String,
+    initramfs: Option<String>,
+    output: String,
+    section: &'a ManifestImageSection,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -1628,39 +1640,17 @@ fn build_manifest_image(
                         .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
                 }
 
-                let plugin_manifest = project
-                    .join("../../cargo-scarlet-plugin-limine/Cargo.toml")
-                    .canonicalize()
-                    .unwrap_or_else(|_| {
-                        project.join("../../cargo-scarlet-plugin-limine/Cargo.toml")
-                    });
-
-                let mut cmd = Command::new("cargo");
-                cmd.arg("run")
-                    .arg("--manifest-path")
-                    .arg(&plugin_manifest)
-                    .current_dir(plugin_manifest.parent().unwrap_or(Path::new(".")))
-                    .arg("--")
-                    .arg("--arch")
-                    .arg(arch_name)
-                    .arg("--kernel")
-                    .arg(&kernel_elf)
-                    .arg("--initramfs")
-                    .arg(&initramfs_path)
-                    .arg("--output")
-                    .arg(&output_path);
-
-                if !section_cfg.cmdline.is_empty() {
-                    cmd.arg("--cmdline").arg(&section_cfg.cmdline);
-                }
-
-                let status = cmd
-                    .status()
-                    .map_err(|e| format!("failed to run limine plugin: {e}"))?;
-
-                if !status.success() {
-                    return Err("limine plugin failed".to_string());
-                }
+                let request = PluginRequest {
+                    project_dir: project.display().to_string(),
+                    section_name: &section_name,
+                    format,
+                    arch: arch_name.to_string(),
+                    kernel_elf: kernel_elf.display().to_string(),
+                    initramfs: Some(initramfs_path.display().to_string()),
+                    output: output_path.display().to_string(),
+                    section: section_cfg,
+                };
+                run_plugin("limine", &request)?;
 
                 eprintln!(
                     "cargo-scarlet: wrote {} to {}",
@@ -1693,6 +1683,30 @@ fn build_manifest_image(
     save_lock(project, &new_lock)?;
 
     Ok(())
+}
+
+fn run_plugin<T: Serialize>(name: &str, request: &T) -> Result<(), String> {
+    let program = format!("cargo-scarlet-plugin-{name}");
+    let payload = serde_json::to_vec(request)
+        .map_err(|error| format!("failed to encode plugin request for '{name}': {error}"))?;
+    let mut child = Command::new(&program)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to run plugin '{name}' ({program}): {error}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| format!("failed to open stdin for plugin '{name}'"))?
+        .write_all(&payload)
+        .map_err(|error| format!("failed to write plugin request for '{name}': {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("failed to wait for plugin '{name}': {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("plugin '{name}' failed with status {status}"))
+    }
 }
 
 fn topo_sort_images(
