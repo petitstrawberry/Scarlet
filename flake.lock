@@ -35,7 +35,8 @@
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "scarlet-rust-toolchain": "scarlet-rust-toolchain"
+        "scarlet-rust-toolchain": "scarlet-rust-toolchain",
+        "scarlet-sdk": "scarlet-sdk"
       }
     },
     "rust-overlay": {
@@ -75,6 +76,22 @@
       "original": {
         "owner": "petitstrawberry",
         "repo": "scarlet-rust-nix",
+        "type": "github"
+      }
+    },
+    "scarlet-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781172864,
+        "narHash": "sha256-xSij0o0XcR1Up9YPHjMJPWrUsjkg3USnoUxwNoCSd2M=",
+        "owner": "petitstrawberry",
+        "repo": "scarlet-sdk",
+        "rev": "1bf40e7b6de2d9febaa2e27a9081027aaa2ce28d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "petitstrawberry",
+        "repo": "scarlet-sdk",
         "type": "github"
       }
     }

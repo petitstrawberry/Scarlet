@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cargo-scarlet"]
+dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-userbin-std", "fmt-drivers", "fmt-modules"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cargo-scarlet-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check"]
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
@@ -92,17 +92,17 @@ args = ["clippy", "--", "-D", "warnings"]
 [tasks.clippy-project-riscv64]
 description = "Run clippy for RISC-V project"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "clippy", "--project", "projects/riscv64-limine-full"]
+args = ["scarlet", "clippy", "--project", "projects/riscv64-limine-full"]
 
 [tasks.clippy-project-aarch64]
 description = "Run clippy for AArch64 project"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "clippy", "--project", "projects/aarch64-limine-full"]
+args = ["scarlet", "clippy", "--project", "projects/aarch64-limine-full"]
 
 [tasks.clippy-project-aarch64-microvm]
 description = "Run clippy for AArch64 microvm project"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "clippy", "--project", "projects/aarch64-limine-microvm"]
+args = ["scarlet", "clippy", "--project", "projects/aarch64-limine-microvm"]
 
 [tasks.clippy-userlib]
 description = "Run clippy for user libraries by calling sub Makefile.toml"
@@ -175,18 +175,6 @@ for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
 done
 '''
 
-[tasks.fmt-cargo-scarlet]
-description = "Format cargo-scarlet code"
-cwd = "cargo-scarlet"
-command = "cargo"
-args = ["fmt"]
-
-[tasks.fmt-cargo-scarlet-check]
-description = "Check cargo-scarlet formatting"
-cwd = "cargo-scarlet"
-command = "cargo"
-args = ["fmt", "--", "--check"]
-
 [tasks.build-riscv64]
 description = "Build all components (RISC-V, debug)"
 dependencies = ["build-debug-riscv64"]
@@ -247,63 +235,63 @@ dependencies = ["build-kernel-debug-aarch64"]
 description = "Build the kernel in debug mode (RISC-V) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/riscv64-limine-full
+cargo scarlet build --project projects/riscv64-limine-full
 '''
 
 [tasks.build-kernel-debug-aarch64]
 description = "Build the kernel in debug mode (AArch64) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/aarch64-limine-full
+cargo scarlet build --project projects/aarch64-limine-full
 '''
 
 [tasks.build-kernel-debug-aarch64-microvm]
 description = "Build the kernel in debug mode (AArch64 microvm) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/aarch64-limine-microvm
+cargo scarlet build --project projects/aarch64-limine-microvm
 '''
 
 [tasks.build-kernel-release-riscv64]
 description = "Build the kernel in release mode (RISC-V) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/riscv64-limine-full --release
+cargo scarlet build --project projects/riscv64-limine-full --release
 '''
 
 [tasks.build-kernel-release-aarch64]
 description = "Build the kernel in release mode (AArch64) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/aarch64-limine-full --release
+cargo scarlet build --project projects/aarch64-limine-full --release
 '''
 
 [tasks.build-kernel-release-aarch64-microvm]
 description = "Build the kernel in release mode (AArch64 microvm) with post-link ksym injection"
 script_runner = "@shell"
 script = '''
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- build --project projects/aarch64-limine-microvm --release
+cargo scarlet build --project projects/aarch64-limine-microvm --release
 '''
 
 [tasks.generate-project-riscv64]
 description = "Validate and refresh project-local scarlet-modules for RISC-V"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "check", "--project", "projects/riscv64-limine-full"]
+args = ["scarlet", "check", "--project", "projects/riscv64-limine-full"]
 
 [tasks.generate-project-aarch64]
 description = "Validate and refresh project-local scarlet-modules for AArch64"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "check", "--project", "projects/aarch64-limine-full"]
+args = ["scarlet", "check", "--project", "projects/aarch64-limine-full"]
 
 [tasks.generate-project-aarch64-microvm]
 description = "Validate and refresh project-local scarlet-modules for AArch64 microvm"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "check", "--project", "projects/aarch64-limine-microvm"]
+args = ["scarlet", "check", "--project", "projects/aarch64-limine-microvm"]
 
 [tasks.image-aarch64-microvm]
 description = "Build AArch64 microvm project image from project-local image recipe"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--project", "projects/aarch64-limine-microvm", "--release"]
+args = ["scarlet", "image", "--project", "projects/aarch64-limine-microvm", "--release"]
 dependencies = ["build-userbin-release-aarch64"]
 
 [tasks.build-userlib-debug-riscv64]
@@ -452,19 +440,12 @@ dependencies = ["test-kernel-riscv64"]
 description = "Run tests (AArch64)"
 dependencies = ["test-kernel-aarch64"]
 
-[tasks.build-limine-plugin]
-description = "Build cargo-scarlet-plugin-limine"
-cwd = "cargo-scarlet-plugin-limine"
-command = "cargo"
-args = ["build"]
-
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
 cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/riscv64gc-unknown-none-elf.json"]
-dependencies = ["build-limine-plugin"]
 
 [tasks.test-kernel-aarch64]
 description = "Run kernel tests (AArch64)"
@@ -472,47 +453,46 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-limine-plugin"]
 
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/riscv64-limine-full", "--release"]
+args = ["scarlet", "run", "--project", "projects/riscv64-limine-full", "--release"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-full", "--release"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-full", "--release"]
 
 [tasks.run-aarch64-microvm]
 description = "Run the kernel in release mode (AArch64 microvm)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-microvm", "--release"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-microvm", "--release"]
 
 [tasks.run-debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/riscv64-limine-full"]
+args = ["scarlet", "run", "--project", "projects/riscv64-limine-full"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-full"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-full"]
 
 [tasks.run-debug-aarch64-microvm]
 description = "Run the kernel in debug mode (AArch64 microvm)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "run", "--project", "projects/aarch64-limine-microvm"]
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-microvm"]
 
 [tasks.image-debug-riscv64]
 description = "Build boot image for debugging (RISC-V)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--project", "projects/riscv64-limine-full"]
+args = ["scarlet", "image", "--project", "projects/riscv64-limine-full"]
 
 [tasks.image-debug-aarch64]
 description = "Build boot image for debugging (AArch64)"
 command = "cargo"
-args = ["run", "--manifest-path", "cargo-scarlet/Cargo.toml", "--", "image", "--project", "projects/aarch64-limine-full"]
+args = ["scarlet", "image", "--project", "projects/aarch64-limine-full"]
 
 [tasks.debug-riscv64]
 description = "Run the kernel in debug mode (RISC-V)"
@@ -534,7 +514,6 @@ cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
 args = ["test", "--", "--debug"]
-dependencies = ["build-limine-plugin"]
 
 [tasks.debug-test-aarch64]
 description = "Run kernel tests in debug mode with gdb (AArch64)"
@@ -542,7 +521,6 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json", "--", "--debug"]
-dependencies = ["build-limine-plugin"]
 
 [tasks.doc-riscv64]
 description = "Generate documentation for all components (RISC-V)"

@@ -11,6 +11,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
+    scarlet-sdk = {
+      url = "github:petitstrawberry/scarlet-sdk";
+      flake = false;
+    };
   };
 
   outputs =
@@ -18,6 +22,7 @@
       self,
       nixpkgs,
       scarlet-rust-toolchain,
+      scarlet-sdk,
     }:
     let
       supportedSystems = [
@@ -71,6 +76,22 @@
           };
 
           rustToolchain = scarlet-rust-toolchain.packages.${system}.scarlet-rust-toolchain;
+
+          cargo-scarlet = pkgs.rustPlatform.buildRustPackage {
+            pname = "cargo-scarlet";
+            version = "0.1.0";
+            src = scarlet-sdk;
+            buildAndTestSubdir = "cargo-scarlet";
+            cargoLock.lockFile = "${scarlet-sdk}/Cargo.lock";
+          };
+
+          cargo-scarlet-plugin-limine = pkgs.rustPlatform.buildRustPackage {
+            pname = "cargo-scarlet-plugin-limine";
+            version = "0.1.0";
+            src = scarlet-sdk;
+            buildAndTestSubdir = "cargo-scarlet-plugin-limine";
+            cargoLock.lockFile = "${scarlet-sdk}/Cargo.lock";
+          };
 
           rustHostTriple =
             {
@@ -199,6 +220,10 @@
             # Rust
             rustToolchain
             pkgs.cargo-make
+
+            # Scarlet SDK
+            cargo-scarlet
+            cargo-scarlet-plugin-limine
 
             # QEMU (system emulation for riscv64 and aarch64)
             qemu
@@ -334,7 +359,10 @@
             name = "scarlet-dev";
             tag = "latest";
             maxLayers = 120;
-            contents = devPackages ++ [
+            contents = [
+              cargo-scarlet
+              cargo-scarlet-plugin-limine
+            ] ++ devPackages ++ [
               dockerEntrypoint
               pkgs.coreutils
               pkgs.cacert
