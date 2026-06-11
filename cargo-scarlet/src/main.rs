@@ -719,14 +719,24 @@ fn generate_from_manifest(project_dir: &Path) -> Result<ExpandedManifest, String
 
     let generated_root = project_dir.join(".scarlet/scarlet-modules");
     let generated_src = generated_root.join("src");
+    let generated_cargo = generated_root.join(".cargo");
     fs::create_dir_all(&generated_src)
         .map_err(|e| format!("failed to create {}: {e}", generated_src.display()))?;
+    fs::create_dir_all(&generated_cargo)
+        .map_err(|e| format!("failed to create {}: {e}", generated_cargo.display()))?;
 
     let cargo_toml = render_manifest_cargo_toml(&expanded.manifest, project_dir)?;
     let lib_rs = render_manifest_lib_rs(&expanded.manifest);
 
     write_if_changed(&generated_root.join("Cargo.toml"), &cargo_toml)?;
     write_if_changed(&generated_src.join("lib.rs"), &lib_rs)?;
+
+    let cargo_config_path = generated_cargo.join("config.toml");
+    if !cargo_config_path.exists() {
+        let cargo_config = render_cargo_config();
+        fs::write(&cargo_config_path, cargo_config)
+            .map_err(|e| format!("failed to write {}: {e}", cargo_config_path.display()))?;
+    }
 
     Ok(expanded)
 }
@@ -744,21 +754,41 @@ fn render_manifest_cargo_toml(
     out.push_str("[lib]\npath = \"src/lib.rs\"\n\n");
     out.push_str("[dependencies]\n");
 
-    let kernel_abs = manifest
-        .kernel
-        .source
-        .to_local_path(project_dir)
-        .ok_or("kernel source must be a local path for module generation")?;
-    let generated_root = project_dir.join(".scarlet/scarlet-modules");
-    let kernel_rel = pathdiff(&kernel_abs, &generated_root)?;
     let features = render_enabled_kernel_features(&manifest.kernel.features);
-    let _ = writeln!(
-        &mut out,
-        "{} = {{ path = \"{}\", default-features = false, features = [{}] }}",
-        manifest.kernel.package,
-        kernel_rel.display(),
-        features
-    );
+    let kernel_dep = match &manifest.kernel.source {
+        PackageSource::Path(p) => {
+            let expanded = expand_templates(p, &manifest.kernel.target, "");
+            let kernel_abs = resolve_path(project_dir, &expanded);
+            let generated_root = project_dir.join(".scarlet/scarlet-modules");
+            let kernel_rel = pathdiff(&kernel_abs, &generated_root)?;
+            format!(
+                "{{ path = \"{}\", default-features = false, features = [{}] }}",
+                kernel_rel.display(),
+                features
+            )
+        }
+        PackageSource::Git {
+            git,
+            branch,
+            tag,
+            rev,
+        } => {
+            let mut parts = vec![format!("git = \"{git}\"")];
+            if let Some(r) = rev {
+                parts.push(format!("rev = \"{r}\""));
+            }
+            if let Some(b) = branch {
+                parts.push(format!("branch = \"{b}\""));
+            }
+            if let Some(t) = tag {
+                parts.push(format!("tag = \"{t}\""));
+            }
+            parts.push("default-features = false".to_string());
+            parts.push(format!("features = [{features}]"));
+            format!("{{ {} }}", parts.join(", "))
+        }
+    };
+    let _ = writeln!(&mut out, "{} = {}", manifest.kernel.package, kernel_dep);
 
     for (name, module) in &manifest.modules {
         if !module.enabled {
@@ -787,6 +817,29 @@ fn render_manifest_lib_rs(manifest: &ScarletManifest) -> String {
     }
     source.push_str("}\n");
     source
+}
+
+fn render_cargo_config() -> String {
+    let mut out = String::new();
+    out.push_str("# Configure build settings for the scarlet-modules workspace.\n");
+    out.push_str("# This file is generated once by cargo-scarlet and will not be overwritten.\n");
+    out.push_str("#\n");
+    out.push_str("# Required fields:\n");
+    out.push_str("#   [build]\n");
+    out.push_str("#   target = \"<path-to-target-json>\"\n");
+    out.push_str("#\n");
+    out.push_str("#   [unstable]\n");
+    out.push_str("#   build-std = [\"core\", \"compiler_builtins\", \"alloc\"]\n");
+    out.push_str("#   build-std-features = [\"compiler-builtins-mem\"]\n");
+    out.push_str("#\n");
+    out.push_str("# Optional:\n");
+    out.push_str("#   [profile.dev]\n");
+    out.push_str("#   opt-level = 3\n");
+    out.push_str("#\n");
+    out.push_str("#   [target.<target-triple>]\n");
+    out.push_str("#   rustflags = [\"-T\", \"path/to/linker.ld\"]\n");
+    out.push('\n');
+    out
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
