@@ -86,7 +86,7 @@ enum Commands {
         #[arg(long)]
         target: Option<String>,
     },
-    Lock {
+    Update {
         #[arg(long)]
         project: PathBuf,
     },
@@ -106,6 +106,52 @@ struct ModuleConfig {
     features: Option<Vec<String>>,
     #[serde(rename = "default-features")]
     default_features: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum PackageSource {
+    Path(String),
+    Git {
+        git: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+}
+
+impl PackageSource {
+    fn to_local_path(&self, base_dir: &Path) -> Option<PathBuf> {
+        match self {
+            PackageSource::Path(p) => Some(resolve_path(base_dir, p)),
+            PackageSource::Git { .. } => None,
+        }
+    }
+
+    fn is_git(&self) -> bool {
+        matches!(self, PackageSource::Git { .. })
+    }
+
+    fn git_url(&self) -> Option<&str> {
+        match self {
+            PackageSource::Git { git, .. } => Some(git),
+            _ => None,
+        }
+    }
+
+    fn git_ref(&self) -> Option<String> {
+        match self {
+            PackageSource::Git {
+                branch: Some(b), ..
+            } => Some(format!("refs/heads/{b}")),
+            PackageSource::Git { tag: Some(t), .. } => Some(format!("refs/tags/{t}")),
+            PackageSource::Git { rev: Some(r), .. } => Some(r.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,7 +182,7 @@ struct ManifestProject {
 #[derive(Debug, Deserialize)]
 struct ManifestKernel {
     package: String,
-    source: String,
+    source: PackageSource,
     target: String,
     target_json: String,
     #[serde(default)]
@@ -160,7 +206,7 @@ struct ManifestImageSection {
 #[derive(Debug, Deserialize)]
 struct ManifestPackage {
     kind: Option<String>,
-    source: Option<String>,
+    source: Option<PackageSource>,
     package: Option<String>,
     bin: Option<String>,
     from: Option<String>,
@@ -215,6 +261,10 @@ struct PackageLock {
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
@@ -223,7 +273,9 @@ struct PackageLock {
 
 struct ResolvedPackage {
     kind: Option<String>,
-    source: Option<PathBuf>,
+    source: Option<PackageSource>,
+    local_source: Option<PathBuf>,
+    resolved_rev: Option<String>,
     package_name: Option<String>,
     bin: Option<String>,
     from: Option<PathBuf>,
@@ -240,6 +292,16 @@ fn load_manifest(project_dir: &Path) -> Result<ScarletManifest, String> {
         .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
 
     merge_layers_recursive(&mut root, project_dir)?;
+
+    let local_path = project_dir.join("scarlet.local.toml");
+    if local_path.exists() {
+        let local_text = fs::read_to_string(&local_path)
+            .map_err(|e| format!("failed to read {}: {e}", local_path.display()))?;
+        let local_value: toml::Value = toml::from_str(&local_text)
+            .map_err(|e| format!("failed to parse {}: {e}", local_path.display()))?;
+        merge_toml_into(&mut root, local_value);
+        eprintln!("cargo-scarlet: applied overrides from scarlet.local.toml");
+    }
 
     let merged_text = toml::to_string(&root)
         .map_err(|e| format!("failed to re-serialize merged manifest: {e}"))?;
@@ -352,28 +414,41 @@ fn resolve_package(
     images: &BTreeMap<String, ManifestImageSection>,
 ) -> ResolvedPackage {
     let arch = target_triple.split('-').next().unwrap_or("unknown");
+    let source = pkg.source.as_ref().map(|s| match s {
+        PackageSource::Path(p) => {
+            let expanded = expand_templates(p, target_triple, arch);
+            PackageSource::Path(expanded)
+        }
+        PackageSource::Git {
+            git,
+            branch,
+            tag,
+            rev,
+        } => PackageSource::Git {
+            git: git.clone(),
+            branch: branch.clone(),
+            tag: tag.clone(),
+            rev: rev.clone(),
+        },
+    });
+    let local_source = source.as_ref().and_then(|s| s.to_local_path(base_dir));
     ResolvedPackage {
         kind: pkg.kind.clone(),
-        source: pkg
-            .source
-            .as_ref()
-            .map(|s| resolve_path(base_dir, &expand_templates(s, target_triple, arch))),
+        source,
+        local_source,
+        resolved_rev: None,
         package_name: pkg.package.clone(),
         bin: pkg.bin.clone(),
-        from: pkg
-            .from
-            .as_ref()
-            .map(|s| {
-                if images.contains_key(s.as_str()) {
-                    None
-                } else {
-                    Some(resolve_path(
-                        base_dir,
-                        &expand_templates(s, target_triple, arch),
-                    ))
-                }
-            })
-            .flatten(),
+        from: pkg.from.as_ref().and_then(|s| {
+            if images.contains_key(s.as_str()) {
+                None
+            } else {
+                Some(resolve_path(
+                    base_dir,
+                    &expand_templates(s, target_triple, arch),
+                ))
+            }
+        }),
         from_image: pkg
             .from
             .as_ref()
@@ -391,6 +466,151 @@ fn resolve_path(base: &Path, relative: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn git_resolve_rev(url: &str, refspec: &str) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("ls-remote")
+        .arg(url)
+        .arg(refspec)
+        .output()
+        .map_err(|e| format!("failed to run git ls-remote: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git ls-remote failed for {url}: {stderr}"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| format!("git ls-remote returned no output for {url} {refspec}"))?;
+    let rev = line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("git ls-remote unexpected output: {line}"))?;
+    if rev.len() < 40 {
+        return Err(format!("git ls-remote unexpected rev: {rev}"));
+    }
+    Ok(rev[..40].to_string())
+}
+
+fn git_cache_dir_for_url(url: &str, cache_base: &Path) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    cache_base.join(&hash[..16])
+}
+
+fn git_ensure_checkout(url: &str, rev: &str, cache_base: &Path) -> Result<PathBuf, String> {
+    let dir = git_cache_dir_for_url(url, cache_base);
+    if dir.join(".git").exists() {
+        let head_rev = git_current_rev(&dir)?;
+        if head_rev == rev {
+            return Ok(dir);
+        }
+        let status = Command::new("git")
+            .arg("fetch")
+            .arg("origin")
+            .current_dir(&dir)
+            .status()
+            .map_err(|e| format!("git fetch failed: {e}"))?;
+        if !status.success() {
+            return Err(format!("git fetch failed in {}", dir.display()));
+        }
+    } else {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("failed to create cache dir: {e}"))?;
+        }
+        let status = Command::new("git")
+            .arg("clone")
+            .arg(url)
+            .arg(&dir)
+            .status()
+            .map_err(|e| format!("git clone failed: {e}"))?;
+        if !status.success() {
+            return Err(format!("git clone failed for {url}"));
+        }
+    }
+    let status = Command::new("git")
+        .arg("checkout")
+        .arg(rev)
+        .current_dir(&dir)
+        .status()
+        .map_err(|e| format!("git checkout failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("git checkout {rev} failed in {}", dir.display()));
+    }
+    Ok(dir)
+}
+
+fn git_current_rev(dir: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git rev-parse: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("git rev-parse failed in {}", dir.display()));
+    }
+    let rev = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if rev.len() < 40 {
+        return Err(format!("git rev-parse unexpected output: {rev}"));
+    }
+    Ok(rev[..40].to_string())
+}
+
+fn resolve_git_sources(
+    expanded: &mut ExpandedManifest,
+    project: &Path,
+    existing_lock: &ImageLock,
+) -> Result<(), String> {
+    let cache_dir = project.join(".scarlet/cache/git");
+    for (section_name, section) in expanded.sections.iter_mut() {
+        for pkg in &mut section.packages {
+            if let Some(PackageSource::Git {
+                git,
+                branch,
+                tag,
+                rev,
+                ..
+            }) = &pkg.source
+            {
+                if pkg.local_source.is_some() {
+                    continue;
+                }
+                let url = git.clone();
+
+                let locked_rev = existing_lock
+                    .sections
+                    .get(section_name)
+                    .and_then(|s| {
+                        s.packages
+                            .iter()
+                            .find(|p| p.git.as_deref() == Some(&url) && p.bin == pkg.bin)
+                    })
+                    .and_then(|p| p.resolved_rev.clone());
+
+                let resolved_rev = if let Some(rev) = locked_rev {
+                    eprintln!("cargo-scarlet: using locked {} -> {rev}", url);
+                    rev
+                } else {
+                    let refspec = rev
+                        .as_deref()
+                        .or(tag.as_deref())
+                        .or(branch.as_deref())
+                        .unwrap_or("HEAD")
+                        .to_string();
+                    let r = git_resolve_rev(&url, &refspec)?;
+                    eprintln!("cargo-scarlet: resolved {} {} -> {r}", url, refspec);
+                    r
+                };
+                let checkout_dir = git_ensure_checkout(&url, &resolved_rev, &cache_dir)?;
+                pkg.local_source = Some(checkout_dir);
+                pkg.resolved_rev = Some(resolved_rev);
+            }
+        }
+    }
+    Ok(())
 }
 
 struct TemplateContext {
@@ -524,7 +744,11 @@ fn render_manifest_cargo_toml(
     out.push_str("[lib]\npath = \"src/lib.rs\"\n\n");
     out.push_str("[dependencies]\n");
 
-    let kernel_abs = project_dir.join(&manifest.kernel.source);
+    let kernel_abs = manifest
+        .kernel
+        .source
+        .to_local_path(project_dir)
+        .ok_or("kernel source must be a local path for module generation")?;
     let generated_root = project_dir.join(".scarlet/scarlet-modules");
     let kernel_rel = pathdiff(&kernel_abs, &generated_root)?;
     let features = render_enabled_kernel_features(&manifest.kernel.features);
@@ -642,6 +866,103 @@ fn sha256_dir_recursive(dir: &Path, hasher: &mut Sha256) -> Result<(), String> {
                 .update(format!("file:{}:{}\n", entry.file_name().display(), file_hash).as_bytes());
         }
     }
+    Ok(())
+}
+
+fn cmd_update(project: &Path) -> Result<(), String> {
+    let mut expanded = expand_manifest(project)?;
+    let git_cache_dir = project.join(".scarlet/cache/git");
+    let file_cache_dir = project.join(".scarlet/cache/files");
+    let mut lock = load_lock(project);
+
+    for section in expanded.sections.values_mut() {
+        for pkg in &mut section.packages {
+            if let Some(ref src) = pkg.source
+                && src.is_git()
+            {
+                let url = src.git_url().unwrap();
+                let refspec = src.git_ref().unwrap_or_else(|| "HEAD".to_string());
+                let rev = git_resolve_rev(url, &refspec)?;
+                eprintln!("cargo-scarlet: resolved {} {} -> {rev}", url, refspec);
+                let checkout = git_ensure_checkout(url, &rev, &git_cache_dir)?;
+                pkg.local_source = Some(checkout);
+                pkg.resolved_rev = Some(rev.clone());
+            }
+        }
+    }
+
+    for (section_name, section) in &expanded.sections {
+        let mut package_locks = Vec::new();
+        for pkg in &section.packages {
+            if pkg.source.as_ref().is_some_and(|s| s.is_git()) {
+                let source = pkg
+                    .local_source
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string());
+                package_locks.push(PackageLock {
+                    kind: pkg.kind.clone().unwrap_or_default(),
+                    source,
+                    git: pkg
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.git_url())
+                        .map(|s| s.to_string()),
+                    resolved_rev: pkg.resolved_rev.clone(),
+                    bin: pkg.bin.clone(),
+                    output: None,
+                    hash: String::new(),
+                });
+            }
+        }
+
+        let mut file_locks = Vec::new();
+        for file in &section.files {
+            if let FileSource::Url(url) = &file.source {
+                eprintln!("cargo-scarlet: fetching {}", url);
+                let (_, hash) = fetch_url_cached(url, &file_cache_dir, None)?;
+                file_locks.push(FileLock {
+                    source: url.clone(),
+                    hash,
+                });
+            }
+        }
+
+        if !package_locks.is_empty() || !file_locks.is_empty() {
+            let section_lock = lock
+                .sections
+                .entry(section_name.clone())
+                .or_insert_with(|| SectionLock {
+                    hash: String::new(),
+                    files: Vec::new(),
+                    packages: Vec::new(),
+                });
+            for new_pkg in package_locks {
+                if let Some(existing) = section_lock
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.git == new_pkg.git && p.bin == new_pkg.bin)
+                {
+                    existing.resolved_rev = new_pkg.resolved_rev;
+                } else {
+                    section_lock.packages.push(new_pkg);
+                }
+            }
+            for new_file in file_locks {
+                if let Some(existing) = section_lock
+                    .files
+                    .iter_mut()
+                    .find(|f| f.source == new_file.source)
+                {
+                    existing.hash = new_file.hash;
+                } else {
+                    section_lock.files.push(new_file);
+                }
+            }
+        }
+    }
+
+    save_lock(project, &lock)?;
+    eprintln!("cargo-scarlet: lock updated");
     Ok(())
 }
 
@@ -783,9 +1104,9 @@ fn run() -> Result<(), String> {
             kernel_rev.as_deref(),
             target.as_deref(),
         ),
-        Commands::Lock { project } => {
+        Commands::Update { project } => {
             let project = normalize_project_path(&project)?;
-            build_manifest_image(&project, None, false, None, false)
+            cmd_update(&project)
         }
     }
 }
@@ -967,7 +1288,7 @@ fn build_manifest_image(
     kernel_elf: Option<PathBuf>,
     no_build: bool,
 ) -> Result<(), String> {
-    let expanded = generate_from_manifest(project)?;
+    let mut expanded = generate_from_manifest(project)?;
 
     if !no_build {
         cargo_build_manifest(project, &expanded, target.as_deref(), release, "build", &[])?;
@@ -1034,6 +1355,7 @@ fn build_manifest_image(
     let build_order = topo_sort_images(&expanded.manifest.images)?;
 
     let existing_lock = load_lock(project);
+    resolve_git_sources(&mut expanded, project, &existing_lock)?;
     let mut new_lock = ImageLock::default();
 
     for section_name in build_order {
@@ -1067,11 +1389,26 @@ fn build_manifest_image(
                     .map_err(|e| format!("failed to create staging: {e}"))?;
 
                 let cache_dir = project.join(".scarlet/cache/files");
+                let prev_section_lock = existing_lock.sections.get(&section_name);
+                let mut file_locks: Vec<FileLock> = Vec::new();
 
                 for file in &resolved.files {
                     let local_path = match &file.source {
                         FileSource::Local(p) => p.clone(),
-                        FileSource::Url(u) => fetch_url_cached(u, &cache_dir)?,
+                        FileSource::Url(u) => {
+                            let expected = prev_section_lock.and_then(|s| {
+                                s.files
+                                    .iter()
+                                    .find(|f| f.source == *u)
+                                    .map(|f| f.hash.as_str())
+                            });
+                            let (path, hash) = fetch_url_cached(u, &cache_dir, expected)?;
+                            file_locks.push(FileLock {
+                                source: u.clone(),
+                                hash,
+                            });
+                            path
+                        }
                     };
 
                     let dest = staging_dir.join(file.to.trim_start_matches('/'));
@@ -1124,7 +1461,7 @@ fn build_manifest_image(
                                 p.kind == pkg.kind.as_deref().unwrap_or("")
                                     && p.source.as_deref()
                                         == pkg
-                                            .source
+                                            .local_source
                                             .as_ref()
                                             .map(|s| s.to_string_lossy().to_string())
                                             .as_deref()
@@ -1145,19 +1482,18 @@ fn build_manifest_image(
 
                 let staging_hash = sha256_dir(&staging_dir)?;
 
-                if output_path.exists() {
-                    if let Some(existing) = existing_lock.sections.get(&section_name) {
-                        if existing.hash == staging_hash {
-                            eprintln!(
-                                "cargo-scarlet: {} unchanged, skipping image generation",
-                                section_name
-                            );
-                            new_lock
-                                .sections
-                                .insert(section_name.clone(), existing.clone());
-                            continue;
-                        }
-                    }
+                if output_path.exists()
+                    && let Some(existing) = existing_lock.sections.get(&section_name)
+                    && existing.hash == staging_hash
+                {
+                    eprintln!(
+                        "cargo-scarlet: {} unchanged, skipping image generation",
+                        section_name
+                    );
+                    new_lock
+                        .sections
+                        .insert(section_name.clone(), existing.clone());
+                    continue;
                 }
 
                 eprintln!("cargo-scarlet: generating {} image...", section_name);
@@ -1177,7 +1513,7 @@ fn build_manifest_image(
                     section_name.clone(),
                     SectionLock {
                         hash: staging_hash,
-                        files: Vec::new(),
+                        files: file_locks,
                         packages: package_locks,
                     },
                 );
@@ -1191,7 +1527,7 @@ fn build_manifest_image(
 
                 let mut initramfs_path = project.join(".scarlet/images/initramfs.cpio");
                 for pkg in &resolved.packages {
-                    if let Some(source) = &pkg.source {
+                    if let Some(source) = &pkg.local_source {
                         let source_name = source
                             .file_name()
                             .unwrap_or_default()
@@ -1204,7 +1540,7 @@ fn build_manifest_image(
                 }
 
                 let mut limine_hasher = Sha256::new();
-                limine_hasher.update(format!("format=limine-uefi\n").as_bytes());
+                limine_hasher.update(b"format=limine-uefi\n");
                 limine_hasher.update(format!("cmdline={}\n", section_cfg.cmdline).as_bytes());
                 if kernel_elf.exists() {
                     limine_hasher.update(
@@ -1228,16 +1564,15 @@ fn build_manifest_image(
                 }
                 let limine_hash = format!("sha256:{}", hex::encode(limine_hasher.finalize()));
 
-                if output_path.exists() {
-                    if let Some(existing) = existing_lock.sections.get(&section_name) {
-                        if existing.hash == limine_hash {
-                            eprintln!("cargo-scarlet: {} unchanged, skipping", section_name);
-                            new_lock
-                                .sections
-                                .insert(section_name.clone(), existing.clone());
-                            continue;
-                        }
-                    }
+                if output_path.exists()
+                    && let Some(existing) = existing_lock.sections.get(&section_name)
+                    && existing.hash == limine_hash
+                {
+                    eprintln!("cargo-scarlet: {} unchanged, skipping", section_name);
+                    new_lock
+                        .sections
+                        .insert(section_name.clone(), existing.clone());
+                    continue;
                 }
 
                 eprintln!("cargo-scarlet: building {}...", section_name);
@@ -1383,7 +1718,7 @@ fn build_ext2_from_staging(
         .parse()
         .unwrap_or(0);
     let extra_kb: u64 = 65536;
-    let size_kb = ((source_kb + source_kb / 3 + extra_kb + 16383) / 16384) * 16384;
+    let size_kb = (source_kb + source_kb / 3 + extra_kb).div_ceil(16384) * 16384;
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)
@@ -1476,7 +1811,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch_url_cached(url: &str, cache_dir: &Path) -> Result<PathBuf, String> {
+fn fetch_url_cached(
+    url: &str,
+    cache_dir: &Path,
+    expected_hash: Option<&str>,
+) -> Result<(PathBuf, String), String> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     url.hash(&mut hasher);
@@ -1487,24 +1826,32 @@ fn fetch_url_cached(url: &str, cache_dir: &Path) -> Result<PathBuf, String> {
     let cached_name = format!("{}-{}", &hash[..12], basename);
     let cached_path = cache_dir.join(&cached_name);
 
-    if cached_path.exists() {
-        return Ok(cached_path);
+    if !cached_path.exists() {
+        fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("failed to create cache dir {}: {e}", cache_dir.display()))?;
+
+        eprintln!("cargo-scarlet: fetching {}", url);
+        let status = Command::new("curl")
+            .args(["-fsSL", "-o", cached_path.to_str().unwrap_or(""), url])
+            .status()
+            .map_err(|e| format!("failed to run curl: {e}"))?;
+        if !status.success() {
+            let _ = fs::remove_file(&cached_path);
+            return Err(format!("curl failed to fetch {}", url));
+        }
     }
 
-    fs::create_dir_all(cache_dir)
-        .map_err(|e| format!("failed to create cache dir {}: {e}", cache_dir.display()))?;
-
-    eprintln!("cargo-scarlet: fetching {}", url);
-    let status = Command::new("curl")
-        .args(["-fsSL", "-o", cached_path.to_str().unwrap_or(""), url])
-        .status()
-        .map_err(|e| format!("failed to run curl: {e}"))?;
-    if !status.success() {
-        let _ = fs::remove_file(&cached_path);
-        return Err(format!("curl failed to fetch {}", url));
+    let actual_hash = sha256_file(&cached_path)?;
+    if let Some(expected) = expected_hash
+        && actual_hash != expected
+    {
+        return Err(format!(
+            "hash mismatch for {}: expected {}, got {}",
+            url, expected, actual_hash
+        ));
     }
 
-    Ok(cached_path)
+    Ok((cached_path, actual_hash))
 }
 
 fn install_package(
@@ -1524,7 +1871,10 @@ fn install_package(
 
     match pkg.kind.as_deref() {
         Some("cargo") => {
-            let source = pkg.source.as_ref().ok_or("cargo package missing source")?;
+            let source = pkg
+                .local_source
+                .as_ref()
+                .ok_or("cargo package missing source")?;
             let package_name = pkg.package_name.as_deref().unwrap_or("user-bin");
             let bin_name = pkg.bin.as_deref().unwrap_or(package_name);
 
@@ -1583,16 +1933,27 @@ fn install_package(
                 .map_err(|e| format!("failed to copy {}: {e}", binary.display()))?;
 
             let hash = sha256_file(&binary)?;
+            let (git_url, resolved_rev) = match &pkg.source {
+                Some(PackageSource::Git { git, .. }) => {
+                    (Some(git.clone()), pkg.resolved_rev.clone())
+                }
+                _ => (None, None),
+            };
             Ok(Some(PackageLock {
                 kind: "cargo".to_string(),
                 source: Some(source.to_string_lossy().to_string()),
+                git: git_url,
+                resolved_rev,
                 bin: Some(bin_name.to_string()),
                 output: None,
                 hash,
             }))
         }
         Some("script") => {
-            let source = pkg.source.as_ref().ok_or("script package missing source")?;
+            let source = pkg
+                .local_source
+                .as_ref()
+                .ok_or("script package missing source")?;
             let script_path = if source.is_absolute() {
                 source.clone()
             } else {
@@ -1693,6 +2054,8 @@ fn install_package(
             Ok(Some(PackageLock {
                 kind: "script".to_string(),
                 source: Some(source.to_string_lossy().to_string()),
+                git: None,
+                resolved_rev: None,
                 bin: None,
                 output: pkg.output.as_ref().map(|p| p.to_string_lossy().to_string()),
                 hash,
