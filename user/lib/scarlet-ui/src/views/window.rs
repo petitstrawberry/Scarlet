@@ -1022,7 +1022,53 @@ impl WindowRenderObject {
         }
 
         // Title text (exact Scarlet_old: rgb(20, 20, 24))
-        canvas.draw_text_sized(10, 7, title, Color::rgb(20u8, 20u8, 24u8), 18.0);
+        let title_x: i32 = 10;
+        let title_y: i32 = 7;
+        let title_font_size: f32 = 18.0;
+        let title_color = Color::rgb(20u8, 20u8, 24u8);
+        let title_padding_right: f32 = 4.0;
+
+        // minimize is the leftmost control button (index_from_right=2)
+        let available_width = if minimize_rect.origin.x > title_x as f32 {
+            (minimize_rect.origin.x - title_x as f32 - title_padding_right).max(0.0) as u32
+        } else {
+            0
+        };
+
+        let display_title = if available_width == 0 {
+            alloc::string::String::new()
+        } else {
+            let full_width = crate::graphics::measure_text_sized(title, title_font_size).0;
+            if full_width <= available_width {
+                alloc::string::String::from(title)
+            } else {
+                let ellipsis = "...";
+                let ellipsis_width = crate::graphics::measure_text_sized(ellipsis, title_font_size).0;
+                let max_text_width = available_width.saturating_sub(ellipsis_width);
+
+                // binary search: find longest char prefix that fits within max_text_width
+                let chars: Vec<char> = title.chars().collect();
+                let mut lo = 0usize;
+                let mut hi = chars.len();
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let prefix: String = chars[..mid].iter().collect();
+                    let pw = crate::graphics::measure_text_sized(&prefix, title_font_size).0;
+                    if pw <= max_text_width {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                // lo is the first index where prefix doesn't fit; lo chars fit
+                let cut = lo.min(chars.len());
+                let mut result: alloc::string::String = chars[..cut].iter().collect();
+                result.push_str(ellipsis);
+                result
+            }
+        };
+
+        canvas.draw_text_sized(title_x, title_y, &display_title, title_color, title_font_size);
 
         // Draw button icons (exact Scarlet_old design)
         let icon_color = Color::rgb(30u8, 30u8, 34u8);
