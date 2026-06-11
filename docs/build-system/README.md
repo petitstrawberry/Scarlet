@@ -395,11 +395,12 @@ The lock file pins exact source revisions for reproducible builds. It is auto-ge
 [sections.initramfs]
 hash = "sha256:abc123..."
 
-[[sections.initramfs.files]]
+[[sections.initramfs.layers]]
+kind = "copy"
 source = "https://example.com/firmware.bin"
 hash = "sha256:def456..."
 
-[[sections.initramfs.packages]]
+[[sections.initramfs.layers]]
 kind = "cargo"
 git = "https://github.com/example/module"
 resolved_rev = "abc123def456"
