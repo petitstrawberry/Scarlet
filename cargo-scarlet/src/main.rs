@@ -3042,8 +3042,18 @@ pub fn force_link() {}
 
     let _ = write_if_changed(&project_dir.join(".gitignore"), ".scarlet\ntarget\n");
 
+    let modules_cargo_dir = project_dir.join(".scarlet/scarlet-modules/.cargo");
+    fs::create_dir_all(&modules_cargo_dir)
+        .map_err(|e| format!("failed to create {}: {e}", modules_cargo_dir.display()))?;
+    let modules_cargo_config = render_cargo_config();
+    fs::write(modules_cargo_dir.join("config.toml"), modules_cargo_config)
+        .map_err(|e| format!("failed to write scarlet-modules .cargo/config.toml: {e}"))?;
+
     eprintln!("cargo-scarlet: created project '{name}'");
     eprintln!("cargo-scarlet: REQUIRED: update .cargo/config.toml with runner");
+    eprintln!(
+        "cargo-scarlet: REQUIRED: update .scarlet/scarlet-modules/.cargo/config.toml with target and build-std"
+    );
     eprintln!("cargo-scarlet: REQUIRED: add linker script to lds/");
     eprintln!("cargo-scarlet: REQUIRED: implement boot entry in src/main.rs (arch_start_kernel)");
 
