@@ -153,3 +153,17 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "input_dump"
 to = "/system/scarlet/bin/input_dump"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+bin = "mozc_server"
+to = "/system/scarlet/bin/mozc_server"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "scarlet_mozc"
+to = "/system/scarlet/bin/scarlet_mozc"
+

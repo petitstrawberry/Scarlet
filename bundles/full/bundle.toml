@@ -8,3 +8,7 @@ path = "../desktop/bundle.toml"
 [[layers]]
 kind = "bundle"
 path = "../linux/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../experimental/bundle.toml"

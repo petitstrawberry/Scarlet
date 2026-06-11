@@ -1,0 +1,16 @@
+#!/bin/sh
+# Scarlet Shell Initialization Script
+
+# Set environment variables
+export LD_LIBRARY_PATH=/scarlet/system/linux-aarch64/usr/lib:/scarlet/system/linux-aarch64/lib
+export PATH=/bin:/scarlet/system/linux-aarch64/bin:/scarlet/system/linux-aarch64/usr/bin
+
+export XDG_RUNTIME_DIR=/tmp
+export WAYLAND_DISPLAY=wayland-0
+export GDK_BACKEND=wayland
+export MESA_LOADER_DRIVER_OVERRIDE=swrast
+
+export HOME=/root
+
+echo "Welcome to Scarlet Shell!"
+echo "PATH is set to: $PATH"
