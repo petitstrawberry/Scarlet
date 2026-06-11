@@ -77,7 +77,10 @@ if [ ! -f "$LIMINE_PLUGIN" ]; then
     LIMINE_PLUGIN="$PROJECT_ROOT/target/debug/cargo-scarlet-plugin-limine"
 fi
 if [ ! -f "$LIMINE_PLUGIN" ]; then
-    echo "Error: cargo-scarlet-plugin-limine not found"
+    LIMINE_PLUGIN="$(command -v cargo-scarlet-plugin-limine || true)"
+fi
+if [ ! -f "$LIMINE_PLUGIN" ]; then
+    echo "Error: cargo-scarlet-plugin-limine not found. If you are not using nix develop, install it with: cargo install --path cargo-scarlet-plugin-limine"
     exit 1
 fi
 
