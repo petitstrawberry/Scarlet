@@ -8,8 +8,8 @@ dist/
 /kernel/fat32-test.img
 /kernel/ext2-test.img
 opencode.json
+scarlet.local.toml
 /tools/scpm-pack/target
-/cargo-scarlet/target
 /.build
 /.scarlet/
 /drivers/*/target

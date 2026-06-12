@@ -1,0 +1,18 @@
+[package]
+name = "sas-client"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+legacy-scarlet-std = ["dep:scarlet-std", "sas-protocol/legacy-scarlet-std"]
+std = ["dep:scarlet-os", "sas-protocol/std"]
+
+[dependencies]
+scarlet-std = { path = "../std", optional = true }
+scarlet-os = { path = "../scarlet-os", optional = true }
+sas-protocol = { path = "../sas-protocol", default-features = false }
+
+[lib]
+name = "sas_client"
+path = "src/lib.rs"

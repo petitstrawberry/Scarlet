@@ -190,6 +190,8 @@ scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client" }
+sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["legacy-scarlet-std"] }
+sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }

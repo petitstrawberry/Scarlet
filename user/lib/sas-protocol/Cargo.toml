@@ -1,0 +1,16 @@
+[package]
+name = "sas-protocol"
+version = "0.16.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+
+[dependencies]
+scarlet-std = { path = "../std", optional = true }
+
+[lib]
+name = "sas_protocol"
+path = "src/lib.rs"
