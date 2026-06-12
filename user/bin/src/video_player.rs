@@ -399,14 +399,17 @@ impl ControlsOverlay {
         let elapsed = clock_time_us.saturating_sub(window_start);
         if window_start == u64::MAX || elapsed >= FPS_WINDOW_US {
             if window_start != u64::MAX && elapsed > 0 {
-                let window_frames = self.presented_frames.load(Ordering::Acquire)
+                let window_frames = self
+                    .presented_frames
+                    .load(Ordering::Acquire)
                     .saturating_sub(self.fps_window_frames.load(Ordering::Acquire));
                 self.fps_display_x10.store(
                     (window_frames.saturating_mul(10_000_000) / elapsed) as u32,
                     Ordering::Release,
                 );
             }
-            self.fps_window_start_us.store(clock_time_us, Ordering::Release);
+            self.fps_window_start_us
+                .store(clock_time_us, Ordering::Release);
             self.fps_window_frames.store(
                 self.presented_frames.load(Ordering::Acquire),
                 Ordering::Release,
@@ -650,6 +653,19 @@ impl AudioClock {
         self.read_frames.store(0, Ordering::Release);
         self.started.store(false, Ordering::Release);
         self.video_ready.store(false, Ordering::Release);
+        self.unavailable.store(false, Ordering::Release);
+    }
+
+    /// Reset audio timing for replay without touching `video_ready`.
+    /// The decoder thread owns `video_ready` — it clears it before
+    /// decoding and sets it again via `mark_video_ready()`.
+    /// If the audio thread also cleared `video_ready` it could race
+    /// with the decoder and deadlock.
+    fn reset_for_replay_audio(&self) {
+        self.base_frames.store(0, Ordering::Release);
+        self.read_frames.store(0, Ordering::Release);
+        self.started.store(false, Ordering::Release);
+        // intentionally skip video_ready
         self.unavailable.store(false, Ordering::Release);
     }
 }
@@ -896,12 +912,12 @@ fn decode_loop_software(
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, display_index);
-            wait_for_replay_request(controls);
-            frame_store.reset_for_replay();
-            paint_signal.notify();
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
+            wait_for_replay_request(controls);
+            frame_store.reset_for_replay();
+            paint_signal.notify();
             loop_index = 0;
             continue;
         }
@@ -976,12 +992,12 @@ fn decode_loop_hardware(
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, reorder.published());
-            wait_for_replay_request(controls);
-            frame_store.reset_for_replay();
-            paint_signal.notify();
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
+            wait_for_replay_request(controls);
+            frame_store.reset_for_replay();
+            paint_signal.notify();
             loop_index = 0;
             continue;
         }
@@ -1169,12 +1185,12 @@ fn decode_loop_hardware_streaming_mp4(
         paint_signal.notify();
         println!("[{}] finished: {} frames", APP_NAME, reorder.published());
 
-        wait_for_replay_request(controls);
-        frame_store.reset_for_replay();
-        paint_signal.notify();
         if let Some(clock) = clock {
             clock.reset_for_replay();
         }
+        wait_for_replay_request(controls);
+        frame_store.reset_for_replay();
+        paint_signal.notify();
         let source = load_mp4_video_source_with_options(&data, false, true)?;
         if source
             .access_units
@@ -1382,12 +1398,12 @@ fn decode_loop_hardware_streaming_mp4_socket(
         paint_signal.notify();
         println!("[{}] finished: {} frames", APP_NAME, reorder.published());
 
-        wait_for_replay_request(controls);
-        frame_store.reset_for_replay();
-        paint_signal.notify();
         if let Some(clock) = clock {
             clock.reset_for_replay();
         }
+        wait_for_replay_request(controls);
+        frame_store.reset_for_replay();
+        paint_signal.notify();
         let source = load_mp4_video_source_with_options(&data, false, true)?;
         if source
             .access_units
@@ -1425,7 +1441,7 @@ fn replay_hardware_source_loops(
     let loop_duration_us = video_source_duration_us(source);
     let mut access_unit_scratch = Vec::new();
 
-    while controls.is_loop_enabled() {
+    loop {
         let mut decoder = HardwareVideoDecoder::open()?;
         let mut reorder = FrameReorderBuffer::new(total_frames);
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
@@ -1460,33 +1476,29 @@ fn replay_hardware_source_loops(
         }
 
         reorder.finish(frame_store, paint_signal, controls, clock)?;
-        println!(
-            "[{}] loop {} complete: {} frames",
-            APP_NAME,
-            loop_index + 1,
-            reorder.published()
-        );
-        loop_index = loop_index.saturating_add(1);
-    }
+        if controls.is_loop_enabled() {
+            println!(
+                "[{}] loop {} complete: {} frames",
+                APP_NAME,
+                loop_index + 1,
+                reorder.published()
+            );
+            loop_index = loop_index.saturating_add(1);
+            continue;
+        }
 
-    frame_store.mark_complete();
-    paint_signal.notify();
+        frame_store.mark_complete();
+        paint_signal.notify();
+        println!("[{}] finished: {} frames", APP_NAME, reorder.published());
 
-    wait_for_replay_request(controls);
-    frame_store.reset_for_replay();
-    paint_signal.notify();
-    if let Some(clock) = clock {
-        clock.reset_for_replay();
+        if let Some(clock) = clock {
+            clock.reset_for_replay();
+        }
+        wait_for_replay_request(controls);
+        frame_store.reset_for_replay();
+        paint_signal.notify();
+        loop_index = 0;
     }
-    return replay_hardware_source_loops(
-        source,
-        mp4_data,
-        frame_store,
-        paint_signal,
-        controls,
-        clock,
-        0,
-    );
 }
 
 struct VideoSource {
@@ -3908,8 +3920,8 @@ fn start_audio_thread(
             if controls.is_loop_enabled() {
                 continue;
             }
+            clock.reset_for_replay_audio();
             wait_for_replay_request(&controls);
-            clock.reset_for_replay();
             if !clock.wait_until_video_ready() {
                 return;
             }
