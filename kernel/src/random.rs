@@ -29,10 +29,13 @@ use spin::{Mutex, Once};
 
 use crate::device::char::CharDevice;
 use crate::device::{Device, DeviceType};
+use crate::library::std::usercopy::copy_to_user;
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
+use crate::task::mytask;
 
 /// Size of the internal random pool buffer
 const RANDOM_POOL_SIZE: usize = 4096;
+const RANDOM_SYSCALL_CHUNK_SIZE: usize = 256;
 
 /// Trait for entropy sources that can provide random data
 pub trait EntropySource: Send + Sync {
@@ -187,6 +190,58 @@ impl RandomManager {
         } else {
             None
         }
+    }
+}
+
+/// Fill a user-space buffer with random bytes.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - User-space buffer pointer.
+/// * `trapframe.arg(1)` - Number of bytes to fill.
+/// * `trapframe.arg(2)` - Reserved flags, must be zero.
+///
+/// # Returns
+///
+/// Number of bytes written, or `usize::MAX` on error.
+pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let buffer_ptr = trapframe.get_arg(0);
+    let buffer_len = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+
+    if flags != 0 {
+        return usize::MAX;
+    }
+    if buffer_len == 0 {
+        return 0;
+    }
+
+    let mut total_written = 0usize;
+    let mut chunk = [0u8; RANDOM_SYSCALL_CHUNK_SIZE];
+    while total_written < buffer_len {
+        let chunk_len = core::cmp::min(chunk.len(), buffer_len - total_written);
+        let bytes_read = RandomManager::get_random_bytes(&mut chunk[..chunk_len]);
+        if bytes_read == 0 {
+            break;
+        }
+
+        if copy_to_user(task, buffer_ptr + total_written, &chunk[..bytes_read]).is_err() {
+            return usize::MAX;
+        }
+        total_written += bytes_read;
+    }
+
+    if total_written == 0 {
+        usize::MAX
+    } else {
+        total_written
     }
 }
 

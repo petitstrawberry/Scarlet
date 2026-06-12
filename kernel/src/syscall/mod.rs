@@ -29,6 +29,7 @@
 //! - Session/Process Groups: CreateSession (26), GetSessionId (27),
 //!   GetProcessGroupId (28), SetProcessGroup (29)
 //! - Basic I/O: Putchar (16), Getchar (17)
+//! - Random: GetRandom (22)
 //! - ABI Zone: RegisterAbiZone (90), UnregisterAbiZone (91)
 //! - Namespace: CreateNamespace (92) - Smart syscall for task/VFS isolation
 //!
@@ -108,6 +109,7 @@ use crate::object::handle::syscall::{
     sys_handle_close, sys_handle_control, sys_handle_duplicate, sys_handle_query,
     sys_handle_set_role,
 };
+use crate::random::sys_get_random;
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
     sys_exit, sys_exit_group, sys_get_process_group_id, sys_get_session_id,
@@ -186,6 +188,7 @@ syscall_table! {
     Sleep = 20 => sys_sleep,
 
     Yield = 21 => sys_yield,
+    GetRandom = 22 => sys_get_random,
 
     ExitGroup = 23 => sys_exit_group, // Exit all tasks in thread group
     // Process information
