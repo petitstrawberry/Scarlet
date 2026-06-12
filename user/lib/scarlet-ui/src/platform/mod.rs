@@ -7,10 +7,11 @@ mod sws;
 
 pub use sws::SWSPlatformWindow;
 
-use crate::geometry::{Point, Size};
 use crate::buffer::Buffer;
-use crate::event::Event;
+use crate::compositor::DamageRect;
 use crate::error::Result;
+use crate::event::Event;
+use crate::geometry::{Point, Size};
 
 /// Platform-independent window interface
 ///
@@ -27,6 +28,17 @@ pub trait PlatformWindow {
 
     /// Present a buffer to the screen
     fn present(&mut self, buffer: &Buffer);
+
+    /// Present a buffer to the screen with optional physical damage rectangles.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Pixel buffer to present
+    /// * `damage` - Physical pixel regions to update, or `None` for the whole buffer
+    fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) {
+        let _ = damage;
+        self.present(buffer);
+    }
 
     /// Set the window title
     fn set_title(&mut self, title: &str);

@@ -3,6 +3,7 @@
 //! This implementation uses the sws-client library to create and manage windows.
 
 use crate::buffer::Buffer;
+use crate::compositor::DamageRect;
 use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
@@ -345,6 +346,71 @@ impl SWSPlatformWindow {
         )
     }
 
+    fn copy_buffer_region(
+        buffer: &Buffer,
+        dst_data: &mut [u8],
+        dst_width: u32,
+        dst_height: u32,
+        damage: DamageRect,
+    ) -> Option<DamageRect> {
+        let (x, y, width, height) = damage;
+        let x = x.min(dst_width);
+        let y = y.min(dst_height);
+        let width = width.min(dst_width.saturating_sub(x));
+        let height = height.min(dst_height.saturating_sub(y));
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let src_data = buffer.data();
+        let src_width = buffer.width() as usize;
+        let src_height = buffer.height() as usize;
+        let dst_width = dst_width as usize;
+        let x_start = x as usize;
+        let x_end = x.saturating_add(width) as usize;
+        let clear_len = width as usize * 4;
+
+        for row in y as usize..y.saturating_add(height) as usize {
+            let dst_offset = row
+                .saturating_mul(dst_width)
+                .saturating_add(x_start)
+                .saturating_mul(4);
+            let dst_row_end = dst_offset.saturating_add(clear_len).min(dst_data.len());
+            if dst_offset >= dst_row_end {
+                continue;
+            }
+
+            if row >= src_height || x_start >= src_width {
+                dst_data[dst_offset..dst_row_end].fill(0);
+                continue;
+            }
+
+            let copy_x_end = x_end.min(src_width);
+            let copy_len = copy_x_end.saturating_sub(x_start).saturating_mul(4);
+            if copy_len > 0 {
+                let src_offset = row
+                    .saturating_mul(src_width)
+                    .saturating_add(x_start)
+                    .saturating_mul(4);
+                let src_end = src_offset.saturating_add(copy_len).min(src_data.len());
+                let dst_copy_end = dst_offset.saturating_add(src_end.saturating_sub(src_offset));
+                if src_offset < src_end && dst_copy_end <= dst_data.len() {
+                    dst_data[dst_offset..dst_copy_end]
+                        .copy_from_slice(&src_data[src_offset..src_end]);
+                }
+            }
+
+            if copy_x_end < x_end {
+                let clear_start = dst_offset.saturating_add(copy_len);
+                if clear_start < dst_row_end {
+                    dst_data[clear_start..dst_row_end].fill(0);
+                }
+            }
+        }
+
+        Some((x, y, width, height))
+    }
+
     fn map_key_code(code: u16) -> KeyCode {
         match code {
             key_code::KEY_ESC => KeyCode::Escape,
@@ -591,62 +657,41 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn present(&mut self, buffer: &Buffer) {
+        self.present_with_damage(buffer, None);
+    }
+
+    fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) {
+        if damage.is_some_and(|rects| rects.is_empty()) {
+            return;
+        }
+
         // Get the surface and copy pixels
         if let Some(surface) = self.conn.surface_mut(self.surface_id) {
             // Get the shared memory buffer
             surface.with_buffer(|shm_buf, width, height| {
-                let src_data = buffer.data(); // &[u8]
-                let shm_len = (width * height * 4) as usize;
-                let dst_data =
-                    unsafe { core::slice::from_raw_parts_mut(shm_buf.as_mut_ptr(), shm_len) };
-
-                let src_width = buffer.width() as usize;
-                let src_height = buffer.height() as usize;
-                let dst_width = width as usize;
-                let dst_height = height as usize;
-                let copy_width = src_width.min(dst_width);
-                let copy_height = src_height.min(dst_height);
-                let copy_bytes = copy_width.saturating_mul(4);
-
-                for y in 0..copy_height {
-                    let src_offset = y.saturating_mul(src_width).saturating_mul(4);
-                    let dst_offset = y.saturating_mul(dst_width).saturating_mul(4);
-                    let src_end = src_offset.saturating_add(copy_bytes).min(src_data.len());
-                    let dst_end = dst_offset.saturating_add(copy_bytes).min(dst_data.len());
-                    if src_end <= src_offset || dst_end <= dst_offset {
-                        break;
-                    }
-                    let len = (src_end - src_offset).min(dst_end - dst_offset);
-                    dst_data[dst_offset..dst_offset + len]
-                        .copy_from_slice(&src_data[src_offset..src_offset + len]);
-                }
-
-                if copy_width < dst_width {
-                    for y in 0..copy_height {
-                        let row_start = y
-                            .saturating_mul(dst_width)
-                            .saturating_add(copy_width)
-                            .saturating_mul(4);
-                        let row_end = y
-                            .saturating_add(1)
-                            .saturating_mul(dst_width)
-                            .saturating_mul(4);
-                        if row_start < row_end && row_end <= dst_data.len() {
-                            dst_data[row_start..row_end].fill(0);
-                        }
-                    }
-                }
-                if copy_height < dst_height {
-                    let clear_start = copy_height.saturating_mul(dst_width).saturating_mul(4);
-                    if clear_start < dst_data.len() {
-                        dst_data[clear_start..].fill(0);
-                    }
+                let full_damage = [(0, 0, width, height)];
+                let regions = damage.unwrap_or(&full_damage);
+                for region in regions {
+                    let _ = Self::copy_buffer_region(buffer, shm_buf, width, height, *region);
                 }
             });
         }
 
-        // Commit the surface
-        let _ = self.conn.commit(self.surface_id);
+        match damage {
+            Some(rects) => {
+                for rect in rects {
+                    let (x, y, width, height) = *rect;
+                    if width > 0 && height > 0 {
+                        let _ = self
+                            .conn
+                            .commit_region(self.surface_id, x, y, width, height);
+                    }
+                }
+            }
+            None => {
+                let _ = self.conn.commit(self.surface_id);
+            }
+        };
     }
 
     fn set_title(&mut self, title: &str) {

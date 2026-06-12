@@ -232,6 +232,11 @@ impl VideoFrameStore {
             data.current_frame = data.total_frames;
         }
     }
+
+    fn reset_for_replay(&self) {
+        let mut data = self.data.lock();
+        data.current_frame = 0;
+    }
 }
 
 struct ControlsOverlay {
@@ -240,11 +245,15 @@ struct ControlsOverlay {
     loop_enabled: AtomicBool,
     activity_epoch: AtomicU32,
     paused: AtomicBool,
+    finished: AtomicBool,
+    replay_epoch: AtomicU32,
     canvas_width: AtomicU32,
     canvas_height: AtomicU32,
     presented_frames: AtomicU64,
     dropped_frames: AtomicU64,
-    first_clock_us: AtomicU64,
+    fps_display_x10: AtomicU32,
+    fps_window_frames: AtomicU64,
+    fps_window_start_us: AtomicU64,
     last_clock_us: AtomicU64,
     last_video_pts_us: AtomicU64,
     last_lag_us: AtomicU64,
@@ -293,11 +302,15 @@ impl ControlsOverlay {
             loop_enabled: AtomicBool::new(loop_enabled),
             activity_epoch: AtomicU32::new(0),
             paused: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            replay_epoch: AtomicU32::new(0),
             canvas_width: AtomicU32::new(DISPLAY_WIDTH),
             canvas_height: AtomicU32::new(DISPLAY_HEIGHT),
             presented_frames: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
-            first_clock_us: AtomicU64::new(u64::MAX),
+            fps_display_x10: AtomicU32::new(0),
+            fps_window_frames: AtomicU64::new(0),
+            fps_window_start_us: AtomicU64::new(u64::MAX),
             last_clock_us: AtomicU64::new(0),
             last_video_pts_us: AtomicU64::new(0),
             last_lag_us: AtomicU64::new(0),
@@ -339,6 +352,24 @@ impl ControlsOverlay {
         self.show_for_mouse_activity();
     }
 
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.paused.store(false, Ordering::Release);
+    }
+
+    fn request_replay(&self) {
+        self.replay_epoch.fetch_add(1, Ordering::AcqRel);
+        self.finished.store(false, Ordering::Release);
+    }
+
+    fn current_replay_epoch(&self) -> u32 {
+        self.replay_epoch.load(Ordering::Acquire)
+    }
+
     fn toggle_debug(&self) {
         let visible = !self.debug_visible.load(Ordering::Acquire);
         self.debug_visible.store(visible, Ordering::Release);
@@ -363,8 +394,23 @@ impl ControlsOverlay {
 
     fn record_video_timing(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
         let clock_time_us = clock_time_us.unwrap_or(presentation_time_us);
-        if self.first_clock_us.load(Ordering::Acquire) == u64::MAX {
-            self.first_clock_us.store(clock_time_us, Ordering::Release);
+        const FPS_WINDOW_US: u64 = 1_000_000;
+        let window_start = self.fps_window_start_us.load(Ordering::Acquire);
+        let elapsed = clock_time_us.saturating_sub(window_start);
+        if window_start == u64::MAX || elapsed >= FPS_WINDOW_US {
+            if window_start != u64::MAX && elapsed > 0 {
+                let window_frames = self.presented_frames.load(Ordering::Acquire)
+                    .saturating_sub(self.fps_window_frames.load(Ordering::Acquire));
+                self.fps_display_x10.store(
+                    (window_frames.saturating_mul(10_000_000) / elapsed) as u32,
+                    Ordering::Release,
+                );
+            }
+            self.fps_window_start_us.store(clock_time_us, Ordering::Release);
+            self.fps_window_frames.store(
+                self.presented_frames.load(Ordering::Acquire),
+                Ordering::Release,
+            );
         }
         self.last_clock_us.store(clock_time_us, Ordering::Release);
         self.last_video_pts_us
@@ -597,6 +643,14 @@ impl AudioClock {
         let rate = self.sample_rate.load(Ordering::Acquire).max(1);
         let audio_frames = self.read_frames.load(Ordering::Acquire);
         Some(audio_frames.saturating_mul(1_000_000) / rate)
+    }
+
+    fn reset_for_replay(&self) {
+        self.base_frames.store(0, Ordering::Release);
+        self.read_frames.store(0, Ordering::Release);
+        self.started.store(false, Ordering::Release);
+        self.video_ready.store(false, Ordering::Release);
+        self.unavailable.store(false, Ordering::Release);
     }
 }
 
@@ -842,7 +896,14 @@ fn decode_loop_software(
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, display_index);
-            break;
+            wait_for_replay_request(controls);
+            frame_store.reset_for_replay();
+            paint_signal.notify();
+            if let Some(clock) = clock {
+                clock.reset_for_replay();
+            }
+            loop_index = 0;
+            continue;
         }
         println!(
             "[{}] loop {} complete: {} frames",
@@ -915,7 +976,14 @@ fn decode_loop_hardware(
             frame_store.mark_complete();
             paint_signal.notify();
             println!("[{}] finished: {} frames", APP_NAME, reorder.published());
-            break;
+            wait_for_replay_request(controls);
+            frame_store.reset_for_replay();
+            paint_signal.notify();
+            if let Some(clock) = clock {
+                clock.reset_for_replay();
+            }
+            loop_index = 0;
+            continue;
         }
         println!(
             "[{}] loop {} complete: {} frames",
@@ -1099,6 +1167,33 @@ fn decode_loop_hardware_streaming_mp4(
     } else {
         frame_store.mark_complete();
         paint_signal.notify();
+        println!("[{}] finished: {} frames", APP_NAME, reorder.published());
+
+        wait_for_replay_request(controls);
+        frame_store.reset_for_replay();
+        paint_signal.notify();
+        if let Some(clock) = clock {
+            clock.reset_for_replay();
+        }
+        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        if source
+            .access_units
+            .iter()
+            .any(|unit| unit.codec != VideoCodec::H264)
+        {
+            return Err(String::from(
+                "streaming hardware decode currently supports MP4/H.264",
+            ));
+        }
+        replay_hardware_source_loops(
+            &source,
+            &data,
+            frame_store,
+            paint_signal,
+            controls,
+            clock,
+            0,
+        )?;
     }
     println!("[{}] finished: {} frames", APP_NAME, reorder.published());
     Ok(())
@@ -1285,6 +1380,33 @@ fn decode_loop_hardware_streaming_mp4_socket(
     } else {
         frame_store.mark_complete();
         paint_signal.notify();
+        println!("[{}] finished: {} frames", APP_NAME, reorder.published());
+
+        wait_for_replay_request(controls);
+        frame_store.reset_for_replay();
+        paint_signal.notify();
+        if let Some(clock) = clock {
+            clock.reset_for_replay();
+        }
+        let source = load_mp4_video_source_with_options(&data, false, true)?;
+        if source
+            .access_units
+            .iter()
+            .any(|unit| unit.codec != VideoCodec::H264)
+        {
+            return Err(String::from(
+                "streaming hardware decode currently supports MP4/H.264",
+            ));
+        }
+        replay_hardware_source_loops(
+            &source,
+            &data,
+            frame_store,
+            paint_signal,
+            controls,
+            clock,
+            0,
+        )?;
     }
     println!("[{}] finished: {} frames", APP_NAME, reorder.published());
     Ok(())
@@ -1349,7 +1471,22 @@ fn replay_hardware_source_loops(
 
     frame_store.mark_complete();
     paint_signal.notify();
-    Ok(())
+
+    wait_for_replay_request(controls);
+    frame_store.reset_for_replay();
+    paint_signal.notify();
+    if let Some(clock) = clock {
+        clock.reset_for_replay();
+    }
+    return replay_hardware_source_loops(
+        source,
+        mp4_data,
+        frame_store,
+        paint_signal,
+        controls,
+        clock,
+        0,
+    );
 }
 
 struct VideoSource {
@@ -3742,20 +3879,16 @@ fn start_audio_thread(
     source: PlayerAudioSource,
     clock: Arc<AudioClock>,
     controls: Arc<ControlsOverlay>,
-    loop_playback: bool,
+    _loop_playback: bool,
 ) {
     thread::spawn(move || {
-        let source = if loop_playback {
-            match materialize_audio_source(source) {
-                Ok(source) => source,
-                Err(err) => {
-                    clock.mark_unavailable();
-                    println!("[{}] audio: {}", APP_NAME, err);
-                    return;
-                }
+        let source = match materialize_audio_source(source) {
+            Ok(source) => source,
+            Err(err) => {
+                clock.mark_unavailable();
+                println!("[{}] audio: {}", APP_NAME, err);
+                return;
             }
-        } else {
-            source
         };
 
         if let Some(duration_us) = audio_source_duration_us(&source) {
@@ -3772,8 +3905,13 @@ fn start_audio_thread(
                 println!("[{}] audio: {}", APP_NAME, err);
                 return;
             }
-            if !controls.is_loop_enabled() {
-                break;
+            if controls.is_loop_enabled() {
+                continue;
+            }
+            wait_for_replay_request(&controls);
+            clock.reset_for_replay();
+            if !clock.wait_until_video_ready() {
+                return;
             }
         }
     });
@@ -4199,6 +4337,17 @@ fn publish_frame(
 fn wait_while_paused(controls: &ControlsOverlay) {
     while controls.is_paused() {
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_replay_request(controls: &ControlsOverlay) -> u32 {
+    controls.mark_finished();
+    let my_epoch = controls.current_replay_epoch();
+    loop {
+        if controls.current_replay_epoch() != my_epoch {
+            return controls.current_replay_epoch();
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -4877,7 +5026,11 @@ fn handle_canvas_event(event: &Event, controls: &ControlsOverlay) -> bool {
         }) => {
             controls.show_for_mouse_activity();
             if controls.play_pause_button_contains(*x, *y) {
-                controls.toggle_paused();
+                if controls.is_finished() {
+                    controls.request_replay();
+                } else {
+                    controls.toggle_paused();
+                }
                 true
             } else if controls.loop_button_contains(*x, *y) {
                 controls.toggle_loop();
@@ -4899,7 +5052,11 @@ fn handle_key_event(
         KeyEvent::Pressed {
             keycode: KeyCode::Space,
         } => {
-            controls.toggle_paused();
+            if controls.is_finished() {
+                controls.request_replay();
+            } else {
+                controls.toggle_paused();
+            }
             paint_signal.notify();
             true
         }
@@ -4933,17 +5090,12 @@ fn draw_debug_overlay(
 
     let presented = controls.presented_frames.load(Ordering::Acquire);
     let dropped = controls.dropped_frames.load(Ordering::Acquire);
-    let first_clock_us = controls.first_clock_us.load(Ordering::Acquire);
     let last_clock_us = controls.last_clock_us.load(Ordering::Acquire);
     let last_video_pts_us = controls.last_video_pts_us.load(Ordering::Acquire);
     let lag_ms = controls.last_lag_us.load(Ordering::Acquire) / 1_000;
     let total_frames = frame.total_frames.max(frame.current_frame).max(1);
     let current_frame = frame.current_frame.min(total_frames);
-    let fps_x10 = if first_clock_us != u64::MAX && last_clock_us > first_clock_us {
-        presented.saturating_mul(10_000_000) / last_clock_us.saturating_sub(first_clock_us)
-    } else {
-        0
-    };
+    let fps_x10 = controls.fps_display_x10.load(Ordering::Acquire);
 
     let panel_width = logical_canvas_width.min(360);
     let panel_height = 86u32.min(logical_canvas_height);
@@ -5041,7 +5193,7 @@ fn draw_seek_bar(
             canvas_height,
             button_x,
             button_y,
-            controls.is_paused(),
+            controls.is_paused() || controls.is_finished(),
             ui_scale,
         );
         return;
@@ -5097,7 +5249,7 @@ fn draw_seek_bar(
         canvas_height,
         button_x,
         button_y,
-        controls.is_paused(),
+        controls.is_paused() || controls.is_finished(),
         ui_scale,
     );
     if let Some((loop_x, loop_y)) = loop_button_origin(logical_canvas_width, logical_canvas_height)

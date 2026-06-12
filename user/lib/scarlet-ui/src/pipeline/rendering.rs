@@ -3,15 +3,15 @@
 //! RenderingPipeline is the main entry point for the rendering system.
 //! It orchestrates all phases of the rendering pipeline.
 
+use crate::buffer::Buffer;
+use crate::compositor::{Compositor, DamageRect};
+use crate::element::{Element, ElementTree, LayoutConstraints};
+use crate::event::EventDispatcher;
+use crate::geometry::Size;
+use crate::pipeline::PipelineOwner;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::element::{Element, ElementTree, LayoutConstraints};
-use crate::geometry::Size;
-use crate::compositor::Compositor;
-use crate::pipeline::PipelineOwner;
-use crate::buffer::Buffer;
-use crate::event::EventDispatcher;
 
 /// RenderingPipeline integrates all components of the rendering system
 ///
@@ -195,8 +195,15 @@ impl RenderingPipeline {
         bool,
     ) {
         // Extract window info first
-        let (app_id, title, preferred_size, window_type, menu_bar, focus_on_create, active_on_focus) =
-            self.extract_window_info();
+        let (
+            app_id,
+            title,
+            preferred_size,
+            window_type,
+            menu_bar,
+            focus_on_create,
+            active_on_focus,
+        ) = self.extract_window_info();
 
         // Use the preferred size from Window as the actual window size
         let window_size = preferred_size;
@@ -254,7 +261,8 @@ impl RenderingPipeline {
         }
         // Flush all dirty phases (build, layout, paint)
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush(&mut self.element_tree, self.window_size);
+        self.pipeline_owner
+            .flush(&mut self.element_tree, self.window_size);
         if crate::debug::is_enabled() {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
@@ -285,6 +293,15 @@ impl RenderingPipeline {
         }
     }
 
+    /// Handle a render frame and return the buffer with physical damage rectangles.
+    ///
+    /// The damage is `None` when the whole window should be presented.
+    pub fn render_with_damage(&mut self) -> Option<(&Buffer, Option<&[DamageRect]>)> {
+        self.render()?;
+        let compositor = self.compositor.as_ref()?;
+        Some((compositor.window_buffer(), compositor.last_damage_rects()))
+    }
+
     /// Get the window buffer (if available)
     pub fn window_buffer(&self) -> Option<&Buffer> {
         self.compositor.as_ref().map(|c| c.window_buffer())
@@ -305,7 +322,8 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
-        self.event_dispatcher.dispatch(&mut self.element_tree, _event)
+        self.event_dispatcher
+            .dispatch(&mut self.element_tree, _event)
     }
 
     /// Take emitted events from the event dispatcher

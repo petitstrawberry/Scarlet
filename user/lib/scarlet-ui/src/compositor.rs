@@ -4,12 +4,19 @@
 //! and composites all buffers into a single window buffer.
 
 use crate::buffer::Buffer;
-use crate::geometry::{Point, Rect, Size};
 use crate::color::Color;
 use crate::element::{Element, ElementId};
+use crate::geometry::{Point, Rect, Size};
 use crate::render::{RenderNode, RenderTree};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
+
+/// Physical pixel damage rectangle `(x, y, width, height)`.
+pub type DamageRect = (u32, u32, u32, u32);
+
+const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+const PRESENT_DAMAGE_FULL_AREA_NUMERATOR: u64 = 3;
+const PRESENT_DAMAGE_FULL_AREA_DENOMINATOR: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
 struct ClipRegion {
@@ -22,6 +29,7 @@ pub struct Compositor {
     window_buffer: Buffer,
     scale_milli: u32,
     last_bounds: BTreeMap<ElementId, Rect>,
+    last_damage: Option<Vec<DamageRect>>,
 }
 
 impl Compositor {
@@ -35,6 +43,7 @@ impl Compositor {
             ),
             scale_milli: scale_milli.max(1),
             last_bounds: BTreeMap::new(),
+            last_damage: None,
         }
     }
 
@@ -87,8 +96,11 @@ impl Compositor {
     /// This traverses the tree depth-first and composites all buffers.
     pub fn composite_tree(&mut self, tree: &RenderTree) {
         if crate::debug::is_enabled() {
-            crate::logln!("[Compositor] composite_tree: window_size={:?}x{:?}",
-                self.window_buffer.width(), self.window_buffer.height());
+            crate::logln!(
+                "[Compositor] composite_tree: window_size={:?}x{:?}",
+                self.window_buffer.width(),
+                self.window_buffer.height()
+            );
         }
 
         // Clear background
@@ -96,6 +108,7 @@ impl Compositor {
 
         // Composite from root
         self.composite_node(tree.root(), Point::ZERO);
+        self.last_damage = None;
 
         if crate::debug::is_enabled() {
             crate::logln!("[Compositor] composite_tree: complete");
@@ -114,6 +127,7 @@ impl Compositor {
         self.collect_dirty_rects_element(root, Point::ZERO, &dirty_set, &mut rects);
 
         if rects.is_empty() {
+            self.last_damage = Some(Vec::new());
             return;
         }
 
@@ -127,24 +141,31 @@ impl Compositor {
             return;
         }
 
+        let damage = self.present_damage_rects(&rects);
+
         for rect in rects.iter() {
             self.clear_rect(*rect, Color::WHITE);
         }
 
         self.composite_element_clipped(root, Point::ZERO, &rects);
         self.composite_select_overlays_clipped(root, Point::ZERO, &rects, None);
+        self.last_damage = damage;
     }
 
     /// Composite an Element tree into the window buffer.
     pub fn composite_elements(&mut self, root: &dyn Element) {
         if crate::debug::is_enabled() {
-            crate::logln!("[Compositor] composite_elements: window_size={:?}x{:?}",
-                self.window_buffer.width(), self.window_buffer.height());
+            crate::logln!(
+                "[Compositor] composite_elements: window_size={:?}x{:?}",
+                self.window_buffer.width(),
+                self.window_buffer.height()
+            );
         }
 
         self.clear(Color::WHITE);
         self.composite_element_with_clip(root, Point::ZERO, None);
         self.composite_select_overlays(root, Point::ZERO, None);
+        self.last_damage = None;
     }
 
     /// Composite a RenderTree into the window buffer using dirty rectangles.
@@ -157,7 +178,13 @@ impl Compositor {
         let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
         let mut rects = Vec::new();
         let mut fallback_full = false;
-        self.collect_dirty_rects(tree.root(), Point::ZERO, &dirty_set, &mut rects, &mut fallback_full);
+        self.collect_dirty_rects(
+            tree.root(),
+            Point::ZERO,
+            &dirty_set,
+            &mut rects,
+            &mut fallback_full,
+        );
 
         if fallback_full || rects.is_empty() {
             self.composite_tree(tree);
@@ -174,12 +201,15 @@ impl Compositor {
             return;
         }
 
+        let damage = self.present_damage_rects(&rects);
+
         // Clear only dirty regions.
         for rect in rects.iter() {
             self.clear_rect(*rect, Color::WHITE);
         }
 
         self.composite_node_clipped(tree.root(), Point::ZERO, &rects);
+        self.last_damage = damage;
     }
 
     /// Composite a single RenderNode
@@ -209,8 +239,13 @@ impl Compositor {
             if let Some(buffer) = render_object.get_buffer() {
                 let opacity = 1.0;
                 if crate::debug::is_enabled() {
-                    crate::logln!("[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
-                        absolute_origin, buffer.width(), buffer.height(), opacity);
+                    crate::logln!(
+                        "[Compositor] composite_node: origin={:?}, buffer_size={}x{}, opacity={}",
+                        absolute_origin,
+                        buffer.width(),
+                        buffer.height(),
+                        opacity
+                    );
                 }
 
                 self.window_buffer.composite(
@@ -232,7 +267,12 @@ impl Compositor {
         self.composite_element_with_clip(element, origin, None);
     }
 
-    fn composite_element_clipped(&mut self, element: &dyn Element, origin: Point, dirty_rects: &[Rect]) {
+    fn composite_element_clipped(
+        &mut self,
+        element: &dyn Element,
+        origin: Point,
+        dirty_rects: &[Rect],
+    ) {
         self.composite_element_with_clip_dirty(element, origin, dirty_rects, None);
     }
 
@@ -398,7 +438,12 @@ impl Compositor {
         }
 
         for child in element.children() {
-            self.composite_element_with_clip_dirty(child.as_ref(), absolute_origin, dirty_rects, next_clip);
+            self.composite_element_with_clip_dirty(
+                child.as_ref(),
+                absolute_origin,
+                dirty_rects,
+                next_clip,
+            );
         }
     }
 
@@ -541,8 +586,7 @@ impl Compositor {
                     let mut clip_rect = *rect;
                     let mut clip_radius = 0.0;
                     if let Some(active_clip) = next_clip {
-                        if let Some(intersection) =
-                            self.intersect_rect(clip_rect, active_clip.rect)
+                        if let Some(intersection) = self.intersect_rect(clip_rect, active_clip.rect)
                         {
                             clip_rect = intersection;
                             clip_radius = active_clip.radius;
@@ -590,7 +634,12 @@ impl Compositor {
         let render_object = node.render_object();
         if let Some(render_object) = render_object {
             let size = render_object.size();
-            let bounds = Rect::from_xywh(absolute_origin.x, absolute_origin.y, size.width, size.height);
+            let bounds = Rect::from_xywh(
+                absolute_origin.x,
+                absolute_origin.y,
+                size.width,
+                size.height,
+            );
             if !self.overlaps_any(bounds, dirty_rects) {
                 return;
             }
@@ -692,7 +741,12 @@ impl Compositor {
             if let Some(render_object) = node.render_object() {
                 if render_object.get_buffer().is_some() {
                     let size = render_object.size();
-                    rects.push(Rect::from_xywh(absolute_origin.x, absolute_origin.y, size.width, size.height));
+                    rects.push(Rect::from_xywh(
+                        absolute_origin.x,
+                        absolute_origin.y,
+                        size.width,
+                        size.height,
+                    ));
                 } else {
                     *fallback_full = true;
                     return;
@@ -726,6 +780,102 @@ impl Compositor {
         let w = (x1 - x0).max(0.0);
         let h = (y1 - y0).max(0.0);
         (x0 as u32, y0 as u32, w as u32, h as u32)
+    }
+
+    fn present_damage_rects(&self, rects: &[Rect]) -> Option<Vec<DamageRect>> {
+        let mut damage: Vec<DamageRect> = rects
+            .iter()
+            .map(|rect| self.rect_to_u32(*rect))
+            .filter(|(_, _, width, height)| *width > 0 && *height > 0)
+            .collect();
+
+        Self::coalesce_damage_rects(&mut damage);
+
+        let damage_area = Self::damage_rects_area(&damage);
+        let window_area =
+            (self.window_buffer.width() as u64).saturating_mul(self.window_buffer.height() as u64);
+        if damage_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_DENOMINATOR)
+            >= window_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_NUMERATOR)
+        {
+            return None;
+        }
+
+        Some(damage)
+    }
+
+    fn coalesce_damage_rects(rects: &mut Vec<DamageRect>) {
+        rects.retain(|(_, _, width, height)| *width > 0 && *height > 0);
+
+        let mut index = 0usize;
+        while index < rects.len() {
+            let mut merged = false;
+            let mut other = index + 1;
+            while other < rects.len() {
+                if Self::damage_rects_touch_or_overlap(rects[index], rects[other]) {
+                    rects[index] = Self::union_damage_rect(rects[index], rects[other]);
+                    rects.remove(other);
+                    merged = true;
+                } else {
+                    other += 1;
+                }
+            }
+            if !merged {
+                index += 1;
+            }
+        }
+
+        while rects.len() > MAX_PRESENT_DAMAGE_RECTS {
+            let mut best_pair = (0usize, 1usize);
+            let mut best_extra = u64::MAX;
+
+            for i in 0..rects.len() {
+                for j in (i + 1)..rects.len() {
+                    let union = Self::union_damage_rect(rects[i], rects[j]);
+                    let extra = Self::damage_rect_area(union)
+                        .saturating_sub(Self::damage_rect_area(rects[i]))
+                        .saturating_sub(Self::damage_rect_area(rects[j]));
+                    if extra < best_extra {
+                        best_extra = extra;
+                        best_pair = (i, j);
+                    }
+                }
+            }
+
+            let (i, j) = best_pair;
+            rects[i] = Self::union_damage_rect(rects[i], rects[j]);
+            rects.remove(j);
+        }
+    }
+
+    fn damage_rect_area(rect: DamageRect) -> u64 {
+        u64::from(rect.2).saturating_mul(u64::from(rect.3))
+    }
+
+    fn damage_rects_area(rects: &[DamageRect]) -> u64 {
+        rects.iter().fold(0u64, |area, rect| {
+            area.saturating_add(Self::damage_rect_area(*rect))
+        })
+    }
+
+    fn union_damage_rect(a: DamageRect, b: DamageRect) -> DamageRect {
+        let left = a.0.min(b.0);
+        let top = a.1.min(b.1);
+        let right = a.0.saturating_add(a.2).max(b.0.saturating_add(b.2));
+        let bottom = a.1.saturating_add(a.3).max(b.1.saturating_add(b.3));
+        (
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        )
+    }
+
+    fn damage_rects_touch_or_overlap(a: DamageRect, b: DamageRect) -> bool {
+        let a_right = a.0.saturating_add(a.2);
+        let a_bottom = a.1.saturating_add(a.3);
+        let b_right = b.0.saturating_add(b.2);
+        let b_bottom = b.1.saturating_add(b.3);
+        a.0 <= b_right && a_right >= b.0 && a.1 <= b_bottom && a_bottom >= b.1
     }
 
     fn rect_to_i32(&self, rect: Rect) -> (i32, i32, i32, i32) {
@@ -763,6 +913,7 @@ impl Compositor {
             self.scale_milli,
         );
         self.last_bounds.clear();
+        self.last_damage = None;
     }
 
     /// Get the window buffer
@@ -773,5 +924,12 @@ impl Compositor {
     /// Get mutable access to the window buffer
     pub fn window_buffer_mut(&mut self) -> &mut Buffer {
         &mut self.window_buffer
+    }
+
+    /// Get the physical pixel damage rectangles from the last composite.
+    ///
+    /// Returns `None` when the last composite redrew the whole window.
+    pub fn last_damage_rects(&self) -> Option<&[DamageRect]> {
+        self.last_damage.as_deref()
     }
 }

@@ -28,16 +28,12 @@ projects/aarch64-limine-microvm/tools/prepare_prebuilt.sh
 (cd user/lib && cargo make build-userlib-release-aarch64)
 (cd user/bin && cargo make build-release-aarch64)
 
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- image \
-  --project projects/aarch64-limine-microvm \
-  --release
+cargo scarlet image --project projects/aarch64-limine-microvm --release
 
 SCARLET_QEMU_ACCEL=tcg \
 SCARLET_QEMU_VIRTUALIZATION=1 \
 SCARLET_QEMU_SMP=1 \
-cargo run --manifest-path cargo-scarlet/Cargo.toml -- run \
-  --project projects/aarch64-limine-microvm \
-  --release
+cargo scarlet run --project projects/aarch64-limine-microvm --release
 ```
 
 `ARCH=aarch64 bash tools/linux/build_buildroot.sh` builds the AArch64 Buildroot
@@ -52,7 +48,7 @@ toolchain and rootfs tarball under `$BUILDROOT_DIR` and
 project-local copy is missing. The actual binaries under `prebuilt/system/` are
 ignored by git.
 
-After this setup, `cargo-scarlet image` and `cargo-scarlet run` use the
+After this setup, `cargo scarlet image` and `cargo scarlet run` use the
 project-local prebuilt artifacts and do not need to fetch Firecracker during
 image creation.
 
@@ -76,20 +72,12 @@ microVM documentation should prefer the explicit project-local flow above.
 The image configuration lives in `scarlet.toml`.
 
 - The Limine boot image is emitted under `.scarlet/images/`.
-- The initramfs is assembled from this project's `initramfs/` directory plus the
-  config inputs.
-- The rootfs is staged under `.scarlet/rootfs-stage/` by
-  `tools/build_rootfs_ext2.sh`.
+- The initramfs is assembled from the ordered layers in `scarlet.toml`.
+- The rootfs is assembled from the ordered layers in `scarlet.toml`.
 - MicroVM-specific guest artifacts live under `prebuilt/`; the binary payloads
   under `prebuilt/system/` are intentionally ignored by git.
 
-Current compatibility inputs come from repository-wide build outputs, declared
-in `scarlet.toml`:
-
-- `user/bin/dist/aarch64`
-- `mkfs/rootfs`
-- `mkfs/dist/modules/aarch64-unknown-none-elf`
-
-When moving more build steps local, prefer replacing those inputs with explicit
-project-local helper scripts or `cargo-scarlet` config rather than adding
-more top-level `cargo make` dependencies.
+Current userland inputs are declared in `scarlet.toml` as bundle and Cargo
+layers. When moving more build steps local, prefer replacing those inputs with
+explicit project-local helper scripts or `cargo-scarlet` config rather than
+adding more top-level `cargo make` dependencies.

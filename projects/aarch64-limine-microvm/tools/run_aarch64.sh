@@ -68,7 +68,7 @@ fi
 echo "Rebuilding microvm images from $KERNEL_PATH"
 if ! (
     cd "$PROJECT_ROOT" &&
-    cargo run --manifest-path "$PROJECT_ROOT/cargo-scarlet/Cargo.toml" -- image \
+    cargo scarlet image \
         --project "$PROJECT_DIR" \
         --release \
         --no-build \

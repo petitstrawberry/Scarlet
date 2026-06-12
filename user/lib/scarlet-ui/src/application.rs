@@ -288,8 +288,7 @@ pub trait Application: View {
                             pipeline.resize(new_size);
                             self.on_resize(width, height);
                             sync_text_input(&mut platform_window, &pipeline);
-                            if let Some(buffer) = pipeline.render() {
-                                platform_window.present(buffer);
+                            if present_pipeline(&mut pipeline, &mut platform_window) {
                                 presented_this_cycle = true;
                             }
                         }
@@ -305,8 +304,7 @@ pub trait Application: View {
                             }
                         }
                         if !presented_this_cycle && (resize_to.is_some() || pipeline.has_dirty()) {
-                            if let Some(buffer) = pipeline.render() {
-                                platform_window.present(buffer);
+                            if present_pipeline(&mut pipeline, &mut platform_window) {
                                 presented_this_cycle = true;
                             }
                         }
@@ -339,9 +337,8 @@ pub trait Application: View {
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle
                             && pipeline.has_dirty()
-                            && let Some(buffer) = pipeline.render()
+                            && present_pipeline(&mut pipeline, &mut platform_window)
                         {
-                            platform_window.present(buffer);
                             presented_this_cycle = true;
                         }
                     }
@@ -384,9 +381,8 @@ pub trait Application: View {
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle
                             && pipeline.has_dirty()
-                            && let Some(buffer) = pipeline.render()
+                            && present_pipeline(&mut pipeline, &mut platform_window)
                         {
-                            platform_window.present(buffer);
                             presented_this_cycle = true;
                         }
                     }
@@ -420,9 +416,8 @@ pub trait Application: View {
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle
                             && pipeline.has_dirty()
-                            && let Some(buffer) = pipeline.render()
+                            && present_pipeline(&mut pipeline, &mut platform_window)
                         {
-                            platform_window.present(buffer);
                             presented_this_cycle = true;
                         }
                     }
@@ -524,8 +519,7 @@ pub trait Application: View {
                                         "[Application] ActiveAppChanged triggered redraw, has_dirty=true"
                                     );
                                 }
-                                if let Some(buffer) = pipeline.render() {
-                                    platform_window.present(buffer);
+                                if present_pipeline(&mut pipeline, &mut platform_window) {
                                     presented_this_cycle = true;
                                 }
                             }
@@ -536,8 +530,7 @@ pub trait Application: View {
                         let _ = pipeline.handle_event(&event);
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle && pipeline.has_dirty() {
-                            if let Some(buffer) = pipeline.render() {
-                                platform_window.present(buffer);
+                            if present_pipeline(&mut pipeline, &mut platform_window) {
                                 presented_this_cycle = true;
                             }
                         }
@@ -580,9 +573,7 @@ pub trait Application: View {
                 if crate::debug::is_enabled() {
                     println!("[Application] has_dirty=true, calling render()");
                 }
-                if let Some(buffer) = pipeline.render() {
-                    platform_window.present(buffer);
-                }
+                let _ = present_pipeline(&mut pipeline, &mut platform_window);
             }
 
             // 6.4 Small sleep to prevent busy-waiting
@@ -607,6 +598,15 @@ fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
 fn sync_text_input(window: &mut SWSPlatformWindow, pipeline: &RenderingPipeline) {
     let state = pipeline.focused_text_input_state();
     window.sync_text_input(state.as_ref());
+}
+
+fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut SWSPlatformWindow) -> bool {
+    if let Some((buffer, damage)) = pipeline.render_with_damage() {
+        window.present_with_damage(buffer, damage);
+        true
+    } else {
+        false
+    }
 }
 
 struct ApplicationRootElement<A: Application + Clone> {
