@@ -28,6 +28,7 @@
 //! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
 //! - Session/Process Groups: CreateSession (26), GetSessionId (27),
 //!   GetProcessGroupId (28), SetProcessGroup (29)
+//! - Time: Sleep (20), MonotonicTime (35)
 //! - Basic I/O: Putchar (16), Getchar (17)
 //! - Random: GetRandom (22)
 //! - ABI Zone: RegisterAbiZone (90), UnregisterAbiZone (91)
@@ -114,9 +115,9 @@ use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
     sys_exit, sys_exit_group, sys_get_process_group_id, sys_get_session_id,
     sys_get_task_info_count, sys_get_task_info_list, sys_get_tls, sys_getchar, sys_getpid,
-    sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_set_process_group,
-    sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep, sys_thread_detach,
-    sys_thread_exit_cleanup, sys_unregister_abi_zone, sys_waitpid, sys_yield,
+    sys_getppid, sys_monotonic_time, sys_putchar, sys_register_abi_zone, sys_sbrk,
+    sys_set_process_group, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep,
+    sys_thread_detach, sys_thread_exit_cleanup, sys_unregister_abi_zone, sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -204,6 +205,7 @@ syscall_table! {
     SetTidAddress = 32 => sys_set_tid_address,
     ThreadDetach = 33 => sys_thread_detach,
     ThreadExitCleanup = 34 => sys_thread_exit_cleanup,
+    MonotonicTime = 35 => sys_monotonic_time,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

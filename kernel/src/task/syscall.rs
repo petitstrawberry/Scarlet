@@ -879,6 +879,21 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     0
 }
 
+/// Read the kernel monotonic clock.
+///
+/// Returns boot-relative monotonic time in nanoseconds. The value is derived
+/// from the platform architected timer and is suitable for elapsed-time
+/// measurement across scheduler migration on supported SMP platforms.
+///
+/// # Returns
+///
+/// Current monotonic time in nanoseconds since boot.
+pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    crate::time::current_time_ns() as usize
+}
+
 /// Yield execution to the scheduler
 ///
 /// This is a cooperative scheduling primitive similar to `sched_yield(2)`.

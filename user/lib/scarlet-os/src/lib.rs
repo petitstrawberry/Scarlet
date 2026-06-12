@@ -23,6 +23,9 @@ pub mod poll;
 /// Scarlet Native socket APIs.
 pub mod socket;
 
+/// Scarlet time APIs.
+pub mod time;
+
 pub use handle::{Handle, RawHandle};
 pub use ipc::SharedMemory;
 pub use socket::Socket;
