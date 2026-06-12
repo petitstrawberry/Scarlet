@@ -23,8 +23,12 @@
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
-use spin::{Mutex, RwLock};
+use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use core::{
+    mem,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use spin::{Lazy, Mutex, RwLock};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
@@ -50,8 +54,6 @@ use crate::{
     },
     object::capability::ControlOps,
 };
-use core::mem;
-
 // VirtIO Network Feature bits
 const VIRTIO_NET_F_CSUM: u32 = 0; // Device handles packets with partial checksum
 const VIRTIO_NET_F_GUEST_CSUM: u32 = 1; // Guest handles packets with partial checksum
@@ -81,6 +83,18 @@ const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
 
 // Default MTU if not specified
 const DEFAULT_MTU: usize = 1500;
+const RX_WORKER_QUEUE_LIMIT: usize = 256;
+
+struct QueuedRxPacket {
+    interface_name: String,
+    packet: DevicePacket,
+}
+
+static RX_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static RX_PACKET_QUEUE: Lazy<Mutex<VecDeque<QueuedRxPacket>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
+static RX_PACKET_WAKER: crate::sync::Waker =
+    crate::sync::Waker::new_uninterruptible("virtio-net-rx");
 
 /// VirtIO Network Device Configuration
 #[repr(C)]
@@ -89,6 +103,75 @@ pub struct VirtioNetConfig {
     pub status: u16,              // Status
     pub max_virtqueue_pairs: u16, // Maximum number of virtqueue pairs
     pub mtu: u16,                 // MTU
+}
+
+fn ensure_rx_worker_started() {
+    if RX_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let mut task =
+        crate::task::new_kernel_task(String::from("virtio-net-rx"), 1, virtio_net_rx_worker_entry);
+    task.init();
+    crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
+}
+
+fn virtio_net_rx_worker_entry() {
+    loop {
+        drain_queued_rx_packets();
+
+        let Some(task) = crate::task::mytask() else {
+            crate::arch::instruction::idle();
+            continue;
+        };
+
+        RX_PACKET_WAKER.wait(task.get_id(), task.get_trapframe());
+    }
+}
+
+fn drain_queued_rx_packets() {
+    let manager = crate::network::get_network_manager();
+
+    while let Some(queued) = pop_queued_rx_packet() {
+        manager.handle_received_packet(&queued.interface_name, &queued.packet);
+    }
+}
+
+fn pop_queued_rx_packet() -> Option<QueuedRxPacket> {
+    RX_PACKET_QUEUE.lock().pop_front()
+}
+
+fn enqueue_rx_packets(interface_name: String, packets: Vec<DevicePacket>) -> usize {
+    if packets.is_empty() {
+        return 0;
+    }
+
+    ensure_rx_worker_started();
+
+    let mut enqueued = 0usize;
+    {
+        let mut queue = RX_PACKET_QUEUE.lock();
+        for packet in packets {
+            if queue.len() >= RX_WORKER_QUEUE_LIMIT {
+                break;
+            }
+
+            queue.push_back(QueuedRxPacket {
+                interface_name: interface_name.clone(),
+                packet,
+            });
+            enqueued += 1;
+        }
+    }
+
+    if enqueued > 0 {
+        RX_PACKET_WAKER.wake_one();
+    }
+
+    enqueued
 }
 
 /// VirtIO Network Header (for packet transmission/reception)
@@ -224,6 +307,8 @@ impl VirtioNetDevice {
     }
 
     pub fn register_interface(self: &alloc::sync::Arc<Self>, name: &str) {
+        ensure_rx_worker_started();
+
         let manager = get_network_manager();
         let interface = alloc::sync::Arc::new(EthernetNetworkInterface::new(name, self.clone()));
 
@@ -605,38 +690,20 @@ impl InterruptCapableDevice for VirtioNetDevice {
         // crate::println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
-        loop {
-            let packets = self.process_received_packets().unwrap_or_default();
-            // crate::println!("[virtio-net] Processed {} packets", packets.len());
-            if packets.is_empty() {
-                break;
-            }
+        let packets = self.process_received_packets().unwrap_or_default();
+        if packets.is_empty() {
+            return Ok(());
+        }
 
-            let interface_name = self.interface_name.lock().clone();
-            // crate::println!("[virtio-net] Interface name: {:?}", interface_name);
-            if let Some(name) = interface_name {
-                // crate::println!(
-                //     "[virtio-net] Forwarding {} packets to interface {}",
-                //     packets.len(),
-                //     name
-                // );
-                let manager = crate::network::get_network_manager();
-                let mut inbound = 0usize;
-                for (i, packet) in packets.iter().enumerate() {
-                    // crate::println!("[virtio-net] Packet {}: {} bytes", i, packet.len);
-                    if packet.len >= 14 {
-                        let eth_type = u16::from_be_bytes([packet.data[12], packet.data[13]]);
-                        // crate::println!("[virtio-net]   EtherType: 0x{:04X}", eth_type);
-                        if eth_type == 0x0800 {
-                            inbound += 1;
-                        }
-                    }
-                    manager.handle_received_packet(&name, &packet);
-                }
-                // crate::println!("[virtio-net] Forwarded IPv4 packets: {}", inbound);
-            } else {
-                crate::println!("[virtio-net] No interface name set!");
+        if let Some(name) = self.interface_name.lock().clone() {
+            let received = packets.len();
+            let enqueued = enqueue_rx_packets(name, packets);
+            if enqueued < received {
+                let mut stats = self.stats.lock();
+                stats.dropped += (received - enqueued) as u64;
             }
+        } else {
+            crate::println!("[virtio-net] No interface name set!");
         }
 
         Ok(())
