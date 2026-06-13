@@ -1,6 +1,6 @@
 //! Window management module
 
-use std::handle::capability::memory_mapping::flags as mmap_flags;
+use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap};
 use std::ipc::{SharedMemory, permissions};
 use std::string::String;
 use std::vec::Vec;
@@ -326,6 +326,16 @@ impl Window {
         let (w, h) = self.size_limits.clamp(width, height);
         self.width = w;
         self.height = h;
+    }
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        if let (Some(addr), size) = (self.shm_mapped_addr.take(), self.shm_size)
+            && size != 0
+        {
+            let _ = munmap(addr, size);
+        }
     }
 }
 
@@ -916,6 +926,12 @@ impl WindowManager {
         shm_size: usize,
     ) -> bool {
         if let Some(w) = self.get_window_mut(id) {
+            if let (Some(old_addr), old_size) = (w.shm_mapped_addr.take(), w.shm_size)
+                && old_size != 0
+            {
+                let _ = munmap(old_addr, old_size);
+            }
+
             // IMPORTANT: Do not clamp here. The SHM buffer was already allocated
             // for the provided width/height by the IPC thread.
             w.width = width.max(1);

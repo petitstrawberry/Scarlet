@@ -1187,6 +1187,16 @@ impl Drop for VirtualMemoryManager {
             return;
         }
 
+        let memmap = {
+            let mut inner = self.inner.write();
+            core::mem::take(&mut inner.memmap)
+        };
+        for map in memmap.into_values() {
+            if let Some(owner) = map.owner {
+                owner.on_unmapped(map.vmarea.start, map.vmarea.size());
+            }
+        }
+
         let asid = self.get_asid();
         if asid != 0 && is_asid_used(asid) {
             free_virtual_address_space(asid);

@@ -1,7 +1,7 @@
 //! Surface (window buffer) management
 
 use crate::Error;
-use crate::os::{SharedMemory, mmap_flags, permissions};
+use crate::os::{SharedMemory, mmap_flags, munmap, permissions};
 
 /// A surface represents a drawable window buffer
 ///
@@ -70,6 +70,7 @@ impl Surface {
         shm: SharedMemory,
     ) -> Result<(), Error> {
         let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
+        let _ = munmap(self.buffer_ptr as usize, self.buffer_len);
         self.width = width;
         self.height = height;
         self.shm = shm;
@@ -173,5 +174,11 @@ impl Surface {
             chunk[3] = a;
         }
         self.dirty = true;
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        let _ = munmap(self.buffer_ptr as usize, self.buffer_len);
     }
 }
