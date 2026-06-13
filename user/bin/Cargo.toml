@@ -163,10 +163,6 @@ name = "pty_smoke"
 path = "src/pty_smoke.rs"
 
 [[bin]]
-name = "top"
-path = "src/top.rs"
-
-[[bin]]
 name = "mplayer"
 path = "src/mplayer.rs"
 
