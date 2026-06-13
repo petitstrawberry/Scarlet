@@ -1332,8 +1332,9 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     let ids = get_all_task_ids();
     let count = core::cmp::min(capacity, ids.len());
     let now_ns = crate::time::current_time_ns();
+    let mut written = 0;
 
-    for (i, task_id) in ids.iter().take(count).enumerate() {
+    for task_id in ids.iter().take(count) {
         let Some(target) = get_task_by_id(*task_id) else {
             continue;
         };
@@ -1388,10 +1389,12 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
                 core::mem::size_of::<TaskInfo>(),
             )
         };
-        let dest = buf_ptr + i * core::mem::size_of::<TaskInfo>();
+        let dest = buf_ptr + written * core::mem::size_of::<TaskInfo>();
         // Best-effort: skip on copy error.
-        let _ = copy_to_user(task, dest, info_bytes);
+        if copy_to_user(task, dest, info_bytes).is_ok() {
+            written += 1;
+        }
     }
 
-    count
+    written
 }
