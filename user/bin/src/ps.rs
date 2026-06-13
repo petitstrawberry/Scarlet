@@ -5,6 +5,7 @@
 //!   `ps -e`        — same as default (all processes)
 //!   `ps -l` / `ps --long`  — long format (PID, PPID, TGID, STAT, CPU, COMMAND, EXIT)
 //!   `ps -T`        — show threads (TGID column added)
+//!   `ps --idle`    — include per-CPU idle kernel tasks
 //!
 //! Sort options:
 //!   `ps -p`                        — sort by PID (default)
@@ -14,6 +15,7 @@
 //!   `ps --sort name`               — sort by command name
 //!   `ps --sort state`              — sort by state
 //!   `ps --sort type`               — sort by task type
+//!   `ps --sort time`               — sort by cumulative CPU time
 
 #![no_std]
 #![no_main]
@@ -32,6 +34,7 @@ enum SortKey {
     Name,
     State,
     Type,
+    Time,
 }
 
 fn parse_sort_key(s: &str) -> SortKey {
@@ -41,8 +44,28 @@ fn parse_sort_key(s: &str) -> SortKey {
         "name" => SortKey::Name,
         "state" => SortKey::State,
         "type" => SortKey::Type,
+        "time" => SortKey::Time,
         _ => SortKey::Pid,
     }
+}
+
+fn format_time_ns(ns: u64) -> std::string::String {
+    let total_ms = ns / 1_000_000;
+    let ms = total_ms % 1000;
+    let total_secs = total_ms / 1000;
+    let secs = total_secs % 60;
+    let mins = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
+
+    if hours > 0 {
+        format!("{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+    } else {
+        format!("{:02}:{:02}.{:03}", mins, secs, ms)
+    }
+}
+
+fn is_idle_task(task: &std::task::TaskInfo) -> bool {
+    task.task_type() == TaskType::Kernel && task.name().starts_with("idle")
 }
 
 /// Short STAT representation (default format).
@@ -91,6 +114,7 @@ fn apply_sort(tasks: &mut [std::task::TaskInfo], key: SortKey, ascending: bool) 
             SortKey::Name => a.name().cmp(b.name()),
             SortKey::State => format!("{}", a.state()).cmp(&format!("{}", b.state())),
             SortKey::Type => format!("{}", a.task_type()).cmp(&format!("{}", b.task_type())),
+            SortKey::Time => a.cpu_time_ns().cmp(&b.cpu_time_ns()),
         };
         dir(primary).then_with(|| a.pid().cmp(&b.pid()))
     });
@@ -102,6 +126,7 @@ fn main() -> i32 {
 
     let long = args.iter().any(|a| a == "-l" || a == "--long");
     let show_threads = args.iter().any(|a| a == "-T" || a == "--threads");
+    let show_idle = args.iter().any(|a| a == "--idle");
 
     // Parse sort key
     let mut sort_key = SortKey::Pid;
@@ -122,6 +147,9 @@ fn main() -> i32 {
     }
 
     let mut tasks = task::info();
+    if !show_idle {
+        tasks.retain(|t| !is_idle_task(t));
+    }
 
     if tasks.is_empty() {
         println!("No tasks found.");
@@ -131,12 +159,13 @@ fn main() -> i32 {
     apply_sort(&mut tasks, sort_key, sort_ascending);
 
     if long {
-        // ── Long format: PID PPID TGID STAT CPU COMMAND EXIT ──
+        // ── Long format: PID PPID TGID STAT CPU TIME COMMAND EXIT ──
         let mut max_pid = 3;
         let mut max_ppid = 4;
         let mut max_tgid = 4;
         let mut max_cmd = 7;
         let mut max_cpu = 4; // "CPU" header
+        let mut max_time = 4; // "TIME" header
 
         for t in &tasks {
             max_pid = max_pid.max(format!("{}", t.pid()).len());
@@ -144,21 +173,24 @@ fn main() -> i32 {
             max_tgid = max_tgid.max(format!("{}", t.tgid()).len());
             max_cmd = max_cmd.max(t.name().len());
             max_cpu = max_cpu.max(format!("CPU{}", t.cpu()).len());
+            max_time = max_time.max(format_time_ns(t.cpu_time_ns()).len());
         }
 
         println!(
-            "{:>w_pid$} {:>w_ppid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:<w_cmd$} {}",
+            "{:>w_pid$} {:>w_ppid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$} {}",
             "PID",
             "PPID",
             "TGID",
             "STAT",
             "CPU",
+            "TIME",
             "COMMAND",
             "EXIT",
             w_pid = max_pid,
             w_ppid = max_ppid,
             w_tgid = max_tgid,
             w_cpu = max_cpu,
+            w_time = max_time,
             w_cmd = max_cmd,
         );
 
@@ -170,96 +202,110 @@ fn main() -> i32 {
             };
             let stat = format_stat_long(t.state(), t.task_type());
             println!(
-                "{:>w_pid$} {:>w_ppid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:<w_cmd$} {}",
+                "{:>w_pid$} {:>w_ppid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$} {}",
                 t.pid(),
                 t.ppid(),
                 t.tgid(),
                 stat,
                 format!("CPU{}", t.cpu()),
+                format_time_ns(t.cpu_time_ns()),
                 t.name(),
                 exit_str,
                 w_pid = max_pid,
                 w_ppid = max_ppid,
                 w_tgid = max_tgid,
                 w_cpu = max_cpu,
+                w_time = max_time,
                 w_cmd = max_cmd,
             );
         }
     } else if show_threads {
-        // ── Thread format: PID TGID STAT CPU COMMAND ──
+        // ── Thread format: PID TGID STAT CPU TIME COMMAND ──
         let mut max_pid = 3;
         let mut max_tgid = 4;
         let mut max_cmd = 7;
         let mut max_cpu = 4;
+        let mut max_time = 4;
 
         for t in &tasks {
             max_pid = max_pid.max(format!("{}", t.pid()).len());
             max_tgid = max_tgid.max(format!("{}", t.tgid()).len());
             max_cmd = max_cmd.max(t.name().len());
             max_cpu = max_cpu.max(format!("CPU{}", t.cpu()).len());
+            max_time = max_time.max(format_time_ns(t.cpu_time_ns()).len());
         }
 
         println!(
-            "{:>w_pid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:<w_cmd$}",
+            "{:>w_pid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$}",
             "PID",
             "TGID",
             "STAT",
             "CPU",
+            "TIME",
             "COMMAND",
             w_pid = max_pid,
             w_tgid = max_tgid,
             w_cpu = max_cpu,
+            w_time = max_time,
             w_cmd = max_cmd,
         );
 
         for t in &tasks {
             let stat = format_stat(t.state());
             println!(
-                "{:>w_pid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:<w_cmd$}",
+                "{:>w_pid$} {:>w_tgid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$}",
                 t.pid(),
                 t.tgid(),
                 stat,
                 format!("CPU{}", t.cpu()),
+                format_time_ns(t.cpu_time_ns()),
                 t.name(),
                 w_pid = max_pid,
                 w_tgid = max_tgid,
                 w_cpu = max_cpu,
+                w_time = max_time,
                 w_cmd = max_cmd,
             );
         }
     } else {
-        // ── Default format: PID STAT CPU COMMAND ──
+        // ── Default format: PID STAT CPU TIME COMMAND ──
         let mut max_pid = 3;
         let mut max_cmd = 7;
         let mut max_cpu = 4;
+        let mut max_time = 4;
 
         for t in &tasks {
             max_pid = max_pid.max(format!("{}", t.pid()).len());
             max_cmd = max_cmd.max(t.name().len());
             max_cpu = max_cpu.max(format!("CPU{}", t.cpu()).len());
+            max_time = max_time.max(format_time_ns(t.cpu_time_ns()).len());
         }
 
         println!(
-            "{:>w_pid$} {:<5} {:<w_cpu$} {:<w_cmd$}",
+            "{:>w_pid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$}",
             "PID",
             "STAT",
             "CPU",
+            "TIME",
             "COMMAND",
             w_pid = max_pid,
             w_cpu = max_cpu,
+            w_time = max_time,
             w_cmd = max_cmd,
         );
 
         for t in &tasks {
             let stat = format_stat(t.state());
             println!(
-                "{:>w_pid$} {:<5} {:<w_cpu$} {:<w_cmd$}",
+                "{:>w_pid$} {:<5} {:<w_cpu$} {:>w_time$} {:<w_cmd$}",
                 t.pid(),
                 stat,
                 format!("CPU{}", t.cpu()),
+                format_time_ns(t.cpu_time_ns()),
                 t.name(),
                 w_pid = max_pid,
                 w_cpu = max_cpu,
+                w_time = max_time,
                 w_cmd = max_cmd,
             );
         }

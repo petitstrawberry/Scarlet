@@ -47,6 +47,7 @@ pub struct SWSPlatformWindow {
     left_alt_pressed: bool,
     right_alt_pressed: bool,
     text_input: Option<TextInputContext>,
+    needs_full_present: bool,
 }
 
 impl SWSPlatformWindow {
@@ -192,6 +193,7 @@ impl SWSPlatformWindow {
             left_alt_pressed: false,
             right_alt_pressed: false,
             text_input: None,
+            needs_full_present: false,
         })
     }
 
@@ -624,6 +626,7 @@ impl PlatformWindow for SWSPlatformWindow {
             left_alt_pressed: false,
             right_alt_pressed: false,
             text_input: None,
+            needs_full_present: false,
         })
     }
 
@@ -661,6 +664,12 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) {
+        let damage = if self.needs_full_present {
+            None
+        } else {
+            damage
+        };
+
         if damage.is_some_and(|rects| rects.is_empty()) {
             return;
         }
@@ -692,6 +701,8 @@ impl PlatformWindow for SWSPlatformWindow {
                 let _ = self.conn.commit(self.surface_id);
             }
         };
+
+        self.needs_full_present = false;
     }
 
     fn set_title(&mut self, title: &str) {
@@ -714,18 +725,22 @@ impl PlatformWindow for SWSPlatformWindow {
             height: height as f32,
         };
 
-        if self.current_size == new_size {
-            return Ok(());
-        }
-
         let physical_width = self.logical_to_physical_len(width);
         let physical_height = self.logical_to_physical_len(height);
+        if self.current_size == new_size
+            && let Some(surface) = self.conn.surface(self.surface_id)
+            && surface.width() == physical_width
+            && surface.height() == physical_height
+        {
+            return Ok(());
+        }
 
         self.conn
             .resize_window(self.surface_id, physical_width, physical_height)
             .map_err(|_| crate::error::Error::IoError)?;
 
         self.current_size = new_size;
+        self.needs_full_present = true;
         Ok(())
     }
 
@@ -857,6 +872,7 @@ impl PlatformWindow for SWSPlatformWindow {
             left_alt_pressed: false,
             right_alt_pressed: false,
             text_input: None,
+            needs_full_present: false,
         })
     }
 

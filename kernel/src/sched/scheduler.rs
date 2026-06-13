@@ -52,7 +52,7 @@ use crate::{
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
-    timer::get_kernel_timer,
+    timer::{get_kernel_timer, get_time_ns},
 };
 
 use crate::task::Task;
@@ -398,6 +398,19 @@ static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Scheduler CPU accounting snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuUsageSnapshot {
+    /// Number of CPUs currently known to the scheduler.
+    pub online_cpus: usize,
+    /// Cumulative non-idle CPU time in nanoseconds.
+    pub busy_time_ns: u64,
+    /// Cumulative idle task CPU time in nanoseconds.
+    pub idle_time_ns: u64,
+}
 
 pub fn note_idle_to_user_handoff(cpu_id: usize, task_id: usize) {
     if cpu_id < MAX_NUM_CPUS {
@@ -496,6 +509,73 @@ fn release_deferred_prev(cpu_id: usize) {
         if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
             push_ready_task(cpu_id, prev_id);
         }
+    }
+}
+
+fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
+    if delta_ns == 0 {
+        return;
+    }
+
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    if idle_id != 0 && task_id == idle_id {
+        TOTAL_IDLE_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
+    } else {
+        TOTAL_BUSY_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
+    }
+}
+
+fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usize>) {
+    if old_id == next_id {
+        return;
+    }
+
+    let now_ns = get_time_ns();
+
+    if let Some(old_id) = old_id {
+        if let Some(task) = TaskPool::get_task(old_id) {
+            let delta_ns = task.stop_cpu_accounting(now_ns);
+            charge_finished_cpu_time(cpu_id, old_id, delta_ns);
+        }
+    }
+
+    if let Some(next_id) = next_id {
+        if let Some(task) = TaskPool::get_task(next_id) {
+            task.start_cpu_accounting(now_ns);
+        }
+    }
+}
+
+/// Return a system-wide CPU accounting snapshot.
+///
+/// # Returns
+///
+/// Cumulative busy and idle CPU time, including currently running task deltas.
+pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
+    let now_ns = get_time_ns();
+    let mut busy_time_ns = TOTAL_BUSY_CPU_TIME_NS.load(Ordering::SeqCst);
+    let mut idle_time_ns = TOTAL_IDLE_CPU_TIME_NS.load(Ordering::SeqCst);
+
+    for_each_online_cpu(|cpu_id| {
+        let Some(task_id) = current_task_id(cpu_id) else {
+            return;
+        };
+        let Some(task) = TaskPool::get_task(task_id) else {
+            return;
+        };
+        let delta_ns = task.current_cpu_delta_ns(now_ns);
+        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+        if idle_id != 0 && task_id == idle_id {
+            idle_time_ns = idle_time_ns.saturating_add(delta_ns);
+        } else {
+            busy_time_ns = busy_time_ns.saturating_add(delta_ns);
+        }
+    });
+
+    CpuUsageSnapshot {
+        online_cpus: num_online_cpus(),
+        busy_time_ns,
+        idle_time_ns,
     }
 }
 
@@ -777,6 +857,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     }
 
     let Some(next_id) = next_id else {
+        account_task_switch(cpu_id, old_id, None);
         set_current_task_id(cpu_id, None);
         return (old_id, None);
     };
@@ -802,6 +883,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         }
     }
 
+    account_task_switch(cpu_id, old_id, Some(next_id));
     set_current_task_id(cpu_id, Some(next_id));
     if DEBUG_SMP_TASK_FLOW {
         let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
@@ -1167,6 +1249,7 @@ pub fn remove_task_from_queues(task_id: usize) {
 
 /// Get IDs of all tasks across scheduler-visible queues/state.
 pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
+    let _irq_guard = IrqGuard::new();
     let mut ids = alloc::vec::Vec::new();
 
     for_each_online_cpu(|cpu_id| {
@@ -1364,6 +1447,8 @@ pub fn reset() {
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
     }
+    TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
+    TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
     get_task_pool().reset();

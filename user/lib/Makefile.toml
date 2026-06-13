@@ -202,7 +202,16 @@ script = [
     "cd ../framebuffer && cargo clean",
     "cd ../gpu && cargo clean",
     "cd ../sws-protocol && cargo clean",
+    "cd ../sws-client && cargo clean",
+    "cd ../scarlet-ui && cargo clean",
+    "cd ../scarlet-ui-macros && cargo clean",
+    "cd ../sas-protocol && cargo clean",
+    "cd ../sas-client && cargo clean",
+    "cd ../sbus && cargo clean",
+    "cd ../sbus-client && cargo clean",
     "cd ../scarlet-desktop-config && cargo clean",
+    "cd ../scarlet-youtube-net && cargo clean",
+    "cd ../slint-scarlet && cargo clean",
     "cd ../scpm && cargo clean"
 ]
 

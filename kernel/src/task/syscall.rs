@@ -28,8 +28,8 @@ use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
 use crate::sched::scheduler::{
-    cleanup_zombie, enqueue_task, get_all_task_ids, get_task_by_id, register_task,
-    remove_task_from_queues, schedule,
+    cleanup_zombie, cpu_usage_snapshot, enqueue_task, get_all_task_ids, get_task_by_id,
+    register_task, remove_task_from_queues, schedule,
 };
 use crate::task::{
     CloneFlags, CloneFlagsDef, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
@@ -894,6 +894,48 @@ pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
     crate::time::current_time_ns() as usize
 }
 
+/// Read cumulative system-wide CPU usage accounting.
+///
+/// # Arguments
+/// * `trapframe.get_arg(0)` - pointer to a writable `CpuUsageInfo` buffer.
+///
+/// # Returns
+/// `0` on success, or `usize::MAX` on copy failure.
+pub fn sys_get_cpu_usage_info(trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::copy_to_user;
+    use crate::task::CpuUsageInfo;
+
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    let snapshot = cpu_usage_snapshot();
+    let total_time_ns = snapshot.busy_time_ns.saturating_add(snapshot.idle_time_ns);
+    let usage_per_mille = if total_time_ns == 0 {
+        0
+    } else {
+        ((snapshot.busy_time_ns as u128 * 1000) / total_time_ns as u128) as u32
+    };
+    let info = CpuUsageInfo {
+        online_cpus: snapshot.online_cpus,
+        busy_time_ns: snapshot.busy_time_ns,
+        idle_time_ns: snapshot.idle_time_ns,
+        total_time_ns,
+        usage_per_mille,
+        _reserved: 0,
+    };
+
+    let info_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const CpuUsageInfo as *const u8,
+            core::mem::size_of::<CpuUsageInfo>(),
+        )
+    };
+    match copy_to_user(task, trapframe.get_arg(0), info_bytes) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
 /// Yield execution to the scheduler
 ///
 /// This is a cooperative scheduling primitive similar to `sched_yield(2)`.
@@ -1289,6 +1331,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
 
     let ids = get_all_task_ids();
     let count = core::cmp::min(capacity, ids.len());
+    let now_ns = crate::time::current_time_ns();
 
     for (i, task_id) in ids.iter().take(count).enumerate() {
         let Some(target) = get_task_by_id(*task_id) else {
@@ -1336,6 +1379,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             exit_status,
             tgid,
             name,
+            cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
         };
 
         let info_bytes = unsafe {

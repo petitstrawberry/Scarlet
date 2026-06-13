@@ -651,7 +651,7 @@ impl Compositor {
         }
     }
 
-    fn add_exposed_resize_damage(
+    fn add_resize_replacement_damage(
         &mut self,
         old_rect: (i32, i32, u32, u32),
         new_rect: (i32, i32, u32, u32),
@@ -664,26 +664,14 @@ impl Compositor {
         let new_x1 = nx.saturating_add(nw as i32);
         let new_y1 = ny.saturating_add(nh as i32);
 
-        let ix0 = ox.max(nx);
-        let iy0 = oy.max(ny);
-        let ix1 = old_x1.min(new_x1);
-        let iy1 = old_y1.min(new_y1);
+        let x0 = ox.min(nx);
+        let y0 = oy.min(ny);
+        let x1 = old_x1.max(new_x1);
+        let y1 = old_y1.max(new_y1);
 
-        if ix1 <= ix0 || iy1 <= iy0 {
-            self.add_pending_damage(old_rect);
-            return;
+        if x1 > x0 && y1 > y0 {
+            self.add_pending_damage((x0, y0, (x1 - x0) as u32, (y1 - y0) as u32));
         }
-
-        let mut add_rect = |x0: i32, y0: i32, x1: i32, y1: i32| {
-            if x1 > x0 && y1 > y0 {
-                self.add_pending_damage((x0, y0, (x1 - x0) as u32, (y1 - y0) as u32));
-            }
-        };
-
-        add_rect(ox, oy, old_x1, iy0);
-        add_rect(ox, iy1, old_x1, old_y1);
-        add_rect(ox, iy0, ix0, iy1);
-        add_rect(ix1, iy0, old_x1, iy1);
     }
 
     /// Initialize display (clear screen and draw cursor)
@@ -3282,7 +3270,7 @@ impl Compositor {
                         if let Some(w) = self.window_manager.get_window(window_id) {
                             let rect = (w.x, w.y, w.width, w.height);
                             if let Some(old_rect) = old_rect {
-                                self.add_exposed_resize_damage(old_rect, rect);
+                                self.add_resize_replacement_damage(old_rect, rect);
                             }
                         }
                     }

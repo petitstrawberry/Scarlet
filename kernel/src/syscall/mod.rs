@@ -113,7 +113,7 @@ use crate::object::handle::syscall::{
 use crate::random::sys_get_random;
 use crate::task::syscall::{
     sys_brk, sys_clone, sys_create_namespace, sys_create_session, sys_execve, sys_execve_abi,
-    sys_exit, sys_exit_group, sys_get_process_group_id, sys_get_session_id,
+    sys_exit, sys_exit_group, sys_get_cpu_usage_info, sys_get_process_group_id, sys_get_session_id,
     sys_get_task_info_count, sys_get_task_info_list, sys_get_tls, sys_getchar, sys_getpid,
     sys_getppid, sys_monotonic_time, sys_putchar, sys_register_abi_zone, sys_sbrk,
     sys_set_process_group, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep,
@@ -206,6 +206,7 @@ syscall_table! {
     ThreadDetach = 33 => sys_thread_detach,
     ThreadExitCleanup = 34 => sys_thread_exit_cleanup,
     MonotonicTime = 35 => sys_monotonic_time,
+    GetCpuUsageInfo = 36 => sys_get_cpu_usage_info,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

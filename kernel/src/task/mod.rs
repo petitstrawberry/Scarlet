@@ -48,7 +48,9 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
@@ -66,8 +68,9 @@ pub type KernelContextMutex = SpinMutex<KernelContext>;
 /// This is a fixed-size, `#[repr(C)]` structure so that the kernel and user
 /// library can agree on the layout without sharing a header.
 ///
-/// Future fields can be appended without breaking backward compatibility
-/// (user space simply reads fewer bytes on older kernels).
+/// Kernel and user space must agree on this layout because
+/// `GetTaskInfoList` does not take a per-entry size argument. Append fields
+/// only as part of a coordinated kernel/user ABI update.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct TaskInfo {
@@ -92,11 +95,35 @@ pub struct TaskInfo {
     pub tgid: usize,
     /// Null-terminated task name (truncated to fit).
     pub name: [u8; 64],
+    /// Cumulative CPU time consumed by this task, in nanoseconds.
+    pub cpu_time_ns: u64,
 }
 
 impl TaskInfo {
     /// Maximum task name length (excluding null terminator).
     pub const NAME_CAP: usize = 63;
+}
+
+/// Snapshot of system-wide CPU usage exposed to user space.
+///
+/// All time fields are cumulative nanoseconds since scheduler accounting
+/// started. `busy_time_ns + idle_time_ns` is the accounted CPU capacity across
+/// all online CPUs.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct CpuUsageInfo {
+    /// Number of CPUs currently known to the scheduler.
+    pub online_cpus: usize,
+    /// Cumulative non-idle CPU time in nanoseconds.
+    pub busy_time_ns: u64,
+    /// Cumulative idle task CPU time in nanoseconds.
+    pub idle_time_ns: u64,
+    /// Total accounted CPU time in nanoseconds.
+    pub total_time_ns: u64,
+    /// Busy percentage in permille (1000 = 100.0%).
+    pub usage_per_mille: u32,
+    /// Reserved for future use.
+    pub _reserved: u32,
 }
 
 /// Global registry of task-specific wakers for waitpid
@@ -438,6 +465,10 @@ pub struct Task {
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
+    /// Cumulative CPU time charged to this task, in nanoseconds.
+    pub cpu_time_ns: AtomicU64,
+    /// Monotonic timestamp at which the current CPU run began.
+    cpu_run_start_ns: AtomicU64,
     /// Stack size in bytes
     pub stack_size: AtomicUsize,
     /// Data segment size in bytes
@@ -619,6 +650,8 @@ impl Task {
             priority: AtomicU32::new(priority),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
+            cpu_time_ns: AtomicU64::new(0),
+            cpu_run_start_ns: AtomicU64::new(0),
             stack_size: AtomicUsize::new(0),
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
@@ -681,6 +714,67 @@ impl Task {
             self.default_time_slice.load(Ordering::SeqCst),
             Ordering::SeqCst,
         );
+    }
+
+    /// Mark the task as running for CPU accounting.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    pub fn start_cpu_accounting(&self, now_ns: u64) {
+        self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+    }
+
+    /// Stop charging CPU time to this task and return the elapsed delta.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The nanoseconds charged by this stop operation.
+    pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
+        let start_ns = self.cpu_run_start_ns.swap(0, Ordering::SeqCst);
+        if start_ns == 0 {
+            return 0;
+        }
+        let delta_ns = now_ns.saturating_sub(start_ns);
+        self.cpu_time_ns.fetch_add(delta_ns, Ordering::SeqCst);
+        delta_ns
+    }
+
+    /// Return the current CPU time snapshot for this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Cumulative CPU time, including the current running interval if any.
+    pub fn cpu_time_snapshot_ns(&self, now_ns: u64) -> u64 {
+        self.cpu_time_ns
+            .load(Ordering::SeqCst)
+            .saturating_add(self.current_cpu_delta_ns(now_ns))
+    }
+
+    /// Return the current uncommitted running interval for this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Nanoseconds elapsed since the task was last scheduled in.
+    pub fn current_cpu_delta_ns(&self, now_ns: u64) -> u64 {
+        let start_ns = self.cpu_run_start_ns.load(Ordering::SeqCst);
+        if start_ns == 0 {
+            0
+        } else {
+            now_ns.saturating_sub(start_ns)
+        }
     }
 
     pub fn get_id(&self) -> usize {

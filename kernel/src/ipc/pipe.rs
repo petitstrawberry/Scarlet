@@ -375,18 +375,32 @@ impl PipeObject for PipeEndpoint {
 
 impl Drop for PipeEndpoint {
     fn drop(&mut self) {
-        let mut state = self.data.state.lock();
+        let (wake_readers, wake_writers) = {
+            let mut state = self.data.state.lock();
 
-        if self.can_read {
-            state.reader_count = state.reader_count.saturating_sub(1);
-        }
-        if self.can_write {
-            state.writer_count = state.writer_count.saturating_sub(1);
-        }
+            if self.can_read {
+                state.reader_count = state.reader_count.saturating_sub(1);
+            }
+            if self.can_write {
+                state.writer_count = state.writer_count.saturating_sub(1);
+            }
 
-        if state.reader_count == 0 && state.writer_count == 0 {
-            state.closed = true;
-            state.buffer.clear();
+            let wake_readers = self.can_write && state.writer_count == 0;
+            let wake_writers = self.can_read && state.reader_count == 0;
+
+            if state.reader_count == 0 && state.writer_count == 0 {
+                state.closed = true;
+                state.buffer.clear();
+            }
+
+            (wake_readers, wake_writers)
+        };
+
+        if wake_readers {
+            self.data.read_waker.wake_all();
+        }
+        if wake_writers {
+            self.data.write_waker.wake_all();
         }
     }
 }

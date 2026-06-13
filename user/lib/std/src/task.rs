@@ -837,6 +837,7 @@ pub struct TaskInfo {
     exit_status: i32,
     tgid: usize,
     name: crate::string::String,
+    cpu_time_ns: u64,
 }
 
 impl TaskInfo {
@@ -872,6 +873,43 @@ impl TaskInfo {
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// Cumulative CPU time consumed by this task, in nanoseconds.
+    pub fn cpu_time_ns(&self) -> u64 {
+        self.cpu_time_ns
+    }
+}
+
+/// System-wide CPU usage snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuUsageInfo {
+    online_cpus: usize,
+    busy_time_ns: u64,
+    idle_time_ns: u64,
+    total_time_ns: u64,
+    usage_per_mille: u32,
+}
+
+impl CpuUsageInfo {
+    /// Number of CPUs currently known to the scheduler.
+    pub fn online_cpus(&self) -> usize {
+        self.online_cpus
+    }
+    /// Cumulative non-idle CPU time in nanoseconds.
+    pub fn busy_time_ns(&self) -> u64 {
+        self.busy_time_ns
+    }
+    /// Cumulative idle task CPU time in nanoseconds.
+    pub fn idle_time_ns(&self) -> u64 {
+        self.idle_time_ns
+    }
+    /// Total accounted CPU capacity in nanoseconds.
+    pub fn total_time_ns(&self) -> u64 {
+        self.total_time_ns
+    }
+    /// Busy CPU usage in permille (1000 = 100.0%).
+    pub fn usage_per_mille(&self) -> u32 {
+        self.usage_per_mille
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +932,19 @@ pub struct RawTaskInfo {
     pub exit_status: i32,
     pub tgid: usize,
     pub name: [u8; 64],
+    pub cpu_time_ns: u64,
+}
+
+/// Opaque raw CPU usage layout shared with the kernel (`#[repr(C)]`).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct RawCpuUsageInfo {
+    pub online_cpus: usize,
+    pub busy_time_ns: u64,
+    pub idle_time_ns: u64,
+    pub total_time_ns: u64,
+    pub usage_per_mille: u32,
+    pub _reserved: u32,
 }
 
 impl RawTaskInfo {
@@ -915,6 +966,19 @@ impl RawTaskInfo {
             exit_status: self.exit_status,
             tgid: self.tgid,
             name,
+            cpu_time_ns: self.cpu_time_ns,
+        }
+    }
+}
+
+impl RawCpuUsageInfo {
+    fn decode(&self) -> CpuUsageInfo {
+        CpuUsageInfo {
+            online_cpus: self.online_cpus,
+            busy_time_ns: self.busy_time_ns,
+            idle_time_ns: self.idle_time_ns,
+            total_time_ns: self.total_time_ns,
+            usage_per_mille: self.usage_per_mille,
         }
     }
 }
@@ -946,7 +1010,7 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
     let total = syscall0(Syscall::GetTaskInfoCount);
     let mut buf = crate::vec![RawTaskInfo {
         pid: 0, ppid: 0, state: 0, task_type: 0, cpu_id: 0,
-        _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64],
+        _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64], cpu_time_ns: 0,
     }; total];
     let n = syscall2(
         Syscall::GetTaskInfoList,
@@ -955,4 +1019,29 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
     );
     buf.truncate(n);
     buf
+}
+
+/// Collect a system-wide CPU usage snapshot.
+///
+/// # Returns
+///
+/// CPU usage accounting if the kernel successfully wrote the snapshot.
+pub fn cpu_usage() -> Option<CpuUsageInfo> {
+    let mut raw = RawCpuUsageInfo {
+        online_cpus: 0,
+        busy_time_ns: 0,
+        idle_time_ns: 0,
+        total_time_ns: 0,
+        usage_per_mille: 0,
+        _reserved: 0,
+    };
+    let ret = syscall1(
+        Syscall::GetCpuUsageInfo,
+        &mut raw as *mut RawCpuUsageInfo as usize,
+    );
+    if ret == usize::MAX {
+        None
+    } else {
+        Some(raw.decode())
+    }
 }

@@ -1313,25 +1313,7 @@ impl Connection {
                     width,
                     height,
                 } => break (window_id, shm_size, width, height),
-                ServerMessage::ScreenSizeChanged { width, height } => {
-                    self.pending_events
-                        .push(Event::ScreenSizeChanged { width, height });
-                }
-                ServerMessage::OutputScaleChanged { scale_milli } => {
-                    self.pending_events
-                        .push(Event::OutputScaleChanged { scale_milli });
-                }
-                ServerMessage::WindowConfigure {
-                    window_id,
-                    width,
-                    height,
-                } => {
-                    self.pending_events.push(Event::SurfaceConfigure {
-                        surface_id: window_id,
-                        width,
-                        height,
-                    });
-                }
+                message if self.queue_async_message(message) => {}
                 _ => {
                     self.socket
                         .set_nonblocking(true)

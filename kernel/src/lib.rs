@@ -304,7 +304,7 @@ use crate::{
 use arch::get_cpu;
 use core::sync::atomic::{Ordering, compiler_fence, fence};
 use mem::allocator::init_heap;
-use sched::scheduler::{add_task, get_task_by_id, start_scheduler};
+use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_scheduler};
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
@@ -688,6 +688,12 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     lsm::symbol::init_kernel_symbols();
 
+    /* Create and register init before driver workers can consume PID 1. */
+    early_println!("[boot] Creating initial user task...");
+    let mut init_task = new_user_task("init".to_string(), 0);
+    init_task.init();
+    let init_task_id = register_task(init_task);
+
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_manager();
@@ -835,11 +841,8 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
-    /* Make init task */
-    println!("[boot] Creating initial user task...");
-    let mut task = new_user_task("init".to_string(), 0);
-
-    task.init();
+    /* Set up init task */
+    let task = get_task_by_id(init_task_id).expect("init task must be registered");
     *task.vfs.write() = Some(manager.clone());
     task.vfs
         .read()
@@ -874,7 +877,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
             println!("[Scarlet Kernel] Adding init task to scheduler...");
             let cpu_id = get_cpu().get_cpuid();
             println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
-            add_task(task, cpu_id);
+            enqueue_task(init_task_id, cpu_id);
             println!("[Scarlet Kernel] Init task added to scheduler");
         }
         Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
