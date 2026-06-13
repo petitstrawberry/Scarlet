@@ -35,3 +35,9 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "netcfg"
 to = "/system/scarlet/bin/netcfg"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "watch"
+to = "/system/scarlet/bin/watch"

@@ -42,6 +42,10 @@ name = "rm"
 path = "src/rm.rs"
 
 [[bin]]
+name = "watch"
+path = "src/watch.rs"
+
+[[bin]]
 name = "env_test"
 path = "src/env_test.rs"
 
