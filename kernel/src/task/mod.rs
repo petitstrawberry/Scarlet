@@ -102,8 +102,8 @@ impl TaskInfo {
 /// Global registry of task-specific wakers for waitpid
 static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
-/// Note: TASK_ID has been moved to TaskPool::next_id for better ID management
-/// including recycling of freed task IDs. Use TaskPool::allocate_id() instead.
+/// Note: task ID counters live in `TaskPool` for better ID management,
+/// including recycling of freed task IDs.
 ///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit

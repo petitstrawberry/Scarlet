@@ -65,6 +65,7 @@ use crate::task::Task;
 ///       TaskPool to use Arc<Task> for safe sharing across threads/contexts.
 ///       This would also eliminate the fixed-size limitation.
 pub const MAX_TASKS: usize = 1024;
+const KERNEL_TASK_ID_START: usize = MAX_TASKS - 128;
 
 /// Global task pool storing all tasks
 /// Using spin::Once with Box-ed tasks array to avoid large stack usage.
@@ -119,13 +120,15 @@ pub struct TaskPool {
     // be distinguished from stale deferred references.
     slot_generations: Box<[AtomicUsize; MAX_TASKS]>,
 
-    // Free list of recyclable task IDs
-    // IDs are added here when tasks are removed
-    free_ids: spin::Mutex<VecDeque<usize>>,
+    // Free lists of recyclable task IDs. User task IDs are kept in the low range
+    // so init remains PID 1 even if kernel workers are created early.
+    free_user_ids: spin::Mutex<VecDeque<usize>>,
+    free_kernel_ids: spin::Mutex<VecDeque<usize>>,
 
-    // Next ID to allocate when free list is empty
-    // Atomic is sufficient for lock-free allocation
-    next_id: core::sync::atomic::AtomicUsize,
+    // Next IDs to allocate when free lists are empty. Kernel workers allocate
+    // downward from the high reserved range.
+    next_user_id: core::sync::atomic::AtomicUsize,
+    next_kernel_id: core::sync::atomic::AtomicUsize,
 }
 
 impl TaskPool {
@@ -147,31 +150,60 @@ impl TaskPool {
         TaskPool {
             tasks: spin::Mutex::new(tasks),
             slot_generations: Box::new([const { AtomicUsize::new(0) }; MAX_TASKS]),
-            free_ids: spin::Mutex::new(VecDeque::new()),
-            next_id: core::sync::atomic::AtomicUsize::new(1), // Start from 1, ID 0 is invalid
+            free_user_ids: spin::Mutex::new(VecDeque::new()),
+            free_kernel_ids: spin::Mutex::new(VecDeque::new()),
+            next_user_id: core::sync::atomic::AtomicUsize::new(1), // Start from 1, ID 0 is invalid
+            next_kernel_id: core::sync::atomic::AtomicUsize::new(MAX_TASKS - 1),
         }
     }
 
     /// Allocate a new task ID
     /// Tries to reuse freed IDs first, then allocates new ones sequentially
     /// Uses atomic operations for lock-free allocation
-    pub fn allocate_id(&self) -> Option<usize> {
+    pub fn allocate_id(&self, task_type: crate::task::TaskType) -> Option<usize> {
+        match task_type {
+            crate::task::TaskType::Kernel => self.allocate_kernel_id(),
+            crate::task::TaskType::User => self.allocate_user_id(),
+        }
+    }
+
+    fn allocate_user_id(&self) -> Option<usize> {
         // Try to reuse freed IDs first
         {
-            let mut free_ids = self.free_ids.lock();
-            if let Some(id) = free_ids.pop_front() {
+            let mut free_user_ids = self.free_user_ids.lock();
+            if let Some(id) = free_user_ids.pop_front() {
                 return Some(id);
             }
         }
 
         // Allocate new ID using atomic fetch_add
         let id = self
-            .next_id
+            .next_user_id
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if id >= MAX_TASKS {
+        if id >= KERNEL_TASK_ID_START {
             // Rollback on overflow
-            self.next_id
+            self.next_user_id
                 .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+            None
+        } else {
+            Some(id)
+        }
+    }
+
+    fn allocate_kernel_id(&self) -> Option<usize> {
+        {
+            let mut free_kernel_ids = self.free_kernel_ids.lock();
+            if let Some(id) = free_kernel_ids.pop_front() {
+                return Some(id);
+            }
+        }
+
+        let id = self
+            .next_kernel_id
+            .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        if id < KERNEL_TASK_ID_START {
+            self.next_kernel_id
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             None
         } else {
             Some(id)
@@ -182,7 +214,9 @@ impl TaskPool {
     /// Allocates an ID, sets it on the task, and returns the ID
     fn add_task(&self, mut task: Task) -> Result<usize, &'static str> {
         // Allocate ID for this task
-        let task_id = self.allocate_id().ok_or("Task pool exhausted")?;
+        let task_id = self
+            .allocate_id(task.task_type)
+            .ok_or("Task pool exhausted")?;
 
         // Add to the pool at the allocated index BEFORE registering namespace mapping
         if task_id >= MAX_TASKS {
@@ -303,8 +337,10 @@ impl TaskPool {
             return None;
         }
         let task = tasks[task_id].take().unwrap();
-        let mut free_ids = self.free_ids.lock();
-        free_ids.push_back(task_id);
+        match task.task_type {
+            crate::task::TaskType::Kernel => self.free_kernel_ids.lock().push_back(task_id),
+            crate::task::TaskType::User => self.free_user_ids.lock().push_back(task_id),
+        }
         Some(task)
     }
 
@@ -340,11 +376,15 @@ impl TaskPool {
         }
         drop(tasks);
 
-        // Reset ID allocation to start from 1
-        self.next_id.store(1, core::sync::atomic::Ordering::Relaxed);
+        // Reset ID allocation to start from each range's beginning
+        self.next_user_id
+            .store(1, core::sync::atomic::Ordering::Relaxed);
+        self.next_kernel_id
+            .store(MAX_TASKS - 1, core::sync::atomic::Ordering::Relaxed);
 
-        // Clear free list
-        self.free_ids.lock().clear();
+        // Clear free lists
+        self.free_user_ids.lock().clear();
+        self.free_kernel_ids.lock().clear();
     }
 }
 
