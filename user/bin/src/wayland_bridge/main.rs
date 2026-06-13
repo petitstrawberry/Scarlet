@@ -330,10 +330,10 @@ impl WaylandBridge {
         // Send REGISTER_EXTENSION message
         let extension_name = b"wayland_bridge";
         let payload = protocol_sws::payload_register_extension(extension_name);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::REGISTER_EXTENSION,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::REGISTER_EXTENSION,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -604,7 +604,7 @@ impl WaylandBridge {
                 break;
             }
             let payload = &self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len];
-            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type, payload) {
+            if let Ok(msg) = protocol_sws::parse_server_message(header.msg_type_u32(), payload) {
                 match msg {
                     protocol_sws::ServerMessage::InputEvent {
                         window_id,
@@ -776,10 +776,10 @@ impl WaylandBridge {
             // Send EXTENSION_CREATE_WINDOW message
             let payload =
                 protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-            let header = protocol_sws::MessageHeader {
-                msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-                payload_size: payload.len() as u32,
-            };
+            let header = protocol_sws::MessageHeader::new(
+                protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+                payload.len() as u32,
+            );
 
             let mut msg_bytes = Vec::new();
             msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -894,10 +894,10 @@ impl WaylandBridge {
             // Send EXTENSION_CREATE_WINDOW message
             let payload =
                 protocol_sws::payload_extension_create_window(wl_surface_id, width, height);
-            let header = protocol_sws::MessageHeader {
-                msg_type: protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
-                payload_size: payload.len() as u32,
-            };
+            let header = protocol_sws::MessageHeader::new(
+                protocol_sws::client_msg::EXTENSION_CREATE_WINDOW,
+                payload.len() as u32,
+            );
 
             let mut msg_bytes = Vec::new();
             msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1233,10 +1233,10 @@ impl WaylandBridge {
         payload.extend_from_slice(&width.to_le_bytes());
         payload.extend_from_slice(&height.to_le_bytes());
 
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::EXTENSION_UPDATE_BUFFER,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::EXTENSION_UPDATE_BUFFER,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1258,10 +1258,10 @@ impl WaylandBridge {
         );
 
         let payload = protocol_sws::payload_request_move_window(window_id);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::REQUEST_MOVE_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1280,10 +1280,10 @@ impl WaylandBridge {
         bridge_log!("[Bridge] Sending MINIMIZE_WINDOW for window {}", window_id);
 
         let payload = protocol_sws::payload_minimize_window(window_id);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::MINIMIZE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::MINIMIZE_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1302,10 +1302,10 @@ impl WaylandBridge {
         bridge_log!("[Bridge] Sending MAXIMIZE_WINDOW for window {}", window_id);
 
         let payload = protocol_sws::payload_maximize_window(window_id);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::MAXIMIZE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::MAXIMIZE_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1324,10 +1324,10 @@ impl WaylandBridge {
         bridge_log!("[Bridge] Sending RESTORE_WINDOW for window {}", window_id);
 
         let payload = protocol_sws::payload_restore_window(window_id);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::RESTORE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::RESTORE_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1346,10 +1346,10 @@ impl WaylandBridge {
         bridge_log!("[Bridge] Sending DESTROY_WINDOW for window {}", window_id);
 
         let payload = protocol_sws::payload_destroy_window(window_id);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::DESTROY_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::DESTROY_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -1401,10 +1401,10 @@ impl WaylandBridge {
         let payload = protocol_sws::payload_extension_attach_buffer(
             surface_id, window_id, width, height, offset, stride, format, shm_size,
         );
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::EXTENSION_ATTACH_BUFFER,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::EXTENSION_ATTACH_BUFFER,
+            payload.len() as u32,
+        );
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
         msg_bytes.extend_from_slice(&payload);
@@ -1451,10 +1451,10 @@ impl WaylandBridge {
 
         // Send RESIZE_WINDOW message
         let payload = protocol_sws::payload_resize_window(window_id, new_width, new_height);
-        let header = protocol_sws::MessageHeader {
-            msg_type: protocol_sws::client_msg::RESIZE_WINDOW,
-            payload_size: payload.len() as u32,
-        };
+        let header = protocol_sws::MessageHeader::new(
+            protocol_sws::client_msg::RESIZE_WINDOW,
+            payload.len() as u32,
+        );
 
         let mut msg_bytes = Vec::new();
         msg_bytes.extend_from_slice(&header.to_le_bytes());
@@ -3051,7 +3051,7 @@ impl WaylandBridge {
                         header_bytes.copy_from_slice(&buf[0..8]);
                         let header = protocol_sws::MessageHeader::from_le_bytes(header_bytes);
 
-                        if header.msg_type == protocol_sws::server_msg::EXTENSION_INPUT_EVENT
+                        if header.msg_type_u32() == protocol_sws::server_msg::EXTENSION_INPUT_EVENT
                             && n >= 32
                         {
                             // Parse EXTENSION_INPUT_EVENT

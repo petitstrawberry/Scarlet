@@ -2,7 +2,7 @@
 
 This document describes the wire protocol used between the Scarlet Window Server (`sws`) and clients.
 
-The canonical implementation is the `sws_protocol` crate located at `user/lib/sws_protocol`.
+The canonical implementation is the `sws_protocol` crate located at `user/lib/sws-protocol`.
 
 Client-side reference implementations:
 
@@ -44,8 +44,30 @@ The header is always **8 bytes**:
 
 | Offset | Size | Field         | Type | Notes |
 |--------|------|---------------|------|-------|
-| 0      | 4    | `msg_type`     | u32  | Message type ID |
+| 0      | 2    | `msg_type`     | u16  | Message type ID |
+| 2      | 1    | `flags`        | u8   | Routing flags |
+| 3      | 1    | `request_id`   | u8   | Per-connection request ID |
 | 4      | 4    | `payload_size` | u32  | Payload length in bytes |
+
+Defined header flags:
+
+| Flag | Name | Meaning |
+|------|------|---------|
+| `0x01` | `IS_RESPONSE` | This frame is a server response to a client request. |
+
+`request_id` is scoped to a single socket connection. A client sets a non-zero
+`request_id` on requests that expect a synchronous response. The server copies
+that ID into the matching response frame and sets `IS_RESPONSE`.
+
+`request_id = 0` is reserved for unrouted, fire-and-forget traffic. Direct
+protocol senders inside the tree may use it when they do not need strict
+response correlation.
+
+Clients must not identify a synchronous response by message type alone. A client
+waiting for a synchronous reply must keep reading frames until it receives a
+frame with both `IS_RESPONSE` set and the expected `request_id`. Non-response
+frames received while waiting are asynchronous events and should be queued for
+normal dispatch.
 
 ### Payload
 
@@ -184,7 +206,7 @@ Semantics:
 
 - Request a window buffer resize for a window owned by the calling client.
 - The server **must** validate that `window_id` belongs to the requesting client and **must reject** the request if the window is not owned by that client.
-- For valid requests, the server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle.
+- For valid requests, the server allocates a new shared-memory buffer and responds with `WINDOW_RESIZED` + new SHM handle. The `WINDOW_RESIZED` frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 
 #### `GET_SCREEN_SIZE` (type = 10)
 
@@ -193,7 +215,7 @@ Payload: empty.
 Semantics:
 
 - Request the current compositor display size in pixels.
-- The server responds with `SCREEN_SIZE`.
+- The server responds with `SCREEN_SIZE`. The response frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 
 #### `SET_WINDOW_SIZE_LIMITS` (type = 16)
 
@@ -308,7 +330,7 @@ Semantics:
 - Registers the calling client as an extension server.
 - Extension servers can create windows on behalf of external clients (e.g., Wayland clients).
 - Extension servers receive special input event notifications.
-- The server responds with `EXTENSION_REGISTERED` containing an assigned extension ID.
+- The server responds with `EXTENSION_REGISTERED` containing an assigned extension ID. The response frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 
 #### `EXTENSION_CREATE_WINDOW` (type = 101)
 
@@ -327,7 +349,7 @@ Semantics:
 - Creates a window associated with an external client.
 - The `external_client_id` is an opaque identifier chosen by the extension.
 - Input events for this window are delivered to the extension via `EXTENSION_INPUT_EVENT`.
-- The server responds with `WINDOW_CREATED` + SHM handle as usual.
+- The server responds with `WINDOW_CREATED` + SHM handle as usual. The `WINDOW_CREATED` frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 
 #### `EXTENSION_UPDATE_BUFFER` (type = 102)
 
@@ -362,7 +384,8 @@ All text is UTF-8. Offsets are byte offsets into that UTF-8 text.
 | 0      | 4    | `window_id` | u32  |
 | 4      | 4    | `seat_id`   | u32  |
 
-The server responds with `TEXT_INPUT_CREATED`.
+The server responds with `TEXT_INPUT_CREATED`. The response frame is marked
+`IS_RESPONSE` and carries the request's `request_id`.
 
 Fixed-size context messages:
 
@@ -420,7 +443,9 @@ SWS does not define language-specific input modes. An IME may report an opaque `
 | 4      | 4    | `name_len`     | u32  |
 | 8      | N    | `name`         | bytes |
 
-The server responds with `IME_REGISTERED`. The first registered IME becomes active automatically; `IME_SET_ACTIVE` can switch the active IME.
+The server responds with `IME_REGISTERED`. The response frame is marked
+`IS_RESPONSE` and carries the request's `request_id`. The first registered IME
+becomes active automatically; `IME_SET_ACTIVE` can switch the active IME.
 
 Fixed-size IME messages:
 
@@ -503,6 +528,9 @@ Composition states: `DISABLED`, `DIRECT`, `COMPOSING`, `CANDIDATES`. Status flag
 
 #### `WINDOW_CREATED` (type = 10)
 
+When sent as the result of `CREATE_WINDOW` or `EXTENSION_CREATE_WINDOW`, this is
+a response frame: `IS_RESPONSE` is set and `request_id` matches the request.
+
 Payload (12 bytes):
 
 | Offset | Size | Field       | Type | Notes |
@@ -534,6 +562,10 @@ Payload (16 bytes):
 Payload (at least 4 bytes): `code: u32`
 
 #### `WINDOW_RESIZED` (type = 14)
+
+When sent as the result of `RESIZE_WINDOW`, this is a response frame:
+`IS_RESPONSE` is set and `request_id` matches the request. Resize/configure
+notifications sent asynchronously must not set `IS_RESPONSE`.
 
 Payload (20 bytes):
 
@@ -578,6 +610,7 @@ Payload (8 bytes):
 Semantics:
 
 - Sent in response to `GET_SCREEN_SIZE`.
+- The frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 - Reports the current compositor display size in pixels.
 
 #### `SCREEN_SIZE_CHANGED` (type = 22)
@@ -609,6 +642,7 @@ Payload (4 bytes):
 Semantics:
 
 - Sent in response to `REGISTER_EXTENSION`.
+- The frame is marked `IS_RESPONSE` and carries the request's `request_id`.
 - Confirms successful extension registration.
 - The `extension_id` is a unique identifier for this extension instance.
 
@@ -642,6 +676,9 @@ Semantics:
 | 0      | 4    | `context_id` | u32  |
 | 4      | 4    | `serial`     | u32  |
 
+When sent in response to `TEXT_INPUT_CREATE`, this frame is marked
+`IS_RESPONSE` and carries the request's `request_id`.
+
 Variable text events:
 
 | Message | Type | Header Fields | Bytes |
@@ -661,7 +698,9 @@ Toolkits should apply preedit/commit/delete messages in order and treat `TEXT_IN
 
 #### Input Method Service Events (types = 220-226)
 
-`IME_REGISTERED` (220), payload 4 bytes: `ime_id: u32`.
+`IME_REGISTERED` (220), payload 4 bytes: `ime_id: u32`. When sent in response
+to `IME_REGISTER`, this frame is marked `IS_RESPONSE` and carries the request's
+`request_id`.
 
 `IME_ACTIVATE` (221) and `IME_CONTEXT_STATE` (223) share the same variable payload:
 
@@ -719,9 +758,13 @@ SWS withholds a key event from the application while it is pending IME arbitrati
 
 The Extension API allows specialized bridge servers (like the Wayland bridge) to create and manage windows on behalf of external clients.
 
-- The protocol currently has no explicit version field. Changes to message layouts should be made carefully.
-- Prefer adding new message types over changing existing payload formats.
-- When changing payload formats is unavoidable, introduce a new message type ID and keep the old one for compatibility.
+- The protocol currently has no explicit version field.
+- The current wire format is the request-routed 8-byte header described above:
+  `msg_type: u16`, `flags: u8`, `request_id: u8`, `payload_size: u32`.
+- The older `msg_type: u32`, `payload_size: u32` header is not supported.
+- Because SWS is still an internal protocol, incompatible wire changes may be
+  made across the tree without preserving old-client compatibility. Update
+  `sws_protocol`, `sws-client`, SWS, and direct protocol users together.
 
 ### Use Cases
 

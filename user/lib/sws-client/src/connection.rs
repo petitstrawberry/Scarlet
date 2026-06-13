@@ -57,7 +57,7 @@ struct FrameReader {
     header: [u8; protocol::MessageHeader::SIZE],
     header_filled: usize,
     header_parsed: bool,
-    msg_type: u32,
+    header_value: protocol::MessageHeader,
     payload_len: usize,
     payload: Vec<u8>,
     payload_filled: usize,
@@ -69,7 +69,7 @@ impl FrameReader {
             header: [0u8; protocol::MessageHeader::SIZE],
             header_filled: 0,
             header_parsed: false,
-            msg_type: 0,
+            header_value: protocol::MessageHeader::new(0, 0),
             payload_len: 0,
             payload: Vec::new(),
             payload_filled: 0,
@@ -79,7 +79,7 @@ impl FrameReader {
     fn reset(&mut self) {
         self.header_filled = 0;
         self.header_parsed = false;
-        self.msg_type = 0;
+        self.header_value = protocol::MessageHeader::new(0, 0);
         self.payload_len = 0;
         self.payload.clear();
         self.payload_filled = 0;
@@ -89,7 +89,7 @@ impl FrameReader {
         &mut self,
         socket: &mut Socket,
         out_payload: &mut Vec<u8>,
-    ) -> Result<Option<u32>, Error> {
+    ) -> Result<Option<protocol::MessageHeader>, Error> {
         loop {
             if !self.header_parsed {
                 match socket_read(socket, &mut self.header[self.header_filled..]) {
@@ -103,7 +103,7 @@ impl FrameReader {
                         if payload_len > protocol::MAX_PAYLOAD_SIZE {
                             return Err(Error::ProtocolError);
                         }
-                        self.msg_type = header.msg_type;
+                        self.header_value = header;
                         self.payload_len = payload_len;
                         self.payload.clear();
                         if payload_len > 0 {
@@ -113,9 +113,9 @@ impl FrameReader {
                         self.header_parsed = true;
                         if payload_len == 0 {
                             out_payload.clear();
-                            let msg_type = self.msg_type;
+                            let header = self.header_value;
                             self.reset();
-                            return Ok(Some(msg_type));
+                            return Ok(Some(header));
                         }
                     }
                     Err(Error::WouldBlock) => return Ok(None),
@@ -132,9 +132,9 @@ impl FrameReader {
                         }
                         out_payload.clear();
                         out_payload.extend_from_slice(&self.payload);
-                        let msg_type = self.msg_type;
+                        let header = self.header_value;
                         self.reset();
-                        return Ok(Some(msg_type));
+                        return Ok(Some(header));
                     }
                     Err(Error::WouldBlock) => return Ok(None),
                     Err(error) => return Err(error),
@@ -160,7 +160,10 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Error> {
+fn read_frame_into(
+    socket: &mut Socket,
+    payload: &mut Vec<u8>,
+) -> Result<protocol::MessageHeader, Error> {
     let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
     read_exact(socket, &mut header_bytes)?;
 
@@ -177,15 +180,23 @@ fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Er
         read_exact(socket, payload)?;
     }
 
-    Ok(header.msg_type)
+    Ok(header)
 }
 
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), Error> {
+    write_frame_routed(socket, msg_type, 0, 0, payload)
+}
+
+fn write_frame_routed(
+    socket: &mut Socket,
+    msg_type: u32,
+    flags: u8,
+    request_id: u8,
+    payload: &[u8],
+) -> Result<(), Error> {
     // Write header + payload directly to avoid allocating a temporary Vec.
-    let header = protocol::MessageHeader {
-        msg_type,
-        payload_size: payload.len() as u32,
-    };
+    let header =
+        protocol::MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
     let header_bytes = header.to_le_bytes();
     write_all(socket, &header_bytes)?;
     if !payload.is_empty() {
@@ -206,6 +217,7 @@ pub struct Connection {
     pending_head: usize,
     read_payload: Vec<u8>,
     frame_reader: FrameReader,
+    next_request_id: u8,
 }
 
 impl Connection {
@@ -251,7 +263,43 @@ impl Connection {
             pending_head: 0,
             read_payload: Vec::new(),
             frame_reader: FrameReader::new(),
+            next_request_id: 1,
         })
+    }
+
+    fn alloc_request_id(&mut self) -> u8 {
+        let request_id = self.next_request_id.max(1);
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        if self.next_request_id == 0 {
+            self.next_request_id = 1;
+        }
+        request_id
+    }
+
+    fn send_request(&mut self, msg_type: u32, payload: &[u8]) -> Result<u8, Error> {
+        let request_id = self.alloc_request_id();
+        write_frame_routed(&mut self.socket, msg_type, 0, request_id, payload)
+            .map_err(|_| Error::SendFailed)?;
+        Ok(request_id)
+    }
+
+    fn read_response_for(&mut self, request_id: u8) -> Result<ServerMessage, Error> {
+        loop {
+            let header = read_frame_into(&mut self.socket, &mut self.read_payload)
+                .map_err(|_| Error::ReceiveFailed)?;
+            let message = protocol::parse_server_message(header.msg_type_u32(), &self.read_payload)
+                .map_err(|_| Error::InvalidResponse)?;
+
+            if header.is_response() && header.request_id == request_id {
+                return Ok(message);
+            }
+
+            if self.queue_async_message(message) {
+                continue;
+            }
+
+            return Err(Error::InvalidResponse);
+        }
     }
 
     /// Create a text-input context for a surface.
@@ -261,32 +309,15 @@ impl Connection {
         seat_id: u32,
     ) -> Result<(u32, u32), Error> {
         let payload = protocol::payload_text_input_create(surface_id, seat_id);
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::TEXT_INPUT_CREATE,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::TEXT_INPUT_CREATE, &payload)?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let result = (|| loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
-
-            match response {
-                ServerMessage::TextInputCreated { context_id, serial } => {
-                    return Ok((context_id, serial));
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    return Err(Error::InvalidResponse);
-                }
-            }
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::TextInputCreated { context_id, serial } => Ok((context_id, serial)),
+            _ => Err(Error::InvalidResponse),
         })();
 
         self.restore_nonblocking(result)
@@ -394,32 +425,15 @@ impl Connection {
     /// Register this connection as an input method service.
     pub fn register_input_method(&mut self, name: &str, capabilities: u32) -> Result<u32, Error> {
         let payload = protocol::payload_ime_register(name.as_bytes(), capabilities);
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::IME_REGISTER,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::IME_REGISTER, &payload)?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let result = (|| loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
-
-            match response {
-                ServerMessage::ImeRegistered { ime_id } => {
-                    return Ok(ime_id);
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    return Err(Error::InvalidResponse);
-                }
-            }
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::ImeRegistered { ime_id } => Ok(ime_id),
+            _ => Err(Error::InvalidResponse),
         })();
 
         self.restore_nonblocking(result)
@@ -440,39 +454,28 @@ impl Connection {
     ///
     /// List of input methods currently registered with SWS.
     pub fn get_input_methods(&mut self) -> Result<Vec<InputMethodInfo>, Error> {
-        write_frame(&mut self.socket, protocol::client_msg::IME_GET_METHODS, &[])
-            .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::IME_GET_METHODS, &[])?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let result = (|| loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
-
-            match response {
-                ServerMessage::ImeMethods => {
-                    let methods = protocol::parse_ime_methods_payload(&self.read_payload)
-                        .map_err(|_| Error::InvalidResponse)?;
-                    return Ok(methods
-                        .into_iter()
-                        .map(|method| InputMethodInfo {
-                            ime_id: method.ime_id,
-                            name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
-                                .into_owned(),
-                            capabilities: method.capabilities,
-                            active: method.active,
-                        })
-                        .collect());
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    return Err(Error::InvalidResponse);
-                }
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::ImeMethods => {
+                let methods = protocol::parse_ime_methods_payload(&self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
+                Ok(methods
+                    .into_iter()
+                    .map(|method| InputMethodInfo {
+                        ime_id: method.ime_id,
+                        name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
+                            .into_owned(),
+                        capabilities: method.capabilities,
+                        active: method.active,
+                    })
+                    .collect())
             }
+            _ => Err(Error::InvalidResponse),
         })();
 
         self.restore_nonblocking(result)
@@ -484,36 +487,25 @@ impl Connection {
     ///
     /// Active input method information, or `None` when no IME is active.
     pub fn get_active_input_method(&mut self) -> Result<Option<InputMethodInfo>, Error> {
-        write_frame(&mut self.socket, protocol::client_msg::IME_GET_ACTIVE, &[])
-            .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::IME_GET_ACTIVE, &[])?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let result = (|| loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
-
-            match response {
-                ServerMessage::ImeActive => {
-                    let method = protocol::parse_ime_active_payload(&self.read_payload)
-                        .map_err(|_| Error::InvalidResponse)?;
-                    return Ok(method.map(|method| InputMethodInfo {
-                        ime_id: method.ime_id,
-                        name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
-                            .into_owned(),
-                        capabilities: method.capabilities,
-                        active: method.active,
-                    }));
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    return Err(Error::InvalidResponse);
-                }
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::ImeActive => {
+                let method = protocol::parse_ime_active_payload(&self.read_payload)
+                    .map_err(|_| Error::InvalidResponse)?;
+                Ok(method.map(|method| InputMethodInfo {
+                    ime_id: method.ime_id,
+                    name: String::from_utf8_lossy(&method.name[..method.name_len as usize])
+                        .into_owned(),
+                    capabilities: method.capabilities,
+                    active: method.active,
+                }))
             }
+            _ => Err(Error::InvalidResponse),
         })();
 
         self.restore_nonblocking(result)
@@ -735,12 +727,7 @@ impl Connection {
             active_on_focus,
         );
         // println!("[sws-client] Creating surface: payload size {}", payload.len());
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::CREATE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::CREATE_WINDOW, &payload)?;
 
         // Block until we receive the response
         // Temporarily set blocking mode for synchronous create
@@ -749,21 +736,12 @@ impl Connection {
             .map_err(|_| Error::SocketConfig)?;
 
         let result = (|| {
-            let (surface_id, _shm_size) = loop {
-                let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                    .map_err(|_| Error::ReceiveFailed)?;
-
-                let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                    .map_err(|_| Error::InvalidResponse)?;
-
-                match response {
-                    ServerMessage::WindowCreated {
-                        window_id,
-                        shm_size,
-                    } => break (window_id, shm_size),
-                    message if self.queue_async_message(message) => {}
-                    _ => return Err(Error::InvalidResponse),
-                }
+            let (surface_id, _shm_size) = match self.read_response_for(request_id)? {
+                ServerMessage::WindowCreated {
+                    window_id,
+                    shm_size,
+                } => (window_id, shm_size),
+                _ => return Err(Error::InvalidResponse),
             };
 
             // Receive SHM handle (out-of-band)
@@ -813,33 +791,19 @@ impl Connection {
             y,
         );
         // println!("[sws-client] Creating surface: payload size {}", payload.len());
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::CREATE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::CREATE_WINDOW, &payload)?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
         let result = (|| {
-            let (surface_id, _shm_size) = loop {
-                let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                    .map_err(|_| Error::ReceiveFailed)?;
-
-                let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                    .map_err(|_| Error::InvalidResponse)?;
-
-                match response {
-                    ServerMessage::WindowCreated {
-                        window_id,
-                        shm_size,
-                    } => break (window_id, shm_size),
-                    message if self.queue_async_message(message) => {}
-                    _ => return Err(Error::InvalidResponse),
-                }
+            let (surface_id, _shm_size) = match self.read_response_for(request_id)? {
+                ServerMessage::WindowCreated {
+                    window_id,
+                    shm_size,
+                } => (window_id, shm_size),
+                _ => return Err(Error::InvalidResponse),
             };
 
             let shm_handle = self
@@ -1288,38 +1252,25 @@ impl Connection {
         }
 
         let payload = protocol::payload_resize_window(surface_id, width, height);
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::RESIZE_WINDOW,
-            &payload,
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::RESIZE_WINDOW, &payload)?;
 
         // Block until we receive WINDOW_RESIZED + SHM handle.
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let (window_id, _shm_size, new_w, new_h) = loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
-
-            match response {
-                ServerMessage::WindowResized {
-                    window_id,
-                    shm_size,
-                    width,
-                    height,
-                } => break (window_id, shm_size, width, height),
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    self.socket
-                        .set_nonblocking(true)
-                        .map_err(|_| Error::SocketConfig)?;
-                    return Err(Error::InvalidResponse);
-                }
+        let (window_id, _shm_size, new_w, new_h) = match self.read_response_for(request_id)? {
+            ServerMessage::WindowResized {
+                window_id,
+                shm_size,
+                width,
+                height,
+            } => (window_id, shm_size, width, height),
+            _ => {
+                self.socket
+                    .set_nonblocking(true)
+                    .map_err(|_| Error::SocketConfig)?;
+                return Err(Error::InvalidResponse);
             }
         };
 
@@ -1367,8 +1318,13 @@ impl Connection {
                 .frame_reader
                 .poll(&mut self.socket, &mut self.read_payload)
             {
-                Ok(Some(msg_type)) => {
-                    if let Ok(msg) = protocol::parse_server_message(msg_type, &self.read_payload) {
+                Ok(Some(header)) => {
+                    if header.is_response() {
+                        continue;
+                    }
+                    if let Ok(msg) =
+                        protocol::parse_server_message(header.msg_type_u32(), &self.read_payload)
+                    {
                         match msg {
                             ServerMessage::InputEvent {
                                 window_id,
@@ -1877,102 +1833,53 @@ impl Connection {
     ///
     /// This is a synchronous request: it blocks until the server responds with SCREEN_SIZE.
     pub fn get_screen_size(&mut self) -> Result<(u32, u32), Error> {
-        // Send GET_SCREEN_SIZE request (no payload)
-        write_frame(&mut self.socket, protocol::client_msg::GET_SCREEN_SIZE, &[])
-            .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::GET_SCREEN_SIZE, &[])?;
 
-        // Switch to blocking mode for synchronous response
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::ScreenSize { width, height } => Ok((width, height)),
+            _ => Err(Error::InvalidResponse),
+        })();
 
-            match response {
-                ServerMessage::ScreenSize { width, height } => {
-                    // Restore non-blocking mode
-                    let _ = self.socket.set_nonblocking(true);
-                    return Ok((width, height));
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    // Restore non-blocking mode
-                    let _ = self.socket.set_nonblocking(true);
-                    return Err(Error::InvalidResponse);
-                }
-            }
-        }
+        self.restore_nonblocking(result)
     }
 
     /// Get the output scale in milli-units.
     ///
     /// This is a synchronous request: it blocks until the server responds with OUTPUT_SCALE.
     pub fn get_output_scale(&mut self) -> Result<u32, Error> {
-        write_frame(
-            &mut self.socket,
-            protocol::client_msg::GET_OUTPUT_SCALE,
-            &[],
-        )
-        .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::GET_OUTPUT_SCALE, &[])?;
 
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        loop {
-            let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-                .map_err(|_| Error::ReceiveFailed)?;
-            let response = protocol::parse_server_message(msg_type, &self.read_payload)
-                .map_err(|_| Error::InvalidResponse)?;
+        let result = (|| match self.read_response_for(request_id)? {
+            ServerMessage::OutputScale { scale_milli } => Ok(scale_milli.max(1)),
+            _ => Err(Error::InvalidResponse),
+        })();
 
-            match response {
-                ServerMessage::OutputScale { scale_milli } => {
-                    let _ = self.socket.set_nonblocking(true);
-                    return Ok(scale_milli.max(1));
-                }
-                message if self.queue_async_message(message) => {}
-                _ => {
-                    let _ = self.socket.set_nonblocking(true);
-                    return Err(Error::InvalidResponse);
-                }
-            }
-        }
+        self.restore_nonblocking(result)
     }
 
     /// Get the list of all windows.
     ///
     /// This is a synchronous request: it blocks until the server responds with WINDOW_LIST.
     pub fn get_window_list(&mut self) -> Result<Vec<WindowListEntry>, Error> {
-        // Send GET_WINDOW_LIST request (no payload)
-        write_frame(&mut self.socket, protocol::client_msg::GET_WINDOW_LIST, &[])
-            .map_err(|_| Error::SendFailed)?;
+        let request_id = self.send_request(protocol::client_msg::GET_WINDOW_LIST, &[])?;
 
-        // Switch to blocking mode for synchronous response
         self.socket
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        // Wait for WINDOW_LIST response
-        let msg_type = read_frame_into(&mut self.socket, &mut self.read_payload)
-            .map_err(|_| Error::ReceiveFailed)?;
-
-        let response = protocol::parse_server_message(msg_type, &self.read_payload)
-            .map_err(|_| Error::InvalidResponse)?;
-
-        match response {
+        let result = (|| match self.read_response_for(request_id)? {
             ServerMessage::WindowList => {
-                // Use protocol library's parser
                 let windows = protocol::parse_window_list_payload(&self.read_payload)
                     .map_err(|_| Error::InvalidResponse)?;
 
-                // Restore non-blocking mode
-                let _ = self.socket.set_nonblocking(true);
-
-                // Convert protocol::WindowListEntry to sws_client::WindowListEntry
                 Ok(windows
                     .into_iter()
                     .map(|w| WindowListEntry {
@@ -1986,12 +1893,10 @@ impl Connection {
                     })
                     .collect())
             }
-            _ => {
-                // Restore non-blocking mode
-                let _ = self.socket.set_nonblocking(true);
-                Err(Error::InvalidResponse)
-            }
-        }
+            _ => Err(Error::InvalidResponse),
+        })();
+
+        self.restore_nonblocking(result)
     }
 
     /// Check if there are pending events

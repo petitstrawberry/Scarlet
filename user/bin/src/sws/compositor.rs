@@ -2,7 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
-use super::ipc::{IpcEvent, IpcServer, send_message_to_client};
+use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_client};
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
@@ -3753,16 +3753,20 @@ impl Compositor {
                     // No redraw needed, just state change
                 }
             }
-            IpcEvent::GetScreenSize { client_id } => {
+            IpcEvent::GetScreenSize {
+                client_id,
+                request_id,
+            } => {
                 println!(
                     "[Compositor] GetScreenSize request from client {}",
                     client_id
                 );
                 let payload =
                     sws_protocol::payload_screen_size(self.screen_width, self.screen_height);
-                super::ipc::send_message_to_client(
+                super::ipc::send_response_to_client(
                     client_id,
                     sws_protocol::server_msg::SCREEN_SIZE,
+                    request_id,
                     payload.to_vec(),
                 );
                 println!(
@@ -3770,15 +3774,19 @@ impl Compositor {
                     self.screen_width, self.screen_height, client_id
                 );
             }
-            IpcEvent::GetOutputScale { client_id } => {
+            IpcEvent::GetOutputScale {
+                client_id,
+                request_id,
+            } => {
                 println!(
                     "[Compositor] GetOutputScale request from client {}",
                     client_id
                 );
                 let payload = sws_protocol::payload_output_scale(self.output_scale_milli);
-                super::ipc::send_message_to_client(
+                super::ipc::send_response_to_client(
                     client_id,
                     sws_protocol::server_msg::OUTPUT_SCALE,
+                    request_id,
                     payload.to_vec(),
                 );
                 println!(
@@ -3786,7 +3794,10 @@ impl Compositor {
                     self.output_scale_milli, client_id
                 );
             }
-            IpcEvent::GetWindowList { client_id } => {
+            IpcEvent::GetWindowList {
+                client_id,
+                request_id,
+            } => {
                 println!(
                     "[Compositor] GetWindowList request from client {}",
                     client_id
@@ -3816,7 +3827,12 @@ impl Compositor {
 
                 // Send WINDOW_LIST response directly to the client (not via window)
                 // This works for clients with or without windows (like stemd)
-                send_message_to_client(client_id, sws_protocol::server_msg::WINDOW_LIST, payload);
+                send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::WINDOW_LIST,
+                    request_id,
+                    payload,
+                );
                 println!(
                     "[Compositor] Sent WINDOW_LIST: {} windows to client {}",
                     entries.len(),

@@ -18,6 +18,8 @@ This library is intentionally **not** a widget toolkit. It is the "Wayland clien
 - Event-driven control flow: `dispatch()` reads everything available (non-blocking), then the app consumes events.
 - Zero-copy drawing: pixel buffers live in shared memory; clients write directly.
 - Clear layering: protocol definition (`sws_protocol`) is separate from I/O/state (`sws-client`).
+- Correct mixed traffic handling: synchronous replies are matched by
+  `request_id`, while asynchronous server events are queued for later dispatch.
 
 ## Typical control flow
 
@@ -31,6 +33,26 @@ For low-level/advanced usage (or when implementing a toolkit), the typical flow 
 3. Draw by writing to the surface buffer.
 4. Notify damage via `commit()`.
 5. In your main loop: `dispatch()` then consume events.
+
+## Request routing
+
+SWS uses a single socket for both synchronous replies and asynchronous server
+events. `sws-client` therefore does not treat "the next server frame with the
+right message type" as a reply.
+
+For APIs that need a synchronous server answer, such as `create_surface`,
+`resize_window`, `get_screen_size`, `get_output_scale`, `get_window_list`,
+`create_text_input_context`, and IME registration/query calls, `sws-client`:
+
+1. Allocates a non-zero per-connection `request_id`.
+2. Sends the request with that `request_id`.
+3. Reads frames until it receives a frame with `IS_RESPONSE` set and the same
+   `request_id`.
+4. Queues any asynchronous events encountered while waiting.
+
+`dispatch()` ignores response frames and only converts asynchronous server
+messages into client events. This keeps resize/configure/input broadcasts from
+being misinterpreted as replies to synchronous calls.
 
 ## Minimal example
 

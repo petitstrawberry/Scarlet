@@ -7,7 +7,9 @@
 //! -----------
 //! Each message is framed as:
 //! - Header (8 bytes, little-endian)
-//!   - `msg_type: u32`
+//!   - `msg_type: u16`
+//!   - `flags: u8`
+//!   - `request_id: u8`
 //!   - `payload_size: u32`
 //! - Payload (`payload_size` bytes)
 //!
@@ -269,25 +271,137 @@ pub mod window_types {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageHeader {
-    pub msg_type: u32,
+    /// Message type.
+    pub msg_type: u16,
+    /// Routing flags.
+    pub flags: u8,
+    /// Per-connection request identifier used to match synchronous responses.
+    pub request_id: u8,
+    /// Payload size in bytes.
     pub payload_size: u32,
 }
 
 impl MessageHeader {
+    /// Size of the encoded header in bytes.
     pub const SIZE: usize = 8;
+    /// Frame flag set on server responses to client requests.
+    pub const FLAG_IS_RESPONSE: u8 = 1 << 0;
 
+    /// Create an unrouted frame header.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_type` - Message type.
+    /// * `payload_size` - Payload size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Header with no flags and request id 0.
+    pub fn new(msg_type: u32, payload_size: u32) -> Self {
+        Self::with_routing(msg_type, 0, 0, payload_size)
+    }
+
+    /// Create a request frame header.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_type` - Message type.
+    /// * `request_id` - Per-connection request identifier.
+    /// * `payload_size` - Payload size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Header with no response flag.
+    pub fn request(msg_type: u32, request_id: u8, payload_size: u32) -> Self {
+        Self::with_routing(msg_type, 0, request_id, payload_size)
+    }
+
+    /// Create a response frame header.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_type` - Message type.
+    /// * `request_id` - Request identifier being answered.
+    /// * `payload_size` - Payload size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Header with the response flag set.
+    pub fn response(msg_type: u32, request_id: u8, payload_size: u32) -> Self {
+        Self::with_routing(msg_type, Self::FLAG_IS_RESPONSE, request_id, payload_size)
+    }
+
+    /// Create a frame header with explicit routing metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_type` - Message type.
+    /// * `flags` - Routing flags.
+    /// * `request_id` - Per-connection request identifier.
+    /// * `payload_size` - Payload size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Header containing the supplied routing metadata.
+    pub fn with_routing(msg_type: u32, flags: u8, request_id: u8, payload_size: u32) -> Self {
+        Self {
+            msg_type: msg_type as u16,
+            flags,
+            request_id,
+            payload_size,
+        }
+    }
+
+    /// Return the message type as `u32` for compatibility with message constants.
+    ///
+    /// # Returns
+    ///
+    /// Message type widened to `u32`.
+    pub fn msg_type_u32(self) -> u32 {
+        self.msg_type as u32
+    }
+
+    /// Check whether this frame is a response.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the response flag is set.
+    pub fn is_response(self) -> bool {
+        (self.flags & Self::FLAG_IS_RESPONSE) != 0
+    }
+
+    /// Encode this header as little-endian bytes.
+    ///
+    /// # Returns
+    ///
+    /// Encoded 8-byte header.
     pub fn to_le_bytes(self) -> [u8; Self::SIZE] {
         let mut out = [0u8; Self::SIZE];
-        out[0..4].copy_from_slice(&self.msg_type.to_le_bytes());
+        out[0..2].copy_from_slice(&self.msg_type.to_le_bytes());
+        out[2] = self.flags;
+        out[3] = self.request_id;
         out[4..8].copy_from_slice(&self.payload_size.to_le_bytes());
         out
     }
 
+    /// Decode a little-endian header.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Encoded 8-byte header.
+    ///
+    /// # Returns
+    ///
+    /// Decoded message header.
     pub fn from_le_bytes(bytes: [u8; Self::SIZE]) -> Self {
-        let msg_type = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let msg_type = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let flags = bytes[2];
+        let request_id = bytes[3];
         let payload_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         Self {
             msg_type,
+            flags,
+            request_id,
             payload_size,
         }
     }
@@ -307,10 +421,16 @@ pub enum ProtocolError {
 ///
 /// This is a protocol-only helper; actual I/O is implemented by server/client code.
 pub fn encode_frame(msg_type: u32, payload: &[u8]) -> Vec<u8> {
-    let header = MessageHeader {
-        msg_type,
-        payload_size: payload.len() as u32,
-    };
+    let header = MessageHeader::new(msg_type, payload.len() as u32);
+    let mut out = Vec::new();
+    out.extend_from_slice(&header.to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Encode a routed framed message (header + payload).
+pub fn encode_routed_frame(msg_type: u32, flags: u8, request_id: u8, payload: &[u8]) -> Vec<u8> {
+    let header = MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
     let mut out = Vec::new();
     out.extend_from_slice(&header.to_le_bytes());
     out.extend_from_slice(payload);

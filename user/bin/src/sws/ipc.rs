@@ -186,7 +186,7 @@ struct FrameReader {
     header_filled: usize,
     header_parsed: bool,
 
-    msg_type: u32,
+    header_value: protocol::MessageHeader,
     payload_len: usize,
     payload: Vec<u8>,
     payload_filled: usize,
@@ -198,7 +198,7 @@ impl FrameReader {
             header: [0u8; protocol::MessageHeader::SIZE],
             header_filled: 0,
             header_parsed: false,
-            msg_type: 0,
+            header_value: protocol::MessageHeader::new(0, 0),
             payload_len: 0,
             payload: Vec::new(),
             payload_filled: 0,
@@ -208,7 +208,7 @@ impl FrameReader {
     fn reset(&mut self) {
         self.header_filled = 0;
         self.header_parsed = false;
-        self.msg_type = 0;
+        self.header_value = protocol::MessageHeader::new(0, 0);
         self.payload_len = 0;
         self.payload.clear();
         self.payload_filled = 0;
@@ -216,10 +216,13 @@ impl FrameReader {
 
     /// Poll for the next complete frame.
     ///
-    /// - `Ok(Some((msg_type, payload)))` when a full frame is assembled
+    /// - `Ok(Some((header, payload)))` when a full frame is assembled
     /// - `Ok(None)` when no complete frame is available yet
     /// - `Err(..)` on disconnect / I/O / protocol error
-    fn poll(&mut self, socket: &mut Socket) -> Result<Option<(u32, Vec<u8>)>, FrameIoError> {
+    fn poll(
+        &mut self,
+        socket: &mut Socket,
+    ) -> Result<Option<(protocol::MessageHeader, Vec<u8>)>, FrameIoError> {
         use std::io::Read;
 
         // Read header.
@@ -244,7 +247,7 @@ impl FrameReader {
                 self.reset();
                 return Err(FrameIoError::Protocol);
             }
-            self.msg_type = header.msg_type;
+            self.header_value = header;
             self.payload_len = payload_len;
             if payload_len > 0 {
                 self.payload.resize(payload_len, 0);
@@ -267,10 +270,10 @@ impl FrameReader {
         }
 
         // Complete.
-        let msg_type = self.msg_type;
+        let header = self.header_value;
         let payload = core::mem::take(&mut self.payload);
         self.reset();
-        Ok(Some((msg_type, payload)))
+        Ok(Some((header, payload)))
     }
 }
 
@@ -296,13 +299,36 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
 }
 
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
+    write_frame_routed(socket, msg_type, 0, 0, payload)
+}
+
+fn write_frame_response(
+    socket: &mut Socket,
+    msg_type: u32,
+    request_id: u8,
+    payload: &[u8],
+) -> Result<(), FrameIoError> {
+    write_frame_routed(
+        socket,
+        msg_type,
+        protocol::MessageHeader::FLAG_IS_RESPONSE,
+        request_id,
+        payload,
+    )
+}
+
+fn write_frame_routed(
+    socket: &mut Socket,
+    msg_type: u32,
+    flags: u8,
+    request_id: u8,
+    payload: &[u8],
+) -> Result<(), FrameIoError> {
     use std::io::Write;
 
     // Write header + payload directly to avoid allocating a temporary Vec.
-    let header = protocol::MessageHeader {
-        msg_type,
-        payload_size: payload.len() as u32,
-    };
+    let header =
+        protocol::MessageHeader::with_routing(msg_type, flags, request_id, payload.len() as u32);
     let header_bytes = header.to_le_bytes();
     write_all(socket, &header_bytes)?;
     if !payload.is_empty() {
@@ -418,6 +444,8 @@ static PENDING_INPUT_EVENTS: Mutex<BTreeMap<u32, Vec<PendingInputEvent>>> =
 #[derive(Debug, Clone)]
 pub struct PendingServerFrame {
     pub msg_type: u32,
+    pub flags: u8,
+    pub request_id: u8,
     pub payload: Vec<u8>,
 }
 
@@ -617,14 +645,24 @@ fn cleanup_extension_input_events(extension_id: u32, external_client_id: u32) {
 pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     match pending.get_mut(&window_id) {
-        Some(frames) => frames.push(PendingServerFrame { msg_type, payload }),
+        Some(frames) => frames.push(PendingServerFrame {
+            msg_type,
+            flags: 0,
+            request_id: 0,
+            payload,
+        }),
         None => {
             println!(
                 "[IpcServer] Warning: server message queued for unregistered window {} (msg_type={}); creating queue",
                 window_id, msg_type
             );
             let mut frames = Vec::new();
-            frames.push(PendingServerFrame { msg_type, payload });
+            frames.push(PendingServerFrame {
+                msg_type,
+                flags: 0,
+                request_id: 0,
+                payload,
+            });
             pending.insert(window_id, frames);
         }
     }
@@ -633,9 +671,34 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
 /// Queue a server->client protocol message for a specific client (by client_id).
 /// This is used for responses to clients that don't have windows (like stemd).
 pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>) {
+    send_message_to_client_routed(client_id, msg_type, 0, 0, payload);
+}
+
+pub fn send_response_to_client(client_id: usize, msg_type: u32, request_id: u8, payload: Vec<u8>) {
+    send_message_to_client_routed(
+        client_id,
+        msg_type,
+        protocol::MessageHeader::FLAG_IS_RESPONSE,
+        request_id,
+        payload,
+    );
+}
+
+fn send_message_to_client_routed(
+    client_id: usize,
+    msg_type: u32,
+    flags: u8,
+    request_id: u8,
+    payload: Vec<u8>,
+) {
     let mut pending = PENDING_CLIENT_RESPONSES.lock();
     match pending.get_mut(&client_id) {
-        Some(frames) => frames.push(PendingServerFrame { msg_type, payload }),
+        Some(frames) => frames.push(PendingServerFrame {
+            msg_type,
+            flags,
+            request_id,
+            payload,
+        }),
         None => {
             println!(
                 "[IpcServer] Sending message to client {} (msg_type={}, payload_len={})",
@@ -644,7 +707,12 @@ pub fn send_message_to_client(client_id: usize, msg_type: u32, payload: Vec<u8>)
                 payload.len()
             );
             let mut frames = Vec::new();
-            frames.push(PendingServerFrame { msg_type, payload });
+            frames.push(PendingServerFrame {
+                msg_type,
+                flags,
+                request_id,
+                payload,
+            });
             pending.insert(client_id, frames);
         }
     }
@@ -1636,7 +1704,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 frame.msg_type,
                 frame.payload.len()
             );
-            if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
+            if let Err(e) = write_frame_routed(
+                &mut socket,
+                frame.msg_type,
+                frame.flags,
+                frame.request_id,
+                &frame.payload,
+            ) {
                 println!(
                     "[ClientThread {}] Failed to send client response: {:?}",
                     client_id, e
@@ -1650,7 +1724,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             // Send queued server->client control messages for this window.
             let frames = pop_pending_server_frames(window_id);
             for frame in frames {
-                if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
+                if let Err(e) = write_frame_routed(
+                    &mut socket,
+                    frame.msg_type,
+                    frame.flags,
+                    frame.request_id,
+                    &frame.payload,
+                ) {
                     println!(
                         "[ClientThread {}] Failed to send server message to window {}: {:?}",
                         client_id, window_id, e
@@ -1759,7 +1839,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         //     );
         // }
 
-        let (msg_type, payload) = match frame_reader.poll(&mut socket) {
+        let (header, payload) = match frame_reader.poll(&mut socket) {
             Ok(Some(v)) => {
                 idle_backoff_ms = 1;
                 // println!(
@@ -1785,7 +1865,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
         };
 
-        match protocol::parse_client_message(msg_type, &payload) {
+        let request_id = header.request_id;
+
+        match protocol::parse_client_message(header.msg_type_u32(), &payload) {
             Ok(ClientMessageRef::CreateWindow {
                 app_id,
                 app_name,
@@ -1905,7 +1987,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         window_resizable.insert(window_id, resizable);
 
                         // Reply to client with window created message
-                        send_window_created(&mut socket, window_id, buffer_size);
+                        send_window_created(&mut socket, request_id, window_id, buffer_size);
 
                         // Send SHM handle out-of-band
                         println!(
@@ -2081,9 +2163,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         // Reply to client with WINDOW_RESIZED + SHM handle.
                         let payload =
                             protocol::payload_window_resized(window_id, buffer_size, width, height);
-                        if let Err(e) =
-                            write_frame(&mut socket, protocol::server_msg::WINDOW_RESIZED, &payload)
-                        {
+                        if let Err(e) = write_frame_response(
+                            &mut socket,
+                            protocol::server_msg::WINDOW_RESIZED,
+                            request_id,
+                            &payload,
+                        ) {
                             println!(
                                 "[ClientThread {}] ResizeWindow: failed to send WINDOW_RESIZED: {:?}",
                                 client_id, e
@@ -2191,9 +2276,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
                 // Send ExtensionRegistered response
                 let payload = protocol::payload_extension_registered(extension_id);
-                if let Err(e) = write_frame(
+                if let Err(e) = write_frame_response(
                     &mut socket,
                     protocol::server_msg::EXTENSION_REGISTERED,
+                    request_id,
                     &payload,
                 ) {
                     println!(
@@ -2252,7 +2338,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         };
 
                         // Reply with window created
-                        send_window_created(&mut socket, window_id, buffer_size);
+                        send_window_created(&mut socket, request_id, window_id, buffer_size);
 
                         // Send SHM handle
                         if let Err(e) = socket.send_handle(shm.as_handle()) {
@@ -2509,21 +2595,30 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] GetScreenSize: forwarding to compositor",
                     client_id
                 );
-                push_ipc_event(IpcEvent::GetScreenSize { client_id });
+                push_ipc_event(IpcEvent::GetScreenSize {
+                    client_id,
+                    request_id,
+                });
             }
             Ok(ClientMessageRef::GetOutputScale {}) => {
                 println!(
                     "[ClientThread {}] GetOutputScale: forwarding to compositor",
                     client_id
                 );
-                push_ipc_event(IpcEvent::GetOutputScale { client_id });
+                push_ipc_event(IpcEvent::GetOutputScale {
+                    client_id,
+                    request_id,
+                });
             }
             Ok(ClientMessageRef::GetWindowList {}) => {
                 println!(
                     "[ClientThread {}] GetWindowList: requesting window list",
                     client_id
                 );
-                push_ipc_event(IpcEvent::GetWindowList { client_id });
+                push_ipc_event(IpcEvent::GetWindowList {
+                    client_id,
+                    request_id,
+                });
             }
             Ok(ClientMessageRef::TextInputCreate { window_id, seat_id }) => {
                 if !managed_windows.iter().any(|id| *id == window_id) {
@@ -2532,9 +2627,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 let context = create_text_input_context(client_id, window_id, seat_id);
                 let payload =
                     protocol::payload_text_input_created(context.context_id, context.serial);
-                if let Err(e) = write_frame(
+                if let Err(e) = write_frame_response(
                     &mut socket,
                     protocol::server_msg::TEXT_INPUT_CREATED,
+                    request_id,
                     &payload,
                 ) {
                     println!(
@@ -2591,9 +2687,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::ImeGetMethods {}) => {
                 let payload = input_methods_payload();
-                if let Err(e) =
-                    write_frame(&mut socket, protocol::server_msg::IME_METHODS, &payload)
-                {
+                if let Err(e) = write_frame_response(
+                    &mut socket,
+                    protocol::server_msg::IME_METHODS,
+                    request_id,
+                    &payload,
+                ) {
                     println!(
                         "[ClientThread {}] Failed to send IME_METHODS: {:?}",
                         client_id, e
@@ -2603,8 +2702,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::ImeGetActive {}) => {
                 let payload = active_input_method_payload();
-                if let Err(e) = write_frame(&mut socket, protocol::server_msg::IME_ACTIVE, &payload)
-                {
+                if let Err(e) = write_frame_response(
+                    &mut socket,
+                    protocol::server_msg::IME_ACTIVE,
+                    request_id,
+                    &payload,
+                ) {
                     println!(
                         "[ClientThread {}] Failed to send IME_ACTIVE: {:?}",
                         client_id, e
@@ -2619,9 +2722,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     client_id, service.ime_id, service.name, service.capabilities
                 );
                 let payload = protocol::payload_ime_registered(service.ime_id);
-                if let Err(e) =
-                    write_frame(&mut socket, protocol::server_msg::IME_REGISTERED, &payload)
-                {
+                if let Err(e) = write_frame_response(
+                    &mut socket,
+                    protocol::server_msg::IME_REGISTERED,
+                    request_id,
+                    &payload,
+                ) {
                     println!(
                         "[ClientThread {}] Failed to send IME_REGISTERED: {:?}",
                         client_id, e
@@ -2727,7 +2833,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             Err(e) => {
                 println!(
                     "[ClientThread {}] Failed to parse message (type {}): {:?}",
-                    client_id, msg_type, e
+                    client_id,
+                    header.msg_type_u32(),
+                    e
                 );
             }
         }
@@ -2777,9 +2885,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 }
 
 /// Send WindowCreated message
-fn send_window_created(socket: &mut Socket, window_id: u32, shm_size: u64) {
+fn send_window_created(socket: &mut Socket, request_id: u8, window_id: u32, shm_size: u64) {
     let payload = protocol::payload_window_created(window_id, shm_size);
-    if let Err(e) = write_frame(socket, protocol::server_msg::WINDOW_CREATED, &payload) {
+    if let Err(e) = write_frame_response(
+        socket,
+        protocol::server_msg::WINDOW_CREATED,
+        request_id,
+        &payload,
+    ) {
         println!(
             "[IpcServer] Failed to send WindowCreated: {:?} (window_id={}, shm_size={})",
             e, window_id, shm_size
@@ -2997,15 +3110,18 @@ pub enum IpcEvent {
     /// Get the screen size
     GetScreenSize {
         client_id: usize,
+        request_id: u8,
     },
 
     /// Get the output scale
     GetOutputScale {
         client_id: usize,
+        request_id: u8,
     },
 
     /// Get list of all windows
     GetWindowList {
         client_id: usize,
+        request_id: u8,
     },
 }
