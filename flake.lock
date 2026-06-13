@@ -82,11 +82,11 @@
     "scarlet-sdk": {
       "flake": false,
       "locked": {
-        "lastModified": 1781189756,
-        "narHash": "sha256-ktK3Ds1y5ahy/bHffMRvxyWC9xXDSkfegAtJc4brfUA=",
+        "lastModified": 1781362545,
+        "narHash": "sha256-5xhJB69UbwtA1r/BDaIAj41/tRwsL+WOcEr/g8jmVrI=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "93e0f245c4294235c08a921846b7106db9871447",
+        "rev": "a55122d65e9a973adc26b9b911348faf88b95633",
         "type": "github"
       },
       "original": {
