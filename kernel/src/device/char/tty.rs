@@ -1289,8 +1289,7 @@ impl Selectable for TtyDevice {
             set.read = self.is_read_ready_for_select();
         }
         if interest.write {
-            // TTY writes are considered ready (no internal backpressure yet)
-            set.write = true;
+            set.write = self.can_write();
         }
         if interest.except {
             set.except = false;

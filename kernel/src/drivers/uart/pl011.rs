@@ -2,9 +2,9 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, RwLock};
 
-use crate::arch::early_putc;
 use crate::initcall::early;
 use crate::{
     device::{
@@ -22,6 +22,7 @@ use crate::{
     driver_initcall,
     interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
+    sync::waker::Waker,
 };
 
 // PL011 UART register offsets
@@ -54,6 +55,13 @@ const LCR_H_FEN: u32 = 1 << 4; // Enable FIFOs
 
 // Interrupt bits
 const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
+const IMSC_TXIM: u32 = 1 << 5; // Transmit interrupt mask
+const RIS_RXRIS: u32 = 1 << 4; // Receive raw interrupt status
+const RIS_TXRIS: u32 = 1 << 5; // Transmit raw interrupt status
+
+/// Maximum number of bytes buffered in the TX ring before falling back to
+/// synchronous (spinning) output.
+const TX_BUFFER_SIZE: usize = 4096;
 
 pub struct Pl011Uart {
     base: usize,
@@ -61,6 +69,9 @@ pub struct Pl011Uart {
     rx_buffer: Mutex<VecDeque<u8>>,
     event_emitter: Mutex<DeviceEventEmitter>,
     tx_lock: Mutex<()>,
+    tx_buffer: Mutex<VecDeque<u8>>,
+    tx_irq_enabled: AtomicBool,
+    tx_waker: Waker,
 }
 
 impl Pl011Uart {
@@ -71,6 +82,9 @@ impl Pl011Uart {
             rx_buffer: Mutex::new(VecDeque::new()),
             event_emitter: Mutex::new(DeviceEventEmitter::new()),
             tx_lock: Mutex::new(()),
+            tx_buffer: Mutex::new(VecDeque::new()),
+            tx_irq_enabled: AtomicBool::new(false),
+            tx_waker: Waker::new_interruptible("pl011-uart-tx"),
         }
     }
 
@@ -122,16 +136,13 @@ impl Pl011Uart {
     }
 
     fn write_byte_internal(&self, c: u8) {
-        // // Wait until transmit FIFO is not full
         while self.reg_read(UARTFR) & FR_TXFF != 0 {
             core::hint::spin_loop();
         }
         self.reg_write(UARTDR, c as u32);
-        // early_putc(c);
     }
 
     fn read_byte_internal(&self) -> Option<u8> {
-        // Check if receive FIFO is empty
         if self.reg_read(UARTFR) & FR_RXFE != 0 {
             return None;
         }
@@ -139,13 +150,75 @@ impl Pl011Uart {
     }
 
     fn can_read(&self) -> bool {
-        // RX FIFO is not empty
         self.reg_read(UARTFR) & FR_RXFE == 0
     }
 
     fn can_write(&self) -> bool {
-        // TX FIFO is not full
         self.reg_read(UARTFR) & FR_TXFF == 0
+    }
+
+    fn is_interrupt_mode(&self) -> bool {
+        self.interrupt_id.read().is_some()
+    }
+
+    fn enable_tx_interrupt(&self) {
+        if self.tx_irq_enabled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let msc = self.reg_read(UARTIMSC);
+        self.reg_write(UARTIMSC, msc | IMSC_TXIM);
+    }
+
+    fn disable_tx_interrupt(&self) {
+        if !self.tx_irq_enabled.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let msc = self.reg_read(UARTIMSC);
+        self.reg_write(UARTIMSC, msc & !IMSC_TXIM);
+    }
+
+    /// Push bytes from the TX ring into the hardware FIFO without spinning.
+    /// Called from the TX interrupt handler.  If the FIFO fills up,
+    /// the handler returns and the next TX interrupt resumes draining.
+    fn drain_tx(&self) {
+        loop {
+            if !self.can_write() {
+                self.tx_waker.wake_all();
+                return;
+            }
+            let byte = {
+                let mut buf = self.tx_buffer.lock();
+                buf.pop_front()
+            };
+            match byte {
+                Some(b) => self.reg_write(UARTDR, b as u32),
+                None => {
+                    self.disable_tx_interrupt();
+                    self.tx_waker.wake_all();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn enqueue_tx(&self, data: &[u8]) {
+        let mut offset = 0;
+        while offset < data.len() {
+            let space_freed = {
+                let mut buf = self.tx_buffer.lock();
+                let take = core::cmp::min(TX_BUFFER_SIZE - buf.len(), data.len() - offset);
+                for &b in &data[offset..offset + take] {
+                    buf.push_back(b);
+                }
+                take
+            };
+            offset += space_freed;
+            if offset < data.len() {
+                while self.tx_buffer.lock().len() >= TX_BUFFER_SIZE {
+                    core::hint::spin_loop();
+                }
+            }
+        }
     }
 }
 
@@ -203,21 +276,60 @@ impl CharDevice for Pl011Uart {
         self.rx_buffer.lock().pop_front()
     }
 
-    /// Write a single byte. The byte itself is atomic under `tx_lock`,
-    /// but consecutive `write_byte` calls are NOT guaranteed to be atomic.
-    /// Use `write()` for multi-byte atomicity.
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         let _lock = self.tx_lock.lock();
-        self.write_byte_internal(byte);
+
+        if !self.is_interrupt_mode() {
+            self.write_byte_internal(byte);
+            return Ok(());
+        }
+
+        if self.tx_buffer.lock().is_empty() && self.can_write() {
+            self.reg_write(UARTDR, byte as u32);
+            return Ok(());
+        }
+
+        {
+            let mut buf = self.tx_buffer.lock();
+            if buf.len() >= TX_BUFFER_SIZE {
+                self.write_byte_internal(byte);
+            } else {
+                buf.push_back(byte);
+            }
+        }
+        self.enable_tx_interrupt();
         Ok(())
     }
 
-    /// Write entire buffer atomically under `tx_lock`.
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let _lock = self.tx_lock.lock();
-        for &byte in buffer {
-            self.write_byte_internal(byte);
+        if buffer.is_empty() {
+            return Ok(0);
         }
+        let _lock = self.tx_lock.lock();
+
+        if !self.is_interrupt_mode() {
+            for &byte in buffer {
+                self.write_byte_internal(byte);
+            }
+            return Ok(buffer.len());
+        }
+
+        let buf_empty = self.tx_buffer.lock().is_empty();
+        if buf_empty {
+            let mut idx = 0;
+            while idx < buffer.len() && self.can_write() {
+                self.reg_write(UARTDR, buffer[idx] as u32);
+                idx += 1;
+            }
+            if idx == buffer.len() {
+                return Ok(buffer.len());
+            }
+            self.enqueue_tx(&buffer[idx..]);
+        } else {
+            self.enqueue_tx(buffer);
+        }
+
+        self.enable_tx_interrupt();
         Ok(buffer.len())
     }
 
@@ -226,7 +338,7 @@ impl CharDevice for Pl011Uart {
     }
 
     fn can_write(&self) -> bool {
-        self.can_write()
+        self.can_write() || self.tx_buffer.lock().len() < TX_BUFFER_SIZE
     }
 }
 
@@ -250,20 +362,19 @@ impl EventCapableDevice for Pl011Uart {
 
 impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        // Read and clear interrupt status
         let ris = self.reg_read(UARTRIS);
 
-        // Clear ALL interrupts first to prevent re-triggering
         self.reg_write(UARTICR, 0x7FF);
 
-        if ris & IMSC_RXIM != 0 {
-            // Receive interrupt - read all available data
+        if ris & RIS_RXRIS != 0 {
             while let Some(c) = self.read_byte_internal() {
-                // Emit received character event
                 self.emit_event(&InputEvent { data: c });
-                // Also store in buffer
                 self.rx_buffer.lock().push_back(c);
             }
+        }
+
+        if ris & RIS_TXRIS != 0 {
+            self.drain_tx();
         }
 
         Ok(())

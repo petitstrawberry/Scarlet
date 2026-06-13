@@ -2,6 +2,7 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, RwLock};
 
 use crate::{
@@ -20,7 +21,14 @@ use crate::{
     driver_initcall,
     interrupt::InterruptId,
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
+    sync::waker::Waker,
 };
+
+/// Maximum number of bytes buffered in the TX ring before falling back to
+/// synchronous (spinning) output.  The ring absorbs bursty output so the
+/// caller returns quickly; only when the terminal is severely backed up does
+/// the ring fill and force a spin-wait.
+const TX_BUFFER_SIZE: usize = 4096;
 
 pub struct Uart {
     // inner: Arc<Mutex<UartInner>>,
@@ -30,6 +38,14 @@ pub struct Uart {
     event_emitter: Mutex<DeviceEventEmitter>,
     // Serializes TX access across all callers (kernel _print, TTY write, echo).
     tx_lock: Mutex<()>,
+    // Interrupt-driven TX ring buffer.  Bytes enqueued here are drained by the
+    // TX-empty interrupt handler.
+    tx_buffer: Mutex<VecDeque<u8>>,
+    // Tracks whether the UART TX-empty (THRE) interrupt is currently enabled,
+    // to avoid redundant IER writes.
+    tx_irq_enabled: AtomicBool,
+    // Wakes tasks that are blocked waiting for TX buffer space.
+    tx_waker: Waker,
 }
 
 pub const RHR_OFFSET: usize = 0x00;
@@ -68,6 +84,9 @@ impl Uart {
             rx_buffer: Mutex::new(VecDeque::new()),
             event_emitter: Mutex::new(DeviceEventEmitter::new()),
             tx_lock: Mutex::new(()),
+            tx_buffer: Mutex::new(VecDeque::new()),
+            tx_irq_enabled: AtomicBool::new(false),
+            tx_waker: Waker::new_interruptible("virt-uart-tx"),
         }
     }
 
@@ -139,6 +158,76 @@ impl Uart {
             self.emit_event(&InputEvent { data: c });
         }
     }
+
+    /// Returns `true` when the UART is in interrupt-driven mode (i.e. an
+    /// interrupt line has been registered).  Before that — during early boot
+    /// or when no IRQ resource is present — all writes must be synchronous.
+    fn is_interrupt_mode(&self) -> bool {
+        self.interrupt_id.read().is_some()
+    }
+
+    /// Arm the TX-empty (THRE) interrupt so the handler drains the TX ring.
+    fn enable_tx_interrupt(&self) {
+        if self.tx_irq_enabled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let ier = self.reg_read(IER_OFFSET);
+        self.reg_write(IER_OFFSET, ier | IER_THRE);
+    }
+
+    /// Disarm the TX-empty interrupt once the TX ring is fully drained.
+    fn disable_tx_interrupt(&self) {
+        if !self.tx_irq_enabled.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let ier = self.reg_read(IER_OFFSET);
+        self.reg_write(IER_OFFSET, ier & !IER_THRE);
+    }
+
+    /// Push bytes from the TX ring into the hardware FIFO without spinning.
+    /// Called from the TX-empty interrupt handler.  If the FIFO fills up,
+    /// the handler returns and the next THRE interrupt resumes draining.
+    fn drain_tx(&self) {
+        loop {
+            if !self.can_write() {
+                self.tx_waker.wake_all();
+                return;
+            }
+            let byte = {
+                let mut buf = self.tx_buffer.lock();
+                buf.pop_front()
+            };
+            match byte {
+                Some(b) => self.reg_write(THR_OFFSET, b),
+                None => {
+                    self.disable_tx_interrupt();
+                    self.tx_waker.wake_all();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Enqueue bytes into the TX ring, spinning only when the ring is full.
+    fn enqueue_tx(&self, data: &[u8]) {
+        let mut offset = 0;
+        while offset < data.len() {
+            let space_freed = {
+                let mut buf = self.tx_buffer.lock();
+                let take = core::cmp::min(TX_BUFFER_SIZE - buf.len(), data.len() - offset);
+                for &b in &data[offset..offset + take] {
+                    buf.push_back(b);
+                }
+                take
+            };
+            offset += space_freed;
+            if offset < data.len() {
+                while self.tx_buffer.lock().len() >= TX_BUFFER_SIZE {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
 }
 
 impl MemoryMappingOps for Uart {
@@ -198,27 +287,63 @@ impl Device for Uart {
 impl CharDevice for Uart {
     fn read_byte(&self) -> Option<u8> {
         let mut buffer = self.rx_buffer.lock();
-        // Try to read from interrupt buffer
         buffer.pop_front()
     }
 
-    /// Write a single byte. The byte itself is atomic under `tx_lock`,
-    /// but consecutive `write_byte` calls are NOT guaranteed to be atomic.
-    /// Use `write()` for multi-byte atomicity.
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         let _lock = self.tx_lock.lock();
-        self.write_byte_internal(byte);
+
+        if !self.is_interrupt_mode() {
+            self.write_byte_internal(byte);
+            return Ok(());
+        }
+
+        if self.tx_buffer.lock().is_empty() && self.can_write() {
+            self.reg_write(THR_OFFSET, byte);
+            return Ok(());
+        }
+
+        {
+            let mut buf = self.tx_buffer.lock();
+            if buf.len() >= TX_BUFFER_SIZE {
+                self.write_byte_internal(byte);
+            } else {
+                buf.push_back(byte);
+            }
+        }
+        self.enable_tx_interrupt();
         Ok(())
     }
 
-    /// Write entire buffer atomically under `tx_lock`.
-    /// This is the primary API for multi-byte output; all bytes are written
-    /// without interleaving from other CPUs.
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let _lock = self.tx_lock.lock();
-        for &byte in buffer {
-            self.write_byte_internal(byte);
+        if buffer.is_empty() {
+            return Ok(0);
         }
+        let _lock = self.tx_lock.lock();
+
+        if !self.is_interrupt_mode() {
+            for &byte in buffer {
+                self.write_byte_internal(byte);
+            }
+            return Ok(buffer.len());
+        }
+
+        let buf_empty = self.tx_buffer.lock().is_empty();
+        if buf_empty {
+            let mut idx = 0;
+            while idx < buffer.len() && self.can_write() {
+                self.reg_write(THR_OFFSET, buffer[idx]);
+                idx += 1;
+            }
+            if idx == buffer.len() {
+                return Ok(buffer.len());
+            }
+            self.enqueue_tx(&buffer[idx..]);
+        } else {
+            self.enqueue_tx(buffer);
+        }
+
+        self.enable_tx_interrupt();
         Ok(buffer.len())
     }
 
@@ -227,7 +352,7 @@ impl CharDevice for Uart {
     }
 
     fn can_write(&self) -> bool {
-        self.can_write()
+        self.can_write() || self.tx_buffer.lock().len() < TX_BUFFER_SIZE
     }
 }
 
@@ -254,7 +379,15 @@ impl EventCapableDevice for Uart {
 
 impl InterruptCapableDevice for Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
-        self.drain_rx();
+        let iir = self.reg_read(IIR_OFFSET);
+        if iir & IIR_PENDING == 0 {
+            let cause = iir & 0x0E;
+            if cause == IIR_RDA {
+                self.drain_rx();
+            } else if cause == IIR_THRE {
+                self.drain_tx();
+            }
+        }
         Ok(())
     }
 
