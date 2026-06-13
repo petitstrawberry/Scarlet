@@ -567,6 +567,7 @@ impl VideoPlayerApp {
 struct AudioClock {
     video_ready: AtomicBool,
     started: AtomicBool,
+    finished: AtomicBool,
     unavailable: AtomicBool,
     sample_rate: AtomicU64,
     base_frames: AtomicU64,
@@ -579,6 +580,7 @@ impl AudioClock {
         Self {
             video_ready: AtomicBool::new(false),
             started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             sample_rate: AtomicU64::new(48_000),
             base_frames: AtomicU64::new(0),
@@ -594,7 +596,16 @@ impl AudioClock {
     fn mark_started(&self, sample_rate: u32) {
         self.sample_rate
             .store(u64::from(sample_rate), Ordering::Release);
+        self.finished.store(false, Ordering::Release);
         self.started.store(true, Ordering::Release);
+    }
+
+    fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Release);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
     }
 
     fn mark_unavailable(&self) {
@@ -651,6 +662,7 @@ impl AudioClock {
         self.base_frames.store(0, Ordering::Release);
         self.read_frames.store(0, Ordering::Release);
         self.started.store(false, Ordering::Release);
+        self.finished.store(false, Ordering::Release);
         self.video_ready.store(false, Ordering::Release);
         self.unavailable.store(false, Ordering::Release);
     }
@@ -664,6 +676,7 @@ impl AudioClock {
         self.base_frames.store(0, Ordering::Release);
         self.read_frames.store(0, Ordering::Release);
         self.started.store(false, Ordering::Release);
+        self.finished.store(false, Ordering::Release);
         // intentionally skip video_ready
         self.unavailable.store(false, Ordering::Release);
     }
@@ -3919,8 +3932,8 @@ fn start_audio_thread(
             if controls.is_loop_enabled() {
                 continue;
             }
+            wait_for_replay_epoch_change(&controls);
             clock.reset_for_replay_audio();
-            wait_for_replay_request(&controls);
             if !clock.wait_until_video_ready() {
                 return;
             }
@@ -4059,6 +4072,7 @@ fn play_sas_pcm_s16le(
     let frame_bytes = channels as usize * 2;
     if data.len() < frame_bytes {
         clock.mark_started(sample_rate);
+        clock.mark_finished();
         return Ok(());
     }
 
@@ -4067,6 +4081,7 @@ fn play_sas_pcm_s16le(
     writer.write_bytes(data, controls, clock)?;
     writer.drain_close(clock)?;
     clock.advance_base_frames(total_data_frames as u64);
+    clock.mark_finished();
     Ok(())
 }
 
@@ -4207,6 +4222,7 @@ fn play_aac_source_sas(
     }
     writer.drain_close(clock)?;
     clock.advance_base_frames(written_frames);
+    clock.mark_finished();
     Ok(())
 }
 
@@ -4277,6 +4293,9 @@ fn publish_frame_synced(
             if audio_time_us >= presentation_time_us {
                 break;
             }
+            if clock.is_finished() {
+                break;
+            }
             thread::sleep(Duration::from_millis(1));
         }
     } else {
@@ -4325,6 +4344,10 @@ fn wait_while_paused(controls: &ControlsOverlay) {
 
 fn wait_for_replay_request(controls: &ControlsOverlay) -> u32 {
     controls.mark_finished();
+    wait_for_replay_epoch_change(controls)
+}
+
+fn wait_for_replay_epoch_change(controls: &ControlsOverlay) -> u32 {
     let my_epoch = controls.current_replay_epoch();
     loop {
         if controls.current_replay_epoch() != my_epoch {
