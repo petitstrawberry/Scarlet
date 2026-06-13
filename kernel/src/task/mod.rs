@@ -2153,8 +2153,7 @@ impl Task {
                     // Memory barrier to ensure state change is visible
                     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
-                    let waker = get_waitpid_waker(self.task_id);
-                    waker.wake_all();
+                    task.sleep_waker.wake_all();
                 }
             }
         }
@@ -2169,8 +2168,7 @@ impl Task {
         self.add_software_timer_handler(handler);
         // Memory barrier to ensure timer handler registration is visible
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        let waker = get_waitpid_waker(self.id);
-        waker.wait(self.get_id(), trapframe);
+        self.sleep_waker.wait(self.get_id(), trapframe);
     }
 
     // VFS Helper Methods
