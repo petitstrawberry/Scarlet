@@ -32,9 +32,10 @@ use scarlet_ui::{
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
-use std::io::{ErrorKind, Read, SeekFrom, Write};
+use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
 use std::sync::Mutex;
+use std::task::exit;
 use std::{format, println, thread};
 #[cfg(feature = "mp4-aac")]
 use symphonia_codec_aac::AacDecoder;
@@ -64,6 +65,7 @@ const STREAM_START_BUFFER_US: u64 = 1_000_000;
 const STREAM_START_BUFFER_SAMPLES: usize = 24;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const LATE_VIDEO_DROP_THRESHOLD_US: u64 = 250_000;
+const SEEK_COALESCE_DELAY_MS: u64 = 35;
 const CONTROLS_MIN_WIDTH: u32 = 96;
 const CONTROLS_MIN_HEIGHT: u32 = 48;
 const CONTROLS_PANEL_HEIGHT: u32 = 34;
@@ -244,8 +246,15 @@ struct ControlsOverlay {
     loop_enabled: AtomicBool,
     activity_epoch: AtomicU32,
     paused: AtomicBool,
+    pause_after_seek: AtomicBool,
+    scrubbing: AtomicBool,
     finished: AtomicBool,
     replay_epoch: AtomicU32,
+    seek_epoch: AtomicU32,
+    video_ready_seek_epoch: AtomicU32,
+    seek_target_us: AtomicU64,
+    desired_position_us: AtomicU64,
+    media_duration_us: AtomicU64,
     canvas_width: AtomicU32,
     canvas_height: AtomicU32,
     presented_frames: AtomicU64,
@@ -301,8 +310,15 @@ impl ControlsOverlay {
             loop_enabled: AtomicBool::new(loop_enabled),
             activity_epoch: AtomicU32::new(0),
             paused: AtomicBool::new(false),
+            pause_after_seek: AtomicBool::new(false),
+            scrubbing: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             replay_epoch: AtomicU32::new(0),
+            seek_epoch: AtomicU32::new(0),
+            video_ready_seek_epoch: AtomicU32::new(u32::MAX),
+            seek_target_us: AtomicU64::new(0),
+            desired_position_us: AtomicU64::new(0),
+            media_duration_us: AtomicU64::new(0),
             canvas_width: AtomicU32::new(DISPLAY_WIDTH),
             canvas_height: AtomicU32::new(DISPLAY_HEIGHT),
             presented_frames: AtomicU64::new(0),
@@ -361,12 +377,117 @@ impl ControlsOverlay {
     }
 
     fn request_replay(&self) {
+        self.desired_position_us.store(0, Ordering::Release);
+        self.seek_target_us.store(0, Ordering::Release);
+        self.pause_after_seek.store(false, Ordering::Release);
+        self.paused.store(false, Ordering::Release);
+        self.reset_fps_window();
+        self.seek_epoch.fetch_add(1, Ordering::AcqRel);
         self.replay_epoch.fetch_add(1, Ordering::AcqRel);
         self.finished.store(false, Ordering::Release);
     }
 
     fn current_replay_epoch(&self) -> u32 {
         self.replay_epoch.load(Ordering::Acquire)
+    }
+
+    fn set_media_duration_us(&self, duration_us: u64) {
+        let mut current = self.media_duration_us.load(Ordering::Acquire);
+        while duration_us > current {
+            match self.media_duration_us.compare_exchange_weak(
+                current,
+                duration_us,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn media_duration_us(&self) -> u64 {
+        self.media_duration_us.load(Ordering::Acquire)
+    }
+
+    fn current_seek_epoch(&self) -> u32 {
+        self.seek_epoch.load(Ordering::Acquire)
+    }
+
+    fn current_seek_target_us(&self) -> u64 {
+        self.seek_target_us.load(Ordering::Acquire)
+    }
+
+    fn mark_video_ready_for_seek(&self, seek_epoch: u32) {
+        self.video_ready_seek_epoch
+            .store(seek_epoch, Ordering::Release);
+        if self.current_seek_epoch() == seek_epoch
+            && self.pause_after_seek.swap(false, Ordering::AcqRel)
+        {
+            self.paused.store(true, Ordering::Release);
+        }
+    }
+
+    fn is_video_ready_for_seek(&self, seek_epoch: u32) -> bool {
+        self.video_ready_seek_epoch.load(Ordering::Acquire) == seek_epoch
+    }
+
+    fn wait_for_video_seek_ready(&self, seek_epoch: u32) -> bool {
+        while self.video_ready_seek_epoch.load(Ordering::Acquire) != seek_epoch {
+            if self.current_seek_epoch() != seek_epoch {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    fn request_seek_to_us(&self, target_us: u64) {
+        let duration_us = self.media_duration_us();
+        let target_us = if duration_us == 0 {
+            target_us
+        } else {
+            target_us.min(duration_us.saturating_sub(1))
+        };
+        let previous_target = self.desired_position_us.swap(target_us, Ordering::AcqRel);
+        let was_finished = self.finished.swap(false, Ordering::AcqRel);
+        if previous_target == target_us && !was_finished {
+            self.show_for_mouse_activity();
+            return;
+        }
+        self.seek_target_us.store(target_us, Ordering::Release);
+        let pause_after_seek =
+            !was_finished && (self.is_paused() || self.pause_after_seek.load(Ordering::Acquire));
+        self.pause_after_seek
+            .store(pause_after_seek, Ordering::Release);
+        self.paused.store(false, Ordering::Release);
+        self.reset_fps_window();
+        self.seek_epoch.fetch_add(1, Ordering::AcqRel);
+        self.show_for_mouse_activity();
+    }
+
+    fn request_relative_seek_ms(&self, delta_ms: i64) {
+        let seek_epoch = self.current_seek_epoch();
+        let current_us = if self.is_video_ready_for_seek(seek_epoch) {
+            self.last_video_pts_us.load(Ordering::Acquire)
+        } else {
+            self.current_seek_target_us()
+        };
+        let delta_us = delta_ms.saturating_mul(1_000);
+        let target_us = if delta_us >= 0 {
+            current_us.saturating_add(delta_us as u64)
+        } else {
+            current_us.saturating_sub(delta_us.unsigned_abs())
+        };
+        self.request_seek_to_us(target_us);
+    }
+
+    fn set_scrubbing(&self, scrubbing: bool) {
+        self.scrubbing.store(scrubbing, Ordering::Release);
+    }
+
+    fn is_scrubbing(&self) -> bool {
+        self.scrubbing.load(Ordering::Acquire)
     }
 
     fn toggle_debug(&self) {
@@ -386,9 +507,25 @@ impl ControlsOverlay {
         self.record_video_timing(presentation_time_us, clock_time_us);
     }
 
+    fn record_preview_frame(&self, presentation_time_us: u64) {
+        self.last_clock_us
+            .store(presentation_time_us, Ordering::Release);
+        self.last_video_pts_us
+            .store(presentation_time_us, Ordering::Release);
+        self.last_lag_us.store(0, Ordering::Release);
+    }
+
     fn record_dropped_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
         self.dropped_frames.fetch_add(1, Ordering::AcqRel);
         self.record_video_timing(presentation_time_us, clock_time_us);
+    }
+
+    fn reset_fps_window(&self) {
+        self.fps_window_start_us.store(u64::MAX, Ordering::Release);
+        self.fps_window_frames.store(
+            self.presented_frames.load(Ordering::Acquire),
+            Ordering::Release,
+        );
     }
 
     fn record_video_timing(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
@@ -417,6 +554,10 @@ impl ControlsOverlay {
         self.last_clock_us.store(clock_time_us, Ordering::Release);
         self.last_video_pts_us
             .store(presentation_time_us, Ordering::Release);
+        if self.is_video_ready_for_seek(self.current_seek_epoch()) {
+            self.desired_position_us
+                .store(presentation_time_us, Ordering::Release);
+        }
         self.last_lag_us.store(
             clock_time_us.saturating_sub(presentation_time_us),
             Ordering::Release,
@@ -534,6 +675,12 @@ enum PlayerAudioSource {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioPlaybackStatus {
+    Completed,
+    Interrupted,
+}
+
 impl VideoPlayerApp {
     fn new(
         path: String,
@@ -624,6 +771,15 @@ impl AudioClock {
 
     fn advance_base_frames(&self, frames: u64) {
         self.base_frames.fetch_add(frames, Ordering::AcqRel);
+    }
+
+    fn set_start_position_us(&self, start_us: u64, sample_rate: u32) {
+        let rate = u64::from(sample_rate).max(1);
+        let base_frames = start_us.saturating_mul(rate) / 1_000_000;
+        self.sample_rate.store(rate, Ordering::Release);
+        self.base_frames.store(base_frames, Ordering::Release);
+        self.read_frames.store(base_frames, Ordering::Release);
+        self.finished.store(false, Ordering::Release);
     }
 
     fn set_loop_duration_us(&self, duration_us: u64) {
@@ -871,21 +1027,38 @@ fn decode_loop_software(
         source.access_units.len()
     );
     let loop_duration_us = video_source_duration_us(&source);
+    controls.set_media_duration_us(loop_duration_us);
     let mut loop_index = 0u64;
+    let mut seek_epoch = controls.current_seek_epoch();
+    let mut seek_target_us = 0u64;
 
     loop {
         let mut decoder = Decoder::new();
-        let mut display_index = 0usize;
+        let seek_plan = video_seek_plan(&source, seek_target_us);
+        let mut display_index = seek_plan.publish_start_rank;
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
+        let mut restart_for_seek = false;
 
-        for access_unit in &source.access_units {
+        for access_unit in &source.access_units[seek_plan.decode_start_index..] {
+            if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
+                seek_target_us = target_us;
+                loop_index = 0;
+                restart_for_seek = true;
+                break;
+            }
             wait_while_paused(controls);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
             let nals = parse_annex_b(access_unit_bytes);
             for nal in &nals {
                 match decoder.decode_nal(nal) {
                     Ok(Some(frame)) => {
-                        publish_frame_synced(
+                        if !video_should_publish_after_seek(
+                            access_unit,
+                            seek_plan.publish_target_us,
+                        ) {
+                            continue;
+                        }
+                        if !publish_frame_synced(
                             frame_store,
                             paint_signal,
                             controls,
@@ -895,18 +1068,31 @@ fn decode_loop_software(
                             access_unit
                                 .presentation_time_us
                                 .saturating_add(loop_time_offset_us),
+                            seek_epoch,
                             clock,
-                        )?;
+                        )? {
+                            seek_target_us = controls.current_seek_target_us();
+                            seek_epoch = controls.current_seek_epoch();
+                            loop_index = 0;
+                            restart_for_seek = true;
+                            break;
+                        }
                         display_index += 1;
                     }
                     Ok(None) => {}
                     Err(err) => return Err(format!("decode failed: {err}")),
                 }
             }
+            if restart_for_seek {
+                break;
+            }
         }
 
+        if restart_for_seek {
+            continue;
+        }
         if let Some(frame) = decoder.flush() {
-            publish_frame_synced(
+            if !publish_frame_synced(
                 frame_store,
                 paint_signal,
                 controls,
@@ -915,8 +1101,14 @@ fn decode_loop_software(
                 total_frames,
                 loop_time_offset_us
                     .saturating_add(display_index as u64 * FRAME_INTERVAL_MS * 1_000),
+                seek_epoch,
                 clock,
-            )?;
+            )? {
+                seek_target_us = controls.current_seek_target_us();
+                seek_epoch = controls.current_seek_epoch();
+                loop_index = 0;
+                continue;
+            }
             display_index += 1;
         }
 
@@ -927,7 +1119,8 @@ fn decode_loop_software(
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
-            wait_for_replay_request(controls);
+            seek_target_us = wait_for_replay_request(controls).unwrap_or(0);
+            seek_epoch = controls.current_seek_epoch();
             frame_store.reset_for_replay();
             paint_signal.notify();
             loop_index = 0;
@@ -941,8 +1134,6 @@ fn decode_loop_software(
         );
         loop_index = loop_index.saturating_add(1);
     }
-
-    Ok(())
 }
 
 fn decode_loop_hardware(
@@ -963,14 +1154,44 @@ fn decode_loop_hardware(
         source.access_units.len()
     );
     let loop_duration_us = video_source_duration_us(&source);
+    controls.set_media_duration_us(loop_duration_us);
     let mut loop_index = 0u64;
+    let mut seek_epoch = controls.current_seek_epoch();
+    let mut seek_target_us = 0u64;
 
     loop {
-        let mut decoder = HardwareVideoDecoder::open()?;
-        let mut reorder = FrameReorderBuffer::new(total_frames);
+        let seek_plan = video_seek_plan(&source, seek_target_us);
+        let mut reorder = FrameReorderBuffer::new_from(total_frames, seek_plan.publish_start_rank);
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
+        let mut restart_for_seek = false;
 
-        for access_unit in &source.access_units {
+        if seek_epoch != 0 || seek_target_us != 0 {
+            if !publish_hardware_seek_preview(
+                &source,
+                mp4_data,
+                &seek_plan,
+                frame_store,
+                paint_signal,
+                controls,
+                &mut access_unit_scratch,
+                total_frames,
+                seek_epoch,
+            )? {
+                seek_target_us = controls.current_seek_target_us();
+                seek_epoch = controls.current_seek_epoch();
+                loop_index = 0;
+                continue;
+            }
+        }
+
+        let mut decoder = HardwareVideoDecoder::open()?;
+        for access_unit in &source.access_units[seek_plan.decode_start_index..] {
+            if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
+                seek_target_us = target_us;
+                loop_index = 0;
+                restart_for_seek = true;
+                break;
+            }
             wait_while_paused(controls);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
             let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
@@ -980,25 +1201,49 @@ fn decode_loop_hardware(
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
+            if !video_should_publish_after_seek(access_unit, seek_plan.publish_target_us) {
+                continue;
+            }
             if reorder.can_publish_immediately(access_unit.display_rank) {
-                reorder.publish_immediate(
+                if !reorder.publish_immediate(
                     frame_store,
                     paint_signal,
                     controls,
                     clock,
                     presentation_time_us,
+                    seek_epoch,
                     DecodedVideoFrame::Hardware(frame),
-                )?;
+                )? {
+                    seek_target_us = controls.current_seek_target_us();
+                    seek_epoch = controls.current_seek_epoch();
+                    loop_index = 0;
+                    restart_for_seek = true;
+                    break;
+                }
             } else {
                 reorder.push(
                     access_unit.display_rank,
                     presentation_time_us,
                     DecodedVideoFrame::Hardware(frame.into_owned()),
                 )?;
-                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+                if !reorder.publish_ready(frame_store, paint_signal, controls, clock, seek_epoch)? {
+                    seek_target_us = controls.current_seek_target_us();
+                    seek_epoch = controls.current_seek_epoch();
+                    loop_index = 0;
+                    restart_for_seek = true;
+                    break;
+                }
             }
         }
-        reorder.finish(frame_store, paint_signal, controls, clock)?;
+        if restart_for_seek {
+            continue;
+        }
+        if !reorder.finish(frame_store, paint_signal, controls, clock, seek_epoch)? {
+            seek_target_us = controls.current_seek_target_us();
+            seek_epoch = controls.current_seek_epoch();
+            loop_index = 0;
+            continue;
+        }
 
         if !controls.is_loop_enabled() {
             frame_store.mark_complete();
@@ -1007,7 +1252,8 @@ fn decode_loop_hardware(
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
-            wait_for_replay_request(controls);
+            seek_target_us = wait_for_replay_request(controls).unwrap_or(0);
+            seek_epoch = controls.current_seek_epoch();
             frame_store.reset_for_replay();
             paint_signal.notify();
             loop_index = 0;
@@ -1021,8 +1267,6 @@ fn decode_loop_hardware(
         );
         loop_index = loop_index.saturating_add(1);
     }
-
-    Ok(())
 }
 
 fn decode_loop_hardware_streaming_mp4(
@@ -1143,13 +1387,15 @@ fn decode_loop_hardware_streaming_mp4(
                 println!("[{}] stream decoded first frame", APP_NAME);
                 logged_first_decode = true;
             }
+            let seek_epoch = controls.current_seek_epoch();
             if reorder.can_publish_immediately(access_unit.display_rank) {
-                reorder.publish_immediate(
+                let _ = reorder.publish_immediate(
                     frame_store,
                     paint_signal,
                     controls,
                     clock,
                     access_unit.presentation_time_us,
+                    seek_epoch,
                     DecodedVideoFrame::Hardware(frame),
                 )?;
             } else {
@@ -1158,13 +1404,25 @@ fn decode_loop_hardware_streaming_mp4(
                     access_unit.presentation_time_us,
                     DecodedVideoFrame::Hardware(frame.into_owned()),
                 )?;
-                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+                let _ = reorder.publish_ready(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    clock,
+                    seek_epoch,
+                )?;
             }
             decoded += 1;
         }
     }
 
-    reorder.finish(frame_store, paint_signal, controls, clock)?;
+    let _ = reorder.finish(
+        frame_store,
+        paint_signal,
+        controls,
+        clock,
+        controls.current_seek_epoch(),
+    )?;
     drop(decoder);
 
     if controls.is_loop_enabled() {
@@ -1200,7 +1458,7 @@ fn decode_loop_hardware_streaming_mp4(
         if let Some(clock) = clock {
             clock.reset_for_replay();
         }
-        wait_for_replay_request(controls);
+        let _ = wait_for_replay_request(controls);
         frame_store.reset_for_replay();
         paint_signal.notify();
         let source = load_mp4_video_source_with_options(&data, false, true)?;
@@ -1356,13 +1614,15 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 println!("[{}] stream decoded first frame", APP_NAME);
                 logged_first_decode = true;
             }
+            let seek_epoch = controls.current_seek_epoch();
             if reorder.can_publish_immediately(access_unit.display_rank) {
-                reorder.publish_immediate(
+                let _ = reorder.publish_immediate(
                     frame_store,
                     paint_signal,
                     controls,
                     clock,
                     access_unit.presentation_time_us,
+                    seek_epoch,
                     DecodedVideoFrame::Hardware(frame),
                 )?;
             } else {
@@ -1371,13 +1631,25 @@ fn decode_loop_hardware_streaming_mp4_socket(
                     access_unit.presentation_time_us,
                     DecodedVideoFrame::Hardware(frame.into_owned()),
                 )?;
-                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+                let _ = reorder.publish_ready(
+                    frame_store,
+                    paint_signal,
+                    controls,
+                    clock,
+                    seek_epoch,
+                )?;
             }
             decoded += 1;
         }
     }
 
-    reorder.finish(frame_store, paint_signal, controls, clock)?;
+    let _ = reorder.finish(
+        frame_store,
+        paint_signal,
+        controls,
+        clock,
+        controls.current_seek_epoch(),
+    )?;
     drop(decoder);
 
     if controls.is_loop_enabled() {
@@ -1413,7 +1685,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
         if let Some(clock) = clock {
             clock.reset_for_replay();
         }
-        wait_for_replay_request(controls);
+        let _ = wait_for_replay_request(controls);
         frame_store.reset_for_replay();
         paint_signal.notify();
         let source = load_mp4_video_source_with_options(&data, false, true)?;
@@ -1451,14 +1723,44 @@ fn replay_hardware_source_loops(
 ) -> Result<(), String> {
     let total_frames = source.access_units.len().max(1) as u32;
     let loop_duration_us = video_source_duration_us(source);
+    controls.set_media_duration_us(loop_duration_us);
     let mut access_unit_scratch = Vec::new();
+    let mut seek_epoch = controls.current_seek_epoch();
+    let mut seek_target_us = 0u64;
 
     loop {
-        let mut decoder = HardwareVideoDecoder::open()?;
-        let mut reorder = FrameReorderBuffer::new(total_frames);
+        let seek_plan = video_seek_plan(source, seek_target_us);
+        let mut reorder = FrameReorderBuffer::new_from(total_frames, seek_plan.publish_start_rank);
         let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
+        let mut restart_for_seek = false;
 
-        for access_unit in &source.access_units {
+        if seek_epoch != 0 || seek_target_us != 0 {
+            if !publish_hardware_seek_preview(
+                source,
+                Some(mp4_data),
+                &seek_plan,
+                frame_store,
+                paint_signal,
+                controls,
+                &mut access_unit_scratch,
+                total_frames,
+                seek_epoch,
+            )? {
+                seek_target_us = controls.current_seek_target_us();
+                seek_epoch = controls.current_seek_epoch();
+                loop_index = 0;
+                continue;
+            }
+        }
+
+        let mut decoder = HardwareVideoDecoder::open()?;
+        for access_unit in &source.access_units[seek_plan.decode_start_index..] {
+            if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
+                seek_target_us = target_us;
+                loop_index = 0;
+                restart_for_seek = true;
+                break;
+            }
             wait_while_paused(controls);
             let access_unit_bytes = access_unit.bytes(Some(mp4_data), &mut access_unit_scratch)?;
             let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
@@ -1468,26 +1770,50 @@ fn replay_hardware_source_loops(
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
+            if !video_should_publish_after_seek(access_unit, seek_plan.publish_target_us) {
+                continue;
+            }
             if reorder.can_publish_immediately(access_unit.display_rank) {
-                reorder.publish_immediate(
+                if !reorder.publish_immediate(
                     frame_store,
                     paint_signal,
                     controls,
                     clock,
                     presentation_time_us,
+                    seek_epoch,
                     DecodedVideoFrame::Hardware(frame),
-                )?;
+                )? {
+                    seek_target_us = controls.current_seek_target_us();
+                    seek_epoch = controls.current_seek_epoch();
+                    loop_index = 0;
+                    restart_for_seek = true;
+                    break;
+                }
             } else {
                 reorder.push(
                     access_unit.display_rank,
                     presentation_time_us,
                     DecodedVideoFrame::Hardware(frame.into_owned()),
                 )?;
-                reorder.publish_ready(frame_store, paint_signal, controls, clock)?;
+                if !reorder.publish_ready(frame_store, paint_signal, controls, clock, seek_epoch)? {
+                    seek_target_us = controls.current_seek_target_us();
+                    seek_epoch = controls.current_seek_epoch();
+                    loop_index = 0;
+                    restart_for_seek = true;
+                    break;
+                }
             }
         }
 
-        reorder.finish(frame_store, paint_signal, controls, clock)?;
+        if restart_for_seek {
+            continue;
+        }
+        if !reorder.finish(frame_store, paint_signal, controls, clock, seek_epoch)? {
+            seek_target_us = controls.current_seek_target_us();
+            seek_epoch = controls.current_seek_epoch();
+            loop_index = 0;
+            continue;
+        }
         if controls.is_loop_enabled() {
             println!(
                 "[{}] loop {} complete: {} frames",
@@ -1506,7 +1832,8 @@ fn replay_hardware_source_loops(
         if let Some(clock) = clock {
             clock.reset_for_replay();
         }
-        wait_for_replay_request(controls);
+        seek_target_us = wait_for_replay_request(controls).unwrap_or(0);
+        seek_epoch = controls.current_seek_epoch();
         frame_store.reset_for_replay();
         paint_signal.notify();
         loop_index = 0;
@@ -1524,6 +1851,7 @@ struct VideoAccessUnit {
     codec: VideoCodec,
     display_rank: usize,
     presentation_time_us: u64,
+    is_keyframe: bool,
 }
 
 fn video_source_duration_us(source: &VideoSource) -> u64 {
@@ -1546,6 +1874,76 @@ fn video_loop_time_offset_us(
         .and_then(AudioClock::loop_duration_us)
         .unwrap_or(fallback_duration_us);
     loop_index.saturating_mul(duration_us)
+}
+
+struct VideoSeekPlan {
+    decode_start_index: usize,
+    publish_target_us: u64,
+    publish_start_rank: usize,
+    preview_index: Option<usize>,
+}
+
+fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
+    if source.access_units.is_empty() {
+        return VideoSeekPlan {
+            decode_start_index: 0,
+            publish_target_us: 0,
+            publish_start_rank: 0,
+            preview_index: None,
+        };
+    }
+    let publish_target_us = target_us.min(video_source_duration_us(source).saturating_sub(1));
+    let mut decode_start_index = 0usize;
+    for (index, access_unit) in source.access_units.iter().enumerate() {
+        if access_unit.presentation_time_us <= publish_target_us && access_unit.is_keyframe {
+            decode_start_index = index;
+        }
+        if access_unit.presentation_time_us > publish_target_us {
+            break;
+        }
+    }
+    let publish_start_rank = source
+        .access_units
+        .iter()
+        .filter(|unit| unit.presentation_time_us < publish_target_us)
+        .count();
+    let preview_index = source
+        .access_units
+        .iter()
+        .enumerate()
+        .find(|(_, unit)| unit.is_keyframe && unit.presentation_time_us >= publish_target_us)
+        .map(|(index, _)| index)
+        .or_else(|| {
+            source
+                .access_units
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, unit)| unit.is_keyframe)
+                .map(|(index, _)| index)
+        });
+    VideoSeekPlan {
+        decode_start_index,
+        publish_target_us,
+        publish_start_rank,
+        preview_index,
+    }
+}
+
+fn video_should_publish_after_seek(access_unit: &VideoAccessUnit, publish_target_us: u64) -> bool {
+    access_unit.presentation_time_us >= publish_target_us
+}
+
+fn consume_seek_request(controls: &ControlsOverlay, seek_epoch: &mut u32) -> Option<u64> {
+    let current_epoch = controls.current_seek_epoch();
+    if current_epoch != *seek_epoch {
+        thread::sleep(Duration::from_millis(SEEK_COALESCE_DELAY_MS));
+        let current_epoch = controls.current_seek_epoch();
+        *seek_epoch = current_epoch;
+        Some(controls.current_seek_target_us())
+    } else {
+        None
+    }
 }
 
 enum VideoAccessUnitPayload {
@@ -1631,6 +2029,7 @@ fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource,
             .into_iter()
             .enumerate()
             .map(|(display_rank, bytes)| VideoAccessUnit {
+                is_keyframe: h264_access_unit_is_keyframe(&bytes),
                 payload: VideoAccessUnitPayload::Owned(bytes),
                 codec: VideoCodec::H264,
                 display_rank,
@@ -1686,6 +2085,7 @@ struct Mp4Track {
     composition_offsets: Vec<i64>,
     sample_to_chunk: Vec<SampleToChunkEntry>,
     chunk_offsets: Vec<u64>,
+    sync_samples: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -1845,11 +2245,25 @@ fn load_mp4_video_source_with_options(
             }
             VideoContainerFormat::RawH264 => unreachable!(),
         };
+        let is_keyframe = if track.sync_samples.is_empty() {
+            match (&payload, codec) {
+                (VideoAccessUnitPayload::Owned(bytes), VideoCodec::H264) => {
+                    h264_access_unit_is_keyframe(bytes)
+                }
+                (_, _) => index == 0,
+            }
+        } else {
+            track
+                .sync_samples
+                .binary_search(&((index + 1).min(u32::MAX as usize) as u32))
+                .is_ok()
+        };
         access_units.push(VideoAccessUnit {
             payload,
             codec,
             display_rank: sample_layout.display_ranks[index],
             presentation_time_us: sample_layout.presentation_times_us[index],
+            is_keyframe,
         });
     }
 
@@ -2028,6 +2442,7 @@ fn parse_mp4_track_boxes(
             b"stsc" => {
                 track.sample_to_chunk = parse_stsc(data, mp4_box.data_start, mp4_box.data_end)?
             }
+            b"stss" => track.sync_samples = parse_stss(data, mp4_box.data_start, mp4_box.data_end)?,
             b"stco" => {
                 track.chunk_offsets = parse_stco(data, mp4_box.data_start, mp4_box.data_end)?
             }
@@ -2594,6 +3009,22 @@ fn parse_stsc(data: &[u8], start: usize, _end: usize) -> Result<Vec<SampleToChun
         offset += 12;
     }
     Ok(entries)
+}
+
+fn parse_stss(data: &[u8], start: usize, _end: usize) -> Result<Vec<u32>, String> {
+    let entry_count = read_u32_be(
+        data.get(start + 4..start + 8)
+            .ok_or_else(|| String::from("MP4 stss box is truncated"))?,
+    ) as usize;
+    let mut samples = Vec::new();
+    let mut offset = start + 8;
+    for _ in 0..entry_count {
+        samples.push(read_u32_be(data.get(offset..offset + 4).ok_or_else(
+            || String::from("MP4 stss sample number is truncated"),
+        )?));
+        offset += 4;
+    }
+    Ok(samples)
 }
 
 fn parse_stco(data: &[u8], start: usize, _end: usize) -> Result<Vec<u64>, String> {
@@ -3262,6 +3693,12 @@ impl<'a> RawNalUnit<'a> {
     }
 }
 
+fn h264_access_unit_is_keyframe(access_unit: &[u8]) -> bool {
+    parse_raw_annex_b(access_unit)
+        .iter()
+        .any(|nal| nal.nal_type == 5)
+}
+
 struct ScarletVideoFrame {
     width: u32,
     height: u32,
@@ -3620,11 +4057,15 @@ struct FrameReorderBuffer {
 
 impl FrameReorderBuffer {
     fn new(total_frames: u32) -> Self {
+        Self::new_from(total_frames, 0)
+    }
+
+    fn new_from(total_frames: u32, start_rank: usize) -> Self {
         Self {
             pending: Vec::new(),
-            next_rank: 0,
+            next_rank: start_rank,
             total_frames,
-            published: 0,
+            published: start_rank,
         }
     }
 
@@ -3639,9 +4080,10 @@ impl FrameReorderBuffer {
         controls: &ControlsOverlay,
         clock: Option<&AudioClock>,
         presentation_time_us: u64,
+        seek_epoch: u32,
         frame: DecodedVideoFrame,
-    ) -> Result<(), String> {
-        publish_frame_synced(
+    ) -> Result<bool, String> {
+        if !publish_frame_synced(
             frame_store,
             paint_signal,
             controls,
@@ -3649,11 +4091,14 @@ impl FrameReorderBuffer {
             self.published,
             self.total_frames,
             presentation_time_us,
+            seek_epoch,
             clock,
-        )?;
+        )? {
+            return Ok(false);
+        }
         self.next_rank += 1;
         self.published += 1;
-        Ok(())
+        Ok(true)
     }
 
     fn push(
@@ -3680,14 +4125,15 @@ impl FrameReorderBuffer {
         paint_signal: &PaintSignal,
         controls: &ControlsOverlay,
         clock: Option<&AudioClock>,
-    ) -> Result<(), String> {
+        seek_epoch: u32,
+    ) -> Result<bool, String> {
         while let Some(index) = self
             .pending
             .iter()
             .position(|(rank, _, _)| *rank == self.next_rank)
         {
             let (_, presentation_time_us, frame) = self.pending.remove(index);
-            publish_frame_synced(
+            if !publish_frame_synced(
                 frame_store,
                 paint_signal,
                 controls,
@@ -3695,12 +4141,15 @@ impl FrameReorderBuffer {
                 self.published,
                 self.total_frames,
                 presentation_time_us,
+                seek_epoch,
                 clock,
-            )?;
+            )? {
+                return Ok(false);
+            }
             self.next_rank += 1;
             self.published += 1;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn finish(
@@ -3709,11 +4158,12 @@ impl FrameReorderBuffer {
         paint_signal: &PaintSignal,
         controls: &ControlsOverlay,
         clock: Option<&AudioClock>,
-    ) -> Result<(), String> {
+        seek_epoch: u32,
+    ) -> Result<bool, String> {
         self.pending.sort_by_key(|(rank, _, _)| *rank);
         while !self.pending.is_empty() {
             let (_, presentation_time_us, frame) = self.pending.remove(0);
-            publish_frame_synced(
+            if !publish_frame_synced(
                 frame_store,
                 paint_signal,
                 controls,
@@ -3721,11 +4171,14 @@ impl FrameReorderBuffer {
                 self.published,
                 self.total_frames,
                 presentation_time_us,
+                seek_epoch,
                 clock,
-            )?;
+            )? {
+                return Ok(false);
+            }
             self.published += 1;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn published(&self) -> usize {
@@ -3735,6 +4188,44 @@ impl FrameReorderBuffer {
     fn set_total_frames(&mut self, total_frames: u32) {
         self.total_frames = total_frames.max(1);
     }
+}
+
+fn publish_hardware_seek_preview(
+    source: &VideoSource,
+    mp4_data: Option<&[u8]>,
+    seek_plan: &VideoSeekPlan,
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
+    access_unit_scratch: &mut Vec<u8>,
+    total_frames: u32,
+    seek_epoch: u32,
+) -> Result<bool, String> {
+    let Some(preview_index) = seek_plan.preview_index else {
+        return Ok(true);
+    };
+    if controls.current_seek_epoch() != seek_epoch || controls.is_video_ready_for_seek(seek_epoch) {
+        return Ok(controls.current_seek_epoch() == seek_epoch);
+    }
+    let access_unit = &source.access_units[preview_index];
+    if access_unit.presentation_time_us < seek_plan.publish_target_us {
+        return Ok(true);
+    }
+    let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
+    let mut decoder = HardwareVideoDecoder::open()?;
+    let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
+        return Ok(true);
+    };
+    publish_seek_preview(
+        frame_store,
+        paint_signal,
+        controls,
+        DecodedVideoFrame::Hardware(frame),
+        access_unit.display_rank,
+        total_frames,
+        access_unit.presentation_time_us,
+        seek_epoch,
+    )
 }
 
 fn stream_total_frames(source: &VideoSource, decoded: usize, complete: bool) -> u32 {
@@ -3919,23 +4410,56 @@ fn start_audio_thread(
             clock.set_loop_duration_us(duration_us);
         }
 
-        if !clock.wait_until_video_ready() {
-            return;
-        }
-
+        let mut seek_epoch = controls.current_seek_epoch();
+        let mut start_us = controls.current_seek_target_us();
         loop {
-            if let Err(err) = play_audio_source_sas(&source, &clock, &controls) {
-                clock.mark_unavailable();
-                println!("[{}] audio: {}", APP_NAME, err);
-                return;
-            }
-            if controls.is_loop_enabled() {
+            if seek_epoch == 0 && start_us == 0 {
+                if !clock.wait_until_video_ready() {
+                    return;
+                }
+            } else if !controls.wait_for_video_seek_ready(seek_epoch) {
+                seek_epoch = controls.current_seek_epoch();
+                start_us = controls.current_seek_target_us();
+                clock.reset_for_replay_audio();
                 continue;
             }
-            wait_for_replay_epoch_change(&controls);
-            clock.reset_for_replay_audio();
-            if !clock.wait_until_video_ready() {
-                return;
+
+            match play_audio_source_sas(&source, &clock, &controls, start_us, seek_epoch) {
+                Ok(AudioPlaybackStatus::Completed) => {}
+                Ok(AudioPlaybackStatus::Interrupted) => {
+                    seek_epoch = controls.current_seek_epoch();
+                    start_us = controls.current_seek_target_us();
+                    clock.reset_for_replay_audio();
+                    continue;
+                }
+                Err(err) => {
+                    clock.mark_unavailable();
+                    println!("[{}] audio: {}", APP_NAME, err);
+                    return;
+                }
+            }
+            if controls.is_loop_enabled() {
+                start_us = 0;
+                seek_epoch = controls.current_seek_epoch();
+                clock.reset_for_replay_audio();
+                continue;
+            }
+            let replay_epoch = controls.current_replay_epoch();
+            let previous_seek_epoch = controls.current_seek_epoch();
+            loop {
+                if controls.current_seek_epoch() != previous_seek_epoch {
+                    seek_epoch = controls.current_seek_epoch();
+                    start_us = controls.current_seek_target_us();
+                    clock.reset_for_replay_audio();
+                    break;
+                }
+                if controls.current_replay_epoch() != replay_epoch {
+                    seek_epoch = controls.current_seek_epoch();
+                    start_us = 0;
+                    clock.reset_for_replay_audio();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
             }
         }
     });
@@ -4000,10 +4524,14 @@ fn play_audio_source_sas(
     source: &PlayerAudioSource,
     clock: &AudioClock,
     controls: &ControlsOverlay,
-) -> Result<(), String> {
+    start_us: u64,
+    seek_epoch: u32,
+) -> Result<AudioPlaybackStatus, String> {
     match source {
-        PlayerAudioSource::Wav(path) => play_wav_sas(path, clock, controls),
-        PlayerAudioSource::Mp4Aac(data) => play_mp4_aac_sas(data.clone(), clock, controls),
+        PlayerAudioSource::Wav(path) => play_wav_sas(path, clock, controls, start_us, seek_epoch),
+        PlayerAudioSource::Mp4Aac(data) => {
+            play_mp4_aac_sas(data.clone(), clock, controls, start_us, seek_epoch)
+        }
         PlayerAudioSource::StreamingMp4Aac {
             path,
             complete_path,
@@ -4012,33 +4540,49 @@ fn play_audio_source_sas(
                 wait_for_marker(complete_path);
             }
             let data = read_file(path)?;
-            play_mp4_aac_sas(Arc::new(data), clock, controls)
+            play_mp4_aac_sas(Arc::new(data), clock, controls, start_us, seek_epoch)
         }
         PlayerAudioSource::StreamingMp4AacSocket { socket_path } => {
             let data = read_socket_to_end(socket_path)?;
-            play_mp4_aac_sas(Arc::new(data), clock, controls)
+            play_mp4_aac_sas(Arc::new(data), clock, controls, start_us, seek_epoch)
         }
     }
 }
 
-fn play_wav_sas(path: &str, clock: &AudioClock, controls: &ControlsOverlay) -> Result<(), String> {
+fn play_wav_sas(
+    path: &str,
+    clock: &AudioClock,
+    controls: &ControlsOverlay,
+    start_us: u64,
+    seek_epoch: u32,
+) -> Result<AudioPlaybackStatus, String> {
     let bytes = read_file(path)?;
     let wav = parse_wav(&bytes)?;
     if wav.audio_format != 1 || wav.bits_per_sample != 16 {
         return Err(String::from("SAS accepts only PCM S16LE WAV files"));
     }
     let data = &bytes[wav.data_offset..wav.data_offset + wav.data_len];
-    play_sas_pcm_s16le(data, wav.sample_rate, wav.channels, clock, controls)
+    play_sas_pcm_s16le(
+        data,
+        wav.sample_rate,
+        wav.channels,
+        clock,
+        controls,
+        start_us,
+        seek_epoch,
+    )
 }
 
 fn play_mp4_aac_sas(
     data: Arc<Vec<u8>>,
     clock: &AudioClock,
     controls: &ControlsOverlay,
-) -> Result<(), String> {
+    start_us: u64,
+    seek_epoch: u32,
+) -> Result<AudioPlaybackStatus, String> {
     #[cfg(not(feature = "mp4-aac"))]
     {
-        let _ = (data, clock, controls);
+        let _ = (data, clock, controls, start_us, seek_epoch);
         Err(String::from("MP4/AAC audio support is not built"))
     }
 
@@ -4052,7 +4596,7 @@ fn play_mp4_aac_sas(
             source.config.sample_rate,
             source.config.channels
         );
-        play_aac_source_sas(&source, clock, controls)
+        play_aac_source_sas(&source, clock, controls, start_us, seek_epoch)
     }
 }
 
@@ -4062,7 +4606,9 @@ fn play_sas_pcm_s16le(
     channels: u16,
     clock: &AudioClock,
     controls: &ControlsOverlay,
-) -> Result<(), String> {
+    start_us: u64,
+    seek_epoch: u32,
+) -> Result<AudioPlaybackStatus, String> {
     if sample_rate == 0 {
         return Err(String::from("audio sample rate is zero"));
     }
@@ -4070,19 +4616,26 @@ fn play_sas_pcm_s16le(
         return Err(String::from("audio channel count is zero"));
     }
     let frame_bytes = channels as usize * 2;
+    let total_data_frames = data.len() / frame_bytes;
+    let start_frame = (u128::from(start_us) * u128::from(sample_rate) / 1_000_000)
+        .min(total_data_frames as u128) as usize;
+    let start_offset = start_frame * frame_bytes;
+    clock.set_start_position_us(start_us, sample_rate);
     if data.len() < frame_bytes {
         clock.mark_started(sample_rate);
         clock.mark_finished();
-        return Ok(());
+        return Ok(AudioPlaybackStatus::Completed);
     }
 
-    let total_data_frames = data.len() / frame_bytes;
     let mut writer = SasPcmWriter::new(sample_rate, channels, frame_bytes, clock)?;
-    writer.write_bytes(data, controls, clock)?;
+    if writer.write_bytes(&data[start_offset..], controls, clock, seek_epoch)? {
+        writer.close();
+        return Ok(AudioPlaybackStatus::Interrupted);
+    }
     writer.drain_close(clock)?;
-    clock.advance_base_frames(total_data_frames as u64);
+    clock.advance_base_frames(total_data_frames.saturating_sub(start_frame) as u64);
     clock.mark_finished();
-    Ok(())
+    Ok(AudioPlaybackStatus::Completed)
 }
 
 struct SasPcmWriter {
@@ -4128,13 +4681,20 @@ impl SasPcmWriter {
         data: &[u8],
         controls: &ControlsOverlay,
         clock: &AudioClock,
-    ) -> Result<(), String> {
+        seek_epoch: u32,
+    ) -> Result<bool, String> {
         let total_data_frames = data.len() / self.frame_bytes;
         let mut pos_frame = 0usize;
 
         while pos_frame < total_data_frames {
+            if controls.current_seek_epoch() != seek_epoch {
+                return Ok(true);
+            }
             clock.update_read_frames(self.stream.read_frames());
             while controls.is_paused() {
+                if controls.current_seek_epoch() != seek_epoch {
+                    return Ok(true);
+                }
                 clock.update_read_frames(self.stream.read_frames());
                 thread::sleep(Duration::from_millis(10));
             }
@@ -4153,7 +4713,7 @@ impl SasPcmWriter {
                 .write(&data[data_offset..data_offset + frames * self.frame_bytes]);
             pos_frame += written;
         }
-        Ok(())
+        Ok(false)
     }
 
     fn drain_close(mut self, clock: &AudioClock) -> Result<(), String> {
@@ -4167,6 +4727,11 @@ impl SasPcmWriter {
         let _ = self.client.close();
         Ok(())
     }
+
+    fn close(mut self) {
+        self.stream.reset();
+        let _ = self.client.close();
+    }
 }
 
 #[cfg(feature = "mp4-aac")]
@@ -4174,11 +4739,19 @@ fn play_aac_source_sas(
     source: &Mp4AacAudioSource,
     clock: &AudioClock,
     controls: &ControlsOverlay,
-) -> Result<(), String> {
+    start_us: u64,
+    seek_epoch: u32,
+) -> Result<AudioPlaybackStatus, String> {
     let frame_bytes = source.config.channels as usize * 2;
     if frame_bytes == 0 {
         return Err(String::from("AAC channel count is zero"));
     }
+    let start_frame = u128::from(start_us) * u128::from(source.config.sample_rate) / 1_000_000;
+    let start_sample = (start_frame / 1024).min(source.samples.len() as u128) as usize;
+    let start_sample_frame = start_sample as u64 * 1024;
+    let start_sample_us =
+        start_sample_frame.saturating_mul(1_000_000) / u64::from(source.config.sample_rate).max(1);
+    clock.set_start_position_us(start_sample_us, source.config.sample_rate);
     let mut writer = SasPcmWriter::new(
         source.config.sample_rate,
         source.config.channels,
@@ -4188,9 +4761,13 @@ fn play_aac_source_sas(
     let mut decoder = create_aac_decoder(source)?;
     let mut samples = Vec::<i16>::new();
     let mut bytes = Vec::<u8>::new();
-    let mut pts = 0i64;
-    let mut written_frames = 0u64;
-    for range in &source.samples {
+    let mut pts = start_sample_frame as i64;
+    let mut written_frames = start_sample_frame;
+    for range in source.samples.iter().skip(start_sample) {
+        if controls.current_seek_epoch() != seek_epoch {
+            writer.close();
+            return Ok(AudioPlaybackStatus::Interrupted);
+        }
         let sample_end = range
             .offset
             .checked_add(range.size)
@@ -4218,12 +4795,15 @@ fn play_aac_source_sas(
         }
         written_frames =
             written_frames.saturating_add((samples.len() / source.config.channels as usize) as u64);
-        writer.write_bytes(&bytes, controls, clock)?;
+        if writer.write_bytes(&bytes, controls, clock, seek_epoch)? {
+            writer.close();
+            return Ok(AudioPlaybackStatus::Interrupted);
+        }
     }
     writer.drain_close(clock)?;
-    clock.advance_base_frames(written_frames);
+    clock.advance_base_frames(written_frames.saturating_sub(start_sample_frame));
     clock.mark_finished();
-    Ok(())
+    Ok(AudioPlaybackStatus::Completed)
 }
 
 #[cfg(feature = "mp4-aac")]
@@ -4257,49 +4837,67 @@ fn publish_frame_synced(
     display_index: usize,
     total_frames: u32,
     presentation_time_us: u64,
+    seek_epoch: u32,
     clock: Option<&AudioClock>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     wait_while_paused(controls);
+    if controls.current_seek_epoch() != seek_epoch {
+        return Ok(false);
+    }
     let mut sync_time_us = None;
     if let Some(clock) = clock {
-        clock.mark_video_ready();
-        let mut logged_audio_wait = false;
-        let mut audio_wait_ms = 0u64;
-        loop {
-            wait_while_paused(controls);
-            let Some(audio_time_us) = clock.elapsed_us() else {
-                if clock.is_unavailable() {
-                    thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+        if controls.is_video_ready_for_seek(seek_epoch) {
+            let mut logged_audio_wait = false;
+            let mut audio_wait_ms = 0u64;
+            loop {
+                if controls.current_seek_epoch() != seek_epoch {
+                    return Ok(false);
+                }
+                wait_while_paused(controls);
+                if controls.current_seek_epoch() != seek_epoch {
+                    return Ok(false);
+                }
+                let Some(audio_time_us) = clock.elapsed_us() else {
+                    if clock.is_unavailable() {
+                        thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+                        break;
+                    }
+                    if !logged_audio_wait {
+                        println!("[{}] waiting for audio clock", APP_NAME);
+                        logged_audio_wait = true;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                    audio_wait_ms += 1;
+                    if audio_wait_ms >= AUDIO_CLOCK_START_TIMEOUT_MS {
+                        println!("[{}] audio clock start timed out", APP_NAME);
+                        clock.mark_unavailable();
+                        break;
+                    }
+                    continue;
+                };
+                sync_time_us = Some(audio_time_us);
+                if audio_time_us > presentation_time_us.saturating_add(LATE_VIDEO_DROP_THRESHOLD_US)
+                {
+                    controls.record_dropped_frame(presentation_time_us, sync_time_us);
+                    return Ok(true);
+                }
+                if audio_time_us >= presentation_time_us {
                     break;
                 }
-                if !logged_audio_wait {
-                    println!("[{}] waiting for audio clock", APP_NAME);
-                    logged_audio_wait = true;
+                if clock.is_finished() {
+                    break;
                 }
                 thread::sleep(Duration::from_millis(1));
-                audio_wait_ms += 1;
-                if audio_wait_ms >= AUDIO_CLOCK_START_TIMEOUT_MS {
-                    println!("[{}] audio clock start timed out", APP_NAME);
-                    clock.mark_unavailable();
-                    break;
-                }
-                continue;
-            };
-            sync_time_us = Some(audio_time_us);
-            if audio_time_us > presentation_time_us.saturating_add(LATE_VIDEO_DROP_THRESHOLD_US) {
-                controls.record_dropped_frame(presentation_time_us, sync_time_us);
-                return Ok(());
             }
-            if audio_time_us >= presentation_time_us {
-                break;
-            }
-            if clock.is_finished() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
         }
     } else {
         thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+        if controls.current_seek_epoch() != seek_epoch {
+            return Ok(false);
+        }
+    }
+    if controls.current_seek_epoch() != seek_epoch {
+        return Ok(false);
     }
 
     publish_frame(
@@ -4310,8 +4908,37 @@ fn publish_frame_synced(
         display_index,
         total_frames,
     )?;
+    controls.mark_video_ready_for_seek(seek_epoch);
+    if let Some(clock) = clock {
+        clock.mark_video_ready();
+    }
     controls.record_presented_frame(presentation_time_us, sync_time_us);
-    Ok(())
+    Ok(true)
+}
+
+fn publish_seek_preview(
+    frame_store: &VideoFrameStore,
+    paint_signal: &PaintSignal,
+    controls: &ControlsOverlay,
+    frame: DecodedVideoFrame,
+    display_index: usize,
+    total_frames: u32,
+    presentation_time_us: u64,
+    seek_epoch: u32,
+) -> Result<bool, String> {
+    if controls.current_seek_epoch() != seek_epoch {
+        return Ok(false);
+    }
+    publish_frame(
+        frame_store,
+        paint_signal,
+        controls,
+        frame,
+        display_index,
+        total_frames,
+    )?;
+    controls.record_preview_frame(presentation_time_us);
+    Ok(controls.current_seek_epoch() == seek_epoch)
 }
 
 fn publish_frame(
@@ -4342,16 +4969,20 @@ fn wait_while_paused(controls: &ControlsOverlay) {
     }
 }
 
-fn wait_for_replay_request(controls: &ControlsOverlay) -> u32 {
+fn wait_for_replay_request(controls: &ControlsOverlay) -> Option<u64> {
     controls.mark_finished();
-    wait_for_replay_epoch_change(controls)
+    wait_for_replay_or_seek_request(controls)
 }
 
-fn wait_for_replay_epoch_change(controls: &ControlsOverlay) -> u32 {
-    let my_epoch = controls.current_replay_epoch();
+fn wait_for_replay_or_seek_request(controls: &ControlsOverlay) -> Option<u64> {
+    let replay_epoch = controls.current_replay_epoch();
+    let seek_epoch = controls.current_seek_epoch();
     loop {
-        if controls.current_replay_epoch() != my_epoch {
-            return controls.current_replay_epoch();
+        if controls.current_replay_epoch() != replay_epoch {
+            return None;
+        }
+        if controls.current_seek_epoch() != seek_epoch {
+            return Some(controls.current_seek_target_us());
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -4906,22 +5537,49 @@ fn draw_video_frame(
 
 fn handle_canvas_event(event: &Event, controls: &ControlsOverlay) -> bool {
     match event {
-        Event::Mouse(MouseEvent::Entered { .. }) | Event::Mouse(MouseEvent::Moved { .. }) => {
-            controls.show_for_mouse_activity()
+        Event::Mouse(MouseEvent::Entered { .. }) => controls.show_for_mouse_activity(),
+        Event::Mouse(MouseEvent::Moved { x, y }) => {
+            controls.show_for_mouse_activity();
+            if controls.is_scrubbing()
+                && let Some(target_us) = seek_target_from_point(controls, *x, *y)
+            {
+                controls.request_seek_to_us(target_us);
+                true
+            } else {
+                false
+            }
         }
         Event::Mouse(MouseEvent::Exited { .. }) => controls.hide(),
+        Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x,
+            y,
+        }) => {
+            controls.show_for_mouse_activity();
+            if let Some(target_us) = seek_target_from_point(controls, *x, *y) {
+                controls.set_scrubbing(true);
+                controls.request_seek_to_us(target_us);
+                true
+            } else {
+                false
+            }
+        }
         Event::Mouse(MouseEvent::ButtonReleased {
             button: MouseButton::Left,
             x,
             y,
         }) => {
             controls.show_for_mouse_activity();
+            controls.set_scrubbing(false);
             if controls.play_pause_button_contains(*x, *y) {
                 if controls.is_finished() {
                     controls.request_replay();
                 } else {
                     controls.toggle_paused();
                 }
+                true
+            } else if let Some(target_us) = seek_target_from_point(controls, *x, *y) {
+                controls.request_seek_to_us(target_us);
                 true
             } else if controls.loop_button_contains(*x, *y) {
                 controls.toggle_loop();
@@ -4943,11 +5601,60 @@ fn handle_key_event(
         KeyEvent::Pressed {
             keycode: KeyCode::Space,
         } => {
-            if controls.is_finished() {
-                controls.request_replay();
-            } else {
-                controls.toggle_paused();
-            }
+            activate_play_pause(controls);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Escape,
+        }
+        | KeyEvent::Char { c: 'q' | 'Q' } => {
+            exit(0);
+        }
+        KeyEvent::Char { c: 'p' | 'P' } => {
+            activate_play_pause(controls);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Left,
+        } => {
+            controls.request_relative_seek_ms(-5_000);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Right,
+        } => {
+            controls.request_relative_seek_ms(5_000);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Down,
+        } => {
+            controls.request_relative_seek_ms(-60_000);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Up,
+        } => {
+            controls.request_relative_seek_ms(60_000);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Home,
+        } => {
+            controls.request_seek_to_us(0);
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::End,
+        } => {
+            controls.request_seek_to_us(controls.media_duration_us().saturating_sub(1));
             paint_signal.notify();
             true
         }
@@ -4963,6 +5670,38 @@ fn handle_key_event(
         }
         _ => false,
     }
+}
+
+fn activate_play_pause(controls: &ControlsOverlay) {
+    if controls.is_finished() {
+        controls.request_replay();
+    } else {
+        controls.toggle_paused();
+    }
+}
+
+fn seek_target_from_point(controls: &ControlsOverlay, x: i32, y: i32) -> Option<u64> {
+    let x = u32::try_from(x).ok()?;
+    let y = u32::try_from(y).ok()?;
+    let width = controls.canvas_width.load(Ordering::Acquire);
+    let height = controls.canvas_height.load(Ordering::Acquire);
+    if width < 180 {
+        return None;
+    }
+    let track_x = SEEK_TRACK_LEFT_INSET;
+    let right_inset = SEEK_TRACK_RIGHT_INSET.min(width / 8);
+    let track_width = width.saturating_sub(track_x + right_inset).max(1);
+    let track_y = height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
+    let hit_y0 = track_y.saturating_sub(12);
+    let hit_y1 = track_y.saturating_add(12);
+    if x < track_x || x >= track_x + track_width || y < hit_y0 || y > hit_y1 {
+        return None;
+    }
+    let duration_us = controls.media_duration_us();
+    if duration_us == 0 {
+        return None;
+    }
+    Some(u64::from(x - track_x).saturating_mul(duration_us) / u64::from(track_width))
 }
 
 fn draw_debug_overlay(
@@ -4981,7 +5720,6 @@ fn draw_debug_overlay(
 
     let presented = controls.presented_frames.load(Ordering::Acquire);
     let dropped = controls.dropped_frames.load(Ordering::Acquire);
-    let last_clock_us = controls.last_clock_us.load(Ordering::Acquire);
     let last_video_pts_us = controls.last_video_pts_us.load(Ordering::Acquire);
     let lag_ms = controls.last_lag_us.load(Ordering::Acquire) / 1_000;
     let total_frames = frame.total_frames.max(frame.current_frame).max(1);
@@ -5061,8 +5799,6 @@ fn draw_seek_bar(
     else {
         return;
     };
-    let total_frames = frame.total_frames.max(frame.current_frame).max(1);
-    let current_frame = frame.current_frame.min(total_frames);
     let panel_y = logical_canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
 
     blend_rect_scaled(
@@ -5097,8 +5833,18 @@ fn draw_seek_bar(
         .max(1);
     let track_height = SEEK_TRACK_HEIGHT;
     let track_y = logical_canvas_height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
-    let progress_width =
-        (u64::from(track_width) * u64::from(current_frame) / u64::from(total_frames)) as u32;
+    let duration_us = controls.media_duration_us();
+    let progress_width = if duration_us != 0 {
+        let position_us = controls
+            .desired_position_us
+            .load(Ordering::Acquire)
+            .min(duration_us);
+        (u128::from(track_width) * u128::from(position_us) / u128::from(duration_us)) as u32
+    } else {
+        let total_frames = frame.total_frames.max(frame.current_frame).max(1);
+        let current_frame = frame.current_frame.min(total_frames);
+        (u64::from(track_width) * u64::from(current_frame) / u64::from(total_frames)) as u32
+    };
     let knob_x = track_x + progress_width.saturating_sub(1).min(track_width - 1);
 
     blend_rect_scaled(
