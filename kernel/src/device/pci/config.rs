@@ -853,7 +853,7 @@ mod tests {
 
     #[test_case]
     fn test_decode_msi_capability_control() {
-        let cap = PciMsiCapability::from_message_control(0x50, 0x0191);
+        let cap = PciMsiCapability::from_message_control(0x50, 0x0199);
 
         assert_eq!(cap.offset, 0x50);
         assert!(cap.enabled);
