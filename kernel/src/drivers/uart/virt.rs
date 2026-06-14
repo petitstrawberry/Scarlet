@@ -208,6 +208,14 @@ impl Uart {
         }
     }
 
+    fn drain_tx_polling(&self) {
+        while let Some(byte) = self.tx_buffer.lock().pop_front() {
+            self.write_byte_internal(byte);
+        }
+        self.disable_tx_interrupt();
+        self.tx_waker.wake_all();
+    }
+
     /// Enqueue bytes into the TX ring, spinning only when the ring is full.
     fn enqueue_tx(&self, data: &[u8]) {
         let mut offset = 0;
@@ -293,7 +301,8 @@ impl CharDevice for Uart {
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         let _lock = self.tx_lock.lock();
 
-        if !self.is_interrupt_mode() {
+        if !self.is_interrupt_mode() || !crate::interrupt::are_interrupts_enabled() {
+            self.drain_tx_polling();
             self.write_byte_internal(byte);
             return Ok(());
         }
@@ -321,7 +330,8 @@ impl CharDevice for Uart {
         }
         let _lock = self.tx_lock.lock();
 
-        if !self.is_interrupt_mode() {
+        if !self.is_interrupt_mode() || !crate::interrupt::are_interrupts_enabled() {
+            self.drain_tx_polling();
             for &byte in buffer {
                 self.write_byte_internal(byte);
             }
