@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-std", "fmt-framebuffer", "fmt-gpu", "fmt-sws-protocol", "fmt-scarlet-desktop-config", "fmt-scpm"]
+dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-std", "fmt-framebuffer", "fmt-gpu", "fmt-sws-protocol", "fmt-scarlet-ui", "fmt-scarlet-desktop-config", "fmt-scpm"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-check", "fmt-sws-protocol-check", "fmt-scpm-check"]
+dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-check", "fmt-sws-protocol-check", "fmt-scarlet-ui-check", "fmt-scpm-check"]
 
 [tasks.fmt-scarlet-abi-check]
 description = "Check formatting for Scarlet ABI code"
@@ -61,6 +61,12 @@ cwd = "sws-protocol"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
+[tasks.fmt-scarlet-ui-check]
+description = "Check formatting for Scarlet UI code"
+cwd = "scarlet-ui"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
 [tasks.fmt-std]
 description = "Format user library std code"
 cwd = "std"
@@ -106,6 +112,12 @@ args = ["fmt"]
 [tasks.fmt-sws-protocol]
 description = "Format user library sws-protocol code"
 cwd = "sws-protocol"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-scarlet-ui]
+description = "Format Scarlet UI code"
+cwd = "scarlet-ui"
 command = "cargo"
 args = ["fmt"]
 
