@@ -24,7 +24,9 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use scarlet_sys::{Syscall, syscall1, syscall3};
+use scarlet_sys::{
+    SCTL_SOCKET_GET_NONBLOCK, SCTL_SOCKET_SET_NONBLOCK, Syscall, syscall1, syscall3,
+};
 
 pub use crate::handle::capability::ShutdownHow;
 pub use crate::handle::capability::socket::Inet4SocketAddress;
@@ -506,11 +508,10 @@ impl Socket {
     /// socket.set_nonblocking(true).unwrap();
     /// ```
     pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
-        const SOCKET_CMD_SET_NONBLOCKING: u32 = 0x5353_0007;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,
-            SOCKET_CMD_SET_NONBLOCKING as usize,
+            SCTL_SOCKET_SET_NONBLOCK as usize,
             if enabled { 1 } else { 0 },
         );
         if result == usize::MAX {
@@ -533,11 +534,10 @@ impl Socket {
     /// assert!(socket.is_nonblocking().unwrap());
     /// ```
     pub fn is_nonblocking(&self) -> Result<bool> {
-        const SOCKET_CMD_GET_NONBLOCKING: u32 = 0x5353_000B;
         let result = syscall3(
             Syscall::HandleControl,
             self.handle.as_raw() as usize,
-            SOCKET_CMD_GET_NONBLOCKING as usize,
+            SCTL_SOCKET_GET_NONBLOCK as usize,
             0,
         );
         if result == usize::MAX {

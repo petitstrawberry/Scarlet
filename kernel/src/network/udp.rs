@@ -17,7 +17,7 @@ use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketError, SocketObject, SocketProtocol,
     SocketState, SocketType,
 };
-use crate::object::capability::selectable::Selectable;
+use crate::object::capability::{ControlOps, selectable::Selectable};
 use crate::sched::scheduler::current_task_id;
 
 /// Helper function to get local IP address bytes from the default interface
@@ -221,6 +221,14 @@ impl SocketObject for UdpSocket {
 
     fn as_any(&self) -> &dyn core::any::Any {
         self
+    }
+
+    fn as_selectable(&self) -> Option<&dyn crate::object::capability::Selectable> {
+        Some(self)
+    }
+
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
+        Some(self)
     }
 
     fn sendto(
@@ -501,6 +509,34 @@ impl crate::object::capability::Selectable for UdpSocket {
 
     fn is_nonblocking(&self) -> bool {
         !*self.blocking_mode.lock()
+    }
+}
+
+impl ControlOps for UdpSocket {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK => {
+                self.set_nonblocking(arg != 0);
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
+                Ok(if self.is_nonblocking() { 1 } else { 0 })
+            }
+            _ => Err("Unknown control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        alloc::vec![
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_NONBLOCK,
+                "Set non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
+                "Get non-blocking mode",
+            ),
+        ]
     }
 }
 
