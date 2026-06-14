@@ -32,9 +32,7 @@ pub struct ElementTree {
 impl ElementTree {
     /// Create a new empty ElementTree
     pub fn new() -> Self {
-        Self {
-            root: None,
-        }
+        Self { root: None }
     }
 
     /// Set the root Element
@@ -137,7 +135,10 @@ impl ElementTree {
             .is_some_and(|element| element.wants_keyboard_focus())
     }
 
-    fn find_element_recursive_helper(element: &mut Box<dyn Element>, target_id: ElementId) -> Option<&mut Box<dyn Element>> {
+    fn find_element_recursive_helper(
+        element: &mut Box<dyn Element>,
+        target_id: ElementId,
+    ) -> Option<&mut Box<dyn Element>> {
         // Check this element
         if element.id() == target_id {
             return Some(element);
@@ -153,7 +154,11 @@ impl ElementTree {
         None
     }
 
-    fn hit_test_recursive<'a>(&'a self, element: &'a dyn Element, point: crate::geometry::Point) -> Option<&'a dyn Element> {
+    fn hit_test_recursive<'a>(
+        &'a self,
+        element: &'a dyn Element,
+        point: crate::geometry::Point,
+    ) -> Option<&'a dyn Element> {
         let local_point = crate::geometry::Point {
             x: point.x - element.position().x,
             y: point.y - element.position().y,
@@ -184,8 +189,7 @@ impl ElementTree {
         };
 
         for child in element.children().iter().rev() {
-            if let Some(found) =
-                self.hit_test_select_overlay_recursive(child.as_ref(), local_point)
+            if let Some(found) = self.hit_test_select_overlay_recursive(child.as_ref(), local_point)
             {
                 return Some(found);
             }
@@ -206,7 +210,11 @@ impl ElementTree {
         None
     }
 
-    fn find_path_recursive(element: &dyn Element, target: ElementId, path: &mut Vec<ElementId>) -> bool {
+    fn find_path_recursive(
+        element: &dyn Element,
+        target: ElementId,
+        path: &mut Vec<ElementId>,
+    ) -> bool {
         path.push(element.id());
         if element.id() == target {
             return true;

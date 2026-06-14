@@ -2,14 +2,14 @@
 //!
 //! Provides event modifiers for any view.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
+use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::event::{FocusEvent, KeyEvent};
 use crate::geometry::Size;
 use crate::state::{Listenable, State};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Click event modifier - adds click handler to any view
 #[derive(Clone)]
@@ -189,7 +189,11 @@ pub struct OnClickRenderObject {
 
 impl OnClickRenderObject {
     pub fn new() -> Self {
-        Self { is_hovered: false, callback: None, size: Size::ZERO }
+        Self {
+            is_hovered: false,
+            callback: None,
+            size: Size::ZERO,
+        }
     }
 
     pub fn set_callback(&mut self, callback: Box<dyn Fn()>) {
@@ -217,7 +221,11 @@ impl ElementRenderObject for OnClickRenderObject {
             let size = child.layout(constraints);
             self.size = size;
             if crate::debug::is_enabled() {
-                crate::logln!("[OnClickRenderObject::layout_with_children] size={}x{}", size.width, size.height);
+                crate::logln!(
+                    "[OnClickRenderObject::layout_with_children] size={}x{}",
+                    size.width,
+                    size.height
+                );
             }
             size
         } else {
@@ -231,9 +239,17 @@ impl ElementRenderObject for OnClickRenderObject {
     }
 
     fn hit_test(&self, point: crate::geometry::Point) -> bool {
-        let result = point.x >= 0.0 && point.x < self.size.width && point.y >= 0.0 && point.y < self.size.height;
+        let result = point.x >= 0.0
+            && point.x < self.size.width
+            && point.y >= 0.0
+            && point.y < self.size.height;
         if crate::debug::is_enabled() {
-            crate::logln!("[OnClickRenderObject::hit_test] point=({:?}), size={:?}, result={}", point, self.size, result);
+            crate::logln!(
+                "[OnClickRenderObject::hit_test] point=({:?}), size={:?}, result={}",
+                point,
+                self.size,
+                result
+            );
         }
         result
     }

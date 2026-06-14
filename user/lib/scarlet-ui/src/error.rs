@@ -53,5 +53,3 @@ impl fmt::Display for Error {
 
 /// Result type for ScarletUI operations
 pub type Result<T> = core::result::Result<T, Error>;
-
-

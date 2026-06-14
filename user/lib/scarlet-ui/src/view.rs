@@ -174,7 +174,10 @@ pub trait ViewExt: View {
     ///
     /// # Arguments
     /// * `callback` - Function to call when clicked
-    fn on_click<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnClick<Self, F>
+    fn on_click<F: Fn() + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnClick<Self, F>
     where
         Self: Sized,
     {
@@ -185,7 +188,10 @@ pub trait ViewExt: View {
     ///
     /// # Arguments
     /// * `callback` - Function to call when mouse enters
-    fn on_hover<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnHover<Self, F>
+    fn on_hover<F: Fn() + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnHover<Self, F>
     where
         Self: Sized,
     {
@@ -196,7 +202,10 @@ pub trait ViewExt: View {
     ///
     /// # Arguments
     /// * `callback` - Function to call when mouse exits
-    fn on_exit<F: Fn() + Clone + 'static>(self, callback: F) -> crate::views::modifiers::OnExit<Self, F>
+    fn on_exit<F: Fn() + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnExit<Self, F>
     where
         Self: Sized,
     {
@@ -221,7 +230,10 @@ pub trait ViewExt: View {
     ///
     /// # Arguments
     /// * `focused` - State that tracks whether the view is focused.
-    fn focusable(self, focused: crate::state::State<bool>) -> crate::views::modifiers::Focusable<Self>
+    fn focusable(
+        self,
+        focused: crate::state::State<bool>,
+    ) -> crate::views::modifiers::Focusable<Self>
     where
         Self: Sized,
     {

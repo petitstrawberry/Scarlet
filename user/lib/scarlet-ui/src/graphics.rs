@@ -6,10 +6,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont};
+use ab_glyph::{Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont, point};
 
-use crate::color::Color;
 use crate::buffer::Buffer;
+use crate::color::Color;
 use crate::logln as println;
 #[cfg(feature = "std")]
 use crate::os::Read;
@@ -140,7 +140,8 @@ impl TextMetricsCache {
 
 const TEXT_METRICS_CACHE_CAP: usize = 128;
 
-static TEXT_METRICS_CACHE: Mutex<TextMetricsCache> = Mutex::new(TextMetricsCache::new(TEXT_METRICS_CACHE_CAP));
+static TEXT_METRICS_CACHE: Mutex<TextMetricsCache> =
+    Mutex::new(TextMetricsCache::new(TEXT_METRICS_CACHE_CAP));
 
 #[inline]
 fn floor_i32(v: f32) -> i32 {
@@ -554,12 +555,11 @@ pub fn measure_text_sized_with_font_stack(
     font_size_px: f32,
     font_stack: &FontStack,
 ) -> (u32, u32) {
-    TEXT_METRICS_CACHE.lock().get_or_compute(
-        text,
-        font_size_px,
-        font_stack.cache_id(),
-        || measure_text_uncached(text, font_size_px, font_stack),
-    )
+    TEXT_METRICS_CACHE
+        .lock()
+        .get_or_compute(text, font_size_px, font_stack.cache_id(), || {
+            measure_text_uncached(text, font_size_px, font_stack)
+        })
 }
 
 fn fallback_text_metrics(text: &str, font_size_px: f32) -> (u32, u32) {
@@ -696,11 +696,7 @@ impl<'a> Canvas<'a> {
     }
 
     fn put_pixel_physical(&mut self, x: i32, y: i32, color: Color) {
-        if x < 0
-            || x >= self.physical_width as i32
-            || y < 0
-            || y >= self.physical_height as i32
-        {
+        if x < 0 || x >= self.physical_width as i32 || y < 0 || y >= self.physical_height as i32 {
             return;
         }
 
@@ -714,11 +710,7 @@ impl<'a> Canvas<'a> {
     }
 
     fn get_pixel_physical(&self, x: i32, y: i32) -> Color {
-        if x < 0
-            || x >= self.physical_width as i32
-            || y < 0
-            || y >= self.physical_height as i32
-        {
+        if x < 0 || x >= self.physical_width as i32 || y < 0 || y >= self.physical_height as i32 {
             return Color::BLACK;
         }
         let offset = ((y as u32 * self.physical_width + x as u32) * 4) as usize;
@@ -726,8 +718,12 @@ impl<'a> Canvas<'a> {
             return Color::BLACK;
         }
         // Read BGRA bytes as little-endian u32 and convert using from_bgra
-        let bgra_bytes = [self.buffer[offset], self.buffer[offset + 1],
-                          self.buffer[offset + 2], self.buffer[offset + 3]];
+        let bgra_bytes = [
+            self.buffer[offset],
+            self.buffer[offset + 1],
+            self.buffer[offset + 2],
+            self.buffer[offset + 3],
+        ];
         Color::from_bgra(u32::from_le_bytes(bgra_bytes))
     }
 

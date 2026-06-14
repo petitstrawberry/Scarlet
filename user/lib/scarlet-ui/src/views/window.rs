@@ -6,18 +6,20 @@
 //! - Proper event handling for window controls
 //! - Content area for child views
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
 use core::any::Any;
 
-use crate::view::View;
-use crate::element::{Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits};
-use crate::geometry::{Size, Rect, Point};
-use crate::color::Color;
 use crate::buffer::Buffer;
+use crate::color::Color;
+use crate::element::{
+    Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits,
+};
+use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::state::Listenable;
+use crate::view::View;
 
 /// Window types (matching sws_protocol::window_types)
 pub mod window_type {
@@ -145,8 +147,12 @@ pub struct Window<V: View> {
 pub trait WindowViewInfo {
     fn window_info(&self) -> WindowInfo;
     fn window_size_limits(&self) -> WindowSizeLimits;
-    fn is_resizable(&self) -> bool { false }
-    fn is_movable(&self) -> bool { true }
+    fn is_resizable(&self) -> bool {
+        false
+    }
+    fn is_movable(&self) -> bool {
+        true
+    }
 }
 
 impl<V: View> Window<V> {
@@ -284,7 +290,6 @@ impl<V: View> Window<V> {
     pub fn is_decorated(&self) -> bool {
         self.decorated
     }
-
 }
 
 impl<V: View + Clone> Clone for Window<V> {
@@ -392,7 +397,11 @@ pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
 
 impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     /// Create a new WindowRenderElement
-    pub fn new(view: C, render_object: WindowRenderObject, children: Vec<Box<dyn Element>>) -> Self {
+    pub fn new(
+        view: C,
+        render_object: WindowRenderObject,
+        children: Vec<Box<dyn Element>>,
+    ) -> Self {
         Self {
             id: ElementId::generate(),
             view,
@@ -588,7 +597,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     let old_minimize_state = self.render_object.minimize_button_state;
 
                     // Update button states
-                    self.render_object.update_button_states(local_x, local_y, mouse_pressed);
+                    self.render_object
+                        .update_button_states(local_x, local_y, mouse_pressed);
 
                     // Check if any button state changed
                     if old_close_state != self.render_object.close_button_state
@@ -652,7 +662,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     }
 
                     // Update button states (pressed = true)
-                    self.render_object.update_button_states(local_x, local_y, true);
+                    self.render_object
+                        .update_button_states(local_x, local_y, true);
                     needs_repaint = true;
                     handled = true;
 
@@ -698,19 +709,23 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                         // Only trigger action if released on the same button that was pressed
                         match self.pressed_button {
                             1 if released_on_close => {
-                                self.pending_window_action = Some(crate::event::WindowEvent::CloseRequested);
+                                self.pending_window_action =
+                                    Some(crate::event::WindowEvent::CloseRequested);
                             }
                             2 if released_on_maximize => {
                                 // Toggle maximize/restore
                                 if self.maximized {
-                                    self.pending_window_action = Some(crate::event::WindowEvent::RestoreRequested);
+                                    self.pending_window_action =
+                                        Some(crate::event::WindowEvent::RestoreRequested);
                                 } else {
-                                    self.pending_window_action = Some(crate::event::WindowEvent::MaximizeRequested);
+                                    self.pending_window_action =
+                                        Some(crate::event::WindowEvent::MaximizeRequested);
                                 }
                                 self.maximized = !self.maximized;
                             }
                             3 if released_on_minimize => {
-                                self.pending_window_action = Some(crate::event::WindowEvent::MinimizeRequested);
+                                self.pending_window_action =
+                                    Some(crate::event::WindowEvent::MinimizeRequested);
                             }
                             _ => {}
                         }
@@ -718,7 +733,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
                     // Reset pressed state
                     self.pressed_button = 0;
-                    self.render_object.update_button_states(local_x, local_y, false);
+                    self.render_object
+                        .update_button_states(local_x, local_y, false);
                     needs_repaint = true;
 
                     // Update last mouse position
@@ -753,8 +769,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         Option<MenuBarModel>,
         bool,
         bool,
-    )>
-    {
+    )> {
         let info = self.view.window_info();
         Some((
             info.app_id,
@@ -791,7 +806,12 @@ pub struct WindowRenderObject {
 }
 
 impl WindowRenderObject {
-    pub fn new(title: String, size: Size, decorated: bool, background_color: Option<Color>) -> Self {
+    pub fn new(
+        title: String,
+        size: Size,
+        decorated: bool,
+        background_color: Option<Color>,
+    ) -> Self {
         Self {
             title,
             size,
@@ -991,7 +1011,11 @@ impl WindowRenderObject {
         minimize_button_state: u8,
     ) {
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'", width, title);
+            crate::logln!(
+                "[WindowRenderObject] draw_titlebar_canvas: width={}, title='{}'",
+                width,
+                title
+            );
         }
 
         // Title bar base color (exact Scarlet_old: rgb(235, 235, 238))
@@ -1002,7 +1026,11 @@ impl WindowRenderObject {
         let minimize_rect = Self::control_button_rect_static(width, 2);
 
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject] close_rect: origin={:?}, size={:?}", close_rect.origin, close_rect.size);
+            crate::logln!(
+                "[WindowRenderObject] close_rect: origin={:?}, size={:?}",
+                close_rect.origin,
+                close_rect.size
+            );
         }
 
         // Button colors based on hover/pressed state
@@ -1014,9 +1042,27 @@ impl WindowRenderObject {
         for y in 0..TITLEBAR_HEIGHT {
             // No corner rounding (WINDOW_CORNER_RADIUS = 0)
             canvas.fill_rect(0, y as i32, width, 1, base_color);
-            canvas.fill_rect(close_rect.origin.x as i32, y as i32, close_rect.size.width as u32, 1, close_color);
-            canvas.fill_rect(maximize_rect.origin.x as i32, y as i32, maximize_rect.size.width as u32, 1, maximize_color);
-            canvas.fill_rect(minimize_rect.origin.x as i32, y as i32, minimize_rect.size.width as u32, 1, minimize_color);
+            canvas.fill_rect(
+                close_rect.origin.x as i32,
+                y as i32,
+                close_rect.size.width as u32,
+                1,
+                close_color,
+            );
+            canvas.fill_rect(
+                maximize_rect.origin.x as i32,
+                y as i32,
+                maximize_rect.size.width as u32,
+                1,
+                maximize_color,
+            );
+            canvas.fill_rect(
+                minimize_rect.origin.x as i32,
+                y as i32,
+                minimize_rect.size.width as u32,
+                1,
+                minimize_color,
+            );
         }
 
         // Title text (exact Scarlet_old: rgb(20, 20, 24))
@@ -1041,7 +1087,8 @@ impl WindowRenderObject {
                 alloc::string::String::from(title)
             } else {
                 let ellipsis = "...";
-                let ellipsis_width = crate::graphics::measure_text_sized(ellipsis, title_font_size).0;
+                let ellipsis_width =
+                    crate::graphics::measure_text_sized(ellipsis, title_font_size).0;
                 let max_text_width = available_width.saturating_sub(ellipsis_width);
 
                 // binary search: find longest char prefix that fits within max_text_width
@@ -1066,7 +1113,13 @@ impl WindowRenderObject {
             }
         };
 
-        canvas.draw_text_sized(title_x, title_y, &display_title, title_color, title_font_size);
+        canvas.draw_text_sized(
+            title_x,
+            title_y,
+            &display_title,
+            title_color,
+            title_font_size,
+        );
 
         // Draw button icons (exact Scarlet_old design)
         let icon_color = Color::rgb(30u8, 30u8, 34u8);
@@ -1097,11 +1150,23 @@ impl WindowRenderObject {
         let ny = minimize_rect.origin.y + minimize_rect.size.height / 2.0 + 3.0;
         let nsize: i32 = 12;
         let nhalf = nsize / 2;
-        canvas.draw_line(nx as i32 - nhalf, ny as i32, nx as i32 + nhalf, ny as i32, icon_color);
+        canvas.draw_line(
+            nx as i32 - nhalf,
+            ny as i32,
+            nx as i32 + nhalf,
+            ny as i32,
+            icon_color,
+        );
 
         // Draw border at bottom of titlebar (matching slint-scarlet)
         let border_color = Color::rgb(180u8, 180u8, 185u8);
-        canvas.draw_line(0, TITLEBAR_HEIGHT as i32 - 1, width as i32 - 1, TITLEBAR_HEIGHT as i32 - 1, border_color);
+        canvas.draw_line(
+            0,
+            TITLEBAR_HEIGHT as i32 - 1,
+            width as i32 - 1,
+            TITLEBAR_HEIGHT as i32 - 1,
+            border_color,
+        );
     }
 
     /// Static helper for button rect calculation
@@ -1125,7 +1190,11 @@ impl WindowRenderObject {
     /// Draw window border (exact Scarlet_old design)
     fn draw_border_canvas(canvas: &mut crate::graphics::Canvas, width: u32, height: u32) {
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject] draw_border_canvas: {}x{}", width, height);
+            crate::logln!(
+                "[WindowRenderObject] draw_border_canvas: {}x{}",
+                width,
+                height
+            );
         }
 
         // Modern border with subtle shadow effect
@@ -1174,13 +1243,22 @@ impl ElementRenderObject for WindowRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[WindowRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
 
         let size = self.layout(constraints);
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject::layout] size={}x{}", size.width, size.height);
+            crate::logln!(
+                "[WindowRenderObject::layout] size={}x{}",
+                size.width,
+                size.height
+            );
         }
 
         let content_layout = WindowContentLayout::new(self.decorated);
@@ -1192,19 +1270,33 @@ impl ElementRenderObject for WindowRenderObject {
         let content_height = libm::ceilf(size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject::layout] content_area: x={}, y={}, size={}x{}",
-                content_x, content_y, content_width, content_height);
+            crate::logln!(
+                "[WindowRenderObject::layout] content_area: x={}, y={}, size={}x{}",
+                content_x,
+                content_y,
+                content_width,
+                content_height
+            );
         }
 
         for child in children {
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
-                crate::logln!("[WindowRenderObject::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                    child_constraints.min_width, child_constraints.min_height, child_constraints.max_width, child_constraints.max_height);
+                crate::logln!(
+                    "[WindowRenderObject::layout] child_constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                    child_constraints.min_width,
+                    child_constraints.min_height,
+                    child_constraints.max_width,
+                    child_constraints.max_height
+                );
             }
             let child_size = child.layout(child_constraints);
             if crate::debug::is_enabled() {
-                crate::logln!("[WindowRenderObject::layout] child size={}x{}", child_size.width, child_size.height);
+                crate::logln!(
+                    "[WindowRenderObject::layout] child size={}x{}",
+                    child_size.width,
+                    child_size.height
+                );
             }
             child.set_position(Point::new(content_x, content_y));
         }
@@ -1218,13 +1310,19 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn render(&mut self) {
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject] render: size={}x{}, decorated={}",
-                self.size.width, self.size.height, self.decorated);
+            crate::logln!(
+                "[WindowRenderObject] render: size={}x{}, decorated={}",
+                self.size.width,
+                self.size.height,
+                self.decorated
+            );
         }
         self.draw();
         if crate::debug::is_enabled() {
-            crate::logln!("[WindowRenderObject] render: complete, buffer={}",
-                self.buffer.is_some());
+            crate::logln!(
+                "[WindowRenderObject] render: complete, buffer={}",
+                self.buffer.is_some()
+            );
         }
     }
 

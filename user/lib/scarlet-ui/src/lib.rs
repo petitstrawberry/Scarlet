@@ -49,25 +49,25 @@ extern crate scarlet_std as std;
 // Import procedural macros crate (derives work automatically)
 extern crate scarlet_ui_macros;
 
-pub mod geometry;
-pub mod color;
-pub mod error;
-pub mod state;
-pub mod view;
-pub mod element;
-pub mod event;
-pub mod buffer;
-pub mod compositor;
-pub mod render;
-pub mod pipeline;
-pub mod views;
-pub mod platform;
 pub mod application;
-pub mod macros;
-pub mod graphics;
+pub mod buffer;
+pub mod color;
+pub mod compositor;
 pub mod debug;
+pub mod element;
+pub mod error;
+pub mod event;
+pub mod geometry;
+pub mod graphics;
+pub mod macros;
 pub mod menu_model;
 mod os;
+pub mod pipeline;
+pub mod platform;
+pub mod render;
+pub mod state;
+pub mod view;
+pub mod views;
 
 #[doc(hidden)]
 pub mod __private {
@@ -92,63 +92,80 @@ macro_rules! logln {
 pub(crate) use logln;
 
 // Re-exports for convenience
-pub use geometry::{Size, Point, Rect, Offset, EdgeInsets, Alignment};
-pub use color::{Color, ColorScheme, ColorPalette, SemanticColor, SystemColors};
-pub use color::system::{GrayColors, BlueColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors, YellowColors};
-pub use error::{Error, Result};
-pub use state::{generate_state_id, InvalidationKind, Listenable, State, StateId, SubscriptionId};
-pub use view::{View, ViewExt};
-pub use element::{Element, ElementId, LayoutConstraints, ComponentElement, RenderElement, ElementTree, ElementRenderObject, DirtyFlags};
-pub use event::{Event, MouseEvent, KeyEvent, InputEvent, KeyCode, MouseButton, EventDispatcher, FocusEvent, LifecycleEvent};
-pub use buffer::Buffer;
-pub use compositor::Compositor;
-pub use render::{RenderTree, RenderNode};
-pub use pipeline::{PipelineOwner, RenderingPipeline, DirtyPhase, StateRegistry};
-pub use views::{
-    Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
-    WindowContentLayout, ZStack,
-};
-pub use views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, Select, ProgressView, CanvasView};
-pub use views::{NavigationView, NavigationLink};
-pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
-pub use views::navigation::Icon;
-pub use views::modifiers::{
-    AlignmentFrame, Background, Clip, Focusable, Frame, OnKey, Padding, SetSize,
-};
-pub use platform::{PlatformWindow, SWSPlatformWindow};
 pub use application::Application;
+pub use buffer::Buffer;
+pub use color::system::{
+    BlueColors, GrayColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors,
+    YellowColors,
+};
+pub use color::{Color, ColorPalette, ColorScheme, SemanticColor, SystemColors};
+pub use compositor::Compositor;
+pub use element::{
+    ComponentElement, DirtyFlags, Element, ElementId, ElementRenderObject, ElementTree,
+    LayoutConstraints, RenderElement,
+};
+pub use error::{Error, Result};
+pub use event::{
+    Event, EventDispatcher, FocusEvent, InputEvent, KeyCode, KeyEvent, LifecycleEvent, MouseButton,
+    MouseEvent,
+};
+pub use geometry::{Alignment, EdgeInsets, Offset, Point, Rect, Size};
 pub use graphics::{
-    Canvas, FontStack, add_default_font_fallback, clear_default_font_fallbacks,
-    default_font_stack, measure_text_sized, measure_text_sized_with_font_stack, set_default_font,
+    Canvas, FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
+    measure_text_sized, measure_text_sized_with_font_stack, set_default_font,
     set_default_font_stack,
 };
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+pub use pipeline::{DirtyPhase, PipelineOwner, RenderingPipeline, StateRegistry};
+pub use platform::{PlatformWindow, SWSPlatformWindow};
+pub use render::{RenderNode, RenderTree};
+pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
+pub use view::{View, ViewExt};
+pub use views::modifiers::{
+    AlignmentFrame, Background, Clip, Focusable, Frame, OnKey, Padding, SetSize,
+};
+pub use views::navigation::Icon;
+pub use views::{
+    BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, Select, Slider, Toggle,
+};
+pub use views::{
+    Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window, WindowContentLayout,
+    ZStack,
+};
+pub use views::{NavigationLink, NavigationView};
+pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 // Macros are exported at root via #[macro_export]
 // Users can use them directly: vstack! {}, hstack! {}, etc.
 
 /// Prelude module for convenient imports
 pub mod prelude {
-    pub use crate::geometry::*;
-    pub use crate::color::{Color, ColorScheme, ColorPalette, SemanticColor};
+    pub use crate::application::Application;
+    pub use crate::color::{Color, ColorPalette, ColorScheme, SemanticColor};
+    pub use crate::element::{
+        DirtyFlags, Element, ElementId, ElementRenderObject, LayoutConstraints,
+    };
     pub use crate::error::{Error, Result};
+    pub use crate::event::{Event, FocusEvent, KeyEvent, LifecycleEvent, MouseEvent};
+    pub use crate::geometry::*;
+    pub use crate::graphics::{
+        FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
+        measure_text_sized_with_font_stack, set_default_font_stack,
+    };
+    pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt};
-    pub use crate::element::{Element, ElementId, LayoutConstraints, ElementRenderObject, DirtyFlags};
-    pub use crate::event::{Event, MouseEvent, KeyEvent, FocusEvent, LifecycleEvent};
-    pub use crate::application::Application;
+    pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
+    pub use crate::views::{
+        BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, Select, Slider, Toggle,
+    };
     pub use crate::views::{
         Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
         WindowContentLayout, ZStack,
     };
-    pub use crate::views::{BitmapImage, Divider, DividerOrientation, Toggle, Slider, Select, ProgressView, CanvasView};
-    pub use crate::views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
-    pub use crate::views::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
-    pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
-    pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
-    pub use crate::graphics::{
-        FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
-        measure_text_sized_with_font_stack, set_default_font_stack,
+    pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
+    pub use crate::views::{
+        TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width,
     };
 
     // Note: The View derive macro must be imported from scarlet_ui_macros:

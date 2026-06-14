@@ -2,18 +2,18 @@
 //!
 //! Slider is a control that allows selecting a value from a continuous range.
 
+use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
+use crate::graphics;
+use crate::os::Mutex;
+use crate::state::State;
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
-use crate::buffer::Buffer;
-use crate::graphics;
-use crate::state::State;
 use alloc::vec::Vec;
-use crate::os::Mutex;
+use core::any::Any;
 
 static SLIDER_DRAGGING_REGISTRY: Mutex<BTreeMap<crate::state::StateId, State<bool>>> =
     Mutex::new(BTreeMap::new());

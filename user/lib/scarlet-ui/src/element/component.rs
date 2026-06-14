@@ -162,11 +162,9 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         for listenable in listenables {
             let element_id = self.id;
             let invalidation_kind = listenable.invalidation_kind();
-            let callback = Arc::new(move || {
-                match invalidation_kind {
-                    InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
-                    InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
-                }
+            let callback = Arc::new(move || match invalidation_kind {
+                InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
+                InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);
@@ -249,10 +247,16 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn fill_width(&self) -> bool {
-        self.child.as_ref().map(|child| child.fill_width()).unwrap_or(false)
+        self.child
+            .as_ref()
+            .map(|child| child.fill_width())
+            .unwrap_or(false)
     }
 
     fn fill_height(&self) -> bool {
-        self.child.as_ref().map(|child| child.fill_height()).unwrap_or(false)
+        self.child
+            .as_ref()
+            .map(|child| child.fill_height())
+            .unwrap_or(false)
     }
 }

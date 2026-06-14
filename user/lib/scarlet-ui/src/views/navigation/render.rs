@@ -2,22 +2,21 @@
 //!
 //! This module provides the RenderObject for NavigationView which handles:
 //! - Sidebar rendering with selection highlights
+use crate::buffer::Buffer;
+use crate::color::Color;
+use crate::color::ColorPalette;
+use crate::element::{Element, ElementRenderObject, LayoutConstraints};
+use crate::geometry::{Point, Size};
+use crate::graphics;
+use crate::state::State;
+use crate::views::navigation::link::Icon;
 /// - Layout of sidebar and content areas
 /// - Mouse event handling for item selection and hover
-
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::any::Any;
 use libm;
-use crate::element::{Element, ElementRenderObject, LayoutConstraints};
-use crate::geometry::{Size, Point};
-use crate::color::Color;
-use crate::buffer::Buffer;
-use crate::state::State;
-use crate::graphics;
-use crate::views::navigation::link::Icon;
-use crate::color::ColorPalette;
 
 /// NavigationView RenderObject - handles rendering and layout
 ///
@@ -129,11 +128,26 @@ impl NavigationViewRenderObject {
 
         // Background
         let background_color = if is_selected {
-            Color { r: 0.2, g: 0.4, b: 0.8, a: 1.0 }  // Blue for selected
+            Color {
+                r: 0.2,
+                g: 0.4,
+                b: 0.8,
+                a: 1.0,
+            } // Blue for selected
         } else if is_hovered {
-            Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }  // Light gray for hover
+            Color {
+                r: 0.9,
+                g: 0.9,
+                b: 0.9,
+                a: 1.0,
+            } // Light gray for hover
         } else {
-            Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }  // White for normal
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            } // White for normal
         };
 
         canvas.fill_rect(0, y, width as u32, height as u32, background_color);
@@ -143,9 +157,19 @@ impl NavigationViewRenderObject {
 
         // Label
         let text_color = if is_selected {
-            Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }
         } else {
-            Color { r: 0.2, g: 0.2, b: 0.2, a: 1.0 }
+            Color {
+                r: 0.2,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            }
         };
 
         let text_x = (self.item_padding) as i32 + 8;
@@ -153,7 +177,12 @@ impl NavigationViewRenderObject {
         canvas.draw_text_sized(text_x, text_y, label, text_color, self.font_size);
 
         // Bottom border
-        let border_color = Color { r: 0.85, g: 0.85, b: 0.85, a: 1.0 };
+        let border_color = Color {
+            r: 0.85,
+            g: 0.85,
+            b: 0.85,
+            a: 1.0,
+        };
         canvas.draw_line(0, y + height - 1, width, y + height - 1, border_color);
     }
 }
@@ -175,7 +204,10 @@ impl ElementRenderObject for NavigationViewRenderObject {
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[NavigationViewRenderObject::layout] constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
             );
         }
 
@@ -188,10 +220,8 @@ impl ElementRenderObject for NavigationViewRenderObject {
         }
 
         // Layout sidebar (child 0) with fixed width
-        let sidebar_constraints = LayoutConstraints::tight(
-            self.sidebar_width,
-            constraints.max_height,
-        );
+        let sidebar_constraints =
+            LayoutConstraints::tight(self.sidebar_width, constraints.max_height);
         let sidebar_height = if let Some(sidebar) = children.get_mut(0) {
             sidebar.layout(sidebar_constraints)
         } else {
@@ -200,10 +230,8 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
         // Layout content (child 1) with remaining width
         let content_width = constraints.max_width - self.sidebar_width;
-        let content_constraints = LayoutConstraints::new(
-            content_width, content_width,
-            0.0, constraints.max_height,
-        );
+        let content_constraints =
+            LayoutConstraints::new(content_width, content_width, 0.0, constraints.max_height);
         let _content_height = if let Some(content) = children.get_mut(1) {
             content.layout(content_constraints)
         } else {
@@ -230,17 +258,21 @@ impl ElementRenderObject for NavigationViewRenderObject {
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[NavigationViewRenderObject::layout] sidebar size={}x{}, buffer needed={} bytes",
-                sidebar_width_px, sidebar_height_px, sidebar_width_px * sidebar_height_px * 4
+                sidebar_width_px,
+                sidebar_height_px,
+                sidebar_width_px * sidebar_height_px * 4
             );
         }
 
-        let needs_resize = self
-            .buffer
-            .as_ref()
-            .map_or(true, |b| b.logical_width() != sidebar_width_px || b.logical_height() != sidebar_height_px);
+        let needs_resize = self.buffer.as_ref().map_or(true, |b| {
+            b.logical_width() != sidebar_width_px || b.logical_height() != sidebar_height_px
+        });
 
         if needs_resize {
-            self.buffer = Some(Buffer::from_logical_dimensions(sidebar_width_px, sidebar_height_px));
+            self.buffer = Some(Buffer::from_logical_dimensions(
+                sidebar_width_px,
+                sidebar_height_px,
+            ));
         }
 
         self.size
@@ -260,7 +292,10 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
     fn render(&mut self) {
         if crate::debug::is_enabled() {
-            crate::logln!("[NavigationViewRenderObject::render] buffer={}", self.buffer.is_some());
+            crate::logln!(
+                "[NavigationViewRenderObject::render] buffer={}",
+                self.buffer.is_some()
+            );
         }
 
         if let Some(ref mut buffer) = self.buffer {
@@ -301,7 +336,13 @@ impl ElementRenderObject for NavigationViewRenderObject {
                     let indicator_x = 0;
                     let indicator_y = y;
                     let indicator_height = height_px;
-                    canvas.fill_rect(indicator_x, indicator_y, indicator_width as u32, indicator_height as u32, palette.primary());
+                    canvas.fill_rect(
+                        indicator_x,
+                        indicator_y,
+                        indicator_width as u32,
+                        indicator_height as u32,
+                        palette.primary(),
+                    );
                 }
 
                 // Icon (will be provided separately)
@@ -321,7 +362,13 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
             // Draw separator line on the right edge
             let border_color = palette.border();
-            canvas.draw_line(width as i32 - 1, 0, width as i32 - 1, height as i32, border_color);
+            canvas.draw_line(
+                width as i32 - 1,
+                0,
+                width as i32 - 1,
+                height as i32,
+                border_color,
+            );
         }
     }
 
@@ -335,8 +382,10 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
     fn hit_test(&self, point: Point) -> bool {
         // Check if point is within sidebar bounds
-        if point.x >= 0.0 && point.x <= self.sidebar_width
-            && point.y >= 0.0 && point.y <= self.size.height
+        if point.x >= 0.0
+            && point.x <= self.sidebar_width
+            && point.y >= 0.0
+            && point.y <= self.size.height
         {
             true
         } else {

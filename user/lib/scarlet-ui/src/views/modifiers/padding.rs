@@ -2,14 +2,14 @@
 //!
 //! Adds padding around a child view.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::EdgeInsets;
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Padding view modifier - adds space around a child view
 #[derive(Clone)]
@@ -29,10 +29,7 @@ impl<V: View> Padding<V> {
 
     /// Create a new Padding modifier with custom insets
     pub fn with_insets(inner: V, insets: EdgeInsets) -> Self {
-        Self {
-            inner,
-            insets,
-        }
+        Self { inner, insets }
     }
 
     /// Get the inner view

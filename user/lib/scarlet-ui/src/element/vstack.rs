@@ -108,7 +108,8 @@ impl Element for VStackElement {
             flex_total += flex;
 
             // Layout all children with loose constraints to get their sizes
-            let child_constraints = LayoutConstraints::loose(constraints.max_width, constraints.max_height);
+            let child_constraints =
+                LayoutConstraints::loose(constraints.max_width, constraints.max_height);
             let child_size = child.layout(child_constraints);
             child_sizes.push(child_size);
             total_height += child_size.height;
@@ -118,24 +119,39 @@ impl Element for VStackElement {
         // Add spacing to total height
         total_height += spacing_total;
 
-        crate::logln!("[VStackElement::layout] after measuring: total_height={}, max_width={}",
-            total_height, max_width);
+        crate::logln!(
+            "[VStackElement::layout] after measuring: total_height={}, max_width={}",
+            total_height,
+            max_width
+        );
 
         // VStack size calculation
         // Tight constraints (min == max && min > 0 && finite): Frame explicitly set size
         // Loose constraints: fit to content size (do NOT expand to max)
-        let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
-            crate::logln!("[VStackElement::layout] tight width detected, using constraint max_width");
-            constraints.max_width  // Frame指定サイズ
+        let final_width = if constraints.min_width == constraints.max_width
+            && constraints.min_width.is_finite()
+            && constraints.min_width > 0.0
+        {
+            crate::logln!(
+                "[VStackElement::layout] tight width detected, using constraint max_width"
+            );
+            constraints.max_width // Frame指定サイズ
         } else {
             crate::logln!("[VStackElement::layout] loose width, using max_width from content");
-            max_width  // コンテンツサイズ（拡大しない）
+            max_width // コンテンツサイズ（拡大しない）
         };
-        let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
-            crate::logln!("[VStackElement::layout] tight height detected, using constraint max_height");
-            constraints.max_height  // Frame指定サイズ
+        let final_height = if constraints.min_height == constraints.max_height
+            && constraints.min_height.is_finite()
+            && constraints.min_height > 0.0
+        {
+            crate::logln!(
+                "[VStackElement::layout] tight height detected, using constraint max_height"
+            );
+            constraints.max_height // Frame指定サイズ
         } else if constraints.max_height.is_finite() {
-            crate::logln!("[VStackElement::layout] loose height with finite max, using min(total_height, max_height)");
+            crate::logln!(
+                "[VStackElement::layout] loose height with finite max, using min(total_height, max_height)"
+            );
             total_height.min(constraints.max_height)
         } else {
             crate::logln!("[VStackElement::layout] loose height with inf max, using total_height");
@@ -163,7 +179,11 @@ impl Element for VStackElement {
             width: final_width,
             height: final_height,
         };
-        crate::logln!("[VStackElement::layout] FINAL: size={}x{}", final_width, final_height);
+        crate::logln!(
+            "[VStackElement::layout] FINAL: size={}x{}",
+            final_width,
+            final_height
+        );
         self.size
     }
 

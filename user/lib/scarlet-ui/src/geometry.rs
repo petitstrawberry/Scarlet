@@ -13,7 +13,10 @@ pub struct Size {
 }
 
 impl Size {
-    pub const ZERO: Self = Self { width: 0.0, height: 0.0 };
+    pub const ZERO: Self = Self {
+        width: 0.0,
+        height: 0.0,
+    };
 
     pub const fn new(width: f32, height: f32) -> Self {
         Self { width, height }
@@ -412,5 +415,3 @@ impl Alignment {
         }
     }
 }
-
-

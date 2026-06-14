@@ -7,13 +7,13 @@
 //! - Window-specific colors
 
 pub mod base;
+pub mod palette;
 pub mod scheme;
 pub mod semantic;
 pub mod system;
-pub mod palette;
 
 pub use base::{Color, ColorComponent};
+pub use palette::ColorPalette;
 pub use scheme::ColorScheme;
 pub use semantic::SemanticColor;
 pub use system::SystemColors;
-pub use palette::ColorPalette;

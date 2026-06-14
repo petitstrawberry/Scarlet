@@ -2,12 +2,12 @@
 //!
 //! Provides reactive state management with subscription notifications.
 
-use alloc::sync::Arc;
+use crate::os::Mutex;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, Ordering};
-use crate::os::Mutex;
 use std::println;
 
 /// Unique identifier for State instances

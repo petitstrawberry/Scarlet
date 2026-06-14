@@ -7,12 +7,12 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use scarlet_ui::prelude::*;
-use scarlet_ui::geometry::{Size, Point, Rect};
-use scarlet_ui::color::Color;
-use scarlet_ui::state::{State, StateId};
-use scarlet_ui::element::{Element, ElementTree, LayoutConstraints};
 use scarlet_ui::buffer::Buffer;
+use scarlet_ui::color::Color;
+use scarlet_ui::element::{Element, ElementTree, LayoutConstraints};
+use scarlet_ui::geometry::{Point, Rect, Size};
+use scarlet_ui::prelude::*;
+use scarlet_ui::state::{State, StateId};
 
 #[cfg(test)]
 mod tests {
@@ -152,11 +152,10 @@ mod tests {
 
     #[test]
     fn test_window_view_creation() {
-        use scarlet_ui::views::Window;
         use scarlet_ui::views::Text;
+        use scarlet_ui::views::Window;
 
-        let window = Window::new("Test Window", Text::new("Content"))
-            .size(Size::new(800.0, 600.0));
+        let window = Window::new("Test Window", Text::new("Content")).size(Size::new(800.0, 600.0));
 
         assert_eq!(window.title(), "Test Window");
     }

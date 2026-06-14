@@ -2,17 +2,17 @@
 //!
 //! Menu displays dropdown menu items vertically.
 
-use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::any::Any;
-use crate::view::View;
+use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
 use crate::element::{Element, RenderElement};
 use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
-use crate::buffer::Buffer;
 use crate::graphics;
+use crate::view::View;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::any::Any;
 
 /// Menu item action
 #[derive(Clone, Copy)]
@@ -137,11 +137,7 @@ impl View for Menu {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            MenuRenderObject::new(
-                self.items.clone(),
-                self.item_height,
-                self.width,
-            ),
+            MenuRenderObject::new(self.items.clone(), self.item_height, self.width),
         ))
     }
 
@@ -167,13 +163,17 @@ pub struct MenuRenderObject {
 impl MenuRenderObject {
     /// Create a new MenuRenderObject
     pub fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32) -> Self {
-        let height = items.iter().map(|item| {
-            if matches!(item.action, MenuAction::Separator) {
-                1.0 // Separator height
-            } else {
-                item_height
-            }
-        }).sum::<f32>() + 4.0; // Add padding
+        let height = items
+            .iter()
+            .map(|item| {
+                if matches!(item.action, MenuAction::Separator) {
+                    1.0 // Separator height
+                } else {
+                    item_height
+                }
+            })
+            .sum::<f32>()
+            + 4.0; // Add padding
 
         Self {
             items,
@@ -233,13 +233,17 @@ impl MenuRenderObject {
 
     /// Calculate total height
     fn calculate_height(&self) -> f32 {
-        self.items.iter().map(|item| {
-            if matches!(item.action, MenuAction::Separator) {
-                1.0
-            } else {
-                self.item_height
-            }
-        }).sum::<f32>() + 4.0 // Top and bottom padding
+        self.items
+            .iter()
+            .map(|item| {
+                if matches!(item.action, MenuAction::Separator) {
+                    1.0
+                } else {
+                    self.item_height
+                }
+            })
+            .sum::<f32>()
+            + 4.0 // Top and bottom padding
     }
 }
 
@@ -280,8 +284,10 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
     fn render(&mut self) {
         // Render menu to buffer
         if crate::debug::is_enabled() {
-            crate::logln!("[MenuRenderObject] render: buffer={}",
-                self.buffer.is_some());
+            crate::logln!(
+                "[MenuRenderObject] render: buffer={}",
+                self.buffer.is_some()
+            );
         }
 
         let palette = ColorPalette::default();
@@ -310,13 +316,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 if matches!(item.action, MenuAction::Separator) {
                     // Draw separator line
                     let sep_y = current_y as i32;
-                    canvas.draw_line(
-                        2,
-                        sep_y,
-                        (width as i32) - 2,
-                        sep_y,
-                        separator_color,
-                    );
+                    canvas.draw_line(2, sep_y, (width as i32) - 2, sep_y, separator_color);
                     current_y += 1.0;
                 } else {
                     // Draw hover background
@@ -340,25 +340,13 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                         Color::rgb(0.471, 0.471, 0.471) // Disabled text color
                     };
 
-                    canvas.draw_text_sized(
-                        text_x,
-                        text_y,
-                        &item.label,
-                        text_color,
-                        font_size,
-                    );
+                    canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
 
                     // Draw shortcut if present
                     if let Some(ref shortcut) = item.shortcut {
                         let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
                         let shortcut_x = (width as i32) - shortcut_w as i32 - 8;
-                        canvas.draw_text_sized(
-                            shortcut_x,
-                            text_y,
-                            shortcut,
-                            text_color,
-                            font_size,
-                        );
+                        canvas.draw_text_sized(shortcut_x, text_y, shortcut, text_color, font_size);
                     }
 
                     current_y += self.item_height;

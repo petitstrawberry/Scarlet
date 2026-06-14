@@ -2,13 +2,13 @@
 //!
 //! Arranges children in a horizontal row with spacing.
 
+use super::ViewTuple;
+use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject, LayoutConstraints};
-use crate::geometry::{Size, Point};
-use alloc::boxed::Box;
-use super::ViewTuple;
 
 /// HStack View - arranges children horizontally
 ///
@@ -128,8 +128,13 @@ impl ElementRenderObject for HStackRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[HStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[HStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
         let child_count = children.len();
         let spacing_total = if child_count > 1 {
@@ -220,31 +225,47 @@ impl ElementRenderObject for HStackRenderObject {
             }
         }
 
-        let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
+        let final_height = if constraints.min_height == constraints.max_height
+            && constraints.min_height.is_finite()
+            && constraints.min_height > 0.0
+        {
             if crate::debug::is_enabled() {
-                crate::logln!("[HStackRenderObject::layout] tight height detected, using constraint max_height");
+                crate::logln!(
+                    "[HStackRenderObject::layout] tight height detected, using constraint max_height"
+                );
             }
             constraints.max_height
         } else if constraints.max_height.is_finite() {
             if crate::debug::is_enabled() {
-                crate::logln!("[HStackRenderObject::layout] loose height with finite max, using min(max_height, max_height)");
+                crate::logln!(
+                    "[HStackRenderObject::layout] loose height with finite max, using min(max_height, max_height)"
+                );
             }
             max_height.min(constraints.max_height)
         } else {
             if crate::debug::is_enabled() {
-                crate::logln!("[HStackRenderObject::layout] loose height, using max_height from content");
+                crate::logln!(
+                    "[HStackRenderObject::layout] loose height, using max_height from content"
+                );
             }
             max_height
         };
 
-        let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
+        let final_width = if constraints.min_width == constraints.max_width
+            && constraints.min_width.is_finite()
+            && constraints.min_width > 0.0
+        {
             if crate::debug::is_enabled() {
-                crate::logln!("[HStackRenderObject::layout] tight width detected, using constraint max_width");
+                crate::logln!(
+                    "[HStackRenderObject::layout] tight width detected, using constraint max_width"
+                );
             }
             constraints.max_width
         } else {
             if crate::debug::is_enabled() {
-                crate::logln!("[HStackRenderObject::layout] loose width, using child_x_offset from content");
+                crate::logln!(
+                    "[HStackRenderObject::layout] loose width, using child_x_offset from content"
+                );
             }
             (fixed_total_width + spacing_total).min(constraints.max_width)
         };
@@ -280,7 +301,11 @@ impl ElementRenderObject for HStackRenderObject {
             height: final_height,
         };
         if crate::debug::is_enabled() {
-            crate::logln!("[HStackRenderObject::layout] FINAL: size={}x{}", self.size.width, self.size.height);
+            crate::logln!(
+                "[HStackRenderObject::layout] FINAL: size={}x{}",
+                self.size.width,
+                self.size.height
+            );
         }
         self.size
     }

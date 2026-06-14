@@ -617,8 +617,8 @@ impl TextGridRenderObject {
             return;
         }
 
-        let cell_span = text_grid_cell_width(cell.ch)
-            .min(self.grid.columns().saturating_sub(column).max(1));
+        let cell_span =
+            text_grid_cell_width(cell.ch).min(self.grid.columns().saturating_sub(column).max(1));
         let w = libm::ceilf(self.cell_width * cell_span as f32) as u32;
         let h = libm::ceilf(self.cell_height) as u32;
         let (mut foreground, background) = if cell.inverse {
@@ -678,9 +678,7 @@ impl TextGridRenderObject {
         let line_thickness = (libm::ceilf(self.font_size / 12.0) as u32).max(1);
         if cell.underline {
             let underline_thickness = line_thickness.max(cell.underline_thickness as u32);
-            let line_y = y
-                + h.saturating_sub(underline_thickness)
-                    .saturating_sub(1) as i32;
+            let line_y = y + h.saturating_sub(underline_thickness).saturating_sub(1) as i32;
             canvas.fill_rect(
                 x,
                 line_y.max(y),
@@ -709,13 +707,7 @@ impl TextGridRenderObject {
         let grid_height = self.grid_pixel_height().min(height);
 
         if grid_width < width {
-            canvas.fill_rect(
-                grid_width as i32,
-                0,
-                width - grid_width,
-                height,
-                background,
-            );
+            canvas.fill_rect(grid_width as i32, 0, width - grid_width, height, background);
         }
         if grid_height < height {
             canvas.fill_rect(
@@ -798,10 +790,9 @@ impl ElementRenderObject for TextGridRenderObject {
         self.size = Size { width, height };
         let w = libm::ceilf(width).max(1.0) as u32;
         let h = libm::ceilf(height).max(1.0) as u32;
-        let needs_resize = self
-            .buffer
-            .as_ref()
-            .map_or(true, |buffer| buffer.logical_width() != w || buffer.logical_height() != h);
+        let needs_resize = self.buffer.as_ref().map_or(true, |buffer| {
+            buffer.logical_width() != w || buffer.logical_height() != h
+        });
         if needs_resize {
             self.buffer = Some(Buffer::from_logical_dimensions(w, h));
             self.full_repaint = true;

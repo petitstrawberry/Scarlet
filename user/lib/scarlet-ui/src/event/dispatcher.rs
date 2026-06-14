@@ -234,11 +234,7 @@ impl EventDispatcher {
                             bounds.size.height
                         );
                     } else {
-                        crate::logln!(
-                            "[EventDispatcher] path[{}] id={:?} (not found)",
-                            index,
-                            id
-                        );
+                        crate::logln!("[EventDispatcher] path[{}] id={:?} (not found)", index, id);
                     }
                 }
             }
@@ -831,8 +827,8 @@ impl EventDispatcher {
             && old_target_id != target_id
             && let Some(old_target) = element_tree.find_element_mut(old_target_id)
         {
-            let _ =
-                old_target.handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+            let _ = old_target
+                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
         }
 
         self.focused_id = Some(target_id);

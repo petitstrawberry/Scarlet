@@ -173,7 +173,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn type_name_debug(&self) -> alloc::string::String {
-        alloc::format!("RenderElement<{}, {}>",
+        alloc::format!(
+            "RenderElement<{}, {}>",
             core::any::type_name::<V>(),
             core::any::type_name::<R>()
         )
@@ -302,14 +303,24 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         if crate::debug::is_enabled() {
-            crate::logln!("[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                type_name, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[RenderElement::layout] START: type_name={}, constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                type_name,
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
         let size = self
             .render_object
             .layout_with_children(constraints, &mut self.children);
         if crate::debug::is_enabled() {
-            crate::logln!("[RenderElement::layout] render_object returned size={}x{}", size.width, size.height);
+            crate::logln!(
+                "[RenderElement::layout] render_object returned size={}x{}",
+                size.width,
+                size.height
+            );
         }
 
         size
@@ -380,14 +391,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
-        let field = self.view.as_any().downcast_ref::<crate::views::TextField>()?;
+        let field = self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::TextField>()?;
         let render_object = self
             .render_object
             .as_any()
             .downcast_ref::<crate::views::TextFieldRenderObject>()?;
-        render_object
-            .is_focused()
-            .then(|| field.text_input_state(render_object.preedit(), render_object.preedit_anchor_byte()))
+        render_object.is_focused().then(|| {
+            field.text_input_state(render_object.preedit(), render_object.preedit_anchor_byte())
+        })
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
@@ -395,23 +409,28 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if let Event::Keyboard(key_event) = _event {
             if _phase == Phase::Target
-                && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+                && let Some(text_field) =
+                    self.view.as_any().downcast_ref::<crate::views::TextField>()
                 && let Some(render_object) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::TextFieldRenderObject>()
             {
-                let handled = crate::views::text_field::handle_text_field_keyboard(text_field, render_object, *key_event);
+                let handled = crate::views::text_field::handle_text_field_keyboard(
+                    text_field,
+                    render_object,
+                    *key_event,
+                );
                 if handled {
                     crate::pipeline::mark_element_needs_paint(self.id);
                 }
                 return handled;
             }
             if (_phase == Phase::Target || _phase == Phase::Bubble)
-                && let Some(render_object) = self
-                    .render_object
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::modifiers::OnKeyRenderObject>()
+                && let Some(render_object) =
+                    self.render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::modifiers::OnKeyRenderObject>()
             {
                 return render_object.invoke_on_key(*key_event);
             }
@@ -431,13 +450,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 | Event::TextInputDone { .. }
         ) {
             if _phase == Phase::Target
-                && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+                && let Some(text_field) =
+                    self.view.as_any().downcast_ref::<crate::views::TextField>()
                 && let Some(render_object) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::TextFieldRenderObject>()
             {
-                let handled = crate::views::text_field::handle_text_field_text_input(text_field, render_object, _event);
+                let handled = crate::views::text_field::handle_text_field_text_input(
+                    text_field,
+                    render_object,
+                    _event,
+                );
                 if handled {
                     crate::pipeline::mark_element_needs_paint(self.id);
                 }
@@ -453,23 +477,28 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if let Event::Focus(focus_event) = _event {
             if _phase == Phase::Target
-                && self.view.as_any().downcast_ref::<crate::views::TextField>().is_some()
+                && self
+                    .view
+                    .as_any()
+                    .downcast_ref::<crate::views::TextField>()
+                    .is_some()
                 && let Some(render_object) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::TextFieldRenderObject>()
             {
-                let handled = crate::views::text_field::handle_text_field_focus(render_object, *focus_event);
+                let handled =
+                    crate::views::text_field::handle_text_field_focus(render_object, *focus_event);
                 if handled {
                     crate::pipeline::mark_element_needs_paint(self.id);
                 }
                 return handled;
             }
             if _phase == Phase::Target
-                && let Some(render_object) = self
-                    .render_object
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::modifiers::FocusableRenderObject>()
+                && let Some(render_object) =
+                    self.render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::modifiers::FocusableRenderObject>()
             {
                 return render_object.handle_focus(*focus_event);
             }
@@ -490,11 +519,15 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
                 .is_some()
         {
-            if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
-                if let Some(render_object) = self
-                    .render_object
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+            if let MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                ..
+            } = mouse_event
+            {
+                if let Some(render_object) =
+                    self.render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
                 {
                     render_object.invoke_on_click();
                     crate::pipeline::mark_element_needs_paint(self.id);
@@ -532,12 +565,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
-                    MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
                         render_object.set_pressed(true);
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
-                    MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
                         if render_object.is_pressed() {
                             button.invoke_on_click();
                         }
@@ -577,12 +616,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
-                    MouseEvent::ButtonPressed { button: MouseButton::Left, .. } => {
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
                         render_object.set_pressed(true);
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;
                     }
-                    MouseEvent::ButtonReleased { button: MouseButton::Left, .. } => {
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
                         if render_object.is_pressed() {
                             menu_item.invoke_on_click();
                         }
@@ -619,7 +664,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         }
                         return true;
                     }
-                    MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        x,
+                        y,
+                    } => {
                         let local_x = *x as f32;
                         let local_y = *y as f32;
                         if let Some(index) = render_object.hit_test(local_x, local_y) {
@@ -633,12 +682,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
-            if let MouseEvent::ButtonReleased { button: MouseButton::Left, .. } = mouse_event {
+            if let MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                ..
+            } = mouse_event
+            {
                 if crate::debug::is_enabled() {
-                    crate::logln!(
-                        "[RenderElement] Toggle click id={:?}",
-                        self.id
-                    );
+                    crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
                 }
                 let state = toggle.get_is_on().clone();
                 state.update(|value| *value = !*value);
@@ -742,7 +792,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 }
 
                 match mouse_event {
-                    MouseEvent::ButtonPressed { button: MouseButton::Left, x, .. } => {
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        x,
+                        ..
+                    } => {
                         render_object.set_dragging(true);
                         if !dragging_state.get() {
                             dragging_state.set(true);
@@ -756,7 +810,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             return true;
                         }
                     }
-                    MouseEvent::ButtonReleased { button: MouseButton::Left, x, .. } => {
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        x,
+                        ..
+                    } => {
                         if render_object.is_dragging() {
                             update_slider_value(render_object, slider, self.id, *x, true);
                             render_object.set_dragging(false);
@@ -773,7 +831,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         // Handle CanvasView events
-        if let Some(_canvas) = self.view.as_any().downcast_ref::<crate::views::CanvasView>() {
+        if let Some(_canvas) = self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::CanvasView>()
+        {
             if let Some(render_object) = self
                 .render_object
                 .as_any()
@@ -792,10 +854,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         // Handle NavigationView events - check render object directly
-        if let Some(render_object) = self
-            .render_object
-            .as_any_mut()
-            .downcast_mut::<crate::views::navigation::NavigationViewRenderObject>()
+        if let Some(render_object) =
+            self.render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::navigation::NavigationViewRenderObject>()
         {
             match mouse_event {
                 MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
@@ -807,7 +869,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
                         // Calculate which item is being hovered
                         if let Some(index) = render_object.index_at_y(local_y) {
-                            if index < render_object.link_count() && render_object.hovered_index() != Some(index) {
+                            if index < render_object.link_count()
+                                && render_object.hovered_index() != Some(index)
+                            {
                                 render_object.set_hovered_index(Some(index));
                                 crate::pipeline::mark_element_needs_paint(self.id);
                             }
@@ -832,7 +896,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     }
                     return true;
                 }
-                MouseEvent::ButtonReleased { button: MouseButton::Left, x, y } => {
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                } => {
                     // Coordinates are already localized by EventDispatcher
                     let local_x = *x as f32;
                     let local_y = *y as f32;

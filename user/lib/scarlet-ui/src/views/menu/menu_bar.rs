@@ -2,14 +2,14 @@
 //!
 //! MenuBar displays menu items horizontally, similar to macOS menu bar.
 
-use alloc::vec::Vec;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use core::any::Any;
-use crate::view::View;
 use crate::element::{Element, ElementId, LayoutConstraints};
 use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
+use crate::view::View;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::any::Any;
 
 /// MenuBar View - displays menu items horizontally
 #[derive(Clone)]
@@ -154,8 +154,7 @@ impl Element for MenuBarElement {
                 x: *x as f32,
                 y: *y as f32,
             },
-            crate::event::MouseEvent::Exited { .. }
-            | crate::event::MouseEvent::Wheel { .. } => {
+            crate::event::MouseEvent::Exited { .. } | crate::event::MouseEvent::Wheel { .. } => {
                 self.hovered_index = None;
                 return false;
             }
@@ -203,7 +202,11 @@ impl Element for MenuBarElement {
                 min_width: 0.0,
                 min_height: target_height,
                 max_width: f32::INFINITY,
-                max_height: if target_height > 0.0 { target_height } else { constraints.max_height },
+                max_height: if target_height > 0.0 {
+                    target_height
+                } else {
+                    constraints.max_height
+                },
             };
 
             let child_size = child.layout(child_constraints);

@@ -5,11 +5,11 @@
 //! - MenuBar: Container for menu items (horizontal layout)
 //! - Menu: Dropdown menu content
 
-mod menu_item;
-mod menu_bar;
 mod menu;
+mod menu_bar;
+mod menu_item;
 
+pub use menu::{Menu, MenuAction, MenuItemContent, MenuRenderObject};
+pub use menu_bar::{MenuBar, MenuBarElement};
 pub use menu_item::MenuItem;
 pub(crate) use menu_item::MenuItemRenderObject;
-pub use menu_bar::{MenuBar, MenuBarElement};
-pub use menu::{Menu, MenuRenderObject, MenuItemContent, MenuAction};

@@ -1,11 +1,11 @@
 //! Menu model definitions for application menu bars.
 
+use crate::os::Mutex;
+use crate::views::{MenuBar, MenuItem};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::os::Mutex;
-use crate::views::{MenuBar, MenuItem};
 
 pub type MenuCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -138,7 +138,11 @@ fn write_menu_item_json(out: &mut String, item: &MenuItemModel) {
     out.push_str("\",\"title\":\"");
     push_json_string(out, item.title());
     out.push_str("\",\"enabled\":");
-    out.push_str(if item.enabled_value() { "true" } else { "false" });
+    out.push_str(if item.enabled_value() {
+        "true"
+    } else {
+        "false"
+    });
     out.push_str(",\"shortcut\":");
     if let Some(sc) = item.shortcut_value() {
         out.push('"');
@@ -178,8 +182,7 @@ fn push_json_string(out: &mut String, value: &str) {
 
 type MenuCallbackKey = (u32, String);
 
-static MENU_CALLBACKS: Mutex<BTreeMap<MenuCallbackKey, MenuCallback>> =
-    Mutex::new(BTreeMap::new());
+static MENU_CALLBACKS: Mutex<BTreeMap<MenuCallbackKey, MenuCallback>> = Mutex::new(BTreeMap::new());
 
 pub fn register_menu_callbacks(window_id: u32, menu_bar: &MenuBarModel) {
     let mut registry = MENU_CALLBACKS.lock();

@@ -2,16 +2,16 @@
 //!
 //! Toggle is a switch control that can be on or off.
 
-use alloc::boxed::Box;
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
 use crate::graphics;
 use crate::state::State;
+use crate::view::View;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
 
 /// Toggle View - on/off switch
 #[derive(Clone)]
@@ -171,31 +171,17 @@ impl ToggleRenderObject {
         }
     }
 
-    fn blend_bgra_over(
-        dst: &mut [u8],
-        src: &[u8],
-        width: u32,
-        height: u32,
-    ) {
+    fn blend_bgra_over(dst: &mut [u8], src: &[u8], width: u32, height: u32) {
         for y in 0..height {
             for x in 0..width {
                 let idx = ((y * width + x) * 4) as usize;
-                let bgra = u32::from_le_bytes([
-                    src[idx],
-                    src[idx + 1],
-                    src[idx + 2],
-                    src[idx + 3],
-                ]);
+                let bgra = u32::from_le_bytes([src[idx], src[idx + 1], src[idx + 2], src[idx + 3]]);
                 let color = Color::from_bgra(bgra);
                 if color.a <= 0.0 {
                     continue;
                 }
-                let dst_bgra = u32::from_le_bytes([
-                    dst[idx],
-                    dst[idx + 1],
-                    dst[idx + 2],
-                    dst[idx + 3],
-                ]);
+                let dst_bgra =
+                    u32::from_le_bytes([dst[idx], dst[idx + 1], dst[idx + 2], dst[idx + 3]]);
                 let dst_color = Color::from_bgra(dst_bgra);
                 let out = color.blend_over(dst_color);
                 let out_bytes = out.to_bgra().to_le_bytes();
@@ -305,14 +291,7 @@ impl ToggleRenderObject {
             Self::fill_circle(&mut thumb_canvas, center_x, center_y, radius, thumb_color);
 
             let mut thumb = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
-            Self::downsample_2x(
-                &thumb_hi,
-                w_hi,
-                h_hi,
-                &mut thumb,
-                physical_w,
-                physical_h,
-            );
+            Self::downsample_2x(&thumb_hi, w_hi, h_hi, &mut thumb, physical_w, physical_h);
             Self::blend_bgra_over(data, &thumb, physical_w, physical_h);
         }
     }
@@ -321,7 +300,7 @@ impl ToggleRenderObject {
 impl ElementRenderObject for ToggleRenderObject {
     fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
         // Toggle has fixed size (51x31), ignore constraints
-        let width = self.size.width;  // 51.0
+        let width = self.size.width; // 51.0
         let height = self.size.height; // 31.0
 
         self.size = Size { width, height };

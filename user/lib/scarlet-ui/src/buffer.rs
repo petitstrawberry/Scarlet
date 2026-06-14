@@ -2,10 +2,10 @@
 //!
 //! Provides BGRA format pixel buffers with alpha blending support.
 
-use alloc::vec::Vec;
-use alloc::vec;
-use crate::geometry::Size;
 use crate::color::Color;
+use crate::geometry::Size;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Pixel buffer in BGRA format
 ///
@@ -161,16 +161,16 @@ impl Buffer {
     /// * `dst_x` - Destination X position
     /// * `dst_y` - Destination Y position
     /// * `opacity` - Opacity multiplier (0.0 - 1.0)
-    pub fn composite(
-        &mut self,
-        src: &Buffer,
-        dst_x: i32,
-        dst_y: i32,
-        opacity: f32,
-    ) {
+    pub fn composite(&mut self, src: &Buffer, dst_x: i32, dst_y: i32, opacity: f32) {
         if crate::debug::is_enabled() {
-            crate::logln!("[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
-                src.width, src.height, dst_x, dst_y, opacity);
+            crate::logln!(
+                "[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
+                src.width,
+                src.height,
+                dst_x,
+                dst_y,
+                opacity
+            );
         }
 
         let mut pixels_composited = 0u32;
@@ -183,25 +183,26 @@ impl Buffer {
                 let target_y = dst_y + src_y;
 
                 // Check bounds
-                if target_x >= 0 && target_x < self.width as i32
-                    && target_y >= 0 && target_y < self.height as i32
+                if target_x >= 0
+                    && target_x < self.width as i32
+                    && target_y >= 0
+                    && target_y < self.height as i32
                 {
                     let src_pixel = src.data[(y * src.width + x) as usize];
                     let dst_idx = (target_y * self.width as i32 + target_x) as usize;
 
                     // Alpha blending
-                    self.data[dst_idx] = Self::blend_pixels(
-                        self.data[dst_idx],
-                        src_pixel,
-                        opacity,
-                    );
+                    self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
                     pixels_composited += 1;
                 }
             }
         }
 
         if crate::debug::is_enabled() {
-            crate::logln!("[Buffer] composite: {} pixels composited", pixels_composited);
+            crate::logln!(
+                "[Buffer] composite: {} pixels composited",
+                pixels_composited
+            );
         }
     }
 
@@ -250,7 +251,10 @@ impl Buffer {
         }
 
         if crate::debug::is_enabled() {
-            crate::logln!("[Buffer] composite_clipped: {} pixels composited", pixels_composited);
+            crate::logln!(
+                "[Buffer] composite_clipped: {} pixels composited",
+                pixels_composited
+            );
         }
     }
 
@@ -320,11 +324,8 @@ impl Buffer {
                         let src_x = target_x - dst_x;
                         let src_pixel = src.data[(src_row + src_x as usize)];
                         let dst_idx = dst_row + target_x as usize;
-                        self.data[dst_idx] = Self::blend_pixels(
-                            self.data[dst_idx],
-                            src_pixel,
-                            opacity * coverage,
-                        );
+                        self.data[dst_idx] =
+                            Self::blend_pixels(self.data[dst_idx], src_pixel, opacity * coverage);
                         continue;
                     }
                 }
@@ -423,12 +424,7 @@ impl Buffer {
     /// This converts the internal u32 slice to a u8 slice for compatibility
     /// with drawing APIs that expect byte-level access.
     pub fn data(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                self.data.as_ptr() as *const u8,
-                self.data.len() * 4,
-            )
-        }
+        unsafe { core::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 4) }
     }
 
     /// Get the pixel data as a mutable u8 slice (BGRA format)
@@ -437,10 +433,7 @@ impl Buffer {
     /// with drawing APIs that expect byte-level access.
     pub fn data_mut(&mut self) -> &mut [u8] {
         unsafe {
-            core::slice::from_raw_parts_mut(
-                self.data.as_mut_ptr() as *mut u8,
-                self.data.len() * 4,
-            )
+            core::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut u8, self.data.len() * 4)
         }
     }
 }

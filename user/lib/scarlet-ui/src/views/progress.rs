@@ -2,14 +2,14 @@
 //!
 //! ProgressView displays the progress of a long-running task.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
 use crate::graphics;
+use crate::view::View;
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// ProgressView View - shows progress (0.0 to 1.0)
 #[derive(Clone)]

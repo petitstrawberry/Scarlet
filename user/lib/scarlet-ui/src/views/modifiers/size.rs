@@ -2,13 +2,13 @@
 //!
 //! Constrains a child view to minimum/maximum dimensions.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Size view modifier - sets size constraints
 #[derive(Clone)]
@@ -22,13 +22,7 @@ pub struct SetSize<V: View> {
 
 impl<V: View> SetSize<V> {
     /// Create a new SetSize modifier with all constraints
-    pub fn new(
-        inner: V,
-        min_width: f32,
-        min_height: f32,
-        max_width: f32,
-        max_height: f32,
-    ) -> Self {
+    pub fn new(inner: V, min_width: f32, min_height: f32, max_width: f32, max_height: f32) -> Self {
         Self {
             inner,
             min_width,
@@ -72,7 +66,12 @@ impl<V: View + Clone> View for SetSize<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::with_children(
             self.clone(),
-            SizeRenderObject::new(self.min_width, self.min_height, self.max_width, self.max_height),
+            SizeRenderObject::new(
+                self.min_width,
+                self.min_height,
+                self.max_width,
+                self.max_height,
+            ),
             vec![self.inner.create_element()],
         ))
     }

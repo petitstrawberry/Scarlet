@@ -2,62 +2,54 @@
 //!
 //! This module provides common View implementations like Window, Text, Button, etc.
 
-mod window;
-mod text;
 mod button;
-pub(crate) mod text_field;
-mod rectangle;
-mod spacer;
-mod image;
-mod divider;
-mod toggle;
-mod slider;
-mod select;
-mod progress;
 mod canvas;
-mod text_grid;
-pub mod modifiers;
 pub mod containers;
+mod divider;
+mod image;
 pub mod menu;
+pub mod modifiers;
 pub mod navigation;
+mod progress;
+mod rectangle;
+mod select;
+mod slider;
+mod spacer;
+mod text;
+pub(crate) mod text_field;
+mod text_grid;
+mod toggle;
+mod window;
 
-pub use window::{
-    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject,
-};
-pub use window::window_type;
-pub use text::{Text, TextRenderObject};
-pub use button::{Button, ButtonRenderObject, ButtonCallback};
-pub use text_field::{TextField, TextFieldRenderObject};
-pub use rectangle::{Rectangle, RectangleRenderObject};
-pub use spacer::{Spacer, SpacerRenderObject};
+pub use button::{Button, ButtonCallback, ButtonRenderObject};
+pub use canvas::{CanvasEventHandler, CanvasRenderCallback, CanvasRenderObject, CanvasView};
+pub use divider::{Divider, DividerOrientation, DividerRenderObject};
 pub use image::{BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource};
-pub use divider::{Divider, DividerRenderObject, DividerOrientation};
-pub use toggle::{Toggle, ToggleRenderObject};
-pub use slider::{Slider, SliderRenderObject};
-pub use select::{Select, SelectChangeCallback, SelectRenderObject};
+pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
+pub use navigation::{NavigationLink, NavigationView};
 pub use progress::{ProgressView, ProgressViewRenderObject};
-pub use canvas::{CanvasView, CanvasRenderObject, CanvasRenderCallback, CanvasEventHandler};
+pub use rectangle::{Rectangle, RectangleRenderObject};
+pub use select::{Select, SelectChangeCallback, SelectRenderObject};
+pub use slider::{Slider, SliderRenderObject};
+pub use spacer::{Spacer, SpacerRenderObject};
+pub use text::{Text, TextRenderObject};
+pub use text_field::{TextField, TextFieldRenderObject};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
     text_grid_cell_width,
 };
-pub use menu::{MenuItem, MenuBar, Menu, MenuItemContent, MenuAction};
-pub use navigation::{NavigationView, NavigationLink};
+pub use toggle::{Toggle, ToggleRenderObject};
+pub use window::window_type;
+pub use window::{
+    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject,
+};
 
 // Re-export modifiers for convenience
 pub use modifiers::{
-    Padding, PaddingRenderObject,
-    Frame, FrameRenderObject,
-    Background, BackgroundRenderObject,
-    SetSize, SizeRenderObject,
-    AlignmentFrame, AlignmentRenderObject,
-    Focusable, FocusableRenderObject,
-    OnKey, OnKeyRenderObject,
+    AlignmentFrame, AlignmentRenderObject, Background, BackgroundRenderObject, Focusable,
+    FocusableRenderObject, Frame, FrameRenderObject, OnKey, OnKeyRenderObject, Padding,
+    PaddingRenderObject, SetSize, SizeRenderObject,
 };
 
 // Re-export containers for convenience
-pub use containers::{
-    VStack,
-    HStack,
-    ZStack, ZStackRenderObject,
-};
+pub use containers::{HStack, VStack, ZStack, ZStackRenderObject};

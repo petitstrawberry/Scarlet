@@ -3,8 +3,8 @@
 //! This module provides gesture recognizers for common pointer gestures
 //! like tap, drag, long press, etc.
 
-use crate::geometry::Point;
 use crate::event::MouseEvent;
+use crate::geometry::Point;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -32,10 +32,7 @@ pub trait GestureRecognizer {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gesture {
     /// Tap gesture (click/tap)
-    Tap {
-        position: Point,
-        count: usize,
-    },
+    Tap { position: Point, count: usize },
     /// Drag gesture
     Drag {
         start_position: Point,
@@ -43,20 +40,11 @@ pub enum Gesture {
         delta: Point,
     },
     /// Long press gesture
-    LongPress {
-        position: Point,
-        duration_ms: u64,
-    },
+    LongPress { position: Point, duration_ms: u64 },
     /// Pinch gesture (for touch displays)
-    Pinch {
-        center: Point,
-        scale: f32,
-    },
+    Pinch { center: Point, scale: f32 },
     /// Rotation gesture (for touch displays)
-    Rotation {
-        center: Point,
-        angle: f32,
-    },
+    Rotation { center: Point, angle: f32 },
 }
 
 impl Gesture {
@@ -64,7 +52,9 @@ impl Gesture {
     pub fn position(&self) -> Point {
         match self {
             Gesture::Tap { position, .. } => *position,
-            Gesture::Drag { current_position, .. } => *current_position,
+            Gesture::Drag {
+                current_position, ..
+            } => *current_position,
             Gesture::LongPress { position, .. } => *position,
             Gesture::Pinch { center, .. } => *center,
             Gesture::Rotation { center, .. } => *center,
@@ -114,13 +104,19 @@ impl GestureRecognizer for TapGestureRecognizer {
     fn process_event(&mut self, event: &MouseEvent) -> Option<Gesture> {
         match event {
             MouseEvent::ButtonPressed { x, y, .. } => {
-                self.start_position = Some(Point { x: *x as f32, y: *y as f32 });
+                self.start_position = Some(Point {
+                    x: *x as f32,
+                    y: *y as f32,
+                });
                 self.is_active = true;
                 None
             }
             MouseEvent::ButtonReleased { x, y, .. } => {
                 if let (Some(start), true) = (self.start_position, self.is_active) {
-                    let end = Point { x: *x as f32, y: *y as f32 };
+                    let end = Point {
+                        x: *x as f32,
+                        y: *y as f32,
+                    };
                     let dx = end.x - start.x;
                     let dy = end.y - start.y;
                     let distance = libm::sqrtf(dx * dx + dy * dy);
@@ -137,9 +133,7 @@ impl GestureRecognizer for TapGestureRecognizer {
                 }
                 None
             }
-            MouseEvent::Moved { .. }
-            | MouseEvent::Entered { .. }
-            | MouseEvent::Exited { .. } => {
+            MouseEvent::Moved { .. } | MouseEvent::Entered { .. } | MouseEvent::Exited { .. } => {
                 // Movement doesn't cancel tap, just check distance on release
                 None
             }
@@ -210,7 +204,10 @@ impl GestureRecognizer for DragGestureRecognizer {
     fn process_event(&mut self, event: &MouseEvent) -> Option<Gesture> {
         match event {
             MouseEvent::ButtonPressed { x, y, .. } => {
-                self.start_position = Some(Point { x: *x as f32, y: *y as f32 });
+                self.start_position = Some(Point {
+                    x: *x as f32,
+                    y: *y as f32,
+                });
                 self.current_position = self.start_position;
                 self.is_active = true;
                 self.has_started = false;
@@ -218,7 +215,10 @@ impl GestureRecognizer for DragGestureRecognizer {
             }
             MouseEvent::Moved { x, y } => {
                 if let (Some(start), true) = (self.start_position, self.is_active) {
-                    let current = Point { x: *x as f32, y: *y as f32 };
+                    let current = Point {
+                        x: *x as f32,
+                        y: *y as f32,
+                    };
                     let delta = Point {
                         x: current.x - start.x,
                         y: current.y - start.y,
@@ -321,7 +321,10 @@ impl GestureRecognizer for LongPressGestureRecognizer {
     fn process_event(&mut self, event: &MouseEvent) -> Option<Gesture> {
         match event {
             MouseEvent::ButtonPressed { x, y, .. } => {
-                self.start_position = Some(Point { x: *x as f32, y: *y as f32 });
+                self.start_position = Some(Point {
+                    x: *x as f32,
+                    y: *y as f32,
+                });
                 self.duration_ms = 0;
                 self.is_active = true;
                 self.has_triggered = false;
@@ -329,7 +332,10 @@ impl GestureRecognizer for LongPressGestureRecognizer {
             }
             MouseEvent::Moved { x, y } => {
                 if let (Some(start), true) = (self.start_position, self.is_active) {
-                    let current = Point { x: *x as f32, y: *y as f32 };
+                    let current = Point {
+                        x: *x as f32,
+                        y: *y as f32,
+                    };
                     let dx = current.x - start.x;
                     let dy = current.y - start.y;
                     let distance = libm::sqrtf(dx * dx + dy * dy);

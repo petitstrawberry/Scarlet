@@ -2,13 +2,13 @@
 //!
 //! Arranges children in a vertical column with spacing.
 
+use super::ViewTuple;
+use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject, LayoutConstraints};
-use crate::geometry::{Size, Point};
-use alloc::boxed::Box;
-use super::ViewTuple;
 
 /// VStack View - arranges children vertically
 ///
@@ -128,8 +128,13 @@ impl ElementRenderObject for VStackRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[VStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[VStackRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
         let child_count = children.len();
         let spacing_total = if child_count > 1 {
@@ -222,35 +227,54 @@ impl ElementRenderObject for VStackRenderObject {
         }
 
         if crate::debug::is_enabled() {
-            crate::logln!("[VStackRenderObject::layout] after measuring: total_height={}, max_width={}",
-                total_height, max_width);
+            crate::logln!(
+                "[VStackRenderObject::layout] after measuring: total_height={}, max_width={}",
+                total_height,
+                max_width
+            );
         }
 
-        let final_width = if constraints.min_width == constraints.max_width && constraints.min_width.is_finite() && constraints.min_width > 0.0 {
+        let final_width = if constraints.min_width == constraints.max_width
+            && constraints.min_width.is_finite()
+            && constraints.min_width > 0.0
+        {
             if crate::debug::is_enabled() {
-                crate::logln!("[VStackRenderObject::layout] tight width detected, using constraint max_width");
+                crate::logln!(
+                    "[VStackRenderObject::layout] tight width detected, using constraint max_width"
+                );
             }
             constraints.max_width
         } else {
             if crate::debug::is_enabled() {
-                crate::logln!("[VStackRenderObject::layout] loose width, using max_width from content");
+                crate::logln!(
+                    "[VStackRenderObject::layout] loose width, using max_width from content"
+                );
             }
             max_width
         };
 
-        let final_height = if constraints.min_height == constraints.max_height && constraints.min_height.is_finite() && constraints.min_height > 0.0 {
+        let final_height = if constraints.min_height == constraints.max_height
+            && constraints.min_height.is_finite()
+            && constraints.min_height > 0.0
+        {
             if crate::debug::is_enabled() {
-                crate::logln!("[VStackRenderObject::layout] tight height detected, using constraint max_height");
+                crate::logln!(
+                    "[VStackRenderObject::layout] tight height detected, using constraint max_height"
+                );
             }
             constraints.max_height
         } else if constraints.max_height.is_finite() {
             if crate::debug::is_enabled() {
-                crate::logln!("[VStackRenderObject::layout] loose height with finite max, using min(total_height, max_height)");
+                crate::logln!(
+                    "[VStackRenderObject::layout] loose height with finite max, using min(total_height, max_height)"
+                );
             }
             total_height.min(constraints.max_height)
         } else {
             if crate::debug::is_enabled() {
-                crate::logln!("[VStackRenderObject::layout] loose height with inf max, using total_height");
+                crate::logln!(
+                    "[VStackRenderObject::layout] loose height with inf max, using total_height"
+                );
             }
             total_height
         };
@@ -286,7 +310,11 @@ impl ElementRenderObject for VStackRenderObject {
             height: final_height,
         };
         if crate::debug::is_enabled() {
-            crate::logln!("[VStackRenderObject::layout] FINAL: size={}x{}", final_width, final_height);
+            crate::logln!(
+                "[VStackRenderObject::layout] FINAL: size={}x{}",
+                final_width,
+                final_height
+            );
         }
         self.size
     }

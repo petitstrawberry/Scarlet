@@ -2,14 +2,14 @@
 //!
 //! Rectangle is a basic shape primitive that fills its frame with a solid color.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::Color;
 use crate::buffer::Buffer;
+use crate::color::Color;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
 use crate::graphics;
+use crate::view::View;
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// Rectangle View - displays a filled rectangle
 #[derive(Clone)]
@@ -71,7 +71,12 @@ impl View for Rectangle {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            RectangleRenderObject::new(self.color, self.corner_radius, self.border_width, self.border_color),
+            RectangleRenderObject::new(
+                self.color,
+                self.corner_radius,
+                self.border_width,
+                self.border_color,
+            ),
         ))
     }
 
@@ -96,7 +101,12 @@ pub struct RectangleRenderObject {
 
 impl RectangleRenderObject {
     /// Create a new RectangleRenderObject
-    pub fn new(color: Color, corner_radius: f32, border_width: f32, border_color: Option<Color>) -> Self {
+    pub fn new(
+        color: Color,
+        corner_radius: f32,
+        border_width: f32,
+        border_color: Option<Color>,
+    ) -> Self {
         Self {
             color,
             corner_radius,
@@ -165,8 +175,13 @@ impl RectangleRenderObject {
 impl ElementRenderObject for RectangleRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[RectangleRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
         // Rectangle takes the full available space, or min_size if specified
         // For inf constraints, use min_width/min_height
@@ -184,7 +199,11 @@ impl ElementRenderObject for RectangleRenderObject {
 
         self.size = Size { width, height };
         if crate::debug::is_enabled() {
-            crate::logln!("[RectangleRenderObject::layout] calculated size={}x{}", width, height);
+            crate::logln!(
+                "[RectangleRenderObject::layout] calculated size={}x{}",
+                width,
+                height
+            );
         }
 
         // Create buffer for this rectangle
@@ -194,20 +213,25 @@ impl ElementRenderObject for RectangleRenderObject {
         // Sanity check to prevent overflow
         if w > 10000 || h > 10000 {
             if crate::debug::is_enabled() {
-                crate::logln!("[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
-                    w, h);
+                crate::logln!(
+                    "[RectangleRenderObject] layout: WARNING calculated size {}x{} is too large, using min constraints",
+                    w,
+                    h
+                );
             }
             // Use min constraints as fallback
             let w2 = libm::ceilf(constraints.min_width.max(1.0)) as u32;
             let h2 = libm::ceilf(constraints.min_height.max(1.0)) as u32;
-            let needs_resize = self
-                .buffer
-                .as_ref()
-                .map_or(true, |b| b.logical_width() != w2 || b.logical_height() != h2);
+            let needs_resize = self.buffer.as_ref().map_or(true, |b| {
+                b.logical_width() != w2 || b.logical_height() != h2
+            });
             if needs_resize {
                 self.buffer = Some(Buffer::from_logical_dimensions(w2, h2));
             }
-            self.size = Size { width: constraints.min_width.max(1.0), height: constraints.min_height.max(1.0) };
+            self.size = Size {
+                width: constraints.min_width.max(1.0),
+                height: constraints.min_height.max(1.0),
+            };
             return self.size;
         }
 
@@ -237,8 +261,11 @@ impl ElementRenderObject for RectangleRenderObject {
     fn render(&mut self) {
         // Render rectangle to buffer
         if crate::debug::is_enabled() {
-            crate::logln!("[RectangleRenderObject] render START: color={:?}, buffer={}",
-                self.color, self.buffer.is_some());
+            crate::logln!(
+                "[RectangleRenderObject] render START: color={:?}, buffer={}",
+                self.color,
+                self.buffer.is_some()
+            );
         }
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
@@ -256,8 +283,19 @@ impl ElementRenderObject for RectangleRenderObject {
 
             if self.border_width > 0.0 {
                 if let Some(border_color) = self.border_color {
-                    let bw = self.border_width.max(1.0).min((width.min(height) as f32) / 2.0);
-                    Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, border_color);
+                    let bw = self
+                        .border_width
+                        .max(1.0)
+                        .min((width.min(height) as f32) / 2.0);
+                    Self::fill_rounded_rect(
+                        &mut canvas,
+                        0,
+                        0,
+                        width,
+                        height,
+                        self.corner_radius,
+                        border_color,
+                    );
                     let inner_width = (width as f32 - 2.0 * bw).max(0.0) as u32;
                     let inner_height = (height as f32 - 2.0 * bw).max(0.0) as u32;
                     if inner_width > 0 && inner_height > 0 {
@@ -273,10 +311,26 @@ impl ElementRenderObject for RectangleRenderObject {
                         );
                     }
                 } else {
-                    Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, self.color);
+                    Self::fill_rounded_rect(
+                        &mut canvas,
+                        0,
+                        0,
+                        width,
+                        height,
+                        self.corner_radius,
+                        self.color,
+                    );
                 }
             } else {
-                Self::fill_rounded_rect(&mut canvas, 0, 0, width, height, self.corner_radius, self.color);
+                Self::fill_rounded_rect(
+                    &mut canvas,
+                    0,
+                    0,
+                    width,
+                    height,
+                    self.corner_radius,
+                    self.color,
+                );
             }
 
             if crate::debug::is_enabled() {

@@ -3,9 +3,9 @@
 //! This module defines the trait for tuples of NavigationLinks and provides
 //! implementations for tuples of size 0-16.
 
-use alloc::boxed::Box;
 use crate::view::View;
 use crate::views::navigation::link::NavigationLink;
+use alloc::boxed::Box;
 
 /// Trait for tuples of NavigationLinks
 ///
@@ -134,9 +134,7 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink) {
 }
 
 // Implement NavigationLinkTuple for 3-tuple
-impl NavigationLinkTuple
-    for (NavigationLink, NavigationLink, NavigationLink)
-{
+impl NavigationLinkTuple for (NavigationLink, NavigationLink, NavigationLink) {
     fn count(&self) -> usize {
         3
     }

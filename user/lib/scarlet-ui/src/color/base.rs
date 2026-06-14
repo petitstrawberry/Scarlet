@@ -36,8 +36,17 @@ pub struct Color {
 impl Color {
     /// Create a new RGB color (alpha = 1.0)
     /// Accepts u8 (0-255) or f32 (0.0-1.0) via ColorComponent trait
-    pub fn rgb<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent>(r: T1, g: T2, b: T3) -> Self {
-        Self { r: r.into_color_component(), g: g.into_color_component(), b: b.into_color_component(), a: 1.0 }
+    pub fn rgb<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent>(
+        r: T1,
+        g: T2,
+        b: T3,
+    ) -> Self {
+        Self {
+            r: r.into_color_component(),
+            g: g.into_color_component(),
+            b: b.into_color_component(),
+            a: 1.0,
+        }
     }
 
     /// Create a new RGB color (alpha = 1.0) - const fn version for f32 only
@@ -47,8 +56,18 @@ impl Color {
 
     /// Create a new RGBA color
     /// Accepts u8 (0-255) or f32 (0.0-1.0) via ColorComponent trait
-    pub fn rgba<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent, T4: ColorComponent>(r: T1, g: T2, b: T3, a: T4) -> Self {
-        Self { r: r.into_color_component(), g: g.into_color_component(), b: b.into_color_component(), a: a.into_color_component() }
+    pub fn rgba<T1: ColorComponent, T2: ColorComponent, T3: ColorComponent, T4: ColorComponent>(
+        r: T1,
+        g: T2,
+        b: T3,
+        a: T4,
+    ) -> Self {
+        Self {
+            r: r.into_color_component(),
+            g: g.into_color_component(),
+            b: b.into_color_component(),
+            a: a.into_color_component(),
+        }
     }
 
     /// Create a new RGBA color - const fn version for f32 only
@@ -193,5 +212,3 @@ impl Color {
         }
     }
 }
-
-

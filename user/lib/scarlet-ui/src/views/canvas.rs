@@ -2,16 +2,16 @@
 //!
 //! This allows embedding any rendering system (Slint, custom graphics, etc.) into Scarlet UI.
 
-use crate::view::View;
-use crate::element::{Element, ElementRenderObject, LayoutConstraints};
-use crate::geometry::Size;
-use crate::event::Event;
 use crate::buffer::Buffer;
+use crate::element::{Element, ElementRenderObject, LayoutConstraints};
+use crate::event::Event;
+use crate::geometry::Size;
+use crate::view::View;
 
 use core::any::Any;
 use std::boxed::Box;
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Callback type for canvas rendering
 ///
@@ -97,7 +97,11 @@ impl View for CanvasView {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(crate::element::RenderElement::new(
             self.clone(),
-            CanvasRenderObject::new(self.size, self.render_callback.clone(), self.event_handler.clone()),
+            CanvasRenderObject::new(
+                self.size,
+                self.render_callback.clone(),
+                self.event_handler.clone(),
+            ),
         ))
     }
 

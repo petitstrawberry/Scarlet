@@ -2,14 +2,14 @@
 //!
 //! Divider is a visual separator that can be horizontal or vertical.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
 use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
 use crate::graphics;
+use crate::view::View;
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// Divider View - displays a horizontal or vertical line
 #[derive(Clone, Copy, PartialEq, Debug)]

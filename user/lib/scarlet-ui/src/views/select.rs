@@ -3,13 +3,13 @@
 //! Select displays the current value and expands into a list of options when
 //! clicked.
 
+use crate::os::Mutex;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::os::Mutex;
 
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
@@ -337,8 +337,14 @@ impl SelectRenderObject {
         let palette = ColorPalette::default();
         let background = palette.button_background();
         let popup_background = palette.surface();
-        let selected_background = palette.primary().with_opacity(0.13).blend_over(popup_background);
-        let hover_background = palette.surface_variant().with_opacity(0.8).blend_over(popup_background);
+        let selected_background = palette
+            .primary()
+            .with_opacity(0.13)
+            .blend_over(popup_background);
+        let hover_background = palette
+            .surface_variant()
+            .with_opacity(0.8)
+            .blend_over(popup_background);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();

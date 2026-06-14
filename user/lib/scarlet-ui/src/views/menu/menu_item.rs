@@ -3,16 +3,16 @@
 //! MenuItem represents a single menu item in the menu bar (e.g., "File", "Edit").
 //! When clicked, it can show a dropdown menu.
 
-use alloc::string::String;
+use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
+use crate::graphics;
+use crate::view::View;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
-use crate::buffer::Buffer;
-use crate::graphics;
 
 /// Menu item click callback type
 pub type MenuItemCallback = Box<dyn Fn() + 'static>;
@@ -143,12 +143,7 @@ pub struct MenuItemRenderObject {
 
 impl MenuItemRenderObject {
     /// Create a new MenuItemRenderObject
-    pub fn new(
-        label: String,
-        font_size: f32,
-        padding: f32,
-        selected: bool,
-    ) -> Self {
+    pub fn new(label: String, font_size: f32, padding: f32, selected: bool) -> Self {
         Self {
             label,
             font_size,
@@ -207,8 +202,12 @@ impl ElementRenderObject for MenuItemRenderObject {
         let intrinsic = self.estimate_size();
 
         if crate::debug::is_enabled() {
-            crate::logln!("[MenuItemRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
-                self.label, intrinsic, constraints);
+            crate::logln!(
+                "[MenuItemRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+                self.label,
+                intrinsic,
+                constraints
+            );
         }
 
         // For menu items, use the intrinsic size, but constrain within bounds
@@ -236,8 +235,12 @@ impl ElementRenderObject for MenuItemRenderObject {
         let h = libm::ceilf(height) as u32;
 
         if crate::debug::is_enabled() {
-            crate::logln!("[MenuItemRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-                w, h, w * h * 4);
+            crate::logln!(
+                "[MenuItemRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+                w,
+                h,
+                w * h * 4
+            );
         }
 
         let needs_resize = self
@@ -278,8 +281,11 @@ impl ElementRenderObject for MenuItemRenderObject {
     fn render(&mut self) {
         // Render menu item to buffer
         if crate::debug::is_enabled() {
-            crate::logln!("[MenuItemRenderObject] render: label='{}', buffer={}",
-                self.label, self.buffer.is_some());
+            crate::logln!(
+                "[MenuItemRenderObject] render: label='{}', buffer={}",
+                self.label,
+                self.buffer.is_some()
+            );
         }
         let background = self.current_background();
         let palette = ColorPalette::default();

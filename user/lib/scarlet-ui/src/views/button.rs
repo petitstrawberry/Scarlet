@@ -2,16 +2,16 @@
 //!
 //! Button displays a label and triggers an action when clicked.
 
-use alloc::string::String;
+use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::Size;
+use crate::graphics;
+use crate::view::View;
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::Size;
-use crate::color::{Color, ColorPalette};
-use crate::buffer::Buffer;
-use crate::graphics;
 
 /// Button click callback type
 pub type ButtonCallback = Box<dyn Fn() + 'static>;
@@ -243,8 +243,12 @@ impl ElementRenderObject for ButtonRenderObject {
         let intrinsic = self.estimate_size();
 
         if crate::debug::is_enabled() {
-            crate::logln!("[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
-                self.label, intrinsic, constraints);
+            crate::logln!(
+                "[ButtonRenderObject] layout: label='{}' intrinsic={:?}, constraints={:?}",
+                self.label,
+                intrinsic,
+                constraints
+            );
         }
 
         // For buttons, use the intrinsic size, but constrain within bounds
@@ -269,8 +273,12 @@ impl ElementRenderObject for ButtonRenderObject {
         let h = libm::ceilf(height) as u32;
 
         if crate::debug::is_enabled() {
-            crate::logln!("[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-                w, h, w * h * 4);
+            crate::logln!(
+                "[ButtonRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+                w,
+                h,
+                w * h * 4
+            );
         }
 
         let needs_resize = self
@@ -299,8 +307,11 @@ impl ElementRenderObject for ButtonRenderObject {
     fn render(&mut self) {
         // Render button to buffer
         if crate::debug::is_enabled() {
-            crate::logln!("[ButtonRenderObject] render: label='{}', buffer={}",
-                self.label, self.buffer.is_some());
+            crate::logln!(
+                "[ButtonRenderObject] render: label='{}', buffer={}",
+                self.label,
+                self.buffer.is_some()
+            );
         }
         let background = self.current_background();
         let border = self.current_border();
@@ -326,7 +337,13 @@ impl ElementRenderObject for ButtonRenderObject {
             let x = ((width as i32) - (text_w as i32)) / 2;
             let y = ((height as i32) - (self.font_size as i32 * 6 / 5)) / 2;
 
-            canvas.draw_text_sized(x.max(0), y.max(0), &self.label, self.text_color, self.font_size);
+            canvas.draw_text_sized(
+                x.max(0),
+                y.max(0),
+                &self.label,
+                self.text_color,
+                self.font_size,
+            );
         }
     }
 

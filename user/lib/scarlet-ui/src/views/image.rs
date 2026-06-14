@@ -9,15 +9,15 @@ use core::any::Any;
 
 use crate::buffer::Buffer;
 use crate::color::Color;
-use crate::element::{Element, RenderElement, ElementRenderObject};
+use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::Size;
 use crate::view::View;
 use std::fs::File;
 use std::io::Read;
+use zune_jpeg::JpegDecoder;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
-use zune_jpeg::JpegDecoder;
 
 /// Image source
 #[derive(Clone)]
@@ -220,7 +220,11 @@ impl ImageRenderObject {
     }
 
     /// Calculate size based on fit mode and constraints
-    fn calculate_size(&self, intrinsic: Size, constraints: crate::element::LayoutConstraints) -> Size {
+    fn calculate_size(
+        &self,
+        intrinsic: Size,
+        constraints: crate::element::LayoutConstraints,
+    ) -> Size {
         match self.fit_mode {
             ImageFit::Contain => {
                 // Scale to fit within constraints while preserving aspect ratio
@@ -276,12 +280,20 @@ impl ImageRenderObject {
             ImageFit::None => {
                 // Use intrinsic size, clamped to constraints
                 Size {
-                    width: intrinsic.width
-                        .max(constraints.min_width)
-                        .min(if constraints.max_width > 0.0 { constraints.max_width } else { intrinsic.width }),
-                    height: intrinsic.height
-                        .max(constraints.min_height)
-                        .min(if constraints.max_height > 0.0 { constraints.max_height } else { intrinsic.height }),
+                    width: intrinsic.width.max(constraints.min_width).min(
+                        if constraints.max_width > 0.0 {
+                            constraints.max_width
+                        } else {
+                            intrinsic.width
+                        },
+                    ),
+                    height: intrinsic.height.max(constraints.min_height).min(
+                        if constraints.max_height > 0.0 {
+                            constraints.max_height
+                        } else {
+                            intrinsic.height
+                        },
+                    ),
                 }
             }
         }
@@ -294,10 +306,9 @@ impl ElementRenderObject for ImageRenderObject {
         self.size = self.calculate_size(intrinsic, constraints);
         let width = libm::ceilf(self.size.width.max(1.0)) as u32;
         let height = libm::ceilf(self.size.height.max(1.0)) as u32;
-        let needs_resize = self
-            .buffer
-            .as_ref()
-            .map_or(true, |b| b.logical_width() != width || b.logical_height() != height);
+        let needs_resize = self.buffer.as_ref().map_or(true, |b| {
+            b.logical_width() != width || b.logical_height() != height
+        });
         if needs_resize {
             self.buffer = Some(Buffer::from_logical_dimensions(width, height));
         }
@@ -364,8 +375,12 @@ fn render_raw_image(
             let scale_x = dest_width as f32 / source_width as f32;
             let scale_y = dest_height as f32 / source_height as f32;
             let scale = scale_x.min(scale_y).max(0.001);
-            draw_width = ((source_width as f32 * scale) as u32).max(1).min(dest_width);
-            draw_height = ((source_height as f32 * scale) as u32).max(1).min(dest_height);
+            draw_width = ((source_width as f32 * scale) as u32)
+                .max(1)
+                .min(dest_width);
+            draw_height = ((source_height as f32 * scale) as u32)
+                .max(1)
+                .min(dest_height);
             draw_x = (dest_width - draw_width) / 2;
             draw_y = (dest_height - draw_height) / 2;
         }

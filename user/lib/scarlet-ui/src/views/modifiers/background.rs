@@ -2,14 +2,14 @@
 //!
 //! Adds a background color behind a child view.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
-use crate::element::LayoutConstraints;
 use crate::color::Color;
+use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Background view modifier - adds a background color
 #[derive(Clone)]
@@ -21,10 +21,7 @@ pub struct Background<V: View> {
 impl<V: View> Background<V> {
     /// Create a new Background modifier
     pub fn new(inner: V, color: Color) -> Self {
-        Self {
-            inner,
-            color,
-        }
+        Self { inner, color }
     }
 
     /// Get the inner view

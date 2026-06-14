@@ -2,16 +2,16 @@
 //!
 //! Text view renders text with configurable font size, color, and other styling.
 
+use crate::buffer::Buffer;
+use crate::color::{Color, ColorPalette};
+use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::graphics;
+use crate::view::View;
+use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
-use crate::element::LayoutConstraints;
-use crate::color::{Color, ColorPalette};
-use crate::buffer::Buffer;
-use crate::graphics;
-use alloc::boxed::Box;
 
 /// Text View - displays a string of text
 #[derive(Clone)]
@@ -113,14 +113,25 @@ impl TextRenderObject {
 impl ElementRenderObject for TextRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
-                self.content, constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height);
+            crate::logln!(
+                "[TextRenderObject::layout] START: content='{}', constraints=({:?}, {:?}) -> ({:?}, {:?})",
+                self.content,
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height
+            );
         }
         // Use actual font measurement
-        let (measured_width, measured_height) = graphics::measure_text_sized(&self.content, self.font_size);
+        let (measured_width, measured_height) =
+            graphics::measure_text_sized(&self.content, self.font_size);
 
         if crate::debug::is_enabled() {
-            crate::logln!("[TextRenderObject::layout] measured={}x{}", measured_width, measured_height);
+            crate::logln!(
+                "[TextRenderObject::layout] measured={}x{}",
+                measured_width,
+                measured_height
+            );
         }
 
         // For text, use the measured size, but constrain within bounds
@@ -146,8 +157,12 @@ impl ElementRenderObject for TextRenderObject {
         let w = libm::ceilf(width) as u32;
         let h = libm::ceilf(height) as u32;
         if crate::debug::is_enabled() {
-            crate::logln!("[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
-                w, h, w * h * 4);
+            crate::logln!(
+                "[TextRenderObject] layout: final size={}x{}, buffer needed={} bytes",
+                w,
+                h,
+                w * h * 4
+            );
         }
 
         let needs_resize = self
@@ -189,8 +204,12 @@ impl ElementRenderObject for TextRenderObject {
             let height = canvas.height();
 
             if crate::debug::is_enabled() {
-                crate::logln!("[TextRenderObject] render: buffer {}x{}, data.len()={}",
-                    width, height, width.saturating_mul(height).saturating_mul(4));
+                crate::logln!(
+                    "[TextRenderObject] render: buffer {}x{}, data.len()={}",
+                    width,
+                    height,
+                    width.saturating_mul(height).saturating_mul(4)
+                );
             }
 
             // Clear to avoid blending text on top of previous frames.

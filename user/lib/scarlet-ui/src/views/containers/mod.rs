@@ -2,22 +2,22 @@
 //!
 //! This module provides layout containers for arranging child views.
 
-use alloc::vec::Vec;
-use alloc::vec;
-use alloc::boxed::Box;
 use crate::element::Element;
-use crate::view::View;
 use crate::state::Listenable;
+use crate::view::View;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 
-mod vstack;
 mod hstack;
+mod vstack;
 mod zstack;
 
 #[cfg(test)]
 mod tests;
 
-pub use vstack::VStack;
 pub use hstack::HStack;
+pub use vstack::VStack;
 pub use zstack::{ZStack, ZStackRenderObject};
 
 /// Trait for tuples of Views
@@ -66,10 +66,7 @@ impl<V1: View> ViewTuple for (V1,) {
 // Implement ViewTuple for 2-tuple
 impl<V1: View, V2: View> ViewTuple for (V1, V2) {
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
-        vec![
-            self.0.create_element(),
-            self.1.create_element(),
-        ]
+        vec![self.0.create_element(), self.1.create_element()]
     }
 
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
@@ -136,7 +133,9 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View> ViewTuple for (V1, V2, V3
 }
 
 // Implement ViewTuple for 6-tuple
-impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View> ViewTuple for (V1, V2, V3, V4, V5, V6) {
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View> ViewTuple
+    for (V1, V2, V3, V4, V5, V6)
+{
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![
             self.0.create_element(),
@@ -159,7 +158,9 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View> ViewTuple for (
 }
 
 // Implement ViewTuple for 7-tuple
-impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7) {
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View> ViewTuple
+    for (V1, V2, V3, V4, V5, V6, V7)
+{
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![
             self.0.create_element(),
@@ -184,7 +185,9 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View> ViewT
 }
 
 // Implement ViewTuple for 8-tuple
-impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8) {
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View> ViewTuple
+    for (V1, V2, V3, V4, V5, V6, V7, V8)
+{
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![
             self.0.create_element(),
@@ -211,7 +214,9 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: V
 }
 
 // Implement ViewTuple for 9-tuple
-impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View, V9: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9) {
+impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View, V9: View>
+    ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9)
+{
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![
             self.0.create_element(),
@@ -240,7 +245,19 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: V
 }
 
 // Implement ViewTuple for 10-tuple
-impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: View, V9: View, V10: View> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9, V10) {
+impl<
+    V1: View,
+    V2: View,
+    V3: View,
+    V4: View,
+    V5: View,
+    V6: View,
+    V7: View,
+    V8: View,
+    V9: View,
+    V10: View,
+> ViewTuple for (V1, V2, V3, V4, V5, V6, V7, V8, V9, V10)
+{
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![
             self.0.create_element(),

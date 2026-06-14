@@ -2,13 +2,13 @@
 //!
 //! Clips child content to a rounded rectangle.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Point, Size};
 use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Clip view modifier - clips child content to a rounded rect.
 #[derive(Clone)]

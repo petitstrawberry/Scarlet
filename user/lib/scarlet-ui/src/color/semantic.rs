@@ -101,9 +101,9 @@ impl SemanticColor {
             background_tertiary: Color::rgb(0.95, 0.95, 0.97),
 
             // Text Colors - Apple label colors
-            text: Color::rgb(0, 0, 0), // label
+            text: Color::rgb(0, 0, 0),                    // label
             text_secondary: Color::rgba(60, 60, 67, 0.6), // secondaryLabel
-            text_tertiary: Color::rgba(60, 60, 67, 0.3), // tertiaryLabel
+            text_tertiary: Color::rgba(60, 60, 67, 0.3),  // tertiaryLabel
             text_inverse: Color::rgb(1.0, 1.0, 1.0),
 
             // Primary - scarlet red (緋色)
@@ -157,9 +157,9 @@ impl SemanticColor {
             background_tertiary: Color::rgb(0.24, 0.24, 0.24),
 
             // Text Colors - Apple label colors
-            text: Color::rgb(255, 255, 255), // label
+            text: Color::rgb(255, 255, 255),                 // label
             text_secondary: Color::rgba(235, 235, 245, 0.6), // secondaryLabel
-            text_tertiary: Color::rgba(235, 235, 245, 0.3), // tertiaryLabel
+            text_tertiary: Color::rgba(235, 235, 245, 0.3),  // tertiaryLabel
             text_inverse: Color::rgb(0.0, 0.0, 0.0),
 
             // Primary - scarlet red (緋色, lighter variant for dark mode)

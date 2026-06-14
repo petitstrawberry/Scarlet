@@ -4,10 +4,10 @@
 //! It is NOT a View - it's a data structure that holds label, icon, and
 //! a closure to build the content view.
 
-use alloc::string::String;
-use alloc::rc::Rc;
-use alloc::boxed::Box;
 use crate::view::View;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::String;
 
 /// Icon type for navigation items
 ///
@@ -80,7 +80,11 @@ impl NavigationLink {
     /// ```ignore
     /// NavigationLink::new("Settings", Icon::Settings, || SettingsView::new())
     /// ```
-    pub fn new<V>(label: impl Into<String>, icon: Icon, content_builder: impl Fn() -> V + 'static) -> Self
+    pub fn new<V>(
+        label: impl Into<String>,
+        icon: Icon,
+        content_builder: impl Fn() -> V + 'static,
+    ) -> Self
     where
         V: View + 'static,
     {

@@ -57,20 +57,21 @@ impl WindowSizeLimits {
 
     pub fn to_u32_limits(self) -> (u32, u32, u32, u32) {
         let min_width = self.min.map(|size| size.width.max(0.0) as u32).unwrap_or(0);
-        let min_height = self.min.map(|size| size.height.max(0.0) as u32).unwrap_or(0);
+        let min_height = self
+            .min
+            .map(|size| size.height.max(0.0) as u32)
+            .unwrap_or(0);
         let max_width = self.max.map(|size| size.width.max(0.0) as u32).unwrap_or(0);
-        let max_height = self.max.map(|size| size.height.max(0.0) as u32).unwrap_or(0);
+        let max_height = self
+            .max
+            .map(|size| size.height.max(0.0) as u32)
+            .unwrap_or(0);
         (min_width, min_height, max_width, max_height)
     }
 }
 
 impl LayoutConstraints {
-    pub const fn new(
-        min_width: f32,
-        max_width: f32,
-        min_height: f32,
-        max_height: f32,
-    ) -> Self {
+    pub const fn new(min_width: f32, max_width: f32, min_height: f32, max_height: f32) -> Self {
         Self {
             min_width,
             max_width,

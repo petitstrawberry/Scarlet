@@ -2,14 +2,14 @@
 //!
 //! Controls the alignment of a child view within its available space.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::Alignment;
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Alignment view modifier - controls child alignment
 #[derive(Clone)]
@@ -21,10 +21,7 @@ pub struct AlignmentFrame<V: View> {
 impl<V: View> AlignmentFrame<V> {
     /// Create a new AlignmentFrame modifier
     pub fn new(inner: V, alignment: Alignment) -> Self {
-        Self {
-            inner,
-            alignment,
-        }
+        Self { inner, alignment }
     }
 
     /// Get the inner view
@@ -102,12 +99,8 @@ impl ElementRenderObject for AlignmentRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if let Some(child) = children.first_mut() {
-            let child_constraints = LayoutConstraints::new(
-                0.0,
-                constraints.max_width,
-                0.0,
-                constraints.max_height,
-            );
+            let child_constraints =
+                LayoutConstraints::new(0.0, constraints.max_width, 0.0, constraints.max_height);
             let child_size = child.layout(child_constraints);
 
             let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {

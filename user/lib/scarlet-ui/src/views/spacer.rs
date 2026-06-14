@@ -2,11 +2,11 @@
 //!
 //! Spacer creates flexible empty space in layouts.
 
-use core::any::Any;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
 use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// Spacer View - creates empty space
 #[derive(Clone)]
@@ -27,10 +27,7 @@ impl Default for Spacer {
 
 impl View for Spacer {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            SpacerRenderObject,
-        ))
+        Box::new(RenderElement::new(self.clone(), SpacerRenderObject))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
@@ -58,10 +55,7 @@ impl ElementRenderObject for SpacerRenderObject {
         } else {
             0.0
         };
-        Size {
-            width,
-            height,
-        }
+        Size { width, height }
     }
 
     fn size(&self) -> Size {

@@ -2,13 +2,13 @@
 //!
 //! Arranges children layered on top of each other.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
-use crate::element::LayoutConstraints;
-use alloc::boxed::Box;
 use super::ViewTuple;
+use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
+use alloc::boxed::Box;
+use core::any::Any;
 
 /// ZStack View - arranges children in layers
 ///
@@ -126,12 +126,8 @@ impl ElementRenderObject for ZStackRenderObject {
         let mut max_height: f32 = 0.0;
 
         for (index, child) in children.iter_mut().enumerate() {
-            let child_constraints = LayoutConstraints::new(
-                0.0,
-                constraints.max_width,
-                0.0,
-                constraints.max_height,
-            );
+            let child_constraints =
+                LayoutConstraints::new(0.0, constraints.max_width, 0.0, constraints.max_height);
             let child_size = child.layout(child_constraints);
             self.child_sizes[index] = child_size;
             max_width = max_width.max(child_size.width);
@@ -165,10 +161,26 @@ impl ElementRenderObject for ZStackRenderObject {
 
             if child.fill_width() || child.fill_height() {
                 let child_constraints = LayoutConstraints {
-                    min_width: if child.fill_width() { final_width } else { child_size.width },
-                    max_width: if child.fill_width() { final_width } else { child_size.width },
-                    min_height: if child.fill_height() { final_height } else { child_size.height },
-                    max_height: if child.fill_height() { final_height } else { child_size.height },
+                    min_width: if child.fill_width() {
+                        final_width
+                    } else {
+                        child_size.width
+                    },
+                    max_width: if child.fill_width() {
+                        final_width
+                    } else {
+                        child_size.width
+                    },
+                    min_height: if child.fill_height() {
+                        final_height
+                    } else {
+                        child_size.height
+                    },
+                    max_height: if child.fill_height() {
+                        final_height
+                    } else {
+                        child_size.height
+                    },
                 };
                 child_size = child.layout(child_constraints);
                 self.child_sizes[index] = child_size;

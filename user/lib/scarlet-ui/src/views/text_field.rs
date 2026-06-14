@@ -96,7 +96,11 @@ impl TextField {
         }
     }
 
-    pub(crate) fn text_input_state(&self, preedit: &str, anchor_byte: u32) -> TextInputElementState {
+    pub(crate) fn text_input_state(
+        &self,
+        preedit: &str,
+        anchor_byte: u32,
+    ) -> TextInputElementState {
         let text = self.text.get();
         let mut display = text.clone();
         display.push_str(preedit_prefix(preedit, anchor_byte));
@@ -189,10 +193,9 @@ impl ElementRenderObject for TextFieldRenderObject {
         self.size = constraints.constrain(intrinsic);
         let width = libm::ceilf(self.size.width.max(1.0)) as u32;
         let height = libm::ceilf(self.size.height.max(1.0)) as u32;
-        let needs_resize = self
-            .buffer
-            .as_ref()
-            .map_or(true, |b| b.logical_width() != width || b.logical_height() != height);
+        let needs_resize = self.buffer.as_ref().map_or(true, |b| {
+            b.logical_width() != width || b.logical_height() != height
+        });
         if needs_resize {
             self.buffer = Some(Buffer::from_logical_dimensions(width, height));
         }
@@ -500,8 +503,8 @@ fn draw_preedit_marks(
             spans[offset + 11],
         ]);
         let start = clamp_byte_boundary(preedit, start) as usize;
-        let end = clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32)
-            as usize;
+        let end =
+            clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32) as usize;
         if start < end {
             let active = style
                 & (sws_protocol::preedit_style::HIGHLIGHT

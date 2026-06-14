@@ -3,8 +3,8 @@
 //! NavigationView provides a sidebar navigation interface where users can select
 //! different items to display different content views.
 
-use alloc::collections::BTreeMap;
 use crate::os::Mutex;
+use alloc::collections::BTreeMap;
 
 use crate::state::State;
 use crate::views::navigation::tuple::NavigationLinkTuple;
@@ -89,8 +89,8 @@ where
     ///
     /// ```ignore
     /// let nav = NavigationView::new((
-///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
-///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings")),
+    ///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
+    ///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings")),
     /// ));
     /// ```
     pub fn new(links: T) -> Self {

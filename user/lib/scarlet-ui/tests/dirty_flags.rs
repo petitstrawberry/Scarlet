@@ -1,7 +1,7 @@
 //! Test DirtyFlags implementation
 
-use scarlet_ui::DirtyFlags;
 use core::ops::{BitOr, Sub};
+use scarlet_ui::DirtyFlags;
 
 #[test]
 fn test_dirty_flags_empty() {

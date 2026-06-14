@@ -1,16 +1,16 @@
 //! NavigationView implementation
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use alloc::string::ToString;
-use core::any::Any;
-use crate::view::View;
+use crate::element::{ComponentElement, Element, RenderElement};
 use crate::state::Listenable;
-use crate::element::{Element, ComponentElement, RenderElement};
-use crate::views::navigation::render::NavigationViewRenderObject;
-use crate::views::navigation::view::NavigationView;
-use crate::views::navigation::tuple::NavigationLinkTuple;
+use crate::view::View;
 use crate::views::Spacer;
+use crate::views::navigation::render::NavigationViewRenderObject;
+use crate::views::navigation::tuple::NavigationLinkTuple;
+use crate::views::navigation::view::NavigationView;
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::any::Any;
 
 // Internal View that actually creates the RenderElement
 struct NavigationContent<T>
@@ -83,9 +83,7 @@ where
     T: NavigationLinkTuple + Clone + 'static,
 {
     fn create_element(&self) -> Box<dyn Element> {
-        let content = NavigationContent {
-            nav: self.clone(),
-        };
+        let content = NavigationContent { nav: self.clone() };
         Box::new(ComponentElement::new(content))
     }
 

@@ -2,13 +2,13 @@
 //!
 //! Constrains a child view to a specific size.
 
-use core::any::Any;
-use crate::view::View;
-use crate::element::{Element, RenderElement, ElementRenderObject};
-use crate::geometry::{Size, Point};
 use crate::element::LayoutConstraints;
+use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::geometry::{Point, Size};
+use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
+use core::any::Any;
 
 /// Frame view modifier - constrains a child to a specific size
 #[derive(Clone)]
@@ -116,7 +116,14 @@ impl<V: View + Clone> View for Frame<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::with_children(
             self.clone(),
-            FrameRenderObject::new(self.width, self.height, self.min_width, self.min_height, self.max_width, self.max_height),
+            FrameRenderObject::new(
+                self.width,
+                self.height,
+                self.min_width,
+                self.min_height,
+                self.max_width,
+                self.max_height,
+            ),
             vec![self.inner.create_element()],
         ))
     }
@@ -218,8 +225,15 @@ impl FrameRenderObject {
 impl ElementRenderObject for FrameRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
-            crate::logln!("[FrameRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?}), self.width={:?}, self.height={:?}",
-                constraints.min_width, constraints.min_height, constraints.max_width, constraints.max_height, self.width, self.height);
+            crate::logln!(
+                "[FrameRenderObject::layout] START: constraints=({:?}, {:?}) -> ({:?}, {:?}), self.width={:?}, self.height={:?}",
+                constraints.min_width,
+                constraints.min_height,
+                constraints.max_width,
+                constraints.max_height,
+                self.width,
+                self.height
+            );
         }
         // Determine the size based on explicit width/height and constraints
         let width = if let Some(w) = self.width {
@@ -228,12 +242,14 @@ impl ElementRenderObject for FrameRenderObject {
             } else if constraints.is_tight_width() {
                 constraints.max_width
             } else {
-                constraints.min_width
+                constraints
+                    .min_width
                     .max(self.min_width)
                     .min(constraints.max_width.min(self.max_width))
             }
         } else {
-            constraints.min_width
+            constraints
+                .min_width
                 .max(self.min_width)
                 .min(constraints.max_width.min(self.max_width))
         };
@@ -244,19 +260,25 @@ impl ElementRenderObject for FrameRenderObject {
             } else if constraints.is_tight_height() {
                 constraints.max_height
             } else {
-                constraints.min_height
+                constraints
+                    .min_height
                     .max(self.min_height)
                     .min(constraints.max_height.min(self.max_height))
             }
         } else {
-            constraints.min_height
+            constraints
+                .min_height
                 .max(self.min_height)
                 .min(constraints.max_height.min(self.max_height))
         };
 
         self.size = Size { width, height };
         if crate::debug::is_enabled() {
-            crate::logln!("[FrameRenderObject::layout] FINAL: size={}x{}", width, height);
+            crate::logln!(
+                "[FrameRenderObject::layout] FINAL: size={}x{}",
+                width,
+                height
+            );
         }
         self.size
     }
