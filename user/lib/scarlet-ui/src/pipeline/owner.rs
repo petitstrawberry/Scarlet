@@ -6,13 +6,13 @@
 //! PipelineOwner also owns the StateRegistry, ensuring there is only one
 //! registry per application.
 
-use alloc::collections::BTreeSet;
-use alloc::boxed::Box;
 use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
+use crate::os::Mutex;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
-use crate::os::Mutex;
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use std::println;
 
 /// Global dirty element IDs for State change callbacks
@@ -21,6 +21,7 @@ use std::println;
 /// when State changes occur.
 static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 static GLOBAL_DIRTY_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
+static GLOBAL_DIRTY_SELF_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 
 /// Mark an element as dirty for rebuild (called from ComponentElement callbacks)
 ///
@@ -43,6 +44,15 @@ pub fn mark_element_needs_paint(id: ElementId) {
     ids.insert(id);
 }
 
+/// Mark an element as needing paint for its own buffer only.
+///
+/// This is for render objects whose internal state changed without changing
+/// their descendants, such as a window titlebar hover state.
+pub fn mark_element_needs_self_paint(id: ElementId) {
+    let mut ids = GLOBAL_DIRTY_SELF_PAINT_IDS.lock();
+    ids.insert(id);
+}
+
 /// Take the globally dirty element IDs (if any)
 ///
 /// Returns an empty vector if no elements are marked dirty.
@@ -60,8 +70,17 @@ pub(crate) fn take_global_dirty_paint_ids() -> alloc::vec::Vec<ElementId> {
     collected
 }
 
+pub(crate) fn take_global_dirty_self_paint_ids() -> alloc::vec::Vec<ElementId> {
+    let mut ids = GLOBAL_DIRTY_SELF_PAINT_IDS.lock();
+    let collected = ids.iter().copied().collect();
+    ids.clear();
+    collected
+}
+
 pub(crate) fn has_global_dirty() -> bool {
-    !GLOBAL_DIRTY_IDS.lock().is_empty() || !GLOBAL_DIRTY_PAINT_IDS.lock().is_empty()
+    !GLOBAL_DIRTY_IDS.lock().is_empty()
+        || !GLOBAL_DIRTY_PAINT_IDS.lock().is_empty()
+        || !GLOBAL_DIRTY_SELF_PAINT_IDS.lock().is_empty()
 }
 
 /// Dirty flags for different render phases
@@ -86,6 +105,8 @@ pub struct PipelineOwner {
     dirty_layout: BTreeSet<ElementId>,
     /// Elements that need repainting
     dirty_paint: BTreeSet<ElementId>,
+    /// Elements whose own buffers need repainting without repainting descendants
+    dirty_self_paint: BTreeSet<ElementId>,
     /// Elements repainted in the last flush
     last_paint_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
@@ -99,6 +120,7 @@ impl PipelineOwner {
             dirty_build: BTreeSet::new(),
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
+            dirty_self_paint: BTreeSet::new(),
             last_paint_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
         }
@@ -139,12 +161,18 @@ impl PipelineOwner {
         self.mark_dirty(id, DirtyPhase::Paint);
     }
 
+    /// Mark an element as needing only its own buffer repainted.
+    pub fn mark_needs_self_paint(&mut self, id: ElementId) {
+        self.dirty_self_paint.insert(id);
+    }
+
     /// Check if there's any dirty work
     pub fn has_dirty(&self) -> bool {
         has_global_dirty()
             || !self.dirty_build.is_empty()
             || !self.dirty_layout.is_empty()
             || !self.dirty_paint.is_empty()
+            || !self.dirty_self_paint.is_empty()
     }
 
     /// Flush all dirty phases
@@ -157,6 +185,9 @@ impl PipelineOwner {
         }
         for dirty_id in take_global_dirty_paint_ids() {
             self.mark_needs_paint(dirty_id);
+        }
+        for dirty_id in take_global_dirty_self_paint_ids() {
+            self.mark_needs_self_paint(dirty_id);
         }
 
         // 1. Build Phase: Rebuild Elements whose State changed
@@ -284,22 +315,42 @@ impl PipelineOwner {
     /// Flush the paint phase
     fn flush_paint(&mut self, element_tree: &mut ElementTree) {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
+        let dirty_self_paint = core::mem::take(&mut self.dirty_self_paint);
         self.last_paint_ids.clear();
         self.last_paint_ids.extend(dirty_paint.iter().copied());
+        self.last_paint_ids.extend(dirty_self_paint.iter().copied());
 
         if crate::debug::is_enabled() {
-            crate::logln!("[PipelineOwner] flush_paint: {} dirty elements", dirty_paint.len());
+            crate::logln!(
+                "[PipelineOwner] flush_paint: {} dirty elements",
+                dirty_paint.len()
+            );
         }
 
         for id in dirty_paint {
             if crate::debug::is_enabled() {
-                crate::logln!("[PipelineOwner] flush_paint: rendering element id={}", id.get());
+                crate::logln!(
+                    "[PipelineOwner] flush_paint: rendering element id={}",
+                    id.get()
+                );
             }
             // Find the element and call render()
             if let Some(element) = element_tree.find_element_mut(id) {
                 // Render this element and all its descendants
                 // Containers like VStack/HStack don't have buffers, but their children do
                 Self::render_recursive(element, 0);
+            }
+        }
+
+        for id in dirty_self_paint {
+            if crate::debug::is_enabled() {
+                crate::logln!(
+                    "[PipelineOwner] flush_paint: rendering self element id={}",
+                    id.get()
+                );
+            }
+            if let Some(element) = element_tree.find_element_mut(id) {
+                element.render();
             }
         }
     }
@@ -311,13 +362,16 @@ impl PipelineOwner {
         let has_buffer = element.get_buffer().is_some();
 
         if crate::debug::is_enabled() {
-            crate::logln!("[PipelineOwner] {}render: {} (buffer={})", indent, type_name, has_buffer);
+            crate::logln!(
+                "[PipelineOwner] {}render: {} (buffer={})",
+                indent,
+                type_name,
+                has_buffer
+            );
         }
 
-        // Render this element
-        element.render();
-
-        // Render children (containers might not have buffers, but their children do)
+        // Render children before the parent so parent renderers that composite
+        // child buffers, such as WindowRenderElement, see fresh child content.
         let children = element.children();
         if crate::debug::is_enabled() {
             crate::logln!("[PipelineOwner] {}has {} children", indent, children.len());
@@ -325,10 +379,18 @@ impl PipelineOwner {
 
         for (i, child) in element.children_mut().iter_mut().enumerate() {
             if crate::debug::is_enabled() {
-                crate::logln!("[PipelineOwner] {}child #{}: {}", indent, i, child.type_name_debug());
+                crate::logln!(
+                    "[PipelineOwner] {}child #{}: {}",
+                    indent,
+                    i,
+                    child.type_name_debug()
+                );
             }
             Self::render_recursive(child, depth + 1);
         }
+
+        // Render this element
+        element.render();
     }
 
     /// Get the StateRegistry
@@ -353,7 +415,7 @@ impl PipelineOwner {
 
     /// Check if there are any dirty paint elements
     pub fn has_dirty_paint(&self) -> bool {
-        !self.dirty_paint.is_empty()
+        !self.dirty_paint.is_empty() || !self.dirty_self_paint.is_empty()
     }
 
     /// Get the IDs repainted in the last flush.

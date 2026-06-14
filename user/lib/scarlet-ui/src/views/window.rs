@@ -517,18 +517,16 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         // Render window decorations (background, titlebar, borders)
         self.render_object.render();
 
-        // Render children and composite their buffers below the titlebar
+        // Composite existing child buffers below the titlebar. Child rendering is
+        // handled by PipelineOwner so titlebar-only repaints do not repaint
+        // expensive content like CanvasView.
         let mut child_buffers: Vec<Option<&Buffer>> = Vec::new();
-        for child in &mut self.children {
-            child.render();
+        for child in &self.children {
             child_buffers.push(child.get_buffer());
         }
 
         // Composite child buffers into window buffer
-        let buffers: Vec<&Buffer> = child_buffers
-            .into_iter()
-            .filter_map(|b| b)
-            .collect();
+        let buffers: Vec<&Buffer> = child_buffers.into_iter().filter_map(|b| b).collect();
         self.render_object.composite_children(&buffers);
     }
 
@@ -735,7 +733,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
         // Mark for repaint if button states changed
         if needs_repaint {
-            crate::pipeline::mark_element_needs_paint(self.id());
+            crate::pipeline::mark_element_needs_self_paint(self.id());
         }
 
         handled
