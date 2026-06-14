@@ -418,6 +418,7 @@ impl<'a> PciScanner<'a> {
             .config
             .read_u8(&addr, super::config::offset::INTERRUPT_PIN);
         let routed_irq = self.routed_irq_for(&addr, interrupt_pin);
+        let interrupt_capabilities = self.config.read_interrupt_capabilities(&addr);
         let mut bars = self.config.read_bars(&addr);
         let bar_issues = PciConfig::validate_bars(&bars);
         if !bar_issues.is_empty() {
@@ -451,6 +452,7 @@ impl<'a> PciScanner<'a> {
             *id_counter,
         )
         .with_bars(bars);
+        let device_info = device_info.with_interrupt_capabilities(interrupt_capabilities);
 
         *id_counter += 1;
 
@@ -485,6 +487,31 @@ impl<'a> PciScanner<'a> {
                     bus, device, function, pin_name
                 ),
             }
+        }
+        if let Some(msi) = interrupt_capabilities.msi {
+            println!(
+                "pci 0000:{:02x}:{:02x}.{}: MSI{} cap {:#04x} vectors={} enabled={}",
+                bus,
+                device,
+                function,
+                if msi.is_64bit { " 64-bit" } else { "" },
+                msi.offset,
+                msi.multiple_message_capable,
+                msi.enabled
+            );
+        }
+        if let Some(msix) = interrupt_capabilities.msix {
+            println!(
+                "pci 0000:{:02x}:{:02x}.{}: MSI-X cap {:#04x} table BAR {} offset {:#x} entries={} enabled={}",
+                bus,
+                device,
+                function,
+                msix.offset,
+                msix.table_bar,
+                msix.table_offset,
+                msix.table_size,
+                msix.enabled
+            );
         }
 
         Some(device_info)

@@ -34,6 +34,12 @@ const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
 const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
+const VIRTIO_PCI_COMMON_MSIX_CONFIG: usize = 0x10;
+const VIRTIO_PCI_COMMON_NUM_QUEUES: usize = 0x12;
+const VIRTIO_PCI_COMMON_QUEUE_SELECT: usize = 0x16;
+const VIRTIO_PCI_COMMON_QUEUE_MSIX_VECTOR: usize = 0x1a;
+const VIRTIO_PCI_MSIX_NO_VECTOR: u16 = 0xffff;
+
 const VIRTIO_PCI_CAP_ID: usize = 0x00;
 const VIRTIO_PCI_CAP_NEXT: usize = 0x01;
 const VIRTIO_PCI_CAP_LEN: usize = 0x02;
@@ -86,6 +92,66 @@ impl VirtioPciTransport {
         let byte_offset =
             usize::from(queue_notify_off).checked_mul(self.notify_off_multiplier as usize)?;
         self.notify_cfg.checked_add(byte_offset)
+    }
+
+    /// Read the number of queues exposed by the device.
+    ///
+    /// # Returns
+    ///
+    /// Number of virtqueues reported by the common configuration.
+    pub fn num_queues(&self) -> u16 {
+        unsafe { crate::arch::mmio::read16(self.common_cfg + VIRTIO_PCI_COMMON_NUM_QUEUES) }
+    }
+
+    /// Program the MSI-X vector used for configuration changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `vector` - MSI-X table vector number, or `0xffff` to disable.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the device accepted the vector.
+    pub fn set_config_msix_vector(&self, vector: u16) -> bool {
+        unsafe {
+            crate::arch::mmio::write16(self.common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG, vector);
+            crate::arch::mmio::read16(self.common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG) == vector
+        }
+    }
+
+    /// Program the MSI-X vector used by a virtqueue.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue_idx` - Virtqueue index.
+    /// * `vector` - MSI-X table vector number, or `0xffff` to disable.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the device accepted the vector.
+    pub fn set_queue_msix_vector(&self, queue_idx: u16, vector: u16) -> bool {
+        unsafe {
+            crate::arch::mmio::write16(self.common_cfg + VIRTIO_PCI_COMMON_QUEUE_SELECT, queue_idx);
+            crate::arch::mmio::write16(
+                self.common_cfg + VIRTIO_PCI_COMMON_QUEUE_MSIX_VECTOR,
+                vector,
+            );
+            crate::arch::mmio::read16(self.common_cfg + VIRTIO_PCI_COMMON_QUEUE_MSIX_VECTOR)
+                == vector
+        }
+    }
+
+    /// Disable all VirtIO PCI MSI-X vectors visible in common configuration.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the device accepted all disable writes.
+    pub fn disable_msix_vectors(&self) -> bool {
+        let mut accepted = self.set_config_msix_vector(VIRTIO_PCI_MSIX_NO_VECTOR);
+        for queue_idx in 0..self.num_queues() {
+            accepted &= self.set_queue_msix_vector(queue_idx, VIRTIO_PCI_MSIX_NO_VECTOR);
+        }
+        accepted
     }
 }
 
@@ -270,6 +336,65 @@ fn register_legacy_intx(
     Some(interrupt_id)
 }
 
+fn log_pci_interrupt_capabilities(device: &PciDeviceInfo, transport: &VirtioPciTransport) {
+    let caps = device.interrupt_capabilities();
+    if let Some(msix) = caps.msix {
+        early_println!(
+            "[virtio-pci] MSI-X present for {:02x}:{:02x}.{}: entries={} table_bar={} table_offset={:#x} queues={}",
+            device.address().bus,
+            device.address().device,
+            device.address().function,
+            msix.table_size,
+            msix.table_bar,
+            msix.table_offset,
+            transport.num_queues()
+        );
+
+        if !transport.disable_msix_vectors() {
+            early_println!(
+                "[virtio-pci] Device did not accept MSI-X disable vectors; keeping INTx fallback"
+            );
+        }
+
+        let addr = device.address();
+        let request = crate::interrupt::controllers::MsiRequest {
+            count: 1,
+            target_cpu: crate::arch::get_cpu().get_cpuid() as u32,
+            requester: Some(crate::interrupt::controllers::MsiRequester {
+                segment: addr.segment,
+                bus: addr.bus,
+                device: addr.device,
+                function: addr.function,
+            }),
+        };
+
+        match crate::interrupt::allocate_msi_vectors(request) {
+            Ok(allocation) => {
+                early_println!(
+                    "[virtio-pci] MSI allocation available: {} vector(s); MSI-X programming is not wired to device handlers yet",
+                    allocation.vectors.len()
+                );
+            }
+            Err(e) => {
+                early_println!(
+                    "[virtio-pci] MSI allocation unavailable ({:?}); using INTx fallback when an interrupt handler is needed",
+                    e
+                );
+            }
+        }
+    } else if let Some(msi) = caps.msi {
+        early_println!(
+            "[virtio-pci] MSI present for {:02x}:{:02x}.{}: vectors={} 64bit={} pvm={}; using INTx fallback",
+            device.address().bus,
+            device.address().device,
+            device.address().function,
+            msi.multiple_message_capable,
+            msi.is_64bit,
+            msi.per_vector_masking
+        );
+    }
+}
+
 fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     println!(
         "[virtio-pci] Probing device {:04x}:{:04x}",
@@ -281,6 +406,7 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     enable_pci_device(&config, device);
 
     let transport = parse_virtio_pci_caps(&config, device)?;
+    log_pci_interrupt_capabilities(device, &transport);
 
     match device.device_id() {
         VIRTIO_PCI_TRANSITIONAL_NET_DEVICE_ID => {

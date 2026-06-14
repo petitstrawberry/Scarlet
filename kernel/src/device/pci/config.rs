@@ -70,8 +70,12 @@ pub mod status {
 
 /// PCI capability IDs.
 pub mod capability {
+    /// MSI capability.
+    pub const MSI: u8 = 0x05;
     /// Vendor-specific capability.
     pub const VENDOR_SPECIFIC: u8 = 0x09;
+    /// MSI-X capability.
+    pub const MSI_X: u8 = 0x11;
 }
 
 /// Number of BAR slots in a type-0 PCI header.
@@ -82,6 +86,122 @@ pub const HEADER_TYPE_ENDPOINT: u8 = 0x00;
 
 /// PCI-to-PCI bridge header type.
 pub const HEADER_TYPE_BRIDGE: u8 = 0x01;
+
+/// PCI capability list entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciCapability {
+    /// Capability ID.
+    pub id: u8,
+    /// Offset in PCI configuration space.
+    pub offset: u8,
+    /// Next capability pointer, or zero when this is the last entry.
+    pub next: u8,
+}
+
+/// Decoded PCI MSI capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciMsiCapability {
+    /// Capability offset in PCI configuration space.
+    pub offset: u8,
+    /// Raw MSI message control register.
+    pub message_control: u16,
+    /// True when MSI is enabled.
+    pub enabled: bool,
+    /// Number of messages the device can support.
+    pub multiple_message_capable: u8,
+    /// Number of messages currently enabled.
+    pub multiple_message_enable: u8,
+    /// True when the capability has a 64-bit message address.
+    pub is_64bit: bool,
+    /// True when per-vector masking registers are present.
+    pub per_vector_masking: bool,
+}
+
+impl PciMsiCapability {
+    /// Decode an MSI capability from the raw control register.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Capability offset in PCI configuration space.
+    /// * `message_control` - Raw MSI message control register value.
+    ///
+    /// # Returns
+    ///
+    /// A decoded MSI capability.
+    pub const fn from_message_control(offset: u8, message_control: u16) -> Self {
+        let capable_shift = ((message_control >> 1) & 0x7) as u8;
+        let enabled_shift = ((message_control >> 4) & 0x7) as u8;
+        Self {
+            offset,
+            message_control,
+            enabled: (message_control & 0x1) != 0,
+            multiple_message_capable: 1u8 << capable_shift,
+            multiple_message_enable: 1u8 << enabled_shift,
+            is_64bit: (message_control & (1 << 7)) != 0,
+            per_vector_masking: (message_control & (1 << 8)) != 0,
+        }
+    }
+}
+
+/// Decoded PCI MSI-X capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciMsixCapability {
+    /// Capability offset in PCI configuration space.
+    pub offset: u8,
+    /// Raw MSI-X message control register.
+    pub message_control: u16,
+    /// Number of table entries.
+    pub table_size: u16,
+    /// True when MSI-X is enabled.
+    pub enabled: bool,
+    /// True when all MSI-X entries are masked at function level.
+    pub function_masked: bool,
+    /// BAR index containing the MSI-X table.
+    pub table_bar: u8,
+    /// Offset of the MSI-X table within `table_bar`.
+    pub table_offset: u32,
+    /// BAR index containing the pending bit array.
+    pub pba_bar: u8,
+    /// Offset of the pending bit array within `pba_bar`.
+    pub pba_offset: u32,
+}
+
+impl PciMsixCapability {
+    /// Decode an MSI-X capability from raw table/PBA registers.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Capability offset in PCI configuration space.
+    /// * `message_control` - Raw MSI-X message control register value.
+    /// * `table` - Raw table BAR indicator and offset register.
+    /// * `pba` - Raw pending bit array BAR indicator and offset register.
+    ///
+    /// # Returns
+    ///
+    /// A decoded MSI-X capability.
+    pub const fn from_raw(offset: u8, message_control: u16, table: u32, pba: u32) -> Self {
+        Self {
+            offset,
+            message_control,
+            table_size: (message_control & 0x07ff) + 1,
+            enabled: (message_control & (1 << 15)) != 0,
+            function_masked: (message_control & (1 << 14)) != 0,
+            table_bar: (table & 0x7) as u8,
+            table_offset: table & !0x7,
+            pba_bar: (pba & 0x7) as u8,
+            pba_offset: pba & !0x7,
+        }
+    }
+}
+
+/// PCI interrupt-related capabilities discovered during enumeration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PciInterruptCapabilities {
+    /// MSI capability, if present.
+    pub msi: Option<PciMsiCapability>,
+    /// MSI-X capability, if present.
+    pub msix: Option<PciMsixCapability>,
+}
 
 /// Decoded PCI BAR resource kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +440,99 @@ impl PciConfig {
     /// Read header type
     pub fn read_header_type(&self, addr: &PciAddress) -> u8 {
         self.read_u8(addr, offset::HEADER_TYPE)
+    }
+
+    /// Read the standard PCI capability list.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - PCI function address.
+    ///
+    /// # Returns
+    ///
+    /// Capability entries in list order. The list is bounded to avoid loops in
+    /// malformed configuration spaces.
+    pub fn read_capabilities(&self, addr: &PciAddress) -> Vec<PciCapability> {
+        let status = self.read_u16(addr, offset::STATUS);
+        if status & status::CAPABILITIES_LIST == 0 {
+            return Vec::new();
+        }
+
+        let mut caps = Vec::new();
+        let mut cap_offset = self.read_u8(addr, offset::CAPABILITIES_POINTER) & !0x3;
+        for _ in 0..64 {
+            if cap_offset == 0 {
+                break;
+            }
+            if !(0x40..0x100).contains(&(cap_offset as usize)) {
+                break;
+            }
+
+            let id = self.read_u8(addr, cap_offset as usize);
+            let next = self.read_u8(addr, cap_offset as usize + 1) & !0x3;
+            caps.push(PciCapability {
+                id,
+                offset: cap_offset,
+                next,
+            });
+            cap_offset = next;
+        }
+
+        caps
+    }
+
+    /// Find the first capability with the requested ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - PCI function address.
+    /// * `capability_id` - Capability ID to find.
+    ///
+    /// # Returns
+    ///
+    /// The capability entry, if present.
+    pub fn find_capability(&self, addr: &PciAddress, capability_id: u8) -> Option<PciCapability> {
+        self.read_capabilities(addr)
+            .into_iter()
+            .find(|cap| cap.id == capability_id)
+    }
+
+    /// Read MSI/MSI-X capabilities for a PCI function.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - PCI function address.
+    ///
+    /// # Returns
+    ///
+    /// Decoded interrupt capabilities.
+    pub fn read_interrupt_capabilities(&self, addr: &PciAddress) -> PciInterruptCapabilities {
+        let mut interrupts = PciInterruptCapabilities::default();
+        for cap in self.read_capabilities(addr) {
+            match cap.id {
+                capability::MSI => {
+                    let message_control = self.read_u16(addr, cap.offset as usize + 0x02);
+                    interrupts.msi = Some(PciMsiCapability::from_message_control(
+                        cap.offset,
+                        message_control,
+                    ));
+                }
+                capability::MSI_X => {
+                    let message_control = self.read_u16(addr, cap.offset as usize + 0x02);
+                    let table = self.read_u32(addr, cap.offset as usize + 0x04);
+                    let pba = self.read_u32(addr, cap.offset as usize + 0x08);
+                    interrupts.msix = Some(PciMsixCapability::from_raw(
+                        cap.offset,
+                        message_control,
+                        table,
+                        pba,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        interrupts
     }
 
     fn bar_offset(index: u8) -> Option<usize> {
@@ -636,5 +849,31 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue, PciBarIssue::MisalignedBase { .. }))
         );
+    }
+
+    #[test_case]
+    fn test_decode_msi_capability_control() {
+        let cap = PciMsiCapability::from_message_control(0x50, 0x0191);
+
+        assert_eq!(cap.offset, 0x50);
+        assert!(cap.enabled);
+        assert_eq!(cap.multiple_message_capable, 16);
+        assert_eq!(cap.multiple_message_enable, 2);
+        assert!(cap.is_64bit);
+        assert!(cap.per_vector_masking);
+    }
+
+    #[test_case]
+    fn test_decode_msix_capability_registers() {
+        let cap = PciMsixCapability::from_raw(0x60, 0xc003, 0x1005, 0x2002);
+
+        assert_eq!(cap.offset, 0x60);
+        assert_eq!(cap.table_size, 4);
+        assert!(cap.enabled);
+        assert!(cap.function_masked);
+        assert_eq!(cap.table_bar, 5);
+        assert_eq!(cap.table_offset, 0x1000);
+        assert_eq!(cap.pba_bar, 2);
+        assert_eq!(cap.pba_offset, 0x2000);
     }
 }

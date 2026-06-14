@@ -5,8 +5,112 @@
 use crate::device::platform::resource::{PlatformDeviceResource, PlatformDeviceResourceType};
 use crate::interrupt::InterruptError;
 
-use super::{CpuId, InterruptId, InterruptResult, Priority};
+use super::{CpuId, Hwirq, InterruptId, InterruptResult, Priority, Virq};
 use alloc::boxed::Box;
+
+/// Interrupt handling flow used by the interrupt core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqFlow {
+    /// Level-triggered line interrupt.
+    Level,
+    /// Edge-triggered line interrupt.
+    Edge,
+    /// Interrupt whose CPU-interface EOI is enough to finish handling.
+    FastEoi,
+    /// Message-signaled interrupt.
+    Msi,
+}
+
+/// Mapping from a controller-local interrupt source to a kernel virtual IRQ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrqMapping {
+    /// Kernel-global virtual IRQ.
+    pub virq: Virq,
+    /// Controller-local hardware IRQ.
+    pub hwirq: Hwirq,
+    /// Handling flow for this interrupt.
+    pub flow: IrqFlow,
+}
+
+impl IrqMapping {
+    /// Create a legacy one-to-one IRQ mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Interrupt number used as both virtual and hardware IRQ.
+    /// * `flow` - Interrupt handling flow.
+    ///
+    /// # Returns
+    ///
+    /// A one-to-one interrupt mapping.
+    pub const fn legacy(interrupt_id: InterruptId, flow: IrqFlow) -> Self {
+        Self {
+            virq: interrupt_id,
+            hwirq: interrupt_id,
+            flow,
+        }
+    }
+}
+
+/// Interrupt returned by the CPU-facing delivery path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingIrq {
+    /// Interrupt mapping for this delivery.
+    pub mapping: IrqMapping,
+    /// CPU that observed the interrupt.
+    pub cpu_id: CpuId,
+}
+
+/// PCI requester identity used by MSI/MSI-X routing domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiRequester {
+    /// PCI segment/domain.
+    pub segment: u16,
+    /// PCI bus number.
+    pub bus: u8,
+    /// PCI device number.
+    pub device: u8,
+    /// PCI function number.
+    pub function: u8,
+}
+
+/// MSI/MSI-X allocation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiRequest {
+    /// Number of vectors requested.
+    pub count: usize,
+    /// Preferred target CPU.
+    pub target_cpu: CpuId,
+    /// Optional requester identity for routing domains that need requester IDs.
+    pub requester: Option<MsiRequester>,
+}
+
+/// Message written by a PCI MSI/MSI-X requester to raise an interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiMessage {
+    /// MSI doorbell address.
+    pub address: u64,
+    /// MSI message data payload.
+    pub data: u32,
+}
+
+/// One interrupt vector allocated for MSI/MSI-X.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiVector {
+    /// Kernel virtual IRQ associated with this vector.
+    pub virq: Virq,
+    /// Controller-local hardware IRQ associated with this vector.
+    pub hwirq: Hwirq,
+    /// Doorbell message programmed into the PCI device.
+    pub message: MsiMessage,
+}
+
+/// A contiguous or controller-defined MSI/MSI-X allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsiAllocation {
+    /// Allocated vectors.
+    pub vectors: alloc::vec::Vec<MsiVector>,
+}
 
 /// Trait for per-CPU timer controllers.
 ///
@@ -174,44 +278,141 @@ pub trait SoftwareInterruptController: Send + Sync {
 /// External interrupt controllers manage interrupts from external devices
 /// and can route them to different CPUs with priority support.
 pub trait ExternalInterruptController: Send + Sync {
-    /// Initialize the external interrupt controller
+    /// Initialize the external interrupt controller.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error when initialization fails.
     fn init(&mut self) -> InterruptResult<()>;
 
-    /// Enable a specific interrupt for a CPU
+    /// Enable a hardware interrupt for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    /// * `cpu_id` - CPU that should receive the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Disable a specific interrupt for a CPU
+    /// Disable a hardware interrupt for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    /// * `cpu_id` - CPU whose interrupt routing should be disabled.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn disable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()>;
 
-    /// Set priority for a specific interrupt
+    /// Set priority for a hardware interrupt.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    /// * `priority` - Controller-specific priority value.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn set_priority(
         &mut self,
         interrupt_id: InterruptId,
         priority: Priority,
     ) -> InterruptResult<()>;
 
-    /// Get priority for a specific interrupt
+    /// Get priority for a hardware interrupt.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    ///
+    /// # Returns
+    ///
+    /// Controller-specific priority value.
     fn get_priority(&self, interrupt_id: InterruptId) -> InterruptResult<Priority>;
 
-    /// Set priority threshold for a CPU
+    /// Set priority threshold for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose threshold should be updated.
+    /// * `threshold` - Controller-specific threshold value.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn set_threshold(&mut self, cpu_id: CpuId, threshold: Priority) -> InterruptResult<()>;
 
-    /// Get priority threshold for a CPU
+    /// Get priority threshold for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose threshold should be read.
+    ///
+    /// # Returns
+    ///
+    /// Controller-specific threshold value.
     fn get_threshold(&self, cpu_id: CpuId) -> InterruptResult<Priority>;
 
-    /// Claim an interrupt (acknowledge and get the interrupt ID)
+    /// Claim an interrupt and return its controller-local interrupt number.
+    ///
+    /// This compatibility hook is claim/complete centric. New dispatch paths
+    /// should prefer `claim_pending_irq`, which returns virtual IRQ mapping and
+    /// flow information.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// Hardware interrupt number, or `None` if no interrupt is pending.
     fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>>;
 
-    /// Complete an interrupt (signal that handling is finished)
+    /// Complete a controller-local hardware interrupt.
+    ///
+    /// This compatibility hook is used by the default `eoi_irq`
+    /// implementation. New controllers can override `eoi_irq` directly when
+    /// completion requires flow-specific state.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU that handled the interrupt.
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()>;
 
-    /// Check if a specific interrupt is pending
+    /// Check if a hardware interrupt is pending.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Controller-local hardware interrupt number.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the interrupt is pending.
     fn is_pending(&self, interrupt_id: InterruptId) -> bool;
 
-    /// Get the maximum number of interrupts supported
+    /// Get the maximum controller-local interrupt number supported.
+    ///
+    /// # Returns
+    ///
+    /// Maximum controller-local interrupt number.
     fn max_interrupts(&self) -> InterruptId;
 
-    /// Get the number of CPUs supported
+    /// Get the number of CPUs supported by this controller.
+    ///
+    /// # Returns
+    ///
+    /// Number of CPUs that can be targeted.
     fn max_cpus(&self) -> CpuId;
 
     /// Translate a firmware-provided IRQ resource into this controller's interrupt ID.
@@ -238,11 +439,104 @@ pub trait ExternalInterruptController: Send + Sync {
             }))
     }
 
+    /// Map a firmware-provided IRQ resource into a kernel IRQ descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `resource` - Platform IRQ resource discovered from firmware.
+    ///
+    /// # Returns
+    ///
+    /// Interrupt mapping used by the interrupt core.
+    fn map_irq_resource(&self, resource: &PlatformDeviceResource) -> InterruptResult<IrqMapping> {
+        let hwirq = self.translate_irq_resource(resource)?;
+        Ok(IrqMapping::legacy(hwirq, IrqFlow::Level))
+    }
+
+    /// Claim or fetch the next pending interrupt for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// Pending interrupt mapping, or `None` if there is no pending interrupt.
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::Level),
+                cpu_id,
+            }))
+    }
+
+    /// Acknowledge a pending interrupt before running handlers.
+    ///
+    /// # Arguments
+    ///
+    /// * `irq` - Pending interrupt to acknowledge.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success.
+    fn ack_irq(&self, _irq: &PendingIrq) -> InterruptResult<()> {
+        Ok(())
+    }
+
+    /// Finish interrupt handling at the controller.
+    ///
+    /// # Arguments
+    ///
+    /// * `irq` - Pending interrupt being finished.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success.
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
+    }
+
+    /// Allocate MSI/MSI-X vectors for a device.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - MSI allocation request.
+    ///
+    /// # Returns
+    ///
+    /// Allocated MSI vectors and message programming data, or `NotSupported`
+    /// when this controller has no MSI domain.
+    fn allocate_msi_vectors(&self, request: MsiRequest) -> InterruptResult<MsiAllocation> {
+        let _ = request;
+        Err(InterruptError::NotSupported)
+    }
+
+    /// Send an inter-processor interrupt through this controller.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_cpu_id` - CPU that should receive the IPI.
+    /// * `ipi_type` - Local interrupt type to deliver.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or `NotSupported` when the controller cannot send
+    /// IPIs.
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
         let _ = (target_cpu_id, ipi_type);
         Err(InterruptError::NotSupported)
     }
 
+    /// Initialize external interrupt state for a CPU.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU whose controller state should be initialized.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an interrupt error on failure.
     fn init_for_cpu(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
         Ok(())
     }

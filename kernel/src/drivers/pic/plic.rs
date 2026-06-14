@@ -15,7 +15,7 @@ use crate::{
     early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptResult, Priority,
-        controllers::ExternalInterruptController,
+        controllers::{ExternalInterruptController, IrqFlow, IrqMapping, PendingIrq},
     },
 };
 use alloc::{boxed::Box, vec, vec::Vec};
@@ -346,6 +346,15 @@ impl ExternalInterruptController for Plic {
         }
     }
 
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::Level),
+                cpu_id,
+            }))
+    }
+
     /// Complete an interrupt (signal that handling is finished)
     fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
@@ -358,6 +367,10 @@ impl ExternalInterruptController for Plic {
         }
 
         Ok(())
+    }
+
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
     /// Check if a specific interrupt is pending

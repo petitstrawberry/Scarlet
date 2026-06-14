@@ -18,7 +18,7 @@ use crate::{
     early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptResult, Priority,
-        controllers::ExternalInterruptController,
+        controllers::{ExternalInterruptController, IrqFlow, IrqMapping, PendingIrq},
     },
 };
 
@@ -412,6 +412,15 @@ impl ExternalInterruptController for GicV3 {
         }
     }
 
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::FastEoi),
+                cpu_id,
+            }))
+    }
+
     fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
@@ -419,6 +428,10 @@ impl ExternalInterruptController for GicV3 {
         // Stateless completion: write INTID back.
         write_icc_eoir1_el1(interrupt_id);
         Ok(())
+    }
+
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
     fn is_pending(&self, interrupt_id: InterruptId) -> bool {
@@ -465,6 +478,11 @@ impl ExternalInterruptController for GicV3 {
                     _ => metadata.irq_number,
                 }
             }))
+    }
+
+    fn map_irq_resource(&self, resource: &PlatformDeviceResource) -> InterruptResult<IrqMapping> {
+        let hwirq = self.translate_irq_resource(resource)?;
+        Ok(IrqMapping::legacy(hwirq, IrqFlow::FastEoi))
     }
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {

@@ -15,7 +15,9 @@ use crate::{
     driver_initcall, early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptResult, Priority,
-        controllers::{ExternalInterruptController, LocalInterruptType},
+        controllers::{
+            ExternalInterruptController, IrqFlow, IrqMapping, LocalInterruptType, PendingIrq,
+        },
     },
 };
 use alloc::{boxed::Box, vec};
@@ -387,6 +389,15 @@ impl ExternalInterruptController for Gic {
         }
     }
 
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        Ok(self
+            .claim_interrupt(cpu_id)?
+            .map(|interrupt_id| PendingIrq {
+                mapping: IrqMapping::legacy(interrupt_id, IrqFlow::FastEoi),
+                cpu_id,
+            }))
+    }
+
     fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
@@ -403,6 +414,10 @@ impl ExternalInterruptController for Gic {
         self.last_iar[cpu_id as usize].store(0, Ordering::Relaxed);
 
         Ok(())
+    }
+
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
     fn is_pending(&self, interrupt_id: InterruptId) -> bool {
@@ -440,6 +455,11 @@ impl ExternalInterruptController for Gic {
             .map_or(resource.start as InterruptId, |metadata| {
                 self.translate_interrupt(&metadata)
             }))
+    }
+
+    fn map_irq_resource(&self, resource: &PlatformDeviceResource) -> InterruptResult<IrqMapping> {
+        let hwirq = self.translate_irq_resource(resource)?;
+        Ok(IrqMapping::legacy(hwirq, IrqFlow::FastEoi))
     }
 
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {

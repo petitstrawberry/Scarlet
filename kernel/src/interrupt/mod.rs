@@ -14,8 +14,17 @@ pub mod controllers;
 
 static INTERRUPT_MANAGER: spin::Once<InterruptManager> = spin::Once::new();
 
-/// Interrupt ID type
-pub type InterruptId = u32;
+/// Kernel-global virtual IRQ number.
+pub type Virq = u32;
+
+/// Controller-local hardware IRQ number.
+pub type Hwirq = u32;
+
+/// Interrupt ID type.
+///
+/// This is kept as a compatibility alias for drivers. New interrupt-core code
+/// should treat it as a `Virq`, not as a controller-local hardware line.
+pub type InterruptId = Virq;
 
 /// CPU ID type
 pub type CpuId = u32;
@@ -61,6 +70,22 @@ pub fn register_and_enable_platform_irq_device(
     InterruptManager::global().register_and_enable_platform_irq_device(resource, device, cpu_id)
 }
 
+/// Allocate MSI/MSI-X vectors from the active external interrupt controller.
+///
+/// # Arguments
+///
+/// * `count` - Number of vectors requested.
+/// * `cpu_id` - Preferred target CPU for the vectors.
+///
+/// # Returns
+///
+/// Allocated vectors with MSI doorbell programming data.
+pub fn allocate_msi_vectors(
+    request: controllers::MsiRequest,
+) -> InterruptResult<controllers::MsiAllocation> {
+    InterruptManager::global().allocate_msi_vectors(request)
+}
+
 /// Handler function type for external interrupts
 pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<()>;
 
@@ -68,8 +93,14 @@ pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<
 pub type LocalInterruptHandler =
     fn(cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IrqDesc {
+    mapping: controllers::IrqMapping,
+}
+
 pub struct InterruptManager {
     controllers: spin::Once<spin::Mutex<controllers::InterruptControllers>>,
+    irq_descs: spin::Lazy<spin::Mutex<HashMap<Virq, IrqDesc>>>,
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
     interrupt_devices: spin::Lazy<
         spin::Mutex<
@@ -85,6 +116,7 @@ impl InterruptManager {
     pub fn new() -> Self {
         Self {
             controllers: spin::Once::new(),
+            irq_descs: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             external_handlers: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             interrupt_devices: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
         }
@@ -153,19 +185,59 @@ impl InterruptManager {
         &self,
         resource: &PlatformDeviceResource,
     ) -> InterruptResult<InterruptId> {
+        let mapping = {
+            let controllers = self.controllers().lock();
+            if let Some(controller) = controllers.external_controller() {
+                controller.map_irq_resource(resource)?
+            } else {
+                return Err(InterruptError::ControllerNotFound);
+            }
+        };
+
+        self.register_irq_mapping(mapping);
+        Ok(mapping.virq)
+    }
+
+    fn register_irq_mapping(&self, mapping: controllers::IrqMapping) {
+        let mut descs = self.irq_descs.lock();
+        descs.entry(mapping.virq).or_insert(IrqDesc { mapping });
+    }
+
+    fn irq_desc_or_legacy(&self, interrupt_id: InterruptId) -> IrqDesc {
+        {
+            let descs = self.irq_descs.lock();
+            if let Some(desc) = descs.get(&interrupt_id) {
+                return *desc;
+            }
+        }
+
+        let mapping = controllers::IrqMapping::legacy(interrupt_id, controllers::IrqFlow::Level);
+        let desc = IrqDesc { mapping };
+        self.irq_descs.lock().entry(interrupt_id).or_insert(desc);
+        desc
+    }
+
+    fn finish_pending_irq(&self, irq: &controllers::PendingIrq) -> InterruptResult<()> {
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.translate_irq_resource(resource)
+            controller.eoi_irq(irq)
         } else {
             Err(InterruptError::ControllerNotFound)
         }
     }
 
-    pub fn handle_external_interrupt(
-        &self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn handle_pending_irq(&self, pending: controllers::PendingIrq) -> InterruptResult<()> {
+        self.register_irq_mapping(pending.mapping);
+        {
+            let controllers = self.controllers().lock();
+            if let Some(controller) = controllers.external_controller() {
+                controller.ack_irq(&pending)?;
+            } else {
+                return Err(InterruptError::ControllerNotFound);
+            }
+        }
+
+        let interrupt_id = pending.mapping.virq;
         let device = {
             let devices = self.interrupt_devices.lock();
             devices.get(&interrupt_id).cloned()
@@ -175,7 +247,7 @@ impl InterruptManager {
             for device in devices {
                 device.handle_interrupt()?;
             }
-            self.complete_external_interrupt(cpu_id, interrupt_id)
+            self.finish_pending_irq(&pending)
         } else {
             let handler = {
                 let handlers = self.external_handlers.lock();
@@ -183,30 +255,43 @@ impl InterruptManager {
             };
 
             if let Some(handler_fn) = handler {
-                let mut handle = InterruptHandle::new(interrupt_id, cpu_id);
+                let mut handle = InterruptHandle::new_pending(pending);
                 handler_fn(&mut handle)
             } else {
-                self.complete_external_interrupt(cpu_id, interrupt_id)
+                self.finish_pending_irq(&pending)
             }
         }
+    }
+
+    pub fn handle_external_interrupt(
+        &self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
+        let desc = self.irq_desc_or_legacy(interrupt_id);
+        self.handle_pending_irq(controllers::PendingIrq {
+            mapping: desc.mapping,
+            cpu_id,
+        })
     }
 
     pub fn claim_and_handle_external_interrupt(
         &self,
         cpu_id: CpuId,
     ) -> InterruptResult<Option<InterruptId>> {
-        let interrupt_id = {
+        let pending = {
             let controllers = self.controllers().lock();
             if let Some(controller) = controllers.external_controller() {
-                controller.claim_interrupt(cpu_id)?
+                controller.claim_pending_irq(cpu_id)?
             } else {
                 return Err(InterruptError::ControllerNotFound);
             }
         };
 
-        if let Some(id) = interrupt_id {
-            self.handle_external_interrupt(id, cpu_id)?;
-            Ok(Some(id))
+        if let Some(pending) = pending {
+            let virq = pending.mapping.virq;
+            self.handle_pending_irq(pending)?;
+            Ok(Some(virq))
         } else {
             Ok(None)
         }
@@ -362,6 +447,9 @@ impl InterruptManager {
         if handlers.contains_key(&interrupt_id) {
             return Err(InterruptError::HandlerAlreadyRegistered);
         }
+        drop(handlers);
+        self.irq_desc_or_legacy(interrupt_id);
+        let mut handlers = self.external_handlers.lock();
         handlers.insert(interrupt_id, handler);
         Ok(())
     }
@@ -371,6 +459,7 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         device: Arc<dyn crate::device::events::InterruptCapableDevice>,
     ) -> InterruptResult<()> {
+        self.irq_desc_or_legacy(interrupt_id);
         let mut devices = self.interrupt_devices.lock();
         devices.entry(interrupt_id).or_default().push(device);
         Ok(())
@@ -402,12 +491,11 @@ impl InterruptManager {
         cpu_id: CpuId,
         interrupt_id: InterruptId,
     ) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.external_controller() {
-            controller.complete_interrupt(cpu_id, interrupt_id)
-        } else {
-            Err(InterruptError::ControllerNotFound)
-        }
+        let desc = self.irq_desc_or_legacy(interrupt_id);
+        self.finish_pending_irq(&controllers::PendingIrq {
+            mapping: desc.mapping,
+            cpu_id,
+        })
     }
 
     pub fn enable_external_interrupt(
@@ -415,9 +503,10 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
+        let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.enable_interrupt(interrupt_id, cpu_id)
+            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)
         } else {
             Err(InterruptError::ControllerNotFound)
         }
@@ -433,14 +522,36 @@ impl InterruptManager {
         Ok(interrupt_id)
     }
 
+    pub fn allocate_msi_vectors(
+        &self,
+        request: controllers::MsiRequest,
+    ) -> InterruptResult<controllers::MsiAllocation> {
+        let controllers = self.controllers().lock();
+        if let Some(controller) = controllers.external_controller() {
+            let allocation = controller.allocate_msi_vectors(request)?;
+            drop(controllers);
+            for vector in &allocation.vectors {
+                self.register_irq_mapping(controllers::IrqMapping {
+                    virq: vector.virq,
+                    hwirq: vector.hwirq,
+                    flow: controllers::IrqFlow::Msi,
+                });
+            }
+            Ok(allocation)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
     pub fn disable_external_interrupt(
         &self,
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
+        let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.disable_interrupt(interrupt_id, cpu_id)
+            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)
         } else {
             Err(InterruptError::ControllerNotFound)
         }
@@ -473,29 +584,45 @@ impl InterruptManager {
 /// This provides a safe interface for interrupt handlers to interact with
 /// the interrupt controller without direct access.
 pub struct InterruptHandle {
-    interrupt_id: InterruptId,
-    cpu_id: CpuId,
+    pending: controllers::PendingIrq,
     completed: bool,
 }
 
 impl InterruptHandle {
     /// Create a new interrupt handle
     pub fn new(interrupt_id: InterruptId, cpu_id: CpuId) -> Self {
-        Self {
-            interrupt_id,
+        let desc = InterruptManager::global().irq_desc_or_legacy(interrupt_id);
+        Self::new_pending(controllers::PendingIrq {
+            mapping: desc.mapping,
             cpu_id,
+        })
+    }
+
+    fn new_pending(pending: controllers::PendingIrq) -> Self {
+        Self {
+            pending,
             completed: false,
         }
     }
 
     /// Get the interrupt ID
     pub fn interrupt_id(&self) -> InterruptId {
-        self.interrupt_id
+        self.pending.mapping.virq
+    }
+
+    /// Get the controller-local hardware interrupt ID.
+    pub fn hwirq(&self) -> Hwirq {
+        self.pending.mapping.hwirq
+    }
+
+    /// Get the interrupt flow.
+    pub fn flow(&self) -> controllers::IrqFlow {
+        self.pending.mapping.flow
     }
 
     /// Get the CPU ID
     pub fn cpu_id(&self) -> CpuId {
-        self.cpu_id
+        self.pending.cpu_id
     }
 
     /// Mark the interrupt as completed
@@ -506,7 +633,7 @@ impl InterruptHandle {
             return Err(InterruptError::InvalidOperation);
         }
 
-        InterruptManager::global().complete_external_interrupt(self.cpu_id, self.interrupt_id)?;
+        InterruptManager::global().finish_pending_irq(&self.pending)?;
         self.completed = true;
         Ok(())
     }
@@ -518,12 +645,12 @@ impl InterruptHandle {
 
     /// Enable another interrupt
     pub fn enable_interrupt(&self, target_interrupt: InterruptId) -> InterruptResult<()> {
-        InterruptManager::global().enable_external_interrupt(target_interrupt, self.cpu_id)
+        InterruptManager::global().enable_external_interrupt(target_interrupt, self.cpu_id())
     }
 
     /// Disable another interrupt
     pub fn disable_interrupt(&self, target_interrupt: InterruptId) -> InterruptResult<()> {
-        InterruptManager::global().disable_external_interrupt(target_interrupt, self.cpu_id)
+        InterruptManager::global().disable_external_interrupt(target_interrupt, self.cpu_id())
     }
 }
 

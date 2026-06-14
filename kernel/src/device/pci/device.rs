@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use super::PciAddress;
-use super::config::PciBar;
+use super::config::{PciBar, PciInterruptCapabilities};
 use crate::device::{DeviceInfo, DeviceType};
 
 /// PCI device class codes
@@ -119,6 +119,8 @@ pub struct PciDeviceInfo {
     id: usize,
     /// Decoded BAR resources.
     bars: Vec<PciBar>,
+    /// Decoded interrupt-related capabilities.
+    interrupt_capabilities: PciInterruptCapabilities,
 }
 
 impl PciDeviceInfo {
@@ -168,6 +170,7 @@ impl PciDeviceInfo {
             name,
             id,
             bars: Vec::new(),
+            interrupt_capabilities: PciInterruptCapabilities::default(),
         }
     }
 
@@ -182,6 +185,23 @@ impl PciDeviceInfo {
     /// The updated PCI device information.
     pub fn with_bars(mut self, bars: Vec<PciBar>) -> Self {
         self.bars = bars;
+        self
+    }
+
+    /// Attach decoded interrupt capabilities to this PCI device information.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_capabilities` - MSI/MSI-X capabilities decoded during enumeration.
+    ///
+    /// # Returns
+    ///
+    /// The updated PCI device information.
+    pub fn with_interrupt_capabilities(
+        mut self,
+        interrupt_capabilities: PciInterruptCapabilities,
+    ) -> Self {
+        self.interrupt_capabilities = interrupt_capabilities;
         self
     }
 
@@ -325,6 +345,15 @@ impl PciDeviceInfo {
     pub fn mmio_bar(&self, index: usize) -> Option<&PciBar> {
         self.bar(index)
             .filter(|bar| bar.is_memory() && bar.is_assigned())
+    }
+
+    /// Get decoded MSI/MSI-X capabilities.
+    ///
+    /// # Returns
+    ///
+    /// Interrupt-related PCI capabilities discovered during enumeration.
+    pub const fn interrupt_capabilities(&self) -> PciInterruptCapabilities {
+        self.interrupt_capabilities
     }
 }
 
