@@ -51,6 +51,7 @@ const MAX_RECV_BUFFER_SIZE: usize = 128 * 1024; // Two advertised receive window
 const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
+const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
 
 /// TCP header
 #[derive(Debug, Clone, Copy)]
@@ -305,6 +306,10 @@ pub struct TcpSocket {
     send_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
     /// Block mode: true for blocking, false for non-blocking
     blocking_mode: AtomicBool,
+    /// Read timeout in milliseconds. Zero means no timeout.
+    read_timeout_ms: AtomicU64,
+    /// Write timeout in milliseconds. Zero means no timeout.
+    write_timeout_ms: AtomicU64,
     /// Direct peer for in-kernel loopback connections.
     loopback_peer: Mutex<Weak<TcpSocket>>,
     /// Listening socket that should receive this socket once the handshake completes.
@@ -417,6 +422,8 @@ impl TcpSocket {
             recv_waker: Mutex::new(None),
             send_waker: Mutex::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
+            read_timeout_ms: AtomicU64::new(0),
+            write_timeout_ms: AtomicU64::new(0),
             loopback_peer: Mutex::new(Weak::new()),
             accept_listener: Mutex::new(Weak::new()),
             accept_queued: AtomicBool::new(false),
@@ -610,6 +617,44 @@ impl TcpSocket {
             NEXT_EPHEMERAL_PORT.store(49152, Ordering::SeqCst);
         }
         if port < 49152 { 49152 } else { port }
+    }
+
+    fn timeout_ms_to_ticks(timeout_ms: u64) -> Option<u64> {
+        if timeout_ms == 0 {
+            None
+        } else {
+            let us = timeout_ms.saturating_mul(1_000);
+            Some(
+                us.saturating_add(crate::timer::TICK_INTERVAL_US - 1)
+                    / crate::timer::TICK_INTERVAL_US,
+            )
+        }
+    }
+
+    fn read_timeout_ticks(&self) -> Option<u64> {
+        Self::timeout_ms_to_ticks(self.read_timeout_ms.load(Ordering::SeqCst))
+    }
+
+    fn write_timeout_ticks(&self) -> Option<u64> {
+        Self::timeout_ms_to_ticks(self.write_timeout_ms.load(Ordering::SeqCst))
+    }
+
+    fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        self.read_timeout_ms
+            .store(timeout_ms as u64, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_write_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        self.write_timeout_ms
+            .store(timeout_ms as u64, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Get current TCP state
@@ -1480,7 +1525,9 @@ impl TcpSocket {
                             })
                             .clone()
                     };
-                    waker.wait(task_id, trapframe);
+                    if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ticks()) {
+                        return Err(SocketError::WouldBlock);
+                    }
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -1524,7 +1571,9 @@ impl TcpSocket {
                         continue;
                     }
                 }
-                waker.wait(task_id, trapframe);
+                if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ticks()) {
+                    return Err(SocketError::WouldBlock);
+                }
             }
         }
     }
@@ -1634,7 +1683,9 @@ impl TcpSocket {
                 if !self.recv_buffer.lock().is_empty() {
                     continue;
                 }
-                waker.wait(task_id, trapframe);
+                if !waker.wait_with_timeout(task_id, trapframe, self.read_timeout_ticks()) {
+                    return Err(SocketError::WouldBlock);
+                }
             }
         }
     }
@@ -2001,6 +2052,22 @@ impl crate::object::capability::ControlOps for TcpSocket {
                     0
                 },
             ),
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS => {
+                self.set_read_timeout_ms(arg)
+                    .map_err(|_| "Invalid read timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS => {
+                self.set_write_timeout_ms(arg)
+                    .map_err(|_| "Invalid write timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS => {
+                Ok(self.read_timeout_ms.load(Ordering::SeqCst) as i32)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS => {
+                Ok(self.write_timeout_ms.load(Ordering::SeqCst) as i32)
+            }
             _ => Err("Unsupported socket control command"),
         }
     }
@@ -2014,6 +2081,22 @@ impl crate::object::capability::ControlOps for TcpSocket {
             (
                 crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
                 "Get non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                "Set read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS,
+                "Set write timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS,
+                "Get read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS,
+                "Get write timeout",
             ),
         ]
     }

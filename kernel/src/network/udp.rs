@@ -20,6 +20,8 @@ use crate::network::socket::{
 use crate::object::capability::{ControlOps, selectable::Selectable};
 use crate::sched::scheduler::current_task_id;
 
+const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
+
 /// Helper function to get local IP address bytes from the default interface
 fn get_local_ip_bytes() -> [u8; 4] {
     let manager = get_network_manager();
@@ -157,6 +159,10 @@ pub struct UdpSocket {
     send_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Blocking mode (default: true)
     blocking_mode: spin::Mutex<bool>,
+    /// Read timeout in milliseconds. Zero means no timeout.
+    read_timeout_ms: Mutex<u64>,
+    /// Write timeout in milliseconds. Zero means no timeout.
+    write_timeout_ms: Mutex<u64>,
 }
 
 impl UdpSocket {
@@ -173,6 +179,8 @@ impl UdpSocket {
             recv_waker: Mutex::new(None),
             send_waker: Mutex::new(None),
             blocking_mode: spin::Mutex::new(true),
+            read_timeout_ms: Mutex::new(0),
+            write_timeout_ms: Mutex::new(0),
         })
     }
 
@@ -183,6 +191,38 @@ impl UdpSocket {
         if let Some(waker) = self.recv_waker.lock().as_ref() {
             waker.wake_one();
         }
+    }
+
+    fn timeout_ms_to_ticks(timeout_ms: u64) -> Option<u64> {
+        if timeout_ms == 0 {
+            None
+        } else {
+            let us = timeout_ms.saturating_mul(1_000);
+            Some(
+                us.saturating_add(crate::timer::TICK_INTERVAL_US - 1)
+                    / crate::timer::TICK_INTERVAL_US,
+            )
+        }
+    }
+
+    fn read_timeout_ticks(&self) -> Option<u64> {
+        Self::timeout_ms_to_ticks(*self.read_timeout_ms.lock())
+    }
+
+    fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.read_timeout_ms.lock() = timeout_ms as u64;
+        Ok(())
+    }
+
+    fn set_write_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.write_timeout_ms.lock() = timeout_ms as u64;
+        Ok(())
     }
 }
 
@@ -274,7 +314,19 @@ impl SocketObject for UdpSocket {
             let task = crate::task::mytask();
             if let Some(t) = task {
                 let trapframe = t.get_trapframe();
-                Selectable::wait_until_ready(self, interest, trapframe, None, 0);
+                let outcome = Selectable::wait_until_ready(
+                    self,
+                    interest,
+                    trapframe,
+                    self.read_timeout_ticks(),
+                    0,
+                );
+                if matches!(
+                    outcome,
+                    crate::object::capability::selectable::SelectWaitOutcome::TimedOut
+                ) {
+                    return Err(SocketError::WouldBlock);
+                }
             }
         }
 
@@ -392,22 +444,6 @@ impl crate::ipc::StreamIpcOps for UdpSocket {
 
 impl crate::object::capability::StreamOps for UdpSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
-        use crate::object::capability::selectable::Selectable;
-
-        if !Selectable::is_nonblocking(self) {
-            // Blocking mode: wait for data
-            let task = crate::task::mytask();
-            if let Some(t) = task {
-                let trapframe = t.get_trapframe();
-                let interest = crate::object::capability::selectable::ReadyInterest {
-                    read: true,
-                    write: false,
-                    except: false,
-                };
-                Selectable::wait_until_ready(self, interest, trapframe, None, 0);
-            }
-        }
-
         let (len, _) = self.recvfrom(buffer, 0).map_err(|e| match e {
             SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
             _ => crate::object::capability::StreamError::Other("udp recv error".into()),
@@ -522,6 +558,22 @@ impl ControlOps for UdpSocket {
             crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK => {
                 Ok(if self.is_nonblocking() { 1 } else { 0 })
             }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS => {
+                self.set_read_timeout_ms(arg)
+                    .map_err(|_| "Invalid read timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS => {
+                self.set_write_timeout_ms(arg)
+                    .map_err(|_| "Invalid write timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS => {
+                Ok(*self.read_timeout_ms.lock() as i32)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS => {
+                Ok(*self.write_timeout_ms.lock() as i32)
+            }
             _ => Err("Unknown control command"),
         }
     }
@@ -535,6 +587,22 @@ impl ControlOps for UdpSocket {
             (
                 crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
                 "Get non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                "Set read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS,
+                "Set write timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS,
+                "Get read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS,
+                "Get write timeout",
             ),
         ]
     }

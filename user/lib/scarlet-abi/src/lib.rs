@@ -43,6 +43,14 @@ pub const FILE_PERMISSION_EXECUTE: u32 = 1 << 2;
 pub const SCTL_SOCKET_SET_NONBLOCK: u32 = 0x5353_0007;
 /// Scarlet-private socket control opcode for querying non-blocking mode.
 pub const SCTL_SOCKET_GET_NONBLOCK: u32 = 0x5353_000B;
+/// Scarlet-private socket control opcode for setting read timeout in milliseconds.
+pub const SCTL_SOCKET_SET_READ_TIMEOUT_MS: u32 = 0x5353_000C;
+/// Scarlet-private socket control opcode for setting write timeout in milliseconds.
+pub const SCTL_SOCKET_SET_WRITE_TIMEOUT_MS: u32 = 0x5353_000D;
+/// Scarlet-private socket control opcode for querying read timeout in milliseconds.
+pub const SCTL_SOCKET_GET_READ_TIMEOUT_MS: u32 = 0x5353_000E;
+/// Scarlet-private socket control opcode for querying write timeout in milliseconds.
+pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
 
 /// Fixed-layout file metadata returned by Scarlet Native metadata syscalls.
 #[repr(C)]

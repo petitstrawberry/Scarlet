@@ -43,6 +43,14 @@ pub mod socket_ctl {
     pub const SCTL_SOCKET_GET_STATE: u32 = 0x5353_0008;
     /// Get socket non-blocking mode (returns 0 or 1)
     pub const SCTL_SOCKET_GET_NONBLOCK: u32 = 0x5353_000B;
+    /// Set socket read timeout in milliseconds (arg: 0=disabled)
+    pub const SCTL_SOCKET_SET_READ_TIMEOUT_MS: u32 = 0x5353_000C;
+    /// Set socket write timeout in milliseconds (arg: 0=disabled)
+    pub const SCTL_SOCKET_SET_WRITE_TIMEOUT_MS: u32 = 0x5353_000D;
+    /// Get socket read timeout in milliseconds (returns 0 if disabled)
+    pub const SCTL_SOCKET_GET_READ_TIMEOUT_MS: u32 = 0x5353_000E;
+    /// Get socket write timeout in milliseconds (returns 0 if disabled)
+    pub const SCTL_SOCKET_GET_WRITE_TIMEOUT_MS: u32 = 0x5353_000F;
     /// Get socket type (returns SocketType value)
     pub const SCTL_SOCKET_GET_TYPE: u32 = 0x5353_0009;
     /// Check if connected (returns 0 or 1)
