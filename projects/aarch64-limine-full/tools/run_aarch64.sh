@@ -4,6 +4,7 @@ set -o pipefail
 
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
+CHECK_TEST_OUTPUT=${SCARLET_QEMU_CHECK_TEST_OUTPUT:-0}
 KERNEL_PATH=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
@@ -128,7 +129,10 @@ if [ ! -f "$ROOTFS_IMAGE" ]; then
     exit 1
 fi
 
-TEMP_OUTPUT=$(mktemp)
+TEMP_OUTPUT=""
+if [ "$CHECK_TEST_OUTPUT" = "1" ] || [ "$CHECK_TEST_OUTPUT" = "true" ]; then
+    TEMP_OUTPUT=$(mktemp)
+fi
 EFI_VARS_RUNTIME_CLEANUP=""
 VHOST_USER_VIDEO_PID=""
 VHOST_USER_VIDEO_SOCKET_CLEANUP=""
@@ -398,7 +402,7 @@ if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-
     fi
 fi
 
-qemu-system-aarch64 \
+QEMU_CMD=(qemu-system-aarch64
     -machine "$QEMU_MACHINE" \
     -cpu "$QEMU_CPU" \
     -accel "$QEMU_ACCEL" \
@@ -420,11 +424,20 @@ qemu-system-aarch64 \
     "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
-    $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
+    $DEBUG_FLAGS)
 
-# Capture pipeline exit codes (qemu is element 0, tee is element 1)
-QEMU_EXIT_CODE=${PIPESTATUS[0]}
-TEE_EXIT_CODE=${PIPESTATUS[1]}
+if [ -n "$TEMP_OUTPUT" ]; then
+    "${QEMU_CMD[@]}" | tee "$TEMP_OUTPUT"
+
+    # Capture pipeline exit codes (qemu is element 0, tee is element 1)
+    QEMU_EXIT_CODE=${PIPESTATUS[0]}
+    TEE_EXIT_CODE=${PIPESTATUS[1]}
+else
+    "${QEMU_CMD[@]}"
+    QEMU_EXIT_CODE=$?
+    exit $QEMU_EXIT_CODE
+fi
+
 
 # In debug mode, don't check for test patterns since we're debugging
 if [ "$DEBUG_MODE" = "true" ]; then
