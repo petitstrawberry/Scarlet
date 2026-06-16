@@ -111,6 +111,9 @@ pub fn limine_entry() -> ! {
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
+    // Cache the wall-clock epoch now; the Limine response pointer is invalid
+    // after the page-table switch in start_kernel.
+    crate::boot::limine::capture_date_at_boot();
     let bootinfo = BootInfo::new(
         bsp.bsp_hartid as usize,
         cpu_count,

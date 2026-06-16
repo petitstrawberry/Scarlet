@@ -117,7 +117,8 @@ use crate::task::syscall::{
     sys_get_task_info_count, sys_get_task_info_list, sys_get_tls, sys_getchar, sys_getpid,
     sys_getppid, sys_monotonic_time, sys_putchar, sys_register_abi_zone, sys_sbrk,
     sys_set_process_group, sys_set_tid_address, sys_set_tls, sys_shutdown, sys_sleep,
-    sys_thread_detach, sys_thread_exit_cleanup, sys_unregister_abi_zone, sys_waitpid, sys_yield,
+    sys_system_time, sys_thread_detach, sys_thread_exit_cleanup, sys_unregister_abi_zone,
+    sys_waitpid, sys_yield,
 };
 
 #[macro_use]
@@ -207,6 +208,7 @@ syscall_table! {
     ThreadExitCleanup = 34 => sys_thread_exit_cleanup,
     MonotonicTime = 35 => sys_monotonic_time,
     GetCpuUsageInfo = 36 => sys_get_cpu_usage_info,
+    SystemTime = 37 => sys_system_time,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

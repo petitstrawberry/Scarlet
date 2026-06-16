@@ -178,6 +178,10 @@ pub extern "C" fn limine_entry() -> ! {
     let cpu_id = current_cpu_id();
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
+    // Cache the wall-clock epoch now; the Limine response pointer is invalid
+    // after the page-table switch in start_kernel.
+    crate::boot::limine::capture_date_at_boot();
+
     bootstrap_aps();
 
     let bootinfo = BootInfo::new(

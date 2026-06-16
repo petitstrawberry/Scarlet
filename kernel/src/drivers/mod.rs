@@ -13,6 +13,7 @@ pub mod nvmem;
 pub mod pcie;
 pub mod phy;
 pub mod pic;
+pub mod rtc;
 pub mod soc;
 pub mod special;
 pub mod spi;

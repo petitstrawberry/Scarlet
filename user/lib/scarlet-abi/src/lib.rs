@@ -102,6 +102,7 @@ pub enum Syscall {
     ExitGroup = 23,
     MonotonicTime = 35,
     GetCpuUsageInfo = 36,
+    SystemTime = 37,
 
     // Process information
     GetTaskInfoCount = 24,

@@ -14,7 +14,7 @@ use crate::{
     object::timer::Timer,
     sched::scheduler::wake_task,
     task::mytask,
-    time::current_time,
+    time::{current_time, current_time_ns},
     timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
 };
 use alloc::sync::{Arc, Weak};
@@ -738,13 +738,11 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
     // Get the current time based on the clock type
     let timespec = match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
-            // For now, we use the same monotonic time for realtime
-            // In a full implementation, this would be adjusted to Unix epoch
-            let time_us = current_time();
-            TimeSpec {
-                tv_sec: (time_us / 1_000_000) as i64,
-                tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
-            }
+            // Wall clock (Unix epoch). Falls back to monotonic if no RTC has
+            // initialized the wall clock yet (e.g. RTC-less hardware), so that
+            // clock_gettime never fails for REALTIME.
+            let ns = crate::time::system_time_ns().unwrap_or_else(current_time_ns);
+            ns_to_timespec(ns)
         }
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE => {
             // Monotonic time since boot

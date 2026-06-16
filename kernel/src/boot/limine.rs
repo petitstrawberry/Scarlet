@@ -1,8 +1,11 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use limine::BaseRevision;
 use limine::memmap;
+
 use limine::request::{
-    DtbRequest, ExecutableAddressRequest, FramebufferRequest, FramebufferResponse, HhdmRequest,
-    MemmapRequest, MemmapResponse, ModulesRequest, ModulesResponse, MpRequest, MpResponse,
+    DateAtBootRequest, DtbRequest, ExecutableAddressRequest, FramebufferRequest,
+    FramebufferResponse, HhdmRequest, MemmapRequest, MemmapResponse, ModulesRequest,
+    ModulesResponse, MpRequest, MpResponse,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -35,6 +38,10 @@ pub static DTB_REQUEST: DtbRequest = DtbRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
+pub static DATE_AT_BOOT_REQUEST: DateAtBootRequest = DateAtBootRequest::new();
+
+#[unsafe(link_section = ".limine_requests")]
+#[used]
 pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
@@ -56,6 +63,35 @@ pub fn ensure_base_revision_supported() {
             BASE_REVISION.actual_revision()
         );
     }
+}
+
+/// Cached wall-clock nanoseconds from Limine's `Date at Boot`.
+///
+/// `u64::MAX` is the "not captured" sentinel.
+static DATE_AT_BOOT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Read Limine's `Date at Boot` response and cache the wall-clock nanoseconds.
+///
+/// Must be called once from the boot entry, before the page-table switch: the
+/// Limine response pointer is only valid in the bootloader's address space, so
+/// it cannot be dereferenced later from `start_kernel`. No-op if the
+/// bootloader provided no response.
+pub fn capture_date_at_boot() {
+    let Some(resp) = DATE_AT_BOOT_REQUEST.response() else {
+        return;
+    };
+    let secs = resp.timestamp;
+    if secs >= 0 {
+        DATE_AT_BOOT_NS.store(secs as u64 * 1_000_000_000, Ordering::SeqCst);
+    }
+}
+
+/// Cached wall-clock nanoseconds since the Unix epoch from Limine's
+/// `Date at Boot`. Returns `None` if not captured (e.g. non-EFI boot). The
+/// value has ~1s granularity (Limine exposes a whole-second timestamp).
+pub fn date_at_boot_ns() -> Option<u64> {
+    let ns = DATE_AT_BOOT_NS.load(Ordering::Acquire);
+    if ns == u64::MAX { None } else { Some(ns) }
 }
 
 pub fn response<T>(response: Option<&'static T>, name: &str) -> &'static T {

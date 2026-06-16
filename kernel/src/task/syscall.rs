@@ -894,6 +894,23 @@ pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
     crate::time::current_time_ns() as usize
 }
 
+/// Read the kernel wall-clock (real) time.
+///
+/// Returns wall-clock nanoseconds since the Unix epoch. If no RTC source has
+/// initialized the wall clock yet, returns `usize::MAX` as a sentinel.
+///
+/// # Returns
+///
+/// Wall-clock nanoseconds since the Unix epoch, or `usize::MAX` if unavailable.
+pub fn sys_system_time(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    match crate::time::system_time_ns() {
+        Some(ns) => ns as usize,
+        None => usize::MAX,
+    }
+}
+
 /// Read cumulative system-wide CPU usage accounting.
 ///
 /// # Arguments
