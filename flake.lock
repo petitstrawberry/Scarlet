@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1781359544,
-        "narHash": "sha256-iUuzKQcyXvopYDDzFpMK5eQKP3WIJExYny2kJtbgUcE=",
+        "lastModified": 1781607440,
+        "narHash": "sha256-rxO+uc/KFbSJp+pgyXRuAX6QlG9hJdnt0BXpEQRXY+U=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "9f11f828c213641c2369a9f1fa31fe31557e3156",
+        "rev": "3e41b24abd260e8f71dbe2f5737d24122f972158",
         "type": "github"
       },
       "original": {
@@ -66,11 +66,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1781504657,
-        "narHash": "sha256-8dlJJeYqc9pKg5aRL4N4HhQOeu1buZCVQG/s1jzTyEA=",
+        "lastModified": 1781616333,
+        "narHash": "sha256-oMWBZAa3GkcJHBkdcWcSf99x8Nu0azHa8ilvaLVP5Cc=",
         "owner": "petitstrawberry",
         "repo": "scarlet-rust-nix",
-        "rev": "120664b5d479ddec994e409c6a8c13587f747806",
+        "rev": "4aabad72da5827cdc992b51c671effed586015fb",
         "type": "github"
       },
       "original": {
