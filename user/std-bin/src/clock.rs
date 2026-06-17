@@ -108,7 +108,10 @@ fn main() -> ExitCode {
     let tick = app.tick.clone();
     thread::spawn(move || {
         loop {
-            thread::sleep(Duration::from_secs(1));
+            let ns = time::system_time_ns().unwrap_or(0);
+            let ms_into_sec = (ns / 1_000_000) % 1000;
+            let ms_until_next = (1000 - ms_into_sec).max(50);
+            thread::sleep(Duration::from_millis(ms_until_next));
             tick.set(tick.get() + 1);
         }
     });
