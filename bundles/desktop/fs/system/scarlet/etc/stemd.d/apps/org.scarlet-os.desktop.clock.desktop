@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Clock
-Exec=/bin/scarlet_desktop_clock
-Icon=clock
+Exec=/bin/clock
+Icon=preferences-system-time
 Type=Application
 Terminal=false

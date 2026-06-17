@@ -13,7 +13,7 @@ panic = "abort"
 clap = { version = "4.5.32", features = ["derive"] }
 csv = "1.3"
 httparse = "1.9"
-scarlet-os = { path = "../lib/scarlet-os" }
+scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std"] }
 scarlet-ui-macros = { path = "../lib/scarlet-ui-macros" }
@@ -148,6 +148,10 @@ path = "src/regex_demo.rs"
 [[bin]]
 name = "json_demo"
 path = "src/json_demo.rs"
+
+[[bin]]
+name = "clock"
+path = "src/clock.rs"
 
 [[bin]]
 name = "markdown_demo"

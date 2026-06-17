@@ -96,14 +96,14 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "scarlet-std-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
-hash = "sha256:cc360ca268969f54494d77330fd29905c5f05704fca440575ea05a6758ea8bec"
+hash = ""
 
 [sections.initramfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
@@ -240,14 +240,14 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "scarlet-std-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
-hash = "sha256:cc360ca268969f54494d77330fd29905c5f05704fca440575ea05a6758ea8bec"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"

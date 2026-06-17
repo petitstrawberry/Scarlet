@@ -41,3 +41,9 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "watch"
 to = "/system/scarlet/bin/watch"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "date"
+to = "/system/scarlet/bin/date"

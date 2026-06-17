@@ -183,6 +183,13 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
             children: Vec::new(),
         }),
         TaskMenuEntry::Item(TaskMenuItem {
+            id: String::from("system_clock"),
+            title: String::from("Clock"),
+            enabled: true,
+            shortcut: None,
+            children: Vec::new(),
+        }),
+        TaskMenuEntry::Item(TaskMenuItem {
             id: String::from("system_settings"),
             title: String::from("Settings"),
             enabled: true,
@@ -499,6 +506,10 @@ fn build_menu_items(
                     // Handle system menu items
                     if item_id == "system_terminal" {
                         launch_new_app(b"org.scarlet-os.desktop.terminal");
+                        return;
+                    }
+                    if item_id == "system_clock" {
+                        launch_new_app(b"org.scarlet-os.desktop.clock");
                         return;
                     }
                     if item_id == "system_settings" {

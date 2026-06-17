@@ -139,6 +139,12 @@ to = "/system/scarlet/bin/lsm_list"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
+bin = "clock"
+to = "/system/scarlet/bin/clock"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
 bin = "lsm_load"
 to = "/system/scarlet/bin/lsm_load"
 

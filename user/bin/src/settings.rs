@@ -160,6 +160,9 @@ fn save_timezone(zone: &str) {
                 let _ = file.write(zone.as_bytes());
             }
             println!("[settings] Timezone set to {}", zone);
+            if let Ok(ch) = scarlet_os::ipc::event_channel_create("system.timezone") {
+                let _ = scarlet_os::ipc::event_publish(ch, 1, 0);
+            }
         }
         Err(e) => println!("[settings] Failed to set timezone: {:?}", e),
     }

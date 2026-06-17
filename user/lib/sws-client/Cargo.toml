@@ -6,11 +6,11 @@ edition = "2024"
 [features]
 default = ["legacy-scarlet-std"]
 legacy-scarlet-std = ["dep:scarlet-std", "sws-protocol/legacy-scarlet-std"]
-std = ["dep:scarlet-os", "sws-protocol/std"]
+std = ["dep:scarlet-os", "scarlet-os/std", "sws-protocol/std"]
 
 [dependencies]
 scarlet-std = { path = "../std", optional = true }
-scarlet-os = { path = "../scarlet-os", optional = true }
+scarlet-os = { path = "../scarlet-os", optional = true, default-features = false }
 sws-protocol = { path = "../sws-protocol", default-features = false }
 
 [lib]

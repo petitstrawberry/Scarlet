@@ -63,8 +63,8 @@ to = "/system/scarlet/bin/shutdown"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "top"
 to = "/system/scarlet/bin/top"
 

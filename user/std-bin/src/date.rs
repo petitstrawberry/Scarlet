@@ -1,8 +1,7 @@
-//! Print the current wall-clock date and time.
+//! Print the current wall-clock date and time (local, derived from `TZ`).
 //!
-//! Reads the kernel wall clock via `scarlet_os::time::system_time` and formats
-//! it as a human-readable UTC timestamp. Fails if no RTC has initialized the
-//! wall clock.
+//! Reads the wall clock via `scarlet_os::time::system_time_ns` and applies the
+//! UTC offset parsed from the `TZ` environment variable.
 
 use std::process::ExitCode;
 
@@ -12,22 +11,29 @@ const SECS_PER_DAY: u64 = 86_400;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 fn main() -> ExitCode {
-    let Some(elapsed) = time::system_time() else {
-        eprintln!("date: wall clock unavailable (no RTC initialized)");
-        return ExitCode::FAILURE;
+    let utc_ns = match time::system_time_ns() {
+        Some(ns) => ns,
+        None => {
+            eprintln!("date: wall clock unavailable (no RTC initialized)");
+            return ExitCode::FAILURE;
+        }
     };
 
-    let total_ns = elapsed.as_nanos();
-    let secs = elapsed.as_secs();
-    let nanos = elapsed.subsec_nanos();
+    let offset = time::local_utc_offset_seconds().unwrap_or(0);
+    let local_ns = utc_ns as i128 + offset as i128 * 1_000_000_000;
+    let secs = (local_ns / 1_000_000_000) as u64;
+    let nanos = (local_ns % 1_000_000_000) as u32;
 
     let (year, month, day, hh, mm, ss, weekday) = civil_from_unix(secs);
 
+    let sign = if offset >= 0 { "+" } else { "-" };
+    let oh = offset.unsigned_abs() / 3600;
+    let om = (offset.unsigned_abs() % 3600) / 60;
     println!(
-        "{} {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} UTC",
-        weekday, year, month, day, hh, mm, ss, nanos,
+        "{} {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09} UTC{}{:02}{:02}",
+        weekday, year, month, day, hh, mm, ss, nanos, sign, oh, om,
     );
-    println!("epoch = {} ns", total_ns);
+    println!("epoch = {} ns", utc_ns);
 
     ExitCode::SUCCESS
 }
