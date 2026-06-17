@@ -280,6 +280,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         {
             return true;
         }
+        if self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::SelectRenderObject>()
+            .is_some_and(|select| select.is_expanded())
+        {
+            return true;
+        }
         self.render_object
             .as_any()
             .downcast_ref::<crate::views::modifiers::FocusableRenderObject>()
@@ -291,6 +299,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .as_any()
             .downcast_ref::<crate::views::TextField>()
             .is_some()
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Select>()
+                .is_some()
             || self
                 .render_object
                 .as_any()
@@ -433,6 +446,56 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         .downcast_mut::<crate::views::modifiers::OnKeyRenderObject>()
             {
                 return render_object.invoke_on_key(*key_event);
+            }
+            if _phase == Phase::Target
+                && let Some(select_view) = self.view.as_any().downcast_ref::<crate::views::Select>()
+                && let Some(select_ro) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::SelectRenderObject>()
+                && select_ro.is_expanded()
+            {
+                let handled = match key_event {
+                    crate::event::KeyEvent::Pressed { keycode } => match keycode {
+                        crate::event::KeyCode::Up => {
+                            let current = select_ro
+                                .hovered_index()
+                                .unwrap_or_else(|| select_view.selected_index().get());
+                            select_ro.set_hovered_index(Some(current.saturating_sub(1)));
+                            select_ro.adjust_scroll();
+                            true
+                        }
+                        crate::event::KeyCode::Down => {
+                            let current = select_ro
+                                .hovered_index()
+                                .unwrap_or_else(|| select_view.selected_index().get());
+                            let new =
+                                (current + 1).min(select_view.option_count().saturating_sub(1));
+                            select_ro.set_hovered_index(Some(new));
+                            select_ro.adjust_scroll();
+                            true
+                        }
+                        crate::event::KeyCode::Enter => {
+                            if let Some(hovered) = select_ro.hovered_index() {
+                                select_view.selected_index().set(hovered);
+                                select_view.invoke_on_change(hovered);
+                            }
+                            select_view.expanded().set(false);
+                            true
+                        }
+                        crate::event::KeyCode::Escape => {
+                            select_view.expanded().set(false);
+                            true
+                        }
+                        _ => false,
+                    },
+                    crate::event::KeyEvent::Char { c } => select_ro.typeahead(*c),
+                    _ => false,
+                };
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.id);
+                }
+                return handled;
             }
             for child in self.children.iter_mut() {
                 if child.handle_event(_event, _phase) {
@@ -732,6 +795,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         } else if select.option_count() > 0 {
                             select.expanded().set(true);
                             render_object.set_expanded(true);
+                            let current = select.selected_index().get();
+                            render_object.set_hovered_index(Some(current));
+                            render_object.adjust_scroll();
                         }
                         crate::pipeline::mark_element_needs_paint(self.id);
                         return true;

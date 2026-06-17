@@ -6,6 +6,9 @@
 
 #![no_std]
 
+#[cfg(feature = "std")]
+extern crate std;
+
 pub mod ffi;
 
 /// Handle ownership and capability views.

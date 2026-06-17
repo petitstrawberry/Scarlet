@@ -45,6 +45,8 @@ pub struct Select {
     on_change: Option<Arc<dyn Fn(usize) + 'static>>,
     width: f32,
     row_height: f32,
+    placeholder: String,
+    max_visible_rows: usize,
 }
 
 impl Select {
@@ -67,6 +69,8 @@ impl Select {
             on_change: None,
             width: 260.0,
             row_height: 32.0,
+            placeholder: String::from("Select…"),
+            max_visible_rows: 8,
         }
     }
 
@@ -112,6 +116,18 @@ impl Select {
         self
     }
 
+    /// Set placeholder text shown when no option is selected.
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Set the maximum number of visible rows before scrolling.
+    pub fn max_visible_rows(mut self, max: usize) -> Self {
+        self.max_visible_rows = max.max(1);
+        self
+    }
+
     /// Get the selected index state.
     ///
     /// # Returns
@@ -130,11 +146,6 @@ impl Select {
         &self.expanded
     }
 
-    /// Get the number of options.
-    ///
-    /// # Returns
-    ///
-    /// The option count.
     pub fn option_count(&self) -> usize {
         self.options.len()
     }
@@ -161,6 +172,8 @@ impl View for Select {
                 self.expanded.get(),
                 self.width,
                 self.row_height,
+                self.placeholder.clone(),
+                self.max_visible_rows,
             ),
         ))
     }
@@ -181,6 +194,9 @@ pub struct SelectRenderObject {
     expanded: bool,
     width: f32,
     row_height: f32,
+    placeholder: String,
+    max_visible_rows: usize,
+    scroll_offset: usize,
     hovered_index: Option<usize>,
     size: Size,
     buffer: Option<Buffer>,
@@ -206,6 +222,8 @@ impl SelectRenderObject {
         expanded: bool,
         width: f32,
         row_height: f32,
+        placeholder: String,
+        max_visible_rows: usize,
     ) -> Self {
         let mut render_object = Self {
             options,
@@ -213,6 +231,9 @@ impl SelectRenderObject {
             expanded,
             width,
             row_height,
+            placeholder,
+            max_visible_rows,
+            scroll_offset: 0,
             hovered_index: None,
             size: Size::ZERO,
             buffer: None,
@@ -239,6 +260,49 @@ impl SelectRenderObject {
         self.expanded
     }
 
+    pub fn hovered_index(&self) -> Option<usize> {
+        self.hovered_index
+    }
+
+    pub fn adjust_scroll(&mut self) {
+        if self.options.is_empty() {
+            return;
+        }
+        let visible = self.options.len().min(self.max_visible_rows);
+        if visible == 0 {
+            return;
+        }
+        let target = self.hovered_index.unwrap_or(self.selected_index);
+        let ideal_start = target.saturating_sub(visible / 2);
+        let max_start = self.options.len().saturating_sub(visible);
+        self.scroll_offset = ideal_start.min(max_start);
+    }
+
+    pub fn typeahead(&mut self, c: char) -> bool {
+        if !c.is_ascii_graphic() && c != ' ' {
+            return false;
+        }
+        let lower = c.to_ascii_lowercase();
+        let count = self.options.len();
+        if count == 0 {
+            return false;
+        }
+        let start = self.hovered_index.unwrap_or(self.selected_index);
+        for offset in 0..count {
+            let i = (start + 1 + offset) % count;
+            if self.options[i]
+                .chars()
+                .next()
+                .is_some_and(|fc| fc.to_ascii_lowercase() == lower)
+            {
+                self.hovered_index = Some(i);
+                self.adjust_scroll();
+                return true;
+            }
+        }
+        false
+    }
+
     /// Set the hovered option index.
     ///
     /// # Arguments
@@ -261,7 +325,7 @@ impl SelectRenderObject {
         if !self.expanded || y < self.row_height {
             return None;
         }
-        let index = ((y - self.row_height) / self.row_height) as usize;
+        let index = ((y - self.row_height) / self.row_height) as usize + self.scroll_offset;
         if index < self.options.len() {
             Some(index)
         } else {
@@ -279,7 +343,7 @@ impl SelectRenderObject {
 
     fn popup_row_count(&self) -> usize {
         if self.expanded {
-            self.options.len() + 1
+            self.options.len().min(self.max_visible_rows) + 1
         } else {
             1
         }
@@ -312,6 +376,13 @@ impl SelectRenderObject {
         canvas.draw_line(x + 5, y + 5, x + 10, y, color);
     }
 
+    fn draw_checkmark(canvas: &mut graphics::Canvas<'_>, w: u32, y: i32, row_h: u32, color: Color) {
+        let cx = w.saturating_sub(22) as i32;
+        let cy = y + ((row_h as i32 - 8) / 2).max(0) + 2;
+        canvas.draw_line(cx, cy, cx + 3, cy + 3, color);
+        canvas.draw_line(cx + 3, cy + 3, cx + 8, cy - 3, color);
+    }
+
     fn draw_select(&mut self) {
         let w = libm::ceilf(self.size.width) as u32;
         let h = libm::ceilf(self.popup_height()) as u32;
@@ -320,6 +391,10 @@ impl SelectRenderObject {
         let selected_label = self.options.get(selected_index).cloned();
         let options = self.options.clone();
         let hovered_index = self.hovered_index;
+        let opt_count = options.len();
+        let visible = opt_count.min(self.max_visible_rows);
+        let scroll_start = self.scroll_offset.min(opt_count.saturating_sub(visible));
+        let scroll_end = (scroll_start + visible).min(opt_count);
 
         let needs_resize = self
             .buffer
@@ -356,7 +431,7 @@ impl SelectRenderObject {
         if let Some(label) = selected_label {
             Self::draw_label(&mut canvas, &label, 0, w, row_h, text);
         } else {
-            Self::draw_label(&mut canvas, "No input methods", 0, w, row_h, subtle);
+            Self::draw_label(&mut canvas, &self.placeholder, 0, w, row_h, subtle);
         }
         Self::draw_chevron(
             &mut canvas,
@@ -366,18 +441,25 @@ impl SelectRenderObject {
         );
 
         if self.expanded {
+            let active = hovered_index.or(Some(selected_index));
+            let active_background = palette
+                .primary()
+                .with_opacity(0.2)
+                .blend_over(popup_background);
             let mut y = row_h as i32;
-            for (index, label) in options.iter().enumerate() {
-                let row_background = if index == selected_index {
-                    selected_background
-                } else if hovered_index == Some(index) {
-                    hover_background
+            for index in scroll_start..scroll_end {
+                let label = &options[index];
+                let row_background = if active == Some(index) {
+                    active_background
                 } else {
                     popup_background
                 };
                 canvas.fill_rect(0, y, w, row_h, row_background);
                 canvas.draw_line(0, y, w as i32, y, border.with_opacity(0.55));
                 Self::draw_label(&mut canvas, label, y, w, row_h, text);
+                if index == selected_index {
+                    Self::draw_checkmark(&mut canvas, w, y, row_h, subtle);
+                }
                 y += row_h as i32;
             }
             canvas.draw_rect(0, 0, w, h, border);
@@ -449,19 +531,31 @@ impl ElementRenderObject for SelectRenderObject {
             let new_expanded = select.expanded.get();
             let new_width = select.width;
             let new_row_height = select.row_height;
+            let new_placeholder = select.placeholder.clone();
+            let new_max_visible_rows = select.max_visible_rows;
 
             if self.options != new_options
                 || self.selected_index != new_selected_index
                 || self.expanded != new_expanded
                 || (self.width - new_width).abs() > 0.001
                 || (self.row_height - new_row_height).abs() > 0.001
+                || self.placeholder != new_placeholder
+                || self.max_visible_rows != new_max_visible_rows
             {
+                let just_expanded = !self.expanded && new_expanded;
                 self.options = new_options;
                 self.selected_index = new_selected_index;
                 self.expanded = new_expanded;
                 self.width = new_width;
                 self.row_height = new_row_height;
+                self.placeholder = new_placeholder;
+                self.max_visible_rows = new_max_visible_rows;
                 self.selected_index = self.clamped_selected_index();
+                if just_expanded {
+                    self.hovered_index = Some(self.selected_index);
+                    self.scroll_offset = 0;
+                    self.adjust_scroll();
+                }
                 crate::element::UpdateResult::Updated
             } else {
                 crate::element::UpdateResult::NoChange

@@ -175,6 +175,22 @@ pub fn var(key: &str) -> Option<String> {
     }
 }
 
+/// Fetches the environment variable `key` without panicking.
+///
+/// Returns `None` if the variable is absent OR the environment has not been
+/// initialized yet (e.g. called before `init_env`). Use this from code paths
+/// that must stay infallible during early/edge contexts.
+pub fn try_var(key: &str) -> Option<String> {
+    if !INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+
+    unsafe {
+        let env_map = &*ENV_MAP_PTR;
+        env_map.get(key).cloned()
+    }
+}
+
 /// Returns an iterator over all environment variables
 ///
 /// Each item returned by the iterator is a (key, value) pair.

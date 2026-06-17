@@ -7,6 +7,16 @@ edition = "2024"
 name = "scarlet_os"
 path = "src/lib.rs"
 
+[features]
+# By default (no_std targets like user/bin) TZ is read via scarlet_rt::env.
+default = ["rt-env"]
+# Internal feature that pulls in scarlet-rt for no_std environment access.
+rt-env = ["dep:scarlet-rt"]
+# When building against Rust `std` (e.g. user/std-bin), TZ is read via
+# std::env and scarlet_rt is not pulled in.
+std = []
+
 [dependencies]
 scarlet-abi = { path = "../scarlet-abi" }
 scarlet-sys = { path = "../scarlet-sys" }
+scarlet-rt = { path = "../scarlet-rt", optional = true }

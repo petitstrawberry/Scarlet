@@ -92,6 +92,79 @@ fn save_output_scale_config(scale_milli: u32) {
     }
 }
 
+fn enumerate_regions() -> Vec<String> {
+    let mut regions = Vec::new();
+    if let Ok(entries) = fs::list_directory("/usr/share/zoneinfo") {
+        for entry in &entries {
+            let name = entry.name.as_str();
+            if name.starts_with('.') || name.starts_with('+') {
+                continue;
+            }
+            if name == "posix" || name == "right" || name == "tab" {
+                continue;
+            }
+            if entry.is_directory() {
+                regions.push(String::from(name));
+            }
+        }
+    }
+    regions.sort();
+    regions
+}
+
+fn enumerate_cities(region: &str) -> Vec<String> {
+    let path = format!("/usr/share/zoneinfo/{}", region);
+    let mut cities = Vec::new();
+    if let Ok(entries) = fs::list_directory(&path) {
+        for entry in &entries {
+            let name = entry.name.as_str();
+            if name.starts_with('.') {
+                continue;
+            }
+            if entry.is_file() {
+                cities.push(String::from(name));
+            }
+        }
+    }
+    cities.sort();
+    cities
+}
+
+fn read_current_timezone() -> String {
+    match fs::File::open("/etc/timezone") {
+        Ok(mut file) => {
+            let mut buf = [0u8; 128];
+            match file.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let s = core::str::from_utf8(&buf[..n]).unwrap_or("UTC");
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        String::from("UTC")
+                    } else {
+                        String::from(trimmed)
+                    }
+                }
+                _ => String::from("UTC"),
+            }
+        }
+        Err(_) => String::from("UTC"),
+    }
+}
+
+fn save_timezone(zone: &str) {
+    let target = format!("/usr/share/zoneinfo/{}", zone);
+    let _ = fs::remove_file("/etc/localtime");
+    match fs::create_symlink("/etc/localtime", &target) {
+        Ok(()) => {
+            if let Ok(mut file) = fs::File::create("/etc/timezone") {
+                let _ = file.write(zone.as_bytes());
+            }
+            println!("[settings] Timezone set to {}", zone);
+        }
+        Err(e) => println!("[settings] Failed to set timezone: {:?}", e),
+    }
+}
+
 #[derive(View, Clone)]
 struct SettingsApp {
     background_style: State<BackgroundStyle>,
@@ -100,6 +173,10 @@ struct SettingsApp {
     blue_value: State<f32>,
     input_methods: State<Vec<InputMethodInfo>>,
     selected_ime_index: State<usize>,
+    timezone_regions: State<Vec<String>>,
+    timezone_region_index: State<usize>,
+    timezone_cities: State<Vec<String>>,
+    timezone_city_index: State<usize>,
 }
 
 impl SettingsApp {
@@ -112,6 +189,23 @@ impl SettingsApp {
             .iter()
             .position(|method| method.active)
             .unwrap_or(0);
+        let timezone_regions = enumerate_regions();
+        let current_tz = read_current_timezone();
+        let (cur_region, cur_city) = current_tz.split_once('/').unwrap_or(("Etc", "UTC"));
+        let region_index = timezone_regions
+            .iter()
+            .position(|r| r == cur_region)
+            .unwrap_or(0);
+        let timezone_cities = enumerate_cities(
+            timezone_regions
+                .get(region_index)
+                .map(|s| s.as_str())
+                .unwrap_or("Etc"),
+        );
+        let city_index = timezone_cities
+            .iter()
+            .position(|c| c == cur_city)
+            .unwrap_or(0);
         Self {
             background_style: State::new(StateId::new(0), style),
             red_value: State::new(StateId::new(1), color[0] as f32),
@@ -119,6 +213,10 @@ impl SettingsApp {
             blue_value: State::new(StateId::new(3), color[2] as f32),
             input_methods: State::new(StateId::new(4), input_methods),
             selected_ime_index: State::new(StateId::new(5), selected_ime_index),
+            timezone_regions: State::new(StateId::new(6), timezone_regions),
+            timezone_region_index: State::new(StateId::new(7), region_index),
+            timezone_cities: State::new(StateId::new(8), timezone_cities),
+            timezone_city_index: State::new(StateId::new(9), city_index),
         }
     }
 
@@ -598,10 +696,73 @@ fn input_page(app: SettingsApp) -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+fn datetime_page(
+    regions: Vec<String>,
+    region_idx: State<usize>,
+    cities_state: State<Vec<String>>,
+    city_idx: State<usize>,
+) -> impl View {
+    let cities = cities_state.get();
+    let current_region = regions.get(region_idx.get()).cloned().unwrap_or_default();
+    let current_city = cities.get(city_idx.get()).cloned().unwrap_or_default();
+    let cities_state2 = cities_state.clone();
+    let city_idx2 = city_idx.clone();
+    let region_idx2 = region_idx.clone();
+    let cities2 = cities.clone();
+    let regions2 = regions.clone();
+
+    vstack! {
+        Text::new("Date & Time").font_size(28.0),
+        Text::new("Timezone").font_size(13.0),
+        Divider::new(),
+
+        vstack! {
+            hstack! {
+                Text::new("Region").font_size(13.0).frame_width(120.0),
+                Select::new(regions.clone(), region_idx.clone())
+                    .width(250.0)
+                    .on_change(move |index| {
+                        if let Some(r) = regions.get(index) {
+                            let new_cities = enumerate_cities(r);
+                            cities_state.set(new_cities);
+                            city_idx.set(0);
+                        }
+                        region_idx.set(index);
+                    }),
+            }
+            .padding(10.0),
+            hstack! {
+                Text::new("City").font_size(13.0).frame_width(120.0),
+                Select::new(cities2, city_idx2.clone())
+                    .width(250.0)
+                    .on_change(move |index| {
+                        if let (Some(r), Some(c)) = (
+                            regions2.get(region_idx2.get()),
+                            cities_state2.get().get(index),
+                        ) {
+                            let zone = format!("{}/{}", r, c);
+                            save_timezone(&zone);
+                        }
+                        city_idx2.set(index);
+                    }),
+            }
+            .padding(10.0),
+            Text::new(format!("Current: {}/{}", current_region, current_city)).font_size(12.0),
+        }
+        .padding(10.0),
+    }
+    .padding(10.0)
+    .frame(f32::INFINITY, f32::INFINITY)
+}
+
 impl Application for SettingsApp {
     fn body(&self) -> impl View {
         let app = self.clone();
         let input_app = self.clone();
+        let tz_regions = self.timezone_regions.get();
+        let tz_region_idx = self.timezone_region_index.clone();
+        let tz_cities = self.timezone_cities.clone();
+        let tz_city_idx = self.timezone_city_index.clone();
         let r0 = self.red_value.clone();
         let g0 = self.green_value.clone();
         let b0 = self.blue_value.clone();
@@ -670,7 +831,14 @@ impl Application for SettingsApp {
                 }),
                 NavigationLink::new("Display", Icon::Search, display_page),
                 NavigationLink::new("Input", Icon::Settings, move || input_page(input_app.clone())),
-                NavigationLink::new("Network", Icon::Search, network_page),
+                NavigationLink::new("Date & Time", Icon::Search, move || {
+                    datetime_page(
+                        tz_regions.clone(),
+                        tz_region_idx.clone(),
+                        tz_cities.clone(),
+                        tz_city_idx.clone(),
+                    )
+                }),
                 NavigationLink::new("About", Icon::Info, about_page),
             }
             .sidebar_width(150.0)

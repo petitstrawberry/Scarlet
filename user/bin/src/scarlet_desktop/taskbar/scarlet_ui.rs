@@ -14,6 +14,7 @@ extern crate scarlet_ui_macros;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
+use scarlet_os::time;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
 use scarlet_ui::element::{ElementRenderObject, LayoutConstraints};
@@ -96,7 +97,7 @@ fn connect_sws_with_screen_size_retry() -> core::result::Result<SwsScreenConnect
 struct TaskBarApp {
     cpu_usage: State<u8>,
     memory_usage: State<u8>,
-    uptime: State<u32>,
+    clock: State<u32>,
     screen_width: State<f32>,
     menu_bar: State<MenuBarModel>,
     active_window_id: State<u32>,
@@ -111,7 +112,7 @@ impl TaskBarApp {
         Self {
             cpu_usage: State::new(StateId::new(0), 15),
             memory_usage: State::new(StateId::new(1), 42),
-            uptime: State::new(StateId::new(2), 0),
+            clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
             menu_bar: State::new(
                 StateId::new(4),
@@ -642,7 +643,7 @@ impl Application for TaskBarApp {
     fn body(&self) -> impl View {
         let cpu = self.cpu_usage.get();
         let mem = self.memory_usage.get();
-        let uptime = self.uptime.get();
+        let clock = self.clock.get();
         let screen_width = self.screen_width.get();
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
@@ -652,8 +653,8 @@ impl Application for TaskBarApp {
         );
         let active_window_id = self.active_window_id.get();
 
-        let mins = (uptime / 60) % 60;
-        let secs = uptime % 60;
+        let hours = clock / 3600;
+        let mins = (clock / 60) % 60;
 
         let bar_height = TASKBAR_HEIGHT as f32;
         let window_height = bar_height;
@@ -674,7 +675,7 @@ impl Application for TaskBarApp {
                 Text::new("•")
                     .font_size(12.0)
                     .color(Color::rgb(0.600, 0.600, 0.630)),
-                Text::new(format!("Up {:02}:{:02}", mins, secs))
+                Text::new(format!("{:02}:{:02}", hours, mins))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
             }
@@ -980,12 +981,19 @@ impl TaskBarApp {
             }
         });
 
-        // Uptime counter
-        let uptime = self.uptime.clone();
+        // Wall clock: seconds-of-day (UTC), refreshed once per second.
+        let clock = self.clock.clone();
 
         std::thread::spawn(move || {
             loop {
-                uptime.update(|u| *u += 1);
+                let secs_of_day = time::system_time_ns()
+                    .map(|ns| {
+                        let offset = time::local_utc_offset_seconds().unwrap_or(0);
+                        let local = (ns / 1_000_000_000) as i64 + offset;
+                        (((local % 86_400) + 86_400) % 86_400) as u32
+                    })
+                    .unwrap_or(0);
+                clock.update(|c| *c = secs_of_day);
                 std::thread::sleep(Duration::from_secs(1));
             }
         });

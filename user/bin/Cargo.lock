@@ -273,6 +273,7 @@ name = "scarlet-os"
 version = "0.16.0"
 dependencies = [
  "scarlet-abi",
+ "scarlet-rt",
  "scarlet-sys",
 ]
 
@@ -522,6 +523,7 @@ dependencies = [
  "sbus",
  "sbus-client",
  "scarlet-desktop-config",
+ "scarlet-os",
  "scarlet-std",
  "scarlet-ui",
  "scarlet-ui-macros",
