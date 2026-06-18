@@ -111,8 +111,14 @@ impl<V: View + Clone> Element for ComponentElement<V> {
                 .as_ref()
                 .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
 
+            if let Some(ref mut child) = self.child {
+                child.unmount();
+            }
+
             // Create new child element
-            let new_child = self.view.create_element();
+            let mut new_child = self.view.create_element();
+            let ctx = MountContext::new(self.pipeline_id);
+            new_child.mount(&ctx);
 
             // Replace the old child with the new one
             self.child = Some(new_child);

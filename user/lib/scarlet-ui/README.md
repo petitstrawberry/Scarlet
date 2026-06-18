@@ -1,54 +1,84 @@
-# ScarletUI 2.0
+# ScarletUI
 
-A declarative UI framework for Scarlet OS, inspired by Flutter and SwiftUI.
+ScarletUI is a declarative UI framework for Scarlet applications. It is designed
+to run the same application code on Scarlet OS through SWS and on native desktop
+platforms through platform features such as winit.
 
-## Overview
+The application API is platform-agnostic: application code declares scenes and
+calls `app.run()`. Platform selection is a crate feature decision, not an app
+runtime decision.
 
-ScarletUI is a reactive UI framework built for Rust in a `no_std` environment. It provides:
+## Features
 
-- **Declarative Views**: Describe your UI with composable Views
-- **State Management**: Reactive `State<T>` with automatic updates
-- **Element System**: Efficient runtime representation with reconciliation
-- **Layout Engine**: Constraint-based layout system
-- **Event Handling**: Pointer and keyboard event routing
-- **Platform Abstraction**: Work with SWS, SDL2, Winit, or custom backends
+- **Declarative views**: compose UI with `View` values and container macros.
+- **State management**: `State<T>` drives rebuild, layout, paint, and composite.
+- **Scene model**: `Application::scenes()` declares top-level windows.
+- **Multi-window runtime**: each opened window owns its own rendering pipeline.
+- **Platform abstraction**: SWS and native desktop platforms share the same runner.
+- **Text input**: keyboard, character input, IME preedit/commit, and focus sync.
 
-## Architecture
+## Platform Features
 
-ScarletUI follows a layered architecture:
+`scarlet-ui` currently has one selected platform feature per build.
 
+| Feature | Target | Notes |
+|---------|--------|-------|
+| `platform-sws` | Scarlet OS / SWS | Default platform feature. Uses `sws-client` and `sws-protocol`. |
+| `platform-winit` | native desktop | Uses `winit` + `softbuffer`; requires `std`. |
+
+The default feature set is:
+
+```toml
+default = ["std", "platform-sws"]
 ```
-User Code (Views)
-       ↓
-Element Tree (Runtime)
-       ↓
-Render Pipeline (Layout/Paint)
-       ↓
-Platform Window (SWS/SDL/etc.)
+
+For native desktop builds, depend on ScarletUI with `platform-winit`:
+
+```toml
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 ```
 
-### Key Concepts
+For Scarlet OS builds, use `platform-sws`:
 
-1. **View**: A factory that creates Elements
-2. **Element**: The runtime representation of a View
-3. **RenderObject**: Handles layout and rendering
-4. **State<T>>**: Reactive state with change notifications
-5. **Application**: Main entry point with event loop
+```toml
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+```
 
-## Basic Usage
+`platform-sws` and `platform-winit` are mutually exclusive. `std` and
+`legacy-scarlet-std` are also mutually exclusive.
+
+## Basic Application
 
 ```rust
 use scarlet_ui::prelude::*;
+use scarlet_ui::{hstack, vstack};
 use scarlet_ui_macros::View;
 
-#[derive(View, Clone)]
+#[derive(View, Clone, Default)]
 struct CounterApp {
     count: State<i32>,
 }
 
 impl CounterApp {
-    fn counter_view(&self) -> impl View {
-        Text::new(format!("Count: {}", self.count.get()))
+    fn content(&self) -> impl View {
+        vstack! {
+            Text::new("Counter").font_size(24.0),
+            Text::new(format!("Count: {}", self.count.get())),
+            hstack! {
+                Button::new("-").on_click({
+                    let count = self.count.clone();
+                    move || count.set(count.get() - 1)
+                }),
+                Button::new("+").on_click({
+                    let count = self.count.clone();
+                    move || count.set(count.get() + 1)
+                }),
+            },
+        }
+        .spacing(12.0)
+        .padding(EdgeInsets::all(16.0))
     }
 }
 
@@ -56,143 +86,92 @@ impl Application for CounterApp {
     fn scenes(&self) -> impl Scene {
         WindowGroup::new(
             "main",
-            Window::new("Counter", self.counter_view()).size(Size::new(400.0, 300.0)),
+            Window::new("Counter", self.content())
+                .app_id("org.scarlet-os.counter")
+                .size(Size::new(400.0, 300.0)),
         )
     }
 }
 
-fn main() {
-    let mut app = CounterApp {
-        count: State::new(StateId::new(1), 0),
-    };
-    app.run();
+fn main() -> scarlet_ui::Result<()> {
+    let mut app = CounterApp::default();
+    app.run()
 }
 ```
 
-## Available Views
+## Application Model
 
-### Primitive Views
+`Application::scenes()` is the application UI entry point. `body()` is still used
+by `#[derive(View)]` for reusable view components, but it is not the top-level
+application entry point.
 
-- **`Text`**: Display text with configurable font size and color
-- **`Button`**: Interactive button with click callbacks
-- **`Rectangle`**: Filled rectangle with color and corner radius
-- **`Spacer`**: Flexible or fixed empty space
-- **`Image`**: Display images from various sources
+Each scene declaration produces a top-level `Window`. At runtime, ScarletUI
+creates one `WindowSlot` per opened window:
 
-### View Modifiers
-
-- **`Padding`**: Add padding around a view
-- **`Frame`**: Constrain a view to a specific size
-- **`Background`**: Set background color
-- **`SetSize`**: Set minimum/maximum size constraints
-- **`AlignmentFrame`**: Control alignment within available space
-
-### Layout Containers
-
-- **`Window`**: Top-level window container
-
-## Examples
-
-See the `examples/` directory in the source tree for complete examples.
-
-## State Management
-
-```rust
-let state = State::new(StateId::new(1), 0);
-
-// Get current value
-let value = state.get();
-
-// Update value
-state.set(42);
-
-// Clone for sharing
-let state2 = state.clone(); // Both point to same underlying state
+```text
+Application::scenes()
+  -> Scene declarations
+  -> ApplicationRunner<SelectedPlatform>
+  -> WindowSlot { WindowId, PipelineId, RenderingPipeline, PlatformWindow }
 ```
 
-## Event Handling
-
-ScarletUI provides an event dispatcher that routes events to the appropriate views:
-
-```rust
-use scarlet_ui::event::{Event, MouseEvent};
-
-// Events are dispatched through the EventDispatcher
-// Views can handle events via the handle_event method
-```
-
-## Gesture Recognition
-
-Built-in gesture recognizers for common interactions:
-
-- **`TapGestureRecognizer`**: Detect tap/click gestures
-- **`DragGestureRecognizer`**: Detect drag gestures
-- **`LongPressGestureRecognizer`**: Detect long press gestures
+Application code should not choose or name a platform implementation. It imports the
+normal ScarletUI prelude and calls `app.run()`.
 
 ## Platform Integration
 
-ScarletUI abstracts platform window operations:
+Platform code lives behind `PlatformBackend` and `PlatformWindow`. These are
+internal runner boundaries for creating windows, polling events, presenting
+buffers, routing text input, and handling window controls.
 
-```rust
-use scarlet_ui::platform::{PlatformWindow, SWSPlatformWindow};
+Most applications should not construct a `PlatformWindow` directly. Use
+`Window`, `WindowGroup`, `open_window`, `dismiss_window`, and `app.run()`.
 
-// Create platform window (SWS backend)
-let window = SWSPlatformWindow::new(
-    "com.example.app",
-    "My App",
-    Size::new(800.0, 600.0)
-)?;
-```
+SWS-specific applications may use lifecycle hooks and downcast the
+`dyn PlatformWindow` only when they intentionally depend on SWS-specific
+capabilities.
 
-## Rendering Pipeline
+## Common Views
 
-The rendering pipeline consists of three phases:
+- `Text`
+- `Button`
+- `TextField`
+- `Toggle`
+- `Slider`
+- `Select`
+- `CanvasView`
+- `Image`
+- `Rectangle`
+- `Spacer`
+- `Divider`
+- `Window`
+- `VStack`, `HStack`, `ZStack`
+- `NavigationView`, `NavigationLink`
 
-1. **Build Phase**: Update element tree based on state changes
-2. **Layout Phase**: Calculate sizes and positions
-3. **Paint Phase**: Render to buffers
-4. **Composite Phase**: Combine buffers for display
+## Development Commands
 
-## Testing
-
-Run the test suite:
+Run ScarletUI tests:
 
 ```bash
-cargo test
+cargo test --offline --lib --tests
 ```
 
-## Development Status
+Check the std smoke app for native desktop:
 
-### Completed (✅)
-- Phase 1: Core Foundations (Geometry, Color, State, View trait)
-- Phase 2: Element System (ComponentElement, RenderElement, ElementTree)
-- Phase 3: Rendering System (Buffer, Compositor, RenderObject)
-- Phase 4: Pipeline & Reconciliation (PipelineOwner, RenderingPipeline)
-- Phase 5: Primitive Views (Text, Button, Rectangle, Spacer, Image)
-- Phase 6: View Modifiers (Padding, Frame, Background, Size, Alignment)
-- Phase 7: Window System (Window View, PlatformWindow abstraction, SWS backend)
-- Phase 8: Event Handling (EventDispatcher, Gesture recognizers)
-- Phase 9: Integration & Testing (Examples, basic tests)
+```bash
+cd ../../std-bin
+cargo check --offline --target aarch64-apple-darwin --bin ui_smoke
+```
 
-### Future Work
+Check the same app for Scarlet targets:
 
-- Container views (VStack, HStack, ZStack)
-- View macros (`vstack!`, `hstack!`, etc.)
-- `#[derive(View)]` procedural macro
-- ForEach view for dynamic lists
-- Advanced gesture recognizers (Pinch, Rotation)
-- Animation system
-- Focus management
-- Accessibility support
-
-## License
-
-MIT License - See LICENSE file for details
-
-## Contributing
-
-Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+```bash
+cd ../../std-bin
+cargo check --offline --target riscv64gc-unknown-scarlet --bin ui_smoke
+cargo check --offline --target aarch64-unknown-scarlet --bin ui_smoke
+```
 
 ## Design Documents
 
-See `docs/scarletui/design.md` for detailed architecture documentation.
+- `docs/graphics/scarletui/design.md`
+- `docs/graphics/scarletui/api.md`

@@ -234,8 +234,58 @@ fn glyph_cache_get_or_rasterize(
     }
 }
 
+#[cfg(any(not(feature = "std"), all(feature = "std", target_os = "scarlet")))]
 const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
+#[cfg(any(not(feature = "std"), all(feature = "std", target_os = "scarlet")))]
 const FALLBACK_FONT_PATHS: &[&str] = &["/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"];
+
+#[cfg(all(feature = "std", target_os = "scarlet"))]
+const STD_DEFAULT_FONT_PATHS: &[&str] = &[DEFAULT_FONT_PATH];
+
+#[cfg(all(feature = "std", target_os = "scarlet"))]
+const STD_FALLBACK_FONT_PATHS: &[&str] = FALLBACK_FONT_PATHS;
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+const STD_DEFAULT_FONT_PATHS: &[&str] = &[
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bundles/desktop/fs/system/scarlet/fonts/Mplus1-Regular.ttf"
+    ),
+    "/System/Library/Fonts/SFNS.ttf",
+    "/Library/Fonts/OpenSans-Regular.ttf",
+];
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+const STD_FALLBACK_FONT_PATHS: &[&str] = &[
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bundles/desktop/fs/system/scarlet/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+    ),
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Apple Symbols.ttf",
+];
+
+#[cfg(all(feature = "std", not(any(target_os = "scarlet", target_os = "macos"))))]
+const STD_DEFAULT_FONT_PATHS: &[&str] = &[
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bundles/desktop/fs/system/scarlet/fonts/Mplus1-Regular.ttf"
+    ),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+];
+
+#[cfg(all(feature = "std", not(any(target_os = "scarlet", target_os = "macos"))))]
+const STD_FALLBACK_FONT_PATHS: &[&str] = &[
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bundles/desktop/fs/system/scarlet/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
+    ),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+];
 
 static NEXT_FONT_STACK_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -468,13 +518,46 @@ fn load_fonts_from_rootfs_once() {
         return;
     }
 
-    if let Some(bytes) = read_font_file(DEFAULT_FONT_PATH) {
-        let _ = set_default_font_owned(bytes);
-    }
-    for path in FALLBACK_FONT_PATHS {
-        if let Some(bytes) = read_font_file(path) {
-            let _ = add_fallback_font_owned(bytes);
+    for path in default_font_paths() {
+        if let Some(bytes) = read_font_file(path)
+            && set_default_font_owned(bytes).is_ok()
+        {
+            break;
         }
+    }
+
+    if DEFAULT_FONT.lock().font.is_none() {
+        return;
+    }
+
+    for path in fallback_font_paths() {
+        if let Some(bytes) = read_font_file(path)
+            && add_fallback_font_owned(bytes).is_ok()
+        {
+            continue;
+        }
+    }
+}
+
+fn default_font_paths() -> &'static [&'static str] {
+    #[cfg(feature = "std")]
+    {
+        STD_DEFAULT_FONT_PATHS
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        &[DEFAULT_FONT_PATH]
+    }
+}
+
+fn fallback_font_paths() -> &'static [&'static str] {
+    #[cfg(feature = "std")]
+    {
+        STD_FALLBACK_FONT_PATHS
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        FALLBACK_FONT_PATHS
     }
 }
 

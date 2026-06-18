@@ -1,6 +1,11 @@
 //! Test the new State API
 
-use scarlet_ui::{State, StateId};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+
+use scarlet_ui::{Listenable, State, StateId};
 
 #[test]
 fn test_state_new_with_id_and_value() {
@@ -38,16 +43,12 @@ fn test_state_set_and_update() {
 #[test]
 fn test_state_subscriptions() {
     let state = State::new(StateId::new(5), 0);
-    let state_clone = state.clone();
+    let call_count = Arc::new(AtomicU32::new(0));
+    let call_count_for_callback = Arc::clone(&call_count);
+    let _subscription = state.subscribe_any(Arc::new(move || {
+        call_count_for_callback.fetch_add(1, Ordering::SeqCst);
+    }));
 
-    // Test subscription callback
-    let mut call_count = 0;
-    state.subscribe(move |value| {
-        call_count += 1;
-        assert_eq!(*value, 42);
-    });
-
-    state_clone.set(42);
-    // Note: In a real test, we'd need to ensure the notification was delivered
-    // This is just to verify the API compiles
+    state.set(42);
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }

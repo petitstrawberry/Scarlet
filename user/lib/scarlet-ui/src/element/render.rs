@@ -418,7 +418,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .as_any()
             .downcast_ref::<crate::views::TextFieldRenderObject>()?;
         render_object.is_focused().then(|| {
-            field.text_input_state(render_object.preedit(), render_object.preedit_anchor_byte())
+            field.text_input_state(render_object.preedit(), render_object.preedit_cursor_byte())
         })
     }
 
