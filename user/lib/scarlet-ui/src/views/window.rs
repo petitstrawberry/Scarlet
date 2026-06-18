@@ -18,6 +18,7 @@ use crate::element::{
 };
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
+use crate::pipeline::{MountContext, PipelineId};
 use crate::state::Listenable;
 use crate::view::View;
 
@@ -75,7 +76,7 @@ const CLOSE_BUTTON_SIZE: u32 = 18;
 const CLOSE_BUTTON_MARGIN: u32 = 8;
 const TITLEBAR_CONTROL_COUNT: u32 = 3;
 const WINDOW_CORNER_RADIUS: u32 = 0;
-const WINDOW_BORDER_WIDTH: u32 = 2; // 1 outer border + 1 inner highlight
+const WINDOW_BORDER_WIDTH: u32 = 1;
 
 /// Layout metrics for the content area inside a top-level window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -629,6 +630,7 @@ pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     last_mouse_pressed: bool,
     // Track maximized state for toggle
     maximized: bool,
+    pipeline_id: PipelineId,
 }
 
 impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
@@ -650,6 +652,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             last_mouse_y: -1,
             last_mouse_pressed: false,
             maximized: false,
+            pipeline_id: PipelineId::default(),
         }
     }
 
@@ -704,7 +707,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         if let Some(index) = self.titlebar_child_index()
             && let Some(titlebar) = self.children.get(index)
         {
-            crate::pipeline::mark_element_needs_paint(titlebar.id());
+            crate::pipeline::mark_element_needs_paint(self.pipeline_id, titlebar.id());
         }
     }
 }
@@ -750,7 +753,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             {
                 let titlebar_view = WindowTitleBarView::new(window_info.title.clone());
                 if matches!(titlebar.update(&titlebar_view), UpdateResult::Updated) {
-                    crate::pipeline::mark_element_needs_paint(titlebar.id());
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, titlebar.id());
                 }
             }
 
@@ -760,14 +763,18 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     match content.update(content_view) {
                         UpdateResult::NoChange => {}
                         UpdateResult::Updated => {
-                            crate::pipeline::mark_element_needs_paint(content.id());
+                            crate::pipeline::mark_element_needs_paint(
+                                self.pipeline_id,
+                                content.id(),
+                            );
                         }
                         UpdateResult::Replaced => {
                             let old_constraints = content.last_layout_constraints();
                             let old_position = content.position();
                             content.unmount();
                             let mut new_content = content_view.create_element();
-                            new_content.mount();
+                            let ctx = MountContext::new(self.pipeline_id);
+                            new_content.mount(&ctx);
                             if let Some(constraints) = old_constraints {
                                 new_content.layout(constraints);
                                 new_content.set_position(old_position);
@@ -775,10 +782,12 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                             self.children[content_index] = new_content;
                             if old_constraints.is_some() {
                                 crate::pipeline::mark_element_needs_paint(
+                                    self.pipeline_id,
                                     self.children[content_index].id(),
                                 );
                             } else {
                                 crate::pipeline::mark_element_needs_layout(
+                                    self.pipeline_id,
                                     self.children[content_index].id(),
                                 );
                             }
@@ -799,10 +808,11 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         UpdateResult::NoChange
     }
 
-    fn mount(&mut self) {
+    fn mount(&mut self, ctx: &MountContext) {
+        self.pipeline_id = ctx.pipeline_id();
         // Mount children
         for child in &mut self.children {
-            child.mount();
+            child.mount(ctx);
         }
     }
 
@@ -1399,25 +1409,13 @@ impl WindowRenderObject {
             );
         }
 
-        // Modern border with subtle shadow effect
-        // Outer border: rgb(100, 100, 105)
+        // Match the titlebar outline: one physical-looking stroke, no extra inner highlight.
         let border_color = Color::rgb(100u8, 100u8, 105u8);
         if width == 0 || height == 0 {
             return;
         }
 
         canvas.draw_rect(0, 0, width, height, border_color);
-
-        // Inner highlight for depth: rgb(90, 90, 95)
-        if width > 2 && height > 2 {
-            canvas.draw_rect(
-                1,
-                1,
-                width.saturating_sub(2),
-                height.saturating_sub(2),
-                Color::rgb(90u8, 90u8, 95u8),
-            );
-        }
     }
 }
 

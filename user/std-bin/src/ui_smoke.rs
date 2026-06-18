@@ -19,8 +19,8 @@ impl UiSmokeApp {
 }
 
 impl Application for UiSmokeApp {
-    fn body(&self) -> impl View {
-        Window::new(
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new(
             "ScarletUI std smoke",
             vstack! {
                 Text::new("ScarletUI std smoke")
@@ -61,7 +61,11 @@ impl Application for UiSmokeApp {
                 println!("[ui_smoke] menu help");
             })),
         ]))
-        .size(Size::new(640.0, 420.0))
+        .size(Size::new(640.0, 420.0)))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn debug_logging(&self) -> bool {

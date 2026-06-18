@@ -22,13 +22,19 @@
 //! }
 //!
 //! impl CounterApp {
-//!     fn body(&self) -> impl View {
+//!     fn counter_view(&self) -> impl View {
 //!         vstack! {
 //!             Text::new("Counter"),
 //!             Button::new("Increment")
 //!                 .on_click(|_| self.count.update(|c| *c += 1)),
 //!             Text::new(&format!("Count: {}", self.count.get())),
 //!         }
+//!     }
+//! }
+//!
+//! impl Application for CounterApp {
+//!     fn scenes(&self) -> impl Scene {
+//!         WindowGroup::new("main", Window::new("Counter", self.counter_view()))
 //!     }
 //! }
 //!
@@ -65,6 +71,7 @@ mod os;
 pub mod pipeline;
 pub mod platform;
 pub mod render;
+pub mod scene;
 pub mod state;
 pub mod view;
 pub mod views;
@@ -92,7 +99,7 @@ macro_rules! logln {
 pub(crate) use logln;
 
 // Re-exports for convenience
-pub use application::Application;
+pub use application::{Application, ApplicationRunExt, ApplicationRunner};
 pub use buffer::Buffer;
 pub use color::system::{
     BlueColors, GrayColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors,
@@ -116,9 +123,12 @@ pub use graphics::{
     set_default_font_stack,
 };
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
-pub use pipeline::{DirtyPhase, PipelineOwner, RenderingPipeline, StateRegistry};
-pub use platform::{PlatformWindow, SWSPlatformWindow};
+pub use pipeline::{
+    DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
+};
+pub use platform::{PlatformBackend, PlatformWindow, SWSPlatformWindow, SwsBackend};
 pub use render::{RenderNode, RenderTree};
+pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId};
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
 pub use view::{View, ViewExt};
 pub use views::modifiers::{
@@ -140,7 +150,7 @@ pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_gri
 
 /// Prelude module for convenient imports
 pub mod prelude {
-    pub use crate::application::Application;
+    pub use crate::application::{Application, ApplicationRunExt};
     pub use crate::color::{Color, ColorPalette, ColorScheme, SemanticColor};
     pub use crate::element::{
         DirtyFlags, Element, ElementId, ElementRenderObject, LayoutConstraints,
@@ -153,6 +163,9 @@ pub mod prelude {
         measure_text_sized_with_font_stack, set_default_font_stack,
     };
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+    pub use crate::scene::{
+        Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId,
+    };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt};
     pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};

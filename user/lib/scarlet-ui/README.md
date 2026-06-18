@@ -39,24 +39,25 @@ Platform Window (SWS/SDL/etc.)
 
 ```rust
 use scarlet_ui::prelude::*;
+use scarlet_ui_macros::View;
 
+#[derive(View, Clone)]
 struct CounterApp {
     count: State<i32>,
 }
 
-impl View for CounterApp {
-    fn create_element(&self) -> Box<dyn Element> {
-        // Create element from this view
+impl CounterApp {
+    fn counter_view(&self) -> impl View {
         Text::new(format!("Count: {}", self.count.get()))
-            .create_element()
     }
-    // ...
 }
 
 impl Application for CounterApp {
-    fn body(&self) -> impl View {
-        Window::new("Counter", Text::new("Hello"))
-            .size(Size::new(400.0, 300.0))
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new(
+            "main",
+            Window::new("Counter", self.counter_view()).size(Size::new(400.0, 300.0)),
+        )
     }
 }
 

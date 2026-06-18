@@ -10,6 +10,7 @@ use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Size};
+use crate::pipeline::{MountContext, PipelineId};
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
@@ -27,6 +28,7 @@ pub struct ComponentElement<V: View + Clone> {
     position: Point,
     last_constraints: Option<LayoutConstraints>,
     subscriptions: Vec<SubscriptionId>,
+    pipeline_id: PipelineId,
 }
 
 impl<V: View + Clone> ComponentElement<V> {
@@ -42,6 +44,7 @@ impl<V: View + Clone> ComponentElement<V> {
             position: Point::ZERO,
             last_constraints: None,
             subscriptions: Vec::new(),
+            pipeline_id: PipelineId::default(),
         }
     }
 
@@ -135,7 +138,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             match child.update(&self.view) {
                 UpdateResult::NoChange => return UpdateResult::NoChange,
                 UpdateResult::Updated => {
-                    crate::pipeline::mark_element_needs_layout(child.id());
+                    crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
                     return UpdateResult::NoChange;
                 }
                 UpdateResult::Replaced => {
@@ -152,19 +155,21 @@ impl<V: View + Clone> Element for ComponentElement<V> {
 
         // Mount the new child
         if let Some(ref mut child) = self.child {
-            child.mount();
+            let ctx = MountContext::new(self.pipeline_id);
+            child.mount(&ctx);
             if let Some(path) = focused_path.as_deref() {
                 crate::element::restore_focus_at_path(child.as_mut(), path);
             }
         }
 
         if let Some(ref child) = self.child {
-            crate::pipeline::mark_element_needs_layout(child.id());
+            crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
         }
         UpdateResult::NoChange
     }
 
-    fn mount(&mut self) {
+    fn mount(&mut self, ctx: &MountContext) {
+        self.pipeline_id = ctx.pipeline_id();
         // Subscribe to all Listenables from the View
         let listenables = self.view.listenables();
 
@@ -172,10 +177,15 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         // Store the subscription IDs so we can unsubscribe later
         for listenable in listenables {
             let element_id = self.id;
+            let pipeline_id = self.pipeline_id;
             let invalidation_kind = listenable.invalidation_kind();
             let callback = Arc::new(move || match invalidation_kind {
-                InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
-                InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
+                InvalidationKind::Build => {
+                    crate::pipeline::mark_element_dirty(pipeline_id, element_id)
+                }
+                InvalidationKind::Paint => {
+                    crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
+                }
             });
             let subscription_id = listenable.subscribe_any(callback);
             self.subscriptions.push(subscription_id);
@@ -183,7 +193,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
 
         // Mount the child
         if let Some(ref mut child) = self.child {
-            child.mount();
+            child.mount(ctx);
         }
     }
 

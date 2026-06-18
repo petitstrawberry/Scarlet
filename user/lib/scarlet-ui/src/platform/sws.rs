@@ -8,7 +8,7 @@ use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
 use crate::geometry::{Point, Rect, Size};
-use crate::platform::PlatformWindow;
+use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
@@ -48,6 +48,37 @@ pub struct SWSPlatformWindow {
     right_alt_pressed: bool,
     text_input: Option<TextInputContext>,
     needs_full_present: bool,
+}
+
+/// Scarlet Window Server backend.
+#[derive(Default)]
+pub struct SwsBackend;
+
+impl SwsBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PlatformBackend for SwsBackend {
+    type Window = SWSPlatformWindow;
+
+    fn output_scale_milli(&mut self) -> u32 {
+        SWSPlatformWindow::query_output_scale()
+    }
+
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window> {
+        SWSPlatformWindow::create_with_type_and_menu_and_policies(
+            &request.app_id,
+            &request.title,
+            request.size,
+            request.window_type,
+            &request.menu_titles,
+            request.focus_on_create,
+            request.active_on_focus,
+            request.opaque,
+        )
+    }
 }
 
 impl SWSPlatformWindow {
@@ -918,6 +949,10 @@ impl PlatformWindow for SWSPlatformWindow {
         self.surface_id
     }
 
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
     fn set_resizable(&mut self, resizable: bool) -> Result<()> {
         self.conn
             .set_window_resizable(self.surface_id, resizable)
@@ -950,6 +985,10 @@ impl PlatformWindow for SWSPlatformWindow {
         self.conn
             .set_window_menu_titles(self.surface_id, menu_titles)
             .map_err(|_| crate::error::Error::IoError)
+    }
+
+    fn sync_text_input(&mut self, state: Option<&TextInputElementState>) {
+        SWSPlatformWindow::sync_text_input(self, state);
     }
 }
 

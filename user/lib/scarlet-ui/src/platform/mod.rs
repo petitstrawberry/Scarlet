@@ -9,15 +9,43 @@ pub use sws::SWSPlatformWindow;
 
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
+use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::Event;
 use crate::geometry::{Point, Size};
+use alloc::string::String;
+use core::any::Any;
+
+pub use sws::SwsBackend;
+
+/// Backend-independent platform window creation request.
+pub struct WindowCreateRequest {
+    pub app_id: String,
+    pub title: String,
+    pub size: Size,
+    pub window_type: u32,
+    pub menu_titles: String,
+    pub focus_on_create: bool,
+    pub active_on_focus: bool,
+    pub opaque: bool,
+}
+
+/// Platform backend that can create and drive windows.
+pub trait PlatformBackend {
+    type Window: PlatformWindow + 'static;
+
+    /// Query the current output scale in milli-units.
+    fn output_scale_milli(&mut self) -> u32;
+
+    /// Create one backend window.
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window>;
+}
 
 /// Platform-independent window interface
 ///
 /// PlatformWindow abstracts platform-specific window functionality,
 /// allowing ScarletUI to work with different window systems.
-pub trait PlatformWindow {
+pub trait PlatformWindow: Any {
     /// Create a new platform window
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self>
     where
@@ -102,6 +130,14 @@ pub trait PlatformWindow {
     /// Get the underlying surface ID (for SWS-specific operations)
     fn surface_id(&self) -> u32;
 
+    /// Get the backend-native window ID as a backend-neutral integer.
+    fn platform_window_id(&self) -> u64 {
+        self.surface_id() as u64
+    }
+
+    /// Return mutable Any for backend-specific escape hatches.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
     /// Set whether the window is resizable
     fn set_resizable(&mut self, resizable: bool) -> Result<()>;
 
@@ -110,4 +146,7 @@ pub trait PlatformWindow {
 
     /// Update menu titles for the window (format: "menu1|menu2|menu3")
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
+
+    /// Synchronize focused text-input state with the backend.
+    fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}
 }

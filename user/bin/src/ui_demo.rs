@@ -12,6 +12,7 @@ extern crate scarlet_ui_macros;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::f32;
 
 use scarlet_std::format;
@@ -35,8 +36,8 @@ impl DemoApp {
 }
 
 impl Application for DemoApp {
-    fn body(&self) -> impl View {
-        Window::new("ScarletUI Demo",
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("ScarletUI Demo",
         vstack! {
             Text::new("Hello ScarletUI!")
                 .font_size(40.0),
@@ -139,7 +140,11 @@ impl Application for DemoApp {
                 println!("[ui_demo] Menu: Help");
             })),
         ]))
-        .size(Size::new(800.0, 600.0))
+        .size(Size::new(800.0, 600.0)))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn debug_logging(&self) -> bool {

@@ -1,102 +1,63 @@
-//! Application Trait - Main entry point for ScarletUI applications
-//!
-//! The Application trait provides the main loop and lifecycle management
-//! for ScarletUI applications.
+//! Application entry point and multi-window runner for ScarletUI applications.
 
-use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
-use crate::error::Result;
-use crate::event::Event;
-use crate::geometry::Size;
-use crate::geometry::{Point, Rect};
-use crate::menu_model;
-use crate::pipeline::RenderingPipeline;
-use crate::platform::{PlatformWindow, SWSPlatformWindow};
-use crate::state::{InvalidationKind, StateId, SubscriptionId};
-use crate::view::View;
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
-use std::println;
+use core::marker::PhantomData;
 
-/// Application trait - main entry point for ScarletUI apps
+use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
+use crate::error::{Error, Result};
+use crate::event::Event;
+use crate::geometry::{Point, Rect, Size};
+use crate::menu_model;
+use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
+use crate::platform::{PlatformBackend, PlatformWindow, SwsBackend, WindowCreateRequest};
+use crate::scene::{
+    Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
+};
+use crate::state::{InvalidationKind, Listenable, StateId, SubscriptionId};
+use crate::view::View;
+
+/// Application trait - main entry point for ScarletUI apps.
 ///
-/// Applications implement this trait to define their UI and behavior.
-/// The trait provides a default main loop that handles events,
-/// rendering, and window management.
-pub trait Application: View {
-    /// Returns the body of the application
-    ///
-    /// This is where the application's UI is defined using Views.
-    fn body(&self) -> impl View;
+/// Applications declare top-level windows via `scenes()`.
+pub trait Application: Clone + 'static {
+    /// Returns the scene graph of top-level application windows.
+    fn scenes(&self) -> impl Scene;
 
-    /// Handle focus change event from window server
-    ///
-    /// Called when another window gains focus. This allows applications
-    /// like TaskBar to update their state based on the focused window.
-    /// Default implementation does nothing.
-    fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
-        // Default: do nothing
+    /// Return listenable dependencies owned directly by the application.
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        Vec::new()
     }
 
-    /// Handle active application change event from window server
-    ///
-    /// Called when the active APPLICATION changes (normal window gains focus).
-    /// This is separate from on_focus_changed because TaskBar/Desktop/etc
-    /// can receive focus without changing the active application.
-    /// This is used by TaskBar to update its menu bar.
-    /// Default implementation does nothing.
-    fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
-        // Default: do nothing
-    }
+    /// Handle focus change event from window server.
+    fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
 
-    /// Configure the created platform window before the main loop starts.
-    ///
-    /// Applications can override this to register optional window-scoped
-    /// protocols such as text-input contexts.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - The SWS platform window created for this application.
-    fn on_window_created(&mut self, _window: &mut SWSPlatformWindow) {
-        // Default: do nothing
-    }
+    /// Handle active application change event from window server.
+    fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
+
+    /// Configure a created platform window before the main loop starts.
+    fn on_window_created(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
     /// Synchronize application-managed window state.
-    ///
-    /// Applications that manage window-scoped protocols directly can override
-    /// this hook to update those protocol states during the main loop.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - The SWS platform window for this application.
-    fn on_window_sync(&mut self, _window: &mut SWSPlatformWindow) {
-        // Default: do nothing
-    }
+    fn on_window_sync(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
     /// Handle committed text from an input method.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Text-input context that received the commit.
-    /// * `serial` - Server serial for the text-input update.
-    /// * `text` - UTF-8 text committed by the input method.
-    fn on_text_input_commit(&mut self, _context_id: u32, _serial: u32, _text: &str) {
-        // Default: do nothing
+    fn on_text_input_commit(
+        &mut self,
+        _ctx: &WindowContext,
+        _context_id: u32,
+        _serial: u32,
+        _text: &str,
+    ) {
     }
 
     /// Handle preedit text from an input method.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Text-input context that received the preedit update.
-    /// * `serial` - Server serial for the text-input update.
-    /// * `cursor_byte` - UTF-8 byte offset of the preedit cursor.
-    /// * `anchor_byte` - UTF-8 byte offset of the active preedit segment.
-    /// * `text` - UTF-8 preedit text.
-    /// * `spans` - Encoded preedit style spans.
     fn on_text_input_preedit(
         &mut self,
+        _ctx: &WindowContext,
         _context_id: u32,
         _serial: u32,
         _cursor_byte: u32,
@@ -104,469 +65,248 @@ pub trait Application: View {
         _text: &str,
         _spans: &[u8],
     ) {
-        // Default: do nothing
     }
 
     /// Handle a request to delete text around the cursor from an input method.
-    ///
-    /// # Arguments
-    ///
-    /// * `context_id` - Text-input context that received the request.
-    /// * `serial` - Server serial for the text-input update.
-    /// * `before_bytes` - Bytes before the cursor to delete.
-    /// * `after_bytes` - Bytes after the cursor to delete.
     fn on_text_input_delete_surrounding_text(
         &mut self,
+        _ctx: &WindowContext,
         _context_id: u32,
         _serial: u32,
         _before_bytes: u32,
         _after_bytes: u32,
     ) {
-        // Default: do nothing
     }
 
-    /// Handle window resize event
-    ///
-    /// Called when the window is resized. Applications like TaskBar
-    /// can override this to update their internal state (e.g., screen_width).
-    /// Default implementation does nothing.
-    fn on_resize(&mut self, _width: u32, _height: u32) {
-        // Default: do nothing
-    }
+    /// Handle window resize event.
+    fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {}
 
-    /// Handle display size change event
-    ///
-    /// Called when the compositor reports a new physical screen size.
-    /// Default implementation does nothing.
+    /// Handle display size change event.
     fn on_screen_size_changed(&mut self, _width: u32, _height: u32) -> Option<Size> {
-        // Default: do nothing
         None
     }
 
-    /// Register all State instances used by this Application
-    ///
-    /// This method is called during Application initialization to register
-    /// all State instances with the StateRegistry. The default implementation
-    /// returns an empty vector.
-    ///
-    /// # Note
-    ///
-    /// This method is provided for future enhancement when automatic State
-    /// registration via macros is implemented. Currently, States are
-    /// automatically registered when first created through the View system.
-    fn register_states(&self) -> alloc::vec::Vec<StateId> {
-        alloc::vec::Vec::new()
+    /// Register all State instances used by this Application.
+    fn register_states(&self) -> Vec<StateId> {
+        Vec::new()
     }
 
-    /// Initialize the application
-    ///
-    /// Called once before the main loop starts.
-    /// Override this to set up any initial state.
-    fn init(&mut self) {
-        // Default implementation: do nothing
-    }
+    /// Initialize the application.
+    fn init(&mut self) {}
 
     /// Handle idle ticks on the application main thread.
-    ///
-    /// This is called once per main-loop iteration after pending platform and
-    /// window events are processed and before rendering. Applications can use
-    /// this to drain messages from worker threads and update UI state without
-    /// mutating `State` from background threads.
-    fn on_idle(&mut self) {
-        // Default implementation: do nothing
+    fn on_idle(&mut self) {}
+
+    /// Exit when all windows are closed.
+    fn exit_when_all_windows_closed(&self) -> bool {
+        true
     }
 
-    /// Enable or disable debug logging for this application
+    /// Enable or disable debug logging for this application.
     fn debug_logging(&self) -> bool {
         false
     }
+}
 
-    /// Run the application main loop
-    ///
-    /// This sets up the window, runs the event loop, and renders the UI.
-    /// The default implementation uses SWS as the platform backend.
+/// Extension methods for running applications.
+pub trait ApplicationRunExt: Application {
+    /// Run with the default SWS backend.
     fn run(&mut self) -> Result<()>
     where
-        Self: Sized + Clone,
+        Self: Sized,
     {
-        crate::debug::set_enabled(self.debug_logging());
+        self.run_with_backend(SwsBackend::new())
+    }
 
-        // 1. Set up rendering pipeline
-        let mut pipeline = RenderingPipeline::new();
+    /// Run with a custom platform backend.
+    fn run_with_backend<B: PlatformBackend>(&mut self, backend: B) -> Result<()>
+    where
+        Self: Sized,
+    {
+        ApplicationRunner::new(backend).run(self)
+    }
+}
 
-        // 2. Create root element from body()
-        let root_element = Box::new(ApplicationRootElement::new(self.clone()));
-        pipeline.set_root(root_element);
+impl<T: Application> ApplicationRunExt for T {}
 
-        // 3. Initialize the application
-        self.init();
+/// Backend-independent application runner.
+pub struct ApplicationRunner<B: PlatformBackend> {
+    backend: B,
+}
 
-        let output_scale_milli = SWSPlatformWindow::query_output_scale();
-        pipeline.set_scale_milli(output_scale_milli);
+impl<B: PlatformBackend> ApplicationRunner<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
 
-        // 4. Perform initial layout to determine window size and extract window properties
-        let window_info = pipeline.layout_initial();
-        let app_id = window_info.app_id.clone();
-        let window_title = window_info.title.clone();
-        let window_size = window_info.size;
-        let window_type = window_info.window_type;
-        let menu_bar = window_info.menu_bar.clone();
-        let focus_on_create = window_info.focus_on_create;
-        let active_on_focus = window_info.active_on_focus;
-        let opaque = window_info.opaque;
+    pub fn run<A: Application>(&mut self, app: &mut A) -> Result<()> {
+        crate::debug::set_enabled(app.debug_logging());
+        app.init();
 
-        // Debug: Dump element tree
-        if crate::debug::is_enabled() {
-            pipeline.element_tree().dump();
+        let declarations = collect_scene_declarations(app)?;
+        let mut slots = self.create_slots(app, declarations)?;
+
+        if slots.is_empty() && app.exit_when_all_windows_closed() {
+            return Ok(());
         }
 
-        let menu_json = menu_bar
-            .as_ref()
-            .map(|menu_bar| menu_bar.to_json())
-            .unwrap_or_default();
+        self.run_loop(app, &mut slots)
+    }
 
-        // 5. Create platform window (default: SWS backend)
-        // Use create_with_type for special window types (TASKBAR, ALWAYS_ON_TOP)
-        let mut platform_window = if window_type == crate::views::window_type::NORMAL {
-            SWSPlatformWindow::new_with_menu_and_policies(
-                &app_id,
-                &window_title,
-                window_size,
-                &menu_json,
-                focus_on_create,
-                active_on_focus,
-                opaque,
-            )
-            .map_err(|_| crate::error::Error::WindowCreationFailed)?
-        } else {
-            SWSPlatformWindow::create_with_type_and_menu_and_policies(
-                &app_id,
-                &window_title,
-                window_size,
-                window_type,
-                &menu_json,
-                focus_on_create,
-                active_on_focus,
-                opaque,
-            )
-            .map_err(|_| crate::error::Error::WindowCreationFailed)?
-        };
+    fn create_slots<A: Application>(
+        &mut self,
+        app: &mut A,
+        declarations: Vec<WindowDeclaration>,
+    ) -> Result<Vec<WindowSlot<B::Window, A>>> {
+        let scale_milli = self.backend.output_scale_milli();
+        let mut slots = Vec::new();
 
-        if let Some(menu_bar) = menu_bar {
-            if !menu_json.is_empty() {
-                let _ = platform_window.set_menu_titles(&menu_json);
-                menu_model::register_menu_callbacks(platform_window.surface_id(), &menu_bar);
-            }
-        }
+        for (index, declaration) in declarations.into_iter().enumerate() {
+            let window_id = WindowId::generate();
+            let pipeline_id = PipelineId::new(window_id.get());
+            let mut pipeline = RenderingPipeline::with_pipeline_id(pipeline_id);
+            pipeline.set_scale_milli(scale_milli);
 
-        self.on_window_created(&mut platform_window);
+            let root = Box::new(SceneWindowRootElement::new(
+                app.clone(),
+                declaration.key.clone(),
+                pipeline_id,
+            ));
+            pipeline.set_root(root);
 
-        // Apply window size limits (resizable, etc.) from Window view
-        if let Some(limits) = pipeline
-            .element_tree()
-            .root()
-            .and_then(|r| find_window_size_limits(r))
-        {
-            if !limits.resizable {
-                let _ = platform_window.set_resizable(false);
-            }
-        }
-        sync_text_input(&mut platform_window, &pipeline);
+            let window_info = pipeline.layout_initial();
+            let limits = pipeline
+                .element_tree()
+                .root()
+                .and_then(find_window_size_limits)
+                .unwrap_or_default();
+            let menu_json = window_info
+                .menu_bar
+                .as_ref()
+                .map(|menu_bar| menu_bar.to_json())
+                .unwrap_or_default();
 
-        // 6. Main event loop
-        loop {
-            let mut presented_this_cycle = false;
-            // 6.1 Poll events
-            while let Some(event) = platform_window.poll_event() {
-                match event {
-                    Event::Quit => {
-                        // Graceful shutdown
-                        let _ = platform_window.close();
-                        return Ok(());
-                    }
-                    Event::Resize { width, height } => {
-                        let new_size = Size::new(width as f32, height as f32);
-                        if platform_window.resize(width, height).is_ok() {
-                            pipeline.resize(new_size);
-                            self.on_resize(width, height);
-                            sync_text_input(&mut platform_window, &pipeline);
-                            if present_pipeline(&mut pipeline, &mut platform_window) {
-                                presented_this_cycle = true;
-                            }
-                        }
-                    }
-                    Event::ScreenSizeChanged { width, height } => {
-                        let resize_to = self.on_screen_size_changed(width, height);
-                        if let Some(new_size) = resize_to {
-                            let new_width = new_size.width.max(1.0) as u32;
-                            let new_height = new_size.height.max(1.0) as u32;
-                            if platform_window.resize(new_width, new_height).is_ok() {
-                                pipeline.resize(new_size);
-                                sync_text_input(&mut platform_window, &pipeline);
-                            }
-                        }
-                        if !presented_this_cycle && (resize_to.is_some() || pipeline.has_dirty()) {
-                            if present_pipeline(&mut pipeline, &mut platform_window) {
-                                presented_this_cycle = true;
-                            }
-                        }
-                    }
-                    Event::MenuItemActivated {
-                        window_id,
-                        menu_item_id,
-                    } => {
-                        let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
-                    }
-                    Event::TextInputCommit {
-                        context_id,
-                        serial,
-                        text,
-                    } => {
-                        let event = Event::TextInputCommit {
-                            context_id,
-                            serial,
-                            text,
-                        };
-                        if !pipeline.handle_event(&event)
-                            && let Event::TextInputCommit {
-                                context_id,
-                                serial,
-                                text,
-                            } = &event
-                        {
-                            self.on_text_input_commit(*context_id, *serial, text);
-                        }
-                        sync_text_input(&mut platform_window, &pipeline);
-                        if !presented_this_cycle
-                            && pipeline.has_dirty()
-                            && present_pipeline(&mut pipeline, &mut platform_window)
-                        {
-                            presented_this_cycle = true;
-                        }
-                    }
-                    Event::TextInputPreedit {
-                        context_id,
-                        serial,
-                        cursor_byte,
-                        anchor_byte,
-                        text,
-                        spans,
-                    } => {
-                        let event = Event::TextInputPreedit {
-                            context_id,
-                            serial,
-                            cursor_byte,
-                            anchor_byte,
-                            text,
-                            spans,
-                        };
-                        if !pipeline.handle_event(&event)
-                            && let Event::TextInputPreedit {
-                                context_id,
-                                serial,
-                                cursor_byte,
-                                anchor_byte,
-                                text,
-                                spans,
-                                ..
-                            } = &event
-                        {
-                            self.on_text_input_preedit(
-                                *context_id,
-                                *serial,
-                                *cursor_byte,
-                                *anchor_byte,
-                                text,
-                                spans,
-                            );
-                        }
-                        sync_text_input(&mut platform_window, &pipeline);
-                        if !presented_this_cycle
-                            && pipeline.has_dirty()
-                            && present_pipeline(&mut pipeline, &mut platform_window)
-                        {
-                            presented_this_cycle = true;
-                        }
-                    }
-                    Event::TextInputDeleteSurroundingText {
-                        context_id,
-                        serial,
-                        before_bytes,
-                        after_bytes,
-                    } => {
-                        let event = Event::TextInputDeleteSurroundingText {
-                            context_id,
-                            serial,
-                            before_bytes,
-                            after_bytes,
-                        };
-                        if !pipeline.handle_event(&event)
-                            && let Event::TextInputDeleteSurroundingText {
-                                context_id,
-                                serial,
-                                before_bytes,
-                                after_bytes,
-                            } = event
-                        {
-                            self.on_text_input_delete_surrounding_text(
-                                context_id,
-                                serial,
-                                before_bytes,
-                                after_bytes,
-                            );
-                        }
-                        sync_text_input(&mut platform_window, &pipeline);
-                        if !presented_this_cycle
-                            && pipeline.has_dirty()
-                            && present_pipeline(&mut pipeline, &mut platform_window)
-                        {
-                            presented_this_cycle = true;
-                        }
-                    }
-                    Event::TextInputDone { context_id, serial } => {
-                        let event = Event::TextInputDone { context_id, serial };
-                        let _ = pipeline.handle_event(&event);
-                    }
-                    Event::Custom { event_type, data } if event_type == 0xF0C0F => {
-                        // FocusChanged event from SWS
-                        // Decode the data: window_id (u32) + app_id_len (u32) + app_id + app_name_len (u32) + app_name + title_len (u32) + title + menu_titles_len (u32) + menu_titles
-                        let mut offset = 0;
-                        if data.len() >= 4 {
-                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
-                            offset = 4;
+            let request = WindowCreateRequest {
+                app_id: window_info.app_id.clone(),
+                title: window_info.title.clone(),
+                size: window_info.size,
+                window_type: window_info.window_type,
+                menu_titles: menu_json.clone(),
+                focus_on_create: window_info.focus_on_create,
+                active_on_focus: window_info.active_on_focus,
+                opaque: window_info.opaque,
+            };
 
-                            let read_str = |data: &[u8], offset: &mut usize| -> String {
-                                if *offset + 4 > data.len() {
-                                    return String::new();
-                                }
-                                let len = u32::from_le_bytes(
-                                    data[*offset..*offset + 4].try_into().unwrap(),
-                                ) as usize;
-                                *offset += 4;
-                                if *offset + len > data.len() {
-                                    return String::new();
-                                }
-                                let s = core::str::from_utf8(&data[*offset..*offset + len])
-                                    .unwrap_or("");
-                                *offset += len;
-                                String::from(s)
-                            };
+            let mut window = self.backend.create_window(request)?;
 
-                            // Skip app_id
-                            let _app_id = read_str(&data, &mut offset);
-                            let app_name = read_str(&data, &mut offset);
-                            let _title = read_str(&data, &mut offset);
-                            let menu_titles = read_str(&data, &mut offset);
-
-                            // Box large strings to move them to heap and reduce stack pressure
-                            let app_name: Box<str> = app_name.into_boxed_str();
-                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
-
-                            if crate::debug::is_enabled() {
-                                println!(
-                                    "[Application] FocusChanged: window_id={}, app_name={}, menu_titles={}",
-                                    window_id, app_name, menu_titles
-                                );
-                            }
-                            self.on_focus_changed(window_id, &app_name, &menu_titles);
-                        }
-                    }
-                    Event::Custom { event_type, data } if event_type == 0xF0C0A => {
-                        // ActiveAppChanged event from SWS
-                        // Decode the data (same format as FocusChanged)
-                        let mut offset = 0;
-                        if data.len() >= 4 {
-                            let window_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
-                            offset = 4;
-
-                            let read_str = |data: &[u8], offset: &mut usize| -> String {
-                                if *offset + 4 > data.len() {
-                                    return String::new();
-                                }
-                                let len = u32::from_le_bytes(
-                                    data[*offset..*offset + 4].try_into().unwrap(),
-                                ) as usize;
-                                *offset += 4;
-                                if *offset + len > data.len() {
-                                    return String::new();
-                                }
-                                let s = core::str::from_utf8(&data[*offset..*offset + len])
-                                    .unwrap_or("");
-                                *offset += len;
-                                String::from(s)
-                            };
-
-                            // Skip app_id
-                            let _app_id = read_str(&data, &mut offset);
-                            let app_name = read_str(&data, &mut offset);
-                            let _title = read_str(&data, &mut offset);
-                            let menu_titles = read_str(&data, &mut offset);
-
-                            // Box large strings to move them to heap and reduce stack pressure
-                            let app_name: Box<str> = app_name.into_boxed_str();
-                            let menu_titles: Box<str> = menu_titles.into_boxed_str();
-
-                            if crate::debug::is_enabled() {
-                                println!(
-                                    "[Application] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
-                                    window_id, app_name, menu_titles
-                                );
-                            }
-                            self.on_active_app_changed(window_id, &app_name, &menu_titles);
-
-                            // Force redraw after active app changed (State updates trigger dirty flag)
-                            if !presented_this_cycle && pipeline.has_dirty() {
-                                if crate::debug::is_enabled() {
-                                    println!(
-                                        "[Application] ActiveAppChanged triggered redraw, has_dirty=true"
-                                    );
-                                }
-                                if present_pipeline(&mut pipeline, &mut platform_window) {
-                                    presented_this_cycle = true;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        // Other events are handled by the pipeline
-                        let _ = pipeline.handle_event(&event);
-                        if handle_emitted_window_events(&mut pipeline, &mut platform_window)? {
-                            return Ok(());
-                        }
-                        sync_text_input(&mut platform_window, &pipeline);
-                        if !presented_this_cycle && pipeline.has_dirty() {
-                            if present_pipeline(&mut pipeline, &mut platform_window) {
-                                presented_this_cycle = true;
-                            }
-                        }
-                    }
+            if let Some(menu_bar) = window_info.menu_bar {
+                if !menu_json.is_empty() {
+                    let _ = window.set_menu_titles(&menu_json);
+                    menu_model::register_menu_callbacks(window.surface_id(), &menu_bar);
                 }
             }
 
-            // 6.2 Handle emitted Window events
-            if handle_emitted_window_events(&mut pipeline, &mut platform_window)? {
+            if !limits.resizable {
+                let _ = window.set_resizable(false);
+            }
+
+            let context = WindowContext {
+                window_id,
+                scene_key: declaration.key,
+                pipeline_id,
+                platform_window_id: window.platform_window_id(),
+                is_primary: index == 0,
+            };
+
+            app.on_window_created(&context, &mut window);
+            sync_text_input(&mut window, &pipeline);
+
+            slots.push(WindowSlot {
+                context,
+                pipeline,
+                window,
+                presented_this_cycle: false,
+                _app: PhantomData,
+            });
+        }
+
+        Ok(slots)
+    }
+
+    fn run_loop<A: Application>(
+        &mut self,
+        app: &mut A,
+        slots: &mut Vec<WindowSlot<B::Window, A>>,
+    ) -> Result<()> {
+        loop {
+            let mut any_event = false;
+            let mut any_presented = false;
+            let mut close_ids = Vec::new();
+
+            for slot in slots.iter_mut() {
+                slot.presented_this_cycle = false;
+                while let Some(event) = slot.window.poll_event() {
+                    any_event = true;
+                    handle_window_event(app, slot, event, &mut close_ids)?;
+                }
+            }
+
+            remove_closed_slots(slots, &close_ids);
+            if slots.is_empty() && app.exit_when_all_windows_closed() {
                 return Ok(());
             }
 
-            // 6.3 Render frame
-            // if let Some(buffer) = pipeline.render() {
-            //     platform_window.present(buffer);
-            // }
-            self.on_idle();
-            self.on_window_sync(&mut platform_window);
-            sync_text_input(&mut platform_window, &pipeline);
-            if !presented_this_cycle && pipeline.has_dirty() {
-                if crate::debug::is_enabled() {
-                    println!("[Application] has_dirty=true, calling render()");
+            app.on_idle();
+
+            for slot in slots.iter_mut() {
+                app.on_window_sync(&slot.context, &mut slot.window);
+                sync_text_input(&mut slot.window, &slot.pipeline);
+                if slot.pipeline.has_dirty()
+                    && !slot.presented_this_cycle
+                    && present_pipeline(&mut slot.pipeline, &mut slot.window)
+                {
+                    slot.presented_this_cycle = true;
+                    any_presented = true;
                 }
-                let _ = present_pipeline(&mut pipeline, &mut platform_window);
             }
 
-            // 6.4 Small sleep to prevent busy-waiting
-            // In a real implementation, this would use proper frame timing
-            std::thread::sleep(std::time::Duration::from_millis(16));
+            if !any_event && !any_presented {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
         }
     }
+}
+
+struct WindowSlot<W: PlatformWindow, A: Application> {
+    context: WindowContext,
+    pipeline: RenderingPipeline,
+    window: W,
+    presented_this_cycle: bool,
+    _app: PhantomData<A>,
+}
+
+fn collect_scene_declarations<A: Application>(app: &A) -> Result<Vec<WindowDeclaration>> {
+    let mut builder = SceneBuilder::new();
+    app.scenes().build(&mut builder);
+    let declarations = builder.into_declarations();
+    let mut keys = BTreeSet::new();
+    for declaration in &declarations {
+        if !keys.insert(declaration.key.clone()) {
+            return Err(Error::DuplicateSceneWindowKey);
+        }
+    }
+    Ok(declarations)
+}
+
+fn resolve_scene_view<A: Application>(
+    app: &A,
+    target_key: &SceneWindowKey,
+) -> Option<Box<dyn View>> {
+    collect_scene_declarations(app)
+        .ok()?
+        .into_iter()
+        .find(|declaration| &declaration.key == target_key)
+        .map(|declaration| declaration.view)
 }
 
 fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
@@ -581,12 +321,12 @@ fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
     None
 }
 
-fn sync_text_input(window: &mut SWSPlatformWindow, pipeline: &RenderingPipeline) {
+fn sync_text_input(window: &mut dyn PlatformWindow, pipeline: &RenderingPipeline) {
     let state = pipeline.focused_text_input_state();
     window.sync_text_input(state.as_ref());
 }
 
-fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut SWSPlatformWindow) -> bool {
+fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut dyn PlatformWindow) -> bool {
     if let Some((buffer, damage)) = pipeline.render_with_damage() {
         window.present_with_damage(buffer, damage);
         true
@@ -595,69 +335,282 @@ fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut SWSPlatformWi
     }
 }
 
-fn handle_emitted_window_events(
-    pipeline: &mut RenderingPipeline,
-    window: &mut SWSPlatformWindow,
-) -> Result<bool> {
-    for emitted_event in pipeline.take_emitted_events() {
+fn handle_window_event<A: Application, W: PlatformWindow>(
+    app: &mut A,
+    slot: &mut WindowSlot<W, A>,
+    event: Event,
+    close_ids: &mut Vec<WindowId>,
+) -> Result<()> {
+    match event {
+        Event::Quit => {
+            let _ = slot.window.close();
+            close_ids.push(slot.context.window_id);
+        }
+        Event::Resize { width, height } => {
+            let new_size = Size::new(width as f32, height as f32);
+            if slot.window.resize(width, height).is_ok() {
+                slot.pipeline.resize(new_size);
+                app.on_window_resize(&slot.context, width, height);
+                sync_text_input(&mut slot.window, &slot.pipeline);
+                if present_pipeline(&mut slot.pipeline, &mut slot.window) {
+                    slot.presented_this_cycle = true;
+                }
+            }
+        }
+        Event::ScreenSizeChanged { width, height } => {
+            let resize_to = app.on_screen_size_changed(width, height);
+            if let Some(new_size) = resize_to {
+                let new_width = new_size.width.max(1.0) as u32;
+                let new_height = new_size.height.max(1.0) as u32;
+                if slot.window.resize(new_width, new_height).is_ok() {
+                    slot.pipeline.resize(new_size);
+                    sync_text_input(&mut slot.window, &slot.pipeline);
+                }
+            }
+            if resize_to.is_some() || slot.pipeline.has_dirty() {
+                if present_pipeline(&mut slot.pipeline, &mut slot.window) {
+                    slot.presented_this_cycle = true;
+                }
+            }
+        }
+        Event::MenuItemActivated {
+            window_id,
+            menu_item_id,
+        } => {
+            let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
+        }
+        Event::TextInputCommit {
+            context_id,
+            serial,
+            text,
+        } => {
+            let event = Event::TextInputCommit {
+                context_id,
+                serial,
+                text,
+            };
+            if !slot.pipeline.handle_event(&event)
+                && let Event::TextInputCommit {
+                    context_id,
+                    serial,
+                    text,
+                } = &event
+            {
+                app.on_text_input_commit(&slot.context, *context_id, *serial, text);
+            }
+            sync_after_event(slot);
+        }
+        Event::TextInputPreedit {
+            context_id,
+            serial,
+            cursor_byte,
+            anchor_byte,
+            text,
+            spans,
+        } => {
+            let event = Event::TextInputPreedit {
+                context_id,
+                serial,
+                cursor_byte,
+                anchor_byte,
+                text,
+                spans,
+            };
+            if !slot.pipeline.handle_event(&event)
+                && let Event::TextInputPreedit {
+                    context_id,
+                    serial,
+                    cursor_byte,
+                    anchor_byte,
+                    text,
+                    spans,
+                } = &event
+            {
+                app.on_text_input_preedit(
+                    &slot.context,
+                    *context_id,
+                    *serial,
+                    *cursor_byte,
+                    *anchor_byte,
+                    text,
+                    spans,
+                );
+            }
+            sync_after_event(slot);
+        }
+        Event::TextInputDeleteSurroundingText {
+            context_id,
+            serial,
+            before_bytes,
+            after_bytes,
+        } => {
+            let event = Event::TextInputDeleteSurroundingText {
+                context_id,
+                serial,
+                before_bytes,
+                after_bytes,
+            };
+            if !slot.pipeline.handle_event(&event)
+                && let Event::TextInputDeleteSurroundingText {
+                    context_id,
+                    serial,
+                    before_bytes,
+                    after_bytes,
+                } = event
+            {
+                app.on_text_input_delete_surrounding_text(
+                    &slot.context,
+                    context_id,
+                    serial,
+                    before_bytes,
+                    after_bytes,
+                );
+            }
+            sync_after_event(slot);
+        }
+        Event::TextInputDone { context_id, serial } => {
+            let event = Event::TextInputDone { context_id, serial };
+            let _ = slot.pipeline.handle_event(&event);
+        }
+        Event::Custom { event_type, data } if event_type == 0xF0C0F => {
+            if let Some((window_id, app_name, menu_titles)) = decode_app_change_payload(&data) {
+                app.on_focus_changed(window_id, &app_name, &menu_titles);
+            }
+        }
+        Event::Custom { event_type, data } if event_type == 0xF0C0A => {
+            if let Some((window_id, app_name, menu_titles)) = decode_app_change_payload(&data) {
+                app.on_active_app_changed(window_id, &app_name, &menu_titles);
+                sync_after_event(slot);
+            }
+        }
+        _ => {
+            let _ = slot.pipeline.handle_event(&event);
+            handle_emitted_window_events(slot, close_ids)?;
+            sync_after_event(slot);
+        }
+    }
+    Ok(())
+}
+
+fn sync_after_event<A: Application, W: PlatformWindow>(slot: &mut WindowSlot<W, A>) {
+    sync_text_input(&mut slot.window, &slot.pipeline);
+    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, &mut slot.window) {
+        slot.presented_this_cycle = true;
+    }
+}
+
+fn handle_emitted_window_events<A: Application, W: PlatformWindow>(
+    slot: &mut WindowSlot<W, A>,
+    close_ids: &mut Vec<WindowId>,
+) -> Result<()> {
+    for emitted_event in slot.pipeline.take_emitted_events() {
         match emitted_event {
             Event::Window(crate::event::WindowEvent::CloseRequested) => {
-                let _ = window.close();
-                return Ok(true);
+                let _ = slot.window.close();
+                close_ids.push(slot.context.window_id);
             }
             Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
-                let _ = window.maximize();
+                let _ = slot.window.maximize();
             }
             Event::Window(crate::event::WindowEvent::RestoreRequested) => {
-                let _ = window.restore();
+                let _ = slot.window.restore();
             }
             Event::Window(crate::event::WindowEvent::MinimizeRequested) => {
-                let _ = window.minimize();
+                let _ = slot.window.minimize();
             }
             Event::Window(crate::event::WindowEvent::MoveRequested) => {
-                let _ = window.request_move();
+                let _ = slot.window.request_move();
             }
             _ => {}
         }
     }
-    Ok(false)
+    Ok(())
 }
 
-struct ApplicationRootElement<A: Application + Clone> {
+fn remove_closed_slots<A: Application, W: PlatformWindow>(
+    slots: &mut Vec<WindowSlot<W, A>>,
+    close_ids: &[WindowId],
+) {
+    if close_ids.is_empty() {
+        return;
+    }
+    slots.retain(|slot| {
+        if close_ids.contains(&slot.context.window_id) {
+            menu_model::unregister_menu_callbacks(slot.window.surface_id());
+            false
+        } else {
+            true
+        }
+    });
+}
+
+fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let window_id = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    let mut offset = 4;
+
+    let read_str = |data: &[u8], offset: &mut usize| -> Option<String> {
+        if *offset + 4 > data.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes(data[*offset..*offset + 4].try_into().ok()?) as usize;
+        *offset += 4;
+        if *offset + len > data.len() {
+            return None;
+        }
+        let s = core::str::from_utf8(&data[*offset..*offset + len]).ok()?;
+        *offset += len;
+        Some(String::from(s))
+    };
+
+    let _app_id = read_str(data, &mut offset)?;
+    let app_name = read_str(data, &mut offset)?;
+    let _title = read_str(data, &mut offset)?;
+    let menu_titles = read_str(data, &mut offset)?;
+    Some((window_id, app_name, menu_titles))
+}
+
+struct SceneWindowRootElement<A: Application> {
     id: ElementId,
     app: A,
+    scene_key: SceneWindowKey,
+    pipeline_id: PipelineId,
     child: Option<Box<dyn Element>>,
-    size: crate::geometry::Size,
+    size: Size,
     position: Point,
     subscriptions: Vec<SubscriptionId>,
 }
 
-impl<A: Application + Clone> ApplicationRootElement<A> {
-    fn new(app: A) -> Self {
+impl<A: Application> SceneWindowRootElement<A> {
+    fn new(app: A, scene_key: SceneWindowKey, pipeline_id: PipelineId) -> Self {
         let id = ElementId::generate();
-        let child = app.body().create_element();
+        let child = resolve_scene_view(&app, &scene_key).map(|view| view.create_element());
         Self {
             id,
             app,
-            child: Some(child),
-            size: crate::geometry::Size::ZERO,
+            scene_key,
+            pipeline_id,
+            child,
+            size: Size::ZERO,
             position: Point::ZERO,
             subscriptions: Vec::new(),
         }
     }
 }
 
-impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
+impl<A: Application> Element for SceneWindowRootElement<A> {
     fn id(&self) -> ElementId {
         self.id
     }
 
     fn type_name(&self) -> &str {
-        "ApplicationRootElement"
+        "SceneWindowRootElement"
     }
 
-    fn type_name_debug(&self) -> alloc::string::String {
-        alloc::format!("ApplicationRootElement<{}>", core::any::type_name::<A>())
+    fn type_name_debug(&self) -> String {
+        alloc::format!("SceneWindowRootElement<{}>", core::any::type_name::<A>())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -682,87 +635,59 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
         }
     }
 
-    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        if let Some(app) = new_view.as_any().downcast_ref::<A>() {
-            let focused_path = self
-                .child
-                .as_ref()
-                .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-            self.app = app.clone();
-            self.child = Some(self.app.body().create_element());
-            if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
-                crate::element::restore_focus_at_path(child.as_mut(), path);
-            }
-            UpdateResult::Updated
-        } else {
-            UpdateResult::Replaced
-        }
+    fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
+        UpdateResult::NoChange
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        if crate::debug::is_enabled() {
-            println!(
-                "[ApplicationRootElement] rebuild() called for id={}",
-                self.id.get()
-            );
-        }
         let focused_path = self
             .child
             .as_ref()
             .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-        let body = self.app.body();
+        let Some(new_view) = resolve_scene_view(&self.app, &self.scene_key) else {
+            return UpdateResult::NoChange;
+        };
         if let Some(ref mut child) = self.child {
-            match child.update(&body) {
+            match child.update(new_view.as_ref()) {
                 UpdateResult::NoChange => return UpdateResult::NoChange,
                 UpdateResult::Updated => {
-                    crate::pipeline::mark_element_needs_layout(child.id());
+                    crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
                     return UpdateResult::NoChange;
                 }
-                UpdateResult::Replaced => {
-                    child.unmount();
-                }
+                UpdateResult::Replaced => child.unmount(),
             }
         }
-        self.child = Some(body.create_element());
+        self.child = Some(new_view.create_element());
         if let Some(ref mut child) = self.child {
-            child.mount();
+            let ctx = MountContext::new(self.pipeline_id);
+            child.mount(&ctx);
             if let Some(path) = focused_path.as_deref() {
                 crate::element::restore_focus_at_path(child.as_mut(), path);
             }
-        }
-        if let Some(ref child) = self.child {
-            crate::pipeline::mark_element_needs_layout(child.id());
+            crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
         }
         UpdateResult::NoChange
     }
 
-    fn mount(&mut self) {
+    fn mount(&mut self, ctx: &MountContext) {
+        self.pipeline_id = ctx.pipeline_id();
         let listenables = self.app.listenables();
-        if crate::debug::is_enabled() {
-            println!(
-                "[ApplicationRootElement] mount() called: {} listenables found",
-                listenables.len()
-            );
-        }
         for listenable in listenables {
             let element_id = self.id;
+            let pipeline_id = self.pipeline_id;
             let invalidation_kind = listenable.invalidation_kind();
-            if crate::debug::is_enabled() {
-                println!(
-                    "[ApplicationRootElement] Subscribing to element_id={}",
-                    element_id.get()
-                );
-            }
             let callback = alloc::sync::Arc::new(move || match invalidation_kind {
-                InvalidationKind::Build => crate::pipeline::mark_element_dirty(element_id),
-                InvalidationKind::Paint => crate::pipeline::mark_element_needs_paint(element_id),
+                InvalidationKind::Build => {
+                    crate::pipeline::mark_element_dirty(pipeline_id, element_id)
+                }
+                InvalidationKind::Paint => {
+                    crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
+                }
             });
-            let subscription_id = listenable.subscribe_any(callback);
-            self.subscriptions.push(subscription_id);
+            self.subscriptions.push(listenable.subscribe_any(callback));
         }
-
         if let Some(ref mut child) = self.child {
-            child.mount();
+            child.mount(ctx);
         }
     }
 
@@ -770,14 +695,18 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
+        let listenables = self.app.listenables();
+        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
+            listenable.unsubscribe(*subscription_id);
+        }
         self.subscriptions.clear();
     }
 
-    fn layout(&mut self, constraints: LayoutConstraints) -> crate::geometry::Size {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if let Some(ref mut child) = self.child {
             self.size = child.layout(constraints);
         } else {
-            self.size = crate::geometry::Size::ZERO;
+            self.size = Size::ZERO;
         }
         self.size
     }
@@ -801,19 +730,16 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        if let Some(ref child) = self.child {
-            child.hit_test(point)
-        } else {
-            self.bounds().contains(point)
-        }
+        self.child
+            .as_ref()
+            .is_some_and(|child| child.hit_test(point))
+            || self.bounds().contains(point)
     }
 
-    fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
-        if let Some(ref mut child) = self.child {
-            child.handle_event(event, phase)
-        } else {
-            false
-        }
+    fn handle_event(&mut self, event: &Event, phase: crate::event::Phase) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| child.handle_event(event, phase))
     }
 
     fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {

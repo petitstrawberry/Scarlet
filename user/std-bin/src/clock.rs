@@ -38,36 +38,43 @@ impl ClockApp {
 }
 
 impl Application for ClockApp {
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let _ = self.tick.get();
         let bg = self.bg_color();
         let show = self.show_settings.get();
 
-        Window::new(
-            if show { "Clock Settings" } else { "Clock" },
-            match_view!(show, {
-                true => settings_content(self.clone()),
-                false => CanvasView::new(300.0, 300.0, Rc::new(move |buf, w, h| {
-                    let mut canvas = Canvas::new(buf, w, h);
-                    draw_clock(&mut canvas, w, h);
-                })),
-            })
-            .frame(f32::INFINITY, f32::INFINITY),
+        WindowGroup::new(
+            "main",
+            Window::new(
+                if show { "Clock Settings" } else { "Clock" },
+                match_view!(show, {
+                    true => settings_content(self.clone()),
+                    false => CanvasView::new(300.0, 300.0, Rc::new(move |buf, w, h| {
+                        let mut canvas = Canvas::new(buf, w, h);
+                        draw_clock(&mut canvas, w, h);
+                    })),
+                })
+                .frame(f32::INFINITY, f32::INFINITY),
+            )
+            .background_color(bg)
+            .opaque(false)
+            .app_id("org.scarlet-os.desktop.clock")
+            .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(
+                vec![MenuEntry::Item(
+                    MenuItemModel::new("settings", "Settings...").on_activate(Arc::new({
+                        let s = self.show_settings.clone();
+                        move || {
+                            s.set(true);
+                        }
+                    })),
+                )],
+            )]))
+            .size(Size::new(320.0, 320.0)),
         )
-        .background_color(bg)
-        .opaque(false)
-        .app_id("org.scarlet-os.desktop.clock")
-        .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(
-            vec![MenuEntry::Item(
-                MenuItemModel::new("settings", "Settings...").on_activate(Arc::new({
-                    let s = self.show_settings.clone();
-                    move || {
-                        s.set(true);
-                    }
-                })),
-            )],
-        )]))
-        .size(Size::new(320.0, 320.0))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn debug_logging(&self) -> bool {
