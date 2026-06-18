@@ -291,20 +291,8 @@ pub trait Element {
 
     /// Get window information if this Element represents a Window
     ///
-    /// Returns Some((app_id, title, size, window_type, menu_bar, focus_on_create, active_on_focus))
-    /// if this Element is a WindowElement,
-    /// None otherwise. Default implementation returns None.
-    fn get_window_info(
-        &self,
-    ) -> Option<(
-        alloc::string::String,
-        alloc::string::String,
-        Size,
-        u32,
-        Option<crate::menu_model::MenuBarModel>,
-        bool,
-        bool,
-    )> {
+    /// Returns window information if this element is a window.
+    fn get_window_info(&self) -> Option<crate::views::WindowInfo> {
         None
     }
 

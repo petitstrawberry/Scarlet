@@ -632,7 +632,8 @@ impl<V: View> Window<V> {
     pub fn resizable(mut self, resizable: bool) -> Self;
     pub fn movable(mut self, movable: bool) -> Self;
     pub fn decorated(mut self, decorated: bool) -> Self;
-    pub fn background_color(mut self, color: Option<Color>) -> Self;
+    pub fn background_color(mut self, color: Color) -> Self;
+    pub fn opaque(mut self, opaque: bool) -> Self;
     pub fn window_type(mut self, window_type: u32) -> Self;
     pub fn focus_on_create(mut self, focus_on_create: bool) -> Self;
     pub fn active_on_focus(mut self, active_on_focus: bool) -> Self;
@@ -646,6 +647,7 @@ impl<V: View> Window<V> {
     pub fn get_max_size(&self) -> Option<Size>;
     pub fn is_resizable(&self) -> bool;
     pub fn is_decorated(&self) -> bool;
+    pub fn is_opaque(&self) -> bool;
 }
 ```
 

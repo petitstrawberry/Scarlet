@@ -205,15 +205,15 @@ pub trait Application: View {
         pipeline.set_scale_milli(output_scale_milli);
 
         // 4. Perform initial layout to determine window size and extract window properties
-        let (
-            app_id,
-            window_title,
-            window_size,
-            window_type,
-            menu_bar,
-            focus_on_create,
-            active_on_focus,
-        ) = pipeline.layout_initial();
+        let window_info = pipeline.layout_initial();
+        let app_id = window_info.app_id.clone();
+        let window_title = window_info.title.clone();
+        let window_size = window_info.size;
+        let window_type = window_info.window_type;
+        let menu_bar = window_info.menu_bar.clone();
+        let focus_on_create = window_info.focus_on_create;
+        let active_on_focus = window_info.active_on_focus;
+        let opaque = window_info.opaque;
 
         // Debug: Dump element tree
         if crate::debug::is_enabled() {
@@ -235,6 +235,7 @@ pub trait Application: View {
                 &menu_json,
                 focus_on_create,
                 active_on_focus,
+                opaque,
             )
             .map_err(|_| crate::error::Error::WindowCreationFailed)?
         } else {
@@ -246,6 +247,7 @@ pub trait Application: View {
                 &menu_json,
                 focus_on_create,
                 active_on_focus,
+                opaque,
             )
             .map_err(|_| crate::error::Error::WindowCreationFailed)?
         };

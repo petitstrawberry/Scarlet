@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::buffer::Buffer;
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits,
 };
@@ -39,6 +39,8 @@ pub struct WindowInfo {
     pub menu_bar: Option<MenuBarModel>,
     pub focus_on_create: bool,
     pub active_on_focus: bool,
+    pub background_color: Color,
+    pub opaque: bool,
 }
 
 impl WindowInfo {
@@ -50,6 +52,8 @@ impl WindowInfo {
         menu_bar: Option<MenuBarModel>,
         focus_on_create: bool,
         active_on_focus: bool,
+        background_color: Color,
+        opaque: bool,
     ) -> Self {
         Self {
             app_id,
@@ -59,6 +63,8 @@ impl WindowInfo {
             menu_bar,
             focus_on_create,
             active_on_focus,
+            background_color,
+            opaque,
         }
     }
 }
@@ -136,7 +142,8 @@ pub struct Window<V: View> {
     resizable: bool,
     movable: bool,
     decorated: bool,
-    background_color: Option<Color>,
+    background_color: Color,
+    opaque: bool,
     window_type: u32,
     menu_bar: Option<MenuBarModel>,
     focus_on_create: bool,
@@ -168,7 +175,8 @@ impl<V: View> Window<V> {
             resizable: true,
             movable: true,
             decorated: true,
-            background_color: Some(Color::WHITE),
+            background_color: ColorPalette::light().window_background(),
+            opaque: true,
             window_type: window_type::NORMAL,
             menu_bar: None,
             focus_on_create: true,
@@ -226,9 +234,15 @@ impl<V: View> Window<V> {
         self
     }
 
-    /// Set the background color (None for transparent)
-    pub fn background_color(mut self, color: Option<Color>) -> Self {
+    /// Set the background color.
+    pub fn background_color(mut self, color: Color) -> Self {
         self.background_color = color;
+        self
+    }
+
+    /// Set whether this window is fully opaque.
+    pub fn opaque(mut self, opaque: bool) -> Self {
+        self.opaque = opaque;
         self
     }
 
@@ -290,6 +304,11 @@ impl<V: View> Window<V> {
     pub fn is_decorated(&self) -> bool {
         self.decorated
     }
+
+    /// Check if the window is fully opaque.
+    pub fn is_opaque(&self) -> bool {
+        self.opaque
+    }
 }
 
 impl<V: View + Clone> Clone for Window<V> {
@@ -304,6 +323,7 @@ impl<V: View + Clone> Clone for Window<V> {
             movable: self.movable,
             decorated: self.decorated,
             background_color: self.background_color,
+            opaque: self.opaque,
             window_type: self.window_type,
             menu_bar: self.menu_bar.clone(),
             focus_on_create: self.focus_on_create,
@@ -323,6 +343,8 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.menu_bar.clone(),
             self.focus_on_create,
             self.active_on_focus,
+            self.background_color,
+            self.opaque,
         )
     }
 
@@ -759,27 +781,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         core::mem::take(&mut self.pending_window_action)
     }
 
-    fn get_window_info(
-        &self,
-    ) -> Option<(
-        alloc::string::String,
-        alloc::string::String,
-        Size,
-        u32,
-        Option<MenuBarModel>,
-        bool,
-        bool,
-    )> {
-        let info = self.view.window_info();
-        Some((
-            info.app_id,
-            info.title,
-            info.size,
-            info.window_type,
-            info.menu_bar,
-            info.focus_on_create,
-            info.active_on_focus,
-        ))
+    fn get_window_info(&self) -> Option<WindowInfo> {
+        Some(self.view.window_info())
     }
 
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
@@ -796,7 +799,7 @@ pub struct WindowRenderObject {
     title: String,
     size: Size,
     decorated: bool,
-    background_color: Option<Color>,
+    background_color: Color,
     focused: bool,
     buffer: Option<Buffer>,
     // Button hover states (0=none, 1=hover, 2=pressed)
@@ -806,12 +809,7 @@ pub struct WindowRenderObject {
 }
 
 impl WindowRenderObject {
-    pub fn new(
-        title: String,
-        size: Size,
-        decorated: bool,
-        background_color: Option<Color>,
-    ) -> Self {
+    pub fn new(title: String, size: Size, decorated: bool, background_color: Color) -> Self {
         Self {
             title,
             size,
@@ -823,6 +821,11 @@ impl WindowRenderObject {
             maximize_button_state: 0,
             minimize_button_state: 0,
         }
+    }
+
+    /// Get the window background color.
+    pub fn background_color(&self) -> Color {
+        self.background_color
     }
 
     /// Get close button rect (matching Scarlet_old)
@@ -944,10 +947,8 @@ impl WindowRenderObject {
             let w = canvas.width();
             let h = canvas.height();
 
-            // Fill background with specified color (or skip if None for transparent)
-            if let Some(bg_color) = self.background_color {
-                canvas.fill_rect(0, 0, w, h, bg_color);
-            }
+            // Fill background with the specified color, including explicit transparency.
+            canvas.fill_rect(0, 0, w, h, self.background_color);
 
             // Draw titlebar if decorated
             if decorated {

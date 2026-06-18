@@ -28,13 +28,14 @@ struct ClipRegion {
 pub struct Compositor {
     window_buffer: Buffer,
     scale_milli: u32,
+    background_color: Color,
     last_bounds: BTreeMap<ElementId, Rect>,
     last_damage: Option<Vec<DamageRect>>,
 }
 
 impl Compositor {
     /// Create a new compositor with the given window size
-    pub fn new(window_size: Size, scale_milli: u32) -> Self {
+    pub fn new(window_size: Size, scale_milli: u32, background_color: Color) -> Self {
         Self {
             window_buffer: Buffer::from_logical_dimensions_with_scale(
                 libm::ceilf(window_size.width.max(1.0)) as u32,
@@ -42,6 +43,7 @@ impl Compositor {
                 scale_milli,
             ),
             scale_milli: scale_milli.max(1),
+            background_color,
             last_bounds: BTreeMap::new(),
             last_damage: None,
         }
@@ -83,6 +85,11 @@ impl Compositor {
         self.resize(logical_size);
     }
 
+    /// Set the background color used when clearing the output buffer.
+    pub fn set_background_color(&mut self, color: Color) {
+        self.background_color = color;
+    }
+
     /// Clear the window buffer with a color
     pub fn clear(&mut self, color: Color) {
         let pixel = color.to_bgra();
@@ -104,7 +111,7 @@ impl Compositor {
         }
 
         // Clear background
-        self.clear(Color::WHITE);
+        self.clear(self.background_color);
 
         // Composite from root
         self.composite_node(tree.root(), Point::ZERO);
@@ -144,7 +151,7 @@ impl Compositor {
         let damage = self.present_damage_rects(&rects);
 
         for rect in rects.iter() {
-            self.clear_rect(*rect, Color::WHITE);
+            self.clear_rect(*rect, self.background_color);
         }
 
         self.composite_element_clipped(root, Point::ZERO, &rects);
@@ -162,7 +169,7 @@ impl Compositor {
             );
         }
 
-        self.clear(Color::WHITE);
+        self.clear(self.background_color);
         self.composite_element_with_clip(root, Point::ZERO, None);
         self.composite_select_overlays(root, Point::ZERO, None);
         self.last_damage = None;
@@ -205,7 +212,7 @@ impl Compositor {
 
         // Clear only dirty regions.
         for rect in rects.iter() {
-            self.clear_rect(*rect, Color::WHITE);
+            self.clear_rect(*rect, self.background_color);
         }
 
         self.composite_node_clipped(tree.root(), Point::ZERO, &rects);

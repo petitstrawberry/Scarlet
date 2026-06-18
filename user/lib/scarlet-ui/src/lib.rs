@@ -160,8 +160,8 @@ pub mod prelude {
         BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, Select, Slider, Toggle,
     };
     pub use crate::views::{
-        Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window,
-        WindowContentLayout, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer, Text,
+        TextField, VStack, Window, WindowContentLayout, ZStack,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

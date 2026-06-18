@@ -282,13 +282,16 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
     } else if trimmed.starts_with('{') {
         parse_menu_tree_json(trimmed)
     } else {
-        trimmed.split('|').map(|s| TaskMenuItem {
-            id: s.to_string(),
-            title: s.to_string(),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        }).collect()
+        trimmed
+            .split('|')
+            .map(|s| TaskMenuItem {
+                id: s.to_string(),
+                title: s.to_string(),
+                enabled: true,
+                shortcut: None,
+                children: Vec::new(),
+            })
+            .collect()
     };
 
     if !app_name.is_empty() {
@@ -697,7 +700,7 @@ impl Application for TaskBarApp {
         )
         .app_id("org.scarlet-os.desktop.taskbar")
         .decorated(false)
-        .background_color(Some(Color::rgb(0.940, 0.940, 0.960)))
+        .background_color(Color::rgb(0.940, 0.940, 0.960))
         .window_type(scarlet_ui::views::window_type::TASKBAR)
         .active_on_focus(false)
         .resizable(false)

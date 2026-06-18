@@ -117,6 +117,7 @@ impl SWSPlatformWindow {
             "",
             true,
             window_type == sws_protocol::window_types::NORMAL,
+            true,
         )
     }
 
@@ -136,6 +137,7 @@ impl SWSPlatformWindow {
             menu_titles,
             true,
             window_type == sws_protocol::window_types::NORMAL,
+            true,
         )
     }
 
@@ -148,6 +150,7 @@ impl SWSPlatformWindow {
         menu_titles: &str,
         focus_on_create: bool,
         active_on_focus: bool,
+        opaque: bool,
     ) -> Result<Self> {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
@@ -175,6 +178,11 @@ impl SWSPlatformWindow {
                 active_on_focus,
             )
             .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+
+        if !opaque {
+            conn.set_window_has_alpha_content(surface_id, true)
+                .map_err(|_| crate::error::Error::IoError)?;
+        }
 
         Ok(Self {
             conn,
@@ -206,6 +214,7 @@ impl SWSPlatformWindow {
             menu_titles,
             true,
             true,
+            true,
         )
     }
 
@@ -216,6 +225,7 @@ impl SWSPlatformWindow {
         menu_titles: &str,
         focus_on_create: bool,
         active_on_focus: bool,
+        opaque: bool,
     ) -> Result<Self> {
         Self::create_with_type_and_menu_and_policies(
             app_id,
@@ -225,6 +235,7 @@ impl SWSPlatformWindow {
             menu_titles,
             focus_on_create,
             active_on_focus,
+            opaque,
         )
     }
 
@@ -927,6 +938,12 @@ impl PlatformWindow for SWSPlatformWindow {
         }
 
         Ok(())
+    }
+
+    fn set_opaque(&mut self, opaque: bool) -> Result<()> {
+        self.conn
+            .set_window_has_alpha_content(self.surface_id, !opaque)
+            .map_err(|_| crate::error::Error::IoError)
     }
 
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
