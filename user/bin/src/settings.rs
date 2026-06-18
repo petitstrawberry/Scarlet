@@ -756,7 +756,7 @@ fn datetime_page(
 }
 
 impl Application for SettingsApp {
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let app = self.clone();
         let input_app = self.clone();
         let tz_regions = self.timezone_regions.get();
@@ -809,7 +809,7 @@ impl Application for SettingsApp {
         let highlight = ColorPalette::light().primary();
         let border = ColorPalette::light().border();
 
-        Window::new(
+        WindowGroup::new("main", Window::new(
             "Settings",
             navigation! {
                 NavigationLink::new("Appearance", Icon::Home, move || {
@@ -845,7 +845,11 @@ impl Application for SettingsApp {
             .frame(f32::INFINITY, f32::INFINITY),
         )
         .app_id("org.scarlet-os.desktop.settings")
-        .size(Size::new(800.0, 600.0))
+        .size(Size::new(800.0, 600.0)))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn debug_logging(&self) -> bool {

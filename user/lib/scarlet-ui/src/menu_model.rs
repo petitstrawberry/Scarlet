@@ -200,13 +200,19 @@ pub fn register_menu_callbacks(window_id: u32, menu_bar: &MenuBarModel) {
 
 pub fn invoke_menu_callback(window_id: u32, item_id: &str) -> bool {
     let key = (window_id, item_id.to_string());
-    let registry = MENU_CALLBACKS.lock();
-    if let Some(callback) = registry.get(&key) {
+    let callback = MENU_CALLBACKS.lock().get(&key).cloned();
+    if let Some(callback) = callback {
         callback();
         true
     } else {
         false
     }
+}
+
+pub fn unregister_menu_callbacks(window_id: u32) {
+    MENU_CALLBACKS
+        .lock()
+        .retain(|(registered_window_id, _), _| *registered_window_id != window_id);
 }
 
 fn collect_callbacks(

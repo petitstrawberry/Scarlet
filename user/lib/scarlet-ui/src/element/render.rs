@@ -9,6 +9,7 @@ use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::{MountContext, PipelineId};
 use crate::view::View;
 
 /// RenderObject trait for leaf rendering nodes
@@ -110,6 +111,7 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     children: Vec<Box<dyn Element>>,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
+    pipeline_id: PipelineId,
 }
 
 impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
@@ -122,6 +124,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children: Vec::new(),
             position: Point::ZERO,
             last_constraints: None,
+            pipeline_id: PipelineId::default(),
         }
     }
 
@@ -134,6 +137,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            pipeline_id: PipelineId::default(),
         }
     }
 
@@ -217,9 +221,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         UpdateResult::NoChange
     }
 
-    fn mount(&mut self) {
+    fn mount(&mut self, ctx: &MountContext) {
+        self.pipeline_id = ctx.pipeline_id();
         for child in &mut self.children {
-            child.mount();
+            child.mount(ctx);
         }
     }
 
@@ -435,7 +440,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     *key_event,
                 );
                 if handled {
-                    crate::pipeline::mark_element_needs_paint(self.id);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
             }
@@ -493,7 +498,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     _ => false,
                 };
                 if handled {
-                    crate::pipeline::mark_element_needs_paint(self.id);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
             }
@@ -526,7 +531,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     _event,
                 );
                 if handled {
-                    crate::pipeline::mark_element_needs_paint(self.id);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
             }
@@ -553,7 +558,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 let handled =
                     crate::views::text_field::handle_text_field_focus(render_object, *focus_event);
                 if handled {
-                    crate::pipeline::mark_element_needs_paint(self.id);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
             }
@@ -593,7 +598,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
                 {
                     render_object.invoke_on_click();
-                    crate::pipeline::mark_element_needs_paint(self.id);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                     return true;
                 }
             }
@@ -619,13 +624,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 match mouse_event {
                     MouseEvent::Entered { .. } => {
                         render_object.set_hovered(true);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::Exited { .. } => {
                         render_object.set_hovered(false);
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::ButtonPressed {
@@ -633,7 +638,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_pressed(true);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::ButtonReleased {
@@ -644,7 +649,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             button.invoke_on_click();
                         }
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     _ => {}
@@ -662,7 +667,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     MouseEvent::Entered { .. } => {
                         render_object.set_hovered(true);
                         menu_item.invoke_on_hover();
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::Moved { .. } => {
@@ -670,13 +675,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             render_object.set_hovered(true);
                         }
                         menu_item.invoke_on_hover();
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::Exited { .. } => {
                         render_object.set_hovered(false);
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::ButtonPressed {
@@ -684,7 +689,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_pressed(true);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::ButtonReleased {
@@ -695,7 +700,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             menu_item.invoke_on_click();
                         }
                         render_object.set_pressed(false);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     _ => {}
@@ -716,14 +721,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         let hovered = render_object.hit_test(local_x, local_y);
                         if hovered != render_object.hovered() {
                             render_object.set_hovered(hovered);
-                            crate::pipeline::mark_element_needs_paint(self.id);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         }
                         return true;
                     }
                     MouseEvent::Exited { .. } => {
                         if render_object.hovered().is_some() {
                             render_object.set_hovered(None);
-                            crate::pipeline::mark_element_needs_paint(self.id);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         }
                         return true;
                     }
@@ -769,12 +774,12 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     MouseEvent::Entered { x: _, y } | MouseEvent::Moved { x: _, y } => {
                         let hovered = render_object.option_index_at_y(*y as f32);
                         render_object.set_hovered_index(hovered);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::Exited { .. } => {
                         render_object.set_hovered_index(None);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     MouseEvent::ButtonReleased {
@@ -799,7 +804,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             render_object.set_hovered_index(Some(current));
                             render_object.adjust_scroll();
                         }
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
                     _ => {}
@@ -829,6 +834,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 fn update_slider_value(
                     render_object: &mut crate::views::SliderRenderObject,
                     slider: &crate::views::Slider,
+                    pipeline_id: PipelineId,
                     id: ElementId,
                     x: i32,
                     commit: bool,
@@ -847,7 +853,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     let mut changed = false;
                     if (render_object.get_value() - new_value).abs() > 0.001 {
                         render_object.set_value(new_value);
-                        crate::pipeline::mark_element_needs_paint(id);
+                        crate::pipeline::mark_element_needs_paint(pipeline_id, id);
                         changed = true;
                     }
                     if commit && (state_value - new_value).abs() > 0.001 {
@@ -867,12 +873,26 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if !dragging_state.get() {
                             dragging_state.set(true);
                         }
-                        update_slider_value(render_object, slider, self.id, *x, true);
+                        update_slider_value(
+                            render_object,
+                            slider,
+                            self.pipeline_id,
+                            self.id,
+                            *x,
+                            true,
+                        );
                         return true;
                     }
                     MouseEvent::Moved { x, .. } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, *x, true);
+                            update_slider_value(
+                                render_object,
+                                slider,
+                                self.pipeline_id,
+                                self.id,
+                                *x,
+                                true,
+                            );
                             return true;
                         }
                     }
@@ -882,7 +902,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         if render_object.is_dragging() {
-                            update_slider_value(render_object, slider, self.id, *x, true);
+                            update_slider_value(
+                                render_object,
+                                slider,
+                                self.pipeline_id,
+                                self.id,
+                                *x,
+                                true,
+                            );
                             render_object.set_dragging(false);
                             if dragging_state.get() {
                                 dragging_state.set(false);
@@ -911,7 +938,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     if let Ok(mut handler) = handler.try_borrow_mut() {
                         let handled = handler(_event);
                         if handled {
-                            crate::pipeline::mark_element_needs_paint(self.id);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         }
                         return handled;
                     }
@@ -939,18 +966,24 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 && render_object.hovered_index() != Some(index)
                             {
                                 render_object.set_hovered_index(Some(index));
-                                crate::pipeline::mark_element_needs_paint(self.id);
+                                crate::pipeline::mark_element_needs_paint(
+                                    self.pipeline_id,
+                                    self.id,
+                                );
                             }
                         } else {
                             if render_object.hovered_index().is_some() {
                                 render_object.set_hovered_index(None);
-                                crate::pipeline::mark_element_needs_paint(self.id);
+                                crate::pipeline::mark_element_needs_paint(
+                                    self.pipeline_id,
+                                    self.id,
+                                );
                             }
                         }
                     } else {
                         if render_object.hovered_index().is_some() {
                             render_object.set_hovered_index(None);
-                            crate::pipeline::mark_element_needs_paint(self.id);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         }
                     }
                     return true;
@@ -958,7 +991,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 MouseEvent::Exited { .. } => {
                     if render_object.hovered_index().is_some() {
                         render_object.set_hovered_index(None);
-                        crate::pipeline::mark_element_needs_paint(self.id);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                     }
                     return true;
                 }
@@ -981,7 +1014,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
                                 if current != index {
                                     selected_state.set(index);
-                                    crate::pipeline::mark_element_dirty(self.id);
+                                    crate::pipeline::mark_element_dirty(self.pipeline_id, self.id);
                                 }
                             }
                         }

@@ -640,7 +640,7 @@ impl Application for TaskBarApp {
         self.update_menu_for_app(window_id, app_name, &resolved_menu_titles);
     }
 
-    fn on_resize(&mut self, width: u32, height: u32) {
+    fn on_window_resize(&mut self, _ctx: &WindowContext, width: u32, height: u32) {
         println!("[TaskBar] on_resize: width={}, height={}", width, height);
         self.screen_width.set(width as f32);
         self.open_menu_index.set(None);
@@ -655,7 +655,7 @@ impl Application for TaskBarApp {
         Some(Size::new(width as f32, TASKBAR_HEIGHT as f32))
     }
 
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let cpu = self.cpu_usage.get();
         let mem = self.memory_usage.get();
         let clock = self.clock.get();
@@ -663,7 +663,7 @@ impl Application for TaskBarApp {
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
         println!(
-            "[TaskBar] body() called: menu_tree has {} items",
+            "[TaskBar] scenes() called: menu_tree has {} items",
             menu_tree.items.len()
         );
         let active_window_id = self.active_window_id.get();
@@ -674,7 +674,7 @@ impl Application for TaskBarApp {
         let bar_height = TASKBAR_HEIGHT as f32;
         let window_height = bar_height;
 
-        Window::new("TaskBar",
+        WindowGroup::new("main", Window::new("TaskBar",
             hstack! {
                 build_menu_bar_view(&menu_tree.items, active_window_id, self.open_menu_index.clone()),
                 Spacer::new(),
@@ -705,7 +705,15 @@ impl Application for TaskBarApp {
         .active_on_focus(false)
         .resizable(false)
         .movable(false)
-        .size(Size::new(screen_width, window_height))
+        .size(Size::new(screen_width, window_height)))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
+    }
+
+    fn exit_when_all_windows_closed(&self) -> bool {
+        false
     }
 
     fn init(&mut self) {

@@ -31,6 +31,9 @@ pub enum Error {
 
     /// Event dispatch error
     EventDispatchError,
+
+    /// Duplicate scene window key
+    DuplicateSceneWindowKey,
 }
 
 impl fmt::Display for Error {
@@ -47,6 +50,7 @@ impl fmt::Display for Error {
             Error::LayoutConstraintViolation => write!(f, "Layout constraint violation"),
             Error::RenderError => write!(f, "Rendering error"),
             Error::EventDispatchError => write!(f, "Event dispatch error"),
+            Error::DuplicateSceneWindowKey => write!(f, "Duplicate scene window key"),
         }
     }
 }

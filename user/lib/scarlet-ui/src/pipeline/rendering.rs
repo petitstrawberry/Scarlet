@@ -8,7 +8,7 @@ use crate::compositor::{Compositor, DamageRect};
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
 use crate::geometry::Size;
-use crate::pipeline::PipelineOwner;
+use crate::pipeline::{PipelineId, PipelineOwner};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -37,14 +37,31 @@ pub struct RenderingPipeline {
 impl RenderingPipeline {
     /// Create a new RenderingPipeline
     pub fn new() -> Self {
+        Self::with_pipeline_id(PipelineId::generate())
+    }
+
+    /// Create a new RenderingPipeline with a stable owner ID.
+    pub fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
         Self {
-            element_tree: ElementTree::new(),
-            pipeline_owner: PipelineOwner::new(),
+            element_tree: ElementTree::with_pipeline_id(pipeline_id),
+            pipeline_owner: PipelineOwner::with_pipeline_id(pipeline_id),
             compositor: None,
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
         }
+    }
+
+    /// Return this pipeline's owner ID.
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.element_tree.pipeline_id()
+    }
+
+    /// Unmount the element tree and discard pending global dirty work.
+    pub fn teardown(&mut self) {
+        self.element_tree.clear_root();
+        crate::pipeline::clear_global_dirty(self.pipeline_id());
+        self.compositor = None;
     }
 
     /// Set the output scale in milli-units.
@@ -289,6 +306,12 @@ impl RenderingPipeline {
 
     pub fn focused_text_input_state(&self) -> Option<crate::element::TextInputElementState> {
         self.element_tree.focused_text_input_state()
+    }
+}
+
+impl Drop for RenderingPipeline {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 

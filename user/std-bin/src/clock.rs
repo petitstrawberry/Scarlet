@@ -7,7 +7,7 @@ use std::time::Duration;
 use scarlet_os::time;
 use scarlet_ui::graphics::Canvas;
 use scarlet_ui::prelude::*;
-use scarlet_ui::{CanvasView, MenuBarModel, MenuEntry, MenuItemModel, hstack, match_view, vstack};
+use scarlet_ui::{CanvasView, MenuBarModel, MenuEntry, MenuItemModel, hstack, scenes, vstack};
 use scarlet_ui_macros::View;
 
 fn presets() -> [(Color, &'static str); 6] {
@@ -26,7 +26,6 @@ struct ClockApp {
     tick: State<u64>,
     base_color: State<Color>,
     alpha: State<f32>,
-    show_settings: State<bool>,
 }
 
 impl ClockApp {
@@ -38,36 +37,43 @@ impl ClockApp {
 }
 
 impl Application for ClockApp {
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let _ = self.tick.get();
         let bg = self.bg_color();
-        let show = self.show_settings.get();
 
-        Window::new(
-            if show { "Clock Settings" } else { "Clock" },
-            match_view!(show, {
-                true => settings_content(self.clone()),
-                false => CanvasView::new(300.0, 300.0, Rc::new(move |buf, w, h| {
-                    let mut canvas = Canvas::new(buf, w, h);
-                    draw_clock(&mut canvas, w, h);
-                })),
-            })
-            .frame(f32::INFINITY, f32::INFINITY),
-        )
-        .background_color(bg)
-        .opaque(false)
-        .app_id("org.scarlet-os.desktop.clock")
-        .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(
-            vec![MenuEntry::Item(
-                MenuItemModel::new("settings", "Settings...").on_activate(Arc::new({
-                    let s = self.show_settings.clone();
-                    move || {
-                        s.set(true);
-                    }
-                })),
-            )],
-        )]))
-        .size(Size::new(320.0, 320.0))
+        scenes! {
+            Window::new(
+                "Clock",
+                CanvasView::new(
+                    300.0,
+                    300.0,
+                    Rc::new(move |buf, w, h| {
+                        let mut canvas = Canvas::new(buf, w, h);
+                        draw_clock(&mut canvas, w, h);
+                    }),
+                )
+                .frame(f32::INFINITY, f32::INFINITY),
+            )
+            .background_color(bg)
+            .opaque(false)
+            .app_id("org.scarlet-os.desktop.clock")
+            .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(
+                vec![MenuEntry::Item(
+                        MenuItemModel::new("settings", "Settings...")
+                            .on_activate(Arc::new(|| open_window("settings"))),
+                    )],
+            )]))
+            .size(Size::new(320.0, 320.0)),
+            Window::new("Clock Settings", settings_content(self.clone()))
+                .scene_key("settings")
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.desktop.clock.settings")
+                .size(Size::new(320.0, 360.0)),
+        }
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn debug_logging(&self) -> bool {
@@ -81,7 +87,6 @@ fn settings_content(app: ClockApp) -> impl View + Clone {
     let current_alpha = app.alpha.get();
     let base_state = app.base_color.clone();
     let alpha_state = app.alpha.clone();
-    let show_state = app.show_settings.clone();
 
     vstack! {
         vstack! {
@@ -114,7 +119,7 @@ fn settings_content(app: ClockApp) -> impl View + Clone {
             Slider::new(alpha_state).min(0.0).max(1.0),
 
             Spacer::new().frame_height(16.0),
-            Button::new("Done").on_click(move || { show_state.set(false); }),
+            Button::new("Done").on_click(|| { dismiss_window("settings"); }),
         }
         .padding(20.0)
     }
@@ -207,7 +212,6 @@ fn main() -> ExitCode {
         tick: State::new(StateId::new(0), 0),
         base_color: State::new(StateId::new(1), Color::rgb(30, 30, 40)),
         alpha: State::new(StateId::new(3), 1.0),
-        show_settings: State::new(StateId::new(2), false),
     };
 
     let tick = app.tick.clone();

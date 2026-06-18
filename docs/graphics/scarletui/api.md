@@ -38,8 +38,8 @@ impl CounterApp {
             ..Default::default()
         }
     }
-    
-    fn body(&self) -> impl View {
+
+    fn counter_view(&self) -> impl View {
         vstack! {
             Text::new("Counter"),
             Button::new("Increment")
@@ -47,6 +47,12 @@ impl CounterApp {
             Text::new(&format!("Count: {}", self.count.get())),
         }
         .spacing(10.0)
+    }
+}
+
+impl Application for CounterApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("Counter", self.counter_view()))
     }
 }
 
@@ -1088,8 +1094,8 @@ pub enum WindowEvent {
 Main entry point for ScarletUI applications.
 
 ```rust
-pub trait Application: View {
-    fn body(&self) -> impl View;
+pub trait Application: Clone + 'static {
+    fn scenes(&self) -> impl Scene;
 
     fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {
         // Default: do nothing
@@ -1111,9 +1117,9 @@ pub trait Application: View {
         false
     }
 
-    fn run(&mut self) -> Result<()>
-    where
-        Self: Sized + Clone;
+    fn exit_when_all_windows_closed(&self) -> bool {
+        true
+    }
 }
 ```
 
@@ -1125,10 +1131,14 @@ struct MyApp {
 }
 
 impl MyApp {
-    fn body(&self) -> impl View {
-        Window::new("My App",
-            Text::new(&format!("Count: {}", self.count.get()))
-        )
+    fn content(&self) -> impl View {
+        Text::new(&format!("Count: {}", self.count.get()))
+    }
+}
+
+impl Application for MyApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("My App", self.content()))
     }
 
     fn init(&mut self) {
@@ -1141,6 +1151,37 @@ fn main() {
         count: State::initial(StateId::new(1)),
     };
     app.run().unwrap();
+}
+```
+
+### Auxiliary Windows
+
+Declare auxiliary windows directly in `scenes()` and open or dismiss them with application commands from callbacks.
+This keeps the scene graph static and avoids representing runtime window state with `Option<Scene>` branches.
+
+```rust
+impl Application for MyApp {
+    fn scenes(&self) -> impl Scene {
+        scenes! {
+            WindowGroup::new(
+                "main",
+                Window::new("My App", self.content())
+                    .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(vec![
+                        MenuEntry::Item(
+                            MenuItemModel::new("settings", "Settings...")
+                                .on_activate(Arc::new(|| open_window("settings"))),
+                        ),
+                    ])])),
+            ),
+            Window::new("Settings", self.settings_content())
+                .scene_key("settings")
+                .open_at_launch(false),
+        }
+    }
+
+    fn settings_content(&self) -> impl View + Clone {
+        Button::new("Done").on_click(|| dismiss_window("settings"))
+    }
 }
 ```
 
@@ -1305,24 +1346,28 @@ struct CounterApp {
 }
 
 impl CounterApp {
-    fn body(&self) -> impl View {
-        Window::new("Counter",
-            vstack! {
-                Text::new("Counter").font_size(24.0),
-                Text::new(&format!("Count: {}", self.count.get()))
-                    .font_size(32.0),
-                hstack! {
-                    Button::new("-")
-                        .on_click(|| self.count.update(|c| *c -= 1)),
-                    Spacer::new().flex(1),
-                    Button::new("+")
-                        .on_click(|| self.count.update(|c| *c += 1)),
-                }
-                .spacing(10.0),
+    fn counter_view(&self) -> impl View {
+        vstack! {
+            Text::new("Counter").font_size(24.0),
+            Text::new(&format!("Count: {}", self.count.get()))
+                .font_size(32.0),
+            hstack! {
+                Button::new("-")
+                    .on_click(|| self.count.update(|c| *c -= 1)),
+                Spacer::new().flex(1),
+                Button::new("+")
+                    .on_click(|| self.count.update(|c| *c += 1)),
             }
-            .spacing(20.0)
-            .alignment(Alignment::Center),
-        )
+            .spacing(10.0),
+        }
+        .spacing(20.0)
+        .alignment(Alignment::Center)
+    }
+}
+
+impl Application for CounterApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("Counter", self.counter_view()))
     }
 }
 
@@ -1348,21 +1393,25 @@ struct TodoApp {
 }
 
 impl TodoApp {
-    fn body(&self) -> impl View {
-        Window::new("TODO List",
-            vstack! {
-                Text::new("TODO List").font_size(20.0),
-                Divider::new(),
-                // TODO: Add TextField when available
-                Button::new("Add Item")
-                    .on_click(|| {
-                        // Add item logic
-                    }),
-                Divider::new(),
-                // TODO: Add list rendering
-            }
-            .spacing(10.0),
-        )
+    fn content(&self) -> impl View {
+        vstack! {
+            Text::new("TODO List").font_size(20.0),
+            Divider::new(),
+            // TODO: Add TextField when available
+            Button::new("Add Item")
+                .on_click(|| {
+                    // Add item logic
+                }),
+            Divider::new(),
+            // TODO: Add list rendering
+        }
+        .spacing(10.0)
+    }
+}
+
+impl Application for TodoApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new("main", Window::new("TODO List", self.content()))
     }
 }
 ```

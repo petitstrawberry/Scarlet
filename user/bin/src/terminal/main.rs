@@ -18,9 +18,10 @@ use core::f32;
 use core::time::Duration;
 
 use scarlet_ui::{
-    Application, Color, ComponentElement, Element, KeyCode, KeyEvent, PlatformWindow,
-    SWSPlatformWindow, Size, State, StateId, TextGrid, TextGridBuffer, TextGridCell,
-    TextGridCursor, View, ViewExt, Window, WindowContentLayout, text_grid_cell_width,
+    Application, ApplicationRunExt, Color, ComponentElement, Element, KeyCode, KeyEvent,
+    Listenable, PlatformWindow, SWSPlatformWindow, Scene, Size, State, StateId, TextGrid,
+    TextGridBuffer, TextGridCell, TextGridCursor, View, ViewExt, Window, WindowContentLayout,
+    WindowContext, WindowGroup, text_grid_cell_width,
 };
 use std::fs::File;
 use std::handle::Handle;
@@ -291,7 +292,7 @@ impl View for TerminalApp {
 }
 
 impl Application for TerminalApp {
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let writer = self.master_writer.clone();
         let screen = self.screen.clone();
         let grid = self.grid.clone();
@@ -300,41 +301,51 @@ impl Application for TerminalApp {
         let window_size = self.window_size.clone();
         let preedit = self.preedit.clone();
         let metrics = self.metrics.get();
-        Window::new(
-            "Terminal",
-            TextGrid::new(self.grid.clone())
-                .cell_size(metrics.cell_width, metrics.cell_height)
-                .font_size(metrics.font_size)
-                .background_color(Color::rgb(12, 14, 18))
-                .cursor(Some(self.cursor.get()))
-                .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
-                .on_key(move |event| {
-                    write_key_event(
-                        &writer,
-                        &screen,
-                        &grid,
-                        &cursor,
-                        &metrics_state,
-                        &window_size,
-                        &preedit,
-                        event,
-                    )
-                })
-                .frame(f32::INFINITY, f32::INFINITY),
+        WindowGroup::new(
+            "main",
+            Window::new(
+                "Terminal",
+                TextGrid::new(self.grid.clone())
+                    .cell_size(metrics.cell_width, metrics.cell_height)
+                    .font_size(metrics.font_size)
+                    .background_color(Color::rgb(12, 14, 18))
+                    .cursor(Some(self.cursor.get()))
+                    .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
+                    .on_key(move |event| {
+                        write_key_event(
+                            &writer,
+                            &screen,
+                            &grid,
+                            &cursor,
+                            &metrics_state,
+                            &window_size,
+                            &preedit,
+                            event,
+                        )
+                    })
+                    .frame(f32::INFINITY, f32::INFINITY),
+            )
+            .app_id("org.scarlet-os.desktop.terminal")
+            .decorated(TERMINAL_WINDOW_DECORATED)
+            .size(Size::new(
+                DEFAULT_WINDOW_WIDTH as f32,
+                DEFAULT_WINDOW_HEIGHT as f32,
+            )),
         )
-        .app_id("org.scarlet-os.desktop.terminal")
-        .decorated(TERMINAL_WINDOW_DECORATED)
-        .size(Size::new(
-            DEFAULT_WINDOW_WIDTH as f32,
-            DEFAULT_WINDOW_HEIGHT as f32,
-        ))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn init(&mut self) {
         self.start_pty_session();
     }
 
-    fn on_window_created(&mut self, window: &mut SWSPlatformWindow) {
+    fn on_window_created(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
+            return;
+        };
         let window_id = window.surface_id();
         let Ok((context_id, serial)) = window
             .connection_mut()
@@ -379,7 +390,13 @@ impl Application for TerminalApp {
         }
     }
 
-    fn on_text_input_commit(&mut self, context_id: u32, _serial: u32, text: &str) {
+    fn on_text_input_commit(
+        &mut self,
+        _ctx: &WindowContext,
+        context_id: u32,
+        _serial: u32,
+        text: &str,
+    ) {
         let Some(text_input) = *self.text_input.lock() else {
             return;
         };
@@ -393,6 +410,7 @@ impl Application for TerminalApp {
 
     fn on_text_input_preedit(
         &mut self,
+        _ctx: &WindowContext,
         context_id: u32,
         _serial: u32,
         cursor_byte: u32,
@@ -421,6 +439,7 @@ impl Application for TerminalApp {
 
     fn on_text_input_delete_surrounding_text(
         &mut self,
+        _ctx: &WindowContext,
         context_id: u32,
         _serial: u32,
         _before_bytes: u32,
@@ -434,7 +453,7 @@ impl Application for TerminalApp {
         }
     }
 
-    fn on_resize(&mut self, width: u32, height: u32) {
+    fn on_window_resize(&mut self, _ctx: &WindowContext, width: u32, height: u32) {
         *self.window_size.lock() = (width, height);
         if let Some(state) = self.text_input.lock().as_mut() {
             state.last_cursor_rect = None;
@@ -455,7 +474,10 @@ impl Application for TerminalApp {
         false
     }
 
-    fn on_window_sync(&mut self, window: &mut SWSPlatformWindow) {
+    fn on_window_sync(&mut self, _ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
+            return;
+        };
         self.refresh_text_input_state(window);
     }
 }

@@ -12,90 +12,123 @@ use crate::os::Mutex;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::println;
 
-/// Global dirty element IDs for State change callbacks
-///
-/// This allows ComponentElement callbacks to notify the PipelineOwner
-/// when State changes occur.
-static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
-static GLOBAL_DIRTY_LAYOUT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
-static GLOBAL_DIRTY_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
-static GLOBAL_DIRTY_SELF_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
+/// Stable owner ID for dirty queues belonging to one rendering pipeline.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PipelineId(u64);
+
+impl PipelineId {
+    /// Generate a globally unique pipeline ID.
+    pub fn generate() -> Self {
+        static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_PIPELINE_ID.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Create a pipeline ID from a raw numeric value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the raw numeric value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for PipelineId {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+/// Context passed while mounting an element tree.
+#[derive(Clone, Copy, Debug)]
+pub struct MountContext {
+    pipeline_id: PipelineId,
+}
+
+impl MountContext {
+    /// Create a mount context for a rendering pipeline.
+    pub const fn new(pipeline_id: PipelineId) -> Self {
+        Self { pipeline_id }
+    }
+
+    /// Return the owning pipeline ID.
+    pub const fn pipeline_id(self) -> PipelineId {
+        self.pipeline_id
+    }
+}
+
+#[derive(Default)]
+struct DirtyQueues {
+    build: BTreeSet<ElementId>,
+    layout: BTreeSet<ElementId>,
+    paint: BTreeSet<ElementId>,
+    self_paint: BTreeSet<ElementId>,
+}
+
+/// Global dirty element IDs for State change callbacks, partitioned by pipeline.
+static GLOBAL_DIRTY: Mutex<BTreeMap<PipelineId, DirtyQueues>> = Mutex::new(BTreeMap::new());
 
 /// Mark an element as dirty for rebuild (called from ComponentElement callbacks)
 ///
 /// This function is called from State change callbacks in ComponentElement
 /// to notify the PipelineOwner that an element needs to be rebuilt.
-pub fn mark_element_dirty(id: ElementId) {
+pub fn mark_element_dirty(owner: PipelineId, id: ElementId) {
     if crate::debug::is_enabled() {
-        println!("[PipelineOwner] mark_element_dirty: id={}", id.get());
+        println!(
+            "[PipelineOwner] mark_element_dirty: owner={}, id={}",
+            owner.get(),
+            id.get()
+        );
     }
-    let mut ids = GLOBAL_DIRTY_IDS.lock();
-    ids.insert(id);
+    let mut queues = GLOBAL_DIRTY.lock();
+    let queue = queues.entry(owner).or_default();
+    queue.build.insert(id);
     if crate::debug::is_enabled() {
-        println!("[PipelineOwner] Dirty count: {}", ids.len());
+        println!("[PipelineOwner] Dirty count: {}", queue.build.len());
     }
 }
 
 /// Mark an element as needing paint only (no build/layout).
-pub fn mark_element_needs_paint(id: ElementId) {
-    let mut ids = GLOBAL_DIRTY_PAINT_IDS.lock();
-    ids.insert(id);
+pub fn mark_element_needs_paint(owner: PipelineId, id: ElementId) {
+    let mut queues = GLOBAL_DIRTY.lock();
+    queues.entry(owner).or_default().paint.insert(id);
 }
 
 /// Mark an element as needing layout and paint.
-pub fn mark_element_needs_layout(id: ElementId) {
-    let mut ids = GLOBAL_DIRTY_LAYOUT_IDS.lock();
-    ids.insert(id);
+pub fn mark_element_needs_layout(owner: PipelineId, id: ElementId) {
+    let mut queues = GLOBAL_DIRTY.lock();
+    queues.entry(owner).or_default().layout.insert(id);
 }
 
 /// Mark an element as needing paint for its own buffer only.
 ///
 /// This is for render objects whose internal state changed without changing
 /// their descendants, such as a window titlebar hover state.
-pub fn mark_element_needs_self_paint(id: ElementId) {
-    let mut ids = GLOBAL_DIRTY_SELF_PAINT_IDS.lock();
-    ids.insert(id);
+pub fn mark_element_needs_self_paint(owner: PipelineId, id: ElementId) {
+    let mut queues = GLOBAL_DIRTY.lock();
+    queues.entry(owner).or_default().self_paint.insert(id);
 }
 
-/// Take the globally dirty element IDs (if any)
-///
-/// Returns an empty vector if no elements are marked dirty.
-pub(crate) fn take_global_dirty_ids() -> alloc::vec::Vec<ElementId> {
-    let mut ids = GLOBAL_DIRTY_IDS.lock();
-    let collected = ids.iter().copied().collect();
-    ids.clear();
-    collected
+fn take_dirty_for(owner: PipelineId) -> DirtyQueues {
+    GLOBAL_DIRTY.lock().remove(&owner).unwrap_or_default()
 }
 
-pub(crate) fn take_global_dirty_paint_ids() -> alloc::vec::Vec<ElementId> {
-    let mut ids = GLOBAL_DIRTY_PAINT_IDS.lock();
-    let collected = ids.iter().copied().collect();
-    ids.clear();
-    collected
+pub(crate) fn clear_global_dirty(owner: PipelineId) {
+    GLOBAL_DIRTY.lock().remove(&owner);
 }
 
-pub(crate) fn take_global_dirty_layout_ids() -> alloc::vec::Vec<ElementId> {
-    let mut ids = GLOBAL_DIRTY_LAYOUT_IDS.lock();
-    let collected = ids.iter().copied().collect();
-    ids.clear();
-    collected
-}
-
-pub(crate) fn take_global_dirty_self_paint_ids() -> alloc::vec::Vec<ElementId> {
-    let mut ids = GLOBAL_DIRTY_SELF_PAINT_IDS.lock();
-    let collected = ids.iter().copied().collect();
-    ids.clear();
-    collected
-}
-
-pub(crate) fn has_global_dirty() -> bool {
-    !GLOBAL_DIRTY_IDS.lock().is_empty()
-        || !GLOBAL_DIRTY_LAYOUT_IDS.lock().is_empty()
-        || !GLOBAL_DIRTY_PAINT_IDS.lock().is_empty()
-        || !GLOBAL_DIRTY_SELF_PAINT_IDS.lock().is_empty()
+pub(crate) fn has_global_dirty(owner: PipelineId) -> bool {
+    GLOBAL_DIRTY.lock().get(&owner).is_some_and(|queue| {
+        !queue.build.is_empty()
+            || !queue.layout.is_empty()
+            || !queue.paint.is_empty()
+            || !queue.self_paint.is_empty()
+    })
 }
 
 /// Dirty flags for different render phases
@@ -114,6 +147,8 @@ pub enum DirtyPhase {
 /// - Layout: Recalculate positions and sizes
 /// - Paint: Repaint to buffers
 pub struct PipelineOwner {
+    /// Dirty queue owner ID.
+    pipeline_id: PipelineId,
     /// Elements that need rebuilding (State changed)
     dirty_build: BTreeSet<ElementId>,
     /// Elements that need relayouting
@@ -131,7 +166,13 @@ pub struct PipelineOwner {
 impl PipelineOwner {
     /// Create a new PipelineOwner
     pub fn new() -> Self {
+        Self::with_pipeline_id(PipelineId::default())
+    }
+
+    /// Create a PipelineOwner for a specific rendering pipeline.
+    pub fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
         Self {
+            pipeline_id,
             dirty_build: BTreeSet::new(),
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
@@ -180,7 +221,7 @@ impl PipelineOwner {
 
     /// Check if there's any dirty work
     pub fn has_dirty(&self) -> bool {
-        has_global_dirty()
+        has_global_dirty(self.pipeline_id)
             || !self.dirty_build.is_empty()
             || !self.dirty_layout.is_empty()
             || !self.dirty_paint.is_empty()
@@ -191,37 +232,33 @@ impl PipelineOwner {
     ///
     /// This processes build, layout, and paint in order.
     pub fn flush(&mut self, element_tree: &mut ElementTree, window_size: Size) {
-        // Collect any globally dirty elements from State change callbacks
-        for dirty_id in take_global_dirty_ids() {
-            self.mark_needs_build(dirty_id);
-        }
-        for dirty_id in take_global_dirty_layout_ids() {
-            self.mark_needs_layout(dirty_id);
-        }
-        for dirty_id in take_global_dirty_paint_ids() {
-            self.mark_needs_paint(dirty_id);
-        }
-        for dirty_id in take_global_dirty_self_paint_ids() {
-            self.mark_needs_self_paint(dirty_id);
-        }
+        self.collect_global_dirty();
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
-        for dirty_id in take_global_dirty_layout_ids() {
-            self.mark_needs_layout(dirty_id);
-        }
-        for dirty_id in take_global_dirty_paint_ids() {
-            self.mark_needs_paint(dirty_id);
-        }
-        for dirty_id in take_global_dirty_self_paint_ids() {
-            self.mark_needs_self_paint(dirty_id);
-        }
+        self.collect_global_dirty();
 
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
 
         // 3. Paint Phase: Repaint dirty elements
         self.flush_paint(element_tree);
+    }
+
+    fn collect_global_dirty(&mut self) {
+        let dirty = take_dirty_for(self.pipeline_id);
+        for id in dirty.build {
+            self.mark_needs_build(id);
+        }
+        for id in dirty.layout {
+            self.mark_needs_layout(id);
+        }
+        for id in dirty.paint {
+            self.mark_needs_paint(id);
+        }
+        for id in dirty.self_paint {
+            self.mark_needs_self_paint(id);
+        }
     }
 
     /// Flush the build phase

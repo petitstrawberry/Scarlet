@@ -25,9 +25,9 @@ use rust_h264::decoder::{Decoder, Frame};
 use rust_h264::nal::parse_annex_b;
 use sas_client::{SasClient, SasStream, StreamConfig};
 use scarlet_ui::{
-    Application, Canvas, CanvasView, Color, ComponentElement, Element, Event, InvalidationKind,
-    KeyCode, KeyEvent, Listenable, MouseButton, MouseEvent, Size, SubscriptionId, View, ViewExt,
-    Window, graphics,
+    Application, ApplicationRunExt, Canvas, CanvasView, Color, ComponentElement, Element, Event,
+    InvalidationKind, KeyCode, KeyEvent, Listenable, MouseButton, MouseEvent, Scene, Size,
+    SubscriptionId, View, ViewExt, Window, WindowGroup, graphics,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::{File, OpenOptions};
@@ -873,29 +873,38 @@ impl View for VideoPlayerApp {
 }
 
 impl Application for VideoPlayerApp {
-    fn body(&self) -> impl View {
+    fn scenes(&self) -> impl Scene {
         let frame_store = self.frame_store.clone();
         let controls = self.controls.clone();
         let controls_for_event = self.controls.clone();
         let paint_signal_for_event = self.paint_signal.clone();
         let controls_for_key = self.controls.clone();
         let paint_signal_for_key = self.paint_signal.clone();
-        Window::new(
-            self.window_title.clone(),
-            CanvasView::new(
-                DISPLAY_WIDTH as f32,
-                DISPLAY_HEIGHT as f32,
-                Rc::new(move |buffer, width, height| {
-                    draw_video_frame(buffer, width, height, &frame_store, &controls);
+        WindowGroup::new(
+            "main",
+            Window::new(
+                self.window_title.clone(),
+                CanvasView::new(
+                    DISPLAY_WIDTH as f32,
+                    DISPLAY_HEIGHT as f32,
+                    Rc::new(move |buffer, width, height| {
+                        draw_video_frame(buffer, width, height, &frame_store, &controls);
+                    }),
+                )
+                .on_event(move |event| {
+                    handle_canvas_event(event, &controls_for_event, &paint_signal_for_event)
+                })
+                .on_key(move |event| {
+                    handle_key_event(event, &controls_for_key, &paint_signal_for_key)
                 }),
             )
-            .on_event(move |event| {
-                handle_canvas_event(event, &controls_for_event, &paint_signal_for_event)
-            })
-            .on_key(move |event| handle_key_event(event, &controls_for_key, &paint_signal_for_key)),
+            .app_id("org.scarlet-os.video-player")
+            .size(Size::new(DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32)),
         )
-        .app_id("org.scarlet-os.video-player")
-        .size(Size::new(DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        <Self as View>::listenables(self)
     }
 
     fn init(&mut self) {

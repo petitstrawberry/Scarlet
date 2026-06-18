@@ -10,6 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{Element, ElementId, TextInputElementState};
 use crate::geometry::{Point, Size};
+use crate::pipeline::{MountContext, PipelineId};
 
 /// Global counter for generating unique Element IDs
 static ELEMENT_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -27,12 +28,21 @@ pub fn generate_element_id() -> u32 {
 /// - Providing access to elements by ID
 pub struct ElementTree {
     root: Option<Box<dyn Element>>,
+    pipeline_id: PipelineId,
 }
 
 impl ElementTree {
     /// Create a new empty ElementTree
     pub fn new() -> Self {
-        Self { root: None }
+        Self::with_pipeline_id(PipelineId::generate())
+    }
+
+    /// Create a new empty ElementTree owned by a rendering pipeline.
+    pub fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
+        Self {
+            root: None,
+            pipeline_id,
+        }
     }
 
     /// Set the root Element
@@ -47,8 +57,22 @@ impl ElementTree {
         // Set and mount the new root
         self.root = Some(root);
         if let Some(ref mut new_root) = self.root {
-            new_root.mount();
+            let ctx = MountContext::new(self.pipeline_id);
+            new_root.mount(&ctx);
         }
+    }
+
+    /// Return the owner pipeline ID.
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
+    }
+
+    /// Unmount and remove the root element.
+    pub fn clear_root(&mut self) {
+        if let Some(ref mut root) = self.root {
+            root.unmount();
+        }
+        self.root = None;
     }
 
     /// Get the root Element

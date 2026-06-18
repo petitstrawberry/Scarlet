@@ -7,6 +7,7 @@ use alloc::string::String;
 use core::any::Any;
 
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::MountContext;
 use crate::view::View;
 
 use super::id::ElementId;
@@ -189,7 +190,7 @@ pub trait Element {
     ///
     /// Called when the Element is first added to the tree.
     /// Subscribers should be set up here.
-    fn mount(&mut self) {}
+    fn mount(&mut self, _ctx: &MountContext) {}
 
     /// Unmount the Element from the tree
     ///
