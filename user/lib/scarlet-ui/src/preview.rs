@@ -369,13 +369,19 @@ impl LoadedPreviewLibrary {
     /// ScarletUI preview API as the host. All preview objects created from this
     /// library must be dropped before this value is dropped.
     pub unsafe fn load(path: impl AsRef<Path>) -> core::result::Result<Self, String> {
+        // SAFETY: The caller guarantees `path` points to a compatible preview
+        // dylib whose lifetime is managed by `Self`.
         let library = unsafe { libloading::Library::new(path.as_ref()) }
             .map_err(|error| error.to_string())?;
+        // SAFETY: The preview dylib contract requires this symbol to exist with
+        // the exact `unsafe fn() -> Box<dyn PreviewLibrary>` signature.
         let entry = unsafe {
             library
                 .get::<unsafe fn() -> Box<dyn PreviewLibrary>>(PREVIEW_ENTRY_SYMBOL)
                 .map_err(|error| error.to_string())?
         };
+        // SAFETY: The symbol ABI is validated by the preview contract above,
+        // and the returned trait object cannot outlive `library`.
         let api = unsafe { entry() };
         drop(entry);
         Ok(Self {

@@ -213,7 +213,10 @@ fn run(config: Config) -> Result<(), String> {
                         host.reload(library)?;
                         println!("[preview] reloaded");
                     } else {
-                        host = Some(PreviewHost::new(library)?);
+                        host = Some(PreviewHost::new_with_selection(
+                            library,
+                            config.preview.as_deref(),
+                        )?);
                         println!("[preview] loaded");
                     }
                 }
@@ -268,6 +271,9 @@ fn build_and_load(
         )
     })?;
 
+    // SAFETY: The copied dylib was just built by this tool against the same
+    // ScarletUI preview API that the host links to, and the loaded library is
+    // kept alive for the lifetime of all objects created from it.
     unsafe { LoadedPreviewLibrary::load(&copy_path) }
 }
 

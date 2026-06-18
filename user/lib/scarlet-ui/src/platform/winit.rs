@@ -5,12 +5,13 @@ use crate::error::{Error, Result};
 use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
 use crate::geometry::{Point, Size};
 use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::cell::RefCell;
 use core::num::NonZeroU32;
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ::winit::application::ApplicationHandler;
@@ -21,19 +22,22 @@ use ::winit::event::{
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
 use ::winit::keyboard::{Key, NamedKey};
-use ::winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+use ::winit::platform::pump_events::EventLoopExtPumpEvents;
 use ::winit::window::{Window as WinitWindow, WindowAttributes, WindowId};
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
     softbuffer::Surface<::winit::event_loop::OwnedDisplayHandle, Rc<WinitWindow>>;
 
-#[derive(Default)]
-pub(crate) struct WinitBackend;
+pub(crate) struct WinitBackend {
+    shared: Rc<WinitSharedState>,
+}
 
 impl WinitBackend {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            shared: Rc::new(WinitSharedState::new()),
+        }
     }
 }
 
@@ -45,7 +49,13 @@ impl PlatformBackend for WinitBackend {
     }
 
     fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window> {
-        WinitPlatformWindow::create(request)
+        WinitPlatformWindow::create(self.shared.clone(), request)
+    }
+}
+
+impl Default for WinitBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -56,7 +66,6 @@ impl PlatformWindowState for WinitPlatformWindow {
 }
 
 struct WinitEventState {
-    window_id: WindowId,
     scale_factor: f64,
     cursor_physical_x: f64,
     cursor_physical_y: f64,
@@ -76,9 +85,8 @@ struct WinitEventState {
 }
 
 impl WinitEventState {
-    fn new(window_id: WindowId, scale_factor: f64) -> Self {
+    fn new(scale_factor: f64) -> Self {
         Self {
-            window_id,
             scale_factor,
             cursor_physical_x: 0.0,
             cursor_physical_y: 0.0,
@@ -133,9 +141,42 @@ impl WinitEventState {
     }
 }
 
-struct WinitPumpHandler {
+struct WinitWindowEntry {
     state: Rc<RefCell<WinitEventState>>,
     window: Rc<WinitWindow>,
+}
+
+struct WinitSharedState {
+    event_loop: RefCell<EventLoop<()>>,
+    windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
+}
+
+impl WinitSharedState {
+    fn new() -> Self {
+        let event_loop = EventLoop::new().expect("winit event loop creation must succeed");
+        Self {
+            event_loop: RefCell::new(event_loop),
+            windows: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn window_entry(
+        &self,
+        window_id: WindowId,
+    ) -> Option<(Rc<RefCell<WinitEventState>>, Rc<WinitWindow>)> {
+        self.windows
+            .borrow()
+            .get(&window_id)
+            .map(|entry| (entry.state.clone(), entry.window.clone()))
+    }
+
+    fn remove_window(&self, window_id: WindowId) {
+        self.windows.borrow_mut().remove(&window_id);
+    }
+}
+
+struct WinitPumpHandler {
+    shared: Rc<WinitSharedState>,
 }
 
 impl ApplicationHandler for WinitPumpHandler {
@@ -143,19 +184,18 @@ impl ApplicationHandler for WinitPumpHandler {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let mut state = self.state.borrow_mut();
-        if window_id != state.window_id {
+        let Some((state, window)) = self.shared.window_entry(window_id) else {
             return;
-        }
+        };
+        let mut state = state.borrow_mut();
 
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 state.push(Event::Quit);
-                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 let logical_width = physical_to_logical_len(size.width, state.scale_factor);
@@ -167,6 +207,11 @@ impl ApplicationHandler for WinitPumpHandler {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 state.scale_factor = scale_factor;
+                let size = window.inner_size();
+                state.push(Event::Resize {
+                    width: physical_to_logical_len(size.width, scale_factor),
+                    height: physical_to_logical_len(size.height, scale_factor),
+                });
             }
             WindowEvent::Focused(focused) => {
                 state.window_focused = focused;
@@ -180,14 +225,14 @@ impl ApplicationHandler for WinitPumpHandler {
                 let new_x = physical_to_logical_pos(position.x, state.scale_factor);
                 let new_y = physical_to_logical_pos(position.y, state.scale_factor);
                 if state.manual_move_active {
-                    if let Ok(outer) = self.window.outer_position() {
+                    if let Ok(outer) = window.outer_position() {
                         let global_x = outer.x as f64 + position.x;
                         let global_y = outer.y as f64 + position.y;
                         let new_outer_x = state.manual_move_origin_outer_x as f64 + global_x
                             - state.manual_move_origin_global_x;
                         let new_outer_y = state.manual_move_origin_outer_y as f64 + global_y
                             - state.manual_move_origin_global_y;
-                        self.window.set_outer_position(PhysicalPosition::new(
+                        window.set_outer_position(PhysicalPosition::new(
                             f64_to_i32_saturated(new_outer_x.round()),
                             f64_to_i32_saturated(new_outer_y.round()),
                         ));
@@ -325,40 +370,50 @@ impl ApplicationHandler for WinitPumpHandler {
 }
 
 pub struct WinitPlatformWindow {
-    event_loop: EventLoop<()>,
+    shared: Rc<WinitSharedState>,
     window: Rc<WinitWindow>,
     surface: SoftbufferSurface,
     state: Rc<RefCell<WinitEventState>>,
     current_size: Size,
     ime_allowed: bool,
+    surface_id: u32,
 }
 
 impl WinitPlatformWindow {
-    fn create(request: WindowCreateRequest) -> Result<Self> {
-        let event_loop = EventLoop::new().map_err(|_| Error::WindowCreationFailed)?;
-        let context = SoftbufferContext::new(event_loop.owned_display_handle())
-            .map_err(|_| Error::IoError)?;
+    fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
         let attributes = WindowAttributes::default()
             .with_title(request.title)
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
+        let context = {
+            let event_loop = shared.event_loop.borrow();
+            SoftbufferContext::new(event_loop.owned_display_handle()).map_err(|_| Error::IoError)?
+        };
         #[allow(deprecated)]
-        let window = Rc::new(
-            event_loop
-                .create_window(attributes)
-                .map_err(|_| Error::WindowCreationFailed)?,
-        );
+        let window = {
+            let event_loop = shared.event_loop.borrow();
+            Rc::new(
+                event_loop
+                    .create_window(attributes)
+                    .map_err(|_| Error::WindowCreationFailed)?,
+            )
+        };
         window.set_ime_allowed(false);
         let scale_factor = window.scale_factor();
         let inner_size = window.inner_size();
         let surface =
             SoftbufferSurface::new(&context, window.clone()).map_err(|_| Error::IoError)?;
-        let state = Rc::new(RefCell::new(WinitEventState::new(
+        let surface_id = next_surface_id();
+        let state = Rc::new(RefCell::new(WinitEventState::new(scale_factor)));
+        shared.windows.borrow_mut().insert(
             window.id(),
-            scale_factor,
-        )));
+            WinitWindowEntry {
+                state: state.clone(),
+                window: window.clone(),
+            },
+        );
         Ok(Self {
-            event_loop,
+            shared,
             window,
             surface,
             state,
@@ -368,20 +423,19 @@ impl WinitPlatformWindow {
                 scale_factor,
             ),
             ime_allowed: false,
+            surface_id,
         })
     }
 
     fn pump_events(&mut self) {
         let mut handler = WinitPumpHandler {
-            state: self.state.clone(),
-            window: self.window.clone(),
+            shared: self.shared.clone(),
         };
-        if let PumpStatus::Exit(_) = self
+        let _ = self
+            .shared
             .event_loop
-            .pump_app_events(Some(Duration::ZERO), &mut handler)
-        {
-            self.state.borrow_mut().push(Event::Quit);
-        }
+            .borrow_mut()
+            .pump_app_events(Some(Duration::ZERO), &mut handler);
         self.state.borrow_mut().flush_pending_empty_preedit();
     }
 
@@ -409,9 +463,9 @@ impl WinitPlatformWindow {
 
 impl PlatformWindow for WinitPlatformWindow {
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
-        let _ = app_id;
-        Self::create(WindowCreateRequest {
-            app_id: alloc::string::String::new(),
+        let mut backend = WinitBackend::new();
+        backend.create_window(WindowCreateRequest {
+            app_id: alloc::string::String::from(app_id),
             title: alloc::string::String::from(title),
             size,
             window_type: 0,
@@ -436,12 +490,13 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn wait_for_event(&mut self, timeout: Duration) {
         let mut handler = WinitPumpHandler {
-            state: self.state.clone(),
-            window: self.window.clone(),
+            shared: self.shared.clone(),
         };
-        if let PumpStatus::Exit(_) = self.event_loop.pump_app_events(Some(timeout), &mut handler) {
-            self.state.borrow_mut().push(Event::Quit);
-        }
+        let _ = self
+            .shared
+            .event_loop
+            .borrow_mut()
+            .pump_app_events(Some(timeout), &mut handler);
         self.state.borrow_mut().flush_pending_empty_preedit();
     }
 
@@ -521,12 +576,25 @@ impl PlatformWindow for WinitPlatformWindow {
         app_id: &str,
         title: &str,
         size: Size,
-        _window_type: u32,
+        window_type: u32,
     ) -> Result<Self>
     where
         Self: Sized,
     {
-        Self::new(app_id, title, size)
+        let _ = app_id;
+        Self::create(
+            self.shared.clone(),
+            WindowCreateRequest {
+                app_id: alloc::string::String::from(app_id),
+                title: alloc::string::String::from(title),
+                size,
+                window_type,
+                menu_titles: alloc::string::String::new(),
+                focus_on_create: true,
+                active_on_focus: true,
+                opaque: true,
+            },
+        )
     }
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
@@ -551,11 +619,11 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn surface_id(&self) -> u32 {
-        1
+        self.surface_id
     }
 
     fn platform_window_id(&self) -> u64 {
-        self.surface_id() as u64
+        self.surface_id as u64
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -580,7 +648,7 @@ impl PlatformWindow for WinitPlatformWindow {
             let mut event_state = self.state.borrow_mut();
             event_state.ime_preedit_active = false;
             event_state.discard_pending_empty_preedit();
-            if self.ime_allowed && !event_state.window_focused {
+            if self.ime_allowed {
                 self.window.set_ime_allowed(false);
                 self.ime_allowed = false;
             }
@@ -594,6 +662,12 @@ impl PlatformWindow for WinitPlatformWindow {
             LogicalPosition::new(state.cursor_rect.origin.x, state.cursor_rect.origin.y),
             LogicalSize::new(state.cursor_rect.size.width, state.cursor_rect.size.height),
         );
+    }
+}
+
+impl Drop for WinitPlatformWindow {
+    fn drop(&mut self) {
+        self.shared.remove_window(self.window.id());
     }
 }
 
@@ -636,6 +710,11 @@ fn physical_to_logical_size(width: u32, height: u32, scale_factor: f64) -> Size 
         physical_to_logical_len(width, scale_factor) as f32,
         physical_to_logical_len(height, scale_factor) as f32,
     )
+}
+
+fn next_surface_id() -> u32 {
+    static NEXT_SURFACE_ID: AtomicU32 = AtomicU32::new(1);
+    NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed).max(1)
 }
 
 fn copy_scaled(buffer: &Buffer, dst: &mut [u32], dst_width: u32, dst_height: u32) {
