@@ -37,6 +37,12 @@ impl MenuItemModel {
         }
     }
 
+    /// Create an app-menu item. The taskbar merges its children into the
+    /// auto-generated app-name dropdown.
+    pub fn app() -> Self {
+        Self::new("__app__", "")
+    }
+
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self

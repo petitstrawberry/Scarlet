@@ -275,42 +275,43 @@ fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
         children: default_system_menu_entries(),
     });
 
-    if !app_name.is_empty() {
-        items.push(TaskMenuItem {
-            id: String::from("system_app"),
-            title: menu_bar_label(app_name),
-            enabled: true,
-            shortcut: None,
-            children: Vec::new(),
-        });
-    }
-
     let cleaned = sanitize_menu_json(menu_titles);
     let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        println!(
-            "[TaskBar] Empty menu_titles after sanitize: orig_len={}, cleaned_len={}",
-            menu_titles.len(),
-            cleaned.len()
-        );
+    let parsed: Vec<TaskMenuItem> = if trimmed.is_empty() {
+        Vec::new()
     } else if trimmed.starts_with('{') {
-        let parsed = parse_menu_tree_json(trimmed);
-        println!("[TaskBar] Parsed menu JSON: items={}", parsed.len());
-        items.extend(parsed);
+        parse_menu_tree_json(trimmed)
     } else {
-        println!(
-            "[TaskBar] Non-JSON menu_titles: orig_len={}, cleaned_len={}, first_byte={:?}",
-            menu_titles.len(),
-            cleaned.len(),
-            trimmed.as_bytes().first().copied()
-        );
-        items.extend(trimmed.split('|').map(|s| TaskMenuItem {
+        trimmed.split('|').map(|s| TaskMenuItem {
             id: s.to_string(),
             title: s.to_string(),
             enabled: true,
             shortcut: None,
             children: Vec::new(),
-        }));
+        }).collect()
+    };
+
+    if !app_name.is_empty() {
+        let app_label = menu_bar_label(app_name);
+
+        let mut app_children = Vec::new();
+        for item in &parsed {
+            if item.id == "__app__" {
+                app_children.extend(item.children.iter().cloned());
+            } else {
+                items.push(item.clone());
+            }
+        }
+
+        items.push(TaskMenuItem {
+            id: String::from("system_app"),
+            title: app_label,
+            enabled: true,
+            shortcut: None,
+            children: app_children,
+        });
+    } else {
+        items.extend(parsed);
     }
 
     MenuTree { items }
