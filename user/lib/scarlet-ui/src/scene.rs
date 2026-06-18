@@ -67,6 +67,7 @@ pub struct WindowContext {
 pub struct WindowDeclaration {
     pub key: SceneWindowKey,
     pub view: Box<dyn View>,
+    pub opens_at_launch: bool,
 }
 
 /// Builder used by scenes to declare top-level windows.
@@ -87,9 +88,22 @@ impl SceneBuilder {
     where
         V: View + 'static,
     {
+        self.window_with_launch_policy(key, view, true);
+    }
+
+    /// Add a top-level window declaration with an explicit launch policy.
+    pub fn window_with_launch_policy<V>(
+        &mut self,
+        key: impl Into<SceneWindowKey>,
+        view: V,
+        opens_at_launch: bool,
+    ) where
+        V: View + 'static,
+    {
         self.declarations.push(WindowDeclaration {
             key: key.into(),
             view: Box::new(view),
+            opens_at_launch,
         });
     }
 
@@ -111,6 +125,10 @@ pub trait Scene {
     fn build(self, builder: &mut SceneBuilder);
 }
 
+impl Scene for () {
+    fn build(self, _builder: &mut SceneBuilder) {}
+}
+
 /// SwiftUI-like window group declaration.
 pub struct WindowGroup<V: View + Clone + 'static> {
     key: SceneWindowKey,
@@ -118,7 +136,7 @@ pub struct WindowGroup<V: View + Clone + 'static> {
 }
 
 impl<V: View + Clone + 'static> WindowGroup<V> {
-    /// Create a new window group. MVP creates one instance at startup.
+    /// Create a new window group declaration.
     pub fn new(key: impl Into<SceneWindowKey>, window: Window<V>) -> Self {
         Self {
             key: key.into(),
@@ -129,13 +147,18 @@ impl<V: View + Clone + 'static> WindowGroup<V> {
 
 impl<V: View + Clone + 'static> Scene for WindowGroup<V> {
     fn build(self, builder: &mut SceneBuilder) {
-        builder.window(self.key, self.window);
+        builder.window_with_launch_policy(self.key, self.window, true);
     }
 }
 
 impl<V: View + Clone + 'static> Scene for Window<V> {
     fn build(self, builder: &mut SceneBuilder) {
-        builder.window(SceneWindowKey::main(), self);
+        let key = self
+            .scene_key_value()
+            .map(SceneWindowKey::from)
+            .unwrap_or_else(SceneWindowKey::main);
+        let opens_at_launch = self.opens_at_launch_value();
+        builder.window_with_launch_policy(key, self, opens_at_launch);
     }
 }
 

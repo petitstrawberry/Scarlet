@@ -4,7 +4,7 @@
 > - [#473 — scarlet-ui: multi window](https://github.com/petitstrawberry/Scarlet/issues/473)
 > - [#467 — scarlet-ui: host-side live preview backend for app development](https://github.com/petitstrawberry/Scarlet/issues/467)
 >
-> 状態: **設計段階（未実装）**
+> 状態: **実装中**
 >
 > 方針: 互換維持ではなく **完全移行**。`Application::body()` を旧 API として残す前提を捨て、`Application::scenes()` を唯一のアプリ UI エントリポイントにする。
 
@@ -35,7 +35,7 @@ ScarletUI を SwiftUI の `App` / `Scene` / `WindowGroup` に近い形へ移行�
 | backend | `Application::run()` は backend 非依存 runner へ移行。SWS は default backend の1つ |
 | ライフサイクルフック | `WindowContext` + `dyn PlatformWindow` を受け取る backend-agnostic API にする |
 | 終了ポリシー | 最後のウィンドウを閉じたら終了。`exit_when_all_windows_closed()` で変更可能 |
-| MVP | 起動時に `scenes()` で宣言した静的複数ウィンドウを開く。動的 `openWindow` は Phase 2 |
+| MVP | `Window` / `WindowGroup` は `scenes()` で宣言する。起動時は先頭の launchable scene だけを開き、補助 window は `scene_key` と `open_window(key)` / `dismiss_window(key)` command で開閉 |
 
 ---
 
@@ -108,7 +108,7 @@ ApplicationRunner<B: PlatformBackend>
 
 | 概念 | 所有者 | 備考 |
 |------|--------|------|
-| 宣言された window | `Scene` / `SceneBuilder` | 起動時 declarative model |
+| 宣言された window | `Scene` / `SceneBuilder` | static declarative model。実行時状態で `Option<Scene>` 分岐しない |
 | 実行時 window | `WindowSlot` | window id、pipeline、platform window を保持 |
 | 描画パイプライン | `RenderingPipeline` | 1 window ごとに独立 |
 | OS/backend window | `PlatformWindow` | SWS / host backend で差し替え |
@@ -293,7 +293,7 @@ where
 ```rust
 impl Application for DemoApp {
     fn scenes(&self) -> impl Scene {
-        (
+        scenes! {
             WindowGroup::new(
                 "main",
                 Window::new("Main", MainView::new(self.state.clone()))
@@ -304,7 +304,7 @@ impl Application for DemoApp {
                 Window::new("Inspector", InspectorView::new(self.state.clone()))
                     .size(Size::new(320.0, 600.0)),
             ),
-        )
+        }
     }
 }
 ```
@@ -711,7 +711,7 @@ window 内 focus は `EventDispatcher` ごとに独立。app-level focused windo
 
 ## 17. Phase 2
 
-- 動的 `open_window(key)` / `close_window(id)` command API
+- value 付き `openWindow(value:)` command API
 - `WindowGroup` の複数 instance 管理
 - `openWindow(value:)` 的な front-or-create セマンティクス
 - `scenePhase`
@@ -754,7 +754,7 @@ impl Application for DemoApp {
 ```rust
 impl Application for DemoApp {
     fn scenes(&self) -> impl Scene {
-        (
+        scenes! {
             WindowGroup::new(
                 "main",
                 Window::new("Main", MainView::new(self.state.clone()))
@@ -765,7 +765,34 @@ impl Application for DemoApp {
                 Window::new("Inspector", InspectorView::new(self.state.clone()))
                     .size(Size::new(320.0, 600.0)),
             ),
-        )
+        }
+    }
+}
+```
+
+### 18.4 補助 window
+
+補助 window は `Window` scene として `scenes()` に直接宣言し、メニューやボタンの callback から command を発行して開閉する。
+`scenes()` を毎ループ再評価して window set を差分同期したり、`Option<Scene>` で現在開いている window を表現したりしない。
+
+```rust
+impl Application for ClockApp {
+    fn scenes(&self) -> impl Scene {
+        scenes! {
+            WindowGroup::new(
+                "main",
+                Window::new("Clock", self.clock_view())
+                    .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(vec![
+                        MenuEntry::Item(
+                            MenuItemModel::new("settings", "Settings...")
+                                .on_activate(Arc::new(|| open_window("settings"))),
+                        ),
+                    ])])),
+            ),
+            Window::new("Clock Settings", self.settings_view())
+                .scene_key("settings")
+                .open_at_launch(false),
+        }
     }
 }
 ```

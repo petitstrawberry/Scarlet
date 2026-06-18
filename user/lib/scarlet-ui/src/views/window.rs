@@ -149,6 +149,8 @@ pub struct Window<V: View> {
     menu_bar: Option<MenuBarModel>,
     focus_on_create: bool,
     active_on_focus: bool,
+    scene_key: Option<String>,
+    opens_at_launch: bool,
     content: V,
 }
 
@@ -223,6 +225,8 @@ impl<V: View> Window<V> {
             menu_bar: None,
             focus_on_create: true,
             active_on_focus: true,
+            scene_key: None,
+            opens_at_launch: true,
             content,
         }
     }
@@ -312,6 +316,26 @@ impl<V: View> Window<V> {
         self
     }
 
+    /// Set the scene key used when this window is declared directly as a scene.
+    pub fn scene_key(mut self, key: impl Into<String>) -> Self {
+        self.scene_key = Some(key.into());
+        self
+    }
+
+    /// Set whether this direct window scene opens when the application launches.
+    pub fn open_at_launch(mut self, opens_at_launch: bool) -> Self {
+        self.opens_at_launch = opens_at_launch;
+        self
+    }
+
+    pub(crate) fn scene_key_value(&self) -> Option<&str> {
+        self.scene_key.as_deref()
+    }
+
+    pub(crate) fn opens_at_launch_value(&self) -> bool {
+        self.opens_at_launch
+    }
+
     /// Get the application ID
     pub fn get_app_id(&self) -> &str {
         &self.app_id
@@ -370,6 +394,8 @@ impl<V: View + Clone> Clone for Window<V> {
             menu_bar: self.menu_bar.clone(),
             focus_on_create: self.focus_on_create,
             active_on_focus: self.active_on_focus,
+            scene_key: self.scene_key.clone(),
+            opens_at_launch: self.opens_at_launch,
             content: self.content.clone(),
         }
     }

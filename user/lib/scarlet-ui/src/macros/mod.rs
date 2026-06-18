@@ -67,6 +67,35 @@ macro_rules! zstack {
     }};
 }
 
+/// Compose top-level application scenes.
+///
+/// # Examples
+///
+/// ```ignore
+/// impl Application for MyApp {
+///     fn scenes(&self) -> impl Scene {
+///         scenes! {
+///             Window::new("Main", self.main_view()),
+///             Window::new("Inspector", self.inspector_view())
+///                 .scene_key("inspector")
+///                 .open_at_launch(false),
+///         }
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! scenes {
+    () => {{
+        ()
+    }};
+    ($scene:expr $(,)?) => {{
+        $scene
+    }};
+    ($first:expr, $($rest:expr),+ $(,)?) => {{
+        ($first, $crate::scenes!($($rest),+))
+    }};
+}
+
 /// Conditional view branching for `if`/`else if`/`else` chains.
 ///
 /// Each branch is wrapped in the appropriate `Either` variant automatically.

@@ -1154,6 +1154,37 @@ fn main() {
 }
 ```
 
+### Auxiliary Windows
+
+Declare auxiliary windows directly in `scenes()` and open or dismiss them with application commands from callbacks.
+This keeps the scene graph static and avoids representing runtime window state with `Option<Scene>` branches.
+
+```rust
+impl Application for MyApp {
+    fn scenes(&self) -> impl Scene {
+        scenes! {
+            WindowGroup::new(
+                "main",
+                Window::new("My App", self.content())
+                    .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(vec![
+                        MenuEntry::Item(
+                            MenuItemModel::new("settings", "Settings...")
+                                .on_activate(Arc::new(|| open_window("settings"))),
+                        ),
+                    ])])),
+            ),
+            Window::new("Settings", self.settings_content())
+                .scene_key("settings")
+                .open_at_launch(false),
+        }
+    }
+
+    fn settings_content(&self) -> impl View + Clone {
+        Button::new("Done").on_click(|| dismiss_window("settings"))
+    }
+}
+```
+
 ---
 
 ## Platform Integration

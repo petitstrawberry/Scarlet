@@ -58,6 +58,7 @@ extern crate scarlet_ui_macros;
 pub mod application;
 pub mod buffer;
 pub mod color;
+pub mod command;
 pub mod compositor;
 pub mod debug;
 pub mod element;
@@ -106,6 +107,7 @@ pub use color::system::{
     YellowColors,
 };
 pub use color::{Color, ColorPalette, ColorScheme, SemanticColor, SystemColors};
+pub use command::{dismiss_window, open_window};
 pub use compositor::Compositor;
 pub use element::{
     ComponentElement, DirtyFlags, Element, ElementId, ElementRenderObject, ElementTree,
@@ -146,12 +148,13 @@ pub use views::{NavigationLink, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 // Macros are exported at root via #[macro_export]
-// Users can use them directly: vstack! {}, hstack! {}, etc.
+// Users can use them directly: vstack! {}, hstack! {}, scenes! {}, etc.
 
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::application::{Application, ApplicationRunExt};
     pub use crate::color::{Color, ColorPalette, ColorScheme, SemanticColor};
+    pub use crate::command::{dismiss_window, open_window};
     pub use crate::element::{
         DirtyFlags, Element, ElementId, ElementRenderObject, LayoutConstraints,
     };
@@ -184,6 +187,6 @@ pub mod prelude {
     // Note: The View derive macro must be imported from scarlet_ui_macros:
     // use scarlet_ui_macros::View;
     //
-    // Declarative macros (vstack!, hstack!, zstack!) can be imported as:
-    // use scarlet_ui::{vstack, hstack, zstack};
+    // Declarative macros (vstack!, hstack!, zstack!, scenes!) can be imported as:
+    // use scarlet_ui::{vstack, hstack, zstack, scenes};
 }

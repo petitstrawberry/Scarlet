@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::marker::PhantomData;
 
+use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::error::{Error, Result};
 use crate::event::Event;
@@ -144,6 +145,11 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         app.init();
 
         let declarations = collect_scene_declarations(app)?;
+        let declarations = declarations
+            .into_iter()
+            .find(|declaration| declaration.opens_at_launch)
+            .into_iter()
+            .collect();
         let mut slots = self.create_slots(app, declarations)?;
 
         if slots.is_empty() && app.exit_when_all_windows_closed() {
@@ -162,75 +168,85 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         let mut slots = Vec::new();
 
         for (index, declaration) in declarations.into_iter().enumerate() {
-            let window_id = WindowId::generate();
-            let pipeline_id = PipelineId::new(window_id.get());
-            let mut pipeline = RenderingPipeline::with_pipeline_id(pipeline_id);
-            pipeline.set_scale_milli(scale_milli);
-
-            let root = Box::new(SceneWindowRootElement::new(
-                app.clone(),
-                declaration.key.clone(),
-                pipeline_id,
-            ));
-            pipeline.set_root(root);
-
-            let window_info = pipeline.layout_initial();
-            let limits = pipeline
-                .element_tree()
-                .root()
-                .and_then(find_window_size_limits)
-                .unwrap_or_default();
-            let menu_json = window_info
-                .menu_bar
-                .as_ref()
-                .map(|menu_bar| menu_bar.to_json())
-                .unwrap_or_default();
-
-            let request = WindowCreateRequest {
-                app_id: window_info.app_id.clone(),
-                title: window_info.title.clone(),
-                size: window_info.size,
-                window_type: window_info.window_type,
-                menu_titles: menu_json.clone(),
-                focus_on_create: window_info.focus_on_create,
-                active_on_focus: window_info.active_on_focus,
-                opaque: window_info.opaque,
-            };
-
-            let mut window = self.backend.create_window(request)?;
-
-            if let Some(menu_bar) = window_info.menu_bar {
-                if !menu_json.is_empty() {
-                    let _ = window.set_menu_titles(&menu_json);
-                    menu_model::register_menu_callbacks(window.surface_id(), &menu_bar);
-                }
-            }
-
-            if !limits.resizable {
-                let _ = window.set_resizable(false);
-            }
-
-            let context = WindowContext {
-                window_id,
-                scene_key: declaration.key,
-                pipeline_id,
-                platform_window_id: window.platform_window_id(),
-                is_primary: index == 0,
-            };
-
-            app.on_window_created(&context, &mut window);
-            sync_text_input(&mut window, &pipeline);
-
-            slots.push(WindowSlot {
-                context,
-                pipeline,
-                window,
-                presented_this_cycle: false,
-                _app: PhantomData,
-            });
+            slots.push(self.create_slot(app, declaration, scale_milli, index == 0)?);
         }
 
         Ok(slots)
+    }
+
+    fn create_slot<A: Application>(
+        &mut self,
+        app: &mut A,
+        declaration: WindowDeclaration,
+        scale_milli: u32,
+        is_primary: bool,
+    ) -> Result<WindowSlot<B::Window, A>> {
+        let window_id = WindowId::generate();
+        let pipeline_id = PipelineId::new(window_id.get());
+        let mut pipeline = RenderingPipeline::with_pipeline_id(pipeline_id);
+        pipeline.set_scale_milli(scale_milli);
+
+        let root = Box::new(SceneWindowRootElement::new(
+            app.clone(),
+            declaration.key.clone(),
+            pipeline_id,
+        ));
+        pipeline.set_root(root);
+
+        let window_info = pipeline.layout_initial();
+        let limits = pipeline
+            .element_tree()
+            .root()
+            .and_then(find_window_size_limits)
+            .unwrap_or_default();
+        let menu_json = window_info
+            .menu_bar
+            .as_ref()
+            .map(|menu_bar| menu_bar.to_json())
+            .unwrap_or_default();
+
+        let request = WindowCreateRequest {
+            app_id: window_info.app_id.clone(),
+            title: window_info.title.clone(),
+            size: window_info.size,
+            window_type: window_info.window_type,
+            menu_titles: menu_json.clone(),
+            focus_on_create: window_info.focus_on_create,
+            active_on_focus: window_info.active_on_focus,
+            opaque: window_info.opaque,
+        };
+
+        let mut window = self.backend.create_window(request)?;
+
+        if let Some(menu_bar) = window_info.menu_bar {
+            if !menu_json.is_empty() {
+                let _ = window.set_menu_titles(&menu_json);
+                menu_model::register_menu_callbacks(window.surface_id(), &menu_bar);
+            }
+        }
+
+        if !limits.resizable {
+            let _ = window.set_resizable(false);
+        }
+
+        let context = WindowContext {
+            window_id,
+            scene_key: declaration.key,
+            pipeline_id,
+            platform_window_id: window.platform_window_id(),
+            is_primary,
+        };
+
+        app.on_window_created(&context, &mut window);
+        sync_text_input(&mut window, &pipeline);
+
+        Ok(WindowSlot {
+            context,
+            pipeline,
+            window,
+            presented_this_cycle: false,
+            _app: PhantomData,
+        })
     }
 
     fn run_loop<A: Application>(
@@ -257,6 +273,10 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
             }
 
             app.on_idle();
+            self.handle_application_commands(app, slots)?;
+            if slots.is_empty() && app.exit_when_all_windows_closed() {
+                return Ok(());
+            }
 
             for slot in slots.iter_mut() {
                 app.on_window_sync(&slot.context, &mut slot.window);
@@ -274,6 +294,49 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
                 std::thread::sleep(std::time::Duration::from_millis(16));
             }
         }
+    }
+
+    fn handle_application_commands<A: Application>(
+        &mut self,
+        app: &mut A,
+        slots: &mut Vec<WindowSlot<B::Window, A>>,
+    ) -> Result<()> {
+        for command in command::take_application_commands() {
+            match command {
+                ApplicationCommand::OpenWindow(key) => {
+                    if slots.iter().any(|slot| slot.context.scene_key == key) {
+                        continue;
+                    }
+                    if let Some(declaration) = collect_scene_declarations(app)?
+                        .into_iter()
+                        .find(|declaration| declaration.key == key)
+                    {
+                        let scale_milli = self.backend.output_scale_milli();
+                        slots.push(self.create_slot(
+                            app,
+                            declaration,
+                            scale_milli,
+                            slots.is_empty(),
+                        )?);
+                    }
+                }
+                ApplicationCommand::DismissWindow(key) => {
+                    let close_ids = slots
+                        .iter()
+                        .filter(|slot| slot.context.scene_key == key)
+                        .map(|slot| slot.context.window_id)
+                        .collect::<Vec<_>>();
+                    for slot in slots.iter_mut() {
+                        if close_ids.contains(&slot.context.window_id) {
+                            let _ = slot.window.close();
+                        }
+                    }
+                    remove_closed_slots(slots, &close_ids);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -534,14 +597,16 @@ fn remove_closed_slots<A: Application, W: PlatformWindow>(
     if close_ids.is_empty() {
         return;
     }
-    slots.retain(|slot| {
+    let mut retained = Vec::new();
+    for mut slot in core::mem::take(slots) {
         if close_ids.contains(&slot.context.window_id) {
             menu_model::unregister_menu_callbacks(slot.window.surface_id());
-            false
+            slot.pipeline.teardown();
         } else {
-            true
+            retained.push(slot);
         }
-    });
+    }
+    *slots = retained;
 }
 
 fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String)> {
