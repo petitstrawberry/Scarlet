@@ -19,6 +19,10 @@ use crate::graphics;
 use crate::state::{Listenable, State};
 use crate::view::View;
 
+const PREEDIT_STYLE_HIGHLIGHT: u32 = 1 << 2;
+const PREEDIT_STYLE_SELECTED: u32 = 1 << 3;
+const PREEDIT_STYLE_TARGET_CONVERTING: u32 = 1 << 5;
+
 /// Single-line editable text input.
 #[derive(Clone)]
 pub struct TextField {
@@ -99,11 +103,11 @@ impl TextField {
     pub(crate) fn text_input_state(
         &self,
         preedit: &str,
-        anchor_byte: u32,
+        cursor_byte: u32,
     ) -> TextInputElementState {
         let text = self.text.get();
         let mut display = text.clone();
-        display.push_str(preedit_prefix(preedit, anchor_byte));
+        display.push_str(preedit_prefix(preedit, cursor_byte));
         let (text_width, _) = graphics::measure_text_sized(&display, self.font_size);
         TextInputElementState {
             cursor_rect: Rect::from_xywh(
@@ -308,8 +312,8 @@ impl TextFieldRenderObject {
         &self.preedit
     }
 
-    pub(crate) fn preedit_anchor_byte(&self) -> u32 {
-        self.preedit_anchor_byte
+    pub(crate) fn preedit_cursor_byte(&self) -> u32 {
+        self.preedit_cursor_byte
     }
 
     pub(crate) fn set_preedit_state(
@@ -507,9 +511,9 @@ fn draw_preedit_marks(
             clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32) as usize;
         if start < end {
             let active = style
-                & (sws_protocol::preedit_style::HIGHLIGHT
-                    | sws_protocol::preedit_style::SELECTED
-                    | sws_protocol::preedit_style::TARGET_CONVERTING)
+                & (PREEDIT_STYLE_HIGHLIGHT
+                    | PREEDIT_STYLE_SELECTED
+                    | PREEDIT_STYLE_TARGET_CONVERTING)
                 != 0;
             draw_preedit_mark_span(
                 canvas,

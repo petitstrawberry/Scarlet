@@ -3,9 +3,10 @@
 //! This crate provides derive macros for ScarletUI traits.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
+use syn::parse::Parser;
 use syn::punctuated::Punctuated;
-use syn::{Data, DataStruct, DeriveInput, Fields, TypePath, parse_macro_input};
+use syn::{Data, DataStruct, DeriveInput, Expr, Fields, ItemFn, Lit, LitStr, Meta, Token, TypePath, parse_macro_input};
 
 /// Derive macro for View trait
 ///
@@ -125,6 +126,132 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
     };
 
     proc_macro::TokenStream::from(expanded)
+}
+
+/// Register a function as a ScarletUI preview.
+///
+/// The function must return a `View + Clone + 'static` value. Multiple preview
+/// functions can be registered in the same crate; the preview wrapper exports a
+/// single dylib entrypoint that exposes all registered previews.
+///
+/// # Example
+///
+/// ```ignore
+/// #[scarlet_ui::preview]
+/// fn counter_preview() -> impl View + Clone {
+///     CounterApp::default().content()
+/// }
+///
+/// #[scarlet_ui::preview]
+/// fn compact_counter_preview() -> impl View + Clone {
+///     CounterApp::default().compact_content()
+/// }
+///
+/// #[scarlet_ui::preview(width = 320.0, height = 180.0)]
+/// fn button_preview() -> impl View + Clone {
+///     Button::new("OK")
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn preview(attr: TokenStream, input: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(input as ItemFn);
+    let name = &item.sig.ident;
+    let args = preview_args(attr, &name.to_string());
+    let display_name = LitStr::new(&args.name, name.span());
+    let width = args.width;
+    let height = args.height;
+    let create_name = format_ident!("__scarlet_ui_preview_create_{}", name);
+
+    let expanded = quote! {
+        #[cfg(feature = "preview")]
+        #item
+
+        #[doc(hidden)]
+        #[cfg(feature = "preview")]
+        fn #create_name(
+            context: ::scarlet_ui::preview::PreviewCreateContext,
+        ) -> ::scarlet_ui::__private::Box<dyn ::scarlet_ui::preview::PreviewSession> {
+            ::scarlet_ui::preview::preview_session_from_view(
+                #display_name,
+                #name(),
+                context,
+            )
+        }
+
+        #[cfg(feature = "preview")]
+        ::scarlet_ui::__private::inventory::submit! {
+            ::scarlet_ui::preview::PreviewRegistration {
+                id: concat!(module_path!(), "::", stringify!(#name)),
+                name: #display_name,
+                preferred_size: ::scarlet_ui::geometry::Size::new(#width as f32, #height as f32),
+                create: #create_name,
+            }
+        }
+    };
+
+    proc_macro::TokenStream::from(expanded)
+}
+
+struct PreviewArgs {
+    name: String,
+    width: Expr,
+    height: Expr,
+}
+
+fn preview_args(attr: TokenStream, fallback: &str) -> PreviewArgs {
+    let args = PreviewArgs {
+        name: humanize_preview_name(fallback),
+        width: syn::parse_quote!(0.0),
+        height: syn::parse_quote!(0.0),
+    };
+    if attr.is_empty() {
+        return args;
+    }
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    let Ok(args) = parser.parse(attr) else {
+        return args;
+    };
+    let mut preview_args = PreviewArgs {
+        name: humanize_preview_name(fallback),
+        width: syn::parse_quote!(0.0),
+        height: syn::parse_quote!(0.0),
+    };
+    for arg in args {
+        let Meta::NameValue(name_value) = arg else {
+            continue;
+        };
+        if name_value.path.is_ident("name") {
+            if let Expr::Lit(expr_lit) = name_value.value
+                && let Lit::Str(value) = expr_lit.lit
+            {
+                preview_args.name = value.value();
+            }
+        } else if name_value.path.is_ident("width") {
+            preview_args.width = name_value.value;
+        } else if name_value.path.is_ident("height") {
+            preview_args.height = name_value.value;
+        }
+    }
+    preview_args
+}
+
+fn humanize_preview_name(name: &str) -> String {
+    let mut output = String::new();
+    for word in name.split('_').filter(|word| !word.is_empty()) {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            output.extend(first.to_uppercase());
+            output.push_str(chars.as_str());
+        }
+    }
+    if output.is_empty() {
+        name.to_string()
+    } else {
+        output
+    }
 }
 
 /// Extract field names that are of type State<T> (without types)

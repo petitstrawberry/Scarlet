@@ -1,6 +1,8 @@
-//! ScarletUI 2.0 - Declarative UI Framework for Scarlet OS
+//! ScarletUI - Declarative UI Framework for Scarlet applications
 //!
 //! ScarletUI is a reactive UI framework inspired by Flutter and SwiftUI.
+//! Application code declares scenes and calls `app.run()`; the selected
+//! platform is chosen by crate features, not by application runtime code.
 //! It provides:
 //!
 //! - **Declarative Views**: Describe your UI with composable Views
@@ -8,12 +10,15 @@
 //! - **Element System**: Efficient runtime representation with reconciliation
 //! - **Layout Engine**: Constraint-based layout system
 //! - **Event Handling**: Pointer and keyboard event routing
-//! - **Platform Abstraction**: Work with SWS, SDL2, Winit, or custom backends
+//! - **Scene Runtime**: Declare top-level windows through `Application::scenes()`
+//! - **Platform Abstraction**: Run on SWS or native desktop platforms through
+//!   feature-selected platform implementations
 //!
 //! # Basic Usage
 //!
-//! ```no_run
+//! ```ignore
 //! use scarlet_ui::*;
+//! use scarlet_ui_macros::View;
 //!
 //! #[derive(View, Clone)]
 //! struct CounterApp {
@@ -26,7 +31,7 @@
 //!         vstack! {
 //!             Text::new("Counter"),
 //!             Button::new("Increment")
-//!                 .on_click(|_| self.count.update(|c| *c += 1)),
+//!                 .on_click(|| self.count.update(|c| *c += 1)),
 //!             Text::new(&format!("Count: {}", self.count.get())),
 //!         }
 //!     }
@@ -40,13 +45,33 @@
 //!
 //! fn main() {
 //!     let mut app = CounterApp {
-//!         count: State::initial(0),
+//!         count: State::initial(StateId::new(0)),
 //!     };
-//!     app.run();
+//!     let _ = app.run();
 //! }
 //! ```
+//!
+//! # Platform Features
+//!
+//! Exactly one platform feature is selected per build:
+//!
+//! - `platform-sws`: Scarlet OS / SWS integration.
+//! - `platform-winit`: native desktop integration using winit + softbuffer.
+//!
+//! The app-facing API remains the same for both platforms.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(all(feature = "std", feature = "legacy-scarlet-std"))]
+compile_error!("scarlet-ui features `std` and `legacy-scarlet-std` are mutually exclusive");
+
+#[cfg(all(feature = "platform-sws", feature = "platform-winit"))]
+compile_error!(
+    "scarlet-ui platform features `platform-sws` and `platform-winit` are mutually exclusive"
+);
+
+#[cfg(not(any(feature = "std", feature = "legacy-scarlet-std")))]
+compile_error!("scarlet-ui requires either the `std` or `legacy-scarlet-std` feature");
 
 extern crate alloc;
 #[cfg(not(feature = "std"))]
@@ -71,6 +96,8 @@ pub mod menu_model;
 mod os;
 pub mod pipeline;
 pub mod platform;
+#[cfg(feature = "preview")]
+pub mod preview;
 pub mod render;
 pub mod scene;
 pub mod state;
@@ -81,6 +108,8 @@ pub mod views;
 pub mod __private {
     pub use alloc::boxed::Box;
     pub use alloc::vec::Vec;
+    #[cfg(feature = "preview")]
+    pub use inventory;
 }
 
 #[cfg(feature = "std")]
@@ -100,7 +129,7 @@ macro_rules! logln {
 pub(crate) use logln;
 
 // Re-exports for convenience
-pub use application::{Application, ApplicationRunExt, ApplicationRunner};
+pub use application::{Application, ApplicationRunExt};
 pub use buffer::Buffer;
 pub use color::system::{
     BlueColors, GrayColors, GreenColors, OrangeColors, PinkColors, PurpleColors, RedColors,
@@ -128,7 +157,9 @@ pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
 };
-pub use platform::{PlatformBackend, PlatformWindow, SWSPlatformWindow, SwsBackend};
+pub use platform::PlatformWindow;
+#[cfg(feature = "platform-sws")]
+pub use platform::SWSPlatformWindow;
 pub use render::{RenderNode, RenderTree};
 pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId};
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
@@ -146,6 +177,8 @@ pub use views::{
 };
 pub use views::{NavigationLink, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
+
+pub use scarlet_ui_macros::preview;
 
 // Macros are exported at root via #[macro_export]
 // Users can use them directly: vstack! {}, hstack! {}, scenes! {}, etc.

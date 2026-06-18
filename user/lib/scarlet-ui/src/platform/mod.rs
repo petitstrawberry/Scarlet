@@ -3,8 +3,12 @@
 //! This module provides the PlatformWindow trait for abstracting
 //! different window system backends (SWS, SDL2, Winit, etc.).
 
+#[cfg(feature = "platform-sws")]
 mod sws;
+#[cfg(feature = "platform-winit")]
+mod winit;
 
+#[cfg(feature = "platform-sws")]
 pub use sws::SWSPlatformWindow;
 
 use crate::buffer::Buffer;
@@ -15,30 +19,38 @@ use crate::event::Event;
 use crate::geometry::{Point, Size};
 use alloc::string::String;
 use core::any::Any;
+use std::time::Duration;
 
-pub use sws::SwsBackend;
+#[cfg(feature = "platform-sws")]
+pub(crate) use sws::SwsBackend;
+#[cfg(feature = "platform-winit")]
+pub(crate) use winit::WinitBackend;
+#[cfg(feature = "platform-winit")]
+pub(crate) type WinitBackendWindow = <WinitBackend as PlatformBackend>::Window;
 
-/// Backend-independent platform window creation request.
-pub struct WindowCreateRequest {
-    pub app_id: String,
-    pub title: String,
-    pub size: Size,
-    pub window_type: u32,
-    pub menu_titles: String,
-    pub focus_on_create: bool,
-    pub active_on_focus: bool,
-    pub opaque: bool,
+pub(crate) struct WindowCreateRequest {
+    pub(crate) app_id: String,
+    pub(crate) title: String,
+    pub(crate) size: Size,
+    pub(crate) window_type: u32,
+    pub(crate) menu_titles: String,
+    pub(crate) focus_on_create: bool,
+    pub(crate) active_on_focus: bool,
+    pub(crate) opaque: bool,
 }
 
-/// Platform backend that can create and drive windows.
-pub trait PlatformBackend {
-    type Window: PlatformWindow + 'static;
+pub(crate) trait PlatformBackend {
+    type Window: PlatformWindow + PlatformWindowState + 'static;
 
-    /// Query the current output scale in milli-units.
     fn output_scale_milli(&mut self) -> u32;
 
-    /// Create one backend window.
     fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window>;
+}
+
+pub(crate) trait PlatformWindowState {
+    fn output_scale_milli(&self) -> u32 {
+        1000
+    }
 }
 
 /// Platform-independent window interface
@@ -53,6 +65,11 @@ pub trait PlatformWindow: Any {
 
     /// Poll for events (returns None if no events available)
     fn poll_event(&mut self) -> Option<Event>;
+
+    /// Wait until more events arrive or the timeout expires.
+    fn wait_for_event(&mut self, timeout: Duration) {
+        std::thread::sleep(timeout);
+    }
 
     /// Present a buffer to the screen
     fn present(&mut self, buffer: &Buffer);

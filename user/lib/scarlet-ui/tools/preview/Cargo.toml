@@ -1,0 +1,7 @@
+[package]
+name = "scarlet-ui-preview"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet-ui = { path = "../..", default-features = false, features = ["std", "platform-winit", "preview"] }

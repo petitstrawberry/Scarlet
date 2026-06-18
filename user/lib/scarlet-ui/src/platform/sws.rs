@@ -8,7 +8,7 @@ use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
 use crate::geometry::{Point, Rect, Size};
-use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
 use alloc::vec::Vec;
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
@@ -52,10 +52,10 @@ pub struct SWSPlatformWindow {
 
 /// Scarlet Window Server backend.
 #[derive(Default)]
-pub struct SwsBackend;
+pub(crate) struct SwsBackend;
 
 impl SwsBackend {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -78,6 +78,12 @@ impl PlatformBackend for SwsBackend {
             request.active_on_focus,
             request.opaque,
         )
+    }
+}
+
+impl PlatformWindowState for SWSPlatformWindow {
+    fn output_scale_milli(&self) -> u32 {
+        self.scale_milli
     }
 }
 

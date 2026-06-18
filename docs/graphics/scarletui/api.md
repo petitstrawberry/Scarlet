@@ -1189,41 +1189,96 @@ impl Application for MyApp {
 
 ## Platform Integration
 
-### PlatformWindow Trait
+ScarletUI platform integration is split into two layers:
+
+- application code declares `Application::scenes()` and calls `app.run()`
+- the crate feature selects the platform implementation used by the runner
+
+Application code should not construct or choose a platform implementation directly. The same
+application source should compile for SWS and native desktop targets when the
+crate dependency selects the appropriate platform feature.
+
+### Platform Features
+
+| Feature | Target | Notes |
+|---------|--------|-------|
+| `platform-sws` | Scarlet OS / SWS | Uses `sws-client` and `sws-protocol`. |
+| `platform-winit` | native desktop | Uses `winit` + `softbuffer`; requires `std`. |
+
+The platform features are mutually exclusive.
+
+Example dependency selection:
+
+```toml
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+```
+
+The application entry point stays unchanged:
 
 ```rust
-pub trait PlatformWindow {
+fn main() -> scarlet_ui::Result<()> {
+    let mut app = MyApp::default();
+    app.run()
+}
+```
+
+### Internal Platform Boundary
+
+`PlatformBackend` is the runner-level factory for platform windows. It is not
+part of the normal application API.
+
+```rust
+pub(crate) trait PlatformBackend {
+    type Window: PlatformWindow + PlatformWindowState + 'static;
+
+    fn output_scale_milli(&mut self) -> u32;
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window>;
+}
+```
+
+`PlatformWindow` is the platform-neutral window interface used by the runner.
+It covers event polling, presentation, window controls, text input sync, and
+platform-specific escape hatches for tightly coupled Scarlet applications.
+
+```rust
+pub trait PlatformWindow: Any {
+    fn new(app_id: &str, title: &str, size: Size) -> Result<Self>
+    where
+        Self: Sized;
+
     fn poll_event(&mut self) -> Option<Event>;
-    fn present(&mut self, buffer: Buffer) -> Result<()>;
+    fn wait_for_event(&mut self, timeout: Duration);
+    fn present(&mut self, buffer: &Buffer);
+    fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>);
+
+    fn set_title(&mut self, title: &str);
+    fn size(&self) -> Size;
     fn resize(&mut self, width: u32, height: u32) -> Result<()>;
+
     fn close(&mut self) -> Result<()>;
-    fn surface_id(&self) -> u32;
-    // ... more methods
+    fn minimize(&mut self) -> Result<()>;
+    fn maximize(&mut self) -> Result<()>;
+    fn restore(&mut self) -> Result<()>;
+    fn request_move(&mut self) -> Result<()>;
+
+    fn platform_window_id(&self) -> u64;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 ```
 
-### SWSPlatformWindow
+### Window Controls
 
-Implementation for Scarlet Window Server.
+`Window` renders ScarletUI titlebar controls. Clicks emit
+`WindowEvent::{CloseRequested, MinimizeRequested, MaximizeRequested,
+RestoreRequested, MoveRequested}`. The application runner routes those events to
+the selected `PlatformWindow`.
 
-```rust
-impl SWSPlatformWindow {
-    pub fn new(app_id: &str, title: &str, size: Size) -> Result<Self>;
-    pub fn new_with_menu(
-        app_id: &str,
-        title: &str,
-        size: Size,
-        menu_json: &str,
-    ) -> Result<Self>;
-    pub fn create_with_type(
-        app_id: &str,
-        title: &str,
-        size: Size,
-        window_type: WindowType,
-    ) -> Result<Self>;
-    // ... more methods
-}
-```
+`close()` must perform the platform close operation only. It must not enqueue a
+new `Event::Quit`; the runner already removes the corresponding window slot.
 
 ---
 

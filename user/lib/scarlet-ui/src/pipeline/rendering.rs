@@ -79,6 +79,11 @@ impl RenderingPipeline {
         }
     }
 
+    /// Return the current output scale in milli-units.
+    pub fn scale_milli(&self) -> u32 {
+        self.scale_milli
+    }
+
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);

@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::marker::PhantomData;
+use std::time::Duration;
 
 use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
@@ -14,7 +15,7 @@ use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model;
 use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
-use crate::platform::{PlatformBackend, PlatformWindow, SwsBackend, WindowCreateRequest};
+use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
 use crate::scene::{
     Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
 };
@@ -106,36 +107,48 @@ pub trait Application: Clone + 'static {
 
 /// Extension methods for running applications.
 pub trait ApplicationRunExt: Application {
-    /// Run with the default SWS backend.
+    /// Run with the selected platform backend.
+    #[cfg(any(feature = "platform-sws", feature = "platform-winit"))]
     fn run(&mut self) -> Result<()>
     where
         Self: Sized + View,
     {
-        self.run_with_backend(SwsBackend::new())
-    }
-
-    /// Run with a custom platform backend.
-    fn run_with_backend<B: PlatformBackend>(&mut self, backend: B) -> Result<()>
-    where
-        Self: Sized + View,
-    {
-        ApplicationRunner::new(backend).run(self)
+        selected_platform::run(self)
     }
 }
 
 impl<T: Application> ApplicationRunExt for T {}
 
+#[cfg(any(feature = "platform-sws", feature = "platform-winit"))]
+mod selected_platform {
+    use crate::application::{Application, ApplicationRunner};
+    use crate::error::Result;
+    use crate::view::View;
+
+    #[cfg(feature = "platform-sws")]
+    type SelectedBackend = crate::platform::SwsBackend;
+    #[cfg(feature = "platform-winit")]
+    type SelectedBackend = crate::platform::WinitBackend;
+
+    pub(super) fn run<A>(app: &mut A) -> Result<()>
+    where
+        A: Application + View,
+    {
+        ApplicationRunner::new(SelectedBackend::new()).run(app)
+    }
+}
+
 /// Backend-independent application runner.
-pub struct ApplicationRunner<B: PlatformBackend> {
+pub(crate) struct ApplicationRunner<B: PlatformBackend> {
     backend: B,
 }
 
 impl<B: PlatformBackend> ApplicationRunner<B> {
-    pub fn new(backend: B) -> Self {
+    pub(crate) fn new(backend: B) -> Self {
         Self { backend }
     }
 
-    pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
+    pub(crate) fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
         app.init();
 
@@ -212,6 +225,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         };
 
         let mut window = self.backend.create_window(request)?;
+        sync_output_scale(&mut pipeline, &window);
 
         if let Some(menu_bar) = window_info.menu_bar {
             if !menu_json.is_empty() {
@@ -286,7 +300,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
             }
 
             if !any_event && !any_presented {
-                std::thread::sleep(std::time::Duration::from_millis(16));
+                wait_for_next_event(slots, Duration::from_millis(16));
             }
         }
     }
@@ -335,7 +349,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
     }
 }
 
-struct WindowSlot<W: PlatformWindow, A: Application> {
+struct WindowSlot<W: PlatformWindow + PlatformWindowState, A: Application> {
     context: WindowContext,
     pipeline: RenderingPipeline,
     window: W,
@@ -393,7 +407,25 @@ fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut dyn PlatformW
     }
 }
 
-fn handle_window_event<A: Application, W: PlatformWindow>(
+fn wait_for_next_event<A: Application, W: PlatformWindow + PlatformWindowState>(
+    slots: &mut [WindowSlot<W, A>],
+    timeout: Duration,
+) {
+    if let Some(slot) = slots.first_mut() {
+        slot.window.wait_for_event(timeout);
+    } else {
+        std::thread::sleep(timeout);
+    }
+}
+
+fn sync_output_scale<W: PlatformWindowState>(pipeline: &mut RenderingPipeline, window: &W) {
+    let scale_milli = window.output_scale_milli();
+    if pipeline.scale_milli() != scale_milli {
+        pipeline.set_scale_milli(scale_milli);
+    }
+}
+
+fn handle_window_event<A: Application, W: PlatformWindow + PlatformWindowState>(
     app: &mut A,
     slot: &mut WindowSlot<W, A>,
     event: Event,
@@ -407,6 +439,7 @@ fn handle_window_event<A: Application, W: PlatformWindow>(
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
             if slot.window.resize(width, height).is_ok() {
+                sync_output_scale(&mut slot.pipeline, &slot.window);
                 slot.pipeline.resize(new_size);
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(&mut slot.window, &slot.pipeline);
@@ -421,6 +454,7 @@ fn handle_window_event<A: Application, W: PlatformWindow>(
                 let new_width = new_size.width.max(1.0) as u32;
                 let new_height = new_size.height.max(1.0) as u32;
                 if slot.window.resize(new_width, new_height).is_ok() {
+                    sync_output_scale(&mut slot.pipeline, &slot.window);
                     slot.pipeline.resize(new_size);
                     sync_text_input(&mut slot.window, &slot.pipeline);
                 }
@@ -550,14 +584,16 @@ fn handle_window_event<A: Application, W: PlatformWindow>(
     Ok(())
 }
 
-fn sync_after_event<A: Application, W: PlatformWindow>(slot: &mut WindowSlot<W, A>) {
+fn sync_after_event<A: Application, W: PlatformWindow + PlatformWindowState>(
+    slot: &mut WindowSlot<W, A>,
+) {
     sync_text_input(&mut slot.window, &slot.pipeline);
     if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, &mut slot.window) {
         slot.presented_this_cycle = true;
     }
 }
 
-fn handle_emitted_window_events<A: Application, W: PlatformWindow>(
+fn handle_emitted_window_events<A: Application, W: PlatformWindow + PlatformWindowState>(
     slot: &mut WindowSlot<W, A>,
     close_ids: &mut Vec<WindowId>,
 ) -> Result<()> {
@@ -585,7 +621,7 @@ fn handle_emitted_window_events<A: Application, W: PlatformWindow>(
     Ok(())
 }
 
-fn remove_closed_slots<A: Application, W: PlatformWindow>(
+fn remove_closed_slots<A: Application, W: PlatformWindow + PlatformWindowState>(
     slots: &mut Vec<WindowSlot<W, A>>,
     close_ids: &[WindowId],
 ) {

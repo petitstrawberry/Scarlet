@@ -797,6 +797,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                         UpdateResult::Replaced => {
                             let old_constraints = content.last_layout_constraints();
                             let old_position = content.position();
+                            let focused_path =
+                                crate::element::focused_descendant_path(content.as_ref());
                             content.unmount();
                             let mut new_content = content_view.create_element();
                             let ctx = MountContext::new(self.pipeline_id);
@@ -804,6 +806,9 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                             if let Some(constraints) = old_constraints {
                                 new_content.layout(constraints);
                                 new_content.set_position(old_position);
+                            }
+                            if let Some(path) = focused_path.as_deref() {
+                                crate::element::restore_focus_at_path(new_content.as_mut(), path);
                             }
                             self.children[content_index] = new_content;
                             if old_constraints.is_some() {

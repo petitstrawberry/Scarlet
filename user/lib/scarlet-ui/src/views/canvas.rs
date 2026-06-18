@@ -22,10 +22,11 @@ use std::rc::Rc;
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```rust
+/// use std::rc::Rc;
 /// use scarlet_ui::CanvasView;
 ///
-/// let view = CanvasView::new(800.0, 600.0, |buffer, width, height| {
+/// let view = CanvasView::new(800.0, 600.0, Rc::new(|buffer: &mut [u8], width, height| {
 ///     // Draw to buffer (BGRA format)
 ///     for y in 0..height {
 ///         for x in 0..width {
@@ -36,7 +37,7 @@ use std::rc::Rc;
 ///             buffer[idx + 3] = 255; // A
 ///         }
 ///     }
-/// });
+/// }));
 /// ```
 pub type CanvasRenderCallback = Rc<dyn Fn(&mut [u8], u32, u32)>;
 
