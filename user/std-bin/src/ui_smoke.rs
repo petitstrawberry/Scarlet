@@ -64,10 +64,6 @@ impl Application for UiSmokeApp {
         .size(Size::new(640.0, 420.0)))
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn debug_logging(&self) -> bool {
         false
     }

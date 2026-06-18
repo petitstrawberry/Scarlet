@@ -72,10 +72,6 @@ impl Application for ClockApp {
         }
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn debug_logging(&self) -> bool {
         false
     }

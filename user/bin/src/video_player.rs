@@ -903,10 +903,6 @@ impl Application for VideoPlayerApp {
         )
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn init(&mut self) {
         start_controls_thread(self.controls.clone(), self.paint_signal.clone());
         if let Some(audio_source) = self.audio_source.clone() {

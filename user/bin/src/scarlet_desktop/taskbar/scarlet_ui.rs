@@ -708,10 +708,6 @@ impl Application for TaskBarApp {
         .size(Size::new(screen_width, window_height)))
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn exit_when_all_windows_closed(&self) -> bool {
         false
     }

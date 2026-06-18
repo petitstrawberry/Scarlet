@@ -848,10 +848,6 @@ impl Application for SettingsApp {
         .size(Size::new(800.0, 600.0)))
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn debug_logging(&self) -> bool {
         false
     }

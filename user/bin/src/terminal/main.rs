@@ -334,10 +334,6 @@ impl Application for TerminalApp {
         )
     }
 
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        <Self as View>::listenables(self)
-    }
-
     fn init(&mut self) {
         self.start_pty_session();
     }

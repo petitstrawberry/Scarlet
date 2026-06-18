@@ -18,7 +18,7 @@ use crate::platform::{PlatformBackend, PlatformWindow, SwsBackend, WindowCreateR
 use crate::scene::{
     Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
 };
-use crate::state::{InvalidationKind, Listenable, StateId, SubscriptionId};
+use crate::state::{InvalidationKind, StateId, SubscriptionId};
 use crate::view::View;
 
 /// Application trait - main entry point for ScarletUI apps.
@@ -27,11 +27,6 @@ use crate::view::View;
 pub trait Application: Clone + 'static {
     /// Returns the scene graph of top-level application windows.
     fn scenes(&self) -> impl Scene;
-
-    /// Return listenable dependencies owned directly by the application.
-    fn listenables(&self) -> Vec<&dyn Listenable> {
-        Vec::new()
-    }
 
     /// Handle focus change event from window server.
     fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
@@ -114,7 +109,7 @@ pub trait ApplicationRunExt: Application {
     /// Run with the default SWS backend.
     fn run(&mut self) -> Result<()>
     where
-        Self: Sized,
+        Self: Sized + View,
     {
         self.run_with_backend(SwsBackend::new())
     }
@@ -122,7 +117,7 @@ pub trait ApplicationRunExt: Application {
     /// Run with a custom platform backend.
     fn run_with_backend<B: PlatformBackend>(&mut self, backend: B) -> Result<()>
     where
-        Self: Sized,
+        Self: Sized + View,
     {
         ApplicationRunner::new(backend).run(self)
     }
@@ -140,7 +135,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         Self { backend }
     }
 
-    pub fn run<A: Application>(&mut self, app: &mut A) -> Result<()> {
+    pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
         app.init();
 
@@ -159,7 +154,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         self.run_loop(app, &mut slots)
     }
 
-    fn create_slots<A: Application>(
+    fn create_slots<A: Application + View>(
         &mut self,
         app: &mut A,
         declarations: Vec<WindowDeclaration>,
@@ -174,7 +169,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         Ok(slots)
     }
 
-    fn create_slot<A: Application>(
+    fn create_slot<A: Application + View>(
         &mut self,
         app: &mut A,
         declaration: WindowDeclaration,
@@ -249,7 +244,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         })
     }
 
-    fn run_loop<A: Application>(
+    fn run_loop<A: Application + View>(
         &mut self,
         app: &mut A,
         slots: &mut Vec<WindowSlot<B::Window, A>>,
@@ -296,7 +291,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         }
     }
 
-    fn handle_application_commands<A: Application>(
+    fn handle_application_commands<A: Application + View>(
         &mut self,
         app: &mut A,
         slots: &mut Vec<WindowSlot<B::Window, A>>,
@@ -637,7 +632,7 @@ fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String)> {
     Some((window_id, app_name, menu_titles))
 }
 
-struct SceneWindowRootElement<A: Application> {
+struct SceneWindowRootElement<A: Application + View> {
     id: ElementId,
     app: A,
     scene_key: SceneWindowKey,
@@ -648,7 +643,7 @@ struct SceneWindowRootElement<A: Application> {
     subscriptions: Vec<SubscriptionId>,
 }
 
-impl<A: Application> SceneWindowRootElement<A> {
+impl<A: Application + View> SceneWindowRootElement<A> {
     fn new(app: A, scene_key: SceneWindowKey, pipeline_id: PipelineId) -> Self {
         let id = ElementId::generate();
         let child = resolve_scene_view(&app, &scene_key).map(|view| view.create_element());
@@ -665,7 +660,7 @@ impl<A: Application> SceneWindowRootElement<A> {
     }
 }
 
-impl<A: Application> Element for SceneWindowRootElement<A> {
+impl<A: Application + View> Element for SceneWindowRootElement<A> {
     fn id(&self) -> ElementId {
         self.id
     }
@@ -736,8 +731,7 @@ impl<A: Application> Element for SceneWindowRootElement<A> {
 
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
-        let listenables = self.app.listenables();
-        for listenable in listenables {
+        for listenable in View::listenables(&self.app) {
             let element_id = self.id;
             let pipeline_id = self.pipeline_id;
             let invalidation_kind = listenable.invalidation_kind();
@@ -760,8 +754,10 @@ impl<A: Application> Element for SceneWindowRootElement<A> {
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
-        let listenables = self.app.listenables();
-        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
+        let listenables = View::listenables(&self.app);
+        for (listenable, subscription_id) in
+            listenables.iter().zip(self.subscriptions.iter())
+        {
             listenable.unsubscribe(*subscription_id);
         }
         self.subscriptions.clear();
