@@ -25,6 +25,8 @@ use std::time::Duration;
 pub(crate) use sws::SwsBackend;
 #[cfg(feature = "platform-winit")]
 pub(crate) use winit::WinitBackend;
+#[cfg(feature = "platform-winit")]
+pub(crate) type WinitBackendWindow = <WinitBackend as PlatformBackend>::Window;
 
 pub(crate) struct WindowCreateRequest {
     pub(crate) app_id: String,

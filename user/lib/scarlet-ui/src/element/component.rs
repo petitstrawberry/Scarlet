@@ -23,6 +23,7 @@ use crate::view::View;
 pub struct ComponentElement<V: View + Clone> {
     id: ElementId,
     view: V,
+    build_child: fn(&V) -> Box<dyn Element>,
     child: Option<Box<dyn Element>>,
     size: Size,
     position: Point,
@@ -34,11 +35,27 @@ pub struct ComponentElement<V: View + Clone> {
 impl<V: View + Clone> ComponentElement<V> {
     /// Create a new ComponentElement with a View
     pub fn new(view: V) -> Self {
+        Self::new_with_builder(view, default_component_child::<V>)
+    }
+
+    /// Create a new ComponentElement with an explicit child builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - View value owned by this component.
+    /// * `build_child` - Function that creates the child element for `view`.
+    ///
+    /// # Returns
+    ///
+    /// Component element that subscribes to `view` listenables and rebuilds
+    /// children through `build_child`.
+    pub fn new_with_builder(view: V, build_child: fn(&V) -> Box<dyn Element>) -> Self {
         let id = ElementId::generate();
-        let child = view.create_element();
+        let child = build_child(&view);
         Self {
             id,
             view,
+            build_child,
             child: Some(child),
             size: Size::ZERO,
             position: Point::ZERO,
@@ -57,6 +74,10 @@ impl<V: View + Clone> ComponentElement<V> {
     pub fn view_mut(&mut self) -> &mut V {
         &mut self.view
     }
+}
+
+fn default_component_child<V: View + Clone>(view: &V) -> Box<dyn Element> {
+    view.create_element()
 }
 
 impl<V: View + Clone> Element for ComponentElement<V> {
@@ -116,7 +137,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             }
 
             // Create new child element
-            let mut new_child = self.view.create_element();
+            let mut new_child = (self.build_child)(&self.view);
             let ctx = MountContext::new(self.pipeline_id);
             new_child.mount(&ctx);
 
@@ -154,7 +175,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         }
 
         // Create new child element from the stored view
-        let new_child = self.view.create_element();
+        let new_child = (self.build_child)(&self.view);
 
         // Replace the old child with the new one
         self.child = Some(new_child);

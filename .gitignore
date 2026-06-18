@@ -24,6 +24,7 @@ kernel/src/lsm/generated_symbols.rs
 # Build artifacts
 tools/guest/*.o
 tools/guest/*.elf
+target/
 
 # Nix
 .direnv/

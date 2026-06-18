@@ -226,6 +226,35 @@ keyboard and IME events into the same ScarletUI event model:
 - plain character input becomes `KeyEvent::Char`
 - IME state is enabled only while a text input is focused
 
+## Native Live Preview
+
+ScarletUI preview is a development-only native desktop host. It does not change
+`Application::run()` and does not expose platform selection to application code.
+Preview entry points are explicit Rust functions annotated with
+`#[scarlet_ui::preview]`. Multiple preview functions can live in the same crate.
+The functions usually return view fragments directly; `Window` is optional and
+is only needed for window-specific preview behavior. Preview names are generated
+from function names by default, and `width` / `height` attributes can provide a
+preferred initial preview size.
+
+Stateful previews should return the state-owning view itself, not an
+already-expanded fragment that has read `State::get()`. The preview host mounts
+the returned view as a component shell and subscribes to its `listenables()`.
+
+The preview host:
+
+- builds the preview crate with the `preview` feature
+- loads the generated dylib with the same Rust toolchain ABI
+- exposes all registered preview functions from the dylib
+- creates a normal `RenderingPipeline` for the exported view
+- routes input, IME state, titlebar controls, resize, and damage presentation
+  through the native platform window
+- watches Rust source and Cargo files, then rebuilds and reloads the dylib after
+  successful builds
+
+Hot reload is intentionally scoped to preview sessions. Scarlet OS execution and
+normal native application execution continue to use the selected platform runner.
+
 ## Feature Matrix
 
 | Build feature | Uses std | Platform | Notes |

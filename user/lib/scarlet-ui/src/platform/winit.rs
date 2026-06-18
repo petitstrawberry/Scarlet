@@ -395,6 +395,16 @@ impl WinitPlatformWindow {
             .resize(width, height)
             .map_err(|_| Error::RenderError)
     }
+
+    pub(crate) fn set_observed_logical_size(&mut self, size: Size) {
+        self.current_size = size;
+    }
+
+    fn observed_logical_size(&self) -> Size {
+        let scale_factor = self.window.scale_factor();
+        let inner_size = self.window.inner_size();
+        physical_to_logical_size(inner_size.width, inner_size.height, scale_factor)
+    }
 }
 
 impl PlatformWindow for WinitPlatformWindow {
@@ -414,7 +424,14 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn poll_event(&mut self) -> Option<Event> {
         self.pump_events();
-        self.state.borrow_mut().queue.pop_front()
+        let event = self.state.borrow_mut().queue.pop_front();
+        if let Some(Event::Resize { width, height }) = event {
+            let size = Size::new(width as f32, height as f32);
+            self.set_observed_logical_size(size);
+            Some(Event::Resize { width, height })
+        } else {
+            event
+        }
     }
 
     fn wait_for_event(&mut self, timeout: Duration) {
@@ -441,7 +458,7 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn size(&self) -> Size {
-        self.current_size
+        self.observed_logical_size()
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {

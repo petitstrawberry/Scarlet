@@ -96,6 +96,8 @@ pub mod menu_model;
 mod os;
 pub mod pipeline;
 pub mod platform;
+#[cfg(feature = "preview")]
+pub mod preview;
 pub mod render;
 pub mod scene;
 pub mod state;
@@ -106,6 +108,8 @@ pub mod views;
 pub mod __private {
     pub use alloc::boxed::Box;
     pub use alloc::vec::Vec;
+    #[cfg(feature = "preview")]
+    pub use inventory;
 }
 
 #[cfg(feature = "std")]
@@ -173,6 +177,8 @@ pub use views::{
 };
 pub use views::{NavigationLink, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
+
+pub use scarlet_ui_macros::preview;
 
 // Macros are exported at root via #[macro_export]
 // Users can use them directly: vstack! {}, hstack! {}, scenes! {}, etc.
