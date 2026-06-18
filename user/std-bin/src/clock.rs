@@ -10,17 +10,37 @@ use scarlet_ui::prelude::*;
 use scarlet_ui::{CanvasView, MenuBarModel, MenuEntry, MenuItemModel, hstack, match_view, vstack};
 use scarlet_ui_macros::View;
 
+fn presets() -> [(Color, &'static str); 6] {
+    [
+        (Color::rgb(30, 30, 40), "Dark"),
+        (Color::rgb(20, 30, 60), "Blue"),
+        (Color::rgb(20, 40, 30), "Green"),
+        (Color::rgb(60, 20, 40), "Red"),
+        (Color::rgb(40, 20, 50), "Purple"),
+        (Color::rgb(240, 240, 245), "Light"),
+    ]
+}
+
 #[derive(View, Clone)]
 struct ClockApp {
     tick: State<u64>,
-    bg_color: State<Color>,
+    base_color: State<Color>,
+    alpha: State<f32>,
     show_settings: State<bool>,
+}
+
+impl ClockApp {
+    fn bg_color(&self) -> Color {
+        let c = self.base_color.get();
+        let a = self.alpha.get();
+        Color::rgba_f32(c.r, c.g, c.b, a)
+    }
 }
 
 impl Application for ClockApp {
     fn body(&self) -> impl View {
         let _ = self.tick.get();
-        let bg = self.bg_color.get();
+        let bg = self.bg_color();
         let show = self.show_settings.get();
 
         Window::new(
@@ -56,8 +76,11 @@ impl Application for ClockApp {
 }
 
 fn settings_content(app: ClockApp) -> impl View + Clone {
-    let current = app.bg_color.get();
-    let bg_state = app.bg_color.clone();
+    let presets = presets();
+    let current_base = app.base_color.get();
+    let current_alpha = app.alpha.get();
+    let base_state = app.base_color.clone();
+    let alpha_state = app.alpha.clone();
     let show_state = app.show_settings.clone();
 
     vstack! {
@@ -66,26 +89,30 @@ fn settings_content(app: ClockApp) -> impl View + Clone {
             Spacer::new().frame_height(12.0),
 
             hstack! {
-                swatch(Color::rgb(30, 30, 40), "Dark", current, bg_state.clone()),
+                swatch(presets[0].0, presets[0].1, current_base, base_state.clone()),
                 Spacer::new().frame_width(12.0),
-                swatch(Color::rgb(20, 30, 60), "Blue", current, bg_state.clone()),
+                swatch(presets[1].0, presets[1].1, current_base, base_state.clone()),
                 Spacer::new().frame_width(12.0),
-                swatch(Color::rgb(20, 40, 30), "Green", current, bg_state.clone()),
+                swatch(presets[2].0, presets[2].1, current_base, base_state.clone()),
             },
 
             Spacer::new().frame_height(12.0),
 
             hstack! {
-                swatch(Color::rgb(60, 20, 40), "Red", current, bg_state.clone()),
+                swatch(presets[3].0, presets[3].1, current_base, base_state.clone()),
                 Spacer::new().frame_width(12.0),
-                swatch(Color::rgb(40, 20, 50), "Purple", current, bg_state.clone()),
+                swatch(presets[4].0, presets[4].1, current_base, base_state.clone()),
                 Spacer::new().frame_width(12.0),
-                swatch(Color::rgb(240, 240, 245), "Light", current, bg_state.clone()),
+                swatch(presets[5].0, presets[5].1, current_base, base_state.clone()),
             },
 
             Spacer::new().frame_height(16.0),
 
-            Button::new("Transparent").on_click(move || { bg_state.set(Color::TRANSPARENT); }),
+            Text::new(format!("Opacity: {}%", (current_alpha * 100.0) as u32))
+                .font_size(13.0)
+                .color(Color::rgb(60, 60, 70)),
+            Slider::new(alpha_state).min(0.0).max(1.0),
+
             Spacer::new().frame_height(16.0),
             Button::new("Done").on_click(move || { show_state.set(false); }),
         }
@@ -95,9 +122,9 @@ fn settings_content(app: ClockApp) -> impl View + Clone {
 
 fn swatch(
     color: Color,
-    label: &'static str,
+    label: &str,
     current: Color,
-    bg_state: State<Color>,
+    base_state: State<Color>,
 ) -> impl View + Clone {
     let is_current = current == color;
     vstack! {
@@ -108,7 +135,7 @@ fn swatch(
                 if is_current { Color::rgb(255, 149, 0) } else { Color::rgb(80, 80, 90) },
             )
             .frame(56.0, 56.0)
-            .on_click(move || { bg_state.set(color); }),
+            .on_click(move || { base_state.set(color); }),
         Text::new(label).font_size(11.0).color(Color::rgb(60, 60, 70)),
     }
     .alignment(Alignment::Center)
@@ -178,7 +205,8 @@ fn main() -> ExitCode {
     println!("[clock] starting");
     let mut app = ClockApp {
         tick: State::new(StateId::new(0), 0),
-        bg_color: State::new(StateId::new(1), Color::rgb(30, 30, 40)),
+        base_color: State::new(StateId::new(1), Color::rgb(30, 30, 40)),
+        alpha: State::new(StateId::new(3), 1.0),
         show_settings: State::new(StateId::new(2), false),
     };
 
