@@ -131,9 +131,17 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             .as_ref()
             .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
 
-        // Unmount the old child
         if let Some(ref mut child) = self.child {
-            child.unmount();
+            match child.update(&self.view) {
+                UpdateResult::NoChange => return UpdateResult::NoChange,
+                UpdateResult::Updated => {
+                    crate::pipeline::mark_element_needs_layout(child.id());
+                    return UpdateResult::NoChange;
+                }
+                UpdateResult::Replaced => {
+                    child.unmount();
+                }
+            }
         }
 
         // Create new child element from the stored view
@@ -150,7 +158,10 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             }
         }
 
-        UpdateResult::Updated
+        if let Some(ref child) = self.child {
+            crate::pipeline::mark_element_needs_layout(child.id());
+        }
+        UpdateResult::NoChange
     }
 
     fn mount(&mut self) {
@@ -244,6 +255,12 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         } else {
             false
         }
+    }
+
+    fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {
+        self.child
+            .as_mut()
+            .and_then(|child| child.take_window_action())
     }
 
     fn fill_width(&self) -> bool {

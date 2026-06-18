@@ -530,6 +530,9 @@ pub trait Application: View {
                     _ => {
                         // Other events are handled by the pipeline
                         let _ = pipeline.handle_event(&event);
+                        if handle_emitted_window_events(&mut pipeline, &mut platform_window)? {
+                            return Ok(());
+                        }
                         sync_text_input(&mut platform_window, &pipeline);
                         if !presented_this_cycle && pipeline.has_dirty() {
                             if present_pipeline(&mut pipeline, &mut platform_window) {
@@ -541,27 +544,8 @@ pub trait Application: View {
             }
 
             // 6.2 Handle emitted Window events
-            for emitted_event in pipeline.take_emitted_events() {
-                match emitted_event {
-                    Event::Window(crate::event::WindowEvent::CloseRequested) => {
-                        // Close the window and exit the application
-                        let _ = platform_window.close();
-                        return Ok(());
-                    }
-                    Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
-                        let _ = platform_window.maximize();
-                    }
-                    Event::Window(crate::event::WindowEvent::RestoreRequested) => {
-                        let _ = platform_window.restore();
-                    }
-                    Event::Window(crate::event::WindowEvent::MinimizeRequested) => {
-                        let _ = platform_window.minimize();
-                    }
-                    Event::Window(crate::event::WindowEvent::MoveRequested) => {
-                        let _ = platform_window.request_move();
-                    }
-                    _ => {}
-                }
+            if handle_emitted_window_events(&mut pipeline, &mut platform_window)? {
+                return Ok(());
             }
 
             // 6.3 Render frame
@@ -609,6 +593,34 @@ fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut SWSPlatformWi
     } else {
         false
     }
+}
+
+fn handle_emitted_window_events(
+    pipeline: &mut RenderingPipeline,
+    window: &mut SWSPlatformWindow,
+) -> Result<bool> {
+    for emitted_event in pipeline.take_emitted_events() {
+        match emitted_event {
+            Event::Window(crate::event::WindowEvent::CloseRequested) => {
+                let _ = window.close();
+                return Ok(true);
+            }
+            Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
+                let _ = window.maximize();
+            }
+            Event::Window(crate::event::WindowEvent::RestoreRequested) => {
+                let _ = window.restore();
+            }
+            Event::Window(crate::event::WindowEvent::MinimizeRequested) => {
+                let _ = window.minimize();
+            }
+            Event::Window(crate::event::WindowEvent::MoveRequested) => {
+                let _ = window.request_move();
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 struct ApplicationRootElement<A: Application + Clone> {
@@ -698,17 +710,30 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
             .child
             .as_ref()
             .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
+        let body = self.app.body();
         if let Some(ref mut child) = self.child {
-            child.unmount();
+            match child.update(&body) {
+                UpdateResult::NoChange => return UpdateResult::NoChange,
+                UpdateResult::Updated => {
+                    crate::pipeline::mark_element_needs_layout(child.id());
+                    return UpdateResult::NoChange;
+                }
+                UpdateResult::Replaced => {
+                    child.unmount();
+                }
+            }
         }
-        self.child = Some(self.app.body().create_element());
+        self.child = Some(body.create_element());
         if let Some(ref mut child) = self.child {
             child.mount();
             if let Some(path) = focused_path.as_deref() {
                 crate::element::restore_focus_at_path(child.as_mut(), path);
             }
         }
-        UpdateResult::Updated
+        if let Some(ref child) = self.child {
+            crate::pipeline::mark_element_needs_layout(child.id());
+        }
+        UpdateResult::NoChange
     }
 
     fn mount(&mut self) {
@@ -789,5 +814,11 @@ impl<A: Application + Clone + 'static> Element for ApplicationRootElement<A> {
         } else {
             false
         }
+    }
+
+    fn take_window_action(&mut self) -> Option<crate::event::WindowEvent> {
+        self.child
+            .as_mut()
+            .and_then(|child| child.take_window_action())
     }
 }

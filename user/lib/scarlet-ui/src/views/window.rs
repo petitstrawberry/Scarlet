@@ -152,11 +152,52 @@ pub struct Window<V: View> {
 }
 
 pub trait WindowViewInfo {
+    /// Return window metadata used by the platform window.
+    ///
+    /// # Returns
+    ///
+    /// Window metadata such as title, size, type, menu bar, and background color.
     fn window_info(&self) -> WindowInfo;
+
+    /// Return size limits advertised for the platform window.
+    ///
+    /// # Returns
+    ///
+    /// Minimum and maximum window sizes plus the resizable flag.
     fn window_size_limits(&self) -> WindowSizeLimits;
+
+    /// Return whether the window draws client-side decorations.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the window has a ScarletUI titlebar and border.
+    fn is_decorated(&self) -> bool {
+        true
+    }
+
+    /// Return the content view hosted by this window.
+    ///
+    /// # Returns
+    ///
+    /// The content view when this value represents an actual `Window`.
+    fn content_view(&self) -> Option<&dyn View> {
+        None
+    }
+
+    /// Return whether the window can be resized.
+    ///
+    /// # Returns
+    ///
+    /// `true` when resize actions should be accepted.
     fn is_resizable(&self) -> bool {
         false
     }
+
+    /// Return whether the window can be moved.
+    ///
+    /// # Returns
+    ///
+    /// `true` when titlebar drag actions should be accepted.
     fn is_movable(&self) -> bool {
         true
     }
@@ -356,6 +397,14 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
         }
     }
 
+    fn is_decorated(&self) -> bool {
+        self.decorated
+    }
+
+    fn content_view(&self) -> Option<&dyn View> {
+        Some(&self.content)
+    }
+
     fn is_resizable(&self) -> bool {
         self.resizable
     }
@@ -367,7 +416,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
 
 impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        // Create WindowRenderObject with titlebar included
+        // Create WindowRenderObject for the background and border.
         let render_object = WindowRenderObject::new(
             self.title.clone(),
             self.size,
@@ -375,8 +424,13 @@ impl<V: View + Clone + 'static> View for Window<V> {
             self.background_color,
         );
 
-        // Create child element from content
-        let children = alloc::vec![self.content.create_element()];
+        // Create child elements. The titlebar is a separate render element so
+        // content repaints do not repaint window decorations.
+        let mut children = Vec::new();
+        if self.decorated {
+            children.push(WindowTitleBarView::new(self.title.clone()).create_element());
+        }
+        children.push(self.content.create_element());
 
         Box::new(WindowRenderElement::new(
             self.clone(),
@@ -394,12 +448,172 @@ impl<V: View + Clone + 'static> View for Window<V> {
     }
 }
 
-/// WindowRenderElement - Element for Window that handles child buffer compositing
+#[derive(Clone)]
+struct WindowTitleBarView {
+    title: String,
+    focused: bool,
+}
+
+impl WindowTitleBarView {
+    fn new(title: String) -> Self {
+        Self {
+            title,
+            focused: true,
+        }
+    }
+}
+
+impl View for WindowTitleBarView {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(crate::element::RenderElement::new(
+            self.clone(),
+            WindowTitleBarRenderObject::new(self.title.clone(), self.focused),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct WindowTitleBarRenderObject {
+    title: String,
+    focused: bool,
+    size: Size,
+    buffer: Option<Buffer>,
+    // Button hover states (0=none, 1=hover, 2=pressed)
+    close_button_state: u8,
+    maximize_button_state: u8,
+    minimize_button_state: u8,
+}
+
+impl WindowTitleBarRenderObject {
+    fn new(title: String, focused: bool) -> Self {
+        Self {
+            title,
+            focused,
+            size: Size::new(0.0, TITLEBAR_HEIGHT as f32),
+            buffer: None,
+            close_button_state: 0,
+            maximize_button_state: 0,
+            minimize_button_state: 0,
+        }
+    }
+
+    fn update_button_states(&mut self, mouse_x: i32, mouse_y: i32, mouse_pressed: bool) -> bool {
+        let old_close_state = self.close_button_state;
+        let old_maximize_state = self.maximize_button_state;
+        let old_minimize_state = self.minimize_button_state;
+
+        let width = self.size.width as u32;
+        self.close_button_state = Self::button_state(width, 0, mouse_x, mouse_y, mouse_pressed);
+        self.maximize_button_state = Self::button_state(width, 1, mouse_x, mouse_y, mouse_pressed);
+        self.minimize_button_state = Self::button_state(width, 2, mouse_x, mouse_y, mouse_pressed);
+
+        old_close_state != self.close_button_state
+            || old_maximize_state != self.maximize_button_state
+            || old_minimize_state != self.minimize_button_state
+    }
+
+    fn button_state(
+        width: u32,
+        index_from_right: u32,
+        mouse_x: i32,
+        mouse_y: i32,
+        mouse_pressed: bool,
+    ) -> u8 {
+        let rect = WindowRenderObject::control_button_rect_static(width, index_from_right);
+        if rect.contains(Point::new(mouse_x as f32, mouse_y as f32)) {
+            if mouse_pressed { 2 } else { 1 }
+        } else {
+            0
+        }
+    }
+}
+
+impl ElementRenderObject for WindowTitleBarRenderObject {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+            constraints.max_width.max(constraints.min_width)
+        } else {
+            self.size.width.max(constraints.min_width)
+        };
+        self.size = Size::new(width, TITLEBAR_HEIGHT as f32);
+
+        let w = libm::ceilf(self.size.width) as u32;
+        let h = libm::ceilf(self.size.height) as u32;
+        let needs_resize = self
+            .buffer
+            .as_ref()
+            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
+        if needs_resize {
+            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
+        }
+
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn render(&mut self) {
+        if let Some(ref mut buffer) = self.buffer {
+            use crate::graphics::Canvas;
+
+            let mut canvas = Canvas::for_buffer(buffer);
+            let width = canvas.width();
+            let height = canvas.height();
+            WindowRenderObject::draw_titlebar_canvas_with_states(
+                &self.title,
+                self.focused,
+                &mut canvas,
+                width,
+                height,
+                self.close_button_state,
+                self.maximize_button_state,
+                self.minimize_button_state,
+            );
+        }
+    }
+
+    fn get_buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
+
+    fn clear_buffer(&mut self) {
+        self.buffer = None;
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        let Some(titlebar) = new_view.as_any().downcast_ref::<WindowTitleBarView>() else {
+            return UpdateResult::Replaced;
+        };
+
+        if self.title == titlebar.title && self.focused == titlebar.focused {
+            return UpdateResult::NoChange;
+        }
+
+        self.title = titlebar.title.clone();
+        self.focused = titlebar.focused;
+        UpdateResult::Updated
+    }
+}
+
+/// WindowRenderElement - Element for top-level Window behavior
 ///
 /// This Element handles Window-specific rendering logic:
-/// - Renders window decorations (titlebar, borders)
-/// - Renders child elements
-/// - Composites child buffers below the titlebar
+/// - Renders the window background and border
+/// - Positions the titlebar and content elements
+/// - Handles titlebar window-control events
 pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     id: ElementId,
     view: C,
@@ -458,6 +672,41 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     pub fn render_object_mut(&mut self) -> &mut WindowRenderObject {
         &mut self.render_object
     }
+
+    fn titlebar_child_index(&self) -> Option<usize> {
+        self.render_object.decorated.then_some(0)
+    }
+
+    fn content_child_index(&self) -> usize {
+        if self.render_object.decorated { 1 } else { 0 }
+    }
+
+    fn titlebar_render_object_mut(&mut self) -> Option<&mut WindowTitleBarRenderObject> {
+        let index = self.titlebar_child_index()?;
+        self.children
+            .get_mut(index)?
+            .render_object_mut()?
+            .as_any_mut()
+            .downcast_mut::<WindowTitleBarRenderObject>()
+    }
+
+    fn update_titlebar_button_states(
+        &mut self,
+        mouse_x: i32,
+        mouse_y: i32,
+        mouse_pressed: bool,
+    ) -> bool {
+        self.titlebar_render_object_mut()
+            .is_some_and(|titlebar| titlebar.update_button_states(mouse_x, mouse_y, mouse_pressed))
+    }
+
+    fn mark_titlebar_needs_paint(&self) {
+        if let Some(index) = self.titlebar_child_index()
+            && let Some(titlebar) = self.children.get(index)
+        {
+            crate::pipeline::mark_element_needs_paint(titlebar.id());
+        }
+    }
 }
 
 impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
@@ -491,8 +740,56 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         if let Some(typed_view) = new_view.as_any().downcast_ref::<C>() {
+            if typed_view.is_decorated() != self.render_object.decorated {
+                return UpdateResult::Replaced;
+            }
+
+            let window_info = typed_view.window_info();
+            if let Some(index) = self.titlebar_child_index()
+                && let Some(titlebar) = self.children.get_mut(index)
+            {
+                let titlebar_view = WindowTitleBarView::new(window_info.title.clone());
+                if matches!(titlebar.update(&titlebar_view), UpdateResult::Updated) {
+                    crate::pipeline::mark_element_needs_paint(titlebar.id());
+                }
+            }
+
+            if let Some(content_view) = typed_view.content_view() {
+                let content_index = self.content_child_index();
+                if let Some(content) = self.children.get_mut(content_index) {
+                    match content.update(content_view) {
+                        UpdateResult::NoChange => {}
+                        UpdateResult::Updated => {
+                            crate::pipeline::mark_element_needs_paint(content.id());
+                        }
+                        UpdateResult::Replaced => {
+                            let old_constraints = content.last_layout_constraints();
+                            let old_position = content.position();
+                            content.unmount();
+                            let mut new_content = content_view.create_element();
+                            new_content.mount();
+                            if let Some(constraints) = old_constraints {
+                                new_content.layout(constraints);
+                                new_content.set_position(old_position);
+                            }
+                            self.children[content_index] = new_content;
+                            if old_constraints.is_some() {
+                                crate::pipeline::mark_element_needs_paint(
+                                    self.children[content_index].id(),
+                                );
+                            } else {
+                                crate::pipeline::mark_element_needs_layout(
+                                    self.children[content_index].id(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             self.view = typed_view.clone();
-            self.render_object.update(new_view)
+            self.render_object
+                .update_from_window_info(&window_info, typed_view.is_decorated())
         } else {
             UpdateResult::Replaced
         }
@@ -545,20 +842,9 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn render(&mut self) {
-        // Render window decorations (background, titlebar, borders)
+        // Render the window background and border. The titlebar and content are
+        // independent children so their paint invalidation stays separate.
         self.render_object.render();
-
-        // Composite existing child buffers below the titlebar. Child rendering is
-        // handled by PipelineOwner so titlebar-only repaints do not repaint
-        // expensive content like CanvasView.
-        let mut child_buffers: Vec<Option<&Buffer>> = Vec::new();
-        for child in &self.children {
-            child_buffers.push(child.get_buffer());
-        }
-
-        // Composite child buffers into window buffer
-        let buffers: Vec<&Buffer> = child_buffers.into_iter().filter_map(|b| b).collect();
-        self.render_object.composite_children(&buffers);
     }
 
     fn get_buffer(&self) -> Option<&Buffer> {
@@ -590,8 +876,13 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             return false;
         }
 
-        // Only handle mouse events in target phase
-        if phase != crate::event::Phase::Target {
+        // Titlebar children are separate elements, so the parent window accepts
+        // all dispatch phases and handles controls whenever the event is in
+        // the titlebar band.
+        if phase != crate::event::Phase::Target
+            && phase != crate::event::Phase::Capture
+            && phase != crate::event::Phase::Bubble
+        {
             return false;
         }
 
@@ -613,20 +904,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 if local_x != self.last_mouse_x || local_y != self.last_mouse_y {
                     let mouse_pressed = self.pressed_button != 0;
 
-                    // Store old states to check for changes
-                    let old_close_state = self.render_object.close_button_state;
-                    let old_maximize_state = self.render_object.maximize_button_state;
-                    let old_minimize_state = self.render_object.minimize_button_state;
-
-                    // Update button states
-                    self.render_object
-                        .update_button_states(local_x, local_y, mouse_pressed);
-
-                    // Check if any button state changed
-                    if old_close_state != self.render_object.close_button_state
-                        || old_maximize_state != self.render_object.maximize_button_state
-                        || old_minimize_state != self.render_object.minimize_button_state
-                    {
+                    if self.update_titlebar_button_states(local_x, local_y, mouse_pressed) {
                         needs_repaint = true;
                     }
 
@@ -684,8 +962,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     }
 
                     // Update button states (pressed = true)
-                    self.render_object
-                        .update_button_states(local_x, local_y, true);
+                    self.update_titlebar_button_states(local_x, local_y, true);
                     needs_repaint = true;
                     handled = true;
 
@@ -755,8 +1032,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
                     // Reset pressed state
                     self.pressed_button = 0;
-                    self.render_object
-                        .update_button_states(local_x, local_y, false);
+                    self.update_titlebar_button_states(local_x, local_y, false);
                     needs_repaint = true;
 
                     // Update last mouse position
@@ -771,7 +1047,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
         // Mark for repaint if button states changed
         if needs_repaint {
-            crate::pipeline::mark_element_needs_self_paint(self.id());
+            self.mark_titlebar_needs_paint();
         }
 
         handled
@@ -794,38 +1070,43 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 ///
 /// This RenderObject owns a single buffer that contains:
 /// - Window background (WHITE or custom)
-/// - Titlebar with buttons (if decorated)
+/// - Window border (if decorated)
 pub struct WindowRenderObject {
-    title: String,
     size: Size,
     decorated: bool,
     background_color: Color,
-    focused: bool,
     buffer: Option<Buffer>,
-    // Button hover states (0=none, 1=hover, 2=pressed)
-    close_button_state: u8,
-    maximize_button_state: u8,
-    minimize_button_state: u8,
 }
 
 impl WindowRenderObject {
-    pub fn new(title: String, size: Size, decorated: bool, background_color: Color) -> Self {
+    pub fn new(_title: String, size: Size, decorated: bool, background_color: Color) -> Self {
         Self {
-            title,
             size,
             decorated,
             background_color,
-            focused: true,
             buffer: None,
-            close_button_state: 0,
-            maximize_button_state: 0,
-            minimize_button_state: 0,
         }
     }
 
     /// Get the window background color.
     pub fn background_color(&self) -> Color {
         self.background_color
+    }
+
+    fn update_from_window_info(&mut self, info: &WindowInfo, decorated: bool) -> UpdateResult {
+        let changed = self.size != info.size
+            || self.decorated != decorated
+            || self.background_color != info.background_color;
+
+        self.size = info.size;
+        self.decorated = decorated;
+        self.background_color = info.background_color;
+
+        if changed {
+            UpdateResult::Updated
+        } else {
+            UpdateResult::NoChange
+        }
     }
 
     /// Get close button rect (matching Scarlet_old)
@@ -859,51 +1140,6 @@ impl WindowRenderObject {
         Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
     }
 
-    /// Update button hover/pressed states based on mouse position
-    pub fn update_button_states(&mut self, mouse_x: i32, mouse_y: i32, mouse_pressed: bool) {
-        if !self.decorated {
-            self.close_button_state = 0;
-            self.maximize_button_state = 0;
-            self.minimize_button_state = 0;
-            return;
-        }
-
-        let width = self.size.width as u32;
-
-        // Update close button state
-        let close_rect = self.close_button_rect(width);
-        self.close_button_state = if close_rect.contains(crate::geometry::Point {
-            x: mouse_x as f32,
-            y: mouse_y as f32,
-        }) {
-            if mouse_pressed { 2 } else { 1 }
-        } else {
-            0
-        };
-
-        // Update maximize button state
-        let maximize_rect = self.maximize_button_rect(width);
-        self.maximize_button_state = if maximize_rect.contains(crate::geometry::Point {
-            x: mouse_x as f32,
-            y: mouse_y as f32,
-        }) {
-            if mouse_pressed { 2 } else { 1 }
-        } else {
-            0
-        };
-
-        // Update minimize button state
-        let minimize_rect = self.minimize_button_rect(width);
-        self.minimize_button_state = if minimize_rect.contains(crate::geometry::Point {
-            x: mouse_x as f32,
-            y: mouse_y as f32,
-        }) {
-            if mouse_pressed { 2 } else { 1 }
-        } else {
-            0
-        };
-    }
-
     /// Get button color based on state
     fn get_button_color(state: u8) -> Color {
         match state {
@@ -918,14 +1154,7 @@ impl WindowRenderObject {
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let title = self.title.clone();
         let decorated = self.decorated;
-        let focused = self.focused;
-
-        // Copy button states before borrowing buffer
-        let close_state = self.close_button_state;
-        let maximize_state = self.maximize_button_state;
-        let minimize_state = self.minimize_button_state;
 
         // Create or resize buffer
         let w = width as u32;
@@ -950,53 +1179,10 @@ impl WindowRenderObject {
             // Fill background with the specified color, including explicit transparency.
             canvas.fill_rect(0, 0, w, h, self.background_color);
 
-            // Draw titlebar if decorated
-            if decorated {
-                Self::draw_titlebar_canvas_with_states(
-                    &title,
-                    focused,
-                    &mut canvas,
-                    w,
-                    h,
-                    close_state,
-                    maximize_state,
-                    minimize_state,
-                );
-            }
-
             // Draw border
             if decorated {
                 Self::draw_border_canvas(&mut canvas, width as u32, height as u32);
             }
-        }
-    }
-
-    /// Composite child buffers into the window buffer
-    ///
-    /// Children are rendered inside the border, below the titlebar
-    pub fn composite_children(&mut self, child_buffers: &[&Buffer]) {
-        if self.buffer.is_none() {
-            return;
-        }
-
-        let buffer = self.buffer.as_mut().unwrap();
-
-        let content_layout = WindowContentLayout::new(self.decorated);
-        let content_offset = content_layout.offset();
-
-        for child_buffer in child_buffers {
-            let scale_milli = buffer.scale_milli();
-            let physical_x =
-                ((content_offset.x as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
-            let physical_y =
-                ((content_offset.y as i64).saturating_mul(scale_milli as i64) / 1000) as i32;
-            // Composite child inside border, below titlebar
-            buffer.composite(
-                child_buffer,
-                physical_x,
-                physical_y,
-                1.0, // Full opacity
-            );
         }
     }
 
@@ -1168,6 +1354,21 @@ impl WindowRenderObject {
             TITLEBAR_HEIGHT as i32 - 1,
             border_color,
         );
+
+        // The titlebar is composited above the window background, so it must
+        // carry the border segments that overlap its own bounds.
+        if width > 0 {
+            let outer_border_color = Color::rgb(100u8, 100u8, 105u8);
+            canvas.draw_line(0, 0, width as i32 - 1, 0, outer_border_color);
+            canvas.draw_line(0, 0, 0, TITLEBAR_HEIGHT as i32 - 1, outer_border_color);
+            canvas.draw_line(
+                width as i32 - 1,
+                0,
+                width as i32 - 1,
+                TITLEBAR_HEIGHT as i32 - 1,
+                outer_border_color,
+            );
+        }
     }
 
     /// Static helper for button rect calculation
@@ -1280,7 +1481,15 @@ impl ElementRenderObject for WindowRenderObject {
             );
         }
 
-        for child in children {
+        if self.decorated
+            && let Some(titlebar) = children.get_mut(0)
+        {
+            titlebar.layout(LayoutConstraints::tight(size.width, TITLEBAR_HEIGHT as f32));
+            titlebar.set_position(Point::ZERO);
+        }
+
+        let content_index = if self.decorated { 1 } else { 0 };
+        if let Some(child) = children.get_mut(content_index) {
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
                 crate::logln!(

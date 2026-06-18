@@ -140,14 +140,6 @@ impl Compositor {
 
         self.merge_overlapping_rects(&mut rects);
 
-        let window_area = (self.window_buffer.logical_width() as f32)
-            * (self.window_buffer.logical_height() as f32);
-        let dirty_area: f32 = rects.iter().map(|r| r.size.width * r.size.height).sum();
-        if dirty_area >= window_area * 0.6 {
-            self.composite_elements(root);
-            return;
-        }
-
         let damage = self.present_damage_rects(&rects);
 
         for rect in rects.iter() {

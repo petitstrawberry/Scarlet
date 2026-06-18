@@ -20,6 +20,7 @@ use std::println;
 /// This allows ComponentElement callbacks to notify the PipelineOwner
 /// when State changes occur.
 static GLOBAL_DIRTY_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
+static GLOBAL_DIRTY_LAYOUT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 static GLOBAL_DIRTY_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 static GLOBAL_DIRTY_SELF_PAINT_IDS: Mutex<BTreeSet<ElementId>> = Mutex::new(BTreeSet::new());
 
@@ -41,6 +42,12 @@ pub fn mark_element_dirty(id: ElementId) {
 /// Mark an element as needing paint only (no build/layout).
 pub fn mark_element_needs_paint(id: ElementId) {
     let mut ids = GLOBAL_DIRTY_PAINT_IDS.lock();
+    ids.insert(id);
+}
+
+/// Mark an element as needing layout and paint.
+pub fn mark_element_needs_layout(id: ElementId) {
+    let mut ids = GLOBAL_DIRTY_LAYOUT_IDS.lock();
     ids.insert(id);
 }
 
@@ -70,6 +77,13 @@ pub(crate) fn take_global_dirty_paint_ids() -> alloc::vec::Vec<ElementId> {
     collected
 }
 
+pub(crate) fn take_global_dirty_layout_ids() -> alloc::vec::Vec<ElementId> {
+    let mut ids = GLOBAL_DIRTY_LAYOUT_IDS.lock();
+    let collected = ids.iter().copied().collect();
+    ids.clear();
+    collected
+}
+
 pub(crate) fn take_global_dirty_self_paint_ids() -> alloc::vec::Vec<ElementId> {
     let mut ids = GLOBAL_DIRTY_SELF_PAINT_IDS.lock();
     let collected = ids.iter().copied().collect();
@@ -79,6 +93,7 @@ pub(crate) fn take_global_dirty_self_paint_ids() -> alloc::vec::Vec<ElementId> {
 
 pub(crate) fn has_global_dirty() -> bool {
     !GLOBAL_DIRTY_IDS.lock().is_empty()
+        || !GLOBAL_DIRTY_LAYOUT_IDS.lock().is_empty()
         || !GLOBAL_DIRTY_PAINT_IDS.lock().is_empty()
         || !GLOBAL_DIRTY_SELF_PAINT_IDS.lock().is_empty()
 }
@@ -131,9 +146,6 @@ impl PipelineOwner {
         match phase {
             DirtyPhase::Build => {
                 self.dirty_build.insert(id);
-                // Build implies layout and paint
-                self.dirty_layout.insert(id);
-                self.dirty_paint.insert(id);
             }
             DirtyPhase::Layout => {
                 self.dirty_layout.insert(id);
@@ -183,6 +195,9 @@ impl PipelineOwner {
         for dirty_id in take_global_dirty_ids() {
             self.mark_needs_build(dirty_id);
         }
+        for dirty_id in take_global_dirty_layout_ids() {
+            self.mark_needs_layout(dirty_id);
+        }
         for dirty_id in take_global_dirty_paint_ids() {
             self.mark_needs_paint(dirty_id);
         }
@@ -192,6 +207,15 @@ impl PipelineOwner {
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
+        for dirty_id in take_global_dirty_layout_ids() {
+            self.mark_needs_layout(dirty_id);
+        }
+        for dirty_id in take_global_dirty_paint_ids() {
+            self.mark_needs_paint(dirty_id);
+        }
+        for dirty_id in take_global_dirty_self_paint_ids() {
+            self.mark_needs_self_paint(dirty_id);
+        }
 
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
@@ -210,7 +234,9 @@ impl PipelineOwner {
                 // Call rebuild() on the element
                 // - ComponentElement: recreates child from stored View
                 // - RenderElement: returns NoChange (properties updated via update())
-                let _ = element.rebuild();
+                if matches!(element.rebuild(), crate::element::UpdateResult::Updated) {
+                    self.mark_needs_layout(id);
+                }
             }
         }
     }
