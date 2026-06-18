@@ -2,11 +2,11 @@ use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
 
 #[derive(Clone)]
-struct PreviewCounter {
+struct PreviewApp {
     count: State<i32>,
 }
 
-impl Default for PreviewCounter {
+impl Default for PreviewApp {
     fn default() -> Self {
         Self {
             count: State::initial(StateId::new(0)),
@@ -14,7 +14,7 @@ impl Default for PreviewCounter {
     }
 }
 
-impl PreviewCounter {
+impl PreviewApp {
     fn content(&self) -> impl View + Clone + use<> {
         vstack! {
             Text::new("ScarletUI Preview").font_size(28.0),
@@ -29,15 +29,13 @@ impl PreviewCounter {
     }
 }
 
-impl View for PreviewCounter {
+impl View for PreviewApp {
     fn create_element(&self) -> Box<dyn Element> {
         self.content().create_element()
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        let mut listenables = Vec::new();
-        listenables.push(&self.count as &dyn Listenable);
-        listenables
+        vec![&self.count as &dyn Listenable]
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
@@ -45,12 +43,26 @@ impl View for PreviewCounter {
     }
 }
 
+impl Application for PreviewApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new(
+            "main",
+            Window::new("Preview Demo", self.content()).size(Size::new(420.0, 260.0)),
+        )
+    }
+}
+
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
 fn counter_preview() -> impl View + Clone {
-    PreviewCounter::default()
+    PreviewApp::default()
 }
 
 #[scarlet_ui::preview(width = 320.0, height = 180.0)]
 fn button_preview() -> impl View + Clone {
     Button::new("Standalone Button").padding(20.0)
+}
+
+fn main() -> scarlet_ui::Result<()> {
+    let mut app = PreviewApp::default();
+    app.run()
 }

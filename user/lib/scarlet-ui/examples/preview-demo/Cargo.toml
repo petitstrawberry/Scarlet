@@ -3,6 +3,9 @@ name = "scarlet-ui-preview-demo"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+path = "src/main.rs"
+
 [features]
 preview = []
 

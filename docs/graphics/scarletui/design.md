@@ -236,6 +236,9 @@ The functions usually return view fragments directly; `Window` is optional and
 is only needed for window-specific preview behavior. Preview names are generated
 from function names by default, and `width` / `height` attributes can provide a
 preferred initial preview size.
+The preferred setup for binary crates is to declare `[lib] path = "src/main.rs"`
+or another UI-focused source file, so the preview host can stay on the normal
+library-target path. Direct source-file targeting remains as a fallback.
 
 Stateful previews should return the state-owning view itself, not an
 already-expanded fragment that has read `State::get()`. The preview host mounts

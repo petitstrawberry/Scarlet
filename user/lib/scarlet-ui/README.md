@@ -60,6 +60,8 @@ The function can return a view fragment directly; a `Window` wrapper is only
 needed when the preview wants to exercise window-specific behavior. Stateful
 previews should return the state-owning view itself so its `listenables()` stay
 mounted; do not return an already-expanded fragment that has read `State::get()`.
+For binary crates, a simple `[lib] path = "src/main.rs"` target keeps preview
+setup minimal.
 
 ```rust
 use scarlet_ui::prelude::*;
@@ -99,6 +101,12 @@ change. Preview dylibs use Rust ABI and must be built by the same toolchain as
 the host.
 
 Use `--build-only` to verify the preview dylib without opening a window.
+
+```bash
+cargo run --manifest-path tools/preview/Cargo.toml -- \
+  --manifest-path examples/preview-demo/Cargo.toml \
+  --build-only
+```
 
 ## Basic Application
 
