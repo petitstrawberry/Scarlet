@@ -755,9 +755,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
             child.unmount();
         }
         let listenables = View::listenables(&self.app);
-        for (listenable, subscription_id) in
-            listenables.iter().zip(self.subscriptions.iter())
-        {
+        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
             listenable.unsubscribe(*subscription_id);
         }
         self.subscriptions.clear();
