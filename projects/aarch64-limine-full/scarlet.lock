@@ -220,7 +220,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:a2c12186fab9c161142f4d1e938cbc53dd95ba7a4aa8ae18a3255b11fa94fff8"
+hash = "sha256:cb7d1d9c59d646c8dcb1e10cc63112e0f91dfcc237e1e814e85f59248d2990dd"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -715,3 +715,17 @@ hash = "sha256:8df616a9b1baa60c4357e109300c0a32d95989296104e4bda20155a02ba67f04"
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
 rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/carmine"
+resolved_rev = "4632e976955491b7eda3a33e3ee7a959cdb2717c"
+package = "carmine"
+bin = "carmine"
+to = "/system/scarlet/bin/carmine"
+hash = "sha256:7778937f04ea207dfcef4dc989dffce86582cd5bc181b3ce78e0c1b670a6782c"
+
+[sections.rootfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/carmine"
+rev = "4632e976955491b7eda3a33e3ee7a959cdb2717c"

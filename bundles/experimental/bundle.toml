@@ -14,3 +14,10 @@ source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/carmine" }
+package = "carmine"
+bin = "carmine"
+to = "/system/scarlet/bin/carmine"
