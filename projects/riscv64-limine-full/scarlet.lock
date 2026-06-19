@@ -199,6 +199,26 @@ hash = "sha256:bab0e316707edc42d3867b97cabc79d98265d4310988abdb971f520ed9fd7ac2"
 type = "path"
 path = "../../user/bin"
 
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "watch"
+to = "/system/scarlet/bin/watch"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "date"
+to = "/system/scarlet/bin/date"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
 [sections.rootfs]
 hash = "sha256:92e8ce44d855471d6c2e513d48f66600e05b95ffa87495174994c0fc6c44f6c2"
 
@@ -396,6 +416,26 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "watch"
+to = "/system/scarlet/bin/watch"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "date"
+to = "/system/scarlet/bin/date"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
@@ -589,6 +629,16 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "clock"
+to = "/system/scarlet/bin/clock"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 bin = "lsm_load"
 to = "/system/scarlet/bin/lsm_load"
 hash = "sha256:a94818ff949395b096c91dc3d4014d9d69622fa927c18620d19b45c4094b1fd4"
@@ -641,7 +691,7 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "87073af278a8b277ba44a3dd078fb55a866e6194"
+resolved_rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
 package = "yt"
 bin = "yt"
 to = "/system/scarlet/bin/yt"
@@ -650,12 +700,12 @@ hash = "sha256:5222d799d75492760026d0138b5f13829f88c5290443fd17c6de0709ccf36fbc"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "87073af278a8b277ba44a3dd078fb55a866e6194"
+rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-resolved_rev = "87073af278a8b277ba44a3dd078fb55a866e6194"
+resolved_rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/system/scarlet/bin/yt-gui"
@@ -664,4 +714,4 @@ hash = "sha256:072a7fd5f4156b4eec4efbfccb581135f1fdc617d646face8fe84ef25061ec6f"
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "87073af278a8b277ba44a3dd078fb55a866e6194"
+rev = "589a6dad71d1bac22f72b3964b9470217cfe3355"

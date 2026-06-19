@@ -629,6 +629,16 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "clock"
+to = "/system/scarlet/bin/clock"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 bin = "lsm_load"
 to = "/system/scarlet/bin/lsm_load"
 hash = "sha256:009c67f708acfbdd0a05269960db0e75a0c24977ae44cbbdeacca633cc400674"

@@ -199,6 +199,26 @@ hash = "sha256:4329ec741810b2d30c493c7697cc29ee0a837d300053ede81235e9bf550dea55"
 type = "path"
 path = "../../user/bin"
 
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "watch"
+to = "/system/scarlet/bin/watch"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "date"
+to = "/system/scarlet/bin/date"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
 [sections.rootfs]
 hash = "sha256:ab72c36790259d2c7c123ceeafffb92c29db09e16834162b74fbf89d4b496f99"
 
@@ -396,6 +416,26 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "watch"
+to = "/system/scarlet/bin/watch"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "date"
+to = "/system/scarlet/bin/date"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 package = "user-bin"
 bin = "scarlet_desktop"
 to = "/system/scarlet/bin/scarlet_desktop"
@@ -582,6 +622,16 @@ kind = "cargo"
 bin = "lsm_list"
 to = "/system/scarlet/bin/lsm_list"
 hash = "sha256:9f74ea541fb6e856d3813c5d7243814b7c738528ff52070deba90e0d4dcd9973"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "clock"
+to = "/system/scarlet/bin/clock"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
