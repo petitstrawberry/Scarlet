@@ -310,14 +310,19 @@ dependencies = [
 name = "scarlet-ui"
 version = "0.1.0"
 dependencies = [
+ "scarlet-ui-core",
+ "scarlet-ui-platform-sws",
+]
+
+[[package]]
+name = "scarlet-ui-core"
+version = "0.1.0"
+dependencies = [
  "ab_glyph",
  "bitflags",
- "framebuffer",
  "libm",
  "scarlet-std",
  "scarlet-ui-macros",
- "sws-client",
- "sws-protocol",
  "zune-jpeg",
 ]
 
@@ -328,6 +333,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "scarlet-ui-platform-sws"
+version = "0.1.0"
+dependencies = [
+ "scarlet-std",
+ "scarlet-ui-core",
+ "sws-client",
+ "sws-protocol",
 ]
 
 [[package]]

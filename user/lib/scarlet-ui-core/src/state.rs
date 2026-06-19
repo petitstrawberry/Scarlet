@@ -174,7 +174,7 @@ impl<T> State<T> {
     ///
     /// # Example
     /// ```no_run
-    /// use scarlet_ui::{State, StateId};
+    /// use scarlet_ui_core::{State, StateId};
     ///
     /// let state = State::new(StateId::new(1), 42);
     /// ```
@@ -236,7 +236,7 @@ impl<T: Default> State<T> {
     ///
     /// # Example
     /// ```no_run
-    /// use scarlet_ui::{State, StateId};
+    /// use scarlet_ui_core::{State, StateId};
     ///
     /// let counter: State<i32> = State::initial(StateId::new(1));
     /// assert_eq!(counter.get(), 0);

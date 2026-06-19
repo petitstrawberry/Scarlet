@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::event::{Event, WindowEvent};
 use crate::geometry::{Alignment, Size};
 use crate::pipeline::RenderingPipeline;
-use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
+use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use crate::view::View;
 use crate::views::{AlignmentFrame, Window};
 
@@ -405,31 +405,24 @@ impl LoadedPreviewLibrary {
     }
 }
 
-/// Native desktop preview host.
-#[cfg(feature = "platform-winit")]
+/// Preview host backed by a supplied platform backend.
 pub struct PreviewHost {
     session: Option<Box<dyn PreviewSession>>,
     loaded: Option<LoadedPreviewLibrary>,
-    window: crate::platform::WinitBackendWindow,
+    window: Box<dyn PlatformWindow>,
     preview_id: PreviewId,
     sync_after_reload: bool,
     full_present_frames: u8,
 }
 
-#[cfg(feature = "platform-winit")]
 impl PreviewHost {
-    /// Create a host from the first preview exported by a dylib.
-    pub fn new(loaded: LoadedPreviewLibrary) -> core::result::Result<Self, String> {
-        Self::new_with_selection(loaded, None)
-    }
-
-    /// Create a host from a selected preview exported by a dylib.
-    pub fn new_with_selection(
+    /// Create a host from a selected preview exported by a dylib and a backend.
+    pub fn new_with_backend(
         mut loaded: LoadedPreviewLibrary,
         preview: Option<&str>,
+        mut backend: Box<dyn PlatformBackend>,
     ) -> core::result::Result<Self, String> {
         let descriptor = select_preview(loaded.previews(), preview)?;
-        let mut backend = crate::platform::WinitBackend::new();
         let scale_milli = backend.output_scale_milli();
         let context = PreviewCreateContext {
             scale_milli,
@@ -494,7 +487,7 @@ impl PreviewHost {
         let mut had_event = false;
         while let Some(event) = self.window.poll_event() {
             had_event = true;
-            if !Self::handle_event(&mut self.window, session.as_mut(), event)? {
+            if !Self::handle_event(self.window.as_mut(), session.as_mut(), event)? {
                 return Ok(false);
             }
         }
@@ -527,7 +520,7 @@ impl PreviewHost {
     }
 
     fn handle_event(
-        window: &mut crate::platform::WinitBackendWindow,
+        window: &mut dyn PlatformWindow,
         session: &mut dyn PreviewSession,
         event: Event,
     ) -> core::result::Result<bool, String> {
@@ -535,7 +528,6 @@ impl PreviewHost {
             Event::Quit => return Ok(false),
             Event::Resize { width, height } => {
                 let size = Size::new(width as f32, height as f32);
-                window.set_observed_logical_size(size);
                 session.resize(size, window.output_scale_milli());
             }
             event => {
@@ -566,7 +558,6 @@ impl PreviewHost {
     }
 }
 
-#[cfg(feature = "platform-winit")]
 fn select_preview(
     previews: Vec<PreviewDescriptor>,
     preview: Option<&str>,
@@ -584,7 +575,6 @@ fn select_preview(
         .ok_or_else(|| format!("preview not found: {preview}"))
 }
 
-#[cfg(feature = "platform-winit")]
 impl Drop for PreviewHost {
     fn drop(&mut self) {
         self.session = None;
@@ -592,7 +582,6 @@ impl Drop for PreviewHost {
     }
 }
 
-#[cfg(feature = "platform-winit")]
 fn error_to_string(error: Error) -> String {
     error.to_string()
 }

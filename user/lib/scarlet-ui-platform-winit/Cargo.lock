@@ -483,15 +483,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory"
-version = "0.3.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1174,41 +1165,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-abi"
-version = "0.16.0"
-
-[[package]]
-name = "scarlet-os"
-version = "0.16.0"
-dependencies = [
- "scarlet-abi",
- "scarlet-sys",
-]
-
-[[package]]
-name = "scarlet-sys"
-version = "0.16.0"
-dependencies = [
- "scarlet-abi",
-]
-
-[[package]]
-name = "scarlet-ui"
-version = "0.1.0"
-dependencies = [
- "scarlet-ui-core",
- "scarlet-ui-platform-sws",
- "scarlet-ui-platform-winit",
-]
-
-[[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.0",
- "inventory",
- "libloading",
  "libm",
  "scarlet-ui-macros",
  "zune-jpeg",
@@ -1224,28 +1185,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-ui-platform-sws"
-version = "0.1.0"
-dependencies = [
- "scarlet-ui-core",
- "sws-client",
- "sws-protocol",
-]
-
-[[package]]
 name = "scarlet-ui-platform-winit"
 version = "0.1.0"
 dependencies = [
  "scarlet-ui-core",
  "softbuffer",
  "winit",
-]
-
-[[package]]
-name = "scarlet-ui-preview"
-version = "0.1.0"
-dependencies = [
- "scarlet-ui",
 ]
 
 [[package]]
@@ -1407,18 +1352,6 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
-
-[[package]]
-name = "sws-client"
-version = "0.1.0"
-dependencies = [
- "scarlet-os",
- "sws-protocol",
-]
-
-[[package]]
-name = "sws-protocol"
-version = "0.16.0"
 
 [[package]]
 name = "syn"

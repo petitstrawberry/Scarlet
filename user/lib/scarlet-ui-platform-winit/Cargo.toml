@@ -1,0 +1,17 @@
+[package]
+name = "scarlet-ui-platform-winit"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+std = ["scarlet-ui-core/std"]
+
+[dependencies]
+scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false, features = ["std"] }
+softbuffer = "0.4.8"
+winit = "0.30.13"
+
+[lib]
+name = "scarlet_ui_platform_winit"
+path = "src/lib.rs"

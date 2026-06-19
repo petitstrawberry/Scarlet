@@ -15,7 +15,7 @@ use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model;
 use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
-use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
+use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use crate::scene::{
     Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
 };
@@ -105,50 +105,35 @@ pub trait Application: Clone + 'static {
     }
 }
 
-/// Extension methods for running applications.
-pub trait ApplicationRunExt: Application {
-    /// Run with the selected platform backend.
-    #[cfg(any(feature = "platform-sws", feature = "platform-winit"))]
-    fn run(&mut self) -> Result<()>
-    where
-        Self: Sized + View,
-    {
-        selected_platform::run(self)
-    }
-}
-
-impl<T: Application> ApplicationRunExt for T {}
-
-#[cfg(any(feature = "platform-sws", feature = "platform-winit"))]
-mod selected_platform {
-    use crate::application::{Application, ApplicationRunner};
-    use crate::error::Result;
-    use crate::view::View;
-
-    #[cfg(feature = "platform-sws")]
-    type SelectedBackend = crate::platform::SwsBackend;
-    #[cfg(feature = "platform-winit")]
-    type SelectedBackend = crate::platform::WinitBackend;
-
-    pub(super) fn run<A>(app: &mut A) -> Result<()>
-    where
-        A: Application + View,
-    {
-        ApplicationRunner::new(SelectedBackend::new()).run(app)
-    }
-}
-
 /// Backend-independent application runner.
-pub(crate) struct ApplicationRunner<B: PlatformBackend> {
-    backend: B,
+pub struct ApplicationRunner {
+    backend: Box<dyn PlatformBackend>,
 }
 
-impl<B: PlatformBackend> ApplicationRunner<B> {
-    pub(crate) fn new(backend: B) -> Self {
+impl ApplicationRunner {
+    /// Create a runner backed by the supplied platform backend.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Platform backend used to create and drive windows
+    ///
+    /// # Returns
+    ///
+    /// A backend-independent application runner.
+    pub fn new(backend: Box<dyn PlatformBackend>) -> Self {
         Self { backend }
     }
 
-    pub(crate) fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
+    /// Run an application using this runner's platform backend.
+    ///
+    /// # Arguments
+    ///
+    /// * `app` - Application instance to run
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the application exits normally.
+    pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
         app.init();
 
@@ -171,7 +156,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         &mut self,
         app: &mut A,
         declarations: Vec<WindowDeclaration>,
-    ) -> Result<Vec<WindowSlot<B::Window, A>>> {
+    ) -> Result<Vec<WindowSlot<A>>> {
         let scale_milli = self.backend.output_scale_milli();
         let mut slots = Vec::new();
 
@@ -188,7 +173,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         declaration: WindowDeclaration,
         scale_milli: u32,
         is_primary: bool,
-    ) -> Result<WindowSlot<B::Window, A>> {
+    ) -> Result<WindowSlot<A>> {
         let window_id = WindowId::generate();
         let pipeline_id = PipelineId::new(window_id.get());
         let mut pipeline = RenderingPipeline::with_pipeline_id(pipeline_id);
@@ -225,7 +210,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
         };
 
         let mut window = self.backend.create_window(request)?;
-        sync_output_scale(&mut pipeline, &window);
+        sync_output_scale(&mut pipeline, window.as_ref());
 
         if let Some(menu_bar) = window_info.menu_bar {
             if !menu_json.is_empty() {
@@ -246,8 +231,8 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
             is_primary,
         };
 
-        app.on_window_created(&context, &mut window);
-        sync_text_input(&mut window, &pipeline);
+        app.on_window_created(&context, window.as_mut());
+        sync_text_input(window.as_mut(), &pipeline);
 
         Ok(WindowSlot {
             context,
@@ -261,7 +246,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
     fn run_loop<A: Application + View>(
         &mut self,
         app: &mut A,
-        slots: &mut Vec<WindowSlot<B::Window, A>>,
+        slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
         loop {
             let mut any_event = false;
@@ -288,11 +273,11 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
             }
 
             for slot in slots.iter_mut() {
-                app.on_window_sync(&slot.context, &mut slot.window);
-                sync_text_input(&mut slot.window, &slot.pipeline);
+                app.on_window_sync(&slot.context, slot.window.as_mut());
+                sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 if slot.pipeline.has_dirty()
                     && !slot.presented_this_cycle
-                    && present_pipeline(&mut slot.pipeline, &mut slot.window)
+                    && present_pipeline(&mut slot.pipeline, slot.window.as_mut())
                 {
                     slot.presented_this_cycle = true;
                     any_presented = true;
@@ -308,7 +293,7 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
     fn handle_application_commands<A: Application + View>(
         &mut self,
         app: &mut A,
-        slots: &mut Vec<WindowSlot<B::Window, A>>,
+        slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
         for command in command::take_application_commands() {
             match command {
@@ -349,10 +334,10 @@ impl<B: PlatformBackend> ApplicationRunner<B> {
     }
 }
 
-struct WindowSlot<W: PlatformWindow + PlatformWindowState, A: Application> {
+struct WindowSlot<A: Application> {
     context: WindowContext,
     pipeline: RenderingPipeline,
-    window: W,
+    window: Box<dyn PlatformWindow>,
     presented_this_cycle: bool,
     _app: PhantomData<A>,
 }
@@ -407,10 +392,7 @@ fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut dyn PlatformW
     }
 }
 
-fn wait_for_next_event<A: Application, W: PlatformWindow + PlatformWindowState>(
-    slots: &mut [WindowSlot<W, A>],
-    timeout: Duration,
-) {
+fn wait_for_next_event<A: Application>(slots: &mut [WindowSlot<A>], timeout: Duration) {
     if let Some(slot) = slots.first_mut() {
         slot.window.wait_for_event(timeout);
     } else {
@@ -418,16 +400,16 @@ fn wait_for_next_event<A: Application, W: PlatformWindow + PlatformWindowState>(
     }
 }
 
-fn sync_output_scale<W: PlatformWindowState>(pipeline: &mut RenderingPipeline, window: &W) {
+fn sync_output_scale(pipeline: &mut RenderingPipeline, window: &dyn PlatformWindow) {
     let scale_milli = window.output_scale_milli();
     if pipeline.scale_milli() != scale_milli {
         pipeline.set_scale_milli(scale_milli);
     }
 }
 
-fn handle_window_event<A: Application, W: PlatformWindow + PlatformWindowState>(
+fn handle_window_event<A: Application>(
     app: &mut A,
-    slot: &mut WindowSlot<W, A>,
+    slot: &mut WindowSlot<A>,
     event: Event,
     close_ids: &mut Vec<WindowId>,
 ) -> Result<()> {
@@ -439,11 +421,11 @@ fn handle_window_event<A: Application, W: PlatformWindow + PlatformWindowState>(
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
             if slot.window.resize(width, height).is_ok() {
-                sync_output_scale(&mut slot.pipeline, &slot.window);
+                sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                 slot.pipeline.resize(new_size);
                 app.on_window_resize(&slot.context, width, height);
-                sync_text_input(&mut slot.window, &slot.pipeline);
-                if present_pipeline(&mut slot.pipeline, &mut slot.window) {
+                sync_text_input(slot.window.as_mut(), &slot.pipeline);
+                if present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
                     slot.presented_this_cycle = true;
                 }
             }
@@ -454,13 +436,13 @@ fn handle_window_event<A: Application, W: PlatformWindow + PlatformWindowState>(
                 let new_width = new_size.width.max(1.0) as u32;
                 let new_height = new_size.height.max(1.0) as u32;
                 if slot.window.resize(new_width, new_height).is_ok() {
-                    sync_output_scale(&mut slot.pipeline, &slot.window);
+                    sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                     slot.pipeline.resize(new_size);
-                    sync_text_input(&mut slot.window, &slot.pipeline);
+                    sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 }
             }
             if resize_to.is_some() || slot.pipeline.has_dirty() {
-                if present_pipeline(&mut slot.pipeline, &mut slot.window) {
+                if present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
                     slot.presented_this_cycle = true;
                 }
             }
@@ -584,17 +566,15 @@ fn handle_window_event<A: Application, W: PlatformWindow + PlatformWindowState>(
     Ok(())
 }
 
-fn sync_after_event<A: Application, W: PlatformWindow + PlatformWindowState>(
-    slot: &mut WindowSlot<W, A>,
-) {
-    sync_text_input(&mut slot.window, &slot.pipeline);
-    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, &mut slot.window) {
+fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) {
+    sync_text_input(slot.window.as_mut(), &slot.pipeline);
+    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
         slot.presented_this_cycle = true;
     }
 }
 
-fn handle_emitted_window_events<A: Application, W: PlatformWindow + PlatformWindowState>(
-    slot: &mut WindowSlot<W, A>,
+fn handle_emitted_window_events<A: Application>(
+    slot: &mut WindowSlot<A>,
     close_ids: &mut Vec<WindowId>,
 ) -> Result<()> {
     for emitted_event in slot.pipeline.take_emitted_events() {
@@ -621,10 +601,7 @@ fn handle_emitted_window_events<A: Application, W: PlatformWindow + PlatformWind
     Ok(())
 }
 
-fn remove_closed_slots<A: Application, W: PlatformWindow + PlatformWindowState>(
-    slots: &mut Vec<WindowSlot<W, A>>,
-    close_ids: &[WindowId],
-) {
+fn remove_closed_slots<A: Application>(slots: &mut Vec<WindowSlot<A>>, close_ids: &[WindowId]) {
     if close_ids.is_empty() {
         return;
     }

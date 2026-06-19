@@ -183,9 +183,10 @@ fn run(config: Config) -> Result<(), String> {
         Ok(library) => {
             print_previews(&library);
             println!("[preview] initial build loaded");
-            host = Some(PreviewHost::new_with_selection(
+            host = Some(PreviewHost::new_with_backend(
                 library,
                 config.preview.as_deref(),
+                Box::new(scarlet_ui::WinitBackend::new()),
             )?);
         }
         Err(error) => {
@@ -213,9 +214,10 @@ fn run(config: Config) -> Result<(), String> {
                         host.reload(library)?;
                         println!("[preview] reloaded");
                     } else {
-                        host = Some(PreviewHost::new_with_selection(
+                        host = Some(PreviewHost::new_with_backend(
                             library,
                             config.preview.as_deref(),
+                            Box::new(scarlet_ui::WinitBackend::new()),
                         )?);
                         println!("[preview] loaded");
                     }

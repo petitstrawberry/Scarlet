@@ -64,7 +64,7 @@ impl<V: View + Clone + 'static> ViewClone for V {
 /// # Example
 ///
 /// ```no_run
-/// use scarlet_ui::prelude::*;
+/// use scarlet_ui_core::prelude::*;
 ///
 /// let view = Text::new("Hello")
 ///     .padding(10.0)

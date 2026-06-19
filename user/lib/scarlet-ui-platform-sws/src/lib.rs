@@ -2,16 +2,37 @@
 //!
 //! This implementation uses the sws-client library to create and manage windows.
 
-use crate::buffer::Buffer;
-use crate::compositor::DamageRect;
-use crate::element::TextInputElementState;
-use crate::error::Result;
-use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
-use crate::geometry::{Point, Rect, Size};
-use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+#[cfg(not(feature = "std"))]
+extern crate scarlet_std as std;
+
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use scarlet_ui_core::buffer::Buffer;
+use scarlet_ui_core::compositor::DamageRect;
+use scarlet_ui_core::element::TextInputElementState;
+use scarlet_ui_core::error::Result;
+use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use scarlet_ui_core::geometry::{Point, Rect, Size};
+use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
+
+#[cfg(feature = "std")]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        std::println!($($arg)*)
+    };
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! logln {
+    ($($arg:tt)*) => {
+        scarlet_std::println!($($arg)*)
+    };
+}
 
 const DEFAULT_SCALE_MILLI: u32 = 1000;
 
@@ -52,38 +73,37 @@ pub struct SWSPlatformWindow {
 
 /// Scarlet Window Server backend.
 #[derive(Default)]
-pub(crate) struct SwsBackend;
+pub struct SwsBackend;
 
 impl SwsBackend {
-    pub(crate) fn new() -> Self {
+    /// Create an SWS backend.
+    ///
+    /// # Returns
+    ///
+    /// A backend that creates SWS platform windows.
+    pub fn new() -> Self {
         Self
     }
 }
 
 impl PlatformBackend for SwsBackend {
-    type Window = SWSPlatformWindow;
-
     fn output_scale_milli(&mut self) -> u32 {
         SWSPlatformWindow::query_output_scale()
     }
 
-    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window> {
-        SWSPlatformWindow::create_with_type_and_menu_and_policies(
-            &request.app_id,
-            &request.title,
-            request.size,
-            request.window_type,
-            &request.menu_titles,
-            request.focus_on_create,
-            request.active_on_focus,
-            request.opaque,
-        )
-    }
-}
-
-impl PlatformWindowState for SWSPlatformWindow {
-    fn output_scale_milli(&self) -> u32 {
-        self.scale_milli
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        Ok(Box::new(
+            SWSPlatformWindow::create_with_type_and_menu_and_policies(
+                &request.app_id,
+                &request.title,
+                request.size,
+                request.window_type,
+                &request.menu_titles,
+                request.focus_on_create,
+                request.active_on_focus,
+                request.opaque,
+            )?,
+        ))
     }
 }
 
@@ -191,7 +211,7 @@ impl SWSPlatformWindow {
     ) -> Result<Self> {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
-            .map_err(|_| crate::error::Error::ConnectionFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -214,11 +234,11 @@ impl SWSPlatformWindow {
                 focus_on_create,
                 active_on_focus,
             )
-            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
         if !opaque {
             conn.set_window_has_alpha_content(surface_id, true)
-                .map_err(|_| crate::error::Error::IoError)?;
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
 
         Ok(Self {
@@ -642,7 +662,7 @@ impl PlatformWindow for SWSPlatformWindow {
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
         // Connect to SWS
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
-            .map_err(|_| crate::error::Error::ConnectionFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -655,7 +675,7 @@ impl PlatformWindow for SWSPlatformWindow {
         // Create surface
         let surface_id = conn
             .create_surface(app_id, title, "", physical_width, physical_height)
-            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
@@ -679,7 +699,7 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
-        let debug = crate::debug::is_enabled();
+        let debug = scarlet_ui_core::debug::is_enabled();
         if self.pending_head >= self.pending_events.len() {
             self.pending_events.clear();
             self.pending_head = 0;
@@ -699,12 +719,16 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.pending_head = 0;
             }
             if debug {
-                crate::logln!("[SWSPlatformWindow] poll_event: {:?}", ev);
+                logln!("[SWSPlatformWindow] poll_event: {:?}", ev);
             }
             Some(ev)
         } else {
             None
         }
+    }
+
+    fn output_scale_milli(&self) -> u32 {
+        self.scale_milli
     }
 
     fn present(&mut self, buffer: &Buffer) {
@@ -765,7 +789,7 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
-            return Err(crate::error::Error::InvalidSize { width, height });
+            return Err(scarlet_ui_core::error::Error::InvalidSize { width, height });
         }
 
         let new_size = Size {
@@ -785,7 +809,7 @@ impl PlatformWindow for SWSPlatformWindow {
 
         self.conn
             .resize_window(self.surface_id, physical_width, physical_height)
-            .map_err(|_| crate::error::Error::IoError)?;
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
 
         self.current_size = new_size;
         self.needs_full_present = true;
@@ -796,7 +820,7 @@ impl PlatformWindow for SWSPlatformWindow {
         // Destroy the surface
         self.conn
             .destroy_surface(self.surface_id)
-            .map_err(|_| crate::error::Error::IoError)?;
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
 
         Ok(())
     }
@@ -804,25 +828,25 @@ impl PlatformWindow for SWSPlatformWindow {
     fn minimize(&mut self) -> Result<()> {
         self.conn
             .minimize_window(self.surface_id)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn maximize(&mut self) -> Result<()> {
         self.conn
             .maximize_window(self.surface_id)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn restore(&mut self) -> Result<()> {
         self.conn
             .restore_window(self.surface_id)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn request_move(&mut self) -> Result<()> {
         self.conn
             .request_move_window(self.surface_id)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
@@ -840,7 +864,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 true,
                 false,
             )
-            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
         // Position the popup
         self.conn
@@ -849,7 +873,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.logical_to_physical_pos(position.x as i32),
                 self.logical_to_physical_pos(position.y as i32),
             )
-            .map_err(|_| crate::error::Error::IoError)?;
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
 
         Ok(popup_surface_id)
     }
@@ -857,7 +881,7 @@ impl PlatformWindow for SWSPlatformWindow {
     fn destroy_popup(&mut self, surface_id: u32) -> Result<()> {
         self.conn
             .destroy_surface(surface_id)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
@@ -868,7 +892,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.logical_to_physical_len(width),
                 self.logical_to_physical_len(height),
             )
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn create_window_with_type(
@@ -882,7 +906,7 @@ impl PlatformWindow for SWSPlatformWindow {
         Self: Sized,
     {
         let mut conn = sws::Connection::connect("/tmp/sws.sock")
-            .map_err(|_| crate::error::Error::ConnectionFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -901,7 +925,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 physical_height,
                 window_type,
             )
-            .map_err(|_| crate::error::Error::SurfaceCreationFailed)?;
+            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
         Ok(Self {
             conn,
@@ -931,20 +955,20 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.logical_to_physical_pos(x),
                 self.logical_to_physical_pos(y),
             )
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn set_window_type(&mut self, surface_id: u32, window_type: u32) -> Result<()> {
         self.conn
             .set_window_type(surface_id, window_type)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn get_screen_size(&mut self) -> Result<(u32, u32)> {
         let (width, height) = self
             .conn
             .get_screen_size()
-            .map_err(|_| crate::error::Error::IoError)?;
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         Ok((
             self.physical_to_logical_len(width),
             self.physical_to_logical_len(height),
@@ -962,7 +986,7 @@ impl PlatformWindow for SWSPlatformWindow {
     fn set_resizable(&mut self, resizable: bool) -> Result<()> {
         self.conn
             .set_window_resizable(self.surface_id, resizable)
-            .map_err(|_| crate::error::Error::IoError)?;
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
 
         if resizable {
             let _ = self
@@ -984,13 +1008,13 @@ impl PlatformWindow for SWSPlatformWindow {
     fn set_opaque(&mut self, opaque: bool) -> Result<()> {
         self.conn
             .set_window_has_alpha_content(self.surface_id, !opaque)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
         self.conn
             .set_window_menu_titles(self.surface_id, menu_titles)
-            .map_err(|_| crate::error::Error::IoError)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn sync_text_input(&mut self, state: Option<&TextInputElementState>) {
@@ -1000,14 +1024,14 @@ impl PlatformWindow for SWSPlatformWindow {
 
 impl SWSPlatformWindow {
     fn handle_sws_event(&mut self, ev: SwsEvent) {
-        let debug = crate::debug::is_enabled();
+        let debug = scarlet_ui_core::debug::is_enabled();
         if debug {
-            crate::logln!("[SWSPlatformWindow] sws_event: {:?}", ev);
+            logln!("[SWSPlatformWindow] sws_event: {:?}", ev);
         }
         match ev {
             SwsEvent::Input(input) => {
                 if debug && input.type_ == event_type::EV_KEY {
-                    crate::logln!(
+                    logln!(
                         "[SWSPlatformWindow] raw key: input_surface={} window_surface={} code={} value={}",
                         input.surface_id,
                         self.surface_id,
@@ -1017,7 +1041,7 @@ impl SWSPlatformWindow {
                 }
                 if input.surface_id != self.surface_id {
                     if debug && input.type_ == event_type::EV_KEY {
-                        crate::logln!(
+                        logln!(
                             "[SWSPlatformWindow] ignored key for another surface: input_surface={} window_surface={}",
                             input.surface_id,
                             self.surface_id
@@ -1031,14 +1055,14 @@ impl SWSPlatformWindow {
                         self.pointer_x = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
-                            crate::logln!("[SWSPlatformWindow] ABS_X: {}", input.value);
+                            logln!("[SWSPlatformWindow] ABS_X: {}", input.value);
                         }
                     }
                     (event_type::EV_ABS, abs_code::ABS_Y) => {
                         self.pointer_y = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
-                            crate::logln!("[SWSPlatformWindow] ABS_Y: {}", input.value);
+                            logln!("[SWSPlatformWindow] ABS_Y: {}", input.value);
                         }
                     }
                     (event_type::EV_SYN, _) => {
@@ -1048,7 +1072,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseMoved: x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1066,7 +1090,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseDown: left x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1079,7 +1103,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseUp: left x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1096,7 +1120,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseDown: right x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1109,7 +1133,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseUp: right x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1126,7 +1150,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseDown: middle x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1139,7 +1163,7 @@ impl SWSPlatformWindow {
                                 y: self.pointer_y,
                             }));
                             if debug {
-                                crate::logln!(
+                                logln!(
                                     "[SWSPlatformWindow] MouseUp: middle x={}, y={}",
                                     self.pointer_x,
                                     self.pointer_y
@@ -1160,7 +1184,7 @@ impl SWSPlatformWindow {
                             Self::map_key_code(code)
                         };
                         if debug {
-                            crate::logln!(
+                            logln!(
                                 "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
                                 code,
                                 input.value,
@@ -1197,7 +1221,7 @@ impl SWSPlatformWindow {
                         height: logical_height,
                     });
                     if debug {
-                        crate::logln!(
+                        logln!(
                             "[SWSPlatformWindow] SurfaceConfigure: physical={}x{} logical={}x{}",
                             width,
                             height,
@@ -1224,7 +1248,7 @@ impl SWSPlatformWindow {
                 if surface_id == self.surface_id {
                     self.push_event(Event::Quit);
                     if debug {
-                        crate::logln!("[SWSPlatformWindow] SurfaceDestroyed");
+                        logln!("[SWSPlatformWindow] SurfaceDestroyed");
                     }
                 }
             }
@@ -1297,7 +1321,7 @@ impl SWSPlatformWindow {
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
                 if debug {
-                    crate::logln!(
+                    logln!(
                         "[SWSPlatformWindow] FocusChanged: window_id={}, app_name={}, menu_titles={}",
                         window_id,
                         app_name,
@@ -1334,7 +1358,7 @@ impl SWSPlatformWindow {
                 // This is ONLY sent for normal windows (not TaskBar/Desktop/etc)
                 // and only when the active APPLICATION changes (same app, different window = no broadcast)
                 if debug {
-                    crate::logln!(
+                    logln!(
                         "[SWSPlatformWindow] ActiveAppChanged: window_id={}, app_name={}, menu_titles={}",
                         window_id,
                         app_name,

@@ -1,10 +1,6 @@
-use crate::buffer::Buffer;
-use crate::compositor::DamageRect;
-use crate::element::TextInputElementState;
-use crate::error::{Error, Result};
-use crate::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
-use crate::geometry::{Point, Size};
-use crate::platform::{PlatformBackend, PlatformWindow, PlatformWindowState, WindowCreateRequest};
+extern crate alloc;
+
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -12,6 +8,13 @@ use core::any::Any;
 use core::cell::RefCell;
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, Ordering};
+use scarlet_ui_core::buffer::Buffer;
+use scarlet_ui_core::compositor::DamageRect;
+use scarlet_ui_core::element::TextInputElementState;
+use scarlet_ui_core::error::{Error, Result};
+use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use scarlet_ui_core::geometry::{Point, Size};
+use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use std::time::Duration;
 
 use ::winit::application::ApplicationHandler;
@@ -29,12 +32,17 @@ type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHa
 type SoftbufferSurface =
     softbuffer::Surface<::winit::event_loop::OwnedDisplayHandle, Rc<WinitWindow>>;
 
-pub(crate) struct WinitBackend {
+pub struct WinitBackend {
     shared: Rc<WinitSharedState>,
 }
 
 impl WinitBackend {
-    pub(crate) fn new() -> Self {
+    /// Create a winit backend.
+    ///
+    /// # Returns
+    ///
+    /// A backend that creates native desktop windows.
+    pub fn new() -> Self {
         Self {
             shared: Rc::new(WinitSharedState::new()),
         }
@@ -42,26 +50,21 @@ impl WinitBackend {
 }
 
 impl PlatformBackend for WinitBackend {
-    type Window = WinitPlatformWindow;
-
     fn output_scale_milli(&mut self) -> u32 {
         1000
     }
 
-    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window> {
-        WinitPlatformWindow::create(self.shared.clone(), request)
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        Ok(Box::new(WinitPlatformWindow::create(
+            self.shared.clone(),
+            request,
+        )?))
     }
 }
 
 impl Default for WinitBackend {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl PlatformWindowState for WinitPlatformWindow {
-    fn output_scale_milli(&self) -> u32 {
-        scale_factor_to_milli(self.window.scale_factor())
     }
 }
 
@@ -463,17 +466,20 @@ impl WinitPlatformWindow {
 
 impl PlatformWindow for WinitPlatformWindow {
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
-        let mut backend = WinitBackend::new();
-        backend.create_window(WindowCreateRequest {
-            app_id: alloc::string::String::from(app_id),
-            title: alloc::string::String::from(title),
-            size,
-            window_type: 0,
-            menu_titles: alloc::string::String::new(),
-            focus_on_create: true,
-            active_on_focus: true,
-            opaque: true,
-        })
+        let backend = WinitBackend::new();
+        Self::create(
+            backend.shared.clone(),
+            WindowCreateRequest {
+                app_id: alloc::string::String::from(app_id),
+                title: alloc::string::String::from(title),
+                size,
+                window_type: 0,
+                menu_titles: alloc::string::String::new(),
+                focus_on_create: true,
+                active_on_focus: true,
+                opaque: true,
+            },
+        )
     }
 
     fn poll_event(&mut self) -> Option<Event> {
@@ -498,6 +504,10 @@ impl PlatformWindow for WinitPlatformWindow {
             .borrow_mut()
             .pump_app_events(Some(timeout), &mut handler);
         self.state.borrow_mut().flush_pending_empty_preedit();
+    }
+
+    fn output_scale_milli(&self) -> u32 {
+        scale_factor_to_milli(self.window.scale_factor())
     }
 
     fn present(&mut self, buffer: &Buffer) {

@@ -6,30 +6,18 @@ edition = "2024"
 [features]
 default = ["std", "platform-sws"]
 legacy-scarlet-std = [
-    "dep:scarlet-std",
-    "dep:framebuffer",
-    "sws-client?/legacy-scarlet-std",
-    "sws-protocol?/legacy-scarlet-std",
+    "scarlet-ui-core/legacy-scarlet-std",
+    "scarlet-ui-platform-sws?/legacy-scarlet-std",
 ]
-std = ["sws-client?/std", "sws-protocol?/std"]
-platform-sws = ["dep:sws-client", "dep:sws-protocol"]
-platform-winit = ["std", "dep:softbuffer", "dep:winit"]
-preview = ["std", "dep:inventory", "dep:libloading"]
+std = ["scarlet-ui-core/std", "scarlet-ui-platform-sws?/std", "scarlet-ui-platform-winit?/std"]
+platform-sws = ["dep:scarlet-ui-platform-sws"]
+platform-winit = ["std", "dep:scarlet-ui-platform-winit"]
+preview = ["std", "scarlet-ui-core/preview"]
 
 [dependencies]
-scarlet-std = { path = "../std", optional = true }
-sws-client = { path = "../sws-client", default-features = false, optional = true }
-sws-protocol = { path = "../sws-protocol", default-features = false, optional = true }
-framebuffer = { path = "../framebuffer", optional = true }
-libm = { version = "0.2", default-features = false }
-scarlet-ui-macros = { path = "../scarlet-ui-macros" }
-bitflags = { version = "2.6", default-features = false }
-ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
-zune-jpeg = { version = "0.5.8", default-features = false }
-softbuffer = { version = "0.4.8", optional = true }
-winit = { version = "0.30.13", optional = true }
-libloading = { version = "0.8.9", optional = true }
-inventory = { version = "0.3", optional = true }
+scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
+scarlet-ui-platform-sws = { path = "../scarlet-ui-platform-sws", default-features = false, optional = true }
+scarlet-ui-platform-winit = { path = "../scarlet-ui-platform-winit", default-features = false, optional = true }
 
 [dev-dependencies]
 # For additional testing

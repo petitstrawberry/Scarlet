@@ -1,15 +1,4 @@
-//! Platform abstraction for window systems
-//!
-//! This module provides the PlatformWindow trait for abstracting
-//! different window system backends (SWS, SDL2, Winit, etc.).
-
-#[cfg(feature = "platform-sws")]
-mod sws;
-#[cfg(feature = "platform-winit")]
-mod winit;
-
-#[cfg(feature = "platform-sws")]
-pub use sws::SWSPlatformWindow;
+//! Platform abstraction for window systems.
 
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
@@ -17,40 +6,38 @@ use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::Event;
 use crate::geometry::{Point, Size};
+use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
 use std::time::Duration;
 
-#[cfg(feature = "platform-sws")]
-pub(crate) use sws::SwsBackend;
-#[cfg(feature = "platform-winit")]
-pub(crate) use winit::WinitBackend;
-#[cfg(feature = "platform-winit")]
-pub(crate) type WinitBackendWindow = <WinitBackend as PlatformBackend>::Window;
-
-pub(crate) struct WindowCreateRequest {
-    pub(crate) app_id: String,
-    pub(crate) title: String,
-    pub(crate) size: Size,
-    pub(crate) window_type: u32,
-    pub(crate) menu_titles: String,
-    pub(crate) focus_on_create: bool,
-    pub(crate) active_on_focus: bool,
-    pub(crate) opaque: bool,
+/// Parameters used by a backend to create a window.
+pub struct WindowCreateRequest {
+    /// Stable application identifier.
+    pub app_id: String,
+    /// Initial window title.
+    pub title: String,
+    /// Initial logical window size.
+    pub size: Size,
+    /// Backend-specific window type.
+    pub window_type: u32,
+    /// Serialized top-level menu titles.
+    pub menu_titles: String,
+    /// Whether the window should receive focus when created.
+    pub focus_on_create: bool,
+    /// Whether focusing the window should activate the app.
+    pub active_on_focus: bool,
+    /// Whether the window contents are fully opaque.
+    pub opaque: bool,
 }
 
-pub(crate) trait PlatformBackend {
-    type Window: PlatformWindow + PlatformWindowState + 'static;
-
+/// Creates platform windows for the application runner.
+pub trait PlatformBackend {
+    /// Return the current output scale in milli-units.
     fn output_scale_milli(&mut self) -> u32;
 
-    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Self::Window>;
-}
-
-pub(crate) trait PlatformWindowState {
-    fn output_scale_milli(&self) -> u32 {
-        1000
-    }
+    /// Create a new platform window for the supplied request.
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>>;
 }
 
 /// Platform-independent window interface
@@ -69,6 +56,11 @@ pub trait PlatformWindow: Any {
     /// Wait until more events arrive or the timeout expires.
     fn wait_for_event(&mut self, timeout: Duration) {
         std::thread::sleep(timeout);
+    }
+
+    /// Return the window output scale in milli-units.
+    fn output_scale_milli(&self) -> u32 {
+        1000
     }
 
     /// Present a buffer to the screen

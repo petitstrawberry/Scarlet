@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-std", "fmt-framebuffer", "fmt-gpu", "fmt-sws-protocol", "fmt-scarlet-ui", "fmt-scarlet-desktop-config", "fmt-scpm"]
+dependencies = ["fmt-scarlet-abi", "fmt-scarlet-sys", "fmt-scarlet-rt", "fmt-scarlet-os", "fmt-std", "fmt-framebuffer", "fmt-gpu", "fmt-sws-protocol", "fmt-scarlet-ui-core", "fmt-scarlet-ui-platform-sws", "fmt-scarlet-ui-platform-winit", "fmt-scarlet-ui", "fmt-scarlet-desktop-config", "fmt-scpm"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-check", "fmt-sws-protocol-check", "fmt-scarlet-ui-check", "fmt-scpm-check"]
+dependencies = ["fmt-scarlet-abi-check", "fmt-scarlet-sys-check", "fmt-scarlet-rt-check", "fmt-scarlet-os-check", "fmt-std-check", "fmt-framebuffer-check", "fmt-gpu-check", "fmt-sws-protocol-check", "fmt-scarlet-ui-core-check", "fmt-scarlet-ui-platform-sws-check", "fmt-scarlet-ui-platform-winit-check", "fmt-scarlet-ui-check", "fmt-scpm-check"]
 
 [tasks.fmt-scarlet-abi-check]
 description = "Check formatting for Scarlet ABI code"
@@ -67,6 +67,24 @@ cwd = "scarlet-ui"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
+[tasks.fmt-scarlet-ui-core-check]
+description = "Check formatting for Scarlet UI core code"
+cwd = "scarlet-ui-core"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-scarlet-ui-platform-sws-check]
+description = "Check formatting for Scarlet UI SWS platform code"
+cwd = "scarlet-ui-platform-sws"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-scarlet-ui-platform-winit-check]
+description = "Check formatting for Scarlet UI winit platform code"
+cwd = "scarlet-ui-platform-winit"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
 [tasks.fmt-std]
 description = "Format user library std code"
 cwd = "std"
@@ -118,6 +136,24 @@ args = ["fmt"]
 [tasks.fmt-scarlet-ui]
 description = "Format Scarlet UI code"
 cwd = "scarlet-ui"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-scarlet-ui-core]
+description = "Format Scarlet UI core code"
+cwd = "scarlet-ui-core"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-scarlet-ui-platform-sws]
+description = "Format Scarlet UI SWS platform code"
+cwd = "scarlet-ui-platform-sws"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-scarlet-ui-platform-winit]
+description = "Format Scarlet UI winit platform code"
+cwd = "scarlet-ui-platform-winit"
 command = "cargo"
 args = ["fmt"]
 
@@ -215,6 +251,9 @@ script = [
     "cd ../gpu && cargo clean",
     "cd ../sws-protocol && cargo clean",
     "cd ../sws-client && cargo clean",
+    "cd ../scarlet-ui-core && cargo clean",
+    "cd ../scarlet-ui-platform-sws && cargo clean",
+    "cd ../scarlet-ui-platform-winit && cargo clean",
     "cd ../scarlet-ui && cargo clean",
     "cd ../scarlet-ui-macros && cargo clean",
     "cd ../sas-protocol && cargo clean",

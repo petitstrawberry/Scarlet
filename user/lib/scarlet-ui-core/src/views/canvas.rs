@@ -24,7 +24,7 @@ use std::rc::Rc;
 ///
 /// ```rust
 /// use std::rc::Rc;
-/// use scarlet_ui::CanvasView;
+/// use scarlet_ui_core::CanvasView;
 ///
 /// let view = CanvasView::new(800.0, 600.0, Rc::new(|buffer: &mut [u8], width, height| {
 ///     // Draw to buffer (BGRA format)

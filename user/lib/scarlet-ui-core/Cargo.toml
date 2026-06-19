@@ -1,0 +1,29 @@
+[package]
+name = "scarlet-ui-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+legacy-scarlet-std = ["dep:scarlet-std"]
+std = []
+preview = ["std", "dep:inventory", "dep:libloading"]
+
+[dependencies]
+scarlet-std = { path = "../std", optional = true }
+libm = { version = "0.2", default-features = false }
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
+bitflags = { version = "2.6", default-features = false }
+ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
+zune-jpeg = { version = "0.5.8", default-features = false }
+libloading = { version = "0.8.9", optional = true }
+inventory = { version = "0.3", optional = true }
+
+[dev-dependencies]
+proc-macro2 = { version = "1.0", default-features = false }
+quote = { version = "1.0", default-features = false }
+syn = { version = "2.0", default-features = false, features = ["derive"] }
+
+[lib]
+name = "scarlet_ui_core"
+path = "src/lib.rs"
