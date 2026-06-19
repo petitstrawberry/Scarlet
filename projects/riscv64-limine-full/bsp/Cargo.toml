@@ -8,4 +8,4 @@ name = "scarlet"
 path = "src/main.rs"
 
 [dependencies]
-scarlet_modules = { package = "scarlet-modules", path = ".scarlet/scarlet-modules" }
+scarlet_modules = { package = "scarlet-modules", path = "../.scarlet/scarlet-modules" }

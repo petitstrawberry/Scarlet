@@ -3,19 +3,13 @@ schema_version = 2
 [project]
 name = "scarlet-aarch64-apple-limine-full"
 
-[kernel]
+[bsp]
+path = "bsp"
 package = "scarlet"
-source = "../../kernel"
-target = "aarch64-unknown-none-elf"
-target_json = "../../kernel/targets/aarch64-unknown-none-elf.json"
 
-[kernel.features]
-network = true
-user-fpu = true
-user-vector = true
-hypervisor = true
-limine = true
-profiler = false
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
