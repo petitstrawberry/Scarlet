@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full", "projects/aarch64-limine-full", "projects/aarch64-limine-microvm", "user/lib/std", "user/bin", "user/std-bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -23,19 +23,19 @@ args = ["fmt", "--", "--check"]
 
 [tasks.fmt-project-riscv64-check]
 description = "Check RISC-V project formatting"
-cwd = "projects/riscv64-limine-full"
+cwd = "projects/riscv64-limine-full/bsp"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
 [tasks.fmt-project-aarch64-check]
 description = "Check AArch64 project formatting"
-cwd = "projects/aarch64-limine-full"
+cwd = "projects/aarch64-limine-full/bsp"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
 [tasks.fmt-project-aarch64-microvm-check]
 description = "Check AArch64 microvm project formatting"
-cwd = "projects/aarch64-limine-microvm"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -123,19 +123,19 @@ args = ["fmt"]
 
 [tasks.fmt-project-riscv64]
 description = "Format RISC-V project code"
-cwd = "projects/riscv64-limine-full"
+cwd = "projects/riscv64-limine-full/bsp"
 command = "cargo"
 args = ["fmt"]
 
 [tasks.fmt-project-aarch64]
 description = "Format AArch64 project code"
-cwd = "projects/aarch64-limine-full"
+cwd = "projects/aarch64-limine-full/bsp"
 command = "cargo"
 args = ["fmt"]
 
 [tasks.fmt-project-aarch64-microvm]
 description = "Format AArch64 microvm project code"
-cwd = "projects/aarch64-limine-microvm"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["fmt"]
 
@@ -398,19 +398,19 @@ args = ["clean"]
 
 [tasks.clean-project-riscv64]
 description = "Clean RISC-V project build artifacts"
-cwd = "projects/riscv64-limine-full"
+cwd = "projects/riscv64-limine-full/bsp"
 command = "cargo"
 args = ["clean"]
 
 [tasks.clean-project-aarch64]
 description = "Clean AArch64 project build artifacts"
-cwd = "projects/aarch64-limine-full"
+cwd = "projects/aarch64-limine-full/bsp"
 command = "cargo"
 args = ["clean"]
 
 [tasks.clean-project-aarch64-microvm]
 description = "Clean AArch64 microvm project build artifacts"
-cwd = "projects/aarch64-limine-microvm"
+cwd = "projects/aarch64-limine-microvm/bsp"
 command = "cargo"
 args = ["clean"]
 
@@ -498,14 +498,14 @@ args = ["scarlet", "image", "--project", "projects/aarch64-limine-full"]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "projects/riscv64-limine-full"
 command = "./tools/run.sh"
-args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/scarlet"]
+args = ["--debug", "bsp/target/riscv64gc-unknown-none-elf/debug/scarlet"]
 dependencies = ["image-debug-riscv64"]
 
 [tasks.debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 cwd = "projects/aarch64-limine-full"
 command = "./tools/run_aarch64.sh"
-args = ["--debug", "target/aarch64-unknown-none-elf/debug/scarlet"]
+args = ["--debug", "bsp/target/aarch64-unknown-none-elf/debug/scarlet"]
 dependencies = ["image-debug-aarch64"]
 
 [tasks.debug-test-riscv64]
@@ -558,15 +558,15 @@ args = ["clippy", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warni
 
 [tasks.clippy-fix-project-riscv64]
 description = "Run clippy with auto-fix for RISC-V project"
-cwd = "projects/riscv64-limine-full"
+cwd = "projects/riscv64-limine-full/bsp"
 command = "cargo"
-args = ["clippy", "--fix", "--target", "../../kernel/targets/riscv64gc-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+args = ["clippy", "--fix", "--target", "../../../kernel/targets/riscv64gc-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.clippy-fix-project-aarch64]
 description = "Run clippy with auto-fix for AArch64 project"
-cwd = "projects/aarch64-limine-full"
+cwd = "projects/aarch64-limine-full/bsp"
 command = "cargo"
-args = ["clippy", "--fix", "--target", "../../kernel/targets/aarch64-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
+args = ["clippy", "--fix", "--target", "../../../kernel/targets/aarch64-unknown-none-elf.json", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"]
 
 [tasks.clippy-fix-userlib]
 description = "Run clippy with auto-fix for user libraries"
