@@ -3,6 +3,16 @@
 //! UI implementation lives in `scarlet-ui-core`; platform backends live in
 //! separate backend crates. This crate preserves the app-facing `scarlet_ui`
 //! API and selects the requested backend by feature.
+//!
+//! Dependency direction:
+//!
+//! ```text
+//! scarlet-ui-platform-sws  ----.
+//!                              v
+//! apps --> scarlet-ui ---> scarlet-ui-core
+//!                              ^
+//! scarlet-ui-platform-winit ---'
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

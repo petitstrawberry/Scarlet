@@ -1,9 +1,7 @@
-//! ScarletUI - Declarative UI Framework for Scarlet applications
+//! ScarletUI core implementation.
 //!
-//! ScarletUI is a reactive UI framework inspired by Flutter and SwiftUI.
-//! Application code declares scenes and calls `app.run()`; the selected
-//! platform is chosen by crate features, not by application runtime code.
-//! It provides:
+//! This crate contains the platform-independent UI implementation used by the
+//! `scarlet-ui` facade crate. It provides:
 //!
 //! - **Declarative Views**: Describe your UI with composable Views
 //! - **State Management**: Reactive State<T> with automatic updates
@@ -11,44 +9,15 @@
 //! - **Layout Engine**: Constraint-based layout system
 //! - **Event Handling**: Pointer and keyboard event routing
 //! - **Scene Runtime**: Declare top-level windows through `Application::scenes()`
-//! - **Platform Abstraction**: Run on SWS or native desktop platforms through
-//!   feature-selected platform implementations
+//! - **Platform Abstraction**: Backend traits implemented by platform crates
 //!
-//! # Basic Usage
+//! Normal applications should depend on `scarlet-ui`, not this crate directly.
+//! The facade re-exports the app-facing API and provides `ApplicationRunExt`.
+//!
+//! # Backend Integration
 //!
 //! ```ignore
-//! use scarlet_ui::*;
-//! use scarlet_ui_macros::View;
-//!
-//! #[derive(View, Clone)]
-//! struct CounterApp {
-//!     #[state]
-//!     count: State<i32>,
-//! }
-//!
-//! impl CounterApp {
-//!     fn counter_view(&self) -> impl View {
-//!         vstack! {
-//!             Text::new("Counter"),
-//!             Button::new("Increment")
-//!                 .on_click(|| self.count.update(|c| *c += 1)),
-//!             Text::new(&format!("Count: {}", self.count.get())),
-//!         }
-//!     }
-//! }
-//!
-//! impl Application for CounterApp {
-//!     fn scenes(&self) -> impl Scene {
-//!         WindowGroup::new("main", Window::new("Counter", self.counter_view()))
-//!     }
-//! }
-//!
-//! fn main() {
-//!     let mut app = CounterApp {
-//!         count: State::initial(StateId::new(0)),
-//!     };
-//!     let _ = app.run();
-//! }
+//! scarlet_ui_core::ApplicationRunner::new(Box::new(my_backend)).run(&mut app)
 //! ```
 //!
 //! # Platform Features

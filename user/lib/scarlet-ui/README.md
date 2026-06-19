@@ -1,12 +1,15 @@
 # ScarletUI
 
-ScarletUI is a declarative UI framework for Scarlet applications. It is designed
-to run the same application code on Scarlet OS through SWS and on native desktop
-platforms through platform features such as winit.
+ScarletUI is a declarative UI framework for Scarlet applications. The public
+application crate is `scarlet-ui`; implementation and platform backends are
+split into local crates so the UI core does not depend on SWS or desktop window
+libraries.
 
 The application API is platform-agnostic: application code declares scenes and
 calls `app.run()`. Platform selection is a crate feature decision, not an app
-runtime decision.
+runtime decision. Internally the selected backend is passed to the runner as a
+`Box<dyn PlatformBackend>`, so backend selection can later move to runtime
+without changing the UI core.
 
 ## Features
 
@@ -19,12 +22,14 @@ runtime decision.
 
 ## Platform Features
 
-`scarlet-ui` currently has one selected platform feature per build.
+`scarlet-ui` currently selects one platform feature per build. The feature pulls
+in the matching backend crate; `scarlet-ui-core` itself never depends on
+`sws-client`, `sws-protocol`, `winit`, or `softbuffer`.
 
 | Feature | Target | Notes |
 |---------|--------|-------|
-| `platform-sws` | Scarlet OS / SWS | Default platform feature. Uses `sws-client` and `sws-protocol`. |
-| `platform-winit` | native desktop | Uses `winit` + `softbuffer`; requires `std`. |
+| `platform-sws` | Scarlet OS / SWS | Default platform feature. Pulls in `scarlet-ui-platform-sws`, which uses `sws-client` and `sws-protocol`. |
+| `platform-winit` | native desktop | Pulls in `scarlet-ui-platform-winit`, which uses `winit` and `softbuffer`; requires `std`. |
 
 The default feature set is:
 
@@ -39,15 +44,61 @@ For native desktop builds, depend on ScarletUI with `platform-winit`:
 scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 ```
 
-For Scarlet OS builds, use `platform-sws`:
+For Scarlet OS `std`-compatible builds, use `platform-sws`:
 
 ```toml
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 ```
 
+For no-std user binaries using Scarlet's legacy std shim, use:
+
+```toml
+scarlet-ui = { path = "../lib/scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+```
+
 `platform-sws` and `platform-winit` are mutually exclusive. `std` and
 `legacy-scarlet-std` are also mutually exclusive.
+
+## Crate Layout
+
+```text
+apps / user bins
+  |
+  v
+scarlet-ui
+  |-- re-exports scarlet-ui-core
+  |-- ApplicationRunExt::run()
+  |-- scarlet-ui-platform-sws    [feature: platform-sws]
+  |   |-- scarlet-ui-core
+  |   |-- sws-client
+  |   `-- sws-protocol
+  `-- scarlet-ui-platform-winit  [feature: platform-winit]
+      |-- scarlet-ui-core
+      |-- winit
+      `-- softbuffer
+
+scarlet-ui-core
+  |-- View / Element / Scene / Pipeline
+  |-- rendering and preview core
+  |-- PlatformBackend trait
+  |-- PlatformWindow trait
+  `-- WindowCreateRequest
+```
+
+Dependency direction is intentionally one-way:
+
+```text
+scarlet-ui-platform-sws  ----.
+                             v
+apps --> scarlet-ui ---> scarlet-ui-core
+                             ^
+scarlet-ui-platform-winit ---'
+```
+
+`scarlet-ui-core` owns the UI implementation and backend traits. Platform crates
+only implement those traits. The `scarlet-ui` facade preserves the app-facing
+`scarlet_ui` crate name and selects the backend crate from features.
 
 ## Live Preview
 
@@ -170,7 +221,8 @@ creates one `WindowSlot` per opened window:
 ```text
 Application::scenes()
   -> Scene declarations
-  -> ApplicationRunner<SelectedPlatform>
+  -> ApplicationRunner
+  -> Box<dyn PlatformBackend>
   -> WindowSlot { WindowId, PipelineId, RenderingPipeline, PlatformWindow }
 ```
 
@@ -179,9 +231,10 @@ normal ScarletUI prelude and calls `app.run()`.
 
 ## Platform Integration
 
-Platform code lives behind `PlatformBackend` and `PlatformWindow`. These are
-internal runner boundaries for creating windows, polling events, presenting
-buffers, routing text input, and handling window controls.
+Platform code lives behind `PlatformBackend` and `PlatformWindow`. These traits
+are public so backend crates can implement them, but they are runner boundaries,
+not normal application APIs. They create windows, poll events, present buffers,
+route text input, and handle window controls.
 
 Most applications should not construct a `PlatformWindow` directly. Use
 `Window`, `WindowGroup`, `open_window`, `dismiss_window`, and `app.run()`.
@@ -213,6 +266,23 @@ Run ScarletUI tests:
 
 ```bash
 cargo test --lib --tests
+```
+
+Run core tests and doctests:
+
+```bash
+cd ../scarlet-ui-core
+cargo test
+```
+
+Check backend crates directly:
+
+```bash
+cd ../scarlet-ui-platform-sws
+cargo check --no-default-features --features legacy-scarlet-std
+
+cd ../scarlet-ui-platform-winit
+cargo check
 ```
 
 Check the std smoke app for native desktop:
