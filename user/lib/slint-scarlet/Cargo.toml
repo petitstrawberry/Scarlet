@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 scarlet-std = { path = "../std" }
-scarlet-ui = { path = "../../../../scarlet-ui/crates/scarlet-ui" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui" }
 sws-client = { path = "../sws-client" }
 sws-protocol = { path = "../sws-protocol" }
 
