@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#f612bbb95789b8720fc2f5ce3174f6e4dcf59096"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#5dd0efebf0c8ba3c2085f93cbbeb6f2dca20b852"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -318,20 +318,21 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#f612bbb95789b8720fc2f5ce3174f6e4dcf59096"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#5dd0efebf0c8ba3c2085f93cbbeb6f2dca20b852"
 dependencies = [
  "ab_glyph",
  "bitflags",
  "libm",
  "scarlet-std",
  "scarlet-ui-macros",
+ "unicode-segmentation",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#f612bbb95789b8720fc2f5ce3174f6e4dcf59096"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#5dd0efebf0c8ba3c2085f93cbbeb6f2dca20b852"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -341,7 +342,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#f612bbb95789b8720fc2f5ce3174f6e4dcf59096"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#5dd0efebf0c8ba3c2085f93cbbeb6f2dca20b852"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",
@@ -529,6 +530,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "userprogram"

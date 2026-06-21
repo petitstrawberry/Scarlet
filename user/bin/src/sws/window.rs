@@ -1066,6 +1066,7 @@ impl WindowManager {
                 }
                 WindowType::ImePopup => {
                     w.raise_on_focus = false;
+                    w.visible = false;
                 }
             }
             println!(

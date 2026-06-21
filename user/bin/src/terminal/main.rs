@@ -639,7 +639,7 @@ fn write_key_event(
             write_bytes(writer, c.encode_utf8(&mut encoded).as_bytes());
             true
         }
-        KeyEvent::Pressed { keycode } => {
+        KeyEvent::Pressed { keycode, .. } => {
             match keycode {
                 KeyCode::Char(c) if c.is_control() => {
                     let mut encoded = [0u8; 4];

@@ -5765,6 +5765,7 @@ fn handle_canvas_event(
             button: MouseButton::Left,
             x,
             y,
+            ..
         }) => {
             controls.show_for_mouse_activity();
             if seekbar_hit_region_contains(controls, *x, *y) {
@@ -5781,6 +5782,7 @@ fn handle_canvas_event(
             button: MouseButton::Left,
             x,
             y,
+            ..
         }) => {
             controls.show_for_mouse_activity();
             if controls.is_scrubbing() {
@@ -5819,6 +5821,7 @@ fn handle_key_event(
     match event {
         KeyEvent::Pressed {
             keycode: KeyCode::Space,
+            ..
         } => {
             activate_play_pause(controls);
             paint_signal.notify();
@@ -5826,6 +5829,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Escape,
+            ..
         }
         | KeyEvent::Char { c: 'q' | 'Q' } => {
             exit(0);
@@ -5837,6 +5841,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Left,
+            ..
         } => {
             controls.request_relative_seek_ms(-5_000);
             paint_signal.notify();
@@ -5844,6 +5849,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Right,
+            ..
         } => {
             controls.request_relative_seek_ms(5_000);
             paint_signal.notify();
@@ -5851,6 +5857,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Down,
+            ..
         } => {
             controls.request_relative_seek_ms(-60_000);
             paint_signal.notify();
@@ -5858,6 +5865,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Up,
+            ..
         } => {
             controls.request_relative_seek_ms(60_000);
             paint_signal.notify();
@@ -5865,6 +5873,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Home,
+            ..
         } => {
             controls.request_seek_to_us(0);
             paint_signal.notify();
@@ -5872,6 +5881,7 @@ fn handle_key_event(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::End,
+            ..
         } => {
             controls.request_seek_to_us(controls.media_duration_us().saturating_sub(1));
             paint_signal.notify();
