@@ -24,10 +24,27 @@ impl InputEvent {
 /// Processed input events for compositor
 #[derive(Debug, Clone)]
 pub enum CompositorInputEvent {
-    MouseMove { dx: i32, dy: i32 },
-    MouseButton { button: u16, pressed: bool },
-    MouseAbsolute { x: i32, y: i32 },
-    Keyboard { code: u16, pressed: bool },
+    MouseMove {
+        dx: i32,
+        dy: i32,
+    },
+    MouseButton {
+        button: u16,
+        pressed: bool,
+    },
+    MouseAbsolute {
+        x: i32,
+        y: i32,
+    },
+    /// Mouse wheel/scroll event
+    MouseWheel {
+        dx: i32,
+        dy: i32,
+    },
+    Keyboard {
+        code: u16,
+        pressed: bool,
+    },
 }
 
 /// Global input event queue
@@ -66,11 +83,17 @@ pub mod event_types {
     pub const EV_ABS: u16 = 0x03;
 }
 
+/// Synchronization event codes
+pub mod syn_codes {
+    pub const SYN_REPORT: u16 = 0;
+}
+
 /// Relative axis codes
 pub mod rel_codes {
     pub const REL_X: u16 = 0x00;
     pub const REL_Y: u16 = 0x01;
     pub const REL_WHEEL: u16 = 0x08;
+    pub const REL_HWHEEL: u16 = 0x06;
 }
 
 /// Absolute axis codes
@@ -82,7 +105,9 @@ pub mod abs_codes {
 /// Key codes
 pub mod key_codes {
     pub const BTN_LEFT: u16 = 0x110;
+    #[allow(dead_code)]
     pub const BTN_RIGHT: u16 = 0x111;
+    #[allow(dead_code)]
     pub const BTN_MIDDLE: u16 = 0x112;
     pub const KEY_SPACE: u16 = 0x39;
     pub const KEY_LEFTCTRL: u16 = 0x1d;
@@ -103,26 +128,42 @@ pub mod key_codes {
 /// Input manager - handles input devices and event reading
 pub struct InputManager {
     mouse_file: File,
-    keyboard_file: Option<File>,
+    _keyboard_file: Option<File>,
     /// Maximum value for tablet absolute coordinates (typically 32767)
     tablet_max: i32,
     /// Current accumulated position for absolute positioning
     pub abs_x: Option<i32>,
     pub abs_y: Option<i32>,
+    /// Accumulated horizontal wheel delta (from REL_HWHEEL)
+    wheel_dx: i32,
+    /// Accumulated vertical wheel delta (from REL_WHEEL)
+    wheel_dy: i32,
 }
 
 impl InputManager {
     /// Create a new input manager
     pub fn new() -> Result<Self, &'static str> {
-        // Try to open tablet device first (absolute positioning), fallback to mouse (relative)
+        // Try to open tablet device first (absolute positioning), fallback to touchpad or mouse (relative)
         let mouse_file = match File::open("/dev/tablet0") {
             Ok(file) => {
                 println!("[InputManager] Opened tablet device (absolute positioning)");
                 file
             }
             Err(_) => {
-                println!("[InputManager] Tablet device not found, trying mouse device...");
-                File::open("/dev/mouse0").map_err(|_| "Failed to open mouse or tablet device")?
+                // Try touchpad (behaves like a relative mouse)
+                match File::open("/dev/touchpad0") {
+                    Ok(file) => {
+                        println!("[InputManager] Opened touchpad device (relative positioning)");
+                        file
+                    }
+                    Err(_) => {
+                        println!(
+                            "[InputManager] Touchpad/tablet not found, trying mouse device..."
+                        );
+                        File::open("/dev/mouse0")
+                            .map_err(|_| "Failed to open mouse, tablet, or touchpad device")?
+                    }
+                }
             }
         };
 
@@ -140,10 +181,12 @@ impl InputManager {
 
         Ok(Self {
             mouse_file,
-            keyboard_file,
+            _keyboard_file: keyboard_file,
             tablet_max: 32767, // Standard virtio-tablet range
             abs_x: None,
             abs_y: None,
+            wheel_dx: 0,
+            wheel_dy: 0,
         })
     }
 
@@ -169,9 +212,9 @@ impl InputManager {
     pub fn try_read_event(&mut self) -> Result<Option<InputEvent>, &'static str> {
         let mut buffer = [0u8; InputEvent::SIZE];
 
-        self.mouse_file.set_nonblocking(true);
+        let _ = self.mouse_file.set_nonblocking(true);
         let result = self.mouse_file.read(&mut buffer);
-        self.mouse_file.set_nonblocking(false);
+        let _ = self.mouse_file.set_nonblocking(false);
 
         match result {
             Ok(bytes_read) if bytes_read == InputEvent::SIZE => {
@@ -257,6 +300,12 @@ fn process_mouse_event(input_manager: &mut InputManager, event: InputEvent) {
                     dy: event.value,
                 });
             }
+            rel_codes::REL_WHEEL => {
+                input_manager.wheel_dy = input_manager.wheel_dy.saturating_add(event.value);
+            }
+            rel_codes::REL_HWHEEL => {
+                input_manager.wheel_dx = input_manager.wheel_dx.saturating_add(event.value);
+            }
             _ => {}
         },
         event_types::EV_ABS => match event.code {
@@ -295,6 +344,19 @@ fn process_mouse_event(input_manager: &mut InputManager, event: InputEvent) {
                 pressed,
             });
         }
+        event_types::EV_SYN => match event.code {
+            syn_codes::SYN_REPORT => {
+                if input_manager.wheel_dx != 0 || input_manager.wheel_dy != 0 {
+                    push_input_event(CompositorInputEvent::MouseWheel {
+                        dx: input_manager.wheel_dx,
+                        dy: input_manager.wheel_dy,
+                    });
+                    input_manager.wheel_dx = 0;
+                    input_manager.wheel_dy = 0;
+                }
+            }
+            _ => {}
+        },
         _ => {}
     }
 }
@@ -333,7 +395,7 @@ fn keyboard_thread_main() {
                     _ => {}
                 }
 
-                keyboard_file.set_nonblocking(true);
+                let _ = keyboard_file.set_nonblocking(true);
                 loop {
                     let mut buf = [0u8; InputEvent::SIZE];
                     match keyboard_file.read(&mut buf) {
@@ -350,7 +412,7 @@ fn keyboard_thread_main() {
                         _ => break,
                     }
                 }
-                keyboard_file.set_nonblocking(false);
+                let _ = keyboard_file.set_nonblocking(false);
 
                 thread::sleep(core::time::Duration::from_millis(16));
             }

@@ -1079,6 +1079,7 @@ impl Compositor {
     }
 
     /// Mark a window's entire area as damaged and request full redraw
+    #[allow(dead_code)]
     fn mark_window_damage(&mut self, window_id: u32) {
         if let Some(w) = self.window_manager.get_window(window_id) {
             // println!("[Compositor] Marking window #{} damage: ({},{}) {}x{}",
@@ -2312,6 +2313,85 @@ impl Compositor {
 
                 Ok(true)
             }
+            CompositorInputEvent::MouseWheel { dx, dy } => {
+                // Route wheel events to the window under the cursor.
+                if let Some(win_id) = self
+                    .window_manager
+                    .window_at_point(self.cursor.x, self.cursor.y)
+                {
+                    if let Some(window) = self.window_manager.get_window(win_id) {
+                        // Only forward if cursor is actually in the window.
+                        if self.cursor_position_in_window(window).is_some()
+                            || window.extension_owner.is_some()
+                        {
+                            let time = 0u64;
+                            // Check if this is an extension-owned window.
+                            if let Some((extension_id, external_client_id)) = window.extension_owner
+                            {
+                                if dy != 0 {
+                                    super::ipc::send_extension_input_event(
+                                        extension_id,
+                                        external_client_id,
+                                        win_id,
+                                        time,
+                                        super::input::event_types::EV_REL,
+                                        super::input::rel_codes::REL_WHEEL,
+                                        dy,
+                                    );
+                                }
+                                if dx != 0 {
+                                    super::ipc::send_extension_input_event(
+                                        extension_id,
+                                        external_client_id,
+                                        win_id,
+                                        time,
+                                        super::input::event_types::EV_REL,
+                                        super::input::rel_codes::REL_HWHEEL,
+                                        dx,
+                                    );
+                                }
+                                super::ipc::send_extension_input_event(
+                                    extension_id,
+                                    external_client_id,
+                                    win_id,
+                                    time,
+                                    super::input::event_types::EV_SYN,
+                                    0,
+                                    0,
+                                );
+                            } else {
+                                if dy != 0 {
+                                    super::ipc::send_input_to_window(
+                                        win_id,
+                                        time,
+                                        super::input::event_types::EV_REL,
+                                        super::input::rel_codes::REL_WHEEL,
+                                        dy,
+                                    );
+                                }
+                                if dx != 0 {
+                                    super::ipc::send_input_to_window(
+                                        win_id,
+                                        time,
+                                        super::input::event_types::EV_REL,
+                                        super::input::rel_codes::REL_HWHEEL,
+                                        dx,
+                                    );
+                                }
+                                super::ipc::send_input_to_window(
+                                    win_id,
+                                    time,
+                                    super::input::event_types::EV_SYN,
+                                    0,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                Ok(true)
+            }
             CompositorInputEvent::MouseButton { button, pressed } => {
                 let mut grab_target = None;
 
@@ -2891,7 +2971,7 @@ impl Compositor {
                             );
                             (x, y)
                         }
-                        (None, Some((wx, wy, ww, wh))) => {
+                        (None, Some((wx, wy, _ww, _wh))) => {
                             // No focused Normal window: position in workarea with padding
                             const PADDING: i32 = 20;
                             let x = wx + PADDING;
@@ -3565,7 +3645,7 @@ impl Compositor {
                 }
             }
             IpcEvent::ExtensionAttachBuffer {
-                external_client_id,
+                external_client_id: _,
                 window_id,
                 width,
                 height,
