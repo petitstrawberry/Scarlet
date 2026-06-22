@@ -92,9 +92,14 @@ pub mod syn_codes {
 pub mod rel_codes {
     pub const REL_X: u16 = 0x00;
     pub const REL_Y: u16 = 0x01;
-    pub const REL_WHEEL: u16 = 0x08;
     pub const REL_HWHEEL: u16 = 0x06;
+    pub const REL_WHEEL: u16 = 0x08;
+    pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
+    pub const REL_WHEEL_HI_RES: u16 = 0x0b;
 }
+
+/// Surface pixels per wheel notch (compositor-side scaling, matches Mutter).
+pub const WHEEL_PIXELS_PER_NOTCH: i32 = 10;
 
 /// Absolute axis codes
 pub mod abs_codes {

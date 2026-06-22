@@ -209,9 +209,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#66688c6116a2ce731010757d294481b79e9c2a05"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#42031bff74eef9c06017e473079aaf6ad64afd63"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#66688c6116a2ce731010757d294481b79e9c2a05"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#42031bff74eef9c06017e473079aaf6ad64afd63"
 dependencies = [
  "ab_glyph",
  "bitflags",
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#66688c6116a2ce731010757d294481b79e9c2a05"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#42031bff74eef9c06017e473079aaf6ad64afd63"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -342,7 +342,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#66688c6116a2ce731010757d294481b79e9c2a05"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#42031bff74eef9c06017e473079aaf6ad64afd63"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",

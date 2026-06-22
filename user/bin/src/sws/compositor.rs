@@ -2314,77 +2314,69 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseWheel { dx, dy } => {
-                // Route wheel events to the window under the cursor.
+                let px_dy = dy.saturating_mul(super::input::WHEEL_PIXELS_PER_NOTCH);
+                let px_dx = dx.saturating_mul(super::input::WHEEL_PIXELS_PER_NOTCH);
+                let hi_dy = dy.saturating_mul(120);
+                let hi_dx = dx.saturating_mul(120);
+
                 if let Some(win_id) = self
                     .window_manager
                     .window_at_point(self.cursor.x, self.cursor.y)
                 {
                     if let Some(window) = self.window_manager.get_window(win_id) {
-                        // Only forward if cursor is actually in the window.
                         if self.cursor_position_in_window(window).is_some()
                             || window.extension_owner.is_some()
                         {
                             let time = 0u64;
-                            // Check if this is an extension-owned window.
+                            let ev_rel = super::input::event_types::EV_REL;
+                            let ev_syn = super::input::event_types::EV_SYN;
+                            use super::input::rel_codes as rel;
+
                             if let Some((extension_id, external_client_id)) = window.extension_owner
                             {
-                                if dy != 0 {
+                                let send_ext = |code: u16, value: i32| {
                                     super::ipc::send_extension_input_event(
                                         extension_id,
                                         external_client_id,
                                         win_id,
                                         time,
-                                        super::input::event_types::EV_REL,
-                                        super::input::rel_codes::REL_WHEEL,
-                                        dy,
+                                        ev_rel,
+                                        code,
+                                        value,
                                     );
+                                };
+                                if px_dy != 0 {
+                                    send_ext(rel::REL_WHEEL, px_dy);
+                                    send_ext(rel::REL_WHEEL_HI_RES, hi_dy);
                                 }
-                                if dx != 0 {
-                                    super::ipc::send_extension_input_event(
-                                        extension_id,
-                                        external_client_id,
-                                        win_id,
-                                        time,
-                                        super::input::event_types::EV_REL,
-                                        super::input::rel_codes::REL_HWHEEL,
-                                        dx,
-                                    );
+                                if px_dx != 0 {
+                                    send_ext(rel::REL_HWHEEL, px_dx);
+                                    send_ext(rel::REL_HWHEEL_HI_RES, hi_dx);
                                 }
                                 super::ipc::send_extension_input_event(
                                     extension_id,
                                     external_client_id,
                                     win_id,
                                     time,
-                                    super::input::event_types::EV_SYN,
+                                    ev_syn,
                                     0,
                                     0,
                                 );
                             } else {
-                                if dy != 0 {
+                                let send = |code: u16, value: i32| {
                                     super::ipc::send_input_to_window(
-                                        win_id,
-                                        time,
-                                        super::input::event_types::EV_REL,
-                                        super::input::rel_codes::REL_WHEEL,
-                                        dy,
+                                        win_id, time, ev_rel, code, value,
                                     );
+                                };
+                                if px_dy != 0 {
+                                    send(rel::REL_WHEEL, px_dy);
+                                    send(rel::REL_WHEEL_HI_RES, hi_dy);
                                 }
-                                if dx != 0 {
-                                    super::ipc::send_input_to_window(
-                                        win_id,
-                                        time,
-                                        super::input::event_types::EV_REL,
-                                        super::input::rel_codes::REL_HWHEEL,
-                                        dx,
-                                    );
+                                if px_dx != 0 {
+                                    send(rel::REL_HWHEEL, px_dx);
+                                    send(rel::REL_HWHEEL_HI_RES, hi_dx);
                                 }
-                                super::ipc::send_input_to_window(
-                                    win_id,
-                                    time,
-                                    super::input::event_types::EV_SYN,
-                                    0,
-                                    0,
-                                );
+                                super::ipc::send_input_to_window(win_id, time, ev_syn, 0, 0);
                             }
                         }
                     }

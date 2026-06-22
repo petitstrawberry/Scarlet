@@ -159,6 +159,8 @@ pub mod rel_code {
     pub const REL_Y: u16 = 0x01;
     pub const REL_HWHEEL: u16 = 0x06;
     pub const REL_WHEEL: u16 = 0x08;
+    pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
+    pub const REL_WHEEL_HI_RES: u16 = 0x0b;
 }
 
 // Common key codes (from linux/input-event-codes.h)

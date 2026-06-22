@@ -324,7 +324,7 @@ qemu-system-riscv64 \
     "${QEMU_AUDIO_ARGS[@]}" \
     "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.4,wheel-axis=true \
     -device virtio-rng-device,bus=virtio-mmio-bus.5 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"

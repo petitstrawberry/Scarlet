@@ -243,7 +243,7 @@ qemu-system-aarch64 \
     -netdev user,id=net0 \
     -device virtio-net-pci,netdev=net0,bus=pcie.0 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.4 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.5 \
+    -device virtio-mouse-device,bus=virtio-mmio-bus.5,wheel-axis=true \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"

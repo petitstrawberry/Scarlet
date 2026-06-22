@@ -537,9 +537,7 @@ impl WaylandBridge {
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
                         msg.add_arg(WaylandArg::Uint(time as u32));
                         msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_VERTICAL_SCROLL));
-                        // Wayland axis value is wl_fixed_t (24.8 fixed point).
-                        // Scale: 1 wheel notch = 10.0 surface-local pixels.
-                        let axis_value = (value as i64 * 10 * 256) as i32;
+                        let axis_value = (value as i64 * 256) as i32;
                         msg.add_arg(WaylandArg::Fixed(axis_value));
                         self.pending_pointer_messages.push(msg);
                         self.pending_pointer_id = Some(pointer_id);
@@ -550,7 +548,7 @@ impl WaylandBridge {
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
                         msg.add_arg(WaylandArg::Uint(time as u32));
                         msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_HORIZONTAL_SCROLL));
-                        let axis_value = (value as i64 * 10 * 256) as i32;
+                        let axis_value = (value as i64 * 256) as i32;
                         msg.add_arg(WaylandArg::Fixed(axis_value));
                         self.pending_pointer_messages.push(msg);
                         self.pending_pointer_id = Some(pointer_id);

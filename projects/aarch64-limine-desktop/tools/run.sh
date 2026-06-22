@@ -336,7 +336,7 @@ fi
 
 QEMU_INPUT_ARGS=()
 if [ "$QEMU_INPUT" = "1" ] || [ "$QEMU_INPUT" = "true" ]; then
-    QEMU_INPUT_ARGS=(-device virtio-keyboard-device,bus=virtio-mmio-bus.4 -device virtio-mouse-device,bus=virtio-mmio-bus.5)
+    QEMU_INPUT_ARGS=(-device virtio-keyboard-device,bus=virtio-mmio-bus.4 -device virtio-mouse-device,bus=virtio-mmio-bus.5,wheel-axis=true)
 fi
 
 QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY")

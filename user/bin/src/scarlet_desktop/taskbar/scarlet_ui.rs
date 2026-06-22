@@ -427,11 +427,11 @@ fn build_menu_bar_view(
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
 ) -> MenuBar {
-    println!(
-        "[TaskBar] build_menu_bar_view: {} items, active_window_id={}",
-        items.len(),
-        active_window_id
-    );
+    // println!(
+    //     "[TaskBar] build_menu_bar_view: {} items, active_window_id={}",
+    //     items.len(),
+    //     active_window_id
+    // );
     let has_children_by_index: Vec<bool> =
         items.iter().map(|item| !item.children.is_empty()).collect();
     let entries = items
@@ -662,10 +662,10 @@ impl Application for TaskBarApp {
         let screen_width = self.screen_width.get();
         let _menu_bar = self.menu_bar.get();
         let menu_tree = self.menu_tree.get();
-        println!(
-            "[TaskBar] scenes() called: menu_tree has {} items",
-            menu_tree.items.len()
-        );
+        // println!(
+        //     "[TaskBar] scenes() called: menu_tree has {} items",
+        //     menu_tree.items.len()
+        // );
         let active_window_id = self.active_window_id.get();
 
         let hours = clock / 3600;

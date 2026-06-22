@@ -109,7 +109,7 @@ VIRTIO_INPUT_ARGS=""
 if [ "${SCARLET_QEMU_DISABLE_VIRTIO_INPUT:-0}" = "1" ] || [ "${SCARLET_QEMU_DISABLE_VIRTIO_INPUT:-}" = "true" ]; then
     echo "QEMU input configuration: USB HID only (virtio input disabled)"
 else
-    VIRTIO_INPUT_ARGS="-device virtio-keyboard-device,bus=virtio-mmio-bus.6 -device virtio-mouse-device,bus=virtio-mmio-bus.7"
+    VIRTIO_INPUT_ARGS="-device virtio-keyboard-device,bus=virtio-mmio-bus.6 -device virtio-mouse-device,bus=virtio-mmio-bus.7,wheel-axis=true"
 fi
 
 # Optional QEMU debug logging
