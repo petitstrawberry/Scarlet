@@ -122,6 +122,8 @@ impl VirtioInputDevice {
         let name_lower = name.to_lowercase();
         if name_lower.contains("keyboard") || name_lower.contains("kbd") {
             "keyboard"
+        } else if name_lower.contains("touchpad") || name_lower.contains("trackpad") {
+            "touchpad"
         } else if name_lower.contains("mouse") {
             "mouse"
         } else if name_lower.contains("tablet") {

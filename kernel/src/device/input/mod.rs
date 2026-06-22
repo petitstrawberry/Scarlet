@@ -77,8 +77,14 @@ pub mod rel_codes {
     pub const REL_Y: u16 = 0x01;
     /// Relative Z axis
     pub const REL_Z: u16 = 0x02;
+    /// Horizontal mouse wheel
+    pub const REL_HWHEEL: u16 = 0x06;
     /// Mouse wheel
     pub const REL_WHEEL: u16 = 0x08;
+    /// High-resolution vertical mouse wheel (value in 1/120 units)
+    pub const REL_WHEEL_HI_RES: u16 = 0x0b;
+    /// High-resolution horizontal mouse wheel (value in 1/120 units)
+    pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
 }
 
 /// Key/button codes (selected common ones)
