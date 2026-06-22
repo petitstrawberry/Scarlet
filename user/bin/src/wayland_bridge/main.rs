@@ -504,11 +504,16 @@ impl WaylandBridge {
         const EV_SYN: u16 = 0x00;
         const REL_X: u16 = 0x00;
         const REL_Y: u16 = 0x01;
+        const REL_HWHEEL: u16 = 0x06;
+        const REL_WHEEL: u16 = 0x08;
         const ABS_X: u16 = 0x00;
         const ABS_Y: u16 = 0x01;
         const BTN_MOUSE_MIN: u16 = 0x110;
         const BTN_MOUSE_MAX: u16 = 0x118;
         const BTN_LEFT: u16 = 0x110;
+        /// wl_pointer axis types
+        const WL_POINTER_AXIS_VERTICAL_SCROLL: u32 = 0;
+        const WL_POINTER_AXIS_HORIZONTAL_SCROLL: u32 = 1;
 
         if let Some(surface_id) = self.surface_id_for_window(window_id) {
             self.queue_focus_events(surface_id);
@@ -518,12 +523,39 @@ impl WaylandBridge {
             EV_REL => {
                 if code == REL_X {
                     self.pointer_x = self.pointer_x.saturating_add(value);
+                    self.pending_pointer_motion = true;
+                    self.pending_pointer_time = time as u32;
+                    self.pending_pointer_id = self.focused_pointer;
                 } else if code == REL_Y {
                     self.pointer_y = self.pointer_y.saturating_add(value);
+                    self.pending_pointer_motion = true;
+                    self.pending_pointer_time = time as u32;
+                    self.pending_pointer_id = self.focused_pointer;
+                } else if code == REL_WHEEL {
+                    if let Some(pointer_id) = self.focused_pointer {
+                        self.queue_pending_pointer_motion();
+                        let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
+                        msg.add_arg(WaylandArg::Uint(time as u32));
+                        msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_VERTICAL_SCROLL));
+                        // Wayland axis value is wl_fixed_t (24.8 fixed point).
+                        // Scale: 1 wheel notch = 10.0 surface-local pixels.
+                        let axis_value = (value as i64 * 10 * 256) as i32;
+                        msg.add_arg(WaylandArg::Fixed(axis_value));
+                        self.pending_pointer_messages.push(msg);
+                        self.pending_pointer_id = Some(pointer_id);
+                    }
+                } else if code == REL_HWHEEL {
+                    if let Some(pointer_id) = self.focused_pointer {
+                        self.queue_pending_pointer_motion();
+                        let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
+                        msg.add_arg(WaylandArg::Uint(time as u32));
+                        msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_HORIZONTAL_SCROLL));
+                        let axis_value = (value as i64 * 10 * 256) as i32;
+                        msg.add_arg(WaylandArg::Fixed(axis_value));
+                        self.pending_pointer_messages.push(msg);
+                        self.pending_pointer_id = Some(pointer_id);
+                    }
                 }
-                self.pending_pointer_motion = true;
-                self.pending_pointer_time = time as u32;
-                self.pending_pointer_id = self.focused_pointer;
             }
             EV_ABS => {
                 if code == ABS_X {

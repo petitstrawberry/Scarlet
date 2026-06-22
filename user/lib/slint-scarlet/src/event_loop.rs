@@ -8,7 +8,7 @@ use slint::platform::{PointerEventButton, WindowEvent};
 use slint::platform::software_renderer::PremultipliedRgbaColor;
 use slint::PhysicalSize;
 use sws_client::Connection;
-use sws_client::event::{abs_code, event_type, key_code, Event as SwsEvent, InputEvent as SwsInputEvent};
+use sws_client::event::{abs_code, event_type, key_code, rel_code, Event as SwsEvent, InputEvent as SwsInputEvent};
 use crate::window_adapter::ScarletWindowAdapter;
 use crate::{use_csd_titlebar, TITLEBAR_HEIGHT_PX};
 use scarlet_ui::{Canvas, Color};
@@ -26,6 +26,8 @@ struct PointerState {
     pressed_in_content: bool,
     last_content_x: f32,
     last_content_y: f32,
+    pending_wheel_dx: f32,
+    pending_wheel_dy: f32,
 }
 
 /// Window decoration state for CSD
@@ -254,6 +256,19 @@ impl EventLoop {
                     }
                     state.pending_move = false;
                 }
+
+                // Dispatch accumulated wheel scroll
+                if state.pending_wheel_dx != 0.0 || state.pending_wheel_dy != 0.0 {
+                    if let Some(pos) = content_pos_from_surface(state.x, state.y) {
+                        win.window().dispatch_event(WindowEvent::PointerScrolled {
+                            position: pos,
+                            delta_x: state.pending_wheel_dx,
+                            delta_y: state.pending_wheel_dy,
+                        });
+                    }
+                    state.pending_wheel_dx = 0.0;
+                    state.pending_wheel_dy = 0.0;
+                }
             }
             (event_type::EV_KEY, key_code::BTN_LEFT) => {
                 let state = self.pointer.entry(ev.surface_id).or_default();
@@ -349,6 +364,15 @@ impl EventLoop {
                     }
                     state.pressed_in_content = false;
                 }
+            }
+            (event_type::EV_REL, rel_code::REL_WHEEL) => {
+                let state = self.pointer.entry(ev.surface_id).or_default();
+                // REL_WHEEL value is typically ±1 per notch. Scale to pixels.
+                state.pending_wheel_dy += ev.value as f32 * 20.0;
+            }
+            (event_type::EV_REL, rel_code::REL_HWHEEL) => {
+                let state = self.pointer.entry(ev.surface_id).or_default();
+                state.pending_wheel_dx += ev.value as f32 * 20.0;
             }
             _ => {}
         }

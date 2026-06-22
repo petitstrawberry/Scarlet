@@ -157,6 +157,8 @@ pub mod abs_code {
 pub mod rel_code {
     pub const REL_X: u16 = 0x00;
     pub const REL_Y: u16 = 0x01;
+    pub const REL_HWHEEL: u16 = 0x06;
+    pub const REL_WHEEL: u16 = 0x08;
 }
 
 // Common key codes (from linux/input-event-codes.h)
