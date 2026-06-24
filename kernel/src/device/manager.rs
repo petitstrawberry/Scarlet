@@ -67,6 +67,7 @@ use super::iommu::{
     DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
 };
 use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
+use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
 use crate::DeviceSource;
@@ -197,6 +198,7 @@ pub struct DeviceManager {
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
+    remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -220,6 +222,7 @@ impl DeviceManager {
             iommu_controllers: Mutex::new(BTreeMap::new()),
             msi_controllers: Mutex::new(BTreeMap::new()),
             mailbox_controllers: Mutex::new(BTreeMap::new()),
+            remote_processors: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -796,6 +799,52 @@ impl DeviceManager {
         phandle: u32,
     ) -> Option<Arc<dyn MailboxController>> {
         self.mailbox_controllers.lock().get(&phandle).cloned()
+    }
+
+    /// Register a remote processor by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the remote processor node.
+    /// * `processor` - Remote processor implementation.
+    pub fn register_remote_processor(&self, phandle: u32, processor: Arc<dyn RemoteProcessor>) {
+        self.remote_processors.lock().insert(phandle, processor);
+    }
+
+    /// Look up a remote processor by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the remote processor node.
+    ///
+    /// # Returns
+    ///
+    /// Remote processor registered for `phandle`, or `None` when missing.
+    pub fn get_remote_processor_by_phandle(
+        &self,
+        phandle: u32,
+    ) -> Option<Arc<dyn RemoteProcessor>> {
+        self.remote_processors.lock().get(&phandle).cloned()
+    }
+
+    /// Look up a service exposed by a registered remote processor.
+    ///
+    /// # Arguments
+    ///
+    /// * `remoteproc_phandle` - Firmware phandle identifying the remote processor node.
+    /// * `service_id` - Service identifier to resolve from that processor.
+    ///
+    /// # Returns
+    ///
+    /// Remote processor service registered for `service_id`, or `None` when the
+    /// processor or service is missing.
+    pub fn get_remoteproc_service(
+        &self,
+        remoteproc_phandle: u32,
+        service_id: RemoteprocServiceId,
+    ) -> Option<Arc<dyn RemoteprocService>> {
+        self.get_remote_processor_by_phandle(remoteproc_phandle)?
+            .get_service(service_id)
     }
 
     /// Resolve a named clock for a platform device from FDT properties.
@@ -1876,6 +1925,7 @@ impl DeviceManager {
         self.iommu_controllers.lock().clear();
         self.msi_controllers.lock().clear();
         self.mailbox_controllers.lock().clear();
+        self.remote_processors.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1888,6 +1938,10 @@ mod tests {
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
     use crate::device::mailbox::{MailboxChannelId, MailboxMessage};
+    use crate::device::remoteproc::{
+        RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware, RemoteprocMessage,
+        RemoteprocState,
+    };
     use crate::device::{GenericDevice, platform::*};
     use crate::interrupt::msi::{
         MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
@@ -2383,6 +2437,101 @@ mod tests {
         }
     }
 
+    struct TestRemoteprocService {
+        id: RemoteprocServiceId,
+    }
+
+    impl TestRemoteprocService {
+        fn new(id: RemoteprocServiceId) -> Self {
+            Self { id }
+        }
+    }
+
+    impl RemoteprocService for TestRemoteprocService {
+        fn id(&self) -> RemoteprocServiceId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "test-remoteproc-service"
+        }
+
+        fn send(&self, message: &RemoteprocMessage) -> Result<(), RemoteprocError> {
+            let _ = message;
+            Ok(())
+        }
+
+        fn try_recv(&self) -> Result<Option<RemoteprocMessage>, RemoteprocError> {
+            Ok(None)
+        }
+
+        fn set_client(
+            &self,
+            client: Option<Arc<dyn crate::device::remoteproc::RemoteprocServiceClient>>,
+        ) -> Result<(), RemoteprocError> {
+            let _ = client;
+            Ok(())
+        }
+    }
+
+    struct TestRemoteProcessor {
+        service: Option<Arc<dyn RemoteprocService>>,
+    }
+
+    impl TestRemoteProcessor {
+        fn new(service: Option<Arc<dyn RemoteprocService>>) -> Self {
+            Self { service }
+        }
+    }
+
+    impl RemoteProcessor for TestRemoteProcessor {
+        fn name(&self) -> &'static str {
+            "test-remoteproc"
+        }
+
+        fn state(&self) -> RemoteprocState {
+            RemoteprocState::Offline
+        }
+
+        fn load(&self, firmware: &RemoteprocFirmware) -> Result<(), RemoteprocError> {
+            let _ = firmware;
+            Ok(())
+        }
+
+        fn boot(&self) -> Result<(), RemoteprocError> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> Result<(), RemoteprocError> {
+            Ok(())
+        }
+
+        fn suspend(&self) -> Result<(), RemoteprocError> {
+            Ok(())
+        }
+
+        fn resume(&self) -> Result<(), RemoteprocError> {
+            Ok(())
+        }
+
+        fn register_crash_handler(
+            &self,
+            handler: Arc<dyn RemoteprocCrashHandler>,
+        ) -> Result<(), RemoteprocError> {
+            let _ = handler;
+            Ok(())
+        }
+
+        fn get_service(&self, id: RemoteprocServiceId) -> Option<Arc<dyn RemoteprocService>> {
+            let service = self.service.as_ref()?;
+            if service.id() == id {
+                Some(service.clone())
+            } else {
+                None
+            }
+        }
+    }
+
     impl IommuController for TestIommuController {
         fn name(&self) -> &'static str {
             "test-iommu"
@@ -2425,6 +2574,51 @@ mod tests {
         let resolved = manager.get_mailbox_controller_by_phandle(0x50).unwrap();
         assert_eq!(resolved.name(), "test-mailbox");
         assert!(manager.get_mailbox_controller_by_phandle(0x51).is_none());
+    }
+
+    #[test_case]
+    fn test_register_get_remote_processor() {
+        let manager = DeviceManager::new();
+        manager.register_remote_processor(0x60, Arc::new(TestRemoteProcessor::new(None)));
+
+        let resolved = manager.get_remote_processor_by_phandle(0x60).unwrap();
+        assert_eq!(resolved.name(), "test-remoteproc");
+        assert!(manager.get_remote_processor_by_phandle(0x61).is_none());
+    }
+
+    #[test_case]
+    fn test_get_remoteproc_service_returns_none_when_processor_missing() {
+        let manager = DeviceManager::new();
+        assert!(
+            manager
+                .get_remoteproc_service(0x60, RemoteprocServiceId(1))
+                .is_none()
+        );
+    }
+
+    #[test_case]
+    fn test_get_remoteproc_service_returns_none_when_service_missing() {
+        let manager = DeviceManager::new();
+        manager.register_remote_processor(0x60, Arc::new(TestRemoteProcessor::new(None)));
+
+        assert!(
+            manager
+                .get_remoteproc_service(0x60, RemoteprocServiceId(1))
+                .is_none()
+        );
+    }
+
+    #[test_case]
+    fn test_get_remoteproc_service_returns_registered_service() {
+        let manager = DeviceManager::new();
+        let service = Arc::new(TestRemoteprocService::new(RemoteprocServiceId(1)));
+        manager.register_remote_processor(0x60, Arc::new(TestRemoteProcessor::new(Some(service))));
+
+        let resolved = manager
+            .get_remoteproc_service(0x60, RemoteprocServiceId(1))
+            .expect("registered remoteproc service missing");
+        assert_eq!(resolved.name(), "test-remoteproc-service");
+        assert_eq!(resolved.id(), RemoteprocServiceId(1));
     }
 
     #[test_case]
