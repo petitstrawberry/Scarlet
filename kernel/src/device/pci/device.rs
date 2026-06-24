@@ -10,6 +10,7 @@ use core::any::Any;
 
 use super::PciAddress;
 use super::config::{PciBar, PciInterruptCapabilities};
+use crate::device::iommu::IommuSpec;
 use crate::device::{DeviceInfo, DeviceType};
 
 /// PCI device class codes
@@ -121,6 +122,8 @@ pub struct PciDeviceInfo {
     bars: Vec<PciBar>,
     /// Decoded interrupt-related capabilities.
     interrupt_capabilities: PciInterruptCapabilities,
+    /// Optional IOMMU specifier resolved from the PCI host bridge `iommu-map`.
+    pub iommu_spec: Option<IommuSpec>,
 }
 
 impl PciDeviceInfo {
@@ -171,6 +174,7 @@ impl PciDeviceInfo {
             id,
             bars: Vec::new(),
             interrupt_capabilities: PciInterruptCapabilities::default(),
+            iommu_spec: None,
         }
     }
 
@@ -202,6 +206,20 @@ impl PciDeviceInfo {
         interrupt_capabilities: PciInterruptCapabilities,
     ) -> Self {
         self.interrupt_capabilities = interrupt_capabilities;
+        self
+    }
+
+    /// Attach an IOMMU firmware specifier to this PCI device information.
+    ///
+    /// # Arguments
+    ///
+    /// * `iommu_spec` - IOMMU specifier resolved from the host bridge `iommu-map`.
+    ///
+    /// # Returns
+    ///
+    /// The updated PCI device information.
+    pub fn with_iommu_spec(mut self, iommu_spec: IommuSpec) -> Self {
+        self.iommu_spec = Some(iommu_spec);
         self
     }
 
@@ -355,6 +373,15 @@ impl PciDeviceInfo {
     pub const fn interrupt_capabilities(&self) -> PciInterruptCapabilities {
         self.interrupt_capabilities
     }
+
+    /// Get the optional IOMMU specifier decoded during PCI enumeration.
+    ///
+    /// # Returns
+    ///
+    /// IOMMU specifier for this device, or `None` when no host mapping exists.
+    pub fn iommu_spec(&self) -> Option<&IommuSpec> {
+        self.iommu_spec.as_ref()
+    }
 }
 
 impl DeviceInfo for PciDeviceInfo {
@@ -441,5 +468,33 @@ mod tests {
         assert_eq!(PciClass::from(0x02), PciClass::Network);
         assert_eq!(PciClass::from(0x03), PciClass::Display);
         assert_eq!(PciClass::from(0xFF), PciClass::Unknown);
+    }
+
+    #[test_case]
+    fn test_pci_device_info_holds_iommu_spec() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        )
+        .with_iommu_spec(IommuSpec {
+            controller_phandle: 0x40,
+            cells: alloc::vec![0x10],
+        });
+
+        let spec = device.iommu_spec().expect("expected IOMMU spec");
+        assert_eq!(spec.controller_phandle, 0x40);
+        assert_eq!(spec.cells, alloc::vec![0x10]);
     }
 }
