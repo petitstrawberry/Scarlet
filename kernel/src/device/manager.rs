@@ -62,6 +62,9 @@ use super::DeviceInfo;
 use super::clk::{ClkError, ClkHandle, ClkProvider};
 use super::gpio::GpioController;
 use super::i2c::I2cBus;
+use super::iommu::{
+    DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
+};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
 use crate::DeviceSource;
@@ -114,6 +117,11 @@ struct DeferredPlatformDevice {
 }
 
 struct OwnedClkSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
+struct OwnedIommuSpec {
     phandle: u32,
     cells: Vec<u32>,
 }
@@ -179,6 +187,7 @@ pub struct DeviceManager {
     usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
+    iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -199,6 +208,7 @@ impl DeviceManager {
             usb_hosts: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
             clk_providers: Mutex::new(BTreeMap::new()),
+            iommu_controllers: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -236,6 +246,12 @@ impl DeviceManager {
     fn get_clock_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_clk_provider_by_phandle(phandle)
             .map(|provider| provider.clock_cells())
+    }
+
+    fn get_iommu_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
+        let node = Self::find_node_by_phandle(fdt, phandle)?;
+        Self::get_u32_prop(&node, "#iommu-cells").map(|cells| cells as usize)
     }
 
     fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
@@ -296,6 +312,34 @@ impl DeviceManager {
         Ok(specs)
     }
 
+    fn parse_iommu_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedIommuSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("iommu: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            if self.get_iommu_controller_by_phandle(phandle).is_none() {
+                return probe_defer();
+            }
+
+            let iommu_cells = self.get_iommu_cells_for_phandle(phandle).unwrap_or(1);
+            if index + iommu_cells > cells.len() {
+                return Err("iommu: truncated specifier");
+            }
+
+            specs.push(OwnedIommuSpec {
+                phandle,
+                cells: cells[index..index + iommu_cells].to_vec(),
+            });
+            index += iommu_cells;
+        }
+
+        Ok(specs)
+    }
+
     fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("clock-names")
@@ -320,6 +364,20 @@ impl DeviceManager {
             ClkError::HardwareError => "clk: hardware error",
             ClkError::Busy => "clk: busy",
             ClkError::NotFound => "clk: not found",
+        }
+    }
+
+    fn iommu_error_to_str(error: IommuError) -> &'static str {
+        match error {
+            IommuError::InvalidSpec => "iommu: invalid specifier",
+            IommuError::ControllerNotFound => "iommu: controller not found",
+            IommuError::DomainAllocationFailed => "iommu: domain allocation failed",
+            IommuError::AttachFailed => "iommu: attach failed",
+            IommuError::MapFailed => "iommu: map failed",
+            IommuError::UnmapFailed => "iommu: unmap failed",
+            IommuError::OutOfIova => "iommu: out of iova",
+            IommuError::NotSupported => "iommu: not supported",
+            IommuError::Busy => "iommu: busy",
         }
     }
 
@@ -582,6 +640,32 @@ impl DeviceManager {
         self.clk_providers.lock().get(&phandle).cloned()
     }
 
+    /// Register an IOMMU controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the IOMMU controller node.
+    /// * `controller` - IOMMU controller implementation.
+    pub fn register_iommu_controller(&self, phandle: u32, controller: Arc<dyn IommuController>) {
+        self.iommu_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up an IOMMU controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the IOMMU controller node.
+    ///
+    /// # Returns
+    ///
+    /// IOMMU controller registered for `phandle`, or `None` when missing.
+    pub fn get_iommu_controller_by_phandle(
+        &self,
+        phandle: u32,
+    ) -> Option<Arc<dyn IommuController>> {
+        self.iommu_controllers.lock().get(&phandle).cloned()
+    }
+
     /// Resolve a named clock for a platform device from FDT properties.
     ///
     /// # Arguments
@@ -675,6 +759,91 @@ impl DeviceManager {
         }
 
         Ok(())
+    }
+
+    /// Resolve and attach a platform device IOMMU from its `iommus` property.
+    ///
+    /// Missing controllers return [`probe_defer`] so platform probing can retry once
+    /// provider drivers register their IOMMU controllers.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `iommus` property.
+    /// * `config` - Domain configuration to use when an IOMMU is present.
+    ///
+    /// # Returns
+    ///
+    /// A resolved IOMMU attachment, or `None` when the device has no IOMMU property.
+    pub fn resolve_platform_iommu(
+        &self,
+        device: &PlatformDeviceInfo,
+        config: IommuDomainConfig,
+    ) -> Result<Option<IommuAttachment>, &'static str> {
+        let iommus = match device.property("iommus") {
+            Some(property) => property,
+            None => return Ok(None),
+        };
+
+        let specs = self.parse_iommu_specs(iommus.value())?;
+        if specs.is_empty() {
+            return Ok(None);
+        }
+
+        let first_phandle = specs[0].phandle;
+        let controller = self
+            .get_iommu_controller_by_phandle(first_phandle)
+            .ok_or(PROBE_DEFER)?;
+        let mut streams = Vec::new();
+
+        for spec in &specs {
+            if spec.phandle != first_phandle {
+                return Err("iommu: multiple controllers not supported");
+            }
+            let iommu_spec = IommuSpec {
+                controller_phandle: spec.phandle,
+                cells: spec.cells.clone(),
+            };
+            let mut decoded_streams = controller
+                .stream_ids_from_fdt(&iommu_spec)
+                .map_err(Self::iommu_error_to_str)?;
+            streams.append(&mut decoded_streams);
+        }
+
+        let domain = controller
+            .alloc_domain(config)
+            .map_err(Self::iommu_error_to_str)?;
+        for stream in &streams {
+            domain
+                .attach_stream(*stream)
+                .map_err(Self::iommu_error_to_str)?;
+        }
+
+        Ok(Some(IommuAttachment {
+            controller,
+            domain,
+            streams,
+        }))
+    }
+
+    /// Resolve a platform device DMA context from its firmware properties.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing optional IOMMU properties.
+    /// * `config` - Domain configuration to use when an IOMMU is present.
+    ///
+    /// # Returns
+    ///
+    /// DMA context for the device, falling back to direct DMA when no IOMMU exists.
+    pub fn resolve_platform_dma_context(
+        &self,
+        device: &PlatformDeviceInfo,
+        config: IommuDomainConfig,
+    ) -> Result<DmaContext, &'static str> {
+        Ok(DmaContext {
+            iommu: self.resolve_platform_iommu(device, config)?,
+            direct_dma_offset: 0,
+        })
     }
 
     pub fn for_each_usb_host<F>(&self, mut f: F)
@@ -1440,6 +1609,7 @@ impl DeviceManager {
         self.usb_hosts.lock().clear();
         self.gpio_controllers.lock().clear();
         self.clk_providers.lock().clear();
+        self.iommu_controllers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1448,6 +1618,9 @@ impl DeviceManager {
 mod tests {
     use super::*;
     use crate::device::clk::{ClkError, ClkFixedRate, ClkHandle, ClkProvider};
+    use crate::device::iommu::{
+        IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
+    };
     use crate::device::{GenericDevice, platform::*};
     use alloc::vec;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1590,6 +1763,83 @@ mod tests {
     }
 
     #[test_case]
+    fn test_register_get_iommu_controller() {
+        let manager = DeviceManager::new();
+        manager.register_iommu_controller(0x40, Arc::new(TestIommuController::new()));
+        let controller = manager.get_iommu_controller_by_phandle(0x40);
+        assert!(controller.is_some());
+        assert_eq!(controller.unwrap().name(), "test-iommu");
+    }
+
+    #[test_case]
+    fn test_resolve_platform_iommu_returns_none_when_no_iommus_property() {
+        let manager = DeviceManager::new();
+        let device = iommu_test_device(vec![]);
+        let attachment = manager
+            .resolve_platform_iommu(&device, test_iommu_config())
+            .unwrap();
+        assert!(attachment.is_none());
+    }
+
+    #[test_case]
+    fn test_resolve_platform_iommu_defers_when_controller_missing() {
+        let manager = DeviceManager::new();
+        let device = iommu_test_device(vec![PlatformDeviceProperty::new(
+            "iommus",
+            &be_cells(&[0x40, 0x10]),
+        )]);
+        assert_eq!(
+            manager
+                .resolve_platform_iommu(&device, test_iommu_config())
+                .unwrap_err(),
+            PROBE_DEFER
+        );
+    }
+
+    #[test_case]
+    fn test_resolve_platform_iommu_attaches_all_streams() {
+        let manager = DeviceManager::new();
+        let controller = Arc::new(TestIommuController::new());
+        manager.register_iommu_controller(0x40, controller.clone());
+        let device = iommu_test_device(vec![PlatformDeviceProperty::new(
+            "iommus",
+            &be_cells(&[0x40, 0x10, 0x40, 0x20]),
+        )]);
+
+        let attachment = manager
+            .resolve_platform_iommu(&device, test_iommu_config())
+            .unwrap()
+            .expect("expected IOMMU attachment");
+
+        assert_eq!(controller.alloc_count.load(Ordering::SeqCst), 1);
+        assert_eq!(attachment.streams.len(), 2);
+        assert_eq!(
+            *controller.domain.attached_streams.lock(),
+            vec![
+                IommuStreamId {
+                    id: 0x10,
+                    substream_id: None,
+                },
+                IommuStreamId {
+                    id: 0x20,
+                    substream_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test_case]
+    fn test_resolve_platform_dma_context_direct_when_no_iommus() {
+        let manager = DeviceManager::new();
+        let device = iommu_test_device(vec![]);
+        let context = manager
+            .resolve_platform_dma_context(&device, test_iommu_config())
+            .unwrap();
+        assert!(context.iommu.is_none());
+        assert_eq!(context.direct_dma_offset, 0);
+    }
+
+    #[test_case]
     fn test_get_missing_clk_provider_returns_none() {
         let manager = DeviceManager::new();
         assert!(manager.get_clk_provider_by_phandle(0x20).is_none());
@@ -1621,6 +1871,113 @@ mod tests {
             properties,
             None,
         )
+    }
+
+    fn iommu_test_device(properties: Vec<PlatformDeviceProperty>) -> PlatformDeviceInfo {
+        PlatformDeviceInfo::new(
+            "iommu-device",
+            0,
+            vec!["test,iommu-device"],
+            vec![],
+            properties,
+            None,
+        )
+    }
+
+    struct TestIommuDomain {
+        attached_streams: Mutex<Vec<IommuStreamId>>,
+    }
+
+    impl TestIommuDomain {
+        fn new() -> Self {
+            Self {
+                attached_streams: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl IommuDomain for TestIommuDomain {
+        fn attach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+            self.attached_streams.lock().push(stream);
+            Ok(())
+        }
+
+        fn detach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+            let _ = stream;
+            Ok(())
+        }
+
+        fn map(
+            &self,
+            iova: crate::device::iommu::Iova,
+            paddr: PhysAddr,
+            len: usize,
+            flags: IommuMapFlags,
+        ) -> Result<(), IommuError> {
+            let _ = (iova, paddr, len, flags);
+            Ok(())
+        }
+
+        fn unmap(&self, iova: crate::device::iommu::Iova, len: usize) -> Result<(), IommuError> {
+            let _ = (iova, len);
+            Ok(())
+        }
+
+        fn iova_to_phys(&self, iova: crate::device::iommu::Iova) -> Option<PhysAddr> {
+            let _ = iova;
+            None
+        }
+
+        fn flush(&self) -> Result<(), IommuError> {
+            Ok(())
+        }
+    }
+
+    struct TestIommuController {
+        domain: Arc<TestIommuDomain>,
+        alloc_count: AtomicUsize,
+    }
+
+    impl TestIommuController {
+        fn new() -> Self {
+            Self {
+                domain: Arc::new(TestIommuDomain::new()),
+                alloc_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl IommuController for TestIommuController {
+        fn name(&self) -> &'static str {
+            "test-iommu"
+        }
+
+        fn alloc_domain(
+            &self,
+            config: IommuDomainConfig,
+        ) -> Result<Arc<dyn IommuDomain>, IommuError> {
+            assert_eq!(config.domain_type, IommuDomainType::Dma);
+            self.alloc_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.domain.clone())
+        }
+
+        fn stream_ids_from_fdt(&self, spec: &IommuSpec) -> Result<Vec<IommuStreamId>, IommuError> {
+            if spec.cells.len() != 1 {
+                return Err(IommuError::InvalidSpec);
+            }
+            Ok(vec![IommuStreamId {
+                id: spec.cells[0],
+                substream_id: None,
+            }])
+        }
+    }
+
+    fn test_iommu_config() -> IommuDomainConfig {
+        IommuDomainConfig {
+            domain_type: IommuDomainType::Dma,
+            iova_base: 0,
+            iova_size: 0x1_0000,
+        }
     }
 
     #[test_case]
