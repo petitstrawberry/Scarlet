@@ -16,6 +16,7 @@ pub mod graphics;
 pub mod i2c;
 pub mod input;
 pub mod iommu;
+pub mod mailbox;
 pub mod manager;
 pub mod network;
 pub mod pci;
