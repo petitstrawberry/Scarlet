@@ -846,6 +846,14 @@ impl DeviceManager {
         })
     }
 
+    fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(iommus) = device.property("iommus") else {
+            return Ok(());
+        };
+
+        self.parse_iommu_specs(iommus.value()).map(|_| ())
+    }
+
     pub fn for_each_usb_host<F>(&self, mut f: F)
     where
         F: FnMut(&Arc<dyn UsbHostController>),
@@ -1366,6 +1374,14 @@ impl DeviceManager {
                             return ProbeOutcome::Deferred;
                         }
                         early_println!("[clk] failed to apply assigned clocks: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
+                    if let Err(e) = self.pre_probe_resolve_iommu(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[iommu] failed to resolve IOMMU: {}", e);
                         return ProbeOutcome::Failed;
                     }
 
@@ -2216,6 +2232,22 @@ mod tests {
         let device = Arc::new(clk_test_device(vec![PlatformDeviceProperty::new(
             "assigned-clocks",
             &be_cells(&[0x10]),
+        )]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert_eq!(manager.deferred_platform_devices.lock().len(), 1);
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 0);
+    }
+
+    #[test_case]
+    fn test_probe_defers_when_iommu_controller_not_yet_registered() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        let manager = DeviceManager::new();
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![PlatformDeviceProperty::new(
+            "iommus",
+            &be_cells(&[0x40, 0x10]),
         )]));
 
         let mut idx = 0;
