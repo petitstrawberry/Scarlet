@@ -451,21 +451,6 @@ pub trait ExternalInterruptController: Send + Sync {
         self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
     }
 
-    /// Allocate MSI/MSI-X vectors for a device.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - MSI allocation request.
-    ///
-    /// # Returns
-    ///
-    /// Allocated MSI vectors and message programming data, or `NotSupported`
-    /// when this controller has no MSI domain.
-    fn allocate_msi_vectors(&self, request: MsiRequest) -> InterruptResult<MsiAllocation> {
-        let _ = request;
-        Err(InterruptError::NotSupported)
-    }
-
     /// Send an inter-processor interrupt through this controller.
     ///
     /// # Arguments

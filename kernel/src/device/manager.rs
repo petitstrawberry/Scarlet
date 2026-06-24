@@ -771,6 +771,23 @@ impl DeviceManager {
         self.msi_controllers.lock().get(&phandle).cloned()
     }
 
+    /// Iterate over all registered MSI controllers.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Callback invoked for each MSI controller. Return `false` to stop iteration.
+    pub fn for_each_msi_controller<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<dyn MsiController>) -> bool,
+    {
+        let controllers = self.msi_controllers.lock();
+        for controller in controllers.values() {
+            if !f(controller) {
+                break;
+            }
+        }
+    }
+
     /// Register a mailbox controller by firmware phandle.
     ///
     /// # Arguments
