@@ -3,10 +3,16 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::cmp;
 
 use scarlet::sync::Mutex;
 
+use scarlet::device::remoteproc::{
+    RemoteProcessor, RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware,
+    RemoteprocMemoryRegion, RemoteprocMessage, RemoteprocService, RemoteprocServiceClient,
+    RemoteprocServiceId, RemoteprocState,
+};
 use scarlet::early_println;
 use scarlet::time;
 use scarlet_driver_apple_asc::{AppleAsc, AscMessage};
@@ -105,10 +111,12 @@ fn mgmt_msg(msg_type: u64, payload: u64) -> u64 {
 /// RTKit protocol context.
 pub struct AppleRtkit {
     asc: Arc<AppleAsc>,
-    iop_power: Mutex<u32>,
-    ap_power: Mutex<u32>,
-    crashed: Mutex<bool>,
-    ep_bitmap: Mutex<u64>,
+    iop_power: Arc<Mutex<u32>>,
+    ap_power: Arc<Mutex<u32>>,
+    crashed: Arc<Mutex<bool>>,
+    ep_bitmap: Arc<Mutex<u64>>,
+    firmware_regions: Arc<Mutex<Vec<RemoteprocMemoryRegion>>>,
+    crash_handler: Arc<Mutex<Option<Arc<dyn RemoteprocCrashHandler>>>>,
 }
 
 impl AppleRtkit {
@@ -116,10 +124,12 @@ impl AppleRtkit {
     pub fn new(asc: Arc<AppleAsc>) -> Self {
         Self {
             asc,
-            iop_power: Mutex::new(RTKIT_POWER_OFF),
-            ap_power: Mutex::new(RTKIT_POWER_OFF),
-            crashed: Mutex::new(false),
-            ep_bitmap: Mutex::new(0),
+            iop_power: Arc::new(Mutex::new(RTKIT_POWER_OFF)),
+            ap_power: Arc::new(Mutex::new(RTKIT_POWER_OFF)),
+            crashed: Arc::new(Mutex::new(false)),
+            ep_bitmap: Arc::new(Mutex::new(0)),
+            firmware_regions: Arc::new(Mutex::new(Vec::new())),
+            crash_handler: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -221,6 +231,22 @@ impl AppleRtkit {
     /// Check whether RTKit reported crash state.
     pub fn is_crashed(&self) -> bool {
         *self.crashed.lock()
+    }
+
+    /// Notify a registered remoteproc crash handler if RTKit has crashed.
+    ///
+    /// The current RTKit driver only records a processor-level crash flag while
+    /// polling messages. Consumers that detect or poll crash state can call this
+    /// helper to bridge that state into the generic remoteproc callback until
+    /// endpoint-specific crash reporting is wired directly into every handler.
+    pub fn check_and_notify_crash(&self) {
+        if !*self.crashed.lock() {
+            return;
+        }
+
+        if let Some(handler) = self.crash_handler.lock().as_ref() {
+            handler.crashed(RemoteprocServiceId(RTKIT_EP_CRASHLOG as u32), 0);
+        }
     }
 
     fn wait_any_mgmt_msg(&self, timeout_us: u64) -> Result<u64, &'static str> {
@@ -343,6 +369,178 @@ impl AppleRtkit {
         self.send(&reply)?;
 
         Ok(true)
+    }
+}
+
+impl RemoteProcessor for AppleRtkit {
+    fn name(&self) -> &'static str {
+        "apple-rtkit"
+    }
+
+    fn state(&self) -> RemoteprocState {
+        if *self.crashed.lock() {
+            return RemoteprocState::Crashed;
+        }
+
+        let iop_power = *self.iop_power.lock();
+        let ap_power = *self.ap_power.lock();
+        if iop_power == RTKIT_POWER_ON && ap_power == RTKIT_POWER_ON {
+            RemoteprocState::Running
+        } else if iop_power == RTKIT_POWER_SLEEP || ap_power == RTKIT_POWER_SLEEP {
+            RemoteprocState::Suspended
+        } else if iop_power == RTKIT_POWER_INIT {
+            RemoteprocState::Loading
+        } else {
+            RemoteprocState::Offline
+        }
+    }
+
+    fn load(&self, firmware: &RemoteprocFirmware) -> Result<(), RemoteprocError> {
+        // Apple RTKit firmware is already loaded by m1n1 before Scarlet boots.
+        // Keep the discovered regions for future diagnostics/mapping work, but
+        // do not attempt to copy firmware bytes here.
+        *self.firmware_regions.lock() = firmware.regions.clone();
+        Ok(())
+    }
+
+    fn boot(&self) -> Result<(), RemoteprocError> {
+        AppleRtkit::boot(self).map_err(|_| RemoteprocError::BootFailed)
+    }
+
+    fn shutdown(&self) -> Result<(), RemoteprocError> {
+        // This driver does not yet implement RTKit's graceful power-down
+        // protocol, so stopping the ASC CPU is a best-effort shutdown.
+        self.asc.cpu_stop();
+        *self.iop_power.lock() = RTKIT_POWER_OFF;
+        *self.ap_power.lock() = RTKIT_POWER_OFF;
+        Ok(())
+    }
+
+    fn suspend(&self) -> Result<(), RemoteprocError> {
+        // TODO: negotiate RTKit sleep/quiesce states before exposing suspend.
+        Err(RemoteprocError::NotSupported)
+    }
+
+    fn resume(&self) -> Result<(), RemoteprocError> {
+        // TODO: resume from RTKit sleep/quiesce states once suspend exists.
+        Err(RemoteprocError::NotSupported)
+    }
+
+    fn register_crash_handler(
+        &self,
+        handler: Arc<dyn RemoteprocCrashHandler>,
+    ) -> Result<(), RemoteprocError> {
+        *self.crash_handler.lock() = Some(handler);
+        Ok(())
+    }
+
+    fn get_service(&self, id: RemoteprocServiceId) -> Option<Arc<dyn RemoteprocService>> {
+        let endpoint = u8::try_from(id.0).ok()?;
+        Some(Arc::new(AppleRtkitService::new(
+            self.clone_for_service(),
+            endpoint,
+        )))
+    }
+}
+
+impl AppleRtkit {
+    fn clone_for_service(&self) -> Arc<Self> {
+        Arc::new(Self {
+            asc: self.asc.clone(),
+            iop_power: self.iop_power.clone(),
+            ap_power: self.ap_power.clone(),
+            crashed: self.crashed.clone(),
+            ep_bitmap: self.ep_bitmap.clone(),
+            firmware_regions: self.firmware_regions.clone(),
+            crash_handler: self.crash_handler.clone(),
+        })
+    }
+}
+
+/// Remoteproc service wrapper for one Apple RTKit endpoint.
+pub struct AppleRtkitService {
+    rtkit: Arc<AppleRtkit>,
+    endpoint: u8,
+    client: Mutex<Option<Arc<dyn RemoteprocServiceClient>>>,
+}
+
+impl AppleRtkitService {
+    /// Create a remoteproc service wrapper for one RTKit endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `rtkit` - Shared RTKit protocol instance backing the service.
+    /// * `endpoint` - RTKit endpoint number exposed as a remoteproc service.
+    ///
+    /// # Returns
+    ///
+    /// A service wrapper that sends and receives messages through `rtkit`.
+    pub fn new(rtkit: Arc<AppleRtkit>, endpoint: u8) -> Self {
+        Self {
+            rtkit,
+            endpoint,
+            client: Mutex::new(None),
+        }
+    }
+
+    fn endpoint_name(&self) -> &'static str {
+        match self.endpoint {
+            RTKIT_EP_MGMT => "rtkit-mgmt",
+            RTKIT_EP_CRASHLOG => "rtkit-crashlog",
+            RTKIT_EP_SYSLOG => "rtkit-syslog",
+            RTKIT_EP_DEBUG => "rtkit-debug",
+            RTKIT_EP_IOREPORT => "rtkit-ioreport",
+            RTKIT_EP_OSLOG => "rtkit-oslog",
+            _ => "rtkit-ep-unknown",
+        }
+    }
+}
+
+impl RemoteprocService for AppleRtkitService {
+    fn id(&self) -> RemoteprocServiceId {
+        RemoteprocServiceId(self.endpoint as u32)
+    }
+
+    fn name(&self) -> &'static str {
+        self.endpoint_name()
+    }
+
+    fn send(&self, message: &RemoteprocMessage) -> Result<(), RemoteprocError> {
+        if message.len == 0 {
+            return Err(RemoteprocError::TransportError);
+        }
+
+        self.rtkit
+            .send(&RtkitMessage {
+                ep: self.endpoint,
+                msg: message.words[0],
+            })
+            .map_err(|_| RemoteprocError::TransportError)
+    }
+
+    fn try_recv(&self) -> Result<Option<RemoteprocMessage>, RemoteprocError> {
+        let mut rtkit_message = RtkitMessage { ep: 0, msg: 0 };
+        // The existing RTKit receive primitive consumes the next non-internal
+        // endpoint message globally and does not yet maintain per-endpoint
+        // queues, so this service currently accepts whichever endpoint message
+        // is pending and exposes its payload through this wrapper.
+        let received = self
+            .rtkit
+            .recv(&mut rtkit_message)
+            .map_err(|_| RemoteprocError::TransportError)?;
+        if !received {
+            return Ok(None);
+        }
+
+        Ok(Some(RemoteprocMessage::one(rtkit_message.msg)))
+    }
+
+    fn set_client(
+        &self,
+        client: Option<Arc<dyn RemoteprocServiceClient>>,
+    ) -> Result<(), RemoteprocError> {
+        *self.client.lock() = client;
+        Ok(())
     }
 }
 
