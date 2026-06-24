@@ -25,6 +25,8 @@ pub struct PciScanner<'a> {
     config: PciConfig,
     /// Bus manager reference
     bus: &'a PciBus,
+    /// MSI parent phandle inherited from the PCI host bridge.
+    host_msi_parent: Option<u32>,
 }
 
 struct PciIommuMapEntry {
@@ -112,6 +114,38 @@ impl<'a> PciScanner<'a> {
         }
 
         None
+    }
+
+    fn find_pci_host_node<'b>(fdt: &'b fdt::Fdt<'b>) -> Option<fdt::node::FdtNode<'b, 'b>> {
+        for parent_path in ["/soc", "/"] {
+            let Some(parent) = fdt.find_node(parent_path) else {
+                continue;
+            };
+            if let Some(node) = parent.children().find(Self::is_pci_host_node) {
+                return Some(node);
+            }
+        }
+
+        None
+    }
+
+    fn host_msi_parent_from_fdt() -> Option<u32> {
+        let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
+        let pci_node = Self::find_pci_host_node(fdt)?;
+        Self::get_u32_prop(&pci_node, "msi-parent")
+    }
+
+    fn inherit_host_msi_parent(
+        device_info: PciDeviceInfo,
+        host_msi_parent: Option<u32>,
+    ) -> PciDeviceInfo {
+        if device_info.msi_parent().is_none()
+            && let Some(msi_parent) = host_msi_parent
+        {
+            device_info.with_msi_parent(msi_parent)
+        } else {
+            device_info
+        }
     }
 
     fn decode_parent_irq_resource(parent_irq_cells: &[u32]) -> Option<PlatformDeviceResource> {
@@ -283,17 +317,7 @@ impl<'a> PciScanner<'a> {
         }
 
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let mut pci_node = None;
-        for parent_path in ["/soc", "/"] {
-            let Some(parent) = fdt.find_node(parent_path) else {
-                continue;
-            };
-            pci_node = parent.children().find(Self::is_pci_host_node);
-            if pci_node.is_some() {
-                break;
-            }
-        }
-        let pci_node = pci_node?;
+        let pci_node = Self::find_pci_host_node(fdt)?;
 
         let mask = pci_node.property("interrupt-map-mask")?.value;
         let map = pci_node.property("interrupt-map")?.value;
@@ -336,17 +360,7 @@ impl<'a> PciScanner<'a> {
 
     fn iommu_spec_for(&self, addr: &PciAddress) -> Option<IommuSpec> {
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let mut pci_node = None;
-        for parent_path in ["/soc", "/"] {
-            let Some(parent) = fdt.find_node(parent_path) else {
-                continue;
-            };
-            pci_node = parent.children().find(Self::is_pci_host_node);
-            if pci_node.is_some() {
-                break;
-            }
-        }
-        let pci_node = pci_node?;
+        let pci_node = Self::find_pci_host_node(fdt)?;
         let map = pci_node.property("iommu-map")?.value;
         let rid = Self::requester_id(addr);
 
@@ -363,7 +377,11 @@ impl<'a> PciScanner<'a> {
     /// * `bus` - Reference to the PCI bus manager
     pub fn new(bus: &'a PciBus) -> Result<Self, &'static str> {
         let config = PciConfig::new(bus.ecam_vaddr()?);
-        Ok(Self { config, bus })
+        Ok(Self {
+            config,
+            bus,
+            host_msi_parent: Self::host_msi_parent_from_fdt(),
+        })
     }
 
     /// Scan the entire PCI bus tree
@@ -559,6 +577,7 @@ impl<'a> PciScanner<'a> {
         )
         .with_bars(bars);
         let device_info = device_info.with_interrupt_capabilities(interrupt_capabilities);
+        let device_info = Self::inherit_host_msi_parent(device_info, self.host_msi_parent);
         let device_info = if let Some(iommu_spec) = self.iommu_spec_for(&addr) {
             device_info.with_iommu_spec(iommu_spec)
         } else {
@@ -811,6 +830,52 @@ mod tests {
         assert_eq!(rid, 0x0a);
         assert_eq!(spec.controller_phandle, 0x40);
         assert_eq!(spec.cells, alloc::vec![0x102]);
+    }
+
+    #[test_case]
+    fn test_pci_host_msi_parent_propagates_to_endpoints() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        );
+
+        let device = PciScanner::inherit_host_msi_parent(device, Some(0x50));
+        assert_eq!(device.msi_parent(), Some(0x50));
+    }
+
+    #[test_case]
+    fn test_pci_endpoint_without_msi_parent_is_none() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        );
+
+        let device = PciScanner::inherit_host_msi_parent(device, None);
+        assert_eq!(device.msi_parent(), None);
     }
 
     #[test_case]
