@@ -366,6 +366,7 @@ fn log_pci_interrupt_capabilities(device: &PciDeviceInfo, transport: &VirtioPciT
                 device: addr.device,
                 function: addr.function,
             }),
+            flags: crate::interrupt::msi::MsiRequestFlags::MSI_X,
         };
 
         match crate::interrupt::allocate_msi_vectors(request) {

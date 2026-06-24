@@ -11,6 +11,7 @@ use crate::arch::{self, interrupt::enable_external_interrupts};
 use crate::device::platform::resource::PlatformDeviceResource;
 
 pub mod controllers;
+pub mod msi;
 
 static INTERRUPT_MANAGER: spin::Once<InterruptManager> = spin::Once::new();
 
