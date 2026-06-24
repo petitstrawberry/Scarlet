@@ -59,6 +59,7 @@ use crate::early_println;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
+use super::clk::{ClkError, ClkHandle, ClkProvider};
 use super::gpio::GpioController;
 use super::i2c::I2cBus;
 use super::spi::SpiBus;
@@ -67,6 +68,31 @@ use crate::DeviceSource;
 
 /// Simplified shared device type
 pub type SharedDevice = Arc<dyn Device>;
+
+/// Probe result string used when a driver cannot probe until a provider appears.
+pub const PROBE_DEFER: &str = "probe: deferred";
+
+/// Return the standard probe deferral error.
+///
+/// # Returns
+///
+/// Always returns `Err(PROBE_DEFER)` for the requested result type.
+pub fn probe_defer<T>() -> Result<T, &'static str> {
+    Err(PROBE_DEFER)
+}
+
+/// Check whether an error string is the probe deferral sentinel.
+///
+/// # Arguments
+///
+/// * `err` - Error string returned by a probe or pre-probe dependency hook.
+///
+/// # Returns
+///
+/// `true` when `err` is exactly [`PROBE_DEFER`].
+pub fn is_probe_defer(err: &str) -> bool {
+    err == PROBE_DEFER
+}
 
 /// Driver priority levels for initialization order
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,6 +105,24 @@ pub enum DriverPriority {
     Standard = 2,
     /// Late initialization drivers (filesystems, user interface)
     Late = 3,
+}
+
+#[derive(Clone)]
+struct DeferredPlatformDevice {
+    priority: DriverPriority,
+    device: Arc<PlatformDeviceInfo>,
+}
+
+struct OwnedClkSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
+enum ProbeOutcome {
+    Probed,
+    Deferred,
+    Failed,
+    NoMatch,
 }
 
 impl DriverPriority {
@@ -125,6 +169,8 @@ pub struct DeviceManager {
     name_to_id: Mutex<BTreeMap<String, usize>>,
     /* Registered device drivers organized by priority */
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
+    /* Platform devices waiting for provider drivers to become available */
+    deferred_platform_devices: Mutex<Vec<DeferredPlatformDevice>>,
     /* Discovered PCI devices awaiting driver probe */
     discovered_pci_devices: Mutex<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
     /* Bus controller registries (phandle → bus) */
@@ -132,6 +178,7 @@ pub struct DeviceManager {
     i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
     usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
+    clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -145,11 +192,13 @@ impl DeviceManager {
             device_by_name: Mutex::new(BTreeMap::new()),
             name_to_id: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
+            deferred_platform_devices: Mutex::new(Vec::new()),
             discovered_pci_devices: Mutex::new(Vec::new()),
             spi_buses: Mutex::new(BTreeMap::new()),
             i2c_buses: Mutex::new(BTreeMap::new()),
             usb_hosts: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
+            clk_providers: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -172,6 +221,117 @@ impl DeviceManager {
         Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn read_be_u32_cells(bytes: &[u8]) -> Option<Vec<u32>> {
+        if !bytes.len().is_multiple_of(4) {
+            return None;
+        }
+
+        let mut cells = Vec::new();
+        for chunk in bytes.chunks_exact(4) {
+            cells.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Some(cells)
+    }
+
+    fn get_clock_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        self.get_clk_provider_by_phandle(phandle)
+            .map(|provider| provider.clock_cells())
+    }
+
+    fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("clk: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+            let clock_cells = self
+                .get_clock_cells_for_phandle(phandle)
+                .ok_or("clk: provider not found")?;
+            if index + clock_cells > cells.len() {
+                return Err("clk: truncated clock specifier");
+            }
+
+            specs.push(OwnedClkSpec {
+                phandle,
+                cells: cells[index..index + clock_cells].to_vec(),
+            });
+            index += clock_cells;
+        }
+
+        Ok(specs)
+    }
+
+    fn parse_assigned_parent_specs(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Vec<Option<OwnedClkSpec>>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("clk: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+            if phandle == 0 {
+                specs.push(None);
+                continue;
+            }
+
+            let clock_cells = self
+                .get_clock_cells_for_phandle(phandle)
+                .ok_or("clk: provider not found")?;
+            if index + clock_cells > cells.len() {
+                return Err("clk: truncated clock specifier");
+            }
+
+            specs.push(Some(OwnedClkSpec {
+                phandle,
+                cells: cells[index..index + clock_cells].to_vec(),
+            }));
+            index += clock_cells;
+        }
+
+        Ok(specs)
+    }
+
+    fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
+        let names = device
+            .property("clock-names")
+            .ok_or("clk: clock-names missing")?
+            .as_string_list()
+            .ok_or("clk: malformed clock-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("clk: clock name not found")
+    }
+
+    fn clk_error_to_str(error: ClkError) -> &'static str {
+        match error {
+            ClkError::Unsupported => "clk: unsupported",
+            ClkError::InvalidRate => "clk: invalid rate",
+            ClkError::InvalidParent => "clk: invalid parent",
+            ClkError::ProviderNotFound => "clk: provider not found",
+            ClkError::ClockNotFound => "clk: clock not found",
+            ClkError::InvalidSpecifier => "clk: invalid specifier",
+            ClkError::HardwareError => "clk: hardware error",
+            ClkError::Busy => "clk: busy",
+            ClkError::NotFound => "clk: not found",
+        }
+    }
+
+    fn resolve_clk_spec(&self, spec: &OwnedClkSpec) -> Result<ClkHandle, &'static str> {
+        let provider = self
+            .get_clk_provider_by_phandle(spec.phandle)
+            .ok_or("clk: provider not found")?;
+        provider
+            .get_clk(&spec.cells)
+            .map_err(Self::clk_error_to_str)
+    }
+
     fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
         let prop = node.property(name)?;
         Self::read_be_u32(prop.value)
@@ -185,15 +345,15 @@ impl DeviceManager {
         stack.push(fdt.find_node("/")?);
 
         while let Some(node) = stack.pop() {
-            if let Some(p) = Self::get_u32_prop(&node, "phandle") {
-                if p == phandle {
-                    return Some(node);
-                }
+            if let Some(p) = Self::get_u32_prop(&node, "phandle")
+                && p == phandle
+            {
+                return Some(node);
             }
-            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle") {
-                if p == phandle {
-                    return Some(node);
-                }
+            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle")
+                && p == phandle
+            {
+                return Some(node);
             }
             for child in node.children() {
                 stack.push(child);
@@ -399,6 +559,124 @@ impl DeviceManager {
         self.gpio_controllers.lock().get(&phandle).cloned()
     }
 
+    /// Register a clock provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the provider node.
+    /// * `provider` - Clock provider implementation.
+    pub fn register_clk_provider(&self, phandle: u32, provider: Arc<dyn ClkProvider>) {
+        self.clk_providers.lock().insert(phandle, provider);
+    }
+
+    /// Look up a clock provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the provider node.
+    ///
+    /// # Returns
+    ///
+    /// Clock provider registered for `phandle`, or `None` when missing.
+    pub fn get_clk_provider_by_phandle(&self, phandle: u32) -> Option<Arc<dyn ClkProvider>> {
+        self.clk_providers.lock().get(&phandle).cloned()
+    }
+
+    /// Resolve a named clock for a platform device from FDT properties.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing raw `clocks` and `clock-names` properties.
+    /// * `name` - Clock name to resolve from `clock-names`.
+    ///
+    /// # Returns
+    ///
+    /// Clock handle for the named clock.
+    pub fn resolve_clk(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<ClkHandle, &'static str> {
+        let index = Self::clock_name_index(device, name)?;
+        let clocks = device.property("clocks").ok_or("clk: clocks missing")?;
+        let specs = self.parse_clock_specs(clocks.value())?;
+        let spec = specs.get(index).ok_or("clk: clock index out of range")?;
+        self.resolve_clk_spec(spec)
+    }
+
+    /// Apply `assigned-clock-parents` and `assigned-clock-rates` for a platform device.
+    ///
+    /// Missing clock providers return [`probe_defer`] so callers can retry probing after
+    /// provider drivers register. Malformed properties return hard errors.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing raw assigned-clock properties.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when assignments are absent or successfully applied.
+    pub fn apply_assigned_clocks(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let assigned_clocks = match device.property("assigned-clocks") {
+            Some(property) => property,
+            None => return Ok(()),
+        };
+
+        let clock_specs = match self.parse_clock_specs(assigned_clocks.value()) {
+            Ok(specs) => specs,
+            Err("clk: provider not found") => return probe_defer(),
+            Err(err) => return Err(err),
+        };
+
+        if let Some(parent_property) = device.property("assigned-clock-parents") {
+            let parent_specs = match self.parse_assigned_parent_specs(parent_property.value()) {
+                Ok(specs) => specs,
+                Err("clk: provider not found") => return probe_defer(),
+                Err(err) => return Err(err),
+            };
+
+            if parent_specs.len() > clock_specs.len() {
+                return Err("clk: too many assigned parents");
+            }
+
+            for (index, parent_spec) in parent_specs.iter().enumerate() {
+                let Some(parent_spec) = parent_spec else {
+                    continue;
+                };
+                let parent = self.resolve_clk_spec(parent_spec)?;
+                let clock_spec = &clock_specs[index];
+                let provider = self
+                    .get_clk_provider_by_phandle(clock_spec.phandle)
+                    .ok_or(PROBE_DEFER)?;
+                provider
+                    .apply_assigned_parent(&clock_spec.cells, parent)
+                    .map_err(Self::clk_error_to_str)?;
+            }
+        }
+
+        if let Some(rate_property) = device.property("assigned-clock-rates") {
+            let rates =
+                Self::read_be_u32_cells(rate_property.value()).ok_or("clk: malformed rates")?;
+            if rates.len() != clock_specs.len() {
+                return Err("clk: malformed rates");
+            }
+
+            for (clock_spec, rate) in clock_specs.iter().zip(rates.iter()) {
+                if *rate == 0 {
+                    continue;
+                }
+                let provider = self
+                    .get_clk_provider_by_phandle(clock_spec.phandle)
+                    .ok_or(PROBE_DEFER)?;
+                provider
+                    .apply_assigned_rate(&clock_spec.cells, *rate as u64)
+                    .map_err(Self::clk_error_to_str)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn for_each_usb_host<F>(&self, mut f: F)
     where
         F: FnMut(&Arc<dyn UsbHostController>),
@@ -478,7 +756,10 @@ impl DeviceManager {
         // Process each priority level separately to reduce stack depth
         for &priority in priority_list {
             self.process_priority_level(fdt, priority);
+            self.retry_deferred_devices(priority);
         }
+
+        self.retry_deferred_devices(DriverPriority::Late);
     }
 
     /// Process devices for a single priority level - reduces stack nesting
@@ -574,12 +855,11 @@ impl DeviceManager {
         parent_phandle: Option<u32>,
         synthetic_phandle: Option<u32>,
     ) {
-        if let Some(status_prop) = child.property("status") {
-            if let Some(status) = status_prop.as_str() {
-                if status == "disabled" {
-                    return;
-                }
-            }
+        if let Some(status_prop) = child.property("status")
+            && let Some(status) = status_prop.as_str()
+            && status == "disabled"
+        {
+            return;
         }
 
         let compatible = child.compatible();
@@ -591,17 +871,15 @@ impl DeviceManager {
 
         let has_drivers = {
             let drivers = self.drivers.lock();
-            drivers
-                .get(&priority)
-                .map_or(false, |list| !list.is_empty())
+            drivers.get(&priority).is_some_and(|list| !list.is_empty())
         };
 
         if !has_drivers {
             return;
         }
 
-        let resources = self.build_minimal_resources(&child);
-        let mut properties = self.build_device_properties(&child);
+        let resources = self.build_minimal_resources(child);
+        let mut properties = self.build_device_properties(child);
 
         if let Some(ph) = synthetic_phandle {
             let mut bytes = [0u8; 4];
@@ -611,7 +889,7 @@ impl DeviceManager {
 
         // Try to match with drivers
         let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
-        self.try_match_and_probe_device(
+        if let Some(device) = self.build_platform_device(
             child,
             priority,
             idx,
@@ -619,7 +897,38 @@ impl DeviceManager {
             resources,
             properties,
             parent_phandle,
-        );
+        ) {
+            self.try_match_and_probe_device(priority, idx, device);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_platform_device(
+        &self,
+        child: &fdt::node::FdtNode,
+        _priority: DriverPriority,
+        idx: &mut usize,
+        compatible: alloc::vec::Vec<&str>,
+        resources: alloc::vec::Vec<PlatformDeviceResource>,
+        properties: alloc::vec::Vec<PlatformDeviceProperty>,
+        parent_phandle: Option<u32>,
+    ) -> Option<Arc<PlatformDeviceInfo>> {
+        // SAFETY: FDT data is loaded at boot and remains resident for the kernel lifetime.
+        let static_name: &'static str = unsafe { core::mem::transmute(child.name) };
+        let static_compatible: alloc::vec::Vec<&'static str> = compatible
+            .into_iter()
+            // SAFETY: Compatible strings are borrowed from the same resident FDT blob.
+            .map(|s| unsafe { core::mem::transmute(s) })
+            .collect();
+
+        Some(Arc::new(PlatformDeviceInfo::new(
+            static_name,
+            *idx,
+            static_compatible,
+            resources,
+            properties,
+            parent_phandle,
+        )))
     }
 
     fn build_device_properties(
@@ -659,216 +968,222 @@ impl DeviceManager {
             }
         }
 
-        if !parsed_any_irq {
-            if let Some(prop) = child.property("interrupts-extended") {
-                if let Some(fdt) = crate::device::fdt::FdtManager::get_manager().get_fdt() {
-                    let bytes = prop.value;
-                    let mut offset = 0usize;
+        if !parsed_any_irq
+            && let Some(prop) = child.property("interrupts-extended")
+            && let Some(fdt) = crate::device::fdt::FdtManager::get_manager().get_fdt()
+        {
+            let bytes = prop.value;
+            let mut offset = 0usize;
 
-                    while offset + 4 <= bytes.len() {
-                        let phandle = match Self::read_be_u32(&bytes[offset..offset + 4]) {
-                            Some(v) => v,
-                            None => break,
-                        };
-                        offset += 4;
+            while offset + 4 <= bytes.len() {
+                let phandle = match Self::read_be_u32(&bytes[offset..offset + 4]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                offset += 4;
 
-                        let intc_node = Self::find_node_by_phandle(fdt, phandle);
-                        let interrupt_cells = intc_node
-                            .as_ref()
-                            .and_then(|n| Self::get_u32_prop(n, "#interrupt-cells"))
-                            .unwrap_or(1) as usize;
+                let intc_node = Self::find_node_by_phandle(fdt, phandle);
+                let interrupt_cells = intc_node
+                    .as_ref()
+                    .and_then(|n| Self::get_u32_prop(n, "#interrupt-cells"))
+                    .unwrap_or(1) as usize;
 
-                        if interrupt_cells == 0 {
-                            break;
-                        }
-
-                        let needed = interrupt_cells.saturating_mul(4);
-                        if offset + needed > bytes.len() {
-                            break;
-                        }
-
-                        let cell0 = Self::read_be_u32(&bytes[offset..offset + 4]).unwrap_or(0);
-                        let cell1 = if interrupt_cells >= 2 {
-                            Self::read_be_u32(&bytes[offset + 4..offset + 8]).unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let cell2 = if interrupt_cells >= 3 {
-                            Self::read_be_u32(&bytes[offset + 8..offset + 12]).unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        let (irq_num, metadata) = match interrupt_cells {
-                            3 => (
-                                cell1 as usize,
-                                Some(crate::device::platform::resource::IrqMetadata {
-                                    irq_type: cell0,
-                                    irq_number: cell1,
-                                    irq_flags: cell2,
-                                }),
-                            ),
-                            2 => (
-                                cell0 as usize,
-                                Some(crate::device::platform::resource::IrqMetadata {
-                                    irq_type: 0,
-                                    irq_number: cell0,
-                                    irq_flags: cell1,
-                                }),
-                            ),
-                            1 => (cell0 as usize, None),
-                            _ => (cell0 as usize, None),
-                        };
-
-                        Self::push_irq_resource(&mut resources, irq_num, metadata);
-                        parsed_any_irq = true;
-                        offset += needed;
-                    }
+                if interrupt_cells == 0 {
+                    break;
                 }
+
+                let needed = interrupt_cells.saturating_mul(4);
+                if offset + needed > bytes.len() {
+                    break;
+                }
+
+                let cell0 = Self::read_be_u32(&bytes[offset..offset + 4]).unwrap_or(0);
+                let cell1 = if interrupt_cells >= 2 {
+                    Self::read_be_u32(&bytes[offset + 4..offset + 8]).unwrap_or(0)
+                } else {
+                    0
+                };
+                let cell2 = if interrupt_cells >= 3 {
+                    Self::read_be_u32(&bytes[offset + 8..offset + 12]).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                let (irq_num, metadata) = match interrupt_cells {
+                    3 => (
+                        cell1 as usize,
+                        Some(crate::device::platform::resource::IrqMetadata {
+                            irq_type: cell0,
+                            irq_number: cell1,
+                            irq_flags: cell2,
+                        }),
+                    ),
+                    2 => (
+                        cell0 as usize,
+                        Some(crate::device::platform::resource::IrqMetadata {
+                            irq_type: 0,
+                            irq_number: cell0,
+                            irq_flags: cell1,
+                        }),
+                    ),
+                    1 => (cell0 as usize, None),
+                    _ => (cell0 as usize, None),
+                };
+
+                Self::push_irq_resource(&mut resources, irq_num, metadata);
+                parsed_any_irq = true;
+                offset += needed;
             }
         }
 
-        if !parsed_any_irq {
-            if let Some(prop) = child.property("interrupts") {
-                // Fallback: Parse raw interrupts property when fdt-rs fails
-                // This preserves interrupt controller metadata for later translation
-                let value = prop.value;
+        if !parsed_any_irq && let Some(prop) = child.property("interrupts") {
+            // Fallback: Parse raw interrupts property when fdt-rs fails
+            // This preserves interrupt controller metadata for later translation
+            let value = prop.value;
 
-                // Detect cell format based on property length
-                let cell_size = if value.len() % 12 == 0 {
-                    3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
-                } else if value.len() % 8 == 0 {
-                    2 // 2-cell format
-                } else if value.len() % 4 == 0 {
-                    1 // 1-cell format (just interrupt number)
-                } else {
-                    return resources; // Unknown format, skip
+            // Detect cell format based on property length
+            let cell_size = if value.len() % 12 == 0 {
+                3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
+            } else if value.len() % 8 == 0 {
+                2 // 2-cell format
+            } else if value.len() % 4 == 0 {
+                1 // 1-cell format (just interrupt number)
+            } else {
+                return resources; // Unknown format, skip
+            };
+
+            let num_irqs = value.len() / (cell_size * 4);
+
+            for i in 0..num_irqs {
+                let offset = i * cell_size * 4;
+
+                let (irq_num, metadata) = match cell_size {
+                    3 => {
+                        // 3-cell format: <type, number, flags>
+                        let irq_type = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+                        let irq_number = u32::from_be_bytes([
+                            value[offset + 4],
+                            value[offset + 5],
+                            value[offset + 6],
+                            value[offset + 7],
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 8],
+                            value[offset + 9],
+                            value[offset + 10],
+                            value[offset + 11],
+                        ]);
+
+                        // Store raw number, let interrupt controller translate
+                        (
+                            irq_number as usize,
+                            Some(crate::device::platform::resource::IrqMetadata {
+                                irq_type,
+                                irq_number,
+                                irq_flags,
+                            }),
+                        )
+                    }
+                    2 => {
+                        // 2-cell format: <number, flags>
+                        let irq_number = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 4],
+                            value[offset + 5],
+                            value[offset + 6],
+                            value[offset + 7],
+                        ]);
+
+                        (
+                            irq_number as usize,
+                            Some(crate::device::platform::resource::IrqMetadata {
+                                irq_type: 0, // No type in 2-cell format
+                                irq_number,
+                                irq_flags,
+                            }),
+                        )
+                    }
+                    1 => {
+                        // 1-cell format: just interrupt number
+                        let irq_number = u32::from_be_bytes([
+                            value[offset],
+                            value[offset + 1],
+                            value[offset + 2],
+                            value[offset + 3],
+                        ]);
+
+                        (irq_number as usize, None)
+                    }
+                    _ => unreachable!(),
                 };
 
-                let num_irqs = value.len() / (cell_size * 4);
-
-                for i in 0..num_irqs {
-                    let offset = i * cell_size * 4;
-
-                    let (irq_num, metadata) = match cell_size {
-                        3 => {
-                            // 3-cell format: <type, number, flags>
-                            let irq_type = u32::from_be_bytes([
-                                value[offset],
-                                value[offset + 1],
-                                value[offset + 2],
-                                value[offset + 3],
-                            ]);
-                            let irq_number = u32::from_be_bytes([
-                                value[offset + 4],
-                                value[offset + 5],
-                                value[offset + 6],
-                                value[offset + 7],
-                            ]);
-                            let irq_flags = u32::from_be_bytes([
-                                value[offset + 8],
-                                value[offset + 9],
-                                value[offset + 10],
-                                value[offset + 11],
-                            ]);
-
-                            // Store raw number, let interrupt controller translate
-                            (
-                                irq_number as usize,
-                                Some(crate::device::platform::resource::IrqMetadata {
-                                    irq_type,
-                                    irq_number,
-                                    irq_flags,
-                                }),
-                            )
-                        }
-                        2 => {
-                            // 2-cell format: <number, flags>
-                            let irq_number = u32::from_be_bytes([
-                                value[offset],
-                                value[offset + 1],
-                                value[offset + 2],
-                                value[offset + 3],
-                            ]);
-                            let irq_flags = u32::from_be_bytes([
-                                value[offset + 4],
-                                value[offset + 5],
-                                value[offset + 6],
-                                value[offset + 7],
-                            ]);
-
-                            (
-                                irq_number as usize,
-                                Some(crate::device::platform::resource::IrqMetadata {
-                                    irq_type: 0, // No type in 2-cell format
-                                    irq_number,
-                                    irq_flags,
-                                }),
-                            )
-                        }
-                        1 => {
-                            // 1-cell format: just interrupt number
-                            let irq_number = u32::from_be_bytes([
-                                value[offset],
-                                value[offset + 1],
-                                value[offset + 2],
-                                value[offset + 3],
-                            ]);
-
-                            (irq_number as usize, None)
-                        }
-                        _ => unreachable!(),
-                    };
-
-                    Self::push_irq_resource(&mut resources, irq_num, metadata);
-                    parsed_any_irq = true;
-                }
+                Self::push_irq_resource(&mut resources, irq_num, metadata);
             }
         }
 
         resources
     }
 
-    /// Try to match device with drivers and probe if successful
-    #[allow(clippy::too_many_arguments)]
+    /// Try to match device with drivers and probe if successful.
+    ///
+    /// # Arguments
+    ///
+    /// * `priority` - Driver priority bucket to match against.
+    /// * `idx` - Mutable device index incremented after successful probe.
+    /// * `device` - Platform device information to probe.
     fn try_match_and_probe_device(
         &self,
-        child: &fdt::node::FdtNode,
         priority: DriverPriority,
         idx: &mut usize,
-        compatible: alloc::vec::Vec<&str>,
-        resources: alloc::vec::Vec<PlatformDeviceResource>,
-        properties: alloc::vec::Vec<PlatformDeviceProperty>,
-        parent_phandle: Option<u32>,
+        device: Arc<PlatformDeviceInfo>,
     ) {
+        match self.probe_platform_device(priority, &device) {
+            ProbeOutcome::Probed => *idx += 1,
+            ProbeOutcome::Deferred => self.defer_platform_device(priority, device),
+            ProbeOutcome::Failed | ProbeOutcome::NoMatch => {}
+        }
+    }
+
+    fn defer_platform_device(&self, priority: DriverPriority, device: Arc<PlatformDeviceInfo>) {
+        early_println!(
+            "[probe] deferred {} device: {}",
+            priority.description(),
+            device.name()
+        );
+        self.deferred_platform_devices
+            .lock()
+            .push(DeferredPlatformDevice { priority, device });
+    }
+
+    fn probe_platform_device(
+        &self,
+        priority: DriverPriority,
+        device: &PlatformDeviceInfo,
+    ) -> ProbeOutcome {
         let drivers = self.drivers.lock();
         if let Some(driver_list) = drivers.get(&priority) {
             for driver in driver_list.iter() {
                 if driver
                     .match_table()
                     .iter()
-                    .any(|&c| compatible.contains(&c))
+                    .any(|&c| device.compatible().contains(&c))
                 {
-                    // Convert borrowed strings to static strings (FDT data is actually static)
-                    // This is safe because FDT is loaded at boot and remains in memory
-                    let static_name: &'static str = unsafe { core::mem::transmute(child.name) };
-                    let static_compatible: alloc::vec::Vec<&'static str> = compatible
-                        .into_iter()
-                        .map(|s| unsafe { core::mem::transmute(s) })
-                        .collect();
-
-                    let device = alloc::boxed::Box::new(PlatformDeviceInfo::new(
-                        static_name,
-                        *idx,
-                        static_compatible,
-                        resources,
-                        properties,
-                        parent_phandle,
-                    ));
-
                     if let Err(e) =
-                        crate::device::power::PowerManager::enable_device_domains(&*device)
+                        crate::device::power::PowerManager::enable_device_domains(device)
                     {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
                         crate::early_println!(
                             "Failed to enable power domains for {} device {}: {}",
                             priority.description(),
@@ -877,26 +1192,89 @@ impl DeviceManager {
                         );
                     }
 
-                    match driver.probe(&*device) {
+                    if let Err(e) = self.apply_assigned_clocks(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[clk] failed to apply assigned clocks: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
+                    match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
                                 "Successfully probed {} device: {}",
                                 priority.description(),
                                 device.name()
                             );
-                            *idx += 1;
+                            return ProbeOutcome::Probed;
                         }
                         Err(e) => {
+                            if is_probe_defer(e) {
+                                return ProbeOutcome::Deferred;
+                            }
                             early_println!(
                                 "Failed to probe {} device {}: {}",
                                 priority.description(),
                                 device.name(),
                                 e
                             );
+                            return ProbeOutcome::Failed;
                         }
                     }
-                    break; // Found matching driver, move to next device
                 }
+            }
+        }
+
+        ProbeOutcome::NoMatch
+    }
+
+    fn retry_deferred_devices(&self, max_priority: DriverPriority) {
+        loop {
+            let retry_batch = {
+                let mut deferred = self.deferred_platform_devices.lock();
+                let mut retry_batch = Vec::new();
+                let mut remaining = Vec::new();
+
+                for item in deferred.drain(..) {
+                    if item.priority <= max_priority {
+                        retry_batch.push(item);
+                    } else {
+                        remaining.push(item);
+                    }
+                }
+
+                *deferred = remaining;
+                retry_batch
+            };
+
+            if retry_batch.is_empty() {
+                return;
+            }
+
+            let mut made_progress = false;
+            let mut still_deferred = Vec::new();
+            for item in retry_batch {
+                early_println!(
+                    "[probe] retrying deferred {} device: {}",
+                    item.priority.description(),
+                    item.device.name()
+                );
+                match self.probe_platform_device(item.priority, &item.device) {
+                    ProbeOutcome::Probed => made_progress = true,
+                    ProbeOutcome::Deferred => still_deferred.push(item),
+                    ProbeOutcome::Failed | ProbeOutcome::NoMatch => {}
+                }
+            }
+
+            if !still_deferred.is_empty() {
+                self.deferred_platform_devices
+                    .lock()
+                    .extend(still_deferred.iter().cloned());
+            }
+
+            if !made_progress {
+                return;
             }
         }
     }
@@ -967,10 +1345,7 @@ impl DeviceManager {
     /// ```
     pub fn register_driver(&self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
         let mut drivers = self.drivers.lock();
-        drivers
-            .entry(priority)
-            .or_insert_with(Vec::new)
-            .push(driver);
+        drivers.entry(priority).or_default().push(driver);
     }
 
     /// Registers a device driver with default Standard priority.
@@ -1030,16 +1405,13 @@ impl DeviceManager {
                         continue;
                     }
 
-                    match driver.probe(&**device) {
-                        Ok(()) => {
-                            claimed_ids.push(device.id());
-                            early_println!(
-                                "Successfully probed PCI device {} with driver {}",
-                                device.name(),
-                                driver.name()
-                            );
-                        }
-                        Err(_) => {} // Not a match, try next driver
+                    if let Ok(()) = driver.probe(&**device) {
+                        claimed_ids.push(device.id());
+                        early_println!(
+                            "Successfully probed PCI device {} with driver {}",
+                            device.name(),
+                            driver.name()
+                        );
                     }
                 }
             }
@@ -1056,15 +1428,18 @@ impl DeviceManager {
         let mut device_by_name = self.device_by_name.lock();
         let mut name_to_id = self.name_to_id.lock();
         let mut discovered = self.discovered_pci_devices.lock();
+        let mut deferred = self.deferred_platform_devices.lock();
 
         devices.clear();
         device_by_name.clear();
         name_to_id.clear();
         discovered.clear();
+        deferred.clear();
         self.spi_buses.lock().clear();
         self.i2c_buses.lock().clear();
         self.usb_hosts.lock().clear();
         self.gpio_controllers.lock().clear();
+        self.clk_providers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1072,8 +1447,456 @@ impl DeviceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::clk::{ClkError, ClkFixedRate, ClkHandle, ClkProvider};
     use crate::device::{GenericDevice, platform::*};
     use alloc::vec;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    static DEFER_PROBE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static DEFER_PROBE_SUCCEEDED: AtomicBool = AtomicBool::new(false);
+    static CLOCK_HOOK_ORDER: AtomicUsize = AtomicUsize::new(0);
+    static CLOCK_HOOK_DRIVER_PROBED: AtomicBool = AtomicBool::new(false);
+
+    fn deferred_probe_once(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let count = DEFER_PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
+        if count == 0 {
+            probe_defer()
+        } else {
+            DEFER_PROBE_SUCCEEDED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn always_deferred_probe(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        DEFER_PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
+        probe_defer()
+    }
+
+    fn hook_order_probe(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        CLOCK_HOOK_DRIVER_PROBED.store(
+            CLOCK_HOOK_ORDER.load(Ordering::SeqCst) == 1,
+            Ordering::SeqCst,
+        );
+        CLOCK_HOOK_ORDER.store(2, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn test_platform_device() -> Arc<PlatformDeviceInfo> {
+        Arc::new(PlatformDeviceInfo::new(
+            "test-device",
+            0,
+            vec!["test,defer"],
+            vec![],
+            vec![],
+            None,
+        ))
+    }
+
+    #[test_case]
+    fn test_probe_defer_constant() {
+        assert_eq!(PROBE_DEFER, "probe: deferred");
+        assert_eq!(probe_defer::<()>().unwrap_err(), PROBE_DEFER);
+    }
+
+    #[test_case]
+    fn test_is_probe_defer_recognizes_string() {
+        assert!(is_probe_defer(PROBE_DEFER));
+        assert!(!is_probe_defer("other error"));
+    }
+
+    #[test_case]
+    fn test_deferred_device_retried_after_provider_registers() {
+        DEFER_PROBE_COUNT.store(0, Ordering::SeqCst);
+        DEFER_PROBE_SUCCEEDED.store(false, Ordering::SeqCst);
+
+        let manager = DeviceManager::new();
+        let driver = Box::new(PlatformDeviceDriver::new(
+            "defer-driver",
+            deferred_probe_once,
+            |_device| Ok(()),
+            vec!["test,defer"],
+        ));
+        manager.register_driver(driver, DriverPriority::Core);
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, test_platform_device());
+        assert_eq!(DEFER_PROBE_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(idx, 0);
+
+        manager.retry_deferred_devices(DriverPriority::Core);
+        assert_eq!(DEFER_PROBE_COUNT.load(Ordering::SeqCst), 2);
+        assert!(DEFER_PROBE_SUCCEEDED.load(Ordering::SeqCst));
+    }
+
+    #[test_case]
+    fn test_deferred_device_stops_retrying_after_max_passes() {
+        DEFER_PROBE_COUNT.store(0, Ordering::SeqCst);
+
+        let manager = DeviceManager::new();
+        let driver = Box::new(PlatformDeviceDriver::new(
+            "always-defer-driver",
+            always_deferred_probe,
+            |_device| Ok(()),
+            vec!["test,defer"],
+        ));
+        manager.register_driver(driver, DriverPriority::Core);
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, test_platform_device());
+        manager.retry_deferred_devices(DriverPriority::Core);
+        assert_eq!(DEFER_PROBE_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(manager.deferred_platform_devices.lock().len(), 1);
+    }
+
+    struct TestClkProvider {
+        clk: ClkHandle,
+        clock_cells: usize,
+    }
+
+    impl TestClkProvider {
+        fn new(rate: u64, clock_cells: usize) -> Self {
+            Self {
+                clk: ClkHandle::new(Arc::new(ClkFixedRate::new("test-clock", rate))),
+                clock_cells,
+            }
+        }
+    }
+
+    impl ClkProvider for TestClkProvider {
+        fn name(&self) -> &'static str {
+            "test-provider"
+        }
+
+        fn clock_cells(&self) -> usize {
+            self.clock_cells
+        }
+
+        fn get_clk(&self, spec: &[u32]) -> Result<ClkHandle, ClkError> {
+            if spec.len() == self.clock_cells {
+                Ok(self.clk.clone())
+            } else {
+                Err(ClkError::InvalidSpecifier)
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_register_get_clk_provider() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        let provider = manager.get_clk_provider_by_phandle(0x10);
+        assert!(provider.is_some());
+        assert_eq!(provider.unwrap().name(), "test-provider");
+    }
+
+    #[test_case]
+    fn test_get_missing_clk_provider_returns_none() {
+        let manager = DeviceManager::new();
+        assert!(manager.get_clk_provider_by_phandle(0x20).is_none());
+    }
+
+    #[test_case]
+    fn test_clear_for_test_clears_clk_providers() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        assert!(manager.get_clk_provider_by_phandle(0x10).is_some());
+        manager.clear_for_test();
+        assert!(manager.get_clk_provider_by_phandle(0x10).is_none());
+    }
+
+    fn be_cells(cells: &[u32]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for cell in cells {
+            bytes.extend_from_slice(&cell.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn clk_test_device(properties: Vec<PlatformDeviceProperty>) -> PlatformDeviceInfo {
+        PlatformDeviceInfo::new(
+            "clk-device",
+            0,
+            vec!["test,clk-device"],
+            vec![],
+            properties,
+            None,
+        )
+    }
+
+    #[test_case]
+    fn test_parse_clock_specs_zero_cells() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        let specs = manager.parse_clock_specs(&be_cells(&[0x10])).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].phandle, 0x10);
+        assert!(specs[0].cells.is_empty());
+    }
+
+    #[test_case]
+    fn test_parse_clock_specs_one_cell() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 1)));
+        let specs = manager.parse_clock_specs(&be_cells(&[0x10, 3])).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].phandle, 0x10);
+        assert_eq!(specs[0].cells, vec![3]);
+    }
+
+    #[test_case]
+    fn test_parse_clock_specs_rejects_truncated_spec() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 1)));
+        match manager.parse_clock_specs(&be_cells(&[0x10])) {
+            Ok(_) => panic!("truncated clock specifier unexpectedly parsed"),
+            Err(err) => assert_eq!(err, "clk: truncated clock specifier"),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_clk_by_name() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("clock-names", b"bus\0"),
+        ]);
+        let clk = manager.resolve_clk(&device, "bus").unwrap();
+        assert_eq!(clk.rate(), 24_000_000);
+    }
+
+    #[test_case]
+    fn test_resolve_clk_missing_clock_names_returns_error() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "clocks",
+            &be_cells(&[0x10]),
+        )]);
+        match manager.resolve_clk(&device, "bus") {
+            Ok(_) => panic!("clock resolved without clock-names"),
+            Err(err) => assert_eq!(err, "clk: clock-names missing"),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_clk_missing_provider_returns_error() {
+        let manager = DeviceManager::new();
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("clock-names", b"bus\0"),
+        ]);
+        match manager.resolve_clk(&device, "bus") {
+            Ok(_) => panic!("clock resolved without provider"),
+            Err(err) => assert_eq!(err, "clk: provider not found"),
+        }
+    }
+
+    struct RecordingProvider {
+        clk: ClkHandle,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> Self {
+            Self {
+                clk: ClkHandle::new(Arc::new(ClkFixedRate::new("recorded", 1))),
+                events: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ClkProvider for RecordingProvider {
+        fn name(&self) -> &'static str {
+            "recording-provider"
+        }
+
+        fn clock_cells(&self) -> usize {
+            0
+        }
+
+        fn get_clk(&self, spec: &[u32]) -> Result<ClkHandle, ClkError> {
+            if spec.is_empty() {
+                Ok(self.clk.clone())
+            } else {
+                Err(ClkError::InvalidSpecifier)
+            }
+        }
+
+        fn apply_assigned_rate(&self, spec: &[u32], rate: u64) -> Result<(), ClkError> {
+            let _ = (spec, rate);
+            self.events.lock().push("rate");
+            Ok(())
+        }
+
+        fn apply_assigned_parent(&self, spec: &[u32], parent: ClkHandle) -> Result<(), ClkError> {
+            let _ = (spec, parent);
+            self.events.lock().push("parent");
+            Ok(())
+        }
+    }
+
+    #[test_case]
+    fn test_apply_assigned_clocks_parents_before_rates() {
+        let manager = DeviceManager::new();
+        let provider = Arc::new(RecordingProvider::new());
+        manager.register_clk_provider(0x10, provider.clone());
+        manager.register_clk_provider(0x20, Arc::new(TestClkProvider::new(2, 0)));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-parents", &be_cells(&[0x20])),
+            PlatformDeviceProperty::new("assigned-clock-rates", &be_cells(&[100])),
+        ]);
+
+        assert!(manager.apply_assigned_clocks(&device).is_ok());
+        assert_eq!(*provider.events.lock(), vec!["parent", "rate"]);
+    }
+
+    #[test_case]
+    fn test_apply_assigned_clocks_skips_zero_rate() {
+        let manager = DeviceManager::new();
+        let provider = Arc::new(RecordingProvider::new());
+        manager.register_clk_provider(0x10, provider.clone());
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-rates", &be_cells(&[0])),
+        ]);
+
+        assert!(manager.apply_assigned_clocks(&device).is_ok());
+        assert!(provider.events.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_apply_assigned_clocks_skips_zero_parent_phandle() {
+        let manager = DeviceManager::new();
+        let provider = Arc::new(RecordingProvider::new());
+        manager.register_clk_provider(0x10, provider.clone());
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-parents", &be_cells(&[0])),
+        ]);
+
+        assert!(manager.apply_assigned_clocks(&device).is_ok());
+        assert!(provider.events.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_apply_assigned_clocks_rejects_malformed_rates() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-rates", &[0, 1]),
+        ]);
+
+        assert_eq!(
+            manager.apply_assigned_clocks(&device).unwrap_err(),
+            "clk: malformed rates"
+        );
+    }
+
+    struct HookOrderProvider;
+
+    impl ClkProvider for HookOrderProvider {
+        fn name(&self) -> &'static str {
+            "hook-order-provider"
+        }
+
+        fn clock_cells(&self) -> usize {
+            0
+        }
+
+        fn get_clk(&self, spec: &[u32]) -> Result<ClkHandle, ClkError> {
+            if spec.is_empty() {
+                Ok(ClkHandle::new(Arc::new(ClkFixedRate::new("hook", 1))))
+            } else {
+                Err(ClkError::InvalidSpecifier)
+            }
+        }
+
+        fn apply_assigned_rate(&self, spec: &[u32], rate: u64) -> Result<(), ClkError> {
+            let _ = (spec, rate);
+            CLOCK_HOOK_ORDER.store(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn hook_test_driver(
+        probe_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+    ) -> Box<dyn DeviceDriver> {
+        Box::new(PlatformDeviceDriver::new(
+            "hook-driver",
+            probe_fn,
+            |_device| Ok(()),
+            vec!["test,clk-device"],
+        ))
+    }
+
+    #[test_case]
+    fn test_probe_applies_assigned_clocks_before_driver_probe() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        CLOCK_HOOK_DRIVER_PROBED.store(false, Ordering::SeqCst);
+
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(HookOrderProvider));
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-rates", &be_cells(&[100])),
+        ]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert!(CLOCK_HOOK_DRIVER_PROBED.load(Ordering::SeqCst));
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 2);
+    }
+
+    #[test_case]
+    fn test_probe_defers_when_clock_provider_not_yet_registered() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        let manager = DeviceManager::new();
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![PlatformDeviceProperty::new(
+            "assigned-clocks",
+            &be_cells(&[0x10]),
+        )]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert_eq!(manager.deferred_platform_devices.lock().len(), 1);
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 0);
+    }
+
+    #[test_case]
+    fn test_probe_hard_fails_on_malformed_assigned_clocks() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(HookOrderProvider));
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![
+            PlatformDeviceProperty::new("assigned-clocks", &be_cells(&[0x10])),
+            PlatformDeviceProperty::new("assigned-clock-rates", &[0, 1]),
+        ]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert_eq!(manager.deferred_platform_devices.lock().len(), 0);
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 0);
+    }
+
+    #[test_case]
+    fn test_device_without_assigned_clocks_probes_normally() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        CLOCK_HOOK_DRIVER_PROBED.store(false, Ordering::SeqCst);
+        let manager = DeviceManager::new();
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert_eq!(idx, 1);
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 2);
+    }
 
     #[cfg(target_arch = "riscv64")]
     #[test_case]
