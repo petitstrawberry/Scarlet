@@ -20,7 +20,7 @@ use scarlet::{
     early_println,
 };
 use scarlet_driver_apple_dart::get_dart_by_phandle;
-use scarlet_driver_apple_msi::MsiPortConfig;
+use scarlet_driver_apple_msi::{MsiPortConfig, register_apple_msi_controller};
 
 const CORE_RC_PHYIF_CTL: usize = 0x0024;
 const CORE_RC_PHYIF_STAT: usize = 0x0028;
@@ -85,7 +85,8 @@ pub struct ApplePciePort {
     phy_base: usize,
     ecam_base: usize,
     initialized: bool,
-    msi_config: Option<MsiPortConfig>,
+    msi_config: Option<Arc<MsiPortConfig>>,
+    msi_phandle: u32,
     msi_base_vector: u32,
     msi_num_vectors: u32,
 }
@@ -207,8 +208,13 @@ impl ApplePciePort {
         let rid2sid = PORT_RID2SID_VALID | (self.port_idx << 16);
         self.write32(PORT_RID2SID, rid2sid);
 
-        let msi = MsiPortConfig::new(self.port_base, self.msi_base_vector, self.msi_num_vectors);
+        let msi = Arc::new(MsiPortConfig::new(
+            self.port_base,
+            self.msi_base_vector,
+            self.msi_num_vectors,
+        ));
         msi.enable_msi();
+        register_apple_msi_controller(Arc::clone(&msi), self.msi_phandle);
         self.msi_config = Some(msi);
 
         self.initialized = true;
@@ -257,6 +263,12 @@ pub fn get_port(id: u32) -> Option<Arc<Mutex<ApplePciePort>>> {
     guard.get(id as usize).cloned()
 }
 
+/// Probe an Apple PCIe controller and initialize its ports.
+///
+/// MSI setup intentionally uses both paths: direct port MMIO programming via
+/// [`MsiPortConfig::enable_msi`] for hardware initialization, and DeviceManager
+/// MSI controller registration so PCI endpoint drivers can resolve vectors via
+/// the common MSI framework.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let resources = device.get_resources();
     let mem_resources: Vec<_> = resources
@@ -320,6 +332,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let msi_base_vector: u32;
     let msi_num_vectors: u32;
 
+    let msi_phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .or_else(|| {
+            device
+                .property("linux,phandle")
+                .and_then(|p| p.as_usize())
+                .map(|v| v as u32)
+        })
+        .unwrap_or(0);
+
     if let Some(msi_prop) = device.property("msi-ranges") {
         let bytes = msi_prop.value();
         if bytes.len() >= 20 {
@@ -359,6 +383,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             ecam_base: config_vaddr,
             initialized: false,
             msi_config: None,
+            msi_phandle,
             msi_base_vector: port_msi_base,
             msi_num_vectors,
         };
