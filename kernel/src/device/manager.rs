@@ -55,6 +55,7 @@ use crate::device::platform::PlatformDeviceProperty;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::early_println;
+use crate::interrupt::msi::MsiController;
 
 use super::Device;
 use super::DeviceDriver;
@@ -188,6 +189,7 @@ pub struct DeviceManager {
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
+    msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -209,6 +211,7 @@ impl DeviceManager {
             gpio_controllers: Mutex::new(BTreeMap::new()),
             clk_providers: Mutex::new(BTreeMap::new()),
             iommu_controllers: Mutex::new(BTreeMap::new()),
+            msi_controllers: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -666,6 +669,29 @@ impl DeviceManager {
         self.iommu_controllers.lock().get(&phandle).cloned()
     }
 
+    /// Register an MSI controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the MSI controller node.
+    /// * `controller` - MSI controller implementation.
+    pub fn register_msi_controller(&self, phandle: u32, controller: Arc<dyn MsiController>) {
+        self.msi_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up an MSI controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the MSI controller node.
+    ///
+    /// # Returns
+    ///
+    /// MSI controller registered for `phandle`, or `None` when missing.
+    pub fn get_msi_controller_by_phandle(&self, phandle: u32) -> Option<Arc<dyn MsiController>> {
+        self.msi_controllers.lock().get(&phandle).cloned()
+    }
+
     /// Resolve a named clock for a platform device from FDT properties.
     ///
     /// # Arguments
@@ -844,6 +870,32 @@ impl DeviceManager {
             iommu: self.resolve_platform_iommu(device, config)?,
             direct_dma_offset: 0,
         })
+    }
+
+    /// Resolve a platform device MSI controller from its `msi-parent` property.
+    ///
+    /// Missing controllers return [`probe_defer`] so platform probing can retry once
+    /// provider drivers register their MSI controllers.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the optional `msi-parent` property.
+    ///
+    /// # Returns
+    ///
+    /// The resolved MSI controller, or `None` when the device has no `msi-parent`.
+    pub fn resolve_msi_controller_for_platform(
+        &self,
+        device: &PlatformDeviceInfo,
+    ) -> Result<Option<Arc<dyn MsiController>>, &'static str> {
+        let msi_parent = match device.property("msi-parent") {
+            Some(property) => property.as_usize().ok_or("msi: malformed msi-parent")? as u32,
+            None => return Ok(None),
+        };
+
+        self.get_msi_controller_by_phandle(msi_parent)
+            .map(Some)
+            .ok_or(PROBE_DEFER)
     }
 
     fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -1626,6 +1678,7 @@ impl DeviceManager {
         self.gpio_controllers.lock().clear();
         self.clk_providers.lock().clear();
         self.iommu_controllers.lock().clear();
+        self.msi_controllers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1638,6 +1691,9 @@ mod tests {
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
     use crate::device::{GenericDevice, platform::*};
+    use crate::interrupt::msi::{
+        MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
+    };
     use alloc::vec;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1788,6 +1844,39 @@ mod tests {
     }
 
     #[test_case]
+    fn test_register_get_msi_controller() {
+        let manager = DeviceManager::new();
+        manager.register_msi_controller(0x50, Arc::new(TestMsiController));
+        let controller = manager.get_msi_controller_by_phandle(0x50);
+        assert!(controller.is_some());
+        assert_eq!(controller.unwrap().name(), "test-msi");
+    }
+
+    #[test_case]
+    fn test_resolve_msi_controller_returns_none_when_no_property() {
+        let manager = DeviceManager::new();
+        let device = msi_test_device(vec![]);
+        let controller = manager
+            .resolve_msi_controller_for_platform(&device)
+            .unwrap();
+        assert!(controller.is_none());
+    }
+
+    #[test_case]
+    fn test_resolve_msi_controller_defers_when_missing() {
+        let manager = DeviceManager::new();
+        let device = msi_test_device(vec![PlatformDeviceProperty::new(
+            "msi-parent",
+            &be_cells(&[0x50]),
+        )]);
+
+        match manager.resolve_msi_controller_for_platform(&device) {
+            Ok(_) => panic!("MSI controller resolved without provider"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
     fn test_resolve_platform_iommu_returns_none_when_no_iommus_property() {
         let manager = DeviceManager::new();
         let device = iommu_test_device(vec![]);
@@ -1804,12 +1893,10 @@ mod tests {
             "iommus",
             &be_cells(&[0x40, 0x10]),
         )]);
-        assert_eq!(
-            manager
-                .resolve_platform_iommu(&device, test_iommu_config())
-                .unwrap_err(),
-            PROBE_DEFER
-        );
+        match manager.resolve_platform_iommu(&device, test_iommu_config()) {
+            Ok(_) => panic!("IOMMU resolved without controller"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
     }
 
     #[test_case]
@@ -1898,6 +1985,53 @@ mod tests {
             properties,
             None,
         )
+    }
+
+    fn msi_test_device(properties: Vec<PlatformDeviceProperty>) -> PlatformDeviceInfo {
+        PlatformDeviceInfo::new(
+            "msi-device",
+            0,
+            vec!["test,msi-device"],
+            vec![],
+            properties,
+            None,
+        )
+    }
+
+    struct TestMsiController;
+
+    impl MsiController for TestMsiController {
+        fn name(&self) -> &'static str {
+            "test-msi"
+        }
+
+        fn allocate_vectors(&self, request: MsiRequest) -> Result<MsiAllocation, MsiError> {
+            let _ = request.flags.contains(MsiRequestFlags::MSI_X);
+            Ok(MsiAllocation {
+                vectors: vec![MsiVector {
+                    virq: 32,
+                    hwirq: 64,
+                    message: MsiMessage {
+                        address: 0xfee0_0000,
+                        data: 1,
+                    },
+                }],
+            })
+        }
+
+        fn free_vectors(&self, allocation: &MsiAllocation) {
+            let _ = allocation;
+        }
+
+        fn mask_vector(&self, vector: &MsiVector) -> Result<(), MsiError> {
+            let _ = vector;
+            Ok(())
+        }
+
+        fn unmask_vector(&self, vector: &MsiVector) -> Result<(), MsiError> {
+            let _ = vector;
+            Ok(())
+        }
     }
 
     struct TestIommuDomain {
