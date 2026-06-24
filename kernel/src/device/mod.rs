@@ -22,6 +22,7 @@ pub mod network;
 pub mod pci;
 pub mod platform;
 pub mod power;
+pub mod remoteproc;
 pub mod spi;
 pub mod usb;
 
