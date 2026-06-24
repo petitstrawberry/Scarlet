@@ -66,6 +66,7 @@ use super::i2c::I2cBus;
 use super::iommu::{
     DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
 };
+use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
 use crate::DeviceSource;
@@ -123,6 +124,11 @@ struct OwnedClkSpec {
 }
 
 struct OwnedIommuSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
+struct OwnedMailboxSpec {
     phandle: u32,
     cells: Vec<u32>,
 }
@@ -190,6 +196,7 @@ pub struct DeviceManager {
     clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
+    mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -212,6 +219,7 @@ impl DeviceManager {
             clk_providers: Mutex::new(BTreeMap::new()),
             iommu_controllers: Mutex::new(BTreeMap::new()),
             msi_controllers: Mutex::new(BTreeMap::new()),
+            mailbox_controllers: Mutex::new(BTreeMap::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -255,6 +263,21 @@ impl DeviceManager {
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
         let node = Self::find_node_by_phandle(fdt, phandle)?;
         Self::get_u32_prop(&node, "#iommu-cells").map(|cells| cells as usize)
+    }
+
+    fn get_mailbox_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        #[cfg(test)]
+        let fdt = {
+            // SAFETY: Unit tests may exercise parser helpers before boot initializes the
+            // global FDT manager. These tests run single-threaded in the kernel harness.
+            unsafe { crate::device::fdt::FdtManager::get_mut_manager() }.get_fdt()?
+        };
+
+        #[cfg(not(test))]
+        let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
+
+        let node = Self::find_node_by_phandle(fdt, phandle)?;
+        Self::get_u32_prop(&node, "#mbox-cells").map(|cells| cells as usize)
     }
 
     fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
@@ -343,6 +366,34 @@ impl DeviceManager {
         Ok(specs)
     }
 
+    fn parse_mailbox_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedMailboxSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("mailbox: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            if self.get_mailbox_controller_by_phandle(phandle).is_none() {
+                return probe_defer();
+            }
+
+            let mailbox_cells = self.get_mailbox_cells_for_phandle(phandle).unwrap_or(1);
+            if index + mailbox_cells > cells.len() {
+                return Err("mailbox: truncated specifier");
+            }
+
+            specs.push(OwnedMailboxSpec {
+                phandle,
+                cells: cells[index..index + mailbox_cells].to_vec(),
+            });
+            index += mailbox_cells;
+        }
+
+        Ok(specs)
+    }
+
     fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("clock-names")
@@ -354,6 +405,19 @@ impl DeviceManager {
             .iter()
             .position(|entry| *entry == name)
             .ok_or("clk: clock name not found")
+    }
+
+    fn mailbox_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
+        let names = device
+            .property("mbox-names")
+            .ok_or("mailbox: mbox-names missing")?
+            .as_string_list()
+            .ok_or("mailbox: malformed mbox-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("mailbox: name not found")
     }
 
     fn clk_error_to_str(error: ClkError) -> &'static str {
@@ -381,6 +445,18 @@ impl DeviceManager {
             IommuError::OutOfIova => "iommu: out of iova",
             IommuError::NotSupported => "iommu: not supported",
             IommuError::Busy => "iommu: busy",
+        }
+    }
+
+    fn mailbox_error_to_str(error: MailboxError) -> &'static str {
+        match error {
+            MailboxError::ControllerNotFound => "mailbox: controller not found",
+            MailboxError::InvalidChannel => "mailbox: invalid channel",
+            MailboxError::Busy => "mailbox: busy",
+            MailboxError::Empty => "mailbox: empty",
+            MailboxError::Timeout => "mailbox: timeout",
+            MailboxError::HardwareError => "mailbox: hardware error",
+            MailboxError::NotSupported => "mailbox: not supported",
         }
     }
 
@@ -692,6 +768,36 @@ impl DeviceManager {
         self.msi_controllers.lock().get(&phandle).cloned()
     }
 
+    /// Register a mailbox controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the mailbox controller node.
+    /// * `controller` - Mailbox controller implementation.
+    pub fn register_mailbox_controller(
+        &self,
+        phandle: u32,
+        controller: Arc<dyn MailboxController>,
+    ) {
+        self.mailbox_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up a mailbox controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the mailbox controller node.
+    ///
+    /// # Returns
+    ///
+    /// Mailbox controller registered for `phandle`, or `None` when missing.
+    pub fn get_mailbox_controller_by_phandle(
+        &self,
+        phandle: u32,
+    ) -> Option<Arc<dyn MailboxController>> {
+        self.mailbox_controllers.lock().get(&phandle).cloned()
+    }
+
     /// Resolve a named clock for a platform device from FDT properties.
     ///
     /// # Arguments
@@ -898,12 +1004,94 @@ impl DeviceManager {
             .ok_or(PROBE_DEFER)
     }
 
+    /// Resolve one mailbox specifier for a platform device by index.
+    ///
+    /// Missing controllers return [`probe_defer`] so platform probing can retry once
+    /// provider drivers register their mailbox controllers.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `mailboxes` property.
+    /// * `index` - Zero-based mailbox specifier index to resolve.
+    ///
+    /// # Returns
+    ///
+    /// A mailbox specifier suitable for [`Self::request_mailbox_channel`].
+    pub fn resolve_mailbox_spec(
+        &self,
+        device: &PlatformDeviceInfo,
+        index: usize,
+    ) -> Result<MailboxSpec, &'static str> {
+        let mailboxes = device
+            .property("mailboxes")
+            .ok_or("mailbox: mailboxes missing")?;
+        let specs = self.parse_mailbox_specs(mailboxes.value())?;
+        let spec = specs.get(index).ok_or("mailbox: index out of range")?;
+        Ok(MailboxSpec {
+            controller_phandle: spec.phandle,
+            cells: spec.cells.clone(),
+        })
+    }
+
+    /// Resolve one named mailbox specifier for a platform device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing `mailboxes` and `mbox-names` properties.
+    /// * `name` - Mailbox name to resolve from `mbox-names`.
+    ///
+    /// # Returns
+    ///
+    /// A mailbox specifier suitable for [`Self::request_mailbox_channel`].
+    pub fn resolve_mailbox_spec_by_name(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<MailboxSpec, &'static str> {
+        let index = Self::mailbox_name_index(device, name)?;
+        self.resolve_mailbox_spec(device, index)
+    }
+
+    /// Request a mailbox channel from the registered controller for a specifier.
+    ///
+    /// Missing controllers return [`probe_defer`] so callers can retry after the
+    /// provider driver registers its mailbox controller.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Mailbox specifier returned by [`Self::resolve_mailbox_spec`].
+    /// * `client` - Optional callback sink to install on the channel.
+    ///
+    /// # Returns
+    ///
+    /// A reference-counted mailbox channel on success.
+    pub fn request_mailbox_channel(
+        &self,
+        spec: &MailboxSpec,
+        client: Option<Arc<dyn MailboxClient>>,
+    ) -> Result<Arc<dyn MailboxChannel>, &'static str> {
+        let controller = self
+            .get_mailbox_controller_by_phandle(spec.controller_phandle)
+            .ok_or(PROBE_DEFER)?;
+        controller
+            .request_channel(spec, client)
+            .map_err(Self::mailbox_error_to_str)
+    }
+
     fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let Some(iommus) = device.property("iommus") else {
             return Ok(());
         };
 
         self.parse_iommu_specs(iommus.value()).map(|_| ())
+    }
+
+    fn pre_probe_resolve_mailbox(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(mailboxes) = device.property("mailboxes") else {
+            return Ok(());
+        };
+
+        self.parse_mailbox_specs(mailboxes.value()).map(|_| ())
     }
 
     pub fn for_each_usb_host<F>(&self, mut f: F)
@@ -1437,6 +1625,14 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
+                    if let Err(e) = self.pre_probe_resolve_mailbox(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[mailbox] failed to resolve mailbox: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
                     match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
@@ -1679,6 +1875,7 @@ impl DeviceManager {
         self.clk_providers.lock().clear();
         self.iommu_controllers.lock().clear();
         self.msi_controllers.lock().clear();
+        self.mailbox_controllers.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1690,6 +1887,7 @@ mod tests {
     use crate::device::iommu::{
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
+    use crate::device::mailbox::{MailboxChannelId, MailboxMessage};
     use crate::device::{GenericDevice, platform::*};
     use crate::interrupt::msi::{
         MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
@@ -2097,6 +2295,94 @@ mod tests {
         }
     }
 
+    struct TestMailboxChannel {
+        id: MailboxChannelId,
+        last_message: Mutex<Option<MailboxMessage>>,
+        client_set: AtomicBool,
+    }
+
+    impl TestMailboxChannel {
+        fn new(id: MailboxChannelId) -> Self {
+            Self {
+                id,
+                last_message: Mutex::new(None),
+                client_set: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl MailboxChannel for TestMailboxChannel {
+        fn id(&self) -> MailboxChannelId {
+            self.id
+        }
+
+        fn try_send(&self, message: &MailboxMessage) -> Result<(), MailboxError> {
+            *self.last_message.lock() = Some(*message);
+            Ok(())
+        }
+
+        fn try_recv(&self) -> Result<Option<MailboxMessage>, MailboxError> {
+            Ok(self.last_message.lock().take())
+        }
+
+        fn send_timeout(
+            &self,
+            message: &MailboxMessage,
+            timeout_us: u64,
+        ) -> Result<(), MailboxError> {
+            let _ = timeout_us;
+            self.try_send(message)
+        }
+
+        fn set_client(&self, client: Option<Arc<dyn MailboxClient>>) -> Result<(), MailboxError> {
+            self.client_set.store(client.is_some(), Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn poll(&self) -> Result<(), MailboxError> {
+            Ok(())
+        }
+    }
+
+    struct TestMailboxController {
+        requested: AtomicUsize,
+        released: AtomicUsize,
+    }
+
+    impl TestMailboxController {
+        fn new() -> Self {
+            Self {
+                requested: AtomicUsize::new(0),
+                released: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl MailboxController for TestMailboxController {
+        fn name(&self) -> &'static str {
+            "test-mailbox"
+        }
+
+        fn request_channel(
+            &self,
+            spec: &MailboxSpec,
+            client: Option<Arc<dyn MailboxClient>>,
+        ) -> Result<Arc<dyn MailboxChannel>, MailboxError> {
+            if spec.cells.is_empty() {
+                return Err(MailboxError::InvalidChannel);
+            }
+            self.requested.fetch_add(1, Ordering::SeqCst);
+            let channel = Arc::new(TestMailboxChannel::new(MailboxChannelId(spec.cells[0])));
+            channel.set_client(client)?;
+            Ok(channel)
+        }
+
+        fn release_channel(&self, channel: MailboxChannelId) {
+            let _ = channel;
+            self.released.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     impl IommuController for TestIommuController {
         fn name(&self) -> &'static str {
             "test-iommu"
@@ -2128,6 +2414,48 @@ mod tests {
             iova_base: 0,
             iova_size: 0x1_0000,
         }
+    }
+
+    #[test_case]
+    fn test_register_get_mailbox_controller() {
+        let manager = DeviceManager::new();
+        let controller = Arc::new(TestMailboxController::new());
+        manager.register_mailbox_controller(0x50, controller.clone());
+
+        let resolved = manager.get_mailbox_controller_by_phandle(0x50).unwrap();
+        assert_eq!(resolved.name(), "test-mailbox");
+        assert!(manager.get_mailbox_controller_by_phandle(0x51).is_none());
+    }
+
+    #[test_case]
+    fn test_resolve_mailbox_spec_defers_when_controller_missing() {
+        let manager = DeviceManager::new();
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "mailboxes",
+            &be_cells(&[0x50, 7]),
+        )]);
+
+        match manager.resolve_mailbox_spec(&device, 0) {
+            Ok(_) => panic!("mailbox spec resolved without controller"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_mailbox_spec_parses_cells() {
+        let manager = DeviceManager::new();
+        manager.register_mailbox_controller(0x50, Arc::new(TestMailboxController::new()));
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "mailboxes",
+            &be_cells(&[0x50, 7]),
+        )]);
+
+        let spec = manager.resolve_mailbox_spec(&device, 0).unwrap();
+        assert_eq!(spec.controller_phandle, 0x50);
+        assert_eq!(spec.cells, vec![7]);
+
+        let channel = manager.request_mailbox_channel(&spec, None).unwrap();
+        assert_eq!(channel.id(), MailboxChannelId(7));
     }
 
     #[test_case]
