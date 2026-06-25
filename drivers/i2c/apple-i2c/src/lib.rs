@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio;
+use scarlet::device::clk::ClkHandle;
 use scarlet::device::i2c::{I2cAddress, I2cBus, I2cError, I2cMessage, I2cMessageFlags};
 use scarlet::device::{
     DeviceInfo,
@@ -65,16 +66,18 @@ struct AppleI2cInner {
 pub struct AppleI2cController {
     base: usize,
     bus_number: u32,
+    _bus_clk: Option<ClkHandle>,
     inner: Mutex<AppleI2cInner>,
     transfer_lock: Mutex<()>,
 }
 
 impl AppleI2cController {
     /// Create a controller instance and initialize hardware.
-    pub fn new(base: usize, bus_number: u32) -> Result<Self, I2cError> {
+    pub fn new(base: usize, bus_number: u32, bus_clk: Option<ClkHandle>) -> Result<Self, I2cError> {
         let controller = Self {
             base,
             bus_number,
+            _bus_clk: bus_clk,
             inner: Mutex::new(AppleI2cInner {
                 bus_hz: DEFAULT_BUS_HZ,
                 hw_rev: 0,
@@ -346,6 +349,7 @@ impl I2cBus for AppleI2cController {
     }
 }
 
+/// Probe an Apple I2C controller, optionally enabling its bus clock before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resources: Vec<_> = device
         .get_resources()
@@ -366,6 +370,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let base = vm::ioremap(paddr, size).map_err(|_| "apple-i2c: ioremap failed")?;
 
+    // TODO: Confirm Apple I2C DT clock-names on all supported SoCs; current bring-up uses "bus".
+    let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) => {
+            scarlet::early_println!("[apple-i2c] warning: bus clock unavailable: {}", e);
+            None
+        }
+    };
+
     let bus_number = device
         .property("reg")
         .and_then(|p| p.as_usize())
@@ -378,7 +394,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .ok_or("apple-i2c: no phandle")?;
 
-    let controller = AppleI2cController::new(base, bus_number)
+    let controller = AppleI2cController::new(base, bus_number, bus_clk)
         .map_err(|_| "apple-i2c: controller initialization failed")?;
     let bus: Arc<dyn I2cBus> = Arc::new(controller);
 
