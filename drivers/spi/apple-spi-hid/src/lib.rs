@@ -16,7 +16,7 @@ use scarlet::device::input::key_codes::{BTN_LEFT, BTN_RIGHT};
 use scarlet::device::input::key_values::{KEY_PRESS, KEY_RELEASE};
 use scarlet::device::input::rel_codes::{REL_X, REL_Y};
 use scarlet::device::input::syn_codes::SYN_REPORT;
-use scarlet::device::manager::{DeviceManager, DriverPriority};
+use scarlet::device::manager::{DeviceManager, DriverPriority, probe_defer};
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use scarlet::device::spi::{SpiBus, SpiError, SpiTransfer};
 use scarlet::early_println;
@@ -494,41 +494,65 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .parent_phandle()
         .ok_or("apple-spi-hid: no parent phandle")?;
 
-    let spi_bus = DeviceManager::get_manager()
-        .get_spi_bus(parent_ph)
-        .ok_or("apple-spi-hid: parent SPI bus not found")?;
+    let spi_bus = match DeviceManager::get_manager().get_spi_bus(parent_ph) {
+        Some(bus) => bus,
+        None => {
+            early_println!("[apple-spi-hid] SPI bus not yet registered, deferring");
+            return probe_defer();
+        }
+    };
 
     spi_bus
         .set_bus_speed(max_freq)
         .map_err(|_| "apple-spi-hid: failed to set bus speed")?;
 
-    let spien_gpio = device
-        .property("spien-gpios")
-        .and_then(|p| {
-            let data = p.value();
+    let spien_gpio = match device.property("spien-gpios") {
+        Some(property) => {
+            let data = property.value();
             if data.len() < 8 {
-                return None;
+                (0, None)
+            } else {
+                let phandle = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let pin = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
+                match gpio {
+                    Some(controller) => (pin, Some(controller)),
+                    None => {
+                        early_println!(
+                            "[apple-spi-hid] SPIEN GPIO controller {} not yet registered, deferring",
+                            phandle
+                        );
+                        return probe_defer();
+                    }
+                }
             }
-            let phandle = u32::from_be_bytes(data[0..4].try_into().ok()?);
-            let pin = u32::from_be_bytes(data[4..8].try_into().ok()?);
-            let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
-            Some((pin, gpio))
-        })
-        .unwrap_or((0, None));
+        }
+        None => (0, None),
+    };
 
-    let irq_gpio = device
-        .property("interrupts-extended")
-        .and_then(|p| {
-            let data = p.value();
+    let irq_gpio = match device.property("interrupts-extended") {
+        Some(property) => {
+            let data = property.value();
             if data.len() < 12 {
-                return None;
+                (0, None)
+            } else {
+                let phandle = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let pin = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
+                match gpio {
+                    Some(controller) => (pin, Some(controller)),
+                    None => {
+                        early_println!(
+                            "[apple-spi-hid] IRQ GPIO controller {} not yet registered, deferring",
+                            phandle
+                        );
+                        return probe_defer();
+                    }
+                }
             }
-            let phandle = u32::from_be_bytes(data[0..4].try_into().ok()?);
-            let pin = u32::from_be_bytes(data[4..8].try_into().ok()?);
-            let gpio = DeviceManager::get_manager().get_gpio_controller(phandle);
-            Some((pin, gpio))
-        })
-        .unwrap_or((0, None));
+        }
+        None => (0, None),
+    };
 
     let keyboard_event = Arc::new(EventDevice::new("keyboard"));
     let trackpad_event = Arc::new(EventDevice::new("mouse"));
@@ -556,15 +580,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let pin = keyboard.irq_gpio.0;
         if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, keyboard.clone()) {
             early_println!(
-                "apple-spi-hid: failed to register keyboard IRQ on pin {}",
+                "[apple-spi-hid] failed to register keyboard IRQ on pin {}, deferring",
                 pin
             );
+            return probe_defer();
         }
         if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, trackpad.clone()) {
             early_println!(
-                "apple-spi-hid: failed to register trackpad IRQ on pin {}",
+                "[apple-spi-hid] failed to register trackpad IRQ on pin {}, deferring",
                 pin
             );
+            return probe_defer();
         }
     }
 
