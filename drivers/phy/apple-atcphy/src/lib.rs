@@ -13,6 +13,7 @@ use scarlet::{
     device::{
         DeviceInfo,
         manager::{DeviceManager, DriverPriority},
+        phy::{Phy, PhyError, PhyHandle, PhyMode, PhyProvider},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -129,8 +130,11 @@ const PIPEHANDLER_MUX_CTRL_CLK_DP: u32 = 4;
 /// register-level tunables and injects them into the device tree.
 #[derive(Debug, Clone)]
 pub struct HardwareTunable {
+    /// Register offset from the target MMIO base.
     pub offset: u32,
+    /// Bit mask selecting the register fields controlled by this tunable.
     pub mask: u32,
+    /// Value to OR into the masked register fields.
     pub value: u32,
 }
 
@@ -165,6 +169,11 @@ impl HardwareTunable {
 }
 
 /// Apply a slice of tunables to an MMIO base.
+///
+/// # Arguments
+///
+/// * `tunables` - Tunable entries to apply in order.
+/// * `base` - Virtual MMIO base address for the target register block.
 pub fn apply_tunables(tunables: &[HardwareTunable], base: usize) {
     for t in tunables {
         t.apply(base);
@@ -183,10 +192,14 @@ fn parse_tunable_prop(device: &PlatformDeviceInfo, name: &str) -> Vec<HardwareTu
 // ATC PHY Mode
 // =============================================================================
 
+/// Supported Apple ATC PHY protocol modes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AtcPhyMode {
+    /// USB 3.x SuperSpeed mode.
     Usb3,
+    /// DisplayPort-only mode.
     DisplayPort,
+    /// Combined USB 3.x and DisplayPort mode.
     Usb3Dp,
 }
 
@@ -194,6 +207,10 @@ pub enum AtcPhyMode {
 // ATC PHY Instance
 // =============================================================================
 
+/// Apple ATC PHY hardware instance.
+///
+/// The instance owns mapped MMIO bases and bootloader-provided tunable tables
+/// used to initialize USB3 and DisplayPort lanes.
 pub struct AppleAtcPhy {
     core_base: usize,
     lpdptx_base: Option<usize>,
@@ -210,6 +227,19 @@ pub struct AppleAtcPhy {
 }
 
 impl AppleAtcPhy {
+    /// Create a new Apple ATC PHY instance from mapped MMIO regions.
+    ///
+    /// # Arguments
+    ///
+    /// * `core_base` - Virtual base for the ATC PHY core register block.
+    /// * `lpdptx_base` - Optional virtual base for the LPDP TX register block.
+    /// * `axi2af_base` - Optional virtual base for the AXI2AF register block.
+    /// * `usb2phy_base` - Virtual base for the USB2 PHY register block.
+    /// * `pipehandler_base` - Virtual base for the pipehandler register block.
+    ///
+    /// # Returns
+    ///
+    /// An uninitialized PHY instance with empty tunable tables.
     pub fn new(
         core_base: usize,
         lpdptx_base: Option<usize>,
@@ -497,6 +527,11 @@ impl AppleAtcPhy {
         }
     }
 
+    /// Initialize the PHY in USB3 mode.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the PHY is powered and configured for USB3 operation.
     pub fn init(&mut self) -> Result<(), &'static str> {
         early_println!("[apple-atcphy] initializing...");
 
@@ -541,6 +576,15 @@ impl AppleAtcPhy {
         Ok(())
     }
 
+    /// Initialize the PHY in a DisplayPort-capable mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - DisplayPort-related ATC PHY mode to apply.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the PHY is powered and configured for the requested mode.
     pub fn init_dp(&mut self, mode: AtcPhyMode) -> Result<(), &'static str> {
         if self.lpdptx_base.is_none() || self.axi2af_base.is_none() {
             return Err("apple-atcphy: lpdptx/axi2af regions not mapped, cannot init DP");
@@ -571,6 +615,122 @@ impl AppleAtcPhy {
     }
 }
 
+struct AppleAtcPhyProvider {
+    lanes: Vec<Arc<AppleAtcPhyLane>>,
+}
+
+impl AppleAtcPhyProvider {
+    fn new(phy: Arc<Mutex<AppleAtcPhy>>) -> Self {
+        Self {
+            lanes: alloc::vec![
+                Arc::new(AppleAtcPhyLane::new(Arc::clone(&phy), 0)),
+                Arc::new(AppleAtcPhyLane::new(phy, 1)),
+            ],
+        }
+    }
+}
+
+impl PhyProvider for AppleAtcPhyProvider {
+    fn name(&self) -> &'static str {
+        "apple-atcphy"
+    }
+
+    fn phy_cells(&self) -> usize {
+        1
+    }
+
+    fn get_phy(&self, spec: &[u32]) -> Result<PhyHandle, PhyError> {
+        if spec.len() != self.phy_cells() {
+            return Err(PhyError::NotFound);
+        }
+
+        let lane = self.lanes.get(spec[0] as usize).ok_or(PhyError::NotFound)?;
+        Ok(PhyHandle::new(lane.clone()))
+    }
+}
+
+struct AppleAtcPhyLane {
+    phy: Arc<Mutex<AppleAtcPhy>>,
+    lane: u32,
+    mode: Mutex<Option<PhyMode>>,
+}
+
+impl AppleAtcPhyLane {
+    fn new(phy: Arc<Mutex<AppleAtcPhy>>, lane: u32) -> Self {
+        Self {
+            phy,
+            lane,
+            mode: Mutex::new(None),
+        }
+    }
+
+    fn atc_mode(&self) -> Result<AtcPhyMode, PhyError> {
+        match *self.mode.lock() {
+            Some(PhyMode::UsbHost | PhyMode::UsbDevice | PhyMode::UsbOtg) | None => {
+                Ok(AtcPhyMode::Usb3)
+            }
+            Some(PhyMode::DisplayPort) => Ok(AtcPhyMode::DisplayPort),
+            Some(PhyMode::Other(0)) => Ok(AtcPhyMode::Usb3),
+            Some(PhyMode::Other(1)) => Ok(AtcPhyMode::Usb3Dp),
+            Some(_) => Err(PhyError::InvalidMode),
+        }
+    }
+
+    fn power_on_current_mode(&self) -> Result<(), PhyError> {
+        let mode = self.atc_mode()?;
+        let mut phy = self.phy.lock();
+        match mode {
+            AtcPhyMode::Usb3 => phy.init(),
+            AtcPhyMode::DisplayPort | AtcPhyMode::Usb3Dp => phy.init_dp(mode),
+        }
+        .map_err(|_| PhyError::PowerOnFailed)
+    }
+}
+
+impl Phy for AppleAtcPhyLane {
+    fn name(&self) -> &'static str {
+        match self.lane {
+            0 => "apple-atcphy-lane0",
+            1 => "apple-atcphy-lane1",
+            _ => "apple-atcphy-lane",
+        }
+    }
+
+    fn power_on(&self) -> Result<(), PhyError> {
+        self.power_on_current_mode()
+    }
+
+    fn power_off(&self) -> Result<(), PhyError> {
+        Ok(())
+    }
+
+    fn reset(&self) -> Result<(), PhyError> {
+        self.power_on_current_mode().map_err(|error| match error {
+            PhyError::PowerOnFailed => PhyError::ResetFailed,
+            other => other,
+        })
+    }
+
+    fn set_mode(&self, mode: PhyMode) -> Result<(), PhyError> {
+        match mode {
+            PhyMode::UsbHost
+            | PhyMode::UsbDevice
+            | PhyMode::UsbOtg
+            | PhyMode::DisplayPort
+            | PhyMode::Other(0)
+            | PhyMode::Other(1) => {
+                *self.mode.lock() = Some(mode);
+                Ok(())
+            }
+            _ => Err(PhyError::InvalidMode),
+        }
+    }
+
+    fn get_mode(&self) -> Option<PhyMode> {
+        *self.mode.lock()
+    }
+}
+
 // =============================================================================
 // Global Registry
 // =============================================================================
@@ -582,21 +742,54 @@ struct AtcPhyEntry {
 
 static ATC_PHY_REGISTRY: Mutex<alloc::vec::Vec<AtcPhyEntry>> = Mutex::new(alloc::vec::Vec::new());
 
+/// Register an ATC PHY instance in the legacy local registry.
+///
+/// # Arguments
+///
+/// * `phy` - ATC PHY instance to store.
+/// * `phandle` - Firmware phandle associated with the PHY node.
+///
+/// # Returns
+///
+/// Numeric local registry ID assigned to the instance.
 pub fn register_atcphy(phy: AppleAtcPhy, phandle: u32) -> u32 {
-    let mut guard = ATC_PHY_REGISTRY.lock();
-    let id = guard.len() as u32;
-    guard.push(AtcPhyEntry {
-        instance: Arc::new(Mutex::new(phy)),
-        phandle,
-    });
-    id
+    register_atcphy_shared(phy, phandle).0
 }
 
+fn register_atcphy_shared(phy: AppleAtcPhy, phandle: u32) -> (u32, Arc<Mutex<AppleAtcPhy>>) {
+    let mut guard = ATC_PHY_REGISTRY.lock();
+    let id = guard.len() as u32;
+    let instance = Arc::new(Mutex::new(phy));
+    guard.push(AtcPhyEntry {
+        instance: Arc::clone(&instance),
+        phandle,
+    });
+    (id, instance)
+}
+
+/// Look up a registered ATC PHY instance by local registry ID.
+///
+/// # Arguments
+///
+/// * `id` - Local registry ID returned by [`register_atcphy`].
+///
+/// # Returns
+///
+/// Shared ATC PHY instance, or `None` when `id` is unknown.
 pub fn get_atcphy(id: u32) -> Option<Arc<Mutex<AppleAtcPhy>>> {
     let guard = ATC_PHY_REGISTRY.lock();
     guard.get(id as usize).map(|e| Arc::clone(&e.instance))
 }
 
+/// Look up a registered ATC PHY instance by firmware phandle.
+///
+/// # Arguments
+///
+/// * `phandle` - Firmware phandle used when the PHY was registered.
+///
+/// # Returns
+///
+/// Shared ATC PHY instance, or `None` when no matching registration exists.
 pub fn get_atcphy_by_phandle(phandle: u32) -> Option<Arc<Mutex<AppleAtcPhy>>> {
     let guard = ATC_PHY_REGISTRY.lock();
     guard
@@ -705,7 +898,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         })
         .unwrap_or(0);
 
-    let _id = register_atcphy(phy, phandle);
+    let (_id, phy_instance) = register_atcphy_shared(phy, phandle);
+    DeviceManager::get_manager()
+        .register_phy_controller(phandle, Arc::new(AppleAtcPhyProvider::new(phy_instance)));
 
     early_println!("[apple-atcphy] registered (id={})", _id);
     Ok(())
@@ -733,5 +928,6 @@ scarlet::driver_initcall!(register_atcphy_driver);
 #[used]
 static SCARLET_DRIVER_APPLE_ATCPHY_ANCHOR: fn() = force_link;
 
+/// Keep the driver object linked into kernel builds that rely on initcall anchors.
 #[inline(never)]
 pub fn force_link() {}
