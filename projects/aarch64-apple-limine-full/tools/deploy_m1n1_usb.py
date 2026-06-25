@@ -23,18 +23,41 @@ DEFAULT_ENTRY_POINT = 0x800
 sys.path.append(str(PROXYCLIENT_DIR))
 
 
-def default_proxy_device():
+def detect_devices():
+    import glob as _glob
+    if platform.system() == "Darwin":
+        pattern = "/dev/cu.usbmodem*"
+    else:
+        pattern = "/dev/ttyACM*"
+    matches = sorted(_glob.glob(pattern))
+    if len(matches) >= 2:
+        return matches[0], matches[1]
+    return None, None
+
+
+def wait_for_devices(timeout):
     if os.environ.get("M1N1DEVICE"):
-        return os.environ["M1N1DEVICE"]
-    if platform.system() == "Darwin":
-        return "/dev/cu.usbmodemP_01"
-    return "/dev/m1n1"
+        proxy = os.environ["M1N1DEVICE"]
+        import pathlib as _p
+        stem = _p.Path(proxy).stem
+        sec = str(_p.Path(proxy).with_name(stem[:-1] + "3")) if stem[-1] == "1" else proxy
+        wait_for_device(proxy, timeout)
+        return proxy, sec
 
-
-def default_secondary_device():
-    if platform.system() == "Darwin":
-        return "/dev/cu.usbmodemP_03"
-    return "/dev/m1n1-sec"
+    print("Waiting for m1n1 USB devices to appear (Ctrl+C to abort)...")
+    start = time.monotonic()
+    while True:
+        proxy, secondary = detect_devices()
+        if proxy:
+            print(f"  Proxy:     {proxy}")
+            print(f"  Secondary: {secondary}")
+            return proxy, secondary
+        if timeout is not None and time.monotonic() - start > timeout:
+            raise TimeoutError("Timed out waiting for m1n1 USB devices")
+        elapsed = int(time.monotonic() - start)
+        sys.stdout.write(f"\r  Scanning... ({elapsed}s)  ")
+        sys.stdout.flush()
+        time.sleep(0.25)
 
 
 def parse_int(value):
@@ -111,7 +134,6 @@ def build_image(args):
 def chainload(args):
     env = os.environ.copy()
     env["M1N1DEVICE"] = args.proxy_device
-    wait_for_device(args.proxy_device, args.connect_timeout)
     run_checked([sys.executable, TOOLS_DIR / "chainload.py", "-r", args.m1n1], cwd=REPO_ROOT, env=env)
 
 
@@ -121,7 +143,7 @@ def start_guest(args):
     from m1n1.hv import HV
     from m1n1.hw.pmu import PMU
 
-    wait_for_device(args.proxy_device, args.connect_timeout)
+    wait_for_device(args.proxy_device, 30)
 
     iface = UartInterface(device=args.proxy_device)
     p = M1N1Proxy(iface, debug=False)
@@ -177,8 +199,8 @@ def main():
     parser.add_argument("--release", action="store_true", help="Build the Scarlet image in release mode")
     parser.add_argument("--no-build", action="store_true", help="Use the existing Scarlet image")
     parser.add_argument("--skip-chainload", action="store_true", help="Do not chainload fresh m1n1 before starting HV")
-    parser.add_argument("--proxy-device", default=default_proxy_device(), help="Primary m1n1 proxy UART device")
-    parser.add_argument("--secondary-device", default=default_secondary_device(), help="Secondary HV virtual UART device")
+    parser.add_argument("--proxy-device", default=None, help="Primary m1n1 proxy UART device (auto-detected if omitted)")
+    parser.add_argument("--secondary-device", default=None, help="Secondary HV virtual UART device (auto-detected if omitted)")
     parser.add_argument("--no-uart", action="store_true", help="Do not capture secondary UART output")
     parser.add_argument("--uart-log", type=pathlib.Path, help="Optional file to append secondary UART output")
     parser.add_argument("--connect-timeout", type=float, default=None, help="Seconds to wait for USB device files")
@@ -195,6 +217,9 @@ def main():
     args.image = pathlib.Path(args.image).resolve()
     args.payload = pathlib.Path(args.payload).resolve()
     args.m1n1 = pathlib.Path(args.m1n1).resolve()
+
+    if not args.proxy_device or not args.secondary_device:
+        args.proxy_device, args.secondary_device = wait_for_devices(args.connect_timeout)
     args.secondary_device = pathlib.Path(args.secondary_device)
 
     uart = None
