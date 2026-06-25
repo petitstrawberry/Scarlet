@@ -514,7 +514,7 @@ fn register_apple_spi_driver() {
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
 }
 
-// scarlet::driver_initcall!(register_apple_spi_driver);
+scarlet::driver_initcall!(register_apple_spi_driver);
 
 #[used]
 static SCARLET_DRIVER_APPLE_SPI_ANCHOR: fn() = force_link;

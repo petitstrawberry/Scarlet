@@ -594,7 +594,7 @@ fn register_apple_spi_hid_driver() {
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
 }
 
-// scarlet::driver_initcall!(register_apple_spi_hid_driver);
+scarlet::driver_initcall!(register_apple_spi_hid_driver);
 
 #[used]
 static SCARLET_DRIVER_APPLE_SPI_HID_ANCHOR: fn() = force_link;
