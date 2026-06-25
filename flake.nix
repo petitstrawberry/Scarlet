@@ -277,6 +277,7 @@
 
             # Debug
             pkgs.gdb
+            pkgs.picocom
 
             # Other dependencies
             pkgs.git
