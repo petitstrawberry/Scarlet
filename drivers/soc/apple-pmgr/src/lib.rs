@@ -399,15 +399,17 @@ pub fn pmgr_is_initialized() -> bool {
 /// This is the convenience API for device drivers that read `power-domains = <&phandle>`
 /// from their device tree node and want to enable that domain.
 pub fn pmgr_get_domain_by_phandle(pwrstate_phandle: u32) -> Result<PmgrDomain, &'static str> {
-    let guard = get_registry().ok_or("pmgr: registry not initialized")?;
-    let registry = guard.as_ref().unwrap();
+    let (pmgr_phandle, domain_index) = {
+        let guard = get_registry().ok_or("pmgr: registry not initialized")?;
+        let registry = guard.as_ref().unwrap();
+        let result = registry
+            .pwrstate_phandles
+            .get(&pwrstate_phandle)
+            .ok_or("pmgr: pwrstate phandle not found")?;
+        (result.0, result.1)
+    };
 
-    let (pmgr_phandle, domain_index) = registry
-        .pwrstate_phandles
-        .get(&pwrstate_phandle)
-        .ok_or("pmgr: pwrstate phandle not found")?;
-
-    pmgr_get_domain(*pmgr_phandle, *domain_index)
+    pmgr_get_domain(pmgr_phandle, domain_index)
 }
 
 // =============================================================================

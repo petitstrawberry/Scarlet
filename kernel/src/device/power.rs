@@ -89,8 +89,13 @@ impl PowerManager {
                 domain.label(),
                 device.name()
             );
-            domain.enable()?;
-            domain.reset_deassert();
+            if let Err(e) = domain.enable() {
+                crate::early_println!(
+                    "[power] failed to enable domain '{}': {} (continuing)",
+                    domain.label(),
+                    e
+                );
+            }
         }
 
         Ok(())

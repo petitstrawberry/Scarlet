@@ -1624,15 +1624,9 @@ impl DeviceManager {
             priority.description()
         );
 
-        // Try /soc node first (RISC-V virt), then fall back to root node (AArch64 virt)
-        let parent_node = if let Some(soc) = fdt.find_node("/soc") {
-            Some(soc)
-        } else {
-            // For AArch64 virt and other platforms where devices are at root level
-            fdt.find_node("/")
-        };
+        let mut idx = 0;
 
-        let parent_node = match parent_node {
+        let root_node = match fdt.find_node("/") {
             Some(node) => node,
             None => {
                 early_println!("No device tree root found");
@@ -1640,11 +1634,9 @@ impl DeviceManager {
             }
         };
 
-        let mut idx = 0;
-
-        for child in parent_node.children() {
-            let parent_ph = Self::get_u32_prop(&parent_node, "phandle")
-                .or_else(|| Self::get_u32_prop(&parent_node, "linux,phandle"));
+        for child in root_node.children() {
+            let parent_ph = Self::get_u32_prop(&root_node, "phandle")
+                .or_else(|| Self::get_u32_prop(&root_node, "linux,phandle"));
             self.process_device_subtree(&child, priority, &mut idx, parent_ph);
         }
 
@@ -2033,6 +2025,8 @@ impl DeviceManager {
                     .iter()
                     .any(|&c| device.compatible().contains(&c))
                 {
+                    early_println!("[probe] matching {} -> {}", device.name(), driver.name());
+
                     if let Err(e) =
                         crate::device::power::PowerManager::enable_device_domains(device)
                     {
@@ -2046,6 +2040,7 @@ impl DeviceManager {
                             e
                         );
                     }
+                    early_println!("[probe] power domains done for {}", device.name());
 
                     if let Err(e) = self.apply_assigned_clocks(device) {
                         if is_probe_defer(e) {
@@ -2087,6 +2082,7 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
+                    early_println!("[probe] calling probe() for {}", device.name());
                     match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
