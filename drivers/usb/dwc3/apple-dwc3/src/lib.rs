@@ -10,7 +10,7 @@ use scarlet::{
     device::{
         DeviceInfo,
         clk::ClkHandle,
-        manager::{DeviceManager, DriverPriority},
+        manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -250,7 +250,20 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             let _ = handle.prepare_enable();
             Some(handle)
         }
-        Err(_) => None,
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            early_println!("[apple-dwc3] bus clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
+            early_println!("[apple-dwc3] warning: bus clock unavailable: {}", e);
+            None
+        }
+        Err(e) => {
+            early_println!("[apple-dwc3] bus clock lookup failed: {}", e);
+            return Err(e);
+        }
     };
 
     let base_addr = scarlet::vm::ioremap(paddr, size).map_err(|_| "dwc3: ioremap failed")?;
@@ -271,9 +284,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 early_println!("[apple-dwc3] ATC PHY ready (phandle={:#x})", phy_phandle);
             } else {
                 early_println!(
-                    "[apple-dwc3] ATC PHY not found (phandle={:#x})",
+                    "[apple-dwc3] ATC PHY not yet registered, deferring (phandle={:#x})",
                     phy_phandle
                 );
+                return probe_defer();
             }
             offset += entry_size;
         }
