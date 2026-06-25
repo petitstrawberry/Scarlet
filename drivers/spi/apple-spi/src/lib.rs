@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio;
+use scarlet::device::clk::ClkHandle;
 use scarlet::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use scarlet::device::{
     DeviceInfo,
@@ -107,16 +108,18 @@ struct AppleSpiInner {
 pub struct AppleSpiController {
     base: usize,
     bus_number: u32,
+    _bus_clk: Option<ClkHandle>,
     inner: Mutex<AppleSpiInner>,
     transfer_lock: Mutex<()>,
 }
 
 impl AppleSpiController {
-    pub fn new(base: usize, bus_number: u32) -> Result<Self, SpiError> {
+    pub fn new(base: usize, bus_number: u32, bus_clk: Option<ClkHandle>) -> Result<Self, SpiError> {
         let speed_hz = Self::clkdiv_to_speed(Self::clkdiv_for_hz(1_000_000)?);
         let controller = Self {
             base,
             bus_number,
+            _bus_clk: bus_clk,
             inner: Mutex::new(AppleSpiInner {
                 speed_hz,
                 mode: 0,
@@ -443,6 +446,7 @@ impl SpiBus for AppleSpiController {
     }
 }
 
+/// Probe an Apple SPI controller, optionally enabling its bus clock before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resources: Vec<_> = device
         .get_resources()
@@ -463,6 +467,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let base = vm::ioremap(paddr, size).map_err(|_| "apple-spi: ioremap failed")?;
 
+    // TODO: Confirm Apple SPI DT clock-names on all supported SoCs; current bring-up uses "bus".
+    let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) => {
+            scarlet::early_println!("[apple-spi] warning: bus clock unavailable: {}", e);
+            None
+        }
+    };
+
     let bus_number = device
         .property("reg")
         .and_then(|p| p.as_usize())
@@ -476,7 +492,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-spi: no phandle")?;
 
     let controller =
-        AppleSpiController::new(base, bus_number).map_err(|_| "apple-spi: init failed")?;
+        AppleSpiController::new(base, bus_number, bus_clk).map_err(|_| "apple-spi: init failed")?;
     let bus: Arc<dyn SpiBus> = Arc::new(controller);
 
     DeviceManager::get_manager().register_spi_bus(phandle, bus);
