@@ -16,7 +16,7 @@ use scarlet::{
             DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent,
             InterruptCapableDevice,
         },
-        manager::{DeviceManager, DriverPriority},
+        manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -355,9 +355,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             let _ = handle.prepare_enable();
             Some(handle)
         }
-        Err(e) => {
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            scarlet::early_println!("[S5L] uart clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
             scarlet::early_println!("[S5L] warning: uart clock unavailable: {}", e);
             None
+        }
+        Err(e) => {
+            scarlet::early_println!("[S5L] uart clock lookup failed: {}", e);
+            return Err(e);
         }
     };
     let baud_clk = match DeviceManager::get_manager().resolve_clk(device, "clk_uart_baud0") {
@@ -365,9 +375,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             let _ = handle.prepare_enable();
             Some(handle)
         }
-        Err(e) => {
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            scarlet::early_println!("[S5L] baud clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
             scarlet::early_println!("[S5L] warning: baud clock unavailable: {}", e);
             None
+        }
+        Err(e) => {
+            scarlet::early_println!("[S5L] baud clock lookup failed: {}", e);
+            return Err(e);
         }
     };
 
