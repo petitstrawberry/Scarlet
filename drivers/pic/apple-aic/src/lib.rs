@@ -317,11 +317,7 @@ impl ExternalInterruptController for Aic {
     /// Enable a specific interrupt for a CPU.
     ///
     /// This sets the CPU affinity and unmasks the IRQ.
-    fn enable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn enable_interrupt(&self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -341,11 +337,7 @@ impl ExternalInterruptController for Aic {
     }
 
     /// Disable a specific interrupt for a CPU.
-    fn disable_interrupt(
-        &mut self,
-        interrupt_id: InterruptId,
-        _cpu_id: CpuId,
-    ) -> InterruptResult<()> {
+    fn disable_interrupt(&self, interrupt_id: InterruptId, _cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
 
         // Mask the IRQ
@@ -404,7 +396,7 @@ impl ExternalInterruptController for Aic {
     /// Reads the AIC_EVENT register to determine the interrupt type and number.
     /// For hardware IRQs, returns the interrupt ID.
     /// For IPIs, acknowledges them internally and returns None.
-    fn claim_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+    fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
         self.validate_cpu_id(cpu_id)?;
 
         // Read the event register
@@ -458,11 +450,7 @@ impl ExternalInterruptController for Aic {
     ///
     /// AIC auto-masks IRQs on delivery. To "complete" the interrupt,
     /// we unmask it to re-enable future occurrences.
-    fn complete_interrupt(
-        &mut self,
-        cpu_id: CpuId,
-        interrupt_id: InterruptId,
-    ) -> InterruptResult<()> {
+    fn complete_interrupt(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.validate_interrupt_id(interrupt_id)?;
 
@@ -553,7 +541,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let aic = Box::new(Aic::new(base_addr, max_cpus));
 
     // Register with interrupt manager
-    match scarlet::interrupt::register_external_controller(aic)
+    match scarlet::interrupt::InterruptManager::global()
+        .register_external_controller(aic)
         .map_err(|_| "Failed to register AIC")
     {
         Ok(()) => {
@@ -667,5 +656,6 @@ mod tests {
 #[used]
 static SCARLET_DRIVER_APPLE_AIC_ANCHOR: fn() = force_link;
 
+/// Force this crate to be linked when the driver is selected.
 #[inline(never)]
 pub fn force_link() {}
