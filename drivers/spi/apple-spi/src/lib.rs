@@ -12,7 +12,7 @@ use scarlet::device::clk::ClkHandle;
 use scarlet::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use scarlet::device::{
     DeviceInfo,
-    manager::{DeviceManager, DriverPriority},
+    manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use scarlet::time;
@@ -473,9 +473,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             let _ = handle.prepare_enable();
             Some(handle)
         }
-        Err(e) => {
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            scarlet::early_println!("[apple-spi] bus clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
             scarlet::early_println!("[apple-spi] warning: bus clock unavailable: {}", e);
             None
+        }
+        Err(e) => {
+            scarlet::early_println!("[apple-spi] bus clock lookup failed: {}", e);
+            return Err(e);
         }
     };
 
