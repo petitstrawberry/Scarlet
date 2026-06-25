@@ -25,6 +25,7 @@ pub mod power;
 pub mod remoteproc;
 pub mod spi;
 pub mod usb;
+pub mod watchdog;
 
 extern crate alloc;
 use core::any::Any;

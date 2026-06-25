@@ -70,6 +70,7 @@ use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxEr
 use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
+use super::watchdog::Watchdog;
 use crate::DeviceSource;
 
 /// Simplified shared device type
@@ -199,6 +200,7 @@ pub struct DeviceManager {
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
     remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
+    watchdogs: Mutex<Vec<Arc<dyn Watchdog>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
@@ -223,6 +225,7 @@ impl DeviceManager {
             msi_controllers: Mutex::new(BTreeMap::new()),
             mailbox_controllers: Mutex::new(BTreeMap::new()),
             remote_processors: Mutex::new(BTreeMap::new()),
+            watchdogs: Mutex::new(Vec::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
             auto_phandle_cache: Mutex::new(BTreeMap::new()),
@@ -1170,6 +1173,45 @@ impl DeviceManager {
         }
     }
 
+    /// Register a hardware watchdog timer.
+    ///
+    /// Watchdogs are stored as a flat list because they are typically singleton
+    /// devices and are not referenced by firmware phandle from other devices.
+    ///
+    /// # Arguments
+    ///
+    /// * `watchdog` - Watchdog implementation to register.
+    pub fn register_watchdog(&self, watchdog: Arc<dyn Watchdog>) {
+        self.watchdogs.lock().push(watchdog);
+    }
+
+    /// Iterate over all registered watchdog timers.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Callback invoked for each registered watchdog.
+    pub fn for_each_watchdog<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<dyn Watchdog>),
+    {
+        let watchdogs = self.watchdogs.lock();
+        for watchdog in watchdogs.iter() {
+            f(watchdog);
+        }
+    }
+
+    /// Ping all registered watchdog timers.
+    ///
+    /// Failed pings are logged and do not stop the remaining watchdogs from
+    /// being pinged.
+    pub fn ping_all_watchdogs(&self) {
+        self.for_each_watchdog(|watchdog| {
+            if let Err(error) = watchdog.ping() {
+                early_println!("watchdog: failed to ping {}: {:?}", watchdog.name(), error);
+            }
+        });
+    }
+
     /// Populates devices from the FDT (Flattened Device Tree).
     ///
     /// This function searches for the `/soc` node in the FDT and iterates through its children.
@@ -1943,6 +1985,7 @@ impl DeviceManager {
         self.msi_controllers.lock().clear();
         self.mailbox_controllers.lock().clear();
         self.remote_processors.lock().clear();
+        self.watchdogs.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
     }
 }
@@ -1959,6 +2002,7 @@ mod tests {
         RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware, RemoteprocMessage,
         RemoteprocState,
     };
+    use crate::device::watchdog::{Watchdog, WatchdogError};
     use crate::device::{GenericDevice, platform::*};
     use crate::interrupt::msi::{
         MsiAllocation, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
@@ -2067,6 +2111,50 @@ mod tests {
         clock_cells: usize,
     }
 
+    struct TestWatchdog {
+        ping_count: AtomicUsize,
+    }
+
+    impl TestWatchdog {
+        fn new() -> Self {
+            Self {
+                ping_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Watchdog for TestWatchdog {
+        fn name(&self) -> &'static str {
+            "test-watchdog"
+        }
+
+        fn start(&self, timeout_ms: u32) -> Result<(), WatchdogError> {
+            let _ = timeout_ms;
+            Ok(())
+        }
+
+        fn stop(&self) -> Result<(), WatchdogError> {
+            Ok(())
+        }
+
+        fn ping(&self) -> Result<(), WatchdogError> {
+            self.ping_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+
+        fn set_timeout(&self, timeout_ms: u32) -> Result<u32, WatchdogError> {
+            Ok(timeout_ms)
+        }
+
+        fn get_timeout(&self) -> Option<u32> {
+            Some(1000)
+        }
+    }
+
     impl TestClkProvider {
         fn new(rate: u64, clock_cells: usize) -> Self {
             Self {
@@ -2119,6 +2207,23 @@ mod tests {
         let controller = manager.get_msi_controller_by_phandle(0x50);
         assert!(controller.is_some());
         assert_eq!(controller.unwrap().name(), "test-msi");
+    }
+
+    #[test_case]
+    fn test_register_watchdog_and_ping_all() {
+        let manager = DeviceManager::new();
+        let watchdog = Arc::new(TestWatchdog::new());
+        manager.register_watchdog(watchdog.clone());
+
+        let mut count = 0;
+        manager.for_each_watchdog(|registered| {
+            assert_eq!(registered.name(), "test-watchdog");
+            count += 1;
+        });
+        assert_eq!(count, 1);
+
+        manager.ping_all_watchdogs();
+        assert_eq!(watchdog.ping_count.load(Ordering::SeqCst), 1);
     }
 
     #[test_case]
