@@ -10,14 +10,12 @@ use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio::{read32, write32};
 use scarlet::device::{
-    DeviceInfo,
     events::InterruptCapableDevice,
     gpio::{GpioController, GpioIrqTrigger, GpioPull},
     manager::{DeviceManager, DriverPriority},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
-use scarlet::driver_initcall;
-use scarlet::interrupt::{InterruptError, InterruptId, InterruptResult};
+use scarlet::interrupt::{InterruptId, InterruptManager, InterruptResult};
 use scarlet::vm;
 
 const REG_DATA_BASE: usize = 0x10_000;
@@ -228,10 +226,12 @@ impl ApplePinctrl {
                 irq_res.start as u32
             };
 
-            scarlet::interrupt::register_interrupt_device(irq_id, pinctrl.clone())
+            InterruptManager::global()
+                .register_interrupt_device(irq_id, pinctrl.clone())
                 .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
 
-            scarlet::interrupt::enable_external_interrupt(irq_id, 0)
+            InterruptManager::global()
+                .enable_external_interrupt(irq_id, 0)
                 .map_err(|_| "apple-pinctrl: failed to enable parent IRQ")?;
 
             pinctrl.parent_irqs.lock().push(irq_id);
