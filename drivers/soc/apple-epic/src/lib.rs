@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 
+use scarlet::device::remoteproc::RemoteProcessor;
 use scarlet::early_println;
 use scarlet::mem::pmm;
 use scarlet::sync::Mutex;
@@ -199,10 +200,34 @@ pub struct EpicEndpoint {
 }
 
 impl EpicEndpoint {
-    /// Create a new EPIC endpoint wrapping an AFK endpoint.
+    /// Create a new EPIC endpoint over a remote processor service.
+    ///
+    /// # Arguments
+    ///
+    /// * `remoteproc` - Remote processor exposing the AFK RTKit endpoint as a service.
+    /// * `endpoint` - RTKit endpoint number used by the EPIC-over-AFK protocol.
+    ///
+    /// # Returns
+    ///
+    /// A started EPIC endpoint ready for service discovery and commands.
+    pub fn new(remoteproc: Arc<dyn RemoteProcessor>, endpoint: u8) -> Result<Self, &'static str> {
+        let afk = Arc::new(Mutex::new(AfkEndpoint::new(remoteproc, endpoint)?));
+        afk.lock().start()?;
+        Self::from_afk(afk)
+    }
+
+    /// Create a new EPIC endpoint wrapping an existing AFK endpoint.
     ///
     /// The AFK endpoint must already be started before use.
-    pub fn new(afk: Arc<Mutex<AfkEndpoint>>) -> Result<Self, &'static str> {
+    ///
+    /// # Arguments
+    ///
+    /// * `afk` - Started AFK endpoint carrying EPIC messages.
+    ///
+    /// # Returns
+    ///
+    /// An EPIC endpoint using the supplied AFK transport.
+    pub fn from_afk(afk: Arc<Mutex<AfkEndpoint>>) -> Result<Self, &'static str> {
         let dma = EpicDmaBuffer::alloc()?;
 
         early_println!(

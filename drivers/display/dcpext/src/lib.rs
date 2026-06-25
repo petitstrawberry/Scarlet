@@ -6,16 +6,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use scarlet::sync::Mutex;
-
 use scarlet::device::graphics::FramebufferConfig;
 use scarlet::device::graphics::output::DisplayOutput;
 use scarlet::device::manager::{DeviceManager, DriverPriority};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
+use scarlet::device::remoteproc::RemoteProcessor;
 use scarlet::early_println;
 use scarlet::vm;
-use scarlet_driver_apple_afk::AfkEndpoint;
 use scarlet_driver_apple_asc::AppleAsc;
 use scarlet_driver_apple_dart::{DartPageTable, get_dart_by_phandle};
 use scarlet_driver_apple_epic::EpicEndpoint;
@@ -175,12 +173,10 @@ impl AppleDcpExt {
     }
 
     fn create_epic_endpoint(
-        rtkit: Arc<AppleRtkit>,
+        remoteproc: Arc<dyn RemoteProcessor>,
         endpoint: u8,
     ) -> Result<EpicEndpoint, &'static str> {
-        let afk = Arc::new(Mutex::new(AfkEndpoint::new(rtkit, endpoint)));
-        afk.lock().start()?;
-        EpicEndpoint::new(afk)
+        EpicEndpoint::new(remoteproc, endpoint)
     }
 
     fn wait_for_named_service(
@@ -218,9 +214,11 @@ impl AppleDcpExt {
         let (asc, rtkit) = self.create_rtkit();
         rtkit.boot()?;
 
-        let mut system_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_SYSTEM_EP)?;
-        let mut dptx_port_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_DPTX_PORT_EP)?;
-        let mut iboot_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_IBOOT_EP)?;
+        let remoteproc: Arc<dyn RemoteProcessor> = rtkit.clone();
+
+        let mut system_ep = Self::create_epic_endpoint(remoteproc.clone(), DCP_SYSTEM_EP)?;
+        let mut dptx_port_ep = Self::create_epic_endpoint(remoteproc.clone(), DCP_DPTX_PORT_EP)?;
+        let mut iboot_ep = Self::create_epic_endpoint(remoteproc, DCP_IBOOT_EP)?;
 
         Self::wait_for_named_service(&mut system_ep, SYSTEM_SERVICE_PREFIX)
             .map_err(|_| "apple-dcpext: system service not announced")?;
