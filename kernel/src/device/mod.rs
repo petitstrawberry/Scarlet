@@ -19,6 +19,7 @@ pub mod iommu;
 pub mod mailbox;
 pub mod manager;
 pub mod network;
+pub mod nvmem;
 pub mod pci;
 pub mod platform;
 pub mod power;

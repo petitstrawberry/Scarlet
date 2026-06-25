@@ -67,6 +67,8 @@ use super::iommu::{
     DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
 };
 use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
+use super::nvmem::{NvmemCell, NvmemError, NvmemProvider};
+use super::phy::{PhyError, PhyHandle, PhyProvider};
 use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
@@ -135,6 +137,16 @@ struct OwnedMailboxSpec {
     cells: Vec<u32>,
 }
 
+struct OwnedPhySpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
+struct OwnedNvmemSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
 enum ProbeOutcome {
     Probed,
     Deferred,
@@ -199,6 +211,7 @@ pub struct DeviceManager {
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
+    nvmem_providers: Mutex<BTreeMap<u32, Arc<dyn NvmemProvider>>>,
     remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
     watchdogs: Mutex<Vec<Arc<dyn Watchdog>>>,
     /* Next available device ID */
@@ -224,6 +237,7 @@ impl DeviceManager {
             iommu_controllers: Mutex::new(BTreeMap::new()),
             msi_controllers: Mutex::new(BTreeMap::new()),
             mailbox_controllers: Mutex::new(BTreeMap::new()),
+            nvmem_providers: Mutex::new(BTreeMap::new()),
             remote_processors: Mutex::new(BTreeMap::new()),
             watchdogs: Mutex::new(Vec::new()),
             next_device_id: AtomicUsize::new(1),
@@ -284,6 +298,11 @@ impl DeviceManager {
 
         let node = Self::find_node_by_phandle(fdt, phandle)?;
         Self::get_u32_prop(&node, "#mbox-cells").map(|cells| cells as usize)
+    }
+
+    fn get_nvmem_cell_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        self.get_nvmem_provider_by_phandle(phandle)
+            .map(|provider| provider.cell_cells())
     }
 
     fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
@@ -400,6 +419,34 @@ impl DeviceManager {
         Ok(specs)
     }
 
+    fn parse_nvmem_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedNvmemSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("nvmem: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            if self.get_nvmem_provider_by_phandle(phandle).is_none() {
+                return probe_defer();
+            }
+
+            let cell_cells = self.get_nvmem_cell_cells_for_phandle(phandle).unwrap_or(2);
+            if index + cell_cells > cells.len() {
+                return Err("nvmem: truncated cell specifier");
+            }
+
+            specs.push(OwnedNvmemSpec {
+                phandle,
+                cells: cells[index..index + cell_cells].to_vec(),
+            });
+            index += cell_cells;
+        }
+
+        Ok(specs)
+    }
+
     fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("clock-names")
@@ -424,6 +471,22 @@ impl DeviceManager {
             .iter()
             .position(|entry| *entry == name)
             .ok_or("mailbox: name not found")
+    }
+
+    fn nvmem_cell_name_index(
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<usize, &'static str> {
+        let names = device
+            .property("nvmem-cell-names")
+            .ok_or("nvmem: nvmem-cell-names missing")?
+            .as_string_list()
+            .ok_or("nvmem: malformed nvmem-cell-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("nvmem: cell name not found")
     }
 
     fn clk_error_to_str(error: ClkError) -> &'static str {
@@ -464,6 +527,40 @@ impl DeviceManager {
             MailboxError::HardwareError => "mailbox: hardware error",
             MailboxError::NotSupported => "mailbox: not supported",
         }
+    }
+
+    fn nvmem_error_to_str(error: NvmemError) -> &'static str {
+        match error {
+            NvmemError::NotFound => "nvmem: not found",
+            NvmemError::OutOfRange => "nvmem: out of range",
+            NvmemError::ReadFailed => "nvmem: read failed",
+            NvmemError::WriteFailed => "nvmem: write failed",
+            NvmemError::NotSupported => "nvmem: not supported",
+            NvmemError::Busy => "nvmem: busy",
+            NvmemError::HardwareError => "nvmem: hardware error",
+        }
+    }
+
+    fn resolve_nvmem_spec(
+        &self,
+        spec: &OwnedNvmemSpec,
+        name: &'static str,
+    ) -> Result<NvmemCell, &'static str> {
+        let provider = self
+            .get_nvmem_provider_by_phandle(spec.phandle)
+            .ok_or(PROBE_DEFER)?;
+        if spec.cells.len() < 2 {
+            return Err("nvmem: invalid cell specifier");
+        }
+
+        let offset = spec.cells[0] as usize;
+        let size = spec.cells[1] as usize;
+        let end = offset.checked_add(size).ok_or("nvmem: out of range")?;
+        if end > provider.size() {
+            return Err(Self::nvmem_error_to_str(NvmemError::OutOfRange));
+        }
+
+        Ok(NvmemCell::new(provider, offset, size, name))
     }
 
     fn resolve_clk_spec(&self, spec: &OwnedClkSpec) -> Result<ClkHandle, &'static str> {
@@ -821,6 +918,29 @@ impl DeviceManager {
         self.mailbox_controllers.lock().get(&phandle).cloned()
     }
 
+    /// Register an NVMEM provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the NVMEM provider node.
+    /// * `provider` - NVMEM provider implementation.
+    pub fn register_nvmem_provider(&self, phandle: u32, provider: Arc<dyn NvmemProvider>) {
+        self.nvmem_providers.lock().insert(phandle, provider);
+    }
+
+    /// Look up an NVMEM provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the NVMEM provider node.
+    ///
+    /// # Returns
+    ///
+    /// NVMEM provider registered for `phandle`, or `None` when missing.
+    pub fn get_nvmem_provider_by_phandle(&self, phandle: u32) -> Option<Arc<dyn NvmemProvider>> {
+        self.nvmem_providers.lock().get(&phandle).cloned()
+    }
+
     /// Register a remote processor by firmware phandle.
     ///
     /// # Arguments
@@ -1147,6 +1267,40 @@ impl DeviceManager {
             .map_err(Self::mailbox_error_to_str)
     }
 
+    /// Resolve a named NVMEM cell for a platform device from FDT properties.
+    ///
+    /// The resolver parses `nvmem-cells` as repeated provider specifiers. Each
+    /// specifier starts with a provider phandle followed by the provider's
+    /// `cell_cells()` values, which default to `(offset, size)`. Because the
+    /// resolved cell must own an `Arc<dyn NvmemProvider>`, this construction lives
+    /// in `DeviceManager` rather than on [`NvmemProvider`].
+    ///
+    /// Missing providers return [`probe_defer`] so platform probing can retry once
+    /// provider drivers register their NVMEM providers.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing `nvmem-cells` and `nvmem-cell-names`.
+    /// * `name` - Cell name to resolve from `nvmem-cell-names`.
+    ///
+    /// # Returns
+    ///
+    /// A cell handle backed by the registered provider.
+    pub fn resolve_nvmem_cell(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<NvmemCell, &'static str> {
+        let index = Self::nvmem_cell_name_index(device, name)?;
+        let cells = device
+            .property("nvmem-cells")
+            .ok_or("nvmem: nvmem-cells missing")?;
+        let specs = self.parse_nvmem_specs(cells.value())?;
+        let spec = specs.get(index).ok_or("nvmem: cell index out of range")?;
+
+        self.resolve_nvmem_spec(spec, "nvmem-cell")
+    }
+
     fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let Some(iommus) = device.property("iommus") else {
             return Ok(());
@@ -1161,6 +1315,14 @@ impl DeviceManager {
         };
 
         self.parse_mailbox_specs(mailboxes.value()).map(|_| ())
+    }
+
+    fn pre_probe_resolve_nvmem(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(cells) = device.property("nvmem-cells") else {
+            return Ok(());
+        };
+
+        self.parse_nvmem_specs(cells.value()).map(|_| ())
     }
 
     pub fn for_each_usb_host<F>(&self, mut f: F)
@@ -1741,6 +1903,14 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
+                    if let Err(e) = self.pre_probe_resolve_nvmem(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[nvmem] failed to resolve NVMEM cell: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
                     match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
@@ -1984,6 +2154,7 @@ impl DeviceManager {
         self.iommu_controllers.lock().clear();
         self.msi_controllers.lock().clear();
         self.mailbox_controllers.lock().clear();
+        self.nvmem_providers.lock().clear();
         self.remote_processors.lock().clear();
         self.watchdogs.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
@@ -1998,6 +2169,7 @@ mod tests {
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
     use crate::device::mailbox::{MailboxChannelId, MailboxMessage};
+    use crate::device::nvmem::NvmemProvider;
     use crate::device::remoteproc::{
         RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware, RemoteprocMessage,
         RemoteprocState,
@@ -2559,6 +2731,60 @@ mod tests {
         }
     }
 
+    struct TestNvmemProvider {
+        data: Mutex<Vec<u8>>,
+        cell_cells: usize,
+    }
+
+    impl TestNvmemProvider {
+        fn new(data: Vec<u8>) -> Self {
+            Self {
+                data: Mutex::new(data),
+                cell_cells: 2,
+            }
+        }
+    }
+
+    impl NvmemProvider for TestNvmemProvider {
+        fn name(&self) -> &'static str {
+            "test-nvmem"
+        }
+
+        fn size(&self) -> usize {
+            self.data.lock().len()
+        }
+
+        fn read(&self, offset: usize, buf: &mut [u8]) -> Result<(), NvmemError> {
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or(NvmemError::OutOfRange)?;
+            let data = self.data.lock();
+            if end > data.len() {
+                return Err(NvmemError::OutOfRange);
+            }
+
+            buf.copy_from_slice(&data[offset..end]);
+            Ok(())
+        }
+
+        fn write(&self, offset: usize, buf: &[u8]) -> Result<(), NvmemError> {
+            let end = offset
+                .checked_add(buf.len())
+                .ok_or(NvmemError::OutOfRange)?;
+            let mut data = self.data.lock();
+            if end > data.len() {
+                return Err(NvmemError::OutOfRange);
+            }
+
+            data[offset..end].copy_from_slice(buf);
+            Ok(())
+        }
+
+        fn cell_cells(&self) -> usize {
+            self.cell_cells
+        }
+    }
+
     struct TestRemoteprocService {
         id: RemoteprocServiceId,
     }
@@ -2699,6 +2925,16 @@ mod tests {
     }
 
     #[test_case]
+    fn test_register_get_nvmem_provider() {
+        let manager = DeviceManager::new();
+        manager.register_nvmem_provider(0x70, Arc::new(TestNvmemProvider::new(vec![1, 2, 3, 4])));
+
+        let resolved = manager.get_nvmem_provider_by_phandle(0x70).unwrap();
+        assert_eq!(resolved.name(), "test-nvmem");
+        assert!(manager.get_nvmem_provider_by_phandle(0x71).is_none());
+    }
+
+    #[test_case]
     fn test_register_get_remote_processor() {
         let manager = DeviceManager::new();
         manager.register_remote_processor(0x60, Arc::new(TestRemoteProcessor::new(None)));
@@ -2772,6 +3008,55 @@ mod tests {
 
         let channel = manager.request_mailbox_channel(&spec, None).unwrap();
         assert_eq!(channel.id(), MailboxChannelId(7));
+    }
+
+    #[test_case]
+    fn test_resolve_nvmem_cell_defers_when_provider_missing() {
+        let manager = DeviceManager::new();
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("nvmem-cells", &be_cells(&[0x70, 1, 2])),
+            PlatformDeviceProperty::new("nvmem-cell-names", b"serial-number\0"),
+        ]);
+
+        match manager.resolve_nvmem_cell(&device, "serial-number") {
+            Ok(_) => panic!("NVMEM cell resolved without provider"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_nvmem_cell_parses_offset_and_size() {
+        let manager = DeviceManager::new();
+        manager.register_nvmem_provider(0x70, Arc::new(TestNvmemProvider::new(vec![1, 2, 3, 4])));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("nvmem-cells", &be_cells(&[0x70, 1, 2])),
+            PlatformDeviceProperty::new("nvmem-cell-names", b"serial-number\0"),
+        ]);
+
+        let cell = manager
+            .resolve_nvmem_cell(&device, "serial-number")
+            .unwrap();
+        let mut buf = [0u8; 2];
+        cell.read(&mut buf).unwrap();
+
+        assert_eq!(cell.name(), "nvmem-cell");
+        assert_eq!(cell.size(), 2);
+        assert_eq!(buf, [2, 3]);
+    }
+
+    #[test_case]
+    fn test_resolve_nvmem_cell_rejects_out_of_range() {
+        let manager = DeviceManager::new();
+        manager.register_nvmem_provider(0x70, Arc::new(TestNvmemProvider::new(vec![1, 2, 3, 4])));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("nvmem-cells", &be_cells(&[0x70, 3, 2])),
+            PlatformDeviceProperty::new("nvmem-cell-names", b"serial-number\0"),
+        ]);
+
+        match manager.resolve_nvmem_cell(&device, "serial-number") {
+            Ok(_) => panic!("out-of-range NVMEM cell resolved"),
+            Err(err) => assert_eq!(err, "nvmem: out of range"),
+        }
     }
 
     #[test_case]
