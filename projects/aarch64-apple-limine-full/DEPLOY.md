@@ -39,7 +39,7 @@ ls /dev/cu.usbmodem*
 
 デプロイ実行：
 ```bash
-nix develop -c python3 projects/aarch64-apple-limine-full/tools/deploy_m1n1_usb.py \
+python3 projects/aarch64-apple-limine-full/tools/deploy_m1n1_usb.py \
   --no-build \
   --proxy-device /dev/cu.usbmodemC02DN1XV0KPF1 \
   --secondary-device /dev/cu.usbmodemC02DN1XV0KPF3 \
