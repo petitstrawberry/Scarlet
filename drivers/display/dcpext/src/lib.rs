@@ -13,6 +13,7 @@ use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use scarlet::device::remoteproc::RemoteProcessor;
 use scarlet::early_println;
+use scarlet::sync::Mutex;
 use scarlet::vm;
 use scarlet_driver_apple_asc::AppleAsc;
 use scarlet_driver_apple_dart::{DartPageTable, get_dart_by_phandle};
