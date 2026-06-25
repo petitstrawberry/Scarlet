@@ -12,7 +12,7 @@ use scarlet::{
     arch::mmio,
     device::{
         DeviceInfo,
-        manager::{DeviceManager, DriverPriority},
+        manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -322,9 +322,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 }
             } else {
                 early_println!(
-                    "[apple-pcie] iommu-map: DART phandle={:#x} not found",
+                    "[apple-pcie] iommu-map: DART phandle={:#x} not ready, deferring",
                     dart_phandle
                 );
+                let defer = probe_defer();
+                if let Err(e) = defer {
+                    debug_assert!(is_probe_defer(e));
+                    return Err(e);
+                }
+                return defer;
             }
         }
     }
