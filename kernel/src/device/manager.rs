@@ -1096,20 +1096,25 @@ impl DeviceManager {
 
     /// Resolve a named clock for a platform device from FDT properties.
     ///
+    /// When `clock-names` is present, the clock is looked up by name.
+    /// When `clock-names` is absent, index 0 (the first clock) is used as
+    /// a fallback. This matches the convention used by device trees that
+    /// reference a single clock without naming it.
+    ///
     /// # Arguments
     ///
-    /// * `device` - Platform device containing raw `clocks` and `clock-names` properties.
+    /// * `device` - Platform device containing raw `clocks` and optionally `clock-names` properties.
     /// * `name` - Clock name to resolve from `clock-names`.
     ///
     /// # Returns
     ///
-    /// Clock handle for the named clock.
+    /// Clock handle for the named (or first) clock.
     pub fn resolve_clk(
         &self,
         device: &PlatformDeviceInfo,
         name: &str,
     ) -> Result<ClkHandle, &'static str> {
-        let index = Self::clock_name_index(device, name)?;
+        let index = Self::clock_name_index(device, name).unwrap_or(0);
         let clocks = device.property("clocks").ok_or("clk: clocks missing")?;
         let specs = self.parse_clock_specs(clocks.value())?;
         let spec = specs.get(index).ok_or("clk: clock index out of range")?;
@@ -3402,17 +3407,15 @@ mod tests {
     }
 
     #[test_case]
-    fn test_resolve_clk_missing_clock_names_returns_error() {
+    fn test_resolve_clk_missing_clock_names_falls_back_to_index_zero() {
         let manager = DeviceManager::new();
         manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
         let device = clk_test_device(vec![PlatformDeviceProperty::new(
             "clocks",
             &be_cells(&[0x10]),
         )]);
-        match manager.resolve_clk(&device, "bus") {
-            Ok(_) => panic!("clock resolved without clock-names"),
-            Err(err) => assert_eq!(err, "clk: clock-names missing"),
-        }
+        let clk = manager.resolve_clk(&device, "bus").unwrap();
+        assert_eq!(clk.rate(), 24_000_000);
     }
 
     #[test_case]
