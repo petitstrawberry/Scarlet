@@ -12,7 +12,6 @@ use scarlet::arch::mmio;
 use scarlet::device::manager::{DeviceManager, DriverPriority};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
-use scarlet::driver_initcall;
 use scarlet::early_println;
 use scarlet::vm;
 

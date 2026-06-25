@@ -20,7 +20,7 @@ use scarlet::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    driver_initcall, early_println,
+    early_println,
 };
 
 // =============================================================================

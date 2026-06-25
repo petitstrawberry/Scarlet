@@ -13,7 +13,7 @@ use scarlet::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    driver_initcall, early_println,
+    early_println,
 };
 
 const APPLE_WDT_WD1_CTRL: usize = 0x1c;

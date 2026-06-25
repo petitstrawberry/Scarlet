@@ -8,7 +8,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
-use scarlet::device::DeviceInfo;
 use scarlet::device::events::InterruptCapableDevice;
 use scarlet::device::gpio::GpioIrqTrigger;
 use scarlet::device::input::event_device::EventDevice;

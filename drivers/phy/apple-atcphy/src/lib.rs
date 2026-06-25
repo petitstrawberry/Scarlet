@@ -17,7 +17,7 @@ use scarlet::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    driver_initcall, early_println,
+    early_println,
 };
 
 // =============================================================================
@@ -416,7 +416,7 @@ impl AppleAtcPhy {
     }
 
     fn configure_pipehandler_dp(&self, swap_lanes: bool) {
-        let (lane0, lane1) = if swap_lanes { (1, 0) } else { (0, 1) };
+        let (lane0, _lane1) = if swap_lanes { (1, 0) } else { (0, 1) };
 
         let nonselected = self.ph_read32(PIPEHANDLER_NONSELECTED_OVERRIDE);
         self.ph_write32(
@@ -426,7 +426,7 @@ impl AppleAtcPhy {
         self.ph_clear32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
 
         // Configure the DP lane
-        let dp_lane = if lane0 == 0 { 0 } else { 1 };
+        let _dp_lane = if lane0 == 0 { 0 } else { 1 };
         let mut mux = self.ph_read32(PIPEHANDLER_MUX_CTRL);
 
         mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_OFF << 3);

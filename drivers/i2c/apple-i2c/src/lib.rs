@@ -15,7 +15,6 @@ use scarlet::device::{
     manager::{DeviceManager, DriverPriority},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
-use scarlet::driver_initcall;
 use scarlet::time;
 use scarlet::vm;
 
@@ -39,7 +38,7 @@ const MRXFIFO_DATA_MASK: u32 = 0xff;
 const MRXFIFO_EMPTY: u32 = 1 << 8;
 
 const SMSTA_XIP: u32 = 1 << 28;
-const SMSTA_XEN: u32 = 1 << 27;
+const _SMSTA_XEN: u32 = 1 << 27;
 const SMSTA_JAM: u32 = 1 << 24;
 const SMSTA_MTO: u32 = 1 << 23;
 const SMSTA_MTA: u32 = 1 << 22;

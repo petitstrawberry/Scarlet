@@ -21,7 +21,6 @@ use scarlet::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    driver_initcall,
     interrupt::{InterruptId, InterruptResult},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
 };
