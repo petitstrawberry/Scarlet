@@ -137,12 +137,12 @@ struct OwnedMailboxSpec {
     cells: Vec<u32>,
 }
 
-struct OwnedPhySpec {
+struct OwnedNvmemSpec {
     phandle: u32,
     cells: Vec<u32>,
 }
 
-struct OwnedNvmemSpec {
+struct OwnedPhySpec {
     phandle: u32,
     cells: Vec<u32>,
 }
@@ -212,6 +212,7 @@ pub struct DeviceManager {
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
     nvmem_providers: Mutex<BTreeMap<u32, Arc<dyn NvmemProvider>>>,
+    phy_providers: Mutex<BTreeMap<u32, Arc<dyn PhyProvider>>>,
     remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
     watchdogs: Mutex<Vec<Arc<dyn Watchdog>>>,
     /* Next available device ID */
@@ -238,6 +239,7 @@ impl DeviceManager {
             msi_controllers: Mutex::new(BTreeMap::new()),
             mailbox_controllers: Mutex::new(BTreeMap::new()),
             nvmem_providers: Mutex::new(BTreeMap::new()),
+            phy_providers: Mutex::new(BTreeMap::new()),
             remote_processors: Mutex::new(BTreeMap::new()),
             watchdogs: Mutex::new(Vec::new()),
             next_device_id: AtomicUsize::new(1),
@@ -303,6 +305,11 @@ impl DeviceManager {
     fn get_nvmem_cell_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_nvmem_provider_by_phandle(phandle)
             .map(|provider| provider.cell_cells())
+    }
+
+    fn get_phy_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        self.get_phy_provider_by_phandle(phandle)
+            .map(|provider| provider.phy_cells())
     }
 
     fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
@@ -447,6 +454,34 @@ impl DeviceManager {
         Ok(specs)
     }
 
+    fn parse_phy_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedPhySpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("phy: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            if self.get_phy_provider_by_phandle(phandle).is_none() {
+                return probe_defer();
+            }
+
+            let phy_cells = self.get_phy_cells_for_phandle(phandle).unwrap_or(0);
+            if index + phy_cells > cells.len() {
+                return Err("phy: truncated specifier");
+            }
+
+            specs.push(OwnedPhySpec {
+                phandle,
+                cells: cells[index..index + phy_cells].to_vec(),
+            });
+            index += phy_cells;
+        }
+
+        Ok(specs)
+    }
+
     fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("clock-names")
@@ -487,6 +522,19 @@ impl DeviceManager {
             .iter()
             .position(|entry| *entry == name)
             .ok_or("nvmem: cell name not found")
+    }
+
+    fn phy_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
+        let names = device
+            .property("phy-names")
+            .ok_or("phy: phy-names missing")?
+            .as_string_list()
+            .ok_or("phy: malformed phy-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("phy: name not found")
     }
 
     fn clk_error_to_str(error: ClkError) -> &'static str {
@@ -541,6 +589,20 @@ impl DeviceManager {
         }
     }
 
+    fn phy_error_to_str(error: PhyError) -> &'static str {
+        match error {
+            PhyError::NotFound => "phy: not found",
+            PhyError::NotSupported => "phy: not supported",
+            PhyError::InvalidMode => "phy: invalid mode",
+            PhyError::PowerOnFailed => "phy: power on failed",
+            PhyError::PowerOffFailed => "phy: power off failed",
+            PhyError::ResetFailed => "phy: reset failed",
+            PhyError::Busy => "phy: busy",
+            PhyError::Timeout => "phy: timeout",
+            PhyError::HardwareError => "phy: hardware error",
+        }
+    }
+
     fn resolve_nvmem_spec(
         &self,
         spec: &OwnedNvmemSpec,
@@ -570,6 +632,15 @@ impl DeviceManager {
         provider
             .get_clk(&spec.cells)
             .map_err(Self::clk_error_to_str)
+    }
+
+    fn resolve_phy_spec(&self, spec: &OwnedPhySpec) -> Result<PhyHandle, &'static str> {
+        let provider = self
+            .get_phy_provider_by_phandle(spec.phandle)
+            .ok_or(PROBE_DEFER)?;
+        provider
+            .get_phy(&spec.cells)
+            .map_err(Self::phy_error_to_str)
     }
 
     fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
@@ -941,6 +1012,42 @@ impl DeviceManager {
         self.nvmem_providers.lock().get(&phandle).cloned()
     }
 
+    /// Register a PHY provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the PHY provider node.
+    /// * `provider` - PHY provider implementation.
+    pub fn register_phy_provider(&self, phandle: u32, provider: Arc<dyn PhyProvider>) {
+        self.phy_providers.lock().insert(phandle, provider);
+    }
+
+    /// Register a PHY controller by firmware phandle.
+    ///
+    /// This is an alias for [`Self::register_phy_provider`] matching common device-tree
+    /// terminology used by PHY controller drivers.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the PHY controller node.
+    /// * `provider` - PHY provider implementation.
+    pub fn register_phy_controller(&self, phandle: u32, provider: Arc<dyn PhyProvider>) {
+        self.register_phy_provider(phandle, provider);
+    }
+
+    /// Look up a PHY provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the PHY provider node.
+    ///
+    /// # Returns
+    ///
+    /// PHY provider registered for `phandle`, or `None` when missing.
+    pub fn get_phy_provider_by_phandle(&self, phandle: u32) -> Option<Arc<dyn PhyProvider>> {
+        self.phy_providers.lock().get(&phandle).cloned()
+    }
+
     /// Register a remote processor by firmware phandle.
     ///
     /// # Arguments
@@ -1301,6 +1408,54 @@ impl DeviceManager {
         self.resolve_nvmem_spec(spec, "nvmem-cell")
     }
 
+    /// Resolve a named PHY for a platform device from FDT properties.
+    ///
+    /// Missing providers return [`probe_defer`] so platform probing can retry once
+    /// provider drivers register their PHY providers.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing `phys` and `phy-names` properties.
+    /// * `name` - PHY name to resolve from `phy-names`.
+    ///
+    /// # Returns
+    ///
+    /// PHY handle backed by the registered provider.
+    pub fn resolve_phy(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<PhyHandle, &'static str> {
+        let index = Self::phy_name_index(device, name)?;
+        let phys = device.property("phys").ok_or("phy: phys missing")?;
+        let specs = self.parse_phy_specs(phys.value())?;
+        let spec = specs.get(index).ok_or("phy: index out of range")?;
+
+        self.resolve_phy_spec(spec)
+    }
+
+    /// Resolve a PHY for a platform device by specifier index.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `phys` property.
+    /// * `index` - Zero-based PHY specifier index to resolve.
+    ///
+    /// # Returns
+    ///
+    /// PHY handle backed by the registered provider.
+    pub fn resolve_phy_by_index(
+        &self,
+        device: &PlatformDeviceInfo,
+        index: usize,
+    ) -> Result<PhyHandle, &'static str> {
+        let phys = device.property("phys").ok_or("phy: phys missing")?;
+        let specs = self.parse_phy_specs(phys.value())?;
+        let spec = specs.get(index).ok_or("phy: index out of range")?;
+
+        self.resolve_phy_spec(spec)
+    }
+
     fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let Some(iommus) = device.property("iommus") else {
             return Ok(());
@@ -1323,6 +1478,14 @@ impl DeviceManager {
         };
 
         self.parse_nvmem_specs(cells.value()).map(|_| ())
+    }
+
+    fn pre_probe_resolve_phy(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(phys) = device.property("phys") else {
+            return Ok(());
+        };
+
+        self.parse_phy_specs(phys.value()).map(|_| ())
     }
 
     pub fn for_each_usb_host<F>(&self, mut f: F)
@@ -1911,6 +2074,14 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
+                    if let Err(e) = self.pre_probe_resolve_phy(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[phy] failed to resolve PHY: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
                     match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
@@ -2155,6 +2326,7 @@ impl DeviceManager {
         self.msi_controllers.lock().clear();
         self.mailbox_controllers.lock().clear();
         self.nvmem_providers.lock().clear();
+        self.phy_providers.lock().clear();
         self.remote_processors.lock().clear();
         self.watchdogs.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
@@ -2170,6 +2342,7 @@ mod tests {
     };
     use crate::device::mailbox::{MailboxChannelId, MailboxMessage};
     use crate::device::nvmem::NvmemProvider;
+    use crate::device::phy::{Phy, PhyMode};
     use crate::device::remoteproc::{
         RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware, RemoteprocMessage,
         RemoteprocState,
@@ -2736,6 +2909,80 @@ mod tests {
         cell_cells: usize,
     }
 
+    struct TestPhy {
+        mode: Mutex<Option<PhyMode>>,
+        power_on_count: AtomicUsize,
+    }
+
+    impl TestPhy {
+        fn new() -> Self {
+            Self {
+                mode: Mutex::new(None),
+                power_on_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Phy for TestPhy {
+        fn name(&self) -> &'static str {
+            "test-phy"
+        }
+
+        fn power_on(&self) -> Result<(), PhyError> {
+            self.power_on_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn power_off(&self) -> Result<(), PhyError> {
+            Ok(())
+        }
+
+        fn reset(&self) -> Result<(), PhyError> {
+            Ok(())
+        }
+
+        fn set_mode(&self, mode: PhyMode) -> Result<(), PhyError> {
+            *self.mode.lock() = Some(mode);
+            Ok(())
+        }
+
+        fn get_mode(&self) -> Option<PhyMode> {
+            *self.mode.lock()
+        }
+    }
+
+    struct TestPhyProvider {
+        phy: Arc<TestPhy>,
+        phy_cells: usize,
+    }
+
+    impl TestPhyProvider {
+        fn new(phy_cells: usize) -> Self {
+            Self {
+                phy: Arc::new(TestPhy::new()),
+                phy_cells,
+            }
+        }
+    }
+
+    impl PhyProvider for TestPhyProvider {
+        fn name(&self) -> &'static str {
+            "test-phy-provider"
+        }
+
+        fn phy_cells(&self) -> usize {
+            self.phy_cells
+        }
+
+        fn get_phy(&self, spec: &[u32]) -> Result<PhyHandle, PhyError> {
+            if spec.len() == self.phy_cells {
+                Ok(PhyHandle::new(self.phy.clone()))
+            } else {
+                Err(PhyError::NotFound)
+            }
+        }
+    }
+
     impl TestNvmemProvider {
         fn new(data: Vec<u8>) -> Self {
             Self {
@@ -2935,6 +3182,16 @@ mod tests {
     }
 
     #[test_case]
+    fn test_register_get_phy_provider() {
+        let manager = DeviceManager::new();
+        manager.register_phy_provider(0x80, Arc::new(TestPhyProvider::new(1)));
+
+        let resolved = manager.get_phy_provider_by_phandle(0x80).unwrap();
+        assert_eq!(resolved.name(), "test-phy-provider");
+        assert!(manager.get_phy_provider_by_phandle(0x81).is_none());
+    }
+
+    #[test_case]
     fn test_register_get_remote_processor() {
         let manager = DeviceManager::new();
         manager.register_remote_processor(0x60, Arc::new(TestRemoteProcessor::new(None)));
@@ -3056,6 +3313,49 @@ mod tests {
         match manager.resolve_nvmem_cell(&device, "serial-number") {
             Ok(_) => panic!("out-of-range NVMEM cell resolved"),
             Err(err) => assert_eq!(err, "nvmem: out of range"),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_phy_defers_when_provider_missing() {
+        let manager = DeviceManager::new();
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("phys", &be_cells(&[0x80, 1])),
+            PlatformDeviceProperty::new("phy-names", b"usb3\0"),
+        ]);
+
+        match manager.resolve_phy(&device, "usb3") {
+            Ok(_) => panic!("PHY resolved without provider"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_phy_by_name_and_index() {
+        let manager = DeviceManager::new();
+        manager.register_phy_provider(0x80, Arc::new(TestPhyProvider::new(1)));
+        let device = clk_test_device(vec![
+            PlatformDeviceProperty::new("phys", &be_cells(&[0x80, 1])),
+            PlatformDeviceProperty::new("phy-names", b"usb3\0"),
+        ]);
+
+        let by_name = manager.resolve_phy(&device, "usb3").unwrap();
+        assert!(by_name.set_mode(PhyMode::UsbHost).is_ok());
+        assert_eq!(by_name.mode(), Some(PhyMode::UsbHost));
+
+        let by_index = manager.resolve_phy_by_index(&device, 0).unwrap();
+        assert!(by_index.power_on().is_ok());
+        assert!(by_index.is_powered());
+    }
+
+    #[test_case]
+    fn test_parse_phy_specs_rejects_truncated_spec() {
+        let manager = DeviceManager::new();
+        manager.register_phy_provider(0x80, Arc::new(TestPhyProvider::new(1)));
+
+        match manager.parse_phy_specs(&be_cells(&[0x80])) {
+            Ok(_) => panic!("truncated PHY specifier unexpectedly parsed"),
+            Err(err) => assert_eq!(err, "phy: truncated specifier"),
         }
     }
 

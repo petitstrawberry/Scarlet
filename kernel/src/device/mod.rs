@@ -21,6 +21,7 @@ pub mod manager;
 pub mod network;
 pub mod nvmem;
 pub mod pci;
+pub mod phy;
 pub mod platform;
 pub mod power;
 pub mod remoteproc;
