@@ -6,8 +6,37 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::ops::{BitOr, BitOrAssign};
+#[cfg(test)]
+use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use spin::Mutex;
+
+#[cfg(not(test))]
+use crate::arch::mmio;
+
+#[cfg(test)]
+static TEST_MMIO_REG: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(not(test))]
+unsafe fn read_clk_reg(reg: usize) -> u32 {
+    unsafe { mmio::read32(reg) }
+}
+
+#[cfg(test)]
+unsafe fn read_clk_reg(_reg: usize) -> u32 {
+    TEST_MMIO_REG.load(AtomicOrdering::SeqCst)
+}
+
+#[cfg(not(test))]
+unsafe fn write_clk_reg(reg: usize, value: u32) {
+    unsafe { mmio::write32(reg, value) }
+}
+
+#[cfg(test)]
+unsafe fn write_clk_reg(_reg: usize, value: u32) {
+    TEST_MMIO_REG.store(value, AtomicOrdering::SeqCst);
+}
 
 /// Clock operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,6 +533,356 @@ impl Clk for ClkFixedRate {
     }
 }
 
+/// Clock gate that enables/disables a single bit in an MMIO register.
+pub struct ClkGate {
+    name: &'static str,
+    parent: Option<ClkHandle>,
+    reg: usize,
+    bit_idx: u32,
+    flags: ClkFlags,
+}
+
+impl ClkGate {
+    /// Create a clock gate.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static clock name.
+    /// * `parent` - Optional parent clock handle.
+    /// * `reg` - MMIO register address containing the gate bit.
+    /// * `bit_idx` - Bit position that controls this gate.
+    ///
+    /// # Returns
+    ///
+    /// A clock gate instance.
+    pub fn new(name: &'static str, parent: Option<ClkHandle>, reg: usize, bit_idx: u32) -> Self {
+        Self {
+            name,
+            parent,
+            reg,
+            bit_idx,
+            flags: ClkFlags::NONE,
+        }
+    }
+
+    /// Set behavior flags for the clock gate.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Behavior flags to associate with this clock.
+    ///
+    /// # Returns
+    ///
+    /// The updated clock gate instance.
+    pub const fn with_flags(mut self, flags: ClkFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    fn bit_mask(&self) -> u32 {
+        1 << self.bit_idx
+    }
+}
+
+impl Clk for ClkGate {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn flags(&self) -> ClkFlags {
+        self.flags
+    }
+
+    fn enable(&self) -> Result<(), ClkError> {
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register for this gate.
+        unsafe {
+            write_clk_reg(self.reg, read_clk_reg(self.reg) | self.bit_mask());
+        }
+        Ok(())
+    }
+
+    fn disable(&self) {
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register for this gate.
+        unsafe {
+            write_clk_reg(self.reg, read_clk_reg(self.reg) & !self.bit_mask());
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register for this gate.
+        unsafe { (read_clk_reg(self.reg) & self.bit_mask()) != 0 }
+    }
+
+    fn recalc_rate(&self, parent_rate: u64) -> u64 {
+        parent_rate
+    }
+
+    fn parent(&self) -> Option<ClkHandle> {
+        self.parent.clone()
+    }
+}
+
+/// Clock divider with a configurable divisor field in an MMIO register.
+pub struct ClkDivider {
+    name: &'static str,
+    parent: ClkHandle,
+    reg: usize,
+    shift: u32,
+    width: u32,
+    flags: ClkFlags,
+}
+
+impl ClkDivider {
+    /// Create a clock divider.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static clock name.
+    /// * `parent` - Parent clock handle.
+    /// * `reg` - MMIO register address containing the divider field.
+    /// * `shift` - First bit of the divider field.
+    /// * `width` - Width of the divider field in bits.
+    ///
+    /// # Returns
+    ///
+    /// A clock divider instance.
+    pub fn new(name: &'static str, parent: ClkHandle, reg: usize, shift: u32, width: u32) -> Self {
+        Self {
+            name,
+            parent,
+            reg,
+            shift,
+            width,
+            flags: ClkFlags::NONE,
+        }
+    }
+
+    /// Set behavior flags for the clock divider.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Behavior flags to associate with this clock.
+    ///
+    /// # Returns
+    ///
+    /// The updated clock divider instance.
+    pub const fn with_flags(mut self, flags: ClkFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Read the zero-based divider field as an actual divisor.
+    ///
+    /// # Returns
+    ///
+    /// Actual divisor, where register value 0 means divide by 1.
+    pub fn read_div(&self) -> u32 {
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register containing this divider field.
+        let value = unsafe { read_clk_reg(self.reg) };
+        ((value >> self.shift) & self.field_mask()) + 1
+    }
+
+    fn max_div(&self) -> u64 {
+        if self.width >= u32::BITS {
+            u32::MAX as u64 + 1
+        } else {
+            1_u64 << self.width
+        }
+    }
+
+    fn field_mask(&self) -> u32 {
+        if self.width >= u32::BITS {
+            u32::MAX
+        } else {
+            (1_u32 << self.width) - 1
+        }
+    }
+
+    fn field_value(&self, div: u64) -> u32 {
+        (div.saturating_sub(1) as u32) & self.field_mask()
+    }
+
+    fn best_div(&self, rate: u64, parent_rate: u64) -> Result<u64, ClkError> {
+        if rate == 0 {
+            return Err(ClkError::InvalidRate);
+        }
+        Ok((parent_rate / rate).clamp(1, self.max_div()))
+    }
+}
+
+impl Clk for ClkDivider {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn flags(&self) -> ClkFlags {
+        self.flags
+    }
+
+    fn enable(&self) -> Result<(), ClkError> {
+        Ok(())
+    }
+
+    fn disable(&self) {}
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    fn recalc_rate(&self, parent_rate: u64) -> u64 {
+        parent_rate / u64::from(self.read_div())
+    }
+
+    fn round_rate(&self, rate: u64, parent_rate: u64) -> Result<u64, ClkError> {
+        Ok(parent_rate / self.best_div(rate, parent_rate)?)
+    }
+
+    fn set_rate(&self, rate: u64, parent_rate: u64) -> Result<u64, ClkError> {
+        let div = self.best_div(rate, parent_rate)?;
+        let mask = self.field_mask() << self.shift;
+        let field_value = self.field_value(div) << self.shift;
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register containing this divider field.
+        unsafe {
+            let value = read_clk_reg(self.reg);
+            write_clk_reg(self.reg, (value & !mask) | field_value);
+        }
+        Ok(parent_rate / div)
+    }
+
+    fn parent(&self) -> Option<ClkHandle> {
+        Some(self.parent.clone())
+    }
+}
+
+/// Clock multiplexer that selects between multiple parent clocks.
+pub struct ClkMux {
+    name: &'static str,
+    parents: Vec<ClkHandle>,
+    reg: usize,
+    shift: u32,
+    width: u32,
+    flags: ClkFlags,
+}
+
+impl ClkMux {
+    /// Create a clock multiplexer.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Static clock name.
+    /// * `parents` - Parent clocks selectable by this mux.
+    /// * `reg` - MMIO register address containing the mux selector field.
+    /// * `shift` - First bit of the mux selector field.
+    /// * `width` - Width of the mux selector field in bits.
+    ///
+    /// # Returns
+    ///
+    /// A clock mux instance.
+    pub fn new(
+        name: &'static str,
+        parents: Vec<ClkHandle>,
+        reg: usize,
+        shift: u32,
+        width: u32,
+    ) -> Self {
+        Self {
+            name,
+            parents,
+            reg,
+            shift,
+            width,
+            flags: ClkFlags::NONE,
+        }
+    }
+
+    /// Set behavior flags for the clock mux.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Behavior flags to associate with this clock.
+    ///
+    /// # Returns
+    ///
+    /// The updated clock mux instance.
+    pub const fn with_flags(mut self, flags: ClkFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    fn field_mask(&self) -> u32 {
+        if self.width >= u32::BITS {
+            u32::MAX
+        } else {
+            (1_u32 << self.width) - 1
+        }
+    }
+
+    fn current_index(&self) -> usize {
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register containing this mux selector field.
+        let value = unsafe { read_clk_reg(self.reg) };
+        ((value >> self.shift) & self.field_mask()) as usize
+    }
+}
+
+impl Clk for ClkMux {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn flags(&self) -> ClkFlags {
+        self.flags
+    }
+
+    fn enable(&self) -> Result<(), ClkError> {
+        Ok(())
+    }
+
+    fn disable(&self) {}
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    fn recalc_rate(&self, parent_rate: u64) -> u64 {
+        parent_rate
+    }
+
+    fn round_rate(&self, rate: u64, _parent_rate: u64) -> Result<u64, ClkError> {
+        Ok(rate)
+    }
+
+    fn set_rate(&self, _rate: u64, _parent_rate: u64) -> Result<u64, ClkError> {
+        Err(ClkError::Unsupported)
+    }
+
+    fn parent(&self) -> Option<ClkHandle> {
+        self.parents.get(self.current_index()).cloned()
+    }
+
+    fn set_parent(&self, parent: ClkHandle) -> Result<(), ClkError> {
+        let idx = self
+            .parents
+            .iter()
+            .position(|candidate| Arc::ptr_eq(&candidate.state, &parent.state))
+            .ok_or(ClkError::InvalidParent)?;
+        let mask = self.field_mask() << self.shift;
+        let field_value = (idx as u32 & self.field_mask()) << self.shift;
+        // SAFETY: `self.reg` is supplied by a clock controller driver and must point to
+        // a valid 32-bit MMIO register containing this mux selector field.
+        unsafe {
+            let value = read_clk_reg(self.reg);
+            write_clk_reg(self.reg, (value & !mask) | field_value);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +1068,52 @@ mod tests {
     fn test_fixed_rate_set_rate_unsupported() {
         let clk = ClkHandle::new(Arc::new(ClkFixedRate::new("fixed", 12_000_000)));
         assert_eq!(clk.set_rate(24_000_000), Err(ClkError::Unsupported));
+    }
+
+    #[test_case]
+    fn test_gate_enable_disable() {
+        TEST_MMIO_REG.store(0, AtomicOrdering::SeqCst);
+        let gate = ClkGate::new("gate", None, 0x1000, 3);
+
+        assert!(!gate.is_enabled());
+        assert!(gate.enable().is_ok());
+        assert_eq!(TEST_MMIO_REG.load(AtomicOrdering::SeqCst), 1 << 3);
+        assert!(gate.is_enabled());
+
+        gate.disable();
+        assert_eq!(TEST_MMIO_REG.load(AtomicOrdering::SeqCst), 0);
+        assert!(!gate.is_enabled());
+    }
+
+    #[test_case]
+    fn test_divider_rate_calculation() {
+        TEST_MMIO_REG.store(3 << 4, AtomicOrdering::SeqCst);
+        let parent = ClkHandle::new(Arc::new(ClkFixedRate::new("parent", 100)));
+        let divider = ClkDivider::new("divider", parent, 0x1000, 4, 3);
+
+        assert_eq!(divider.read_div(), 4);
+        assert_eq!(divider.recalc_rate(100), 25);
+        assert_eq!(divider.round_rate(30, 100), Ok(33));
+        assert_eq!(divider.set_rate(25, 100), Ok(25));
+        assert_eq!(TEST_MMIO_REG.load(AtomicOrdering::SeqCst), 3 << 4);
+    }
+
+    #[test_case]
+    fn test_mux_parent_selection() {
+        let parent0 = ClkHandle::new(Arc::new(ClkFixedRate::new("parent0", 24)));
+        let parent1 = ClkHandle::new(Arc::new(ClkFixedRate::new("parent1", 48)));
+        TEST_MMIO_REG.store(1 << 2, AtomicOrdering::SeqCst);
+        let mux = ClkMux::new(
+            "mux",
+            alloc::vec![parent0.clone(), parent1.clone()],
+            0x1000,
+            2,
+            1,
+        );
+
+        assert_eq!(mux.parent().map(|parent| parent.name()), Some("parent1"));
+        assert_eq!(mux.set_parent(parent0), Ok(()));
+        assert_eq!(TEST_MMIO_REG.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(mux.parent().map(|parent| parent.name()), Some("parent0"));
     }
 }
