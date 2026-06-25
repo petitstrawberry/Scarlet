@@ -33,3 +33,29 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-spi-hid" = { path = "../../drivers/spi/apple-spi-hid", enabled = true }
 "scarlet-driver-dpxbar" = { path = "../../drivers/display/dpxbar", enabled = true }
 "scarlet-driver-dcpext" = { path = "../../drivers/display/dcpext", enabled = true }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-apple-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-aarch64-apple-full.img"
+cmdline = "console=ttyS0"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+

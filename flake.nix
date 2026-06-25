@@ -286,6 +286,8 @@
             pkgs.bc
             pkgs.sleuthkit
             pkgs.python3
+            pkgs.python313Packages.pyserial
+            pkgs.python313Packages.construct
             pkgs.rsync
             pkgs.ncurses
             pkgs.openssl
