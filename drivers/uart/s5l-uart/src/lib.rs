@@ -11,6 +11,7 @@ use scarlet::{
     device::{
         Device, DeviceCapability, DeviceInfo, DeviceType,
         char::CharDevice,
+        clk::ClkHandle,
         events::{
             DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent,
             InterruptCapableDevice,
@@ -23,7 +24,6 @@ use scarlet::{
     driver_initcall,
     interrupt::{InterruptId, InterruptResult},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
-    traits::serial::Serial,
 };
 
 // =============================================================================
@@ -83,16 +83,22 @@ static S5L_CAPS: [DeviceCapability; 1] = [DeviceCapability::Serial];
 
 pub struct S5lUart {
     base: usize,
+    _uart_clk: Option<ClkHandle>,
+    _baud_clk: Option<ClkHandle>,
     interrupt_id: RwLock<Option<InterruptId>>,
+    tx_lock: Mutex<()>,
     rx_buffer: Mutex<VecDeque<u8>>,
     event_emitter: Mutex<DeviceEventEmitter>,
 }
 
 impl S5lUart {
-    pub fn new(base: usize) -> Self {
+    pub fn new(base: usize, uart_clk: Option<ClkHandle>, baud_clk: Option<ClkHandle>) -> Self {
         S5lUart {
             base,
+            _uart_clk: uart_clk,
+            _baud_clk: baud_clk,
             interrupt_id: RwLock::new(None),
+            tx_lock: Mutex::new(()),
             rx_buffer: Mutex::new(VecDeque::new()),
             event_emitter: Mutex::new(DeviceEventEmitter::new()),
         }
@@ -116,7 +122,8 @@ impl S5lUart {
         let ucon = self.reg_read(UCON);
         self.reg_write(UCON, ucon | UCON_RXTHRESH_ENA | UCON_RXTO_ENA);
 
-        scarlet::interrupt::enable_external_interrupt(interrupt_id, 0)
+        scarlet::interrupt::InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, 0)
             .map_err(|_| "Failed to enable interrupt")?;
 
         Ok(())
@@ -158,32 +165,13 @@ impl S5lUart {
     }
 }
 
-impl Serial for S5lUart {
-    fn put(&self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8);
-        Ok(())
-    }
-
-    fn get(&self) -> Option<char> {
-        let mut buffer = self.rx_buffer.lock();
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte as char);
-        }
-        None
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
-        self
-    }
-}
-
 impl fmt::Write for S5lUart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
             if c == '\n' {
-                self.put('\r')?;
+                self.write_byte_internal(b'\r');
             }
-            self.put(c)?;
+            self.write_byte_internal(c as u8);
         }
         Ok(())
     }
@@ -242,8 +230,17 @@ impl CharDevice for S5lUart {
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let _lock = self.tx_lock.lock();
         self.write_byte_internal(byte);
         Ok(())
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let _lock = self.tx_lock.lock();
+        for &byte in buffer {
+            self.write_byte_internal(byte);
+        }
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -313,6 +310,7 @@ impl Selectable for S5lUart {
         _interest: scarlet::object::capability::selectable::ReadyInterest,
         _trapframe: &mut scarlet::arch::Trapframe,
         _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
     ) -> scarlet::object::capability::selectable::SelectWaitOutcome {
         scarlet::object::capability::selectable::SelectWaitOutcome::Ready
     }
@@ -325,6 +323,7 @@ unsafe impl Sync for S5lUart {}
 // Platform Device Driver Registration
 // =============================================================================
 
+/// Probe an S5L UART, enabling optional UART and baud clocks before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     scarlet::early_println!("[S5L] probe: probing device {}", device.name());
 
@@ -352,7 +351,28 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     scarlet::early_println!("[S5L] probe: mapped to {:#x}", base_addr);
 
-    let uart = Arc::new(S5lUart::new(base_addr));
+    let uart_clk = match DeviceManager::get_manager().resolve_clk(device, "uart") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) => {
+            scarlet::early_println!("[S5L] warning: uart clock unavailable: {}", e);
+            None
+        }
+    };
+    let baud_clk = match DeviceManager::get_manager().resolve_clk(device, "clk_uart_baud0") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) => {
+            scarlet::early_println!("[S5L] warning: baud clock unavailable: {}", e);
+            None
+        }
+    };
+
+    let uart = Arc::new(S5lUart::new(base_addr, uart_clk, baud_clk));
     uart.init();
 
     let irq_resources: alloc::vec::Vec<_> = device
@@ -370,8 +390,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         } else {
             scarlet::early_println!("[S5L] probe: interrupts enabled");
 
-            if let Err(e) =
-                scarlet::interrupt::register_interrupt_device(interrupt_id, uart.clone())
+            if let Err(e) = scarlet::interrupt::InterruptManager::global()
+                .register_interrupt_device(interrupt_id, uart.clone())
             {
                 scarlet::early_println!("[S5L] probe: failed to register interrupt device: {}", e);
             } else {
