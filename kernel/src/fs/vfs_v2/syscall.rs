@@ -40,10 +40,7 @@ use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
 use crate::{
     arch::Trapframe,
     fs::{AbiFileMetadata, FileType},
-    library::std::{
-        string::{cstring_to_string, parse_c_string_from_userspace},
-        usercopy::copy_to_user,
-    },
+    library::std::{string::parse_c_string_from_userspace, usercopy::copy_to_user},
     task::mytask,
 };
 
@@ -158,21 +155,17 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (file not found, permission denied, etc.)
 pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1) as u64;
 
     trapframe.increment_pc_next(task);
 
-    // Convert path bytes to string
-    let path_str: String = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let path_str: String = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
 
     let vfs_guard = task.vfs.read();
@@ -307,21 +300,17 @@ pub fn sys_vfs_create_hardlink(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (path already exists, permission denied, etc.)
 pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
     let _mode = trapframe.get_arg(1) as i32;
 
     trapframe.increment_pc_next(task);
 
-    // Convert path bytes to string
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
 
     let vfs_guard = task.vfs.read();
@@ -350,20 +339,16 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (path already exists, permission denied, etc.)
 pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
 
     trapframe.increment_pc_next(task);
 
-    // Convert path bytes to string
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
 
     let vfs_guard = task.vfs.read();
@@ -396,48 +381,32 @@ pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
 pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let source_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let target_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
-    let fstype_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(2))
-        .unwrap() as *const u8;
+    let source_ptr = trapframe.get_arg(0);
+    let target_ptr = trapframe.get_arg(1);
+    let fstype_ptr = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3) as u32;
-    let data_ptr = if trapframe.get_arg(4) == 0 {
-        core::ptr::null()
-    } else {
-        task.vm_manager
-            .translate_to_kva(trapframe.get_arg(4))
-            .unwrap() as *const u8
-    };
+    let data_ptr = trapframe.get_arg(4);
 
     trapframe.increment_pc_next(task);
 
-    // Convert paths and parameters to strings
-    let source_str = match cstring_to_string(source_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
+    let source_str = match parse_c_string_from_userspace(task, source_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
-    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
+    let target_str = match parse_c_string_from_userspace(task, target_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
-    let fstype_str = match cstring_to_string(fstype_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
+    let fstype_str = match parse_c_string_from_userspace(task, fstype_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
-    let data_str = if !data_ptr.is_null() {
-        match cstring_to_string(data_ptr, MAX_PATH_LENGTH) {
-            Ok((s, _)) => Some(s),
+    let data_str = if data_ptr != 0 {
+        match parse_c_string_from_userspace(task, data_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => Some(s),
             Err(_) => return usize::MAX,
         }
     } else {
@@ -530,21 +499,18 @@ fn create_filesystem_and_mount(
 /// * `usize::MAX` on error (path not found, filesystem busy, etc.)
 pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let target_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let target_ptr = trapframe.get_arg(0);
     let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
 
     trapframe.increment_pc_next(task);
 
-    // Convert target path to string
-    let target_str: String = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let target_str: String = match parse_c_string_from_userspace(task, target_ptr, MAX_PATH_LENGTH)
+    {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
 
     // Get VFS reference
@@ -604,34 +570,28 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (invalid path, operation not permitted, etc.)
 pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let new_root_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let old_root_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let new_root_ptr = trapframe.get_arg(0);
+    let old_root_ptr = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(&task);
 
-    // Convert new_root path to string
-    let new_root_str: String = match cstring_to_string(new_root_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs_path) => abs_path,
+    let new_root_str: String =
+        match parse_c_string_from_userspace(task, new_root_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => match to_absolute_path_v2(&task, &s) {
+                Ok(abs_path) => abs_path,
+                Err(_) => return usize::MAX,
+            },
             Err(_) => return usize::MAX,
-        },
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
+        };
 
-    // Convert old_root path to string
-    let old_root_str: String = match cstring_to_string(old_root_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs_path) => abs_path,
+    let old_root_str: String =
+        match parse_c_string_from_userspace(task, old_root_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => match to_absolute_path_v2(&task, &s) {
+                Ok(abs_path) => abs_path,
+                Err(_) => return usize::MAX,
+            },
             Err(_) => return usize::MAX,
-        },
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
+        };
 
     // Get current VFS reference - pivot_root requires isolated VFS namespace
     let current_vfs = match task.vfs.read().clone() {
@@ -741,17 +701,13 @@ fn pivot_root_in_place(
 /// * `usize::MAX` on error (path not found, not a directory, etc.)
 pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if chdir fails
     trapframe.increment_pc_next(task);
 
-    // Convert path pointer to string
-    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok(p) => p.0,
+    let path = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(p) => p,
         Err(_) => return usize::MAX,
     };
 
@@ -860,17 +816,13 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (file/directory not found, permission denied, directory not empty, etc.)
 pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if remove fails
     trapframe.increment_pc_next(task);
 
-    // Convert path pointer to Rust string
-    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
+    let path = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
@@ -914,31 +866,25 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (path already exists, permission denied, etc.)
 pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let symlink_path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let target_path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let symlink_path_ptr = trapframe.get_arg(0);
+    let target_path_ptr = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(task);
 
-    // Convert symlink path bytes to string
-    let symlink_path_str = match cstring_to_string(symlink_path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs_path) => abs_path,
+    let symlink_path_str =
+        match parse_c_string_from_userspace(task, symlink_path_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => match to_absolute_path_v2(&task, &s) {
+                Ok(abs_path) => abs_path,
+                Err(_) => return usize::MAX,
+            },
             Err(_) => return usize::MAX,
-        },
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
+        };
 
-    // Convert target path bytes to string (target can be relative, don't convert to absolute)
-    let target_path_str = match cstring_to_string(target_path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
+    let target_path_str =
+        match parse_c_string_from_userspace(task, target_path_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => s,
+            Err(_) => return usize::MAX,
+        };
 
     let vfs_guard = task.vfs.read();
     let vfs = match vfs_guard.as_ref() {
@@ -968,26 +914,20 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error (not a symlink, permission denied, etc.)
 pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let symlink_path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let buffer_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *mut u8;
+    let symlink_path_ptr = trapframe.get_arg(0);
+    let buffer_ptr = trapframe.get_arg(1);
     let buffer_size = trapframe.get_arg(2);
 
     trapframe.increment_pc_next(task);
 
-    // Convert symlink path bytes to string
-    let symlink_path_str = match cstring_to_string(symlink_path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs_path) => abs_path,
+    let symlink_path_str =
+        match parse_c_string_from_userspace(task, symlink_path_ptr, MAX_PATH_LENGTH) {
+            Ok(s) => match to_absolute_path_v2(&task, &s) {
+                Ok(abs_path) => abs_path,
+                Err(_) => return usize::MAX,
+            },
             Err(_) => return usize::MAX,
-        },
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
+        };
 
     let vfs_guard = task.vfs.read();
     let vfs = match vfs_guard.as_ref() {
@@ -1022,9 +962,8 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     let target_bytes = target.as_bytes();
     let bytes_to_copy = core::cmp::min(target_bytes.len(), buffer_size);
 
-    // Copy target to user buffer
-    unsafe {
-        core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), buffer_ptr, bytes_to_copy);
+    if copy_to_user(task, buffer_ptr, &target_bytes[..bytes_to_copy]).is_err() {
+        return usize::MAX;
     }
 
     bytes_to_copy
@@ -1046,10 +985,7 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
 /// * `usize::MAX` on error
 pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let buffer_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *mut u8;
+    let buffer_ptr = trapframe.get_arg(0);
     let buffer_size = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(task);
@@ -1064,8 +1000,8 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
     let cwd_bytes = cwd.as_bytes();
     let bytes_to_copy = core::cmp::min(cwd_bytes.len(), buffer_size);
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), buffer_ptr, bytes_to_copy);
+    if copy_to_user(task, buffer_ptr, &cwd_bytes[..bytes_to_copy]).is_err() {
+        return usize::MAX;
     }
 
     bytes_to_copy
@@ -1096,27 +1032,21 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 /// * `usize::MAX` on error
 pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let old_path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let new_path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let old_path_ptr = trapframe.get_arg(0);
+    let new_path_ptr = trapframe.get_arg(1);
 
     trapframe.increment_pc_next(task);
 
-    let old_path = match cstring_to_string(old_path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let old_path = match parse_c_string_from_userspace(task, old_path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
         },
         Err(_) => return usize::MAX,
     };
 
-    let new_path = match cstring_to_string(new_path_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+    let new_path = match parse_c_string_from_userspace(task, new_path_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
         },

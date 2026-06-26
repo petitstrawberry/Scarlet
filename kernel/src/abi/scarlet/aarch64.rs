@@ -20,7 +20,9 @@ use crate::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     ipc::event::{Event, EventContent, EventPriority, ProcessControlType},
-    late_initcall, register_abi,
+    late_initcall,
+    library::std::usercopy::{copy_from_user, copy_to_user},
+    register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
@@ -37,6 +39,9 @@ const MAX_PENDING_EVENTS: usize = 1024;
 
 /// Size of the user-visible `EventInfo` passed to Scarlet event handlers.
 const EVENT_INFO_SIZE: usize = 40;
+
+/// Size of the saved AArch64 event/signal frame on the user stack.
+const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8;
 
 /// Event handler function pointer type (user-space address)
 pub type EventHandler = usize;
@@ -202,11 +207,7 @@ impl ScarletAbi {
     pub fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
         if let Some(ptr) = self.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
-                unsafe {
-                    *(paddr as *mut i32) = 0;
-                }
-            }
+            let _ = copy_to_user(task, ptr, &0i32.to_ne_bytes());
             // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
             // on_task_exit implementation. For Scarlet Native, we just clear the value.
         }
@@ -485,7 +486,6 @@ impl ScarletAbi {
         let mut sp = trapframe.sp as usize;
 
         // trampoline(8) + subtype(8) + content_type(8) + regs(31×8) + elr(8) + sp(8) = 288
-        const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8;
         sp -= SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE;
         sp &= !0xF;
 
@@ -496,47 +496,19 @@ impl ScarletAbi {
         let trampoline_instr_0: u32 = 0xd2805068;
         let trampoline_instr_1: u32 = 0xd4000001;
 
-        unsafe {
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u32) = trampoline_instr_0;
-            *((paddr as *mut u32).add(1)) = trampoline_instr_1;
-
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 8)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut usize) = subtype;
-
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 16)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut usize) = content_type;
-
-            for i in 0..31 {
-                let paddr = task
-                    .vm_manager
-                    .translate_to_kva(frame_base + 24 + i * 8)
-                    .ok_or("Failed to translate signal frame address")?;
-                *(paddr as *mut usize) = trapframe.regs.reg[i];
-            }
-
-            // saved elr at frame_base + 24 + 248 = frame_base + 272
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 272)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u64) = trapframe.elr;
-
-            // saved sp at frame_base + 280
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 280)
-                .ok_or("Failed to translate signal frame address")?;
-            *(paddr as *mut u64) = trapframe.sp;
+        let mut frame = [0u8; SIGNAL_FRAME_SIZE];
+        frame[0..4].copy_from_slice(&trampoline_instr_0.to_ne_bytes());
+        frame[4..8].copy_from_slice(&trampoline_instr_1.to_ne_bytes());
+        frame[8..16].copy_from_slice(&subtype.to_ne_bytes());
+        frame[16..24].copy_from_slice(&content_type.to_ne_bytes());
+        for i in 0..31 {
+            let offset = 24 + i * 8;
+            frame[offset..offset + 8].copy_from_slice(&trapframe.regs.reg[i].to_ne_bytes());
+        }
+        frame[272..280].copy_from_slice(&trapframe.elr.to_ne_bytes());
+        frame[280..288].copy_from_slice(&trapframe.sp.to_ne_bytes());
+        if copy_to_user(task, frame_base, &frame).is_err() {
+            return Err("Failed to write signal frame");
         }
 
         write_event_info(task, event_info_addr, content_type, subtype)?;
@@ -568,27 +540,23 @@ impl ScarletAbi {
     ) -> Result<(), &'static str> {
         let frame_base = trapframe.sp as usize; // SP points to signal frame
 
-        unsafe {
-            for i in 0..31 {
-                let paddr = task
-                    .vm_manager
-                    .translate_to_kva(frame_base + 24 + i * 8)
-                    .ok_or("Failed to translate signal frame address")?;
-                trapframe.regs.reg[i] = *(paddr as *const usize);
-            }
+        let mut frame = [0u8; SIGNAL_FRAME_SIZE];
+        copy_from_user(task, frame_base, &mut frame).map_err(|_| "Failed to read signal frame")?;
 
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 272)
-                .ok_or("Failed to translate signal frame address")?;
-            trapframe.elr = *(paddr as *const u64);
-
-            let paddr = task
-                .vm_manager
-                .translate_to_kva(frame_base + 280)
-                .ok_or("Failed to translate signal frame address")?;
-            trapframe.sp = *(paddr as *const u64);
+        for i in 0..31 {
+            let offset = 24 + i * 8;
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&frame[offset..offset + 8]);
+            trapframe.regs.reg[i] = usize::from_ne_bytes(bytes);
         }
+
+        let mut elr_bytes = [0u8; 8];
+        elr_bytes.copy_from_slice(&frame[272..280]);
+        trapframe.elr = u64::from_ne_bytes(elr_bytes);
+
+        let mut sp_bytes = [0u8; 8];
+        sp_bytes.copy_from_slice(&frame[280..288]);
+        trapframe.sp = u64::from_ne_bytes(sp_bytes);
 
         Ok(())
     }
@@ -642,25 +610,16 @@ fn write_event_info(
     content_type: usize,
     subtype: usize,
 ) -> Result<(), &'static str> {
-    let header_addr = task
-        .vm_manager
-        .translate_to_kva(event_info_addr)
-        .ok_or("Failed to translate event info address")?;
-    // SAFETY: The translated address belongs to the current task's user stack frame.
-    unsafe {
-        *(header_addr as *mut u64) = content_type as u8 as u64;
+    let mut event_info = [0u8; EVENT_INFO_SIZE];
+    event_info[0..8].copy_from_slice(&(content_type as u8 as u64).to_ne_bytes());
+    for i in 0..4 {
+        let value = if i == 0 { subtype as u64 } else { 0 };
+        let offset = 8 + i * 8;
+        event_info[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
     }
 
-    for i in 0..4 {
-        let data_addr = task
-            .vm_manager
-            .translate_to_kva(event_info_addr + 8 + i * 8)
-            .ok_or("Failed to translate event info address")?;
-        let value = if i == 0 { subtype as u64 } else { 0 };
-        // SAFETY: Each translated slot is an aligned u64 field in EventInfo.content_data.
-        unsafe {
-            *(data_addr as *mut u64) = value;
-        }
+    if copy_to_user(task, event_info_addr, &event_info).is_err() {
+        return Err("Failed to write event info");
     }
 
     Ok(())
@@ -1307,18 +1266,11 @@ impl ScarletAbi {
                 crate::environment::PAGE_SIZE - page_off,
             );
 
-            match task.vm_manager.translate_to_kva(current_vaddr) {
-                Some(paddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            data[written..written + chunk_len].as_ptr(),
-                            paddr as *mut u8,
-                            chunk_len,
-                        );
-                    }
+            match copy_to_user(task, current_vaddr, &data[written..written + chunk_len]) {
+                Ok(()) => {
                     written += chunk_len;
                 }
-                None => return Err("Failed to translate virtual address for stack write"),
+                Err(_) => return Err("Failed to translate virtual address for stack write"),
             }
         }
 
