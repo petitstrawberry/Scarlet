@@ -44,6 +44,23 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
 
+/// Synchronize instruction fetch after writing executable memory.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
+/// * `len` - Number of bytes written.
+pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    if len == 0 {
+        return;
+    }
+
+    unsafe {
+        asm!("fence.i", options(nostack));
+    }
+}
+
 /// Per-CPU initialization for secondary CPUs.
 ///
 /// Configures trap vectors, FPU, and vector extension for the given hart.
