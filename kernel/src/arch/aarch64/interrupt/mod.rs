@@ -6,7 +6,13 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use crate::arch::get_cpu;
-use crate::interrupt::{InterruptError, controllers::LocalInterruptType};
+use crate::interrupt::{
+    InterruptError,
+    controllers::{LocalInterruptType, PendingIrq, RESCHEDULE_IPI_VIRQ},
+};
+
+/// GIC SGI used by Scarlet for scheduler reschedule IPIs.
+pub const RESCHEDULE_SGI: u32 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerInterruptRoute {
@@ -43,6 +49,19 @@ pub fn timer_external_interrupt_id() -> Option<u32> {
 
 pub fn is_arch_timer_external_interrupt(interrupt_id: u32) -> bool {
     timer_external_interrupt_id() == Some(interrupt_id)
+}
+
+/// Check whether a handled interrupt is a scheduler reschedule IPI.
+///
+/// # Arguments
+///
+/// * `pending` - Pending IRQ mapping returned by the interrupt controller.
+///
+/// # Returns
+///
+/// `true` when the interrupt should run scheduler reschedule handling.
+pub fn is_reschedule_interrupt(pending: &PendingIrq) -> bool {
+    pending.mapping.virq == RESCHEDULE_SGI || pending.mapping.virq == RESCHEDULE_IPI_VIRQ
 }
 
 pub fn interrupt_init() {

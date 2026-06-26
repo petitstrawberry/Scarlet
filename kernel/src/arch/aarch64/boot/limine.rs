@@ -4,16 +4,15 @@ use core::mem::MaybeUninit;
 use limine::mp::MpInfo;
 
 use crate::boot::limine::{
-    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
-    MODULE_REQUEST, MP_REQUEST, ensure_base_revision_supported, framebuffer_area,
-    hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
+    ensure_base_revision_supported, framebuffer_area, hhdm_physical_span, module_area,
+    reserve_front, response, select_usable_region, DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST,
+    FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST, MP_REQUEST,
 };
-use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
 use crate::environment::STACK_SIZE;
-use crate::mem::{KERNEL_STACK, init_bss};
+use crate::mem::{init_bss, KERNEL_STACK};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
-use crate::vm::vmem::MemoryArea;
-use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
+use crate::{early_println, start_ap, start_kernel, wait_for_ap_release, BootInfo, DeviceSource};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
@@ -33,8 +32,7 @@ pub fn is_hv_available() -> bool {
 unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
     naked_asm!(
         // x0 = &MpInfo (from Limine)
-        "ldr x8, [x0, #8]",         // x8 = mp_info.mpidr (offset 8)
-        "and x8, x8, #0xff",        // x8 = cpu_id
+        "ldr x8, [x0, #32]",        // x8 = mp_info.extra_argument = logical cpu_id
         // Compute stack_top = &KERNEL_STACK + STACK_SIZE * (cpu_id + 1)
         "adrp x9, {kernel_stack}",
         "add  x9, x9, #:lo12:{kernel_stack}",
@@ -80,12 +78,16 @@ fn bootstrap_aps() {
         mp_resp.cpus().len()
     );
 
-    for cpu in mp_resp.cpus() {
+    for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
         if cpu.mpidr == bsp_mpidr {
             continue;
         }
-        early_println!("[aarch64] Bootstrapping CPU mpidr={:#x}...", cpu.mpidr);
-        cpu.bootstrap(limine_ap_entry, cpu.mpidr);
+        early_println!(
+            "[aarch64] Bootstrapping CPU {} mpidr={:#x}...",
+            cpu_id,
+            cpu.mpidr
+        );
+        cpu.bootstrap(limine_ap_entry, cpu_id as u64);
     }
 }
 
@@ -118,7 +120,7 @@ pub extern "C" fn limine_entry() -> ! {
     init_bss();
     mask_exceptions();
 
-    let (el, vhe) = detect_el();
+    let (_el, vhe) = detect_el();
     unsafe {
         VHE_ENABLED = vhe;
         HV_AVAILABLE = vhe;
@@ -175,7 +177,7 @@ pub extern "C" fn limine_entry() -> ! {
     let cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
-    let cpu_id = current_cpu_id();
+    let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
     // Cache the wall-clock epoch now; the Limine response pointer is invalid
@@ -223,13 +225,25 @@ pub extern "C" fn limine_entry() -> ! {
     }
 }
 
+fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
+    if let Some(mp_resp) = MP_REQUEST.response() {
+        for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
+            if cpu.mpidr == mpidr {
+                return cpu_id;
+            }
+        }
+    }
+
+    (mpidr & 0xff) as usize
+}
+
 #[inline(always)]
-fn current_cpu_id() -> usize {
-    let mpidr: usize;
+fn current_mpidr() -> u64 {
+    let mpidr: u64;
     unsafe {
         asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack));
     }
-    mpidr & 0xff
+    mpidr
 }
 
 #[inline(always)]

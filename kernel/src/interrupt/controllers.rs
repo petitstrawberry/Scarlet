@@ -13,6 +13,12 @@ pub use super::msi::{
     MsiAllocation, MsiMessage, MsiRequest, MsiRequestFlags, MsiRequester, MsiVector,
 };
 
+/// Virtual IRQ used for controller-provided reschedule IPIs without a normal SGI virq.
+pub const RESCHEDULE_IPI_VIRQ: Virq = Virq::MAX;
+
+/// Hardware IRQ sentinel used for software IPIs that have no external IRQ line.
+pub const SOFTWARE_IPI_HWIRQ: Hwirq = Hwirq::MAX;
+
 /// Interrupt handling flow used by the interrupt core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqFlow {

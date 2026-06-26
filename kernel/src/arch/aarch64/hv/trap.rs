@@ -54,7 +54,6 @@ const TIMER_CTL_ISTATUS: u64 = 1 << 2;
 
 const GIC_DIST_SIZE: u64 = 0x1_0000;
 const GIC_CPUI_SIZE: u64 = 0x2_0000;
-const RESCHEDULE_SGI: u32 = 0;
 static UNKNOWN_GUEST_TRAP_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_sbi_timer_next_event(_next_event: u64) {}
@@ -318,9 +317,12 @@ fn handle_host_irq_from_guest(
     }
 
     let cpu_id = crate::arch::get_cpu().get_cpuid() as u32;
-    match crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id) {
-        Ok(Some(interrupt_id)) => {
-            if interrupt_id == RESCHEDULE_SGI {
+    match crate::interrupt::InterruptManager::global()
+        .claim_and_handle_pending_external_interrupt(cpu_id)
+    {
+        Ok(Some(pending)) => {
+            let interrupt_id = pending.mapping.virq;
+            if crate::arch::interrupt::is_reschedule_interrupt(&pending) {
                 crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, true);
                 return crate::sched::scheduler::has_ready_tasks(cpu_id as usize);
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {

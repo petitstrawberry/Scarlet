@@ -15,7 +15,10 @@ use scarlet::{
     early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptResult, Priority,
-        controllers::ExternalInterruptController,
+        controllers::{
+            ExternalInterruptController, IrqFlow, IrqMapping, LocalInterruptType, PendingIrq,
+            RESCHEDULE_IPI_VIRQ, SOFTWARE_IPI_HWIRQ,
+        },
     },
 };
 
@@ -231,18 +234,18 @@ impl Aic {
     ///
     /// # Arguments
     ///
-    /// * `target_cpu` - CPU ID to send the IPI to
-    pub fn send_ipi(&self, target_cpu: CpuId) {
+    /// * `target_cpu` - CPU ID to send the IPI to.
+    pub fn send_ipi_to_cpu(&self, target_cpu: CpuId) {
         if target_cpu >= self.max_cpus {
             return;
         }
-        let bit = AIC_IPI_SEND_CPU(target_cpu);
+        let bit = aic_ipi_send_cpu(target_cpu);
         unsafe {
             mmio::write32(self.reg_addr(AIC_IPI_SEND), bit);
         }
     }
 
-    /// Send a "self" IPI to the current CPU.
+    /// Send a self IPI to the current CPU.
     pub fn send_ipi_self(&self) {
         unsafe {
             mmio::write32(self.reg_addr(AIC_IPI_SEND), AIC_IPI_SELF);
@@ -251,7 +254,9 @@ impl Aic {
 
     /// Acknowledge pending IPIs.
     ///
-    /// Returns the IPI bits that were pending.
+    /// # Returns
+    ///
+    /// IPI bits that were pending before the acknowledge.
     pub fn ack_ipi(&self) -> u32 {
         unsafe {
             let pending = mmio::read32(self.reg_addr(AIC_IPI_ACK));
@@ -281,13 +286,61 @@ impl Aic {
     }
 
     /// Get the current CPU ID from AIC_WHOAMI.
+    ///
+    /// # Returns
+    ///
+    /// AIC CPU ID observed by the current CPU interface.
     pub fn whoami(&self) -> CpuId {
         unsafe { mmio::read32(self.reg_addr(AIC_WHOAMI)) }
+    }
+
+    fn claim_event(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        self.validate_cpu_id(cpu_id)?;
+
+        let event = unsafe { mmio::read32(self.reg_addr(AIC_EVENT)) };
+        let event_die = (event >> 24) & 0xFF;
+        let event_type = (event >> 16) & 0xFF;
+        let event_num = event & 0xFFFF;
+
+        if event_die != 0 {
+            return Ok(None);
+        }
+
+        match event_type {
+            AIC_EVENT_TYPE_HW => Ok(Some(PendingIrq {
+                mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
+                cpu_id,
+            })),
+            AIC_EVENT_TYPE_IPI => {
+                match event_num {
+                    AIC_EVENT_IPI_OTHER | AIC_EVENT_IPI_SELF => unsafe {
+                        let ack_bit = if event_num == AIC_EVENT_IPI_OTHER {
+                            AIC_IPI_OTHER
+                        } else {
+                            AIC_IPI_SELF
+                        };
+                        mmio::write32(self.reg_addr(AIC_IPI_ACK), ack_bit);
+                        mmio::write32(self.reg_addr(AIC_IPI_MASK_CLR), ack_bit);
+                    },
+                    _ => return Ok(None),
+                }
+
+                Ok(Some(PendingIrq {
+                    mapping: IrqMapping {
+                        virq: RESCHEDULE_IPI_VIRQ,
+                        hwirq: SOFTWARE_IPI_HWIRQ,
+                        flow: IrqFlow::FastEoi,
+                    },
+                    cpu_id,
+                }))
+            }
+            AIC_EVENT_TYPE_NONE | _ => Ok(None),
+        }
     }
 }
 
 /// Helper to create CPU bit for IPI send register.
-const fn AIC_IPI_SEND_CPU(cpu: CpuId) -> u32 {
+const fn aic_ipi_send_cpu(cpu: CpuId) -> u32 {
     1u32 << cpu
 }
 
@@ -311,6 +364,13 @@ impl ExternalInterruptController for Aic {
         self.unmask_ipis();
         scarlet::early_println!("[AIC] init: IPIs unmasked for CPU {}", cpu_id);
 
+        Ok(())
+    }
+
+    fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+        self.validate_cpu_id(cpu_id)?;
+        self.ack_ipi();
+        self.unmask_ipis();
         Ok(())
     }
 
@@ -397,53 +457,31 @@ impl ExternalInterruptController for Aic {
     /// For hardware IRQs, returns the interrupt ID.
     /// For IPIs, acknowledges them internally and returns None.
     fn claim_interrupt(&self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
-        self.validate_cpu_id(cpu_id)?;
+        Ok(self
+            .claim_event(cpu_id)?
+            .map(|pending| pending.mapping.virq))
+    }
 
-        // Read the event register
-        let event = unsafe { mmio::read32(self.reg_addr(AIC_EVENT)) };
+    fn claim_pending_irq(&self, cpu_id: CpuId) -> InterruptResult<Option<PendingIrq>> {
+        self.claim_event(cpu_id)
+    }
 
-        // Extract event type and number
-        // EVENT format: [31:24]=DIE, [23:16]=TYPE, [15:0]=NUMBER
-        let event_die = (event >> 24) & 0xFF;
-        let event_type = (event >> 16) & 0xFF;
-        let event_num = event & 0xFFFF;
-
-        // For AIC v1 (single-die), DIE should always be 0
-        // If DIE is non-zero on v1 hardware, treat as spurious
-        if event_die != 0 {
-            return Ok(None);
+    fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
+        if irq.mapping.hwirq == SOFTWARE_IPI_HWIRQ {
+            return Ok(());
         }
 
-        match event_type {
-            AIC_EVENT_TYPE_HW => {
-                // Hardware IRQ - the IRQ is auto-masked by hardware
-                Ok(Some(event_num))
-            }
-            AIC_EVENT_TYPE_IPI => {
-                // IPI - acknowledge it internally
-                match event_num {
-                    AIC_EVENT_IPI_OTHER | AIC_EVENT_IPI_SELF => {
-                        // Ack the IPI
-                        unsafe {
-                            let ack_bit = if event_num == AIC_EVENT_IPI_OTHER {
-                                AIC_IPI_OTHER
-                            } else {
-                                AIC_IPI_SELF
-                            };
-                            mmio::write32(self.reg_addr(AIC_IPI_ACK), ack_bit);
-                            // Unmask the IPI to allow future IPIs
-                            mmio::write32(self.reg_addr(AIC_IPI_MASK_CLR), ack_bit);
-                        }
-                    }
-                    _ => {}
-                }
-                Ok(None)
-            }
-            AIC_EVENT_TYPE_NONE | _ => {
-                // No event or unknown type
-                Ok(None)
-            }
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
+    }
+
+    fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
+        if ipi_type != LocalInterruptType::Software {
+            return Err(InterruptError::NotSupported);
         }
+
+        self.validate_cpu_id(target_cpu_id)?;
+        self.send_ipi_to_cpu(target_cpu_id);
+        Ok(())
     }
 
     /// Complete an interrupt (signal that handling is finished).
@@ -646,10 +684,10 @@ mod tests {
 
     #[test_case]
     fn test_ipi_send_cpu_bit() {
-        assert_eq!(AIC_IPI_SEND_CPU(0), 1);
-        assert_eq!(AIC_IPI_SEND_CPU(1), 2);
-        assert_eq!(AIC_IPI_SEND_CPU(2), 4);
-        assert_eq!(AIC_IPI_SEND_CPU(30), 1u32 << 30);
+        assert_eq!(aic_ipi_send_cpu(0), 1);
+        assert_eq!(aic_ipi_send_cpu(1), 2);
+        assert_eq!(aic_ipi_send_cpu(2), 4);
+        assert_eq!(aic_ipi_send_cpu(30), 1u32 << 30);
     }
 }
 

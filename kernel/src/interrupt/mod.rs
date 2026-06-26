@@ -277,10 +277,19 @@ impl InterruptManager {
         })
     }
 
-    pub fn claim_and_handle_external_interrupt(
+    /// Claim and handle one pending external interrupt, preserving its mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// The handled pending IRQ, or `None` when no external interrupt is pending.
+    pub fn claim_and_handle_pending_external_interrupt(
         &self,
         cpu_id: CpuId,
-    ) -> InterruptResult<Option<InterruptId>> {
+    ) -> InterruptResult<Option<controllers::PendingIrq>> {
         let pending = {
             let controllers = self.controllers().lock();
             if let Some(controller) = controllers.external_controller() {
@@ -291,12 +300,28 @@ impl InterruptManager {
         };
 
         if let Some(pending) = pending {
-            let virq = pending.mapping.virq;
             self.handle_pending_irq(pending)?;
-            Ok(Some(virq))
+            Ok(Some(pending))
         } else {
             Ok(None)
         }
+    }
+
+    /// Claim and handle one pending external interrupt.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// The handled virtual IRQ number, or `None` when no external interrupt is pending.
+    pub fn claim_and_handle_external_interrupt(
+        &self,
+        cpu_id: CpuId,
+    ) -> InterruptResult<Option<InterruptId>> {
+        self.claim_and_handle_pending_external_interrupt(cpu_id)
+            .map(|pending| pending.map(|pending| pending.mapping.virq))
     }
 
     pub fn enable_local_interrupt(
