@@ -78,8 +78,12 @@ pub fn init_arch(cpu_id: usize) {
     trap_init(aarch64);
 }
 
+/// Initialize AArch64 per-CPU state for a secondary CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the boot protocol.
 pub fn init_ap_cpu(cpu_id: usize) {
-    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
     // Get raw Aarch64 struct
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
     aarch64.cpuid = cpu_id as u64;
@@ -284,7 +288,7 @@ pub struct Trapframe {
     pub tpidrro_el0: u64,
     // exception information
     pub esr_el1: u64,
-    pub _padding: u64, // must be 304 bytes to match trampoline's sub sp, sp, #304
+    pub far_el1: u64,
 }
 
 impl Trapframe {
@@ -297,7 +301,7 @@ impl Trapframe {
             tpidr_el0: 0,
             tpidrro_el0: 0,
             esr_el1: 0,
-            _padding: 0,
+            far_el1: 0,
         }
     }
 
@@ -691,6 +695,23 @@ pub fn clean_dcache_to_pou_range(start_vaddr: usize, len: usize) {
         }
         // Ensure the clean completes before subsequent I-cache invalidation.
         asm!("dsb ishst", options(nostack));
+    }
+}
+
+/// Synchronize instruction fetch after writing executable memory.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
+/// * `len` - Number of bytes written.
+pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    clean_dcache_to_pou_range(start_vaddr, len);
+    unsafe {
+        asm!("ic ialluis", "dsb ish", "isb", options(nostack));
     }
 }
 

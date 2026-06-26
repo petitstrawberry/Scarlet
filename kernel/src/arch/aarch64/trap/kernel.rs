@@ -15,9 +15,8 @@ use core::arch::naked_asm;
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
-    unsafe {
-        naked_asm!(
-            r#"
+    naked_asm!(
+        r#"
         .align 11
         // -----------------------------------------------------------------
         // VBAR_EL1 Kernel Vector Table (2048 bytes)
@@ -135,6 +134,8 @@ pub extern "C" fn _kernel_trap_entry() {
             str x19, [sp, #264]
             mrs x19, esr_el1
             str x19, [sp, #288]
+            mrs x19, far_el1
+            str x19, [sp, #296]
 
             // Call Rust Handler
             // fn arch_kernel_trap_handler(tf: &mut Trapframe, kind: usize)
@@ -180,8 +181,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
             eret
         "#
-        );
-    }
+    );
 }
 
 // Rust側ハンドラ
