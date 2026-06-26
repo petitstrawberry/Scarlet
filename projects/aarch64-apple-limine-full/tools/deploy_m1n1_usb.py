@@ -511,7 +511,12 @@ def main():
         description="Build Scarlet, push its Limine UEFI image to Apple Silicon RAM, and boot it via m1n1 HV."
     )
     parser.add_argument("--project", default=str(PROJECT_DIR), help="Scarlet project directory")
-    parser.add_argument("--release", action="store_true", help="Build the Scarlet image in release mode")
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        default=env_flag("SCARLET_RELEASE") is True,
+        help="Build the Scarlet image in release mode",
+    )
     parser.add_argument("--no-build", action="store_true", help="Use the existing Scarlet image")
     parser.add_argument("--skip-chainload", action="store_true", help="Do not chainload fresh m1n1 before starting HV")
     parser.add_argument("--proxy-device", default=None, help="Primary m1n1 proxy UART device (auto-detected if omitted)")
