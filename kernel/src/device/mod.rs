@@ -25,6 +25,7 @@ pub mod phy;
 pub mod platform;
 pub mod power;
 pub mod remoteproc;
+pub mod reset;
 pub mod spi;
 pub mod usb;
 pub mod watchdog;

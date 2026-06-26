@@ -1,3 +1,5 @@
+//! Power-domain registration and device power sequencing.
+
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
@@ -5,12 +7,36 @@ use spin::Mutex;
 use crate::device::DeviceInfo;
 use crate::device::platform::PlatformDeviceInfo;
 
+/// Power-domain operations exposed by platform PM controllers.
 pub trait PowerDomain: Send + Sync {
+    /// Enable the power domain.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` once the domain is usable, or an error string if the
+    /// controller could not enable it.
     fn enable(&self) -> Result<(), &'static str>;
+
+    /// Disable the power domain.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` once the domain is disabled, or an error string if the
+    /// controller could not disable it.
     fn disable(&self) -> Result<(), &'static str>;
-    fn reset_assert(&self);
-    fn reset_deassert(&self);
+
+    /// Report whether the power domain is currently enabled.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the domain is active.
     fn is_enabled(&self) -> bool;
+
+    /// Return a human-readable domain label.
+    ///
+    /// # Returns
+    ///
+    /// The label supplied by the platform firmware or driver.
     fn label(&self) -> &str;
 }
 
@@ -97,7 +123,6 @@ impl PowerManager {
                 );
             }
         }
-
         Ok(())
     }
 }

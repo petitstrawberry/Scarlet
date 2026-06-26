@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
 use scarlet::device::power::PowerManager;
+use scarlet::device::reset::ResetController;
 use scarlet::{
     arch::mmio,
     device::{
@@ -61,6 +62,7 @@ struct ApplePmDomain {
     pmgr_phandle: u32,
     label: alloc::string::String,
     always_on: bool,
+    reset_cells: Option<usize>,
     index: u32,
     parent_phandles: Vec<u32>,
 }
@@ -73,12 +75,14 @@ impl ApplePmDomain {
         index: u32,
         label: alloc::string::String,
         always_on: bool,
+        reset_cells: Option<usize>,
     ) -> Self {
         Self {
             offset,
             pmgr_phandle,
             label,
             always_on,
+            reset_cells,
             index,
             parent_phandles: Vec::new(),
         }
@@ -261,20 +265,38 @@ impl scarlet::device::power::PowerDomain for ApplePmDomain {
         PmgrInstance::disable_domain(self)
     }
 
-    fn reset_assert(&self) {
-        PmgrInstance::reset_assert_domain(self)
-    }
-
-    fn reset_deassert(&self) {
-        PmgrInstance::reset_deassert_domain(self)
-    }
-
     fn is_enabled(&self) -> bool {
         PmgrInstance::is_domain_on(self)
     }
 
     fn label(&self) -> &str {
         &self.label
+    }
+}
+
+impl ResetController for ApplePmDomain {
+    fn name(&self) -> &'static str {
+        "apple-pmgr-pwrstate-reset"
+    }
+
+    fn reset_cells(&self) -> usize {
+        self.reset_cells.unwrap_or(0)
+    }
+
+    fn assert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+        if spec.len() != self.reset_cells() {
+            return Err("apple-pmgr: invalid reset specifier");
+        }
+        PmgrInstance::reset_assert_domain(self);
+        Ok(())
+    }
+
+    fn deassert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+        if spec.len() != self.reset_cells() {
+            return Err("apple-pmgr: invalid reset specifier");
+        }
+        PmgrInstance::reset_deassert_domain(self);
+        Ok(())
     }
 }
 
@@ -514,6 +536,10 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let label = String::from(label);
 
     let always_on = device.property("apple,always-on").is_some();
+    let reset_cells = device
+        .property("#reset-cells")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as usize);
 
     let pwrstate_phandle = device
         .property("phandle")
@@ -559,7 +585,8 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .parent_phandle()
         .ok_or("apple-pmgr-pwrstate: no parent phandle")?;
 
-    let mut domain = ApplePmDomain::new(offset, parent_phandle, index, label, always_on);
+    let mut domain =
+        ApplePmDomain::new(offset, parent_phandle, index, label, always_on, reset_cells);
     domain.parent_phandles = parent_phandles;
     let domain = Arc::new(domain);
     registry
@@ -574,6 +601,10 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             ph,
             Arc::clone(&domain) as Arc<dyn scarlet::device::power::PowerDomain>,
         );
+        if reset_cells.is_some() {
+            DeviceManager::get_manager()
+                .register_reset_controller(ph, Arc::clone(&domain) as Arc<dyn ResetController>);
+        }
     }
 
     Ok(())

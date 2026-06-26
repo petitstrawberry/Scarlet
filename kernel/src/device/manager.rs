@@ -70,6 +70,7 @@ use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxEr
 use super::nvmem::{NvmemCell, NvmemError, NvmemProvider};
 use super::phy::{PhyError, PhyHandle, PhyProvider};
 use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
+use super::reset::{ResetController, ResetHandle};
 use super::spi::SpiBus;
 use super::usb::UsbHostController;
 use super::watchdog::Watchdog;
@@ -147,6 +148,11 @@ struct OwnedPhySpec {
     cells: Vec<u32>,
 }
 
+struct OwnedResetSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
 enum ProbeOutcome {
     Probed,
     Deferred,
@@ -213,6 +219,7 @@ pub struct DeviceManager {
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
     nvmem_providers: Mutex<BTreeMap<u32, Arc<dyn NvmemProvider>>>,
     phy_providers: Mutex<BTreeMap<u32, Arc<dyn PhyProvider>>>,
+    reset_controllers: Mutex<BTreeMap<u32, Arc<dyn ResetController>>>,
     remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
     watchdogs: Mutex<Vec<Arc<dyn Watchdog>>>,
     /* Next available device ID */
@@ -240,6 +247,7 @@ impl DeviceManager {
             mailbox_controllers: Mutex::new(BTreeMap::new()),
             nvmem_providers: Mutex::new(BTreeMap::new()),
             phy_providers: Mutex::new(BTreeMap::new()),
+            reset_controllers: Mutex::new(BTreeMap::new()),
             remote_processors: Mutex::new(BTreeMap::new()),
             watchdogs: Mutex::new(Vec::new()),
             next_device_id: AtomicUsize::new(1),
@@ -310,6 +318,11 @@ impl DeviceManager {
     fn get_phy_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_phy_provider_by_phandle(phandle)
             .map(|provider| provider.phy_cells())
+    }
+
+    fn get_reset_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        self.get_reset_controller_by_phandle(phandle)
+            .map(|controller| controller.reset_cells())
     }
 
     fn parse_clock_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedClkSpec>, &'static str> {
@@ -482,6 +495,34 @@ impl DeviceManager {
         Ok(specs)
     }
 
+    fn parse_reset_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedResetSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("reset: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            if self.get_reset_controller_by_phandle(phandle).is_none() {
+                return probe_defer();
+            }
+
+            let reset_cells = self.get_reset_cells_for_phandle(phandle).unwrap_or(0);
+            if index + reset_cells > cells.len() {
+                return Err("reset: truncated specifier");
+            }
+
+            specs.push(OwnedResetSpec {
+                phandle,
+                cells: cells[index..index + reset_cells].to_vec(),
+            });
+            index += reset_cells;
+        }
+
+        Ok(specs)
+    }
+
     fn clock_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("clock-names")
@@ -535,6 +576,19 @@ impl DeviceManager {
             .iter()
             .position(|entry| *entry == name)
             .ok_or("phy: name not found")
+    }
+
+    fn reset_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
+        let names = device
+            .property("reset-names")
+            .ok_or("reset: reset-names missing")?
+            .as_string_list()
+            .ok_or("reset: malformed reset-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("reset: name not found")
     }
 
     fn clk_error_to_str(error: ClkError) -> &'static str {
@@ -641,6 +695,13 @@ impl DeviceManager {
         provider
             .get_phy(&spec.cells)
             .map_err(Self::phy_error_to_str)
+    }
+
+    fn resolve_reset_spec(&self, spec: &OwnedResetSpec) -> Result<ResetHandle, &'static str> {
+        let controller = self
+            .get_reset_controller_by_phandle(spec.phandle)
+            .ok_or(PROBE_DEFER)?;
+        Ok(ResetHandle::new(controller, spec.cells.clone()))
     }
 
     fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
@@ -1046,6 +1107,32 @@ impl DeviceManager {
     /// PHY provider registered for `phandle`, or `None` when missing.
     pub fn get_phy_provider_by_phandle(&self, phandle: u32) -> Option<Arc<dyn PhyProvider>> {
         self.phy_providers.lock().get(&phandle).cloned()
+    }
+
+    /// Register a reset controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the reset controller node.
+    /// * `controller` - Reset controller implementation.
+    pub fn register_reset_controller(&self, phandle: u32, controller: Arc<dyn ResetController>) {
+        self.reset_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up a reset controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the reset controller node.
+    ///
+    /// # Returns
+    ///
+    /// Reset controller registered for `phandle`, or `None` when missing.
+    pub fn get_reset_controller_by_phandle(
+        &self,
+        phandle: u32,
+    ) -> Option<Arc<dyn ResetController>> {
+        self.reset_controllers.lock().get(&phandle).cloned()
     }
 
     /// Register a remote processor by firmware phandle.
@@ -1461,6 +1548,47 @@ impl DeviceManager {
         self.resolve_phy_spec(spec)
     }
 
+    /// Resolve a named reset line for a platform device from FDT properties.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing `resets` and `reset-names` properties.
+    /// * `name` - Reset name to resolve from `reset-names`.
+    ///
+    /// # Returns
+    ///
+    /// Reset handle backed by the registered controller.
+    pub fn resolve_reset(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<ResetHandle, &'static str> {
+        let index = Self::reset_name_index(device, name)?;
+        self.resolve_reset_by_index(device, index)
+    }
+
+    /// Resolve a reset line for a platform device by specifier index.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `resets` property.
+    /// * `index` - Zero-based reset specifier index to resolve.
+    ///
+    /// # Returns
+    ///
+    /// Reset handle backed by the registered controller.
+    pub fn resolve_reset_by_index(
+        &self,
+        device: &PlatformDeviceInfo,
+        index: usize,
+    ) -> Result<ResetHandle, &'static str> {
+        let resets = device.property("resets").ok_or("reset: resets missing")?;
+        let specs = self.parse_reset_specs(resets.value())?;
+        let spec = specs.get(index).ok_or("reset: index out of range")?;
+
+        self.resolve_reset_spec(spec)
+    }
+
     fn pre_probe_resolve_iommu(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let Some(iommus) = device.property("iommus") else {
             return Ok(());
@@ -1491,6 +1619,20 @@ impl DeviceManager {
         };
 
         self.parse_phy_specs(phys.value()).map(|_| ())
+    }
+
+    fn deassert_device_resets(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(resets) = device.property("resets") else {
+            return Ok(());
+        };
+
+        let specs = self.parse_reset_specs(resets.value())?;
+        for spec in specs {
+            let reset = self.resolve_reset_spec(&spec)?;
+            reset.deassert()?;
+        }
+
+        Ok(())
     }
 
     pub fn for_each_usb_host<F>(&self, mut f: F)
@@ -2025,8 +2167,6 @@ impl DeviceManager {
                     .iter()
                     .any(|&c| device.compatible().contains(&c))
                 {
-                    early_println!("[probe] matching {} -> {}", device.name(), driver.name());
-
                     if let Err(e) =
                         crate::device::power::PowerManager::enable_device_domains(device)
                     {
@@ -2040,13 +2180,18 @@ impl DeviceManager {
                             e
                         );
                     }
-                    early_println!("[probe] power domains done for {}", device.name());
-
                     if let Err(e) = self.apply_assigned_clocks(device) {
                         if is_probe_defer(e) {
                             return ProbeOutcome::Deferred;
                         }
                         early_println!("[clk] failed to apply assigned clocks: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+                    if let Err(e) = self.deassert_device_resets(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[reset] failed to deassert device resets: {}", e);
                         return ProbeOutcome::Failed;
                     }
 
@@ -2082,7 +2227,6 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
-                    early_println!("[probe] calling probe() for {}", device.name());
                     match driver.probe(device) {
                         Ok(_) => {
                             early_println!(
@@ -2328,6 +2472,7 @@ impl DeviceManager {
         self.mailbox_controllers.lock().clear();
         self.nvmem_providers.lock().clear();
         self.phy_providers.lock().clear();
+        self.reset_controllers.lock().clear();
         self.remote_processors.lock().clear();
         self.watchdogs.lock().clear();
         self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
@@ -2348,6 +2493,7 @@ mod tests {
         RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware, RemoteprocMessage,
         RemoteprocState,
     };
+    use crate::device::reset::ResetController;
     use crate::device::watchdog::{Watchdog, WatchdogError};
     use crate::device::{GenericDevice, platform::*};
     use crate::interrupt::msi::{
@@ -2984,6 +3130,48 @@ mod tests {
         }
     }
 
+    struct TestResetController {
+        reset_cells: usize,
+        assert_count: AtomicUsize,
+        deassert_count: AtomicUsize,
+    }
+
+    impl TestResetController {
+        fn new(reset_cells: usize) -> Self {
+            Self {
+                reset_cells,
+                assert_count: AtomicUsize::new(0),
+                deassert_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ResetController for TestResetController {
+        fn name(&self) -> &'static str {
+            "test-reset"
+        }
+
+        fn reset_cells(&self) -> usize {
+            self.reset_cells
+        }
+
+        fn assert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+            if spec.len() != self.reset_cells {
+                return Err("reset: invalid specifier");
+            }
+            self.assert_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn deassert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+            if spec.len() != self.reset_cells {
+                return Err("reset: invalid specifier");
+            }
+            self.deassert_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     impl TestNvmemProvider {
         fn new(data: Vec<u8>) -> Self {
             Self {
@@ -3358,6 +3546,56 @@ mod tests {
             Ok(_) => panic!("truncated PHY specifier unexpectedly parsed"),
             Err(err) => assert_eq!(err, "phy: truncated specifier"),
         }
+    }
+
+    #[test_case]
+    fn test_parse_reset_specs_zero_cells() {
+        let manager = DeviceManager::new();
+        manager.register_reset_controller(0x90, Arc::new(TestResetController::new(0)));
+        let specs = manager.parse_reset_specs(&be_cells(&[0x90])).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].phandle, 0x90);
+        assert!(specs[0].cells.is_empty());
+    }
+
+    #[test_case]
+    fn test_parse_reset_specs_one_cell() {
+        let manager = DeviceManager::new();
+        manager.register_reset_controller(0x90, Arc::new(TestResetController::new(1)));
+        let specs = manager.parse_reset_specs(&be_cells(&[0x90, 7])).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].phandle, 0x90);
+        assert_eq!(specs[0].cells, vec![7]);
+    }
+
+    #[test_case]
+    fn test_parse_reset_specs_defer_when_provider_missing() {
+        let manager = DeviceManager::new();
+        match manager.parse_reset_specs(&be_cells(&[0x90])) {
+            Ok(_) => panic!("reset specifier unexpectedly parsed without provider"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
+    fn test_deassert_device_resets_uses_explicit_resets_only() {
+        let manager = DeviceManager::new();
+        let reset = Arc::new(TestResetController::new(0));
+        manager.register_reset_controller(0x90, reset.clone());
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "resets",
+            &be_cells(&[0x90]),
+        )]);
+
+        assert!(manager.deassert_device_resets(&device).is_ok());
+        assert_eq!(reset.deassert_count.load(Ordering::SeqCst), 1);
+
+        let power_only_device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "power-domains",
+            &be_cells(&[0x90]),
+        )]);
+        assert!(manager.deassert_device_resets(&power_only_device).is_ok());
+        assert_eq!(reset.deassert_count.load(Ordering::SeqCst), 1);
     }
 
     #[test_case]
