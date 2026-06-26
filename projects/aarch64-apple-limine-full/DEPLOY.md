@@ -61,7 +61,7 @@ deploy_m1n1_usb.py
   └─ hv.start()                   (ゲスト起動)
       → 内側 m1n1 (EL1) が U-Boot を起動
         → CONFIG_BOOTCOMMAND:
-          blkmap create s; blkmap map s 0 0x80000 mem 0x900000000
+          blkmap create s; blkmap map s 0 0x200000 mem 0x900000000
           load blkmap 0:1 ... /EFI/BOOT/BOOTAA64.EFI
           bootefi
         → Limine → Scarlet kernel

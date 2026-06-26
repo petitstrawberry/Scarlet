@@ -19,7 +19,7 @@ M1N1_DIR = PROJECT_DIR / "m1n1"
 PROXYCLIENT_DIR = M1N1_DIR / "proxyclient"
 TOOLS_DIR = PROXYCLIENT_DIR / "tools"
 DEFAULT_IMAGE_ADDR = 0x900000000
-DEFAULT_IMAGE_MAP_SIZE = 0x10000000
+DEFAULT_IMAGE_MAP_SIZE = 0x40000000
 DEFAULT_ENTRY_POINT = 0x800
 
 sys.path.append(str(PROXYCLIENT_DIR))
@@ -381,11 +381,11 @@ def launch_tmux(args):
     runner = shell_join(["env", "SCARLET_M1N1_IN_TMUX=1", *runner_command_args(args)])
     if not args.tmux_keep_on_exit:
         runner = (
-            f"{runner}; status=$?; "
-            'printf "\\nHV runner exited with status %s. Press Enter to close tmux session..." "$status"; '
+            f"{runner}; runner_status=$?; "
+            'printf "\\nHV runner exited with status %s. Press Enter to close tmux session..." "$runner_status"; '
             "read _; "
             f"tmux kill-session -t {shlex.quote(session)}; "
-            'exit "$status"'
+            'exit "$runner_status"'
         )
 
     run_checked([tmux, "new-session", "-d", "-s", session, "-n", "hv", runner], cwd=PROJECT_DIR)
