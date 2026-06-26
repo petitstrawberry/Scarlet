@@ -18,22 +18,25 @@ use scarlet::device::{
 use scarlet::interrupt::{InterruptId, InterruptManager, InterruptResult};
 use scarlet::vm;
 
-const REG_DATA_BASE: usize = 0x10_000;
-const REG_IRQ_BASE: usize = 0x20_000;
+const REG_IRQ_BASE: usize = 0x800;
+const REG_IRQ_GROUP_STRIDE: usize = 0x40;
 
-const PINCFG_FUNC_MASK: u32 = 0b111;
-const PINCFG_INPUT_ENABLE: u32 = 1 << 4;
-const PINCFG_PULL_SHIFT: u32 = 5;
-const PINCFG_PULL_MASK: u32 = 0b11 << PINCFG_PULL_SHIFT;
-
-const GPIO_DATA_OUT: u32 = 1 << 0;
-const GPIO_DATA_OUT_EN: u32 = 1 << 1;
-const GPIO_DATA_IN: u32 = 1 << 16;
-
-const IRQ_ENABLE: u32 = 1 << 0;
-const IRQ_IS_LEVEL: u32 = 1 << 1;
-const IRQ_POLARITY: u32 = 1 << 2;
-const IRQ_STATUS: u32 = 1 << 31;
+const GPIO_DATA: u32 = 1 << 0;
+const GPIO_MODE_SHIFT: u32 = 1;
+const GPIO_MODE_MASK: u32 = 0b111 << GPIO_MODE_SHIFT;
+const GPIO_MODE_OUT: u32 = 1;
+const GPIO_MODE_IN_IRQ_HI: u32 = 2;
+const GPIO_MODE_IN_IRQ_LO: u32 = 3;
+const GPIO_MODE_IN_IRQ_UP: u32 = 4;
+const GPIO_MODE_IN_IRQ_DN: u32 = 5;
+const GPIO_MODE_IN_IRQ_OFF: u32 = 7;
+const GPIO_PERIPH_SHIFT: u32 = 5;
+const GPIO_PERIPH_MASK: u32 = 0b11 << GPIO_PERIPH_SHIFT;
+const GPIO_PULL_SHIFT: u32 = 7;
+const GPIO_PULL_MASK: u32 = 0b11 << GPIO_PULL_SHIFT;
+const GPIO_INPUT_ENABLE: u32 = 1 << 9;
+const GPIO_IRQ_GROUP_SHIFT: u32 = 16;
+const GPIO_IRQ_GROUP_MASK: u32 = 0b111 << GPIO_IRQ_GROUP_SHIFT;
 
 pub struct ApplePinctrl {
     base: usize,
@@ -56,16 +59,12 @@ impl ApplePinctrl {
         pin < self.npins
     }
 
-    fn pincfg_offset(pin: u32) -> usize {
+    fn pin_offset(pin: u32) -> usize {
         (pin as usize) * 4
     }
 
-    fn data_offset(pin: u32) -> usize {
-        REG_DATA_BASE + (pin as usize) * 4
-    }
-
-    fn irq_offset(pin: u32) -> usize {
-        REG_IRQ_BASE + (pin as usize) * 4
+    fn irq_group_offset(group: u32, pin: u32) -> usize {
+        REG_IRQ_BASE + (group as usize) * REG_IRQ_GROUP_STRIDE + ((pin as usize) >> 5) * 4
     }
 
     fn read_reg(&self, offset: usize) -> u32 {
@@ -87,20 +86,37 @@ impl ApplePinctrl {
         self.write_reg(offset, value);
     }
 
+    fn mode_bits(mode: u32) -> u32 {
+        mode << GPIO_MODE_SHIFT
+    }
+
+    fn periph_bits(func: u8) -> u32 {
+        ((func as u32) & 0b11) << GPIO_PERIPH_SHIFT
+    }
+
+    fn irq_group_bits(group: u32) -> u32 {
+        (group & 0b111) << GPIO_IRQ_GROUP_SHIFT
+    }
+
+    fn irq_group(&self, pin: u32) -> u32 {
+        (self.read_reg(Self::pin_offset(pin)) & GPIO_IRQ_GROUP_MASK) >> GPIO_IRQ_GROUP_SHIFT
+    }
+
+    fn irq_status_bit(pin: u32) -> u32 {
+        1 << (pin & 31)
+    }
+
     pub fn set_direction_output(&self, pin: u32, value: bool) {
         if !self.is_valid_pin(pin) {
             return;
         }
 
-        let offset = Self::data_offset(pin);
-        let mut data = self.read_reg(offset);
-        if value {
-            data |= GPIO_DATA_OUT;
-        } else {
-            data &= !GPIO_DATA_OUT;
-        }
-        data |= GPIO_DATA_OUT_EN;
-        self.write_reg(offset, data);
+        let set = Self::mode_bits(GPIO_MODE_OUT) | if value { GPIO_DATA } else { 0 };
+        self.modify_reg(
+            Self::pin_offset(pin),
+            GPIO_PERIPH_MASK | GPIO_MODE_MASK | GPIO_DATA,
+            set,
+        );
     }
 
     pub fn set_direction_input(&self, pin: u32) {
@@ -108,8 +124,11 @@ impl ApplePinctrl {
             return;
         }
 
-        self.modify_reg(Self::data_offset(pin), GPIO_DATA_OUT_EN, 0);
-        self.modify_reg(Self::pincfg_offset(pin), 0, PINCFG_INPUT_ENABLE);
+        self.modify_reg(
+            Self::pin_offset(pin),
+            GPIO_PERIPH_MASK | GPIO_MODE_MASK | GPIO_DATA | GPIO_INPUT_ENABLE,
+            Self::mode_bits(GPIO_MODE_IN_IRQ_OFF) | GPIO_INPUT_ENABLE,
+        );
     }
 
     pub fn set_value(&self, pin: u32, value: bool) {
@@ -117,14 +136,11 @@ impl ApplePinctrl {
             return;
         }
 
-        let offset = Self::data_offset(pin);
-        let mut data = self.read_reg(offset);
-        if value {
-            data |= GPIO_DATA_OUT;
-        } else {
-            data &= !GPIO_DATA_OUT;
-        }
-        self.write_reg(offset, data);
+        self.modify_reg(
+            Self::pin_offset(pin),
+            GPIO_DATA,
+            if value { GPIO_DATA } else { 0 },
+        );
     }
 
     pub fn get_value(&self, pin: u32) -> bool {
@@ -132,7 +148,7 @@ impl ApplePinctrl {
             return false;
         }
 
-        (self.read_reg(Self::data_offset(pin)) & GPIO_DATA_IN) != 0
+        (self.read_reg(Self::pin_offset(pin)) & GPIO_DATA) != 0
     }
 
     pub fn set_pull(&self, pin: u32, pull: GpioPull) {
@@ -143,13 +159,13 @@ impl ApplePinctrl {
         let pull_bits = match pull {
             GpioPull::None => 0,
             GpioPull::Down => 1,
-            GpioPull::Up => 2,
+            GpioPull::Up => 3,
         };
 
         self.modify_reg(
-            Self::pincfg_offset(pin),
-            PINCFG_PULL_MASK,
-            pull_bits << PINCFG_PULL_SHIFT,
+            Self::pin_offset(pin),
+            GPIO_PULL_MASK,
+            pull_bits << GPIO_PULL_SHIFT,
         );
     }
 
@@ -159,9 +175,9 @@ impl ApplePinctrl {
         }
 
         self.modify_reg(
-            Self::pincfg_offset(pin),
-            PINCFG_FUNC_MASK,
-            (func as u32) & PINCFG_FUNC_MASK,
+            Self::pin_offset(pin),
+            GPIO_PERIPH_MASK | GPIO_INPUT_ENABLE,
+            Self::periph_bits(func) | GPIO_INPUT_ENABLE,
         );
     }
 
@@ -170,23 +186,19 @@ impl ApplePinctrl {
             return;
         }
 
-        let mut irq = IRQ_ENABLE;
-        match trigger {
-            GpioIrqTrigger::RisingEdge => {}
-            GpioIrqTrigger::FallingEdge => {
-                irq |= IRQ_POLARITY;
-            }
-            GpioIrqTrigger::HighLevel => {
-                irq |= IRQ_IS_LEVEL;
-            }
-            GpioIrqTrigger::LowLevel => {
-                irq |= IRQ_IS_LEVEL | IRQ_POLARITY;
-            }
-        }
+        let irq_mode = match trigger {
+            GpioIrqTrigger::RisingEdge => GPIO_MODE_IN_IRQ_UP,
+            GpioIrqTrigger::FallingEdge => GPIO_MODE_IN_IRQ_DN,
+            GpioIrqTrigger::HighLevel => GPIO_MODE_IN_IRQ_HI,
+            GpioIrqTrigger::LowLevel => GPIO_MODE_IN_IRQ_LO,
+        };
 
-        let offset = Self::irq_offset(pin);
-        self.write_reg(offset, IRQ_STATUS);
-        self.modify_reg(offset, IRQ_IS_LEVEL | IRQ_POLARITY | IRQ_ENABLE, irq);
+        self.modify_reg(
+            Self::pin_offset(pin),
+            GPIO_PERIPH_MASK | GPIO_MODE_MASK | GPIO_DATA | GPIO_INPUT_ENABLE | GPIO_IRQ_GROUP_MASK,
+            Self::mode_bits(irq_mode) | GPIO_INPUT_ENABLE | Self::irq_group_bits(0),
+        );
+        self.ack_irq(pin);
     }
 
     pub fn disable_irq(&self, pin: u32) {
@@ -194,7 +206,11 @@ impl ApplePinctrl {
             return;
         }
 
-        self.modify_reg(Self::irq_offset(pin), IRQ_ENABLE, 0);
+        self.modify_reg(
+            Self::pin_offset(pin),
+            GPIO_MODE_MASK,
+            Self::mode_bits(GPIO_MODE_IN_IRQ_OFF),
+        );
     }
 
     pub fn ack_irq(&self, pin: u32) {
@@ -202,7 +218,11 @@ impl ApplePinctrl {
             return;
         }
 
-        self.write_reg(Self::irq_offset(pin), IRQ_STATUS);
+        let group = self.irq_group(pin);
+        self.write_reg(
+            Self::irq_group_offset(group, pin),
+            Self::irq_status_bit(pin),
+        );
     }
 
     fn register_parent_irqs(
@@ -297,19 +317,32 @@ impl GpioController for ApplePinctrl {
 
 impl InterruptCapableDevice for ApplePinctrl {
     fn handle_interrupt(&self) -> InterruptResult<()> {
-        let handlers = self.irq_handlers.lock();
+        let group_count = self.parent_irqs.lock().len();
+        let group_count = if group_count == 0 { 1 } else { group_count };
+        let word_count = self.npins.div_ceil(32);
 
-        for pin in 0..self.npins {
-            let reg = self.read_reg(Self::irq_offset(pin));
-            if (reg & IRQ_STATUS) == 0 {
-                continue;
+        for group in 0..group_count {
+            for word in 0..word_count {
+                let first_pin = word * 32;
+                let offset = Self::irq_group_offset(group as u32, first_pin);
+                let mut pending = self.read_reg(offset);
+
+                while pending != 0 {
+                    let bit = pending.trailing_zeros();
+                    let pin = first_pin + bit;
+                    let status_bit = 1 << bit;
+
+                    if pin < self.npins {
+                        let handler = self.irq_handlers.lock().get(&pin).cloned();
+                        if let Some(handler) = handler {
+                            let _ = handler.handle_interrupt();
+                        }
+                    }
+
+                    self.write_reg(offset, status_bit);
+                    pending &= !status_bit;
+                }
             }
-
-            if let Some(handler) = handlers.get(&pin) {
-                let _ = handler.handle_interrupt();
-            }
-
-            self.ack_irq(pin);
         }
 
         Ok(())

@@ -132,34 +132,26 @@ impl AppleSpiController {
     }
 
     fn init_hardware(&self) -> Result<(), SpiError> {
-        scarlet::early_println!("[apple-spi] init: disable IRQs");
         self.write_reg(REG_IE_XFER, 0);
         self.write_reg(REG_IE_FIFO, 0);
         self.clear_interrupt_flags();
 
-        scarlet::early_println!("[apple-spi] init: pin configuration");
         self.write_reg(
             REG_PINCFG,
             PINCFG_KEEP_CLK | PINCFG_KEEP_CS | PINCFG_KEEP_MOSI | PINCFG_CS_IDLE_VAL,
         );
         self.write_reg(REG_SCKCFG, 0);
 
-        scarlet::early_println!("[apple-spi] init: delay configuration");
         let delay_cfg = Self::compose_delay(false, false, false, false, false, 0);
         self.write_reg(REG_WORD_DELAY, delay_cfg);
         self.write_reg(REG_DELAY_PRE, delay_cfg);
         self.write_reg(REG_DELAY_POST, delay_cfg);
 
-        scarlet::early_println!("[apple-spi] init: format");
         self.program_format(0, false)?;
-        scarlet::early_println!("[apple-spi] init: bus speed");
         let speed_hz = self.inner.lock().speed_hz;
         self.program_bus_speed(speed_hz)?;
-        scarlet::early_println!("[apple-spi] init: reset fifos");
         self.reset_fifos();
-        scarlet::early_println!("[apple-spi] init: cs inactive");
         self.set_cs_inactive();
-        scarlet::early_println!("[apple-spi] init: done");
         Ok(())
     }
 
@@ -245,16 +237,10 @@ impl AppleSpiController {
     }
 
     fn program_bus_speed(&self, hz: u32) -> Result<(), SpiError> {
-        scarlet::early_println!("[apple-spi] bus speed: hz={}", hz);
         let divider = Self::clkdiv_for_hz(hz)?;
-        scarlet::early_println!("[apple-spi] bus speed: divider={:#x}", divider);
-        scarlet::early_println!("[apple-spi] bus speed: before write clkdiv");
         self.write_reg(REG_CLKDIV, divider & CLKDIV_MASK);
-        scarlet::early_println!("[apple-spi] bus speed: after write clkdiv");
         let actual = Self::clkdiv_to_speed(divider);
-        scarlet::early_println!("[apple-spi] bus speed: before lock");
         self.inner.lock().speed_hz = actual;
-        scarlet::early_println!("[apple-spi] bus speed: after lock");
         Ok(())
     }
 
@@ -517,10 +503,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|v| v as u32)
         .ok_or("apple-spi: no phandle")?;
 
-    scarlet::early_println!("[apple-spi] probe: creating controller");
     let controller =
         AppleSpiController::new(base, bus_number, bus_clk).map_err(|_| "apple-spi: init failed")?;
-    scarlet::early_println!("[apple-spi] probe: controller created");
     let bus: Arc<dyn SpiBus> = Arc::new(controller);
 
     DeviceManager::get_manager().register_spi_bus(phandle, bus);

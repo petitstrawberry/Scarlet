@@ -31,6 +31,10 @@ const DEVICE_KEYBOARD: u8 = 0x01;
 const DEVICE_TRACKPAD: u8 = 0x02;
 const DEVICE_INFO: u8 = 0xd0;
 
+const PACKET_READ: u8 = 0x20;
+const MSG_REPORT: u8 = 0x10;
+const MSG_HEADER_SIZE: usize = 8;
+
 const FLAG_WRITE: u8 = 0x40;
 const FLAG_READ: u8 = 0x20;
 
@@ -183,8 +187,8 @@ fn hid_usage_to_key(usage: u8) -> Option<u16> {
 pub struct AppleSpiHidTransport {
     spi_bus: Arc<dyn SpiBus>,
     cs: u8,
-    device_id: u8,
-    event_device: Arc<EventDevice>,
+    keyboard_event: Arc<EventDevice>,
+    trackpad_event: Arc<EventDevice>,
     spien_gpio: (u32, Option<Arc<dyn scarlet::device::gpio::GpioController>>),
     irq_gpio: (u32, Option<Arc<dyn scarlet::device::gpio::GpioController>>),
     irq_id: Option<InterruptId>,
@@ -197,16 +201,16 @@ impl AppleSpiHidTransport {
     fn new(
         spi_bus: Arc<dyn SpiBus>,
         cs: u8,
-        device_id: u8,
-        event_device: Arc<EventDevice>,
+        keyboard_event: Arc<EventDevice>,
+        trackpad_event: Arc<EventDevice>,
         spien_gpio: (u32, Option<Arc<dyn scarlet::device::gpio::GpioController>>),
         irq_gpio: (u32, Option<Arc<dyn scarlet::device::gpio::GpioController>>),
     ) -> Self {
         Self {
             spi_bus,
             cs,
-            device_id,
-            event_device,
+            keyboard_event,
+            trackpad_event,
             spien_gpio,
             irq_gpio,
             irq_id: None,
@@ -329,6 +333,9 @@ impl AppleSpiHidTransport {
         if let Some(ref gpio) = self.spien_gpio.1 {
             let pin = self.spien_gpio.0;
             gpio.set_direction_output(pin, true);
+            udelay(5_000);
+            gpio.set_value(pin, false);
+            udelay(5_000);
             gpio.set_value(pin, true);
         } else {
             early_println!("apple-spi-hid: no GPIO controller for SPIEN, skipping power-on");
@@ -339,25 +346,49 @@ impl AppleSpiHidTransport {
             gpio.set_direction_input(self.irq_gpio.0);
         }
 
-        self.send_message(DEVICE_MGMT, &BOOT_CMD)
-            .map_err(|_| "apple-spi-hid: boot command send failed")?;
-        let _boot_resp = self
-            .recv_message()
-            .map_err(|_| "apple-spi-hid: boot response read failed")?;
+        if self.send_message(DEVICE_MGMT, &BOOT_CMD).is_ok() {
+            let _ = self.recv_message();
 
-        let info = self
-            .request_read(DEVICE_INFO)
-            .map_err(|_| "apple-spi-hid: device info read failed")?;
-        if info.len() >= 4 {
-            let status = u32::from_le_bytes([info[0], info[1], info[2], info[3]]);
-            if status != STATUS_OK {
-                return Err("apple-spi-hid: device status not ready");
+            if let Ok(info) = self.request_read(DEVICE_INFO)
+                && info.len() >= 4
+            {
+                let status = u32::from_le_bytes([info[0], info[1], info[2], info[3]]);
+                if status != STATUS_OK {
+                    early_println!(
+                        "apple-spi-hid: unexpected device status {:#x}, continuing",
+                        status
+                    );
+                }
             }
+
+            let _ = self.request_read(DEVICE_KEYBOARD);
+            let _ = self.request_read(DEVICE_TRACKPAD);
         }
 
-        let _ = self.request_read(DEVICE_KEYBOARD);
-        let _ = self.request_read(DEVICE_TRACKPAD);
         Ok(())
+    }
+
+    fn recv_report(&self) -> Result<Option<(u8, Vec<u8>)>, SpiError> {
+        let packet = self.recv_packet()?;
+        if packet[0] != PACKET_READ {
+            return Ok(None);
+        }
+
+        let message = &packet[8..254];
+        if message.len() < MSG_HEADER_SIZE || message[0] != MSG_REPORT {
+            return Ok(None);
+        }
+
+        let device_id = message[1];
+        let payload_len = u16::from_le_bytes([message[6], message[7]]) as usize;
+        if payload_len > message.len() - MSG_HEADER_SIZE {
+            return Err(SpiError::InvalidArg);
+        }
+
+        Ok(Some((
+            device_id,
+            message[MSG_HEADER_SIZE..MSG_HEADER_SIZE + payload_len].to_vec(),
+        )))
     }
 
     fn emit_key_changes(&self, new_modifiers: u8, new_keys: [u8; 6]) {
@@ -378,7 +409,7 @@ impl AppleSpiHidTransport {
             let is_pressed = (new_modifiers & bit) != 0;
             if was_pressed != is_pressed {
                 if let Some(code) = hid_usage_to_key(usage) {
-                    self.event_device.push_event(
+                    self.keyboard_event.push_event(
                         EV_KEY,
                         code,
                         if is_pressed { KEY_PRESS } else { KEY_RELEASE },
@@ -390,7 +421,7 @@ impl AppleSpiHidTransport {
         for usage in *old_keys {
             if usage != 0 && !new_keys.contains(&usage) {
                 if let Some(code) = hid_usage_to_key(usage) {
-                    self.event_device.push_event(EV_KEY, code, KEY_RELEASE);
+                    self.keyboard_event.push_event(EV_KEY, code, KEY_RELEASE);
                 }
             }
         }
@@ -398,7 +429,7 @@ impl AppleSpiHidTransport {
         for usage in new_keys {
             if usage != 0 && !old_keys.contains(&usage) {
                 if let Some(code) = hid_usage_to_key(usage) {
-                    self.event_device.push_event(EV_KEY, code, KEY_PRESS);
+                    self.keyboard_event.push_event(EV_KEY, code, KEY_PRESS);
                 }
             }
         }
@@ -412,11 +443,16 @@ impl AppleSpiHidTransport {
             return;
         }
 
-        let modifiers = report[0];
         let mut keys = [0u8; 6];
-        keys.copy_from_slice(&report[2..8]);
+        let modifiers = if report.len() >= 9 && report[0] == DEVICE_KEYBOARD {
+            keys.copy_from_slice(&report[3..9]);
+            report[1]
+        } else {
+            keys.copy_from_slice(&report[2..8]);
+            report[0]
+        };
         self.emit_key_changes(modifiers, keys);
-        self.event_device.push_event(EV_SYN, SYN_REPORT, 0);
+        self.keyboard_event.push_event(EV_SYN, SYN_REPORT, 0);
     }
 
     fn handle_trackpad_report(&self, report: &[u8]) {
@@ -433,7 +469,7 @@ impl AppleSpiHidTransport {
             let was_pressed = (*old_buttons & mask) != 0;
             let is_pressed = (buttons & mask) != 0;
             if was_pressed != is_pressed {
-                self.event_device.push_event(
+                self.trackpad_event.push_event(
                     EV_KEY,
                     code,
                     if is_pressed { KEY_PRESS } else { KEY_RELEASE },
@@ -442,18 +478,18 @@ impl AppleSpiHidTransport {
         }
 
         if dx != 0 {
-            self.event_device.push_event(EV_REL, REL_X, dx as i32);
+            self.trackpad_event.push_event(EV_REL, REL_X, dx as i32);
         }
         if dy != 0 {
-            self.event_device.push_event(EV_REL, REL_Y, dy as i32);
+            self.trackpad_event.push_event(EV_REL, REL_Y, dy as i32);
         }
 
         *old_buttons = buttons;
-        self.event_device.push_event(EV_SYN, SYN_REPORT, 0);
+        self.trackpad_event.push_event(EV_SYN, SYN_REPORT, 0);
     }
 
-    fn handle_input_report(&self, report: &[u8]) {
-        match self.device_id {
+    fn handle_input_report(&self, device_id: u8, report: &[u8]) {
+        match device_id {
             DEVICE_KEYBOARD => self.handle_keyboard_report(report),
             DEVICE_TRACKPAD => self.handle_trackpad_report(report),
             _ => {}
@@ -463,10 +499,12 @@ impl AppleSpiHidTransport {
 
 impl InterruptCapableDevice for AppleSpiHidTransport {
     fn handle_interrupt(&self) -> InterruptResult<()> {
-        let report = self
-            .recv_message()
-            .map_err(|_| InterruptError::HardwareError)?;
-        self.handle_input_report(&report);
+        if let Some((device_id, report)) = self
+            .recv_report()
+            .map_err(|_| InterruptError::HardwareError)?
+        {
+            self.handle_input_report(device_id, &report);
+        }
         Ok(())
     }
 
@@ -557,37 +595,22 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let keyboard_event = Arc::new(EventDevice::new("keyboard"));
     let trackpad_event = Arc::new(EventDevice::new("mouse"));
 
-    let keyboard = Arc::new(AppleSpiHidTransport::new(
-        spi_bus.clone(),
-        cs,
-        DEVICE_KEYBOARD,
-        keyboard_event.clone(),
-        spien_gpio.clone(),
-        irq_gpio.clone(),
-    ));
-    let trackpad = Arc::new(AppleSpiHidTransport::new(
+    let transport = Arc::new(AppleSpiHidTransport::new(
         spi_bus,
         cs,
-        DEVICE_TRACKPAD,
+        keyboard_event.clone(),
         trackpad_event.clone(),
         spien_gpio,
         irq_gpio,
     ));
 
-    keyboard.initialize()?;
+    transport.initialize()?;
 
-    if let Some(ref gpio) = keyboard.irq_gpio.1 {
-        let pin = keyboard.irq_gpio.0;
-        if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, keyboard.clone()) {
+    if let Some(ref gpio) = transport.irq_gpio.1 {
+        let pin = transport.irq_gpio.0;
+        if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, transport.clone()) {
             early_println!(
-                "[apple-spi-hid] failed to register keyboard IRQ on pin {}, deferring",
-                pin
-            );
-            return probe_defer();
-        }
-        if !gpio.request_irq(pin, GpioIrqTrigger::FallingEdge, trackpad.clone()) {
-            early_println!(
-                "[apple-spi-hid] failed to register trackpad IRQ on pin {}, deferring",
+                "[apple-spi-hid] failed to register IRQ on pin {}, deferring",
                 pin
             );
             return probe_defer();
@@ -600,8 +623,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .register_device_with_name(trackpad_event.get_name().to_string(), trackpad_event);
 
     let mut registry = HID_REGISTRY.lock();
-    registry.push(keyboard);
-    registry.push(trackpad);
+    registry.push(transport);
     Ok(())
 }
 
