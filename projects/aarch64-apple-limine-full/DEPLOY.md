@@ -67,11 +67,15 @@ deploy_m1n1_usb.py
         → Limine → Scarlet kernel
 ```
 
-## UartRouter
+## UART 操作
 
-`deploy_m1n1_usb.py` は secondary UART デバイスをバックグラウンドスレッドでキャプチャする。ゲストの UART 出力がそのまま stdout に出る。
+対話端末から実行した場合、`deploy_m1n1_usb.py` は tmux を起動し、HV/m1n1 操作用ペインと secondary UART の UART console ペインを左右に分ける。UART console ペインは picocom を `--omap crlf --imap lfcrlf -b 500000` 相当で起動する。
 
-`--uart-log file.log` でファイルにも保存可能。
+UART デバイスは chainload/reboot の途中で一度消えることがあるため、右ペインでは `deploy_m1n1_usb.py --uart-console-only` が親プロセスとして残り、picocom が終了しても再接続し続ける。止める場合は UART ペインで Ctrl-C を押す。
+
+secondary UART が既に別プロセスで開かれている場合は、新しい picocom ペインを起動しない。従来通り stdout に UART を混ぜたい場合は `--no-tmux` を付ける。
+
+`--uart-log file.log` で UART 出力をファイルにも保存可能。
 
 ## トラブルシューティング
 

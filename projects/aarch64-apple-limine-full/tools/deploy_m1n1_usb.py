@@ -6,6 +6,8 @@ import argparse
 import os
 import pathlib
 import platform
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -80,6 +82,74 @@ def run_checked(cmd, *, cwd=REPO_ROOT, env=None):
     subprocess.run([str(part) for part in cmd], cwd=cwd, env=env, check=True)
 
 
+def run_checked_capture(cmd, *, cwd=REPO_ROOT, env=None, echo=True):
+    if echo:
+        print("+ " + " ".join(str(part) for part in cmd))
+    return subprocess.run(
+        [str(part) for part in cmd],
+        cwd=cwd,
+        env=env,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def timeout_deadline(timeout):
+    if timeout is None:
+        return None
+    return time.monotonic() + timeout
+
+
+def timeout_remaining(deadline):
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def retry_sleep(deadline, interval=1.0):
+    remaining = timeout_remaining(deadline)
+    if remaining is not None and remaining <= 0:
+        return
+    time.sleep(interval if remaining is None else min(interval, remaining))
+
+
+def summarize_failure(exc):
+    for text in (getattr(exc, "stderr", None), getattr(exc, "output", None), str(exc)):
+        if not text:
+            continue
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+    return type(exc).__name__
+
+
+def env_flag(name):
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def shell_join(cmd):
+    return shlex.join(str(part) for part in cmd)
+
+
+def serial_device_busy(device):
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return False
+    result = subprocess.run(
+        [lsof, str(device)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 class UartRouter:
     def __init__(self, device, logfile=None, baudrate=500000):
         self.device = device
@@ -93,6 +163,7 @@ class UartRouter:
 
     def close(self):
         self.stop.set()
+        self.thread.join(timeout=2)
 
     def _run(self):
         import serial
@@ -134,20 +205,264 @@ def build_image(args):
 def chainload(args):
     env = os.environ.copy()
     env["M1N1DEVICE"] = args.proxy_device
-    run_checked([sys.executable, TOOLS_DIR / "chainload.py", "-r", args.m1n1], cwd=REPO_ROOT, env=env)
+    cmd = [sys.executable, TOOLS_DIR / "chainload.py", "-r", args.m1n1]
+    deadline = timeout_deadline(args.connect_timeout)
+    attempt = 1
+    print("+ " + " ".join(str(part) for part in cmd))
+
+    while True:
+        try:
+            result = run_checked_capture(cmd, cwd=REPO_ROOT, env=env, echo=False)
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            return
+        except subprocess.CalledProcessError as exc:
+            remaining = timeout_remaining(deadline)
+            if remaining is not None and remaining <= 0:
+                raise
+            suffix = "" if remaining is None else f" ({remaining:.0f}s left)"
+            print(
+                f"m1n1 chainload not ready on attempt {attempt}: "
+                f"{summarize_failure(exc)}; retrying{suffix}",
+                file=sys.stderr,
+            )
+            attempt += 1
+            retry_sleep(deadline)
+
+
+def runner_command_args(args):
+    cmd = [
+        sys.executable,
+        pathlib.Path(__file__).resolve(),
+        "--project",
+        args.project,
+        "--proxy-device",
+        args.proxy_device,
+        "--secondary-device",
+        str(args.secondary_device),
+        "--m1n1",
+        args.m1n1,
+        "--payload",
+        args.payload,
+        "--machine",
+        args.machine,
+        "--image",
+        args.image,
+        "--image-addr",
+        hex(args.image_addr),
+        "--image-map-size",
+        hex(args.image_map_size),
+        "--entry-point",
+        hex(args.entry_point),
+        "--uart-baudrate",
+        str(args.uart_baudrate),
+        "--no-tmux",
+        "--no-uart",
+    ]
+    if args.release:
+        cmd.append("--release")
+    if args.no_build:
+        cmd.append("--no-build")
+    if args.skip_chainload:
+        cmd.append("--skip-chainload")
+    if args.connect_timeout is not None:
+        cmd.extend(["--connect-timeout", str(args.connect_timeout)])
+    return cmd
+
+
+def picocom_command_args(args):
+    picocom = shutil.which(args.picocom) or args.picocom
+    cmd = [
+        picocom,
+        "--omap",
+        "crlf",
+        "--imap",
+        "lfcrlf",
+        "--baud",
+        str(args.uart_baudrate),
+    ]
+    if args.uart_log:
+        cmd.extend(["--logfile", args.uart_log])
+    cmd.append(str(args.secondary_device))
+    return cmd
+
+
+def uart_console_command_args(args):
+    cmd = [
+        sys.executable,
+        pathlib.Path(__file__).resolve(),
+        "--uart-console-only",
+        "--secondary-device",
+        str(args.secondary_device),
+        "--uart-baudrate",
+        str(args.uart_baudrate),
+        "--picocom",
+        args.picocom,
+        "--no-tmux",
+    ]
+    if args.uart_log:
+        cmd.extend(["--uart-log", args.uart_log])
+    if args.connect_timeout is not None:
+        cmd.extend(["--connect-timeout", str(args.connect_timeout)])
+    return cmd
+
+
+def run_uart_console(args):
+    if not args.secondary_device:
+        _, args.secondary_device = wait_for_devices(args.connect_timeout)
+    args.secondary_device = pathlib.Path(args.secondary_device)
+
+    if not shutil.which(args.picocom):
+        raise FileNotFoundError(f"picocom not found: {args.picocom}")
+
+    first_connect = True
+    print(f"UART console on {args.secondary_device}")
+    print("picocom restarts across USB reconnects. Press Ctrl-C in this pane to stop.")
+
+    while True:
+        try:
+            wait_for_device(
+                args.secondary_device,
+                args.connect_timeout if first_connect else None,
+            )
+            cmd = picocom_command_args(args)
+            print("+ " + " ".join(str(part) for part in cmd))
+            status = subprocess.run([str(part) for part in cmd], check=False).returncode
+            first_connect = False
+            print(f"picocom exited with status {status}; reconnecting in 1s")
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nUART console stopped")
+            return
+
+
+def tmux_session_exists(tmux, session):
+    return (
+        subprocess.run(
+            [tmux, "has-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def unique_tmux_session(tmux, requested):
+    if not tmux_session_exists(tmux, requested):
+        return requested
+    index = 1
+    while True:
+        candidate = f"{requested}-{index}"
+        if not tmux_session_exists(tmux, candidate):
+            print(f"tmux session '{requested}' already exists; using '{candidate}'")
+            return candidate
+        index += 1
+
+
+def ensure_usb_devices(args):
+    if not args.proxy_device or not args.secondary_device:
+        args.proxy_device, args.secondary_device = wait_for_devices(args.connect_timeout)
+    args.secondary_device = pathlib.Path(args.secondary_device)
+
+
+def launch_tmux(args):
+    tmux = shutil.which("tmux")
+    if not tmux:
+        raise FileNotFoundError("tmux not found")
+    if not args.no_uart and not shutil.which(args.picocom):
+        raise FileNotFoundError(f"picocom not found: {args.picocom}")
+
+    ensure_usb_devices(args)
+
+    session = unique_tmux_session(tmux, args.tmux_session)
+    runner = shell_join(["env", "SCARLET_M1N1_IN_TMUX=1", *runner_command_args(args)])
+    if not args.tmux_keep_on_exit:
+        runner = (
+            f"{runner}; status=$?; "
+            'printf "\\nHV runner exited with status %s. Press Enter to close tmux session..." "$status"; '
+            "read _; "
+            f"tmux kill-session -t {shlex.quote(session)}; "
+            'exit "$status"'
+        )
+
+    run_checked([tmux, "new-session", "-d", "-s", session, "-n", "hv", runner], cwd=PROJECT_DIR)
+
+    if not args.no_uart:
+        if serial_device_busy(args.secondary_device):
+            print(f"Secondary UART {args.secondary_device} is already open; not starting picocom")
+        else:
+            uart = shell_join(["env", "SCARLET_M1N1_IN_TMUX=1", *uart_console_command_args(args)])
+            run_checked([tmux, "split-window", "-h", "-t", f"{session}:0", uart], cwd=PROJECT_DIR)
+            run_checked([tmux, "select-layout", "-t", f"{session}:0", "even-horizontal"], cwd=PROJECT_DIR)
+
+    run_checked([tmux, "select-pane", "-t", f"{session}:0.0"], cwd=PROJECT_DIR)
+    if os.environ.get("TMUX"):
+        run_checked([tmux, "switch-client", "-t", session], cwd=PROJECT_DIR)
+    else:
+        subprocess.run([tmux, "attach-session", "-t", session], cwd=PROJECT_DIR, check=False)
+
+
+def should_launch_tmux(args):
+    if args.no_tmux or os.environ.get("SCARLET_M1N1_IN_TMUX"):
+        return False
+    env = env_flag("SCARLET_M1N1_TMUX")
+    if env is not None:
+        return env
+    if args.tmux:
+        return True
+    return (
+        not args.no_uart
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and shutil.which("tmux") is not None
+        and shutil.which(args.picocom) is not None
+    )
+
+
+def open_proxy(args, *, timeout):
+    from m1n1.proxy import UartInterface, M1N1Proxy, UartTimeout
+    from m1n1.proxyutils import bootstrap_port
+    import serial
+
+    deadline = timeout_deadline(timeout)
+    attempt = 1
+
+    while True:
+        wait_for_device(args.proxy_device, timeout_remaining(deadline))
+        iface = None
+        try:
+            iface = UartInterface(device=args.proxy_device)
+            p = M1N1Proxy(iface, debug=False)
+            bootstrap_port(iface, p)
+            return iface, p
+        except (OSError, serial.SerialException, UartTimeout) as exc:
+            if iface is not None:
+                try:
+                    iface.dev.close()
+                except Exception:
+                    pass
+            remaining = timeout_remaining(deadline)
+            if remaining is not None and remaining <= 0:
+                raise
+            suffix = "" if remaining is None else f" ({remaining:.0f}s left)"
+            print(
+                f"m1n1 proxy not ready on attempt {attempt}: "
+                f"{summarize_failure(exc)}; retrying{suffix}",
+                file=sys.stderr,
+            )
+            attempt += 1
+            retry_sleep(deadline)
 
 
 def start_guest(args):
-    from m1n1.proxy import UartInterface, M1N1Proxy
-    from m1n1.proxyutils import ProxyUtils, bootstrap_port
+    from m1n1.proxyutils import ProxyUtils
     from m1n1.hv import HV
     from m1n1.hw.pmu import PMU
 
-    wait_for_device(args.proxy_device, 30)
-
-    iface = UartInterface(device=args.proxy_device)
-    p = M1N1Proxy(iface, debug=False)
-    bootstrap_port(iface, p)
+    iface, p = open_proxy(args, timeout=args.connect_timeout)
     u = ProxyUtils(p, heap_size=128 * 1024 * 1024)
 
     hv = HV(iface, p, u)
@@ -202,7 +517,14 @@ def main():
     parser.add_argument("--proxy-device", default=None, help="Primary m1n1 proxy UART device (auto-detected if omitted)")
     parser.add_argument("--secondary-device", default=None, help="Secondary HV virtual UART device (auto-detected if omitted)")
     parser.add_argument("--no-uart", action="store_true", help="Do not capture secondary UART output")
+    parser.add_argument("--uart-console-only", action="store_true", help="Open only the reconnecting secondary UART picocom console")
+    parser.add_argument("--uart-baudrate", type=int, default=500000, help="Secondary UART baud rate")
     parser.add_argument("--uart-log", type=pathlib.Path, help="Optional file to append secondary UART output")
+    parser.add_argument("--tmux", action="store_true", help="Run HV control and UART console in split tmux panes")
+    parser.add_argument("--no-tmux", action="store_true", help="Disable automatic tmux split mode")
+    parser.add_argument("--tmux-session", default=os.environ.get("SCARLET_M1N1_TMUX_SESSION", "scarlet-m1n1"), help="tmux session name")
+    parser.add_argument("--tmux-keep-on-exit", action="store_true", help="Keep tmux panes open after the HV runner exits")
+    parser.add_argument("--picocom", default=os.environ.get("SCARLET_M1N1_PICOCOM", "picocom"), help="picocom executable for tmux UART console")
     parser.add_argument("--connect-timeout", type=float, default=None, help="Seconds to wait for USB device files")
     parser.add_argument("--m1n1", type=existing_path, default=M1N1_DIR / "payloads" / "m1n1.bin", help="Fresh raw m1n1.bin to chainload")
     parser.add_argument("--payload", type=existing_path, default=M1N1_DIR / "payloads" / "boot-j293.bin", help="Guest raw payload: m1n1 + DTB + U-Boot")
@@ -218,14 +540,33 @@ def main():
     args.payload = pathlib.Path(args.payload).resolve()
     args.m1n1 = pathlib.Path(args.m1n1).resolve()
 
-    if not args.proxy_device or not args.secondary_device:
-        args.proxy_device, args.secondary_device = wait_for_devices(args.connect_timeout)
-    args.secondary_device = pathlib.Path(args.secondary_device)
+    if args.uart_console_only:
+        try:
+            run_uart_console(args)
+            return
+        except FileNotFoundError as exc:
+            print(f"UART console unavailable: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except TimeoutError as exc:
+            print(f"timeout: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if should_launch_tmux(args):
+        try:
+            launch_tmux(args)
+            return
+        except FileNotFoundError as exc:
+            if args.tmux or env_flag("SCARLET_M1N1_TMUX"):
+                print(f"tmux mode unavailable: {exc}", file=sys.stderr)
+                sys.exit(1)
+            print(f"tmux mode unavailable: {exc}; falling back to inline UART capture", file=sys.stderr)
+
+    ensure_usb_devices(args)
 
     uart = None
     try:
         if not args.no_uart:
-            uart = UartRouter(args.secondary_device, args.uart_log)
+            uart = UartRouter(args.secondary_device, args.uart_log, args.uart_baudrate)
             uart.start()
 
         if not args.no_build:
@@ -237,6 +578,17 @@ def main():
             chainload(args)
 
         start_guest(args)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"command failed with exit status {exc.returncode}: "
+            + " ".join(str(part) for part in exc.cmd),
+            file=sys.stderr,
+        )
+        print(f"last error: {summarize_failure(exc)}", file=sys.stderr)
+        sys.exit(exc.returncode)
+    except TimeoutError as exc:
+        print(f"timeout: {exc}", file=sys.stderr)
+        sys.exit(1)
     finally:
         if uart:
             uart.close()
