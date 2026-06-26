@@ -21,6 +21,8 @@ static mut STDERR: Option<Handle> = None;
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
 
+    let mut using_tmpfs_fallback = false;
+
     // 1. Mount ext2 filesystem from first available block device (e.g., /dev/vblk0)
     println!("init: Mounting ext2 for new root at /mnt/newroot");
     match mount(
@@ -40,6 +42,7 @@ fn setup_new_root() -> bool {
             match mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) {
                 Ok(_) => {
                     println!("init: Fallback tmpfs mounted successfully");
+                    using_tmpfs_fallback = true;
                 }
                 Err(_) => {
                     println!("init: Failed to mount fallback tmpfs at /mnt/newroot");
@@ -52,19 +55,10 @@ fn setup_new_root() -> bool {
     // 2. Create necessary directories in the new root
     println!("init: Creating necessary directories in new root");
 
-    // let _ = create_directory("/mnt/newroot/system");
-    // let _ = create_directory("/mnt/newroot/data");
-    // let _ = create_directory("/mnt/newroot/data/config");
-    // let _ = create_directory("/mnt/newroot/data/config/scarlet");
-
-    // 3. Copy essential binaries (update paths based on actual initramfs structure)
-    // Copy from the actual location in initramfs
-    // copy_dir("/bin", "/mnt/newroot/bin");
-    // copy_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
-    // copy_dir("/data", "/mnt/newroot/data");
-
-    // // 3. Merge essential binaries into new root (overwrite existing files)
-    // merge_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
+    if using_tmpfs_fallback && !populate_tmpfs_root_from_initramfs() {
+        println!("init: Failed to populate tmpfs root from initramfs");
+        return false;
+    }
 
     // Create old_root directory in the new root (where the old root will be moved)
     match create_directory("/mnt/newroot/old_root") {
@@ -90,6 +84,43 @@ fn setup_new_root() -> bool {
     }
 
     true
+}
+
+fn ensure_directory(path: &str) -> bool {
+    match create_directory(path) {
+        Ok(_) => true,
+        Err(_) => match list_directory(path) {
+            Ok(_) => true,
+            Err(_) => {
+                println!("init: Failed to create directory: {}", path);
+                false
+            }
+        },
+    }
+}
+
+fn populate_tmpfs_root_from_initramfs() -> bool {
+    println!("init: Populating tmpfs root from initramfs");
+
+    for path in [
+        "/mnt/newroot/system",
+        "/mnt/newroot/data",
+        "/mnt/newroot/data/config",
+    ] {
+        if !ensure_directory(path) {
+            return false;
+        }
+    }
+
+    let system_ok = copy_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
+    let config_ok = copy_dir("/data/config/scarlet", "/mnt/newroot/data/config/scarlet");
+
+    if system_ok && config_ok {
+        println!("init: tmpfs root populated from initramfs");
+        true
+    } else {
+        false
+    }
 }
 
 fn setup_devfs() -> Result<(), &'static str> {
