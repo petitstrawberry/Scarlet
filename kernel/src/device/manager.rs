@@ -1330,6 +1330,24 @@ impl DeviceManager {
         name: &str,
     ) -> Result<ClkHandle, &'static str> {
         let index = Self::clock_name_index(device, name).unwrap_or(0);
+        self.resolve_clk_by_index(device, index)
+    }
+
+    /// Resolve a clock for a platform device by specifier index.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `clocks` property.
+    /// * `index` - Zero-based clock specifier index to resolve.
+    ///
+    /// # Returns
+    ///
+    /// Clock handle for the requested specifier.
+    pub fn resolve_clk_by_index(
+        &self,
+        device: &PlatformDeviceInfo,
+        index: usize,
+    ) -> Result<ClkHandle, &'static str> {
         let clocks = device.property("clocks").ok_or("clk: clocks missing")?;
         let specs = self.parse_clock_specs(clocks.value())?;
         let spec = specs.get(index).ok_or("clk: clock index out of range")?;
@@ -4054,6 +4072,20 @@ mod tests {
         )]);
         let clk = manager.resolve_clk(&device, "bus").unwrap();
         assert_eq!(clk.rate(), 24_000_000);
+    }
+
+    #[test_case]
+    fn test_resolve_clk_by_index() {
+        let manager = DeviceManager::new();
+        manager.register_clk_provider(0x10, Arc::new(TestClkProvider::new(24_000_000, 0)));
+        manager.register_clk_provider(0x20, Arc::new(TestClkProvider::new(48_000_000, 0)));
+        let device = clk_test_device(vec![PlatformDeviceProperty::new(
+            "clocks",
+            &be_cells(&[0x10, 0x20]),
+        )]);
+
+        let clk = manager.resolve_clk_by_index(&device, 1).unwrap();
+        assert_eq!(clk.rate(), 48_000_000);
     }
 
     #[test_case]
