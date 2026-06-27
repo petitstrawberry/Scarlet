@@ -3,7 +3,7 @@
 //! This module provides a comprehensive interrupt management system for the Scarlet kernel.
 //! It supports both local interrupts (via CLINT) and external interrupts (via PLIC) on RISC-V architecture.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 use hashbrown::HashMap;
 
@@ -104,6 +104,7 @@ pub struct InterruptManager {
     controllers: spin::Once<spin::Mutex<controllers::InterruptControllers>>,
     irq_descs: spin::Lazy<spin::Mutex<HashMap<Virq, IrqDesc>>>,
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
+    enabled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, CpuId>>>,
     interrupt_devices: spin::Lazy<
         spin::Mutex<
             HashMap<
@@ -120,6 +121,7 @@ impl InterruptManager {
             controllers: spin::Once::new(),
             irq_descs: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             external_handlers: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
+            enabled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             interrupt_devices: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
         }
     }
@@ -136,12 +138,36 @@ impl InterruptManager {
     pub fn init_controllers(&self) {
         crate::early_println!("[interrupt] init: external controller...");
 
+        let enabled_external_interrupts: Vec<_> = self
+            .enabled_external_interrupts
+            .lock()
+            .iter()
+            .map(|(interrupt_id, cpu_id)| (self.irq_desc_or_legacy(*interrupt_id), *cpu_id))
+            .collect();
+
         let mut controllers = self.controllers().lock();
         match controllers.init_external_controller() {
             Ok(()) => {}
             Err(e) => {
                 crate::early_println!("Failed to initialize external controller: {}", e);
             }
+        }
+        if let Some(controller) = controllers.external_controller() {
+            let reenable_count = enabled_external_interrupts.len();
+            for (desc, cpu_id) in enabled_external_interrupts {
+                if let Err(e) = controller.enable_interrupt(desc.mapping.hwirq, cpu_id) {
+                    crate::early_println!(
+                        "[interrupt] failed to re-enable IRQ {} for CPU {} after controller init: {}",
+                        desc.mapping.virq,
+                        cpu_id,
+                        e
+                    );
+                }
+            }
+            crate::early_println!(
+                "[interrupt] re-enabled {} external IRQs after controller init",
+                reenable_count
+            );
         }
 
         crate::early_println!("[interrupt] init: external controller done");
@@ -533,7 +559,11 @@ impl InterruptManager {
         let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)
+            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)?;
+            self.enabled_external_interrupts
+                .lock()
+                .insert(interrupt_id, cpu_id);
+            Ok(())
         } else {
             Err(InterruptError::ControllerNotFound)
         }
@@ -606,7 +636,11 @@ impl InterruptManager {
         let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)
+            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)?;
+            self.enabled_external_interrupts
+                .lock()
+                .remove(&interrupt_id);
+            Ok(())
         } else {
             Err(InterruptError::ControllerNotFound)
         }

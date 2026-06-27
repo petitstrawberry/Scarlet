@@ -735,6 +735,36 @@ impl DeviceManager {
         None
     }
 
+    fn find_node_and_parent_by_phandle<'a>(
+        fdt: &'a fdt::Fdt<'a>,
+        phandle: u32,
+    ) -> Option<(fdt::node::FdtNode<'a, 'a>, Option<u32>)> {
+        let mut stack: Vec<(fdt::node::FdtNode<'a, 'a>, Option<u32>)> = Vec::new();
+        stack.push((fdt.find_node("/")?, None));
+
+        while let Some((node, parent_phandle)) = stack.pop() {
+            if let Some(p) = Self::get_u32_prop(&node, "phandle")
+                && p == phandle
+            {
+                return Some((node, parent_phandle));
+            }
+            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle")
+                && p == phandle
+            {
+                return Some((node, parent_phandle));
+            }
+
+            let this_phandle = Self::get_u32_prop(&node, "phandle")
+                .or_else(|| Self::get_u32_prop(&node, "linux,phandle"))
+                .or(parent_phandle);
+            for child in node.children() {
+                stack.push((child, this_phandle));
+            }
+        }
+
+        None
+    }
+
     fn push_irq_resource(
         resources: &mut Vec<PlatformDeviceResource>,
         irq_num: usize,
@@ -1621,6 +1651,52 @@ impl DeviceManager {
         self.parse_phy_specs(phys.value()).map(|_| ())
     }
 
+    fn apply_pinctrl_default(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(pinctrl) = device.property("pinctrl-0") else {
+            return Ok(());
+        };
+
+        let states = Self::read_be_u32_cells(pinctrl.value()).ok_or("pinctrl: malformed state")?;
+        if states.is_empty() {
+            return Ok(());
+        }
+
+        let fdt = crate::device::fdt::FdtManager::get_manager()
+            .get_fdt()
+            .ok_or("pinctrl: FDT unavailable")?;
+
+        for state_phandle in states {
+            let (state_node, controller_phandle) =
+                Self::find_node_and_parent_by_phandle(fdt, state_phandle)
+                    .ok_or("pinctrl: state node not found")?;
+            let Some(pinmux) = state_node.property("pinmux") else {
+                continue;
+            };
+
+            let controller_phandle = controller_phandle.ok_or("pinctrl: state has no parent")?;
+            let controller = self
+                .get_gpio_controller(controller_phandle)
+                .ok_or(PROBE_DEFER)?;
+            let muxes = Self::read_be_u32_cells(pinmux.value).ok_or("pinctrl: malformed pinmux")?;
+
+            for mux in &muxes {
+                let pin = mux & 0xffff;
+                let func = ((mux >> 16) & 0xff) as u8;
+                controller.set_function(pin, func);
+            }
+
+            early_println!(
+                "[pinctrl] applied device={} state phandle={:#x} controller={:#x} pins={}",
+                device.name(),
+                state_phandle,
+                controller_phandle,
+                muxes.len()
+            );
+        }
+
+        Ok(())
+    }
+
     fn deassert_device_resets(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         let Some(resets) = device.property("resets") else {
             return Ok(());
@@ -2192,6 +2268,14 @@ impl DeviceManager {
                             return ProbeOutcome::Deferred;
                         }
                         early_println!("[reset] failed to deassert device resets: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
+                    if let Err(e) = self.apply_pinctrl_default(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[pinctrl] failed to apply default state: {}", e);
                         return ProbeOutcome::Failed;
                     }
 
