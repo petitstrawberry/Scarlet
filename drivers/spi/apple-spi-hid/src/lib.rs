@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use scarlet::sync::Mutex;
 
 use scarlet::device::events::InterruptCapableDevice;
@@ -52,6 +52,8 @@ const REQUEST_WAIT_STEP_US: u64 = 10_000;
 const SPIHID_DESC_MAX: u16 = 512;
 const MAX_IRQ_DRAIN: usize = 8;
 const IRQ_LOG_LIMIT: u32 = 16;
+const REP_DELAY_US: u64 = 250_000;
+const REP_PERIOD_US: u64 = 33_000;
 const PACKET_LOG_LIMIT: u32 = 32;
 const REPORT_LOG_LIMIT: u32 = 16;
 
@@ -228,6 +230,8 @@ pub struct AppleSpiHidTransport {
     last_keys: Mutex<[u8; 6]>,
     last_buttons: Mutex<u8>,
     last_touch: Mutex<Option<(i16, i16)>>,
+    key_press_time: Mutex<u64>,
+    last_repeat_time: Mutex<u64>,
 }
 
 impl AppleSpiHidTransport {
@@ -258,6 +262,8 @@ impl AppleSpiHidTransport {
             last_keys: Mutex::new([0; 6]),
             last_buttons: Mutex::new(0),
             last_touch: Mutex::new(None),
+            key_press_time: Mutex::new(0),
+            last_repeat_time: Mutex::new(0),
         }
     }
 
@@ -745,6 +751,60 @@ impl AppleSpiHidTransport {
 
         *old_modifiers = new_modifiers;
         *old_keys = new_keys;
+        *self.key_press_time.lock() = scarlet::time::current_time();
+        *self.last_repeat_time.lock() = 0;
+    }
+
+    fn maybe_repeat_keys(&self) {
+        let modifiers = *self.last_modifiers.lock();
+        let keys = self.last_keys.lock();
+
+        let any_pressed = modifiers != 0 || keys.iter().any(|k| *k != 0);
+        if !any_pressed {
+            return;
+        }
+
+        let now = scarlet::time::current_time();
+        let press_time = *self.key_press_time.lock();
+        let mut last_repeat = self.last_repeat_time.lock();
+
+        let next_repeat = if *last_repeat == 0 {
+            press_time + REP_DELAY_US
+        } else {
+            *last_repeat + REP_PERIOD_US
+        };
+
+        if now < next_repeat {
+            return;
+        }
+
+        for (bit, usage) in [
+            (0x01u8, 0xe0u8),
+            (0x02, 0xe1),
+            (0x04, 0xe2),
+            (0x08, 0xe3),
+            (0x10, 0xe4),
+            (0x20, 0xe5),
+            (0x40, 0xe6),
+            (0x80, 0xe7),
+        ] {
+            if modifiers & bit != 0 {
+                if let Some(code) = hid_usage_to_key(usage) {
+                    self.keyboard_event.push_event(EV_KEY, code, 2);
+                }
+            }
+        }
+
+        for usage in keys.iter() {
+            if *usage != 0 {
+                if let Some(code) = hid_usage_to_key(*usage) {
+                    self.keyboard_event.push_event(EV_KEY, code, 2);
+                }
+            }
+        }
+
+        self.keyboard_event.push_event(EV_SYN, SYN_REPORT, 0);
+        *last_repeat = now;
     }
 
     fn handle_keyboard_report(&self, report: &[u8]) {
@@ -1059,6 +1119,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     DeviceManager::get_manager()
         .register_device_with_name(trackpad_event.get_name().to_string(), trackpad_event);
 
+    {
+        let mut reg = REPEAT_REGISTRY.lock();
+        *reg = Some(transport.clone());
+    }
+    ensure_repeat_worker_started();
+
     transport.enable_device_irq();
     early_println!("apple-spi-hid: runtime IRQ enabled");
     Ok(())
@@ -1080,6 +1146,38 @@ fn register_apple_spi_hid_driver() {
 }
 
 scarlet::driver_initcall!(register_apple_spi_hid_driver);
+
+static REPEAT_REGISTRY: Mutex<Option<Arc<AppleSpiHidTransport>>> = Mutex::new(None);
+static REPEAT_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn ensure_repeat_worker_started() {
+    if REPEAT_WORKER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let task =
+        scarlet::task::new_kernel_task("spi-hid-repeat".to_string(), 1, repeat_worker_entry);
+    task.init();
+    scarlet::sched::scheduler::add_task(task, scarlet::arch::get_cpu().get_cpuid());
+}
+
+fn repeat_worker_entry() {
+    const REPEAT_TICKS: u64 = 1;
+    loop {
+        if let Some(transport) = REPEAT_REGISTRY.lock().as_ref() {
+            transport.maybe_repeat_keys();
+        }
+
+        if let Some(task) = scarlet::task::mytask() {
+            task.sleep(task.get_trapframe(), REPEAT_TICKS);
+        } else {
+            scarlet::arch::instruction::idle();
+        }
+    }
+}
 
 #[used]
 static SCARLET_DRIVER_APPLE_SPI_HID_ANCHOR: fn() = force_link;
