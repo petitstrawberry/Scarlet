@@ -15,6 +15,7 @@ use scarlet::device::{
     manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
+use scarlet::println;
 use scarlet::time;
 use scarlet::vm;
 
@@ -43,7 +44,8 @@ const SMSTA_JAM: u32 = 1 << 24;
 const SMSTA_MTO: u32 = 1 << 23;
 const SMSTA_MTA: u32 = 1 << 22;
 const SMSTA_MTN: u32 = 1 << 21;
-const SMSTA_ERR_MASK: u32 = SMSTA_JAM | SMSTA_MTO | SMSTA_MTA | SMSTA_MTN;
+const SMSTA_TOM: u32 = 1 << 6;
+const SMSTA_ERR_MASK: u32 = SMSTA_JAM | SMSTA_MTO | SMSTA_MTA | SMSTA_MTN | SMSTA_TOM;
 
 const CTL_EN: u32 = 1 << 11;
 const CTL_MRR: u32 = 1 << 10;
@@ -55,6 +57,7 @@ const DEFAULT_BUS_HZ: u32 = 100_000;
 const REF_CLOCK_HZ: u32 = 24_000_000;
 const TXN_TIMEOUT_US: u64 = 100_000;
 const POLL_INTERVAL_US: u64 = 10;
+const MAX_POLL_ITERATIONS: u32 = 100_000;
 
 struct AppleI2cInner {
     bus_hz: u32,
@@ -171,7 +174,7 @@ impl AppleI2cController {
             I2cError::Nack
         } else if smsta & SMSTA_MTA != 0 {
             I2cError::ArbitrationLost
-        } else if smsta & SMSTA_MTO != 0 {
+        } else if smsta & (SMSTA_MTO | SMSTA_TOM) != 0 {
             I2cError::Timeout
         } else {
             I2cError::BusError
@@ -180,6 +183,7 @@ impl AppleI2cController {
 
     fn poll_transfer_done(&self) -> Result<(), I2cError> {
         let start = time::current_time();
+        let mut iterations: u32 = 0;
         loop {
             let smsta = self.read_reg(REG_SMSTA);
             if smsta & SMSTA_ERR_MASK != 0 {
@@ -192,6 +196,23 @@ impl AppleI2cController {
 
             let now = time::current_time();
             if now.saturating_sub(start) > TXN_TIMEOUT_US {
+                println!(
+                    "[apple-i2c] poll_transfer_done time-timeout, iters={}, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations,
+                    smsta,
+                    self.read_reg(REG_XFSTA)
+                );
+                return Err(I2cError::Timeout);
+            }
+
+            iterations += 1;
+            if iterations > MAX_POLL_ITERATIONS {
+                println!(
+                    "[apple-i2c] poll_transfer_done iter-timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations,
+                    smsta,
+                    self.read_reg(REG_XFSTA)
+                );
                 return Err(I2cError::Timeout);
             }
 
@@ -201,6 +222,7 @@ impl AppleI2cController {
 
     fn wait_rx_available(&self) -> Result<u8, I2cError> {
         let start = time::current_time();
+        let mut iterations: u32 = 0;
         loop {
             let r = self.read_reg(REG_MRXFIFO);
             if r & MRXFIFO_EMPTY == 0 {
@@ -214,6 +236,23 @@ impl AppleI2cController {
 
             let now = time::current_time();
             if now.saturating_sub(start) > TXN_TIMEOUT_US {
+                println!(
+                    "[apple-i2c] wait_rx_available time-timeout, iters={}, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations,
+                    smsta,
+                    self.read_reg(REG_XFSTA)
+                );
+                return Err(I2cError::Timeout);
+            }
+
+            iterations += 1;
+            if iterations > MAX_POLL_ITERATIONS {
+                println!(
+                    "[apple-i2c] wait_rx_available iter-timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations,
+                    smsta,
+                    self.read_reg(REG_XFSTA)
+                );
                 return Err(I2cError::Timeout);
             }
 
