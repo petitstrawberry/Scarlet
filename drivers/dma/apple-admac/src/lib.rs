@@ -18,6 +18,9 @@ use scarlet::{
             DmaSpec,
         },
         events::InterruptCapableDevice,
+        iommu::{
+            DmaAddr as IommuDmaAddr, DmaContext, IommuDomainConfig, IommuDomainType, IommuMapFlags,
+        },
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
@@ -70,14 +73,18 @@ struct AppleAdmacSram {
 
 struct AppleAdmacTransfer {
     config: DmaCyclicConfig,
+    dma_addr: IommuDmaAddr,
+    dma_len: usize,
     submitted_pos: usize,
     reclaimed_pos: usize,
 }
 
 impl AppleAdmacTransfer {
-    fn new(config: DmaCyclicConfig) -> Self {
+    fn new(config: DmaCyclicConfig, dma_addr: IommuDmaAddr, dma_len: usize) -> Self {
         Self {
             config,
+            dma_addr,
+            dma_len,
             submitted_pos: 0,
             reclaimed_pos: 0,
         }
@@ -115,6 +122,7 @@ struct AppleAdmacInner {
     tx_sram: Mutex<AppleAdmacSram>,
     rx_sram: Mutex<AppleAdmacSram>,
     channels: Vec<AppleAdmacChannelState>,
+    dma_context: DmaContext,
 }
 
 /// Apple ADMAC DMA controller.
@@ -133,6 +141,7 @@ impl AppleAdmac {
     /// * `tx_sram_size` - TX SRAM size reported by hardware.
     /// * `rx_sram_size` - RX SRAM size reported by hardware.
     /// * `irq_index` - ADMAC IRQ output index used by the platform resource.
+    /// * `dma_context` - DMA mapping context for this ADMAC requester.
     ///
     /// # Returns
     ///
@@ -144,6 +153,7 @@ impl AppleAdmac {
         tx_sram_size: u32,
         rx_sram_size: u32,
         irq_index: usize,
+        dma_context: DmaContext,
     ) -> Self {
         let mut channels = Vec::new();
         for _ in 0..channel_count {
@@ -166,6 +176,7 @@ impl AppleAdmac {
                     allocated: 0,
                 }),
                 channels,
+                dma_context,
             }),
         }
     }
@@ -383,6 +394,47 @@ impl AppleAdmac {
             DmaDirection::MemToMem => {}
         }
         self.disable_channel_interrupts(index);
+    }
+
+    fn map_flags(direction: DmaDirection) -> IommuMapFlags {
+        match direction {
+            DmaDirection::MemToDev => IommuMapFlags::READ | IommuMapFlags::COHERENT,
+            DmaDirection::DevToMem => IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+            DmaDirection::MemToMem => {
+                IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT
+            }
+        }
+    }
+
+    fn map_cyclic_config(
+        &self,
+        config: DmaCyclicConfig,
+    ) -> Result<(DmaCyclicConfig, IommuDmaAddr), DmaError> {
+        let dma_addr = self
+            .inner
+            .dma_context
+            .map_phys(
+                config.buffer_addr,
+                config.buffer_len,
+                Self::map_flags(config.direction),
+            )
+            .map_err(|_| DmaError::HardwareError)?;
+        let dma_buffer_addr = usize::try_from(dma_addr).map_err(|_| DmaError::InvalidConfig)?;
+
+        Ok((
+            DmaCyclicConfig {
+                buffer_addr: dma_buffer_addr,
+                ..config
+            },
+            dma_addr,
+        ))
+    }
+
+    fn unmap_transfer(&self, transfer: &AppleAdmacTransfer) {
+        let _ = self
+            .inner
+            .dma_context
+            .unmap(transfer.dma_addr, transfer.dma_len);
     }
 
     fn write_one_desc(
@@ -646,7 +698,9 @@ impl Drop for AppleAdmacChannel {
         if let Ok(state) = self.controller.channel_state(self.index) {
             self.controller.stop_channel(self.index);
             self.controller.reset_rings(self.index);
-            *state.transfer.lock() = None;
+            if let Some(transfer) = state.transfer.lock().take() {
+                self.controller.unmap_transfer(&transfer);
+            }
             state.running.store(false, Ordering::Release);
             state.completed_periods.store(0, Ordering::Release);
             state.error.store(false, Ordering::Release);
@@ -674,10 +728,28 @@ impl DmaChannel for AppleAdmacChannel {
             return Err(DmaError::InvalidConfig);
         }
 
-        self.controller.configure_channel(self.index, config)?;
+        let (mapped_config, dma_addr) = self.controller.map_cyclic_config(config)?;
+        if let Err(error) = self.controller.configure_channel(self.index, mapped_config) {
+            let _ = self
+                .controller
+                .inner
+                .dma_context
+                .unmap(dma_addr, config.buffer_len);
+            return Err(error);
+        }
         state.completed_periods.store(0, Ordering::Release);
         state.error.store(false, Ordering::Release);
-        *state.transfer.lock() = Some(AppleAdmacTransfer::new(config));
+        let old_transfer = {
+            let mut transfer = state.transfer.lock();
+            transfer.replace(AppleAdmacTransfer::new(
+                mapped_config,
+                dma_addr,
+                config.buffer_len,
+            ))
+        };
+        if let Some(transfer) = old_transfer {
+            self.controller.unmap_transfer(&transfer);
+        }
         Ok(())
     }
 
@@ -851,6 +923,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     let irq_resource = first_irq_resource(device)?;
+    let dma_context = DeviceManager::get_manager().resolve_platform_dma_context(
+        device,
+        IommuDomainConfig {
+            domain_type: IommuDomainType::Dma,
+            iova_base: 0,
+            iova_size: 1u64 << 36,
+        },
+    )?;
     // SAFETY: `base` is an ioremap'd ADMAC MMIO region and these offsets are
     // fixed hardware register offsets.
     let tx_sram_size = unsafe { mmio::read32(base + REG_TX_SRAM_SIZE) };
@@ -874,6 +954,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         tx_sram_size,
         rx_sram_size,
         irq_index,
+        dma_context,
     ));
     let interrupt_id = scarlet::interrupt::register_and_enable_platform_irq_device(
         irq_resource,
