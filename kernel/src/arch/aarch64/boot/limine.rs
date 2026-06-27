@@ -4,15 +4,15 @@ use core::mem::MaybeUninit;
 use limine::mp::MpInfo;
 
 use crate::boot::limine::{
-    ensure_base_revision_supported, framebuffer_area, hhdm_physical_span, module_area,
-    reserve_front, response, select_usable_region, DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST,
-    FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST, MP_REQUEST,
+    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
+    MODULE_REQUEST, MP_REQUEST, ensure_base_revision_supported, framebuffer_area,
+    hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
 };
-use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
+use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
-use crate::mem::{init_bss, KERNEL_STACK};
+use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
-use crate::{early_println, start_ap, start_kernel, wait_for_ap_release, BootInfo, DeviceSource};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
