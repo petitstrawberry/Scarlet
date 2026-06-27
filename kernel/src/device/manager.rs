@@ -2215,6 +2215,11 @@ impl DeviceManager {
                 };
                 offset += 4;
 
+                if phandle == 0 {
+                    parsed_any_irq = true;
+                    continue;
+                }
+
                 let intc_node = Self::find_node_by_phandle(fdt, phandle);
                 let interrupt_cells = intc_node
                     .as_ref()

@@ -193,6 +193,15 @@ pub trait DmaChannel: Send + Sync {
         Err(DmaError::Unsupported)
     }
 
+    /// Return and clear the number of completed cyclic periods.
+    ///
+    /// # Returns
+    ///
+    /// Number of periods completed since the last call.
+    fn take_completed_periods(&self) -> usize {
+        0
+    }
+
     /// Report whether the channel is currently running.
     ///
     /// # Returns
