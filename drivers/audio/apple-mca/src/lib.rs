@@ -774,15 +774,16 @@ impl AudioPlaybackDevice for AppleMca {
     }
 
     fn release(&self) -> Result<(), &'static str> {
-        let codecs = self.playback_codecs();
-        self.stop()?;
-        if self.stream.lock().is_some() {
+        let had_stream = self.stream.lock().is_some();
+        if had_stream {
+            let codecs = self.playback_codecs();
+            self.stop()?;
             let cluster_base = self.cluster_base(APPLE_MCA_PLAYBACK_CLUSTER)?;
             self.disable_port(cluster_base);
-        }
-        *self.stream.lock() = None;
-        for codec in &codecs {
-            codec.set_playback_powered(false)?;
+            *self.stream.lock() = None;
+            for codec in &codecs {
+                codec.set_playback_powered(false)?;
+            }
         }
         Ok(())
     }

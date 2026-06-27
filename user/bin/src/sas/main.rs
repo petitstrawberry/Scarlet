@@ -91,7 +91,9 @@ unsafe impl Send for OutputDevice {}
 
 impl OutputDevice {
     fn open() -> Result<Self, &'static str> {
+        println!("sas: opening /dev/audio0");
         let audio = AudioDevice::open("/dev/audio0").map_err(|_| "failed to open /dev/audio0")?;
+        println!("sas: querying /dev/audio0 capabilities");
         let caps = audio
             .capabilities()
             .map_err(|_| "failed to query audio capabilities")?;
@@ -114,15 +116,21 @@ impl OutputDevice {
                 .max(caps.min_buffer_frames)
                 .min(caps.max_buffer_frames),
         };
+        println!(
+            "sas: configuring /dev/audio0 S16LE {} Hz {}ch period={} buffer={}",
+            params.rate, params.channels, params.period_frames, params.buffer_frames
+        );
         audio
             .set_params(&params)
             .map_err(|_| "failed to configure audio0")?;
+        println!("sas: mapping /dev/audio0 ring");
         let info = audio
             .buffer_info()
             .map_err(|_| "failed to get audio ring info")?;
         let ring = audio
             .mmap_buffer(&info)
             .map_err(|_| "failed to mmap audio ring")?;
+        println!("sas: /dev/audio0 ready");
 
         Ok(Self {
             audio,

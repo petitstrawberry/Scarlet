@@ -562,23 +562,13 @@ impl AppleAdmac {
             STATUS_DESC_DONE,
         );
 
-        let reports = self.drain_reports(index);
+        let reports = self.reclaim_completed_reports(index);
         if reports == 0 {
             return;
         }
 
         if let Some(state) = self.inner.channels.get(index) {
-            let mut transfer = state.transfer.lock();
-            if let Some(transfer) = transfer.as_mut() {
-                transfer.reclaimed_pos += reports * transfer.config.period_len;
-                transfer.reclaimed_pos %= 2 * transfer.config.buffer_len;
-                state.completed_periods.fetch_add(reports, Ordering::AcqRel);
-                if self.write_available_descs(index, transfer).is_err() {
-                    state.error.store(true, Ordering::Release);
-                    self.stop_channel(index);
-                    state.running.store(false, Ordering::Release);
-                }
-            }
+            state.completed_periods.fetch_add(reports, Ordering::AcqRel);
         }
     }
 
@@ -590,6 +580,42 @@ impl AppleAdmac {
         if cause & STATUS_DESC_DONE != 0 {
             self.handle_status_desc_done(index);
         }
+    }
+
+    fn reclaim_completed_reports(&self, index: usize) -> usize {
+        let reports = self.drain_reports(index);
+        if reports == 0 {
+            return 0;
+        }
+
+        if let Some(state) = self.inner.channels.get(index) {
+            let mut transfer = state.transfer.lock();
+            if let Some(transfer) = transfer.as_mut() {
+                transfer.reclaimed_pos += reports * transfer.config.period_len;
+                transfer.reclaimed_pos %= 2 * transfer.config.buffer_len;
+                if self.write_available_descs(index, transfer).is_err() {
+                    state.error.store(true, Ordering::Release);
+                    self.stop_channel(index);
+                    state.running.store(false, Ordering::Release);
+                }
+            }
+        }
+
+        reports
+    }
+
+    fn poll_channel_completions(&self, index: usize) -> usize {
+        let cause = self.read_reg(Self::chan_intstatus_reg(index, self.inner.irq_index));
+        if cause & STATUS_ERR != 0 {
+            self.handle_status_err(index);
+        }
+        if cause & STATUS_DESC_DONE != 0 {
+            self.write_reg(
+                Self::chan_intstatus_reg(index, self.inner.irq_index),
+                STATUS_DESC_DONE,
+            );
+        }
+        self.reclaim_completed_reports(index)
     }
 }
 
@@ -827,10 +853,12 @@ impl DmaChannel for AppleAdmacChannel {
     }
 
     fn take_completed_periods(&self) -> usize {
-        self.controller
+        let irq_completed = self
+            .controller
             .channel_state(self.index)
             .map(|state| state.completed_periods.swap(0, Ordering::AcqRel))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        irq_completed.saturating_add(self.controller.poll_channel_completions(self.index))
     }
 
     fn is_running(&self) -> bool {

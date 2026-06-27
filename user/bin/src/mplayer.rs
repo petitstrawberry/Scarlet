@@ -381,7 +381,7 @@ fn run(path: &str, seek_ms: u64, controls: &mut Controls) -> Result<PlaybackActi
         let writable_frames = status.writable_frames as usize;
         let (frames, data_frames) = if frames_left <= period_frames {
             if writable_frames < period_frames {
-                core::hint::spin_loop();
+                sleep(Duration::from_millis(1));
                 continue;
             }
             (period_frames, frames_left)
@@ -389,7 +389,7 @@ fn run(path: &str, seek_ms: u64, controls: &mut Controls) -> Result<PlaybackActi
             let frames = core::cmp::min(writable_frames, frames_left);
             let frames = frames - frames % period_frames;
             if frames == 0 {
-                core::hint::spin_loop();
+                sleep(Duration::from_millis(1));
                 continue;
             }
             (frames, frames)
@@ -451,7 +451,7 @@ fn run(path: &str, seek_ms: u64, controls: &mut Controls) -> Result<PlaybackActi
         if status.hw_ptr_frames >= status.app_ptr_frames {
             break;
         }
-        core::hint::spin_loop();
+        sleep(Duration::from_millis(5));
     }
 
     let _ = audio.stop();
@@ -470,8 +470,11 @@ fn run_sas(
     if wav.audio_format != 1 || wav.bits_per_sample != 16 {
         return Err("SAS MVP accepts only PCM S16LE WAV files");
     }
-    if wav.sample_rate != 48_000 || wav.channels != 2 {
-        return Err("SAS MVP accepts only 48000 Hz stereo WAV files");
+    if !(8_000..=192_000).contains(&wav.sample_rate) {
+        return Err("SAS accepts only 8000-192000 Hz WAV files");
+    }
+    if wav.channels == 0 || wav.channels > 2 {
+        return Err("SAS accepts only mono or stereo WAV files");
     }
     let total_frames = wav.frame_count();
     let start_frame = ms_to_frames(seek_ms, wav.sample_rate).min(total_frames);
