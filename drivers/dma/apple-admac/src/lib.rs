@@ -728,6 +728,11 @@ impl DmaChannel for AppleAdmacChannel {
             return Err(DmaError::InvalidConfig);
         }
 
+        let old_transfer = state.transfer.lock().take();
+        if let Some(transfer) = old_transfer {
+            self.controller.unmap_transfer(&transfer);
+        }
+
         let (mapped_config, dma_addr) = self.controller.map_cyclic_config(config)?;
         if let Err(error) = self.controller.configure_channel(self.index, mapped_config) {
             let _ = self
@@ -739,16 +744,13 @@ impl DmaChannel for AppleAdmacChannel {
         }
         state.completed_periods.store(0, Ordering::Release);
         state.error.store(false, Ordering::Release);
-        let old_transfer = {
+        {
             let mut transfer = state.transfer.lock();
-            transfer.replace(AppleAdmacTransfer::new(
+            *transfer = Some(AppleAdmacTransfer::new(
                 mapped_config,
                 dma_addr,
                 config.buffer_len,
-            ))
-        };
-        if let Some(transfer) = old_transfer {
-            self.controller.unmap_transfer(&transfer);
+            ));
         }
         Ok(())
     }
