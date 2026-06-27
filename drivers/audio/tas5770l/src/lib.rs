@@ -15,6 +15,7 @@ use scarlet::{
             AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3, AUDIO_PCM_FORMAT_S32LE, AudioCodec,
             AudioPcmParams,
         },
+        fdt::FdtManager,
         gpio::GpioController,
         i2c::{I2cAddress, I2cBus, I2cError, I2cMessage},
         manager::{DeviceManager, DriverPriority, probe_defer},
@@ -103,11 +104,27 @@ impl TasGpio {
     }
 }
 
+struct TasFixedSupply {
+    gpio: Option<TasGpio>,
+    startup_delay_us: u64,
+}
+
+impl TasFixedSupply {
+    fn enable(&self) {
+        if let Some(gpio) = &self.gpio {
+            gpio.set_output(true);
+        }
+        if self.startup_delay_us != 0 {
+            udelay(self.startup_delay_us);
+        }
+    }
+}
+
 struct Tas5770l {
     bus: Arc<dyn I2cBus>,
     address: I2cAddress,
     bus_phandle: u32,
-    has_sdz_supply: bool,
+    sdz_supply: Option<TasFixedSupply>,
     shutdown_gpio: Option<TasGpio>,
     reset_gpio: Option<TasGpio>,
     i_sense_slot: Option<u8>,
@@ -123,7 +140,7 @@ impl Tas5770l {
         bus: Arc<dyn I2cBus>,
         address: I2cAddress,
         bus_phandle: u32,
-        has_sdz_supply: bool,
+        sdz_supply: Option<TasFixedSupply>,
         shutdown_gpio: Option<TasGpio>,
         reset_gpio: Option<TasGpio>,
         i_sense_slot: Option<u8>,
@@ -135,7 +152,7 @@ impl Tas5770l {
             bus,
             address,
             bus_phandle,
-            has_sdz_supply,
+            sdz_supply,
             shutdown_gpio,
             reset_gpio,
             i_sense_slot,
@@ -376,6 +393,9 @@ impl Tas5770l {
     }
 
     fn initialize(&self) -> Result<(), I2cError> {
+        if let Some(supply) = &self.sdz_supply {
+            supply.enable();
+        }
         self.power_gpio(true);
         udelay(2_000);
         self.hardware_reset();
@@ -471,6 +491,13 @@ fn read_be_u32_cells(value: &[u8]) -> impl Iterator<Item = u32> + '_ {
         .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
 }
 
+fn read_be_u32(value: &[u8]) -> Option<u32> {
+    if value.len() < 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]))
+}
+
 fn resolve_gpio(device: &PlatformDeviceInfo, name: &str) -> Result<Option<TasGpio>, &'static str> {
     let Some(property) = device.property(name) else {
         return Ok(None);
@@ -496,6 +523,107 @@ fn resolve_gpio(device: &PlatformDeviceInfo, name: &str) -> Result<Option<TasGpi
     }
 }
 
+fn resolve_fixed_supply(
+    device: &PlatformDeviceInfo,
+    name: &str,
+) -> Result<Option<TasFixedSupply>, &'static str> {
+    let Some(property) = device.property(name) else {
+        return Ok(None);
+    };
+    let phandle = read_be_u32(property.value()).ok_or("tas5770l: malformed supply property")?;
+    if phandle == 0 {
+        return Ok(None);
+    }
+
+    let fdt = FdtManager::get_manager()
+        .get_fdt()
+        .ok_or("tas5770l: FDT is not available")?;
+    let regulator = {
+        let mut stack = Vec::new();
+        stack.push(fdt.find_node("/").ok_or("tas5770l: missing FDT root")?);
+        let mut found = None;
+
+        while let Some(node) = stack.pop() {
+            let node_phandle = node
+                .property("phandle")
+                .or_else(|| node.property("linux,phandle"))
+                .and_then(|property| read_be_u32(property.value));
+            if node_phandle == Some(phandle) {
+                found = Some(node);
+                break;
+            }
+
+            for child in node.children() {
+                stack.push(child);
+            }
+        }
+
+        found.ok_or("tas5770l: supply node not found")?
+    };
+
+    let is_fixed_regulator = regulator
+        .compatible()
+        .is_some_and(|compatible| compatible.all().any(|entry| entry == "regulator-fixed"));
+    if !is_fixed_regulator {
+        return Err("tas5770l: unsupported supply type");
+    }
+
+    let startup_delay_us = regulator
+        .property("startup-delay-us")
+        .and_then(|property| read_be_u32(property.value))
+        .unwrap_or(0) as u64;
+    let gpio_property = regulator
+        .property("gpios")
+        .or_else(|| regulator.property("gpio"));
+    let gpio = match gpio_property {
+        Some(property) => {
+            let mut cells = read_be_u32_cells(property.value);
+            let gpio_phandle = cells
+                .next()
+                .ok_or("tas5770l: malformed supply GPIO property")?;
+            let pin = cells
+                .next()
+                .ok_or("tas5770l: malformed supply GPIO property")?;
+            let flags = cells.next().unwrap_or(0);
+            let active_low = if flags & 1 != 0 {
+                true
+            } else {
+                regulator.property("enable-active-high").is_none()
+            };
+
+            match DeviceManager::get_manager().get_gpio_controller(gpio_phandle) {
+                Some(controller) => Some(TasGpio {
+                    controller,
+                    pin,
+                    active_low,
+                }),
+                None => {
+                    early_println!(
+                        "[tas5770l] GPIO controller phandle {:#x} for {} regulator is not ready, deferring",
+                        gpio_phandle,
+                        name
+                    );
+                    return probe_defer();
+                }
+            }
+        }
+        None => None,
+    };
+
+    early_println!(
+        "[tas5770l] resolved {} fixed regulator phandle={:#x}, gpio={}, startup-delay-us={}",
+        name,
+        phandle,
+        gpio.is_some(),
+        startup_delay_us
+    );
+
+    Ok(Some(TasFixedSupply {
+        gpio,
+        startup_delay_us,
+    }))
+}
+
 fn resolve_i2c_bus(device: &PlatformDeviceInfo) -> Result<(u32, Arc<dyn I2cBus>), &'static str> {
     let bus_phandle = device
         .parent_phandle()
@@ -517,7 +645,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let phandle = read_phandle(device)?;
     let address = read_i2c_address(device)?;
     let _sound_dai_cells = read_sound_dai_cells(device)?;
-    let has_sdz_supply = device.property("SDZ-supply").is_some();
+    let sdz_supply = resolve_fixed_supply(device, "SDZ-supply")?;
     let shutdown_gpio = resolve_gpio(device, "shutdown-gpios")?;
     let reset_gpio = resolve_gpio(device, "reset-gpios")?;
     let i_sense_slot = read_optional_u8_property(device, "ti,imon-slot-no")?;
@@ -530,7 +658,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         bus,
         address,
         bus_phandle,
-        has_sdz_supply,
+        sdz_supply,
         shutdown_gpio,
         reset_gpio,
         i_sense_slot,
@@ -538,9 +666,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         sdout_pull_down,
         sdout_zero_fill,
     ));
-    codec
-        .initialize()
-        .map_err(|_| "tas5770l: codec initialization failed")?;
+    if let Err(error) = codec.initialize() {
+        early_println!(
+            "[tas5770l] initialization failed for phandle={:#x}, addr={:#x}: {:?}",
+            phandle,
+            address.raw(),
+            error
+        );
+        return Err("tas5770l: codec initialization failed");
+    }
     let audio_codec: Arc<dyn AudioCodec> = codec.clone();
     DeviceManager::get_manager().register_audio_codec(phandle, audio_codec);
     TAS5770L_CODECS.lock().push(codec);
@@ -551,7 +685,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         phandle,
         bus_phandle,
         address.raw(),
-        has_sdz_supply,
+        device.property("SDZ-supply").is_some(),
         has_shutdown_gpio,
         has_reset_gpio,
         i_sense_slot,
