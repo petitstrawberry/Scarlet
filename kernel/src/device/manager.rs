@@ -60,6 +60,7 @@ use crate::interrupt::msi::MsiController;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
+use super::audio::{AudioCodec, AudioDaiProvider};
 use super::clk::{ClkError, ClkHandle, ClkProvider};
 use super::dma::{DmaChannel, DmaController, DmaError, DmaSpec};
 use super::gpio::GpioController;
@@ -219,6 +220,8 @@ pub struct DeviceManager {
     i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
     usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
+    audio_codecs: Mutex<BTreeMap<u32, Arc<dyn AudioCodec>>>,
+    audio_dai_providers: Mutex<BTreeMap<u32, Arc<dyn AudioDaiProvider>>>,
     clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
     dma_controllers: Mutex<BTreeMap<u32, Arc<dyn DmaController>>>,
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
@@ -248,6 +251,8 @@ impl DeviceManager {
             i2c_buses: Mutex::new(BTreeMap::new()),
             usb_hosts: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
+            audio_codecs: Mutex::new(BTreeMap::new()),
+            audio_dai_providers: Mutex::new(BTreeMap::new()),
             clk_providers: Mutex::new(BTreeMap::new()),
             dma_controllers: Mutex::new(BTreeMap::new()),
             iommu_controllers: Mutex::new(BTreeMap::new()),
@@ -1034,6 +1039,55 @@ impl DeviceManager {
 
     pub fn get_gpio_controller(&self, phandle: u32) -> Option<Arc<dyn GpioController>> {
         self.gpio_controllers.lock().get(&phandle).cloned()
+    }
+
+    /// Register an audio codec by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the codec node.
+    /// * `codec` - Codec implementation.
+    pub fn register_audio_codec(&self, phandle: u32, codec: Arc<dyn AudioCodec>) {
+        self.audio_codecs.lock().insert(phandle, codec);
+    }
+
+    /// Look up an audio codec by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the codec node.
+    ///
+    /// # Returns
+    ///
+    /// Audio codec registered for `phandle`, or `None` when missing.
+    pub fn get_audio_codec_by_phandle(&self, phandle: u32) -> Option<Arc<dyn AudioCodec>> {
+        self.audio_codecs.lock().get(&phandle).cloned()
+    }
+
+    /// Register a CPU-side audio DAI provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the DAI provider node.
+    /// * `provider` - DAI provider implementation.
+    pub fn register_audio_dai_provider(&self, phandle: u32, provider: Arc<dyn AudioDaiProvider>) {
+        self.audio_dai_providers.lock().insert(phandle, provider);
+    }
+
+    /// Look up a CPU-side audio DAI provider by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the DAI provider node.
+    ///
+    /// # Returns
+    ///
+    /// Audio DAI provider registered for `phandle`, or `None` when missing.
+    pub fn get_audio_dai_provider_by_phandle(
+        &self,
+        phandle: u32,
+    ) -> Option<Arc<dyn AudioDaiProvider>> {
+        self.audio_dai_providers.lock().get(&phandle).cloned()
     }
 
     /// Register a DMA controller by firmware phandle.
@@ -2731,6 +2785,8 @@ impl DeviceManager {
         self.i2c_buses.lock().clear();
         self.usb_hosts.lock().clear();
         self.gpio_controllers.lock().clear();
+        self.audio_codecs.lock().clear();
+        self.audio_dai_providers.lock().clear();
         self.clk_providers.lock().clear();
         self.dma_controllers.lock().clear();
         self.iommu_controllers.lock().clear();
@@ -2748,6 +2804,7 @@ impl DeviceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::audio::{AudioCodec, AudioDaiProvider, AudioPcmParams};
     use crate::device::clk::{ClkError, ClkFixedRate, ClkHandle, ClkProvider};
     use crate::device::dma::{
         DmaBusWidth, DmaChannel, DmaController, DmaCyclicConfig, DmaDirection, DmaError,
@@ -2883,6 +2940,12 @@ mod tests {
         dma_cells: usize,
     }
 
+    struct TestAudioCodec;
+
+    struct TestAudioDaiProvider {
+        attached: AtomicBool,
+    }
+
     struct TestWatchdog {
         ping_count: AtomicUsize,
     }
@@ -2983,6 +3046,45 @@ mod tests {
         }
     }
 
+    impl AudioCodec for TestAudioCodec {
+        fn configure_playback(
+            &self,
+            params: &AudioPcmParams,
+            tx_mask: u32,
+            slots: usize,
+            slot_width: usize,
+        ) -> Result<(), &'static str> {
+            let _ = (params, tx_mask, slots, slot_width);
+            Ok(())
+        }
+
+        fn set_playback_muted(&self, muted: bool) -> Result<(), &'static str> {
+            let _ = muted;
+            Ok(())
+        }
+
+        fn set_playback_powered(&self, powered: bool) -> Result<(), &'static str> {
+            let _ = powered;
+            Ok(())
+        }
+    }
+
+    impl AudioDaiProvider for TestAudioDaiProvider {
+        fn sound_dai_cells(&self) -> usize {
+            1
+        }
+
+        fn attach_playback_codec(
+            &self,
+            spec: &[u32],
+            codec: Arc<dyn AudioCodec>,
+        ) -> Result<(), &'static str> {
+            let _ = (spec, codec);
+            self.attached.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     impl DmaController for TestDmaController {
         fn name(&self) -> &'static str {
             "test-dma"
@@ -3034,6 +3136,34 @@ mod tests {
         let controller = manager.get_dma_controller_by_phandle(0x30);
         assert!(controller.is_some());
         assert_eq!(controller.unwrap().name(), "test-dma");
+    }
+
+    #[test_case]
+    fn test_register_get_audio_codec() {
+        let manager = DeviceManager::new();
+        manager.register_audio_codec(0x31, Arc::new(TestAudioCodec));
+        let codec = manager.get_audio_codec_by_phandle(0x31);
+        assert!(codec.is_some());
+        assert!(codec.unwrap().set_playback_muted(true).is_ok());
+    }
+
+    #[test_case]
+    fn test_register_get_audio_dai_provider() {
+        let manager = DeviceManager::new();
+        let provider = Arc::new(TestAudioDaiProvider {
+            attached: AtomicBool::new(false),
+        });
+        manager.register_audio_dai_provider(0x32, provider.clone());
+        let resolved = manager.get_audio_dai_provider_by_phandle(0x32);
+        assert!(resolved.is_some());
+        assert_eq!(resolved.as_ref().unwrap().sound_dai_cells(), 1);
+        assert!(
+            resolved
+                .unwrap()
+                .attach_playback_codec(&[0], Arc::new(TestAudioCodec))
+                .is_ok()
+        );
+        assert!(provider.attached.load(Ordering::SeqCst));
     }
 
     #[test_case]

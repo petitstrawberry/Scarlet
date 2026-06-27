@@ -14,14 +14,16 @@ use scarlet::{
     device::{
         DeviceInfo,
         audio::{
-            AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES,
-            AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice, register_playback_device,
+            AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec,
+            AudioDaiProvider, AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
+            register_playback_device,
         },
         clk::ClkHandle,
         dma::{
             DmaBusWidth, DmaChannel, DmaCyclicConfig, DmaDirection, DmaError, DmaPeripheralConfig,
         },
-        manager::{DeviceManager, DriverPriority},
+        fdt::FdtManager,
+        manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -38,6 +40,7 @@ const APPLE_MCA_PLAYBACK_CLUSTER: usize = 0;
 const APPLE_MCA_PLAYBACK_DMA: &str = "tx0a";
 const APPLE_MCA_BCLK_RATIO: u64 = 64;
 const APPLE_MCA_SLOT_WIDTH: usize = 32;
+const APPLE_MCA_SOUND_DAI_CELLS: usize = 1;
 const APPLE_MCA_MAX_BCLK: u32 = 24_576_000;
 const APPLE_MCA_MAX_PERIOD_FRAMES: u32 = 4_096;
 const APPLE_MCA_MAX_BUFFER_FRAMES: u32 = 65_536;
@@ -191,6 +194,7 @@ struct AppleMca {
     clocks: Vec<ClkHandle>,
     dmas: Vec<AppleMcaDma>,
     stream: Mutex<Option<AppleMcaStream>>,
+    playback_codec: Mutex<Option<Arc<dyn AudioCodec>>>,
 }
 
 impl AppleMca {
@@ -210,6 +214,7 @@ impl AppleMca {
             clocks,
             dmas,
             stream: Mutex::new(None),
+            playback_codec: Mutex::new(None),
         }
     }
 
@@ -253,6 +258,23 @@ impl AppleMca {
             .ok_or("apple-mca: missing playback DMA channel")
     }
 
+    fn playback_codec(&self) -> Option<Arc<dyn AudioCodec>> {
+        self.playback_codec.lock().clone()
+    }
+
+    fn playback_slots(params: &AudioPcmParams) -> usize {
+        (APPLE_MCA_BCLK_RATIO as usize / APPLE_MCA_SLOT_WIDTH).max(params.channels as usize)
+    }
+
+    fn playback_tx_mask(params: &AudioPcmParams) -> u32 {
+        let channels = params.channels as usize;
+        if channels >= u32::BITS as usize {
+            u32::MAX
+        } else {
+            (1u32 << channels) - 1
+        }
+    }
+
     fn sample_width_bits(params: &AudioPcmParams) -> Result<usize, &'static str> {
         match params.format {
             AUDIO_PCM_FORMAT_S16LE => Ok(16),
@@ -275,13 +297,8 @@ impl AppleMca {
         cluster: usize,
         params: &AudioPcmParams,
     ) -> Result<(), &'static str> {
-        let channels = params.channels as usize;
-        let slots = (APPLE_MCA_BCLK_RATIO as usize / APPLE_MCA_SLOT_WIDTH).max(channels);
-        let slot_mask = if channels >= u32::BITS as usize {
-            u32::MAX
-        } else {
-            (1u32 << channels) - 1
-        };
+        let slots = Self::playback_slots(params);
+        let slot_mask = Self::playback_tx_mask(params);
         let width = match Self::sample_width_bits(params)? {
             16 => SERDES_CONF_WIDTH_16BIT,
             32 => SERDES_CONF_WIDTH_32BIT,
@@ -492,6 +509,53 @@ fn dma_error_to_str(error: DmaError) -> &'static str {
     }
 }
 
+fn read_phandle(device: &PlatformDeviceInfo) -> Result<u32, &'static str> {
+    device
+        .property("phandle")
+        .or_else(|| device.property("linux,phandle"))
+        .and_then(|property| property.as_usize())
+        .map(|value| value as u32)
+        .ok_or("apple-mca: missing phandle")
+}
+
+fn read_be_u32_cells(value: &[u8]) -> Vec<u32> {
+    value
+        .chunks_exact(4)
+        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+fn parse_sound_dai_property(value: &[u8]) -> Result<(u32, Vec<u32>), &'static str> {
+    if value.len() % 4 != 0 {
+        return Err("apple-macaudio: malformed sound-dai");
+    }
+    let cells = read_be_u32_cells(value);
+    let phandle = *cells.first().ok_or("apple-macaudio: empty sound-dai")?;
+    Ok((phandle, cells[1..].to_vec()))
+}
+
+impl AudioDaiProvider for AppleMca {
+    fn sound_dai_cells(&self) -> usize {
+        APPLE_MCA_SOUND_DAI_CELLS
+    }
+
+    fn attach_playback_codec(
+        &self,
+        spec: &[u32],
+        codec: Arc<dyn AudioCodec>,
+    ) -> Result<(), &'static str> {
+        if spec.len() != APPLE_MCA_SOUND_DAI_CELLS {
+            return Err("apple-mca: invalid sound-dai specifier");
+        }
+        if spec[0] as usize != APPLE_MCA_PLAYBACK_CLUSTER {
+            return Err("apple-mca: only cluster 0 playback is supported");
+        }
+
+        *self.playback_codec.lock() = Some(codec);
+        Ok(())
+    }
+}
+
 impl AudioPlaybackDevice for AppleMca {
     fn capabilities(&self) -> AudioPcmCapabilities {
         let max_rate = APPLE_MCA_MAX_BCLK / APPLE_MCA_BCLK_RATIO as u32;
@@ -536,6 +600,16 @@ impl AudioPlaybackDevice for AppleMca {
         self.configure_clocks_and_port(cluster_base, cluster, params)?;
         self.configure_serdes(cluster_base, cluster, params)?;
         self.configure_dma_adapter(cluster, params)?;
+        if let Some(codec) = self.playback_codec() {
+            codec.configure_playback(
+                params,
+                Self::playback_tx_mask(params),
+                Self::playback_slots(params),
+                APPLE_MCA_SLOT_WIDTH,
+            )?;
+            codec.set_playback_powered(true)?;
+            codec.set_playback_muted(true)?;
+        }
 
         let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
         stream.clear();
@@ -571,6 +645,7 @@ impl AudioPlaybackDevice for AppleMca {
             stream.running = true;
             stream.channel.clone()
         };
+        let codec = self.playback_codec();
 
         self.early_start_serdes(cluster_base, cluster);
         self.enable_serdes(cluster_base);
@@ -582,15 +657,33 @@ impl AudioPlaybackDevice for AppleMca {
             self.disable_serdes(cluster_base);
             return Err(dma_error_to_str(error));
         }
+        if let Some(codec) = codec
+            && let Err(error) = codec
+                .set_playback_powered(true)
+                .and_then(|_| codec.set_playback_muted(false))
+        {
+            let _ = channel.stop();
+            let mut guard = self.stream.lock();
+            if let Some(stream) = guard.as_mut() {
+                stream.running = false;
+            }
+            self.disable_serdes(cluster_base);
+            return Err(error);
+        }
         Ok(())
     }
 
     fn stop(&self) -> Result<(), &'static str> {
         let cluster_base = self.cluster_base(APPLE_MCA_PLAYBACK_CLUSTER)?;
+        let codec_result = self
+            .playback_codec()
+            .map(|codec| codec.set_playback_muted(true))
+            .unwrap_or(Ok(()));
         let channel = {
             let mut guard = self.stream.lock();
             let Some(stream) = guard.as_mut() else {
                 self.disable_serdes(cluster_base);
+                codec_result?;
                 return Ok(());
             };
             stream.running = false;
@@ -601,16 +694,21 @@ impl AudioPlaybackDevice for AppleMca {
             channel.stop().map_err(dma_error_to_str)?;
         }
         self.disable_serdes(cluster_base);
+        codec_result?;
         Ok(())
     }
 
     fn release(&self) -> Result<(), &'static str> {
+        let codec = self.playback_codec();
         self.stop()?;
         if self.stream.lock().is_some() {
             let cluster_base = self.cluster_base(APPLE_MCA_PLAYBACK_CLUSTER)?;
             self.disable_port(cluster_base);
         }
         *self.stream.lock() = None;
+        if let Some(codec) = codec {
+            codec.set_playback_powered(false)?;
+        }
         Ok(())
     }
 
@@ -705,6 +803,7 @@ fn map_resource(device: &PlatformDeviceInfo, index: usize) -> Result<(usize, usi
 }
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let phandle = read_phandle(device)?;
     let (base, size) = map_resource(device, 0)?;
     let (switch_base, switch_size) = map_resource(device, 1)?;
     let clusters = cluster_count(device);
@@ -719,19 +818,109 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         clocks,
         dmas,
     ));
+    let dai_provider: Arc<dyn AudioDaiProvider> = mca.clone();
+    DeviceManager::get_manager().register_audio_dai_provider(phandle, dai_provider);
     let audio_backend: Arc<dyn AudioPlaybackDevice> = mca.clone();
     let audio_name = register_playback_device(audio_backend);
     APPLE_MCA_DEVICES.lock().push(mca);
 
     early_println!(
-        "[apple-mca] probed {} at base={:#x}, switch={:#x}, clusters={}, dmas={}, audio={}",
+        "[apple-mca] probed {} at phandle={:#x}, base={:#x}, switch={:#x}, clusters={}, dmas={}, audio={}",
         device.name(),
+        phandle,
         base,
         switch_base,
         clusters,
         dma_count,
         audio_name
     );
+
+    Ok(())
+}
+
+fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let fdt = FdtManager::get_manager()
+        .get_fdt()
+        .ok_or("apple-macaudio: FDT is not available")?;
+    let sound = fdt
+        .find_node("/sound")
+        .ok_or("apple-macaudio: missing /sound node")?;
+    let manager = DeviceManager::get_manager();
+    let mut speaker_seen = false;
+    let mut attached = 0usize;
+
+    for link in sound.children() {
+        if !link.name.starts_with("dai-link") {
+            continue;
+        }
+        let link_name = link
+            .property("link-name")
+            .and_then(|property| property.as_str())
+            .unwrap_or(link.name);
+        if link_name != "Speaker" {
+            continue;
+        }
+        speaker_seen = true;
+
+        let cpu_node = link
+            .children()
+            .find(|child| child.name == "cpu")
+            .ok_or("apple-macaudio: missing Speaker CPU endpoint")?;
+        let codec_node = link
+            .children()
+            .find(|child| child.name == "codec")
+            .ok_or("apple-macaudio: missing Speaker codec endpoint")?;
+        let (cpu_phandle, cpu_spec) = parse_sound_dai_property(
+            cpu_node
+                .property("sound-dai")
+                .ok_or("apple-macaudio: missing Speaker CPU sound-dai")?
+                .value,
+        )?;
+        let (codec_phandle, codec_spec) = parse_sound_dai_property(
+            codec_node
+                .property("sound-dai")
+                .ok_or("apple-macaudio: missing Speaker codec sound-dai")?
+                .value,
+        )?;
+        if !codec_spec.is_empty() {
+            return Err("apple-macaudio: unsupported Speaker codec specifier");
+        }
+
+        let Some(provider) = manager.get_audio_dai_provider_by_phandle(cpu_phandle) else {
+            early_println!(
+                "[apple-macaudio] CPU DAI phandle {:#x} is not ready, deferring",
+                cpu_phandle
+            );
+            return probe_defer();
+        };
+        if provider.sound_dai_cells() != cpu_spec.len() {
+            return Err("apple-macaudio: invalid Speaker CPU sound-dai cells");
+        }
+
+        let Some(codec) = manager.get_audio_codec_by_phandle(codec_phandle) else {
+            early_println!(
+                "[apple-macaudio] codec phandle {:#x} is not ready, deferring",
+                codec_phandle
+            );
+            return probe_defer();
+        };
+
+        provider.attach_playback_codec(&cpu_spec, codec)?;
+        attached += 1;
+        early_println!(
+            "[apple-macaudio] attached Speaker link cpu={:#x} spec={:?} codec={:#x}",
+            cpu_phandle,
+            cpu_spec,
+            codec_phandle
+        );
+    }
+
+    if !speaker_seen {
+        return Err("apple-macaudio: no Speaker link found");
+    }
+    if attached == 0 {
+        return Err("apple-macaudio: no Speaker link attached");
+    }
 
     Ok(())
 }
@@ -755,6 +944,16 @@ fn register_driver() {
     );
 
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
+
+    let machine_driver = PlatformDeviceDriver::new(
+        "apple-macaudio",
+        probe_macaudio_fn,
+        remove_fn,
+        alloc::vec!["apple,macaudio"],
+    );
+
+    DeviceManager::get_manager()
+        .register_driver(Box::new(machine_driver), DriverPriority::Standard);
 }
 
 scarlet::driver_initcall!(register_driver);

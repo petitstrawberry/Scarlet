@@ -289,6 +289,77 @@ pub trait AudioPlaybackDevice: Send + Sync {
     }
 }
 
+/// Audio codec endpoint controlled by a machine or controller driver.
+pub trait AudioCodec: Send + Sync {
+    /// Configure codec playback parameters for one DAI link.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - PCM parameters selected for the stream.
+    /// * `tx_mask` - TDM transmit slot mask used by the CPU DAI.
+    /// * `slots` - Total number of TDM slots in the frame.
+    /// * `slot_width` - Width of each TDM slot in bits.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when codec playback registers were configured.
+    fn configure_playback(
+        &self,
+        params: &AudioPcmParams,
+        tx_mask: u32,
+        slots: usize,
+        slot_width: usize,
+    ) -> Result<(), &'static str>;
+
+    /// Change codec playback mute state.
+    ///
+    /// # Arguments
+    ///
+    /// * `muted` - `true` to mute playback output, `false` to unmute it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the mute state was applied.
+    fn set_playback_muted(&self, muted: bool) -> Result<(), &'static str>;
+
+    /// Change codec playback power state.
+    ///
+    /// # Arguments
+    ///
+    /// * `powered` - `true` to power playback circuitry, `false` to shut it down.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the power state was applied.
+    fn set_playback_powered(&self, powered: bool) -> Result<(), &'static str>;
+}
+
+/// CPU-side audio DAI provider that can be routed to codecs.
+pub trait AudioDaiProvider: Send + Sync {
+    /// Number of firmware cells consumed after the provider phandle.
+    ///
+    /// # Returns
+    ///
+    /// Number of `sound-dai` specifier cells expected by this provider.
+    fn sound_dai_cells(&self) -> usize;
+
+    /// Attach a playback codec to a CPU DAI endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Firmware specifier cells following the provider phandle.
+    /// * `codec` - Codec endpoint to control for playback on this DAI.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the route was accepted.
+    fn attach_playback_codec(
+        &self,
+        spec: &[u32],
+        codec: Arc<dyn AudioCodec>,
+    ) -> Result<(), &'static str>;
+}
+
 struct AudioPcmRing {
     params: AudioPcmParams,
     pages: ContiguousPages,

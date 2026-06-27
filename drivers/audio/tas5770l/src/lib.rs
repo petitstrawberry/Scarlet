@@ -11,7 +11,10 @@ use scarlet::sync::Mutex;
 use scarlet::{
     device::{
         DeviceInfo,
-        audio::{AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3, AUDIO_PCM_FORMAT_S32LE},
+        audio::{
+            AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3, AUDIO_PCM_FORMAT_S32LE, AudioCodec,
+            AudioPcmParams,
+        },
         gpio::GpioController,
         i2c::{I2cAddress, I2cBus, I2cError, I2cMessage},
         manager::{DeviceManager, DriverPriority, probe_defer},
@@ -389,6 +392,29 @@ impl Tas5770l {
     }
 }
 
+impl AudioCodec for Tas5770l {
+    fn configure_playback(
+        &self,
+        params: &AudioPcmParams,
+        tx_mask: u32,
+        slots: usize,
+        slot_width: usize,
+    ) -> Result<(), &'static str> {
+        self.configure_playback(params.format, params.rate, tx_mask, slots, slot_width)
+            .map_err(|_| "tas5770l: failed to configure playback")
+    }
+
+    fn set_playback_muted(&self, muted: bool) -> Result<(), &'static str> {
+        self.set_muted(muted)
+            .map_err(|_| "tas5770l: failed to change mute state")
+    }
+
+    fn set_playback_powered(&self, powered: bool) -> Result<(), &'static str> {
+        self.set_powered(powered)
+            .map_err(|_| "tas5770l: failed to change power state")
+    }
+}
+
 fn read_i2c_address(device: &PlatformDeviceInfo) -> Result<I2cAddress, &'static str> {
     let address = device
         .property("reg")
@@ -411,6 +437,15 @@ fn read_sound_dai_cells(device: &PlatformDeviceInfo) -> Result<usize, &'static s
     }
 
     Ok(cells)
+}
+
+fn read_phandle(device: &PlatformDeviceInfo) -> Result<u32, &'static str> {
+    device
+        .property("phandle")
+        .or_else(|| device.property("linux,phandle"))
+        .and_then(|property| property.as_usize())
+        .map(|value| value as u32)
+        .ok_or("tas5770l: missing phandle")
 }
 
 fn read_optional_u8_property(
@@ -479,6 +514,7 @@ fn resolve_i2c_bus(device: &PlatformDeviceInfo) -> Result<(u32, Arc<dyn I2cBus>)
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (bus_phandle, bus) = resolve_i2c_bus(device)?;
+    let phandle = read_phandle(device)?;
     let address = read_i2c_address(device)?;
     let _sound_dai_cells = read_sound_dai_cells(device)?;
     let has_sdz_supply = device.property("SDZ-supply").is_some();
@@ -505,11 +541,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     codec
         .initialize()
         .map_err(|_| "tas5770l: codec initialization failed")?;
+    let audio_codec: Arc<dyn AudioCodec> = codec.clone();
+    DeviceManager::get_manager().register_audio_codec(phandle, audio_codec);
     TAS5770L_CODECS.lock().push(codec);
 
     early_println!(
-        "[tas5770l] registered {} at bus-phandle={:#x}, addr={:#x}, sdz-supply={}, shutdown-gpio={}, reset-gpio={}, i-sense-slot={:?}, v-sense-slot={:?}, sdout-pull-down={}, sdout-zero-fill={}",
+        "[tas5770l] registered {} at phandle={:#x}, bus-phandle={:#x}, addr={:#x}, sdz-supply={}, shutdown-gpio={}, reset-gpio={}, i-sense-slot={:?}, v-sense-slot={:?}, sdout-pull-down={}, sdout-zero-fill={}",
         device.name(),
+        phandle,
         bus_phandle,
         address.raw(),
         has_sdz_supply,
