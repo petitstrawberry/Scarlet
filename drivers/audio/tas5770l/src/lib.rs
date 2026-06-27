@@ -39,6 +39,10 @@ const TAS2770_PWR_CTRL_MASK: u8 = 0x03;
 const TAS2770_PWR_CTRL_ACTIVE: u8 = 0x00;
 const TAS2770_PWR_CTRL_MUTE: u8 = 0x01;
 const TAS2770_PWR_CTRL_SHUTDOWN: u8 = 0x02;
+const TAS2770_PLAY_CFG_REG0: u8 = 0x03;
+const TAS5770L_SAFE_AMP_GAIN: u8 = 0x0f;
+const TAS2770_PLAY_CFG_REG2: u8 = 0x05;
+const TAS5770L_SAFE_PLAYBACK_VOLUME: u8 = 0xa1;
 const TAS2770_TDM_CFG_REG0: u8 = 0x0a;
 const TAS2770_TDM_CFG_REG0_SMP_MASK: u8 = 1 << 5;
 const TAS2770_TDM_CFG_REG0_SMP_48KHZ: u8 = 0x00;
@@ -55,6 +59,8 @@ const TAS2770_TDM_CFG_REG1_START_SLOT_SHIFT: u8 = 1;
 const TAS2770_TDM_CFG_REG1_RX_EDGE_MASK: u8 = 1 << 0;
 const TAS2770_TDM_CFG_REG1_RX_FALLING: u8 = 1;
 const TAS2770_TDM_CFG_REG2: u8 = 0x0c;
+const TAS2770_TDM_CFG_REG2_ASI1_SRC_MASK: u8 = 0x30;
+const TAS2770_TDM_CFG_REG2_ASI1_SRC_LEFT: u8 = 0x10;
 const TAS2770_TDM_CFG_REG2_RXW_MASK: u8 = 0x0c;
 const TAS2770_TDM_CFG_REG2_RXW_16BITS: u8 = 0x00;
 const TAS2770_TDM_CFG_REG2_RXW_24BITS: u8 = 0x08;
@@ -267,6 +273,19 @@ impl Tas5770l {
         self.update_bits(TAS2770_TDM_CFG_REG2, TAS2770_TDM_CFG_REG2_RXS_MASK, rxs)
     }
 
+    fn configure_asi1_source(&self) -> Result<(), I2cError> {
+        self.update_bits(
+            TAS2770_TDM_CFG_REG2,
+            TAS2770_TDM_CFG_REG2_ASI1_SRC_MASK,
+            TAS2770_TDM_CFG_REG2_ASI1_SRC_LEFT,
+        )
+    }
+
+    fn configure_playback_level(&self) -> Result<(), I2cError> {
+        self.write_register(TAS2770_PLAY_CFG_REG0, TAS5770L_SAFE_AMP_GAIN)?;
+        self.write_register(TAS2770_PLAY_CFG_REG2, TAS5770L_SAFE_PLAYBACK_VOLUME)
+    }
+
     fn configure_sample_rate(&self, rate: u32) -> Result<(), I2cError> {
         let value = match rate {
             44_100 => TAS2770_TDM_CFG_REG0_SMP_44_1KHZ | TAS2770_TDM_CFG_REG0_RATE_44_1_48KHZ,
@@ -368,6 +387,8 @@ impl Tas5770l {
         slot_width: usize,
     ) -> Result<(), I2cError> {
         self.configure_i2s_ib_if()?;
+        self.configure_asi1_source()?;
+        self.configure_playback_level()?;
         self.configure_bitwidth(format)?;
         self.configure_sample_rate(rate)?;
         self.configure_tdm_slot(tx_mask, slots, slot_width)?;

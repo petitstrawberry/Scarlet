@@ -625,8 +625,13 @@ fn cache_line_bytes_dcache() -> usize {
 
 /// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
 ///
-/// This is primarily useful for ensuring page-table updates become visible to the
-/// hardware table walker during bring-up/debugging.
+/// This is useful for ensuring page-table updates and CPU-written DMA buffers
+/// become visible to hardware.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to clean.
 #[inline(always)]
 pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
     if len == 0 {

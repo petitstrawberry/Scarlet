@@ -148,6 +148,7 @@ impl AppleMcaStream {
         unsafe {
             core::ptr::write_bytes(self.pages.as_vaddr() as *mut u8, 0, self.mapped_bytes);
         }
+        scarlet::arch::clean_dcache_to_poc_range(self.pages.as_vaddr(), self.mapped_bytes);
     }
 
     fn copy_period(&mut self, pcm: &[u8]) -> Result<(), &'static str> {
@@ -174,6 +175,7 @@ impl AppleMcaStream {
                 pcm.len(),
             );
         }
+        scarlet::arch::clean_dcache_to_poc_range(self.pages.as_vaddr() + offset, pcm.len());
 
         self.submit_period = (self.submit_period + 1) % self.period_count;
         self.in_flight_periods += 1;
@@ -620,7 +622,6 @@ impl AudioDaiProvider for AppleMca {
         }
 
         let mut codecs = self.playback_codecs.lock();
-        codecs.clear();
         codecs.push(codec);
         Ok(())
     }
@@ -979,35 +980,45 @@ fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .value,
         )?;
 
-        let Some((cpu_index, cpu_dai)) = cpu_dais
-            .iter()
-            .enumerate()
-            .find(|(_, dai)| dai.spec.first() == Some(&(APPLE_MCA_PLAYBACK_CLUSTER as u32)))
-        else {
+        let codecs_per_cpu = if codec_dais.len() % cpu_dais.len() == 0 {
+            codec_dais.len() / cpu_dais.len()
+        } else {
+            return Err("apple-macaudio: Speaker CPU/CODEC count mismatch");
+        };
+        let mut link_attached = 0usize;
+
+        for (cpu_index, cpu_dai) in cpu_dais.iter().enumerate() {
+            if cpu_dai.spec.first() != Some(&(APPLE_MCA_PLAYBACK_CLUSTER as u32)) {
+                continue;
+            }
+
+            let Some(provider) = manager.get_audio_dai_provider_by_phandle(cpu_dai.phandle) else {
+                return probe_defer();
+            };
+            let codec_start = cpu_index * codecs_per_cpu;
+            let codec_end = codec_start + codecs_per_cpu;
+            for (codec_phandle, codec) in &codec_dais[codec_start..codec_end] {
+                provider.attach_playback_codec(&cpu_dai.spec, Arc::clone(codec))?;
+                link_attached += 1;
+                early_println!(
+                    "[apple-macaudio] attached {} link cpu={:#x} spec={:?} codec={:#x}",
+                    link_name,
+                    cpu_dai.phandle,
+                    cpu_dai.spec,
+                    *codec_phandle
+                );
+            }
+        }
+
+        if link_attached == 0 {
             early_println!(
                 "[apple-macaudio] Speaker link {} has no supported cluster {} CPU DAI",
                 link_name,
                 APPLE_MCA_PLAYBACK_CLUSTER
             );
             continue;
-        };
-        let Some(provider) = manager.get_audio_dai_provider_by_phandle(cpu_dai.phandle) else {
-            return probe_defer();
-        };
-        let Some((codec_phandle, codec)) = codec_dais.get(cpu_index).or_else(|| codec_dais.first())
-        else {
-            return Err("apple-macaudio: no Speaker codec endpoint");
-        };
-
-        provider.attach_playback_codec(&cpu_dai.spec, Arc::clone(codec))?;
-        attached += 1;
-        early_println!(
-            "[apple-macaudio] attached {} link cpu={:#x} spec={:?} codec={:#x}",
-            link_name,
-            cpu_dai.phandle,
-            cpu_dai.spec,
-            *codec_phandle
-        );
+        }
+        attached += link_attached;
     }
 
     if !speaker_seen {
