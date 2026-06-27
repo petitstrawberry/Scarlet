@@ -17,6 +17,7 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-wdt" = { path = "../../drivers/watchdog/apple-wdt", enabled = true }
 "scarlet-driver-apple-pinctrl" = { path = "../../drivers/gpio/apple-pinctrl", enabled = true }
 "scarlet-driver-apple-i2c" = { path = "../../drivers/i2c/apple-i2c", enabled = true }
+"scarlet-driver-apple-admac" = { path = "../../drivers/dma/apple-admac", enabled = true }
 "scarlet-driver-s5l-uart" = { path = "../../drivers/uart/s5l-uart", enabled = true }
 "scarlet-driver-apple-aic" = { path = "../../drivers/pic/apple-aic", enabled = true }
 "scarlet-driver-apple-msi" = { path = "../../drivers/pic/apple-msi", enabled = true }
@@ -61,4 +62,3 @@ to = "/boot/initramfs"
 
 [runner]
 command = "tools/deploy_m1n1_usb.py"
-

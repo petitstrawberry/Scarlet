@@ -61,6 +61,7 @@ use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
 use super::clk::{ClkError, ClkHandle, ClkProvider};
+use super::dma::{DmaChannel, DmaController, DmaError, DmaSpec};
 use super::gpio::GpioController;
 use super::i2c::I2cBus;
 use super::iommu::{
@@ -124,6 +125,11 @@ struct DeferredPlatformDevice {
 }
 
 struct OwnedClkSpec {
+    phandle: u32,
+    cells: Vec<u32>,
+}
+
+struct OwnedDmaSpec {
     phandle: u32,
     cells: Vec<u32>,
 }
@@ -214,6 +220,7 @@ pub struct DeviceManager {
     usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
+    dma_controllers: Mutex<BTreeMap<u32, Arc<dyn DmaController>>>,
     iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
     msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
     mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
@@ -242,6 +249,7 @@ impl DeviceManager {
             usb_hosts: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
             clk_providers: Mutex::new(BTreeMap::new()),
+            dma_controllers: Mutex::new(BTreeMap::new()),
             iommu_controllers: Mutex::new(BTreeMap::new()),
             msi_controllers: Mutex::new(BTreeMap::new()),
             mailbox_controllers: Mutex::new(BTreeMap::new()),
@@ -287,6 +295,11 @@ impl DeviceManager {
     fn get_clock_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_clk_provider_by_phandle(phandle)
             .map(|provider| provider.clock_cells())
+    }
+
+    fn get_dma_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
+        self.get_dma_controller_by_phandle(phandle)
+            .map(|controller| controller.dma_cells())
     }
 
     fn get_iommu_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
@@ -378,6 +391,30 @@ impl DeviceManager {
                 cells: cells[index..index + clock_cells].to_vec(),
             }));
             index += clock_cells;
+        }
+
+        Ok(specs)
+    }
+
+    fn parse_dma_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedDmaSpec>, &'static str> {
+        let cells = Self::read_be_u32_cells(bytes).ok_or("dma: malformed property")?;
+        let mut specs = Vec::new();
+        let mut index = 0usize;
+
+        while index < cells.len() {
+            let phandle = cells[index];
+            index += 1;
+
+            let dma_cells = self.get_dma_cells_for_phandle(phandle).ok_or(PROBE_DEFER)?;
+            if index + dma_cells > cells.len() {
+                return Err("dma: truncated specifier");
+            }
+
+            specs.push(OwnedDmaSpec {
+                phandle,
+                cells: cells[index..index + dma_cells].to_vec(),
+            });
+            index += dma_cells;
         }
 
         Ok(specs)
@@ -536,6 +573,19 @@ impl DeviceManager {
             .ok_or("clk: clock name not found")
     }
 
+    fn dma_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
+        let names = device
+            .property("dma-names")
+            .ok_or("dma: dma-names missing")?
+            .as_string_list()
+            .ok_or("dma: malformed dma-names")?;
+
+        names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or("dma: name not found")
+    }
+
     fn mailbox_name_index(device: &PlatformDeviceInfo, name: &str) -> Result<usize, &'static str> {
         let names = device
             .property("mbox-names")
@@ -602,6 +652,18 @@ impl DeviceManager {
             ClkError::HardwareError => "clk: hardware error",
             ClkError::Busy => "clk: busy",
             ClkError::NotFound => "clk: not found",
+        }
+    }
+
+    fn dma_error_to_str(error: DmaError) -> &'static str {
+        match error {
+            DmaError::InvalidSpec => "dma: invalid specifier",
+            DmaError::ChannelNotFound => "dma: channel not found",
+            DmaError::ChannelBusy => "dma: channel busy",
+            DmaError::InvalidConfig => "dma: invalid config",
+            DmaError::Unsupported => "dma: unsupported",
+            DmaError::HardwareError => "dma: hardware error",
+            DmaError::NotPrepared => "dma: not prepared",
         }
     }
 
@@ -686,6 +748,19 @@ impl DeviceManager {
         provider
             .get_clk(&spec.cells)
             .map_err(Self::clk_error_to_str)
+    }
+
+    fn resolve_dma_spec(&self, spec: &OwnedDmaSpec) -> Result<Arc<dyn DmaChannel>, &'static str> {
+        let controller = self
+            .get_dma_controller_by_phandle(spec.phandle)
+            .ok_or(PROBE_DEFER)?;
+        let dma_spec = DmaSpec {
+            controller_phandle: spec.phandle,
+            cells: spec.cells.clone(),
+        };
+        controller
+            .request_channel(&dma_spec)
+            .map_err(Self::dma_error_to_str)
     }
 
     fn resolve_phy_spec(&self, spec: &OwnedPhySpec) -> Result<PhyHandle, &'static str> {
@@ -959,6 +1034,29 @@ impl DeviceManager {
 
     pub fn get_gpio_controller(&self, phandle: u32) -> Option<Arc<dyn GpioController>> {
         self.gpio_controllers.lock().get(&phandle).cloned()
+    }
+
+    /// Register a DMA controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the DMA controller node.
+    /// * `controller` - DMA controller implementation.
+    pub fn register_dma_controller(&self, phandle: u32, controller: Arc<dyn DmaController>) {
+        self.dma_controllers.lock().insert(phandle, controller);
+    }
+
+    /// Look up a DMA controller by firmware phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle identifying the DMA controller node.
+    ///
+    /// # Returns
+    ///
+    /// DMA controller registered for `phandle`, or `None` when missing.
+    pub fn get_dma_controller_by_phandle(&self, phandle: u32) -> Option<Arc<dyn DmaController>> {
+        self.dma_controllers.lock().get(&phandle).cloned()
     }
 
     /// Register a clock provider by firmware phandle.
@@ -1236,6 +1334,50 @@ impl DeviceManager {
         let specs = self.parse_clock_specs(clocks.value())?;
         let spec = specs.get(index).ok_or("clk: clock index out of range")?;
         self.resolve_clk_spec(spec)
+    }
+
+    /// Resolve a named DMA channel for a platform device from FDT properties.
+    ///
+    /// Missing DMA controllers return [`probe_defer`] so platform probing can
+    /// retry once provider drivers register.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing `dmas` and `dma-names` properties.
+    /// * `name` - DMA channel name to resolve from `dma-names`.
+    ///
+    /// # Returns
+    ///
+    /// DMA channel handle backed by the registered controller.
+    pub fn resolve_dma_channel(
+        &self,
+        device: &PlatformDeviceInfo,
+        name: &str,
+    ) -> Result<Arc<dyn DmaChannel>, &'static str> {
+        let index = Self::dma_name_index(device, name)?;
+        self.resolve_dma_channel_by_index(device, index)
+    }
+
+    /// Resolve a DMA channel for a platform device by specifier index.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device containing the raw `dmas` property.
+    /// * `index` - Zero-based DMA specifier index to resolve.
+    ///
+    /// # Returns
+    ///
+    /// DMA channel handle backed by the registered controller.
+    pub fn resolve_dma_channel_by_index(
+        &self,
+        device: &PlatformDeviceInfo,
+        index: usize,
+    ) -> Result<Arc<dyn DmaChannel>, &'static str> {
+        let dmas = device.property("dmas").ok_or("dma: dmas missing")?;
+        let specs = self.parse_dma_specs(dmas.value())?;
+        let spec = specs.get(index).ok_or("dma: index out of range")?;
+
+        self.resolve_dma_spec(spec)
     }
 
     /// Apply `assigned-clock-parents` and `assigned-clock-rates` for a platform device.
@@ -1625,6 +1767,14 @@ impl DeviceManager {
         };
 
         self.parse_iommu_specs(iommus.value()).map(|_| ())
+    }
+
+    fn pre_probe_resolve_dma(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+        let Some(dmas) = device.property("dmas") else {
+            return Ok(());
+        };
+
+        self.parse_dma_specs(dmas.value()).map(|_| ())
     }
 
     fn pre_probe_resolve_mailbox(&self, device: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -2287,6 +2437,14 @@ impl DeviceManager {
                         return ProbeOutcome::Failed;
                     }
 
+                    if let Err(e) = self.pre_probe_resolve_dma(device) {
+                        if is_probe_defer(e) {
+                            return ProbeOutcome::Deferred;
+                        }
+                        early_println!("[dma] failed to resolve DMA: {}", e);
+                        return ProbeOutcome::Failed;
+                    }
+
                     if let Err(e) = self.pre_probe_resolve_mailbox(device) {
                         if is_probe_defer(e) {
                             return ProbeOutcome::Deferred;
@@ -2551,6 +2709,7 @@ impl DeviceManager {
         self.usb_hosts.lock().clear();
         self.gpio_controllers.lock().clear();
         self.clk_providers.lock().clear();
+        self.dma_controllers.lock().clear();
         self.iommu_controllers.lock().clear();
         self.msi_controllers.lock().clear();
         self.mailbox_controllers.lock().clear();
@@ -2567,6 +2726,10 @@ impl DeviceManager {
 mod tests {
     use super::*;
     use crate::device::clk::{ClkError, ClkFixedRate, ClkHandle, ClkProvider};
+    use crate::device::dma::{
+        DmaBusWidth, DmaChannel, DmaController, DmaCyclicConfig, DmaDirection, DmaError,
+        DmaPeripheralConfig, DmaSpec,
+    };
     use crate::device::iommu::{
         IommuDomain, IommuDomainType, IommuMapFlags, IommuStreamId, PhysAddr,
     };
@@ -2687,6 +2850,16 @@ mod tests {
         clock_cells: usize,
     }
 
+    struct TestDmaChannel {
+        prepared: AtomicBool,
+        running: AtomicBool,
+    }
+
+    struct TestDmaController {
+        channel: Arc<TestDmaChannel>,
+        dma_cells: usize,
+    }
+
     struct TestWatchdog {
         ping_count: AtomicUsize,
     }
@@ -2740,6 +2913,70 @@ mod tests {
         }
     }
 
+    impl TestDmaChannel {
+        fn new() -> Self {
+            Self {
+                prepared: AtomicBool::new(false),
+                running: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl DmaChannel for TestDmaChannel {
+        fn name(&self) -> &'static str {
+            "test-dma-channel"
+        }
+
+        fn prepare_cyclic(&self, config: DmaCyclicConfig) -> Result<(), DmaError> {
+            config.validate()?;
+            self.prepared.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn start(&self) -> Result<(), DmaError> {
+            if !self.prepared.load(Ordering::SeqCst) {
+                return Err(DmaError::NotPrepared);
+            }
+            self.running.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&self) -> Result<(), DmaError> {
+            self.running.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            self.running.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TestDmaController {
+        fn new(dma_cells: usize) -> Self {
+            Self {
+                channel: Arc::new(TestDmaChannel::new()),
+                dma_cells,
+            }
+        }
+    }
+
+    impl DmaController for TestDmaController {
+        fn name(&self) -> &'static str {
+            "test-dma"
+        }
+
+        fn dma_cells(&self) -> usize {
+            self.dma_cells
+        }
+
+        fn request_channel(&self, spec: &DmaSpec) -> Result<Arc<dyn DmaChannel>, DmaError> {
+            if spec.cells.len() != self.dma_cells {
+                return Err(DmaError::InvalidSpec);
+            }
+            Ok(self.channel.clone())
+        }
+    }
+
     impl ClkProvider for TestClkProvider {
         fn name(&self) -> &'static str {
             "test-provider"
@@ -2765,6 +3002,15 @@ mod tests {
         let provider = manager.get_clk_provider_by_phandle(0x10);
         assert!(provider.is_some());
         assert_eq!(provider.unwrap().name(), "test-provider");
+    }
+
+    #[test_case]
+    fn test_register_get_dma_controller() {
+        let manager = DeviceManager::new();
+        manager.register_dma_controller(0x30, Arc::new(TestDmaController::new(1)));
+        let controller = manager.get_dma_controller_by_phandle(0x30);
+        assert!(controller.is_some());
+        assert_eq!(controller.unwrap().name(), "test-dma");
     }
 
     #[test_case]
@@ -2893,6 +3139,60 @@ mod tests {
     }
 
     #[test_case]
+    fn test_resolve_dma_channel_defers_when_controller_missing() {
+        let manager = DeviceManager::new();
+        let device = dma_test_device(vec![PlatformDeviceProperty::new(
+            "dmas",
+            &be_cells(&[0x30, 7]),
+        )]);
+
+        match manager.resolve_dma_channel_by_index(&device, 0) {
+            Ok(_) => panic!("DMA channel resolved without controller"),
+            Err(err) => assert_eq!(err, PROBE_DEFER),
+        }
+    }
+
+    #[test_case]
+    fn test_resolve_dma_channel_by_name() {
+        let manager = DeviceManager::new();
+        manager.register_dma_controller(0x30, Arc::new(TestDmaController::new(1)));
+        let device = dma_test_device(vec![
+            PlatformDeviceProperty::new("dmas", &be_cells(&[0x30, 7])),
+            PlatformDeviceProperty::new("dma-names", b"tx0a\0"),
+        ]);
+
+        let channel = manager.resolve_dma_channel(&device, "tx0a").unwrap();
+        let config = DmaCyclicConfig {
+            buffer_addr: 0x1000,
+            buffer_len: 0x1000,
+            period_len: 0x400,
+            direction: DmaDirection::MemToDev,
+            peripheral: Some(DmaPeripheralConfig {
+                addr: 0x2000,
+                width: DmaBusWidth::Width4,
+                burst_len: 4,
+            }),
+        };
+
+        assert!(channel.prepare_cyclic(config).is_ok());
+        assert!(channel.start().is_ok());
+        assert!(channel.is_running());
+        assert!(channel.stop().is_ok());
+        assert!(!channel.is_running());
+    }
+
+    #[test_case]
+    fn test_parse_dma_specs_rejects_truncated_spec() {
+        let manager = DeviceManager::new();
+        manager.register_dma_controller(0x30, Arc::new(TestDmaController::new(1)));
+
+        match manager.parse_dma_specs(&be_cells(&[0x30])) {
+            Ok(_) => panic!("truncated DMA specifier unexpectedly parsed"),
+            Err(err) => assert_eq!(err, "dma: truncated specifier"),
+        }
+    }
+
+    #[test_case]
     fn test_get_missing_clk_provider_returns_none() {
         let manager = DeviceManager::new();
         assert!(manager.get_clk_provider_by_phandle(0x20).is_none());
@@ -2905,6 +3205,15 @@ mod tests {
         assert!(manager.get_clk_provider_by_phandle(0x10).is_some());
         manager.clear_for_test();
         assert!(manager.get_clk_provider_by_phandle(0x10).is_none());
+    }
+
+    #[test_case]
+    fn test_clear_for_test_clears_dma_controllers() {
+        let manager = DeviceManager::new();
+        manager.register_dma_controller(0x30, Arc::new(TestDmaController::new(1)));
+        assert!(manager.get_dma_controller_by_phandle(0x30).is_some());
+        manager.clear_for_test();
+        assert!(manager.get_dma_controller_by_phandle(0x30).is_none());
     }
 
     fn be_cells(cells: &[u32]) -> Vec<u8> {
@@ -2942,6 +3251,17 @@ mod tests {
             "msi-device",
             0,
             vec!["test,msi-device"],
+            vec![],
+            properties,
+            None,
+        )
+    }
+
+    fn dma_test_device(properties: Vec<PlatformDeviceProperty>) -> PlatformDeviceInfo {
+        PlatformDeviceInfo::new(
+            "dma-device",
+            0,
+            vec!["test,dma-device"],
             vec![],
             properties,
             None,
@@ -3932,6 +4252,22 @@ mod tests {
         let device = Arc::new(clk_test_device(vec![PlatformDeviceProperty::new(
             "iommus",
             &be_cells(&[0x40, 0x10]),
+        )]));
+
+        let mut idx = 0;
+        manager.try_match_and_probe_device(DriverPriority::Core, &mut idx, device);
+        assert_eq!(manager.deferred_platform_devices.lock().len(), 1);
+        assert_eq!(CLOCK_HOOK_ORDER.load(Ordering::SeqCst), 0);
+    }
+
+    #[test_case]
+    fn test_probe_defers_when_dma_controller_not_yet_registered() {
+        CLOCK_HOOK_ORDER.store(0, Ordering::SeqCst);
+        let manager = DeviceManager::new();
+        manager.register_driver(hook_test_driver(hook_order_probe), DriverPriority::Core);
+        let device = Arc::new(clk_test_device(vec![PlatformDeviceProperty::new(
+            "dmas",
+            &be_cells(&[0x30, 7]),
         )]));
 
         let mut idx = 0;

@@ -8,6 +8,7 @@ pub mod audio;
 pub mod block;
 pub mod char;
 pub mod clk;
+pub mod dma;
 pub mod events;
 pub mod fdt;
 pub mod gpio;
