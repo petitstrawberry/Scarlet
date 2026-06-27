@@ -22,6 +22,7 @@ use scarlet::{
     },
     early_println,
     mem::pmm,
+    println,
 };
 
 const DART_PARAMS1: usize = 0x00;
@@ -391,12 +392,21 @@ impl DartPageTable {
                     unsafe {
                         core::ptr::write_bytes(mid_vaddr as *mut u8, 0, DART_TABLE_SIZE);
                     }
-                    let mid_pte = ((mid_paddr >> DART_PAGE_SHIFT) as u64) | DART_PTE_VALID;
+                    // Format must match the read side below and the leaf PTE write:
+                    // paddr bits live in DART_PADDR_MASK (bits 12..35), not as a
+                    // frame number in the low bits. Using `>> DART_PAGE_SHIFT` here
+                    // caused phys_to_virt() to receive a garbage address on the
+                    // next map_page() that hit the same root entry (issue #480).
+                    let mid_pte = (mid_paddr as u64 & DART_PADDR_MASK) | DART_PTE_VALID;
                     Self::write_pte(table_vaddr, index, mid_pte);
                     table_vaddr = mid_vaddr;
                 } else {
                     let next_table_paddr =
                         (((pte & DART_PADDR_MASK) >> DART_PAGE_SHIFT) as usize) << DART_PAGE_SHIFT;
+                    println!(
+                        "[dart] map_page: reuse mid table level={} pte=0x{:08x} next_paddr=0x{:x}",
+                        level, pte, next_table_paddr
+                    );
                     table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
                 }
             }
@@ -460,6 +470,10 @@ impl DartPageTable {
         size: usize,
         flags: u64,
     ) -> Result<(), &'static str> {
+        println!(
+            "[dart] map_contiguous: iova=0x{:x} paddr=0x{:x} size={} flags=0x{:x}",
+            iova, paddr, size, flags
+        );
         let page_size = 1usize << DART_PAGE_SHIFT;
         let pages = size.div_ceil(page_size);
         for i in 0..pages {
