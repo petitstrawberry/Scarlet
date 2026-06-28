@@ -21,7 +21,7 @@ use scarlet::{
         manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{PlatformDeviceDriver, PlatformDeviceInfo},
     },
-    early_println,
+    early_println, println,
     time::udelay,
 };
 
@@ -31,6 +31,9 @@ const TAS5770L_DEFAULT_RATE: u32 = 48_000;
 const TAS5770L_DEFAULT_TX_MASK: u32 = 0x3;
 const TAS5770L_DEFAULT_SLOTS: usize = 2;
 const TAS5770L_DEFAULT_SLOT_WIDTH: usize = 32;
+const TAS2770_POWER_UP_DELAY_US: u64 = 2_000;
+const TAS2770_RESET_LOW_DELAY_US: u64 = 20_000;
+const TAS2770_SHUTDOWN_SETTLE_US: u64 = 7_000;
 
 const TAS2770_SW_RST: u8 = 0x01;
 const TAS2770_RST: u8 = 1 << 0;
@@ -171,16 +174,24 @@ impl Tas5770l {
     }
 
     fn write_register(&self, register: u8, value: u8) -> Result<(), I2cError> {
+        println!(
+            "[tas5770l] write reg=0x{:02x} val=0x{:02x}",
+            register, value
+        );
         let mut messages = alloc::vec![I2cMessage::write(self.address, &[register, value], true)];
-        self.bus.transfer(&mut messages)
+        let result = self.bus.transfer(&mut messages);
+        udelay(500);
+        result
     }
 
     fn read_register(&self, register: u8) -> Result<u8, I2cError> {
+        println!("[tas5770l] read reg=0x{:02x}", register);
         let mut messages = alloc::vec![
             I2cMessage::write(self.address, &[register], false),
             I2cMessage::read(self.address, 1, true),
         ];
-        self.bus.transfer(&mut messages)?;
+        let result = self.bus.transfer(&mut messages)?;
+        udelay(500);
         Ok(messages[1].data[0])
     }
 
@@ -198,15 +209,22 @@ impl Tas5770l {
     fn hardware_reset(&self) {
         if let Some(gpio) = &self.reset_gpio {
             gpio.set_output(false);
-            udelay(20_000);
+            udelay(TAS2770_RESET_LOW_DELAY_US);
             gpio.set(true);
-            udelay(2_000);
+            udelay(TAS2770_POWER_UP_DELAY_US);
         }
     }
 
     fn software_reset(&self) -> Result<(), I2cError> {
         self.write_register(TAS2770_SW_RST, TAS2770_RST)?;
-        udelay(2_000);
+        udelay(TAS2770_POWER_UP_DELAY_US);
+        Ok(())
+    }
+
+    fn enter_shutdown(&self) -> Result<(), I2cError> {
+        *self.powered.lock() = false;
+        self.update_power_ctrl()?;
+        udelay(TAS2770_SHUTDOWN_SETTLE_US);
         Ok(())
     }
 
@@ -222,7 +240,7 @@ impl Tas5770l {
         } else {
             TAS2770_PWR_CTRL_SHUTDOWN
         };
-        self.update_bits(TAS2770_PWR_CTRL, TAS2770_PWR_CTRL_MASK, value)
+        self.write_register(TAS2770_PWR_CTRL, value)
     }
 
     fn set_powered(&self, powered: bool) -> Result<(), I2cError> {
@@ -410,15 +428,18 @@ impl Tas5770l {
             } else {
                 0
             },
-        )
+        )?;
+
+        Ok(())
     }
 
     fn initialize(&self) -> Result<(), I2cError> {
         if let Some(supply) = &self.sdz_supply {
             supply.enable();
+            udelay(TAS2770_POWER_UP_DELAY_US);
         }
         self.power_gpio(true);
-        udelay(2_000);
+        udelay(TAS2770_POWER_UP_DELAY_US);
         self.hardware_reset();
         self.software_reset()?;
         self.configure_playback(

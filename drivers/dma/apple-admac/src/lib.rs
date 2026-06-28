@@ -28,6 +28,7 @@ use scarlet::{
     },
     early_println,
     interrupt::{InterruptId, InterruptResult},
+    println,
 };
 
 const NCHANNELS_MAX: usize = 64;
@@ -606,6 +607,16 @@ impl AppleAdmac {
 
     fn poll_channel_completions(&self, index: usize) -> usize {
         let cause = self.read_reg(Self::chan_intstatus_reg(index, self.inner.irq_index));
+        let ring_status = self.read_reg(Self::report_ring_reg(index));
+        let desc_ring_status = self.read_reg(Self::desc_ring_reg(index));
+        let fifoctl = self.read_reg(Self::chan_fifoctl_reg(index));
+        let residue = self.read_reg(Self::residue_reg(index));
+        let bank0 = self.read_reg(Self::chan_intstatus_reg(index, 0));
+        let tx0 = self.read_reg(Self::tx_intstate_reg(0));
+        println!(
+            "[apple-admac] poll: ch={} cause=0x{:08x} desc=0x{:08x} rpt=0x{:08x} fifo=0x{:08x} residue=0x{:08x} bank0=0x{:08x} tx0=0x{:08x}",
+            index, cause, desc_ring_status, ring_status, fifoctl, residue, bank0, tx0
+        );
         if cause & STATUS_ERR != 0 {
             self.handle_status_err(index);
         }
@@ -961,6 +972,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             iova_size: 1u64 << 36,
         },
     )?;
+    match DeviceManager::get_manager().resolve_reset_by_index(device, 0) {
+        Ok(handle) => {
+            handle
+                .reset()
+                .map_err(|_| "apple-admac: failed to pulse reset")?;
+            early_println!("[apple-admac] probe: reset pulsed");
+        }
+        Err(e) => early_println!("[apple-admac] probe: reset unavailable: {}", e),
+    }
     // SAFETY: `base` is an ioremap'd ADMAC MMIO region and these offsets are
     // fixed hardware register offsets.
     let tx_sram_size = unsafe { mmio::read32(base + REG_TX_SRAM_SIZE) };

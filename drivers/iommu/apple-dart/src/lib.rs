@@ -45,7 +45,7 @@ const DART_PARAMS1_MASK: u32 = 0xf << DART_PARAMS1_SHIFT;
 
 const DART_STREAM_COMMAND_BUSY: u32 = 1 << 2;
 
-const DART_PAGE_SHIFT: usize = 12;
+const DART_PAGE_SHIFT: usize = 14;
 const DART_PTE_COUNT: usize = 512;
 const DART_TABLE_SIZE: usize = DART_PTE_COUNT * 8;
 

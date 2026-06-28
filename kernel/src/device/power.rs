@@ -4,8 +4,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-use crate::device::DeviceInfo;
 use crate::device::platform::PlatformDeviceInfo;
+use crate::device::DeviceInfo;
 
 /// Power-domain operations exposed by platform PM controllers.
 pub trait PowerDomain: Send + Sync {
@@ -38,6 +38,16 @@ pub trait PowerDomain: Send + Sync {
     ///
     /// The label supplied by the platform firmware or driver.
     fn label(&self) -> &str;
+
+    /// Report whether this domain needs an externally running clock before enable.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the owning device driver must enable the required clock
+    /// before powering this domain.
+    fn requires_external_clock(&self) -> bool {
+        false
+    }
 }
 
 static POWER_MANAGER: Mutex<Option<PowerManagerInner>> = Mutex::new(None);
@@ -148,6 +158,15 @@ impl PowerManager {
                     return Err("power: domain not found");
                 }
             };
+
+            if domain.requires_external_clock() {
+                crate::early_println!(
+                    "[power] deferring externally-clocked domain '{}' for {}",
+                    domain.label(),
+                    device.name()
+                );
+                continue;
+            }
 
             if !domain.is_enabled() {
                 crate::early_println!(

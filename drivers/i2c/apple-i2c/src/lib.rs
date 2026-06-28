@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use scarlet::println;
 use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio;
@@ -15,7 +16,6 @@ use scarlet::device::{
     manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
-use scarlet::println;
 use scarlet::time;
 use scarlet::vm;
 
@@ -96,12 +96,23 @@ impl AppleI2cController {
             let mut inner = self.inner.lock();
             inner.hw_rev = hw_rev;
         }
+        let ctl_en = hw_rev >= 6;
+        println!(
+            "[apple-i2c] init_hardware: base=0x{:x} hw_rev={} ctl_en={}",
+            self.base, hw_rev, ctl_en
+        );
 
         self.write_reg(REG_IMASK, 0);
         self.write_reg(REG_SADDR, 0);
         self.write_reg(REG_FIFOCTL, 0);
         self.clear_status();
         self.clear_fifos();
+        let ctl_after = self.read_reg(REG_CTL);
+        println!(
+            "[apple-i2c] init_hardware: REG_CTL=0x{:08x} REG_SMSTA=0x{:08x}",
+            ctl_after,
+            self.read_reg(REG_SMSTA)
+        );
         self.program_bus_speed(DEFAULT_BUS_HZ)?;
         Ok(())
     }
@@ -121,6 +132,32 @@ impl AppleI2cController {
     fn clear_status(&self) {
         self.write_reg(REG_SMSTA, !0u32);
         self.write_reg(REG_XFSTA, !0u32);
+    }
+
+    fn reset_controller(&self) {
+        self.write_reg(REG_CTL, 0);
+        time::udelay(200);
+        self.clear_fifos();
+        self.clear_status();
+    }
+
+    fn ensure_bus_idle(&self) {
+        let start = time::current_time();
+        loop {
+            let smsta = self.read_reg(REG_SMSTA);
+            if smsta & SMSTA_XIP == 0 && smsta & SMSTA_JAM == 0 {
+                return;
+            }
+            if time::current_time().saturating_sub(start) > TXN_TIMEOUT_US {
+                println!(
+                    "[apple-i2c] bus stuck (SMSTA=0x{:08x}), resetting controller",
+                    smsta
+                );
+                self.reset_controller();
+                return;
+            }
+            time::udelay(POLL_INTERVAL_US);
+        }
     }
 
     fn clear_fifos(&self) {
@@ -187,6 +224,19 @@ impl AppleI2cController {
         loop {
             let smsta = self.read_reg(REG_SMSTA);
             if smsta & SMSTA_ERR_MASK != 0 {
+                println!(
+                    "[apple-i2c] poll_transfer_done: ERROR SMSTA=0x{:08x} XFSTA=0x{:08x} (JAM={} MTO={} MTA={} MTN={} TOM={})",
+                    smsta,
+                    self.read_reg(REG_XFSTA),
+                    smsta & SMSTA_JAM != 0,
+                    smsta & SMSTA_MTO != 0,
+                    smsta & SMSTA_MTA != 0,
+                    smsta & SMSTA_MTN != 0,
+                    smsta & SMSTA_TOM != 0,
+                );
+                if smsta & (SMSTA_MTO | SMSTA_TOM | SMSTA_JAM) != 0 {
+                    self.reset_controller();
+                }
                 return Err(Self::map_smsta_error(smsta));
             }
 
@@ -196,22 +246,20 @@ impl AppleI2cController {
 
             let now = time::current_time();
             if now.saturating_sub(start) > TXN_TIMEOUT_US {
+                let xfsta = self.read_reg(REG_XFSTA);
                 println!(
                     "[apple-i2c] poll_transfer_done time-timeout, iters={}, SMSTA=0x{:08x} XFSTA=0x{:08x}",
-                    iterations,
-                    smsta,
-                    self.read_reg(REG_XFSTA)
+                    iterations, smsta, xfsta
                 );
                 return Err(I2cError::Timeout);
             }
 
             iterations += 1;
             if iterations > MAX_POLL_ITERATIONS {
+                let xfsta = self.read_reg(REG_XFSTA);
                 println!(
-                    "[apple-i2c] poll_transfer_done iter-timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
-                    iterations,
-                    smsta,
-                    self.read_reg(REG_XFSTA)
+                    "[apple-i2c] poll_transfer_done timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations, smsta, xfsta
                 );
                 return Err(I2cError::Timeout);
             }
@@ -231,27 +279,32 @@ impl AppleI2cController {
 
             let smsta = self.read_reg(REG_SMSTA);
             if smsta & SMSTA_ERR_MASK != 0 {
+                println!(
+                    "[apple-i2c] wait_rx_available: ERROR SMSTA=0x{:08x} (MTO={} MTN={} TOM={})",
+                    smsta,
+                    smsta & SMSTA_MTO != 0,
+                    smsta & SMSTA_MTN != 0,
+                    smsta & SMSTA_TOM != 0,
+                );
                 return Err(Self::map_smsta_error(smsta));
             }
 
             let now = time::current_time();
             if now.saturating_sub(start) > TXN_TIMEOUT_US {
+                let xfsta = self.read_reg(REG_XFSTA);
                 println!(
                     "[apple-i2c] wait_rx_available time-timeout, iters={}, SMSTA=0x{:08x} XFSTA=0x{:08x}",
-                    iterations,
-                    smsta,
-                    self.read_reg(REG_XFSTA)
+                    iterations, smsta, xfsta
                 );
                 return Err(I2cError::Timeout);
             }
 
             iterations += 1;
             if iterations > MAX_POLL_ITERATIONS {
+                let xfsta = self.read_reg(REG_XFSTA);
                 println!(
-                    "[apple-i2c] wait_rx_available iter-timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
-                    iterations,
-                    smsta,
-                    self.read_reg(REG_XFSTA)
+                    "[apple-i2c] wait_rx_available timeout after {} iters, SMSTA=0x{:08x} XFSTA=0x{:08x}",
+                    iterations, smsta, xfsta
                 );
                 return Err(I2cError::Timeout);
             }
@@ -341,10 +394,22 @@ impl I2cBus for AppleI2cController {
             return Err(I2cError::InvalidArg);
         }
 
+        let first_addr = msgs
+            .first()
+            .map(|m| m.addr)
+            .unwrap_or(I2cAddress::SevenBit(0));
+        println!(
+            "[apple-i2c] transfer: bus={} msgs={} first_addr={:?} CTL=0x{:08x}",
+            self.bus_number,
+            msgs.len(),
+            first_addr,
+            self.read_reg(REG_CTL)
+        );
+
         let _guard = self.transfer_lock.lock();
 
-        self.clear_fifos();
         self.clear_status();
+        self.ensure_bus_idle();
 
         let total = msgs.len();
         for (index, msg) in msgs.iter_mut().enumerate() {
@@ -389,6 +454,13 @@ impl I2cBus for AppleI2cController {
 
 /// Probe an Apple I2C controller, optionally enabling its bus clock before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let has_pd = device.property("power-domains").is_some();
+    println!(
+        "[apple-i2c] probe_fn: device={} power-domains={}",
+        device.name(),
+        if has_pd { "present" } else { "MISSING" }
+    );
+
     let mem_resources: Vec<_> = device
         .get_resources()
         .iter()
@@ -411,21 +483,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // TODO: Confirm Apple I2C DT clock-names on all supported SoCs; current bring-up uses "bus".
     let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
         Ok(handle) => {
-            let _ = handle.prepare_enable();
+            println!("[apple-i2c] bus clock resolved, preparing enable");
+            match handle.prepare_enable() {
+                Ok(()) => println!("[apple-i2c] bus clock prepare_enable() ok"),
+                Err(_) => println!("[apple-i2c] WARNING: prepare_enable() failed"),
+            }
             Some(handle)
         }
         Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
-            scarlet::early_println!("[apple-i2c] bus clock provider not ready, deferring");
+            scarlet::println!("[apple-i2c] bus clock provider not ready, deferring");
             return probe_defer();
         }
         Err(
             e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
         ) => {
-            scarlet::early_println!("[apple-i2c] warning: bus clock unavailable: {}", e);
+            scarlet::println!("[apple-i2c] warning: bus clock unavailable: {}", e);
             None
         }
         Err(e) => {
-            scarlet::early_println!("[apple-i2c] bus clock lookup failed: {}", e);
+            scarlet::println!("[apple-i2c] bus clock lookup failed: {}", e);
             return Err(e);
         }
     };

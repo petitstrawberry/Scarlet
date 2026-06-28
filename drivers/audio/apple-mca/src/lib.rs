@@ -28,10 +28,12 @@ use scarlet::{
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
+        power::{PowerDomain, PowerManager},
     },
     early_println,
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
+    println,
     time::udelay,
 };
 
@@ -73,6 +75,7 @@ const SERDES_CONF_WIDTH_32BIT: u32 = 0x100;
 const SERDES_CONF_UNK1: u32 = 1 << 12;
 const SERDES_CONF_UNK2: u32 = 1 << 13;
 const SERDES_CONF_UNK3: u32 = 1 << 14;
+const SERDES_CONF_BCLK_POL: u32 = 1 << 10;
 const SERDES_CONF_SYNC_SEL_MASK: u32 = 0x7 << 16;
 const SERDES_CONF_SYNC_SEL_SHIFT: u32 = 16;
 
@@ -196,6 +199,7 @@ struct AppleMca {
     size: usize,
     switch_size: usize,
     clocks: Vec<ClkHandle>,
+    cluster_power_domains: Vec<Option<Arc<dyn PowerDomain>>>,
     dmas: Vec<AppleMcaDma>,
     stream: Mutex<Option<AppleMcaStream>>,
     playback_codecs: Mutex<Vec<Arc<dyn AudioCodec>>>,
@@ -208,6 +212,7 @@ impl AppleMca {
         switch_base: usize,
         switch_size: usize,
         clocks: Vec<ClkHandle>,
+        cluster_power_domains: Vec<Option<Arc<dyn PowerDomain>>>,
         dmas: Vec<AppleMcaDma>,
     ) -> Self {
         Self {
@@ -216,6 +221,7 @@ impl AppleMca {
             size,
             switch_size,
             clocks,
+            cluster_power_domains,
             dmas,
             stream: Mutex::new(None),
             playback_codecs: Mutex::new(Vec::new()),
@@ -286,6 +292,18 @@ impl AppleMca {
         } else {
             (1u32 << channels) - 1
         }
+    }
+
+    fn enable_cluster_power_domain(&self, cluster: usize) -> Result<(), &'static str> {
+        let Some(Some(domain)) = self.cluster_power_domains.get(cluster) else {
+            return Ok(());
+        };
+        if !domain.is_enabled() {
+            domain
+                .enable()
+                .map_err(|_| "apple-mca: failed to enable cluster power domain")?;
+        }
+        Ok(())
     }
 
     fn sample_width_bits(params: &AudioPcmParams) -> Result<usize, &'static str> {
@@ -365,13 +383,28 @@ impl AppleMca {
             return Err("apple-mca: requested BCLK is too high");
         }
 
-        let clock = self
-            .clocks
-            .get(cluster)
-            .ok_or("apple-mca: missing cluster clock")?;
-        clock
-            .set_rate(bclk)
-            .map_err(|_| "apple-mca: failed to set NCO rate")?;
+        self.write_reg(
+            cluster_base,
+            REG_PORT_DATA_SEL,
+            Self::txa_port_data_sel(cluster),
+        );
+        self.modify_reg(
+            cluster_base,
+            REG_PORT_ENABLES,
+            PORT_ENABLES_TX_DATA,
+            PORT_ENABLES_TX_DATA,
+        );
+        self.write_reg(
+            cluster_base,
+            REG_PORT_CLOCK_SEL,
+            ((cluster + 1) as u32) << PORT_CLOCK_SEL_SHIFT,
+        );
+        self.modify_reg(
+            cluster_base,
+            REG_PORT_ENABLES,
+            PORT_ENABLES_CLOCKS,
+            PORT_ENABLES_CLOCKS,
+        );
 
         self.write_reg(
             cluster_base,
@@ -384,6 +417,20 @@ impl AppleMca {
             ((APPLE_MCA_BCLK_RATIO + 1) / 2 - 1) as u32,
         );
         self.write_reg(cluster_base, REG_MCLK_CONF, 1 << MCLK_CONF_DIV_SHIFT);
+
+        let clock = self
+            .clocks
+            .get(cluster)
+            .ok_or("apple-mca: missing cluster clock")?;
+        clock
+            .set_rate(bclk)
+            .map_err(|_| "apple-mca: failed to set NCO rate")?;
+        clock
+            .prepare_enable()
+            .map_err(|_| "apple-mca: failed to enable cluster clock")?;
+        self.enable_cluster_power_domain(cluster)?;
+        println!("[apple-mca] clock: enabled={}", clock.is_enabled());
+
         self.write_reg(cluster_base, REG_SYNCGEN_MCLK_SEL, (cluster + 1) as u32);
         self.modify_reg(
             cluster_base,
@@ -392,29 +439,6 @@ impl AppleMca {
             SYNCGEN_STATUS_EN,
         );
         self.modify_reg(cluster_base, REG_STATUS, STATUS_MCLK_EN, STATUS_MCLK_EN);
-
-        self.write_reg(
-            cluster_base,
-            REG_PORT_CLOCK_SEL,
-            ((cluster + 1) as u32) << PORT_CLOCK_SEL_SHIFT,
-        );
-        self.modify_reg(
-            cluster_base,
-            REG_PORT_ENABLES,
-            PORT_ENABLES_CLOCKS,
-            PORT_ENABLES_CLOCKS,
-        );
-        self.write_reg(
-            cluster_base,
-            REG_PORT_DATA_SEL,
-            Self::txa_port_data_sel(cluster),
-        );
-        self.modify_reg(
-            cluster_base,
-            REG_PORT_ENABLES,
-            PORT_ENABLES_TX_DATA,
-            PORT_ENABLES_TX_DATA,
-        );
         Ok(())
     }
 
@@ -557,7 +581,7 @@ fn parse_cpu_sound_dais(value: &[u8]) -> Result<Vec<SoundDaiRef>, &'static str> 
         let phandle = cells[index];
         index += 1;
         let Some(provider) = manager.get_audio_dai_provider_by_phandle(phandle) else {
-            early_println!(
+            println!(
                 "[apple-macaudio] CPU DAI phandle {:#x} is not ready, deferring",
                 phandle
             );
@@ -589,7 +613,7 @@ fn parse_codec_sound_dais(value: &[u8]) -> Result<Vec<(u32, Arc<dyn AudioCodec>)
     let mut codecs = Vec::new();
     for phandle in read_be_u32_cells(value) {
         let Some(codec) = manager.get_audio_codec_by_phandle(phandle) else {
-            early_println!(
+            println!(
                 "[apple-macaudio] codec phandle {:#x} is not ready, deferring",
                 phandle
             );
@@ -653,11 +677,15 @@ impl AudioPlaybackDevice for AppleMca {
     }
 
     fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+        println!("[apple-mca] configure: begin {:?}", params);
         self.release()?;
+        println!("[apple-mca] configure: release done");
 
         let cluster = APPLE_MCA_PLAYBACK_CLUSTER;
         let cluster_base = self.cluster_base(cluster)?;
+        println!("[apple-mca] configure: cluster_base ok");
         let channel = self.playback_dma()?;
+        println!("[apple-mca] configure: playback_dma ok");
         let buffer_bytes = params
             .buffer_bytes()
             .ok_or("apple-mca: PCM buffer overflow")?;
@@ -667,26 +695,39 @@ impl AudioPlaybackDevice for AppleMca {
         let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
         let pages =
             ContiguousPages::new(mapped_bytes / PAGE_SIZE).ok_or("apple-mca: DMA alloc failed")?;
+        println!("[apple-mca] configure: pages allocated");
 
         self.configure_clocks_and_port(cluster_base, cluster, params)?;
+        println!("[apple-mca] configure: clocks done");
         self.configure_serdes(cluster_base, cluster, params)?;
+        println!("[apple-mca] configure: serdes done");
         self.configure_dma_adapter(cluster, params)?;
+        println!("[apple-mca] configure: dma adapter done");
         let codecs = self.playback_codecs();
-        for codec in &codecs {
+        println!("[apple-mca] configure: codecs={}", codecs.len());
+        for (index, codec) in codecs.iter().enumerate() {
+            println!("[apple-mca] configure: codec {} configure begin", index);
             codec.configure_playback(
                 params,
                 Self::playback_tx_mask(params),
                 Self::playback_slots(params),
                 APPLE_MCA_SLOT_WIDTH,
             )?;
+            println!("[apple-mca] configure: codec {} configure done", index);
+            println!("[apple-mca] configure: codec {} power begin", index);
             codec.set_playback_powered(true)?;
+            println!("[apple-mca] configure: codec {} power done", index);
+            println!("[apple-mca] configure: codec {} mute begin", index);
             codec.set_playback_muted(true)?;
+            println!("[apple-mca] configure: codec {} mute done", index);
         }
 
         let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
         stream.clear();
+        println!("[apple-mca] configure: stream new/clear done");
 
         let burst_len = (params.channels as usize).min(4).max(1);
+        println!("[apple-mca] configure: prepare cyclic begin");
         channel
             .prepare_cyclic(DmaCyclicConfig {
                 buffer_addr: stream.pages.as_paddr(),
@@ -700,34 +741,54 @@ impl AudioPlaybackDevice for AppleMca {
                 }),
             })
             .map_err(dma_error_to_str)?;
+        println!("[apple-mca] configure: prepare cyclic done");
 
         *self.stream.lock() = Some(stream);
+        println!("[apple-mca] configure: done");
         Ok(())
     }
 
     fn start(&self) -> Result<(), &'static str> {
+        println!("[apple-mca] start: begin");
         let cluster = APPLE_MCA_PLAYBACK_CLUSTER;
         let cluster_base = self.cluster_base(cluster)?;
         let channel = {
             let mut guard = self.stream.lock();
             let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
             if stream.running {
+                println!("[apple-mca] start: already running, skipping");
                 return Ok(());
             }
             stream.running = true;
             stream.channel.clone()
         };
         let codecs = self.playback_codecs();
+        println!("[apple-mca] start: codecs={}", codecs.len());
 
         self.early_start_serdes(cluster_base, cluster);
-        self.enable_serdes(cluster_base);
+        println!("[apple-mca] start: serdes reset done, starting DMA channel");
         if let Err(error) = channel.start() {
+            println!("[apple-mca] start: channel.start() failed: {:?}", error);
             let mut guard = self.stream.lock();
             if let Some(stream) = guard.as_mut() {
                 stream.running = false;
             }
             self.disable_serdes(cluster_base);
             return Err(dma_error_to_str(error));
+        }
+        println!("[apple-mca] start: DMA channel started");
+        self.enable_serdes(cluster_base);
+        {
+            let status = self.read_reg(cluster_base, REG_STATUS);
+            let syncgen = self.read_reg(cluster_base, REG_SYNCGEN_STATUS);
+            let serdes = self.read_reg(cluster_base, CLUSTER_TXA_OFF + REG_SERDES_STATUS);
+            let port = self.read_reg(cluster_base, REG_PORT_ENABLES);
+            let mclk_sel = self.read_reg(cluster_base, REG_SYNCGEN_MCLK_SEL);
+            let serdes_conf = self.read_reg(cluster_base, CLUSTER_TXA_OFF + REG_TX_SERDES_CONF);
+            println!(
+                "[apple-mca] REGS: status=0x{:08x} syncgen=0x{:08x} serdes=0x{:08x} port=0x{:08x} mclk_sel=0x{:08x} serdes_conf=0x{:08x}",
+                status, syncgen, serdes, port, mclk_sel, serdes_conf
+            );
         }
         for codec in &codecs {
             if let Err(error) = codec
@@ -743,6 +804,7 @@ impl AudioPlaybackDevice for AppleMca {
                 return Err(error);
             }
         }
+        println!("[apple-mca] start: done");
         Ok(())
     }
 
@@ -832,16 +894,45 @@ fn resolve_clocks(
 
     for index in 0..count {
         let clk = manager.resolve_clk_by_index(device, index)?;
-        if clk.prepare_enable().is_err() {
-            for clock in &clocks {
-                clock.disable_unprepare();
-            }
-            return Err("apple-mca: failed to enable clock");
-        }
         clocks.push(clk);
     }
 
     Ok(clocks)
+}
+
+fn resolve_cluster_power_domains(
+    device: &PlatformDeviceInfo,
+    count: usize,
+) -> Result<Vec<Option<Arc<dyn PowerDomain>>>, &'static str> {
+    let Some(property) = device.property("power-domains") else {
+        let mut domains = Vec::new();
+        for _ in 0..count {
+            domains.push(None);
+        }
+        return Ok(domains);
+    };
+    if property.value().len() % 4 != 0 {
+        return Err("apple-mca: malformed power-domains");
+    }
+
+    let phandles = read_be_u32_cells(property.value());
+    let mut domains = Vec::new();
+    for index in 0..count {
+        let Some(phandle) = phandles.get(index + 1).copied() else {
+            domains.push(None);
+            continue;
+        };
+        if phandle == 0 {
+            domains.push(None);
+            continue;
+        }
+        let Some(domain) = PowerManager::get_domain(phandle) else {
+            return probe_defer();
+        };
+        domains.push(Some(domain));
+    }
+
+    Ok(domains)
 }
 
 fn resolve_dmas(device: &PlatformDeviceInfo) -> Result<Vec<AppleMcaDma>, &'static str> {
@@ -901,11 +992,22 @@ fn map_resource(device: &PlatformDeviceInfo, index: usize) -> Result<(usize, usi
 }
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    match DeviceManager::get_manager().resolve_reset_by_index(device, 0) {
+        Ok(handle) => {
+            handle
+                .reset()
+                .map_err(|_| "apple-mca: failed to pulse reset")?;
+            early_println!("[apple-mca] probe: audio_p reset pulsed");
+        }
+        Err(e) => early_println!("[apple-mca] probe: reset unavailable: {}", e),
+    }
+
     let phandle = read_phandle(device)?;
     let (base, size) = map_resource(device, 0)?;
     let (switch_base, switch_size) = map_resource(device, 1)?;
     let clusters = cluster_count(device);
     let clocks = resolve_clocks(device, clusters)?;
+    let cluster_power_domains = resolve_cluster_power_domains(device, clusters)?;
     let dmas = resolve_dmas(device)?;
     let dma_count = dmas.len();
     let mca = Arc::new(AppleMca::new(
@@ -914,6 +1016,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         switch_base,
         switch_size,
         clocks,
+        cluster_power_domains,
         dmas,
     ));
     let dai_provider: Arc<dyn AudioDaiProvider> = mca.clone();
@@ -922,7 +1025,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let audio_name = register_playback_device(audio_backend);
     APPLE_MCA_DEVICES.lock().push(mca);
 
-    early_println!(
+    println!(
         "[apple-mca] probed {} at phandle={:#x}, base={:#x}, switch={:#x}, clusters={}, dmas={}, audio={}",
         device.name(),
         phandle,
@@ -1001,21 +1104,17 @@ fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             for (codec_phandle, codec) in &codec_dais[codec_start..codec_end] {
                 provider.attach_playback_codec(&cpu_dai.spec, Arc::clone(codec))?;
                 link_attached += 1;
-                early_println!(
+                println!(
                     "[apple-macaudio] attached {} link cpu={:#x} spec={:?} codec={:#x}",
-                    link_name,
-                    cpu_dai.phandle,
-                    cpu_dai.spec,
-                    *codec_phandle
+                    link_name, cpu_dai.phandle, cpu_dai.spec, *codec_phandle
                 );
             }
         }
 
         if link_attached == 0 {
-            early_println!(
+            println!(
                 "[apple-macaudio] Speaker link {} has no supported cluster {} CPU DAI",
-                link_name,
-                APPLE_MCA_PLAYBACK_CLUSTER
+                link_name, APPLE_MCA_PLAYBACK_CLUSTER
             );
             continue;
         }

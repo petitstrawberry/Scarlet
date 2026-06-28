@@ -62,6 +62,7 @@ struct ApplePmDomain {
     pmgr_phandle: u32,
     label: alloc::string::String,
     always_on: bool,
+    externally_clocked: bool,
     reset_cells: Option<usize>,
     index: u32,
     parent_phandles: Vec<u32>,
@@ -75,6 +76,7 @@ impl ApplePmDomain {
         index: u32,
         label: alloc::string::String,
         always_on: bool,
+        externally_clocked: bool,
         reset_cells: Option<usize>,
     ) -> Self {
         Self {
@@ -82,6 +84,7 @@ impl ApplePmDomain {
             pmgr_phandle,
             label,
             always_on,
+            externally_clocked,
             reset_cells,
             index,
             parent_phandles: Vec::new(),
@@ -271,6 +274,10 @@ impl scarlet::device::power::PowerDomain for ApplePmDomain {
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn requires_external_clock(&self) -> bool {
+        self.externally_clocked
     }
 }
 
@@ -536,6 +543,7 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let label = String::from(label);
 
     let always_on = device.property("apple,always-on").is_some();
+    let externally_clocked = device.property("apple,externally-clocked").is_some();
     let reset_cells = device
         .property("#reset-cells")
         .and_then(|p| p.as_usize())
@@ -569,11 +577,12 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     };
 
     early_println!(
-        "[apple-pmgr] registering domain '{}' at offset={:#x}, index={}, always_on={}",
+        "[apple-pmgr] registering domain '{}' at offset={:#x}, index={}, always_on={}, externally_clocked={}",
         label,
         offset,
         index,
-        always_on
+        always_on,
+        externally_clocked
     );
 
     let mut registry_guard = PMGR_REGISTRY.lock();
@@ -585,8 +594,15 @@ fn pwrstate_probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .parent_phandle()
         .ok_or("apple-pmgr-pwrstate: no parent phandle")?;
 
-    let mut domain =
-        ApplePmDomain::new(offset, parent_phandle, index, label, always_on, reset_cells);
+    let mut domain = ApplePmDomain::new(
+        offset,
+        parent_phandle,
+        index,
+        label,
+        always_on,
+        externally_clocked,
+        reset_cells,
+    );
     domain.parent_phandles = parent_phandles;
     let domain = Arc::new(domain);
     registry
