@@ -543,10 +543,6 @@ impl AudioCharDevice {
             ring.hw_ptr_frames = ring
                 .hw_ptr_frames
                 .saturating_add(completed as u64 * u64::from(ring.params.period_frames));
-                // println!(
-                //     "[audio] pump: completed={} hw_ptr now={}",
-                //     completed, ring.hw_ptr_frames
-                // );
         }
 
         if ring.state != AUDIO_STATE_RUNNING {
@@ -568,11 +564,6 @@ impl AudioCharDevice {
             match self.backend.submit_period(&period) {
                 Ok(()) => {
                     ring.submitted_ptr_frames += period_frames;
-                    // println!(
-                    //     "[audio] pump: submitted period, submitted={} in_flight={}",
-                    //     ring.submitted_ptr_frames,
-                    //     in_flight + 1
-                    // );
                 }
                 Err(_) => {
                     ring.xruns = ring.xruns.saturating_add(1);
@@ -712,21 +703,12 @@ impl AudioCharDevice {
         self.with_ring_mut(|ring| {
             let frames = u32::try_from(arg).map_err(|_| "Frame commit count is too large")?;
             ring.commit_frames(frames)?;
-            // println!(
-            //     "[audio] commit: frames={} state={} app={} submitted={} hw={}",
-            //     frames,
-            //     ring.state,
-            //     ring.app_ptr_frames,
-            //     ring.submitted_ptr_frames,
-            //     ring.hw_ptr_frames
-            // );
             self.pump_locked(ring);
             Ok(0)
         })
     }
 
     fn handle_start(&self) -> Result<i32, &'static str> {
-        println!("[audio] AUDIO_START received");
         {
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
@@ -734,7 +716,6 @@ impl AudioCharDevice {
             self.pump_locked(ring);
         }
         self.backend.start()?;
-        println!("[audio] AUDIO_START: backend started");
         Ok(0)
     }
 

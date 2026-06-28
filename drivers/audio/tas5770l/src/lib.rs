@@ -21,7 +21,7 @@ use scarlet::{
         manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{PlatformDeviceDriver, PlatformDeviceInfo},
     },
-    early_println, println,
+    early_println,
     time::udelay,
 };
 
@@ -45,7 +45,11 @@ const TAS2770_PWR_CTRL_SHUTDOWN: u8 = 0x02;
 const TAS2770_PLAY_CFG_REG0: u8 = 0x03;
 const TAS5770L_SAFE_AMP_GAIN: u8 = 0x0f;
 const TAS2770_PLAY_CFG_REG2: u8 = 0x05;
-const TAS5770L_SAFE_PLAYBACK_VOLUME: u8 = 0xa1;
+const TAS2770_PLAY_CFG_REG2_VMAX: u8 = 0xc9;
+const TAS5770L_SAFE_PLAYBACK_LEVEL: u8 = 0xa1;
+// Asahi exposes Speaker Playback Volume as an inverted ALSA control:
+// register 0x00 is the loudest setting and user-visible 0xa1 is -20 dB.
+const TAS5770L_SAFE_PLAYBACK_VOLUME: u8 = TAS2770_PLAY_CFG_REG2_VMAX - TAS5770L_SAFE_PLAYBACK_LEVEL;
 const TAS2770_TDM_CFG_REG0: u8 = 0x0a;
 const TAS2770_TDM_CFG_REG0_SMP_MASK: u8 = 1 << 5;
 const TAS2770_TDM_CFG_REG0_SMP_48KHZ: u8 = 0x00;
@@ -174,10 +178,6 @@ impl Tas5770l {
     }
 
     fn write_register(&self, register: u8, value: u8) -> Result<(), I2cError> {
-        println!(
-            "[tas5770l] write reg=0x{:02x} val=0x{:02x}",
-            register, value
-        );
         let mut messages = alloc::vec![I2cMessage::write(self.address, &[register, value], true)];
         let result = self.bus.transfer(&mut messages);
         udelay(500);
@@ -185,12 +185,11 @@ impl Tas5770l {
     }
 
     fn read_register(&self, register: u8) -> Result<u8, I2cError> {
-        println!("[tas5770l] read reg=0x{:02x}", register);
         let mut messages = alloc::vec![
             I2cMessage::write(self.address, &[register], false),
             I2cMessage::read(self.address, 1, true),
         ];
-        let result = self.bus.transfer(&mut messages)?;
+        self.bus.transfer(&mut messages)?;
         udelay(500);
         Ok(messages[1].data[0])
     }

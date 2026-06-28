@@ -96,23 +96,12 @@ impl AppleI2cController {
             let mut inner = self.inner.lock();
             inner.hw_rev = hw_rev;
         }
-        let ctl_en = hw_rev >= 6;
-        println!(
-            "[apple-i2c] init_hardware: base=0x{:x} hw_rev={} ctl_en={}",
-            self.base, hw_rev, ctl_en
-        );
 
         self.write_reg(REG_IMASK, 0);
         self.write_reg(REG_SADDR, 0);
         self.write_reg(REG_FIFOCTL, 0);
         self.clear_status();
         self.clear_fifos();
-        let ctl_after = self.read_reg(REG_CTL);
-        println!(
-            "[apple-i2c] init_hardware: REG_CTL=0x{:08x} REG_SMSTA=0x{:08x}",
-            ctl_after,
-            self.read_reg(REG_SMSTA)
-        );
         self.program_bus_speed(DEFAULT_BUS_HZ)?;
         Ok(())
     }
@@ -394,18 +383,6 @@ impl I2cBus for AppleI2cController {
             return Err(I2cError::InvalidArg);
         }
 
-        let first_addr = msgs
-            .first()
-            .map(|m| m.addr)
-            .unwrap_or(I2cAddress::SevenBit(0));
-        println!(
-            "[apple-i2c] transfer: bus={} msgs={} first_addr={:?} CTL=0x{:08x}",
-            self.bus_number,
-            msgs.len(),
-            first_addr,
-            self.read_reg(REG_CTL)
-        );
-
         let _guard = self.transfer_lock.lock();
 
         self.clear_status();
@@ -454,13 +431,6 @@ impl I2cBus for AppleI2cController {
 
 /// Probe an Apple I2C controller, optionally enabling its bus clock before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    let has_pd = device.property("power-domains").is_some();
-    println!(
-        "[apple-i2c] probe_fn: device={} power-domains={}",
-        device.name(),
-        if has_pd { "present" } else { "MISSING" }
-    );
-
     let mem_resources: Vec<_> = device
         .get_resources()
         .iter()
@@ -483,9 +453,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // TODO: Confirm Apple I2C DT clock-names on all supported SoCs; current bring-up uses "bus".
     let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
         Ok(handle) => {
-            println!("[apple-i2c] bus clock resolved, preparing enable");
             match handle.prepare_enable() {
-                Ok(()) => println!("[apple-i2c] bus clock prepare_enable() ok"),
+                Ok(()) => {}
                 Err(_) => println!("[apple-i2c] WARNING: prepare_enable() failed"),
             }
             Some(handle)

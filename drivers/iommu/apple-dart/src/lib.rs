@@ -21,8 +21,8 @@ use scarlet::{
         },
     },
     early_println,
+    environment::PAGE_SIZE,
     mem::pmm,
-    println,
 };
 
 const DART_PARAMS1: usize = 0x00;
@@ -49,8 +49,13 @@ const DART_PAGE_SHIFT: usize = 14;
 const DART_PTE_COUNT: usize = 512;
 const DART_TABLE_SIZE: usize = DART_PTE_COUNT * 8;
 
+const DART_PTE_SUBPAGE_END_MASK: u64 = 0xfff << 40;
+const DART_PTE_SUBPAGE_ALLOW_ALL: u64 = DART_PTE_SUBPAGE_END_MASK;
+
 const DART_PTE_VALID: u64 = 1 << 0;
 const DART_PTE_SP_DIS: u64 = 1 << 1;
+const DART_PTE_NO_WRITE: u64 = 1 << 7;
+const DART_PTE_NO_READ: u64 = 1 << 8;
 
 const DART_PADDR_MASK: u64 = ((1u64 << 36) - 1) & !((1u64 << DART_PAGE_SHIFT) - 1);
 
@@ -184,6 +189,10 @@ impl DartInstance {
     pub fn page_shift(&self) -> u32 {
         self.params.page_shift
     }
+
+    fn page_size_exceeds_cpu_page_size(&self) -> bool {
+        (1usize << self.params.page_shift) > PAGE_SIZE
+    }
 }
 
 impl IommuController for DartInstance {
@@ -192,10 +201,14 @@ impl IommuController for DartInstance {
     }
 
     fn alloc_domain(&self, config: IommuDomainConfig) -> Result<Arc<dyn IommuDomain>, IommuError> {
+        if self.params.supports_bypass
+            && (matches!(config.domain_type, IommuDomainType::Identity)
+                || self.page_size_exceeds_cpu_page_size())
+        {
+            return Ok(Arc::new(DartBypassDomain::new(Arc::new(self.clone()))));
+        }
         if matches!(config.domain_type, IommuDomainType::Identity) {
-            early_println!(
-                "[apple-dart] identity domain requested; allocating translated DART domain"
-            );
+            return Err(IommuError::NotSupported);
         }
 
         Ok(Arc::new(DartDomain::new(Arc::new(self.clone()))?))
@@ -221,6 +234,78 @@ impl IommuController for DartInstance {
             id: spec.cells[0],
             substream_id: None,
         }])
+    }
+}
+
+struct DartBypassDomain {
+    dart: Arc<DartInstance>,
+    attached_streams: Mutex<alloc::vec::Vec<u32>>,
+}
+
+impl DartBypassDomain {
+    fn new(dart: Arc<DartInstance>) -> Self {
+        Self {
+            dart,
+            attached_streams: Mutex::new(alloc::vec::Vec::new()),
+        }
+    }
+
+    fn validate_stream(&self, stream: IommuStreamId) -> Result<usize, IommuError> {
+        if stream.substream_id.is_some() {
+            return Err(IommuError::NotSupported);
+        }
+
+        if stream.id >= self.dart.params.num_streams {
+            return Err(IommuError::AttachFailed);
+        }
+
+        Ok(stream.id as usize)
+    }
+}
+
+impl IommuDomain for DartBypassDomain {
+    fn attach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+        let sid = self.validate_stream(stream)?;
+        self.dart.enable_bypass(sid);
+
+        let mut attached_streams = self.attached_streams.lock();
+        if !attached_streams.contains(&(sid as u32)) {
+            attached_streams.push(sid as u32);
+        }
+
+        Ok(())
+    }
+
+    fn detach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
+        let sid = self.validate_stream(stream)?;
+        self.dart.disable_translation(sid);
+
+        let mut attached_streams = self.attached_streams.lock();
+        attached_streams.retain(|attached_sid| *attached_sid != sid as u32);
+
+        Ok(())
+    }
+
+    fn map(
+        &self,
+        _iova: Iova,
+        _paddr: PhysAddr,
+        _len: usize,
+        _flags: IommuMapFlags,
+    ) -> Result<(), IommuError> {
+        Ok(())
+    }
+
+    fn unmap(&self, _iova: Iova, _len: usize) -> Result<(), IommuError> {
+        Ok(())
+    }
+
+    fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr> {
+        Some(iova as PhysAddr)
+    }
+
+    fn flush(&self) -> Result<(), IommuError> {
+        Ok(())
     }
 }
 
@@ -326,8 +411,15 @@ impl IommuDomain for DartDomain {
     }
 }
 
-fn dart_pte_flags(_flags: IommuMapFlags) -> u64 {
-    DART_PTE_VALID | DART_PTE_SP_DIS
+fn dart_pte_flags(flags: IommuMapFlags) -> u64 {
+    let mut pte = DART_PTE_VALID | DART_PTE_SP_DIS;
+    if !flags.contains(IommuMapFlags::READ) {
+        pte |= DART_PTE_NO_READ;
+    }
+    if !flags.contains(IommuMapFlags::WRITE) {
+        pte |= DART_PTE_NO_WRITE;
+    }
+    pte
 }
 
 /// Apple DART three-level page table.
@@ -403,17 +495,13 @@ impl DartPageTable {
                 } else {
                     let next_table_paddr =
                         (((pte & DART_PADDR_MASK) >> DART_PAGE_SHIFT) as usize) << DART_PAGE_SHIFT;
-                    println!(
-                        "[dart] map_page: reuse mid table level={} pte=0x{:08x} next_paddr=0x{:x}",
-                        level, pte, next_table_paddr
-                    );
                     table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
                 }
             }
         }
 
         let leaf_index = (iova >> DART_PAGE_SHIFT) & (DART_PTE_COUNT - 1);
-        let leaf_pte = (paddr as u64 & DART_PADDR_MASK) | DART_PTE_SP_DIS | flags;
+        let leaf_pte = (paddr as u64 & DART_PADDR_MASK) | DART_PTE_SUBPAGE_ALLOW_ALL | flags;
         Self::write_pte(table_vaddr, leaf_index, leaf_pte);
         Ok(())
     }
@@ -470,10 +558,6 @@ impl DartPageTable {
         size: usize,
         flags: u64,
     ) -> Result<(), &'static str> {
-        println!(
-            "[dart] map_contiguous: iova=0x{:x} paddr=0x{:x} size={} flags=0x{:x}",
-            iova, paddr, size, flags
-        );
         let page_size = 1usize << DART_PAGE_SHIFT;
         let pages = size.div_ceil(page_size);
         for i in 0..pages {
@@ -673,9 +757,17 @@ mod tests {
     }
 
     #[test_case]
-    fn test_dart_pte_flags_are_always_valid_and_sp_disabled() {
+    fn test_dart_pte_flags_encode_permissions() {
         let flags = IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT;
 
         assert_eq!(dart_pte_flags(flags), DART_PTE_VALID | DART_PTE_SP_DIS);
+        assert_eq!(
+            dart_pte_flags(IommuMapFlags::READ),
+            DART_PTE_VALID | DART_PTE_SP_DIS | DART_PTE_NO_WRITE
+        );
+        assert_eq!(
+            dart_pte_flags(IommuMapFlags::WRITE),
+            DART_PTE_VALID | DART_PTE_SP_DIS | DART_PTE_NO_READ
+        );
     }
 }
