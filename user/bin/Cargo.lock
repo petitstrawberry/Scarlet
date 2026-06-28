@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "rust_h264"
 version = "0.4.0"
-source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=cd5ed47bd5fb1d65878457e8262e2cfbbba8b898#cd5ed47bd5fb1d65878457e8262e2cfbbba8b898"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=a559fe2545fd88def12146dcc06286475b53ead3#a559fe2545fd88def12146dcc06286475b53ead3"
 
 [[package]]
 name = "ryu"
