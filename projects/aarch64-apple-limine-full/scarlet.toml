@@ -46,11 +46,7 @@ output = ".scarlet/images/initramfs-aarch64-apple-full.cpio"
 
 [[images.initramfs.layers]]
 kind = "bundle"
-path = "../../bundles/base/bundle.toml"
-
-[[images.initramfs.layers]]
-kind = "bundle"
-path = "../../bundles/cli-utils/bundle.toml"
+path = "../../bundles/desktop/bundle.toml"
 
 [images.boot]
 format = "limine-uefi"

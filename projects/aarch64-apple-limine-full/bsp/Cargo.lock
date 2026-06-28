@@ -78,6 +78,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-apple-admac"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
 name = "scarlet-driver-apple-afk"
 version = "0.1.0"
 dependencies = [
@@ -144,7 +151,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-apple-mca"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
 name = "scarlet-driver-apple-msi"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
+name = "scarlet-driver-apple-nco"
 version = "0.1.0"
 dependencies = [
  "scarlet",
@@ -230,6 +251,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-tas5770l"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
 name = "scarlet-module-prototype"
 version = "0.1.0"
 dependencies = [
@@ -241,6 +269,7 @@ name = "scarlet-modules"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-admac",
  "scarlet-driver-apple-afk",
  "scarlet-driver-apple-aic",
  "scarlet-driver-apple-asc",
@@ -250,7 +279,9 @@ dependencies = [
  "scarlet-driver-apple-efuse",
  "scarlet-driver-apple-epic",
  "scarlet-driver-apple-i2c",
+ "scarlet-driver-apple-mca",
  "scarlet-driver-apple-msi",
+ "scarlet-driver-apple-nco",
  "scarlet-driver-apple-pcie",
  "scarlet-driver-apple-pinctrl",
  "scarlet-driver-apple-pmgr",
@@ -261,6 +292,7 @@ dependencies = [
  "scarlet-driver-dcpext",
  "scarlet-driver-dpxbar",
  "scarlet-driver-s5l-uart",
+ "scarlet-driver-tas5770l",
  "scarlet-module-prototype",
 ]
 
