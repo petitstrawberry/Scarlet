@@ -66,6 +66,7 @@ const STREAM_START_BUFFER_US: u64 = 1_000_000;
 const STREAM_START_BUFFER_SAMPLES: usize = 24;
 const DISPLAY_QUEUE_MAX_FRAMES: usize = 30;
 const DISPLAY_QUEUE_MAX_BYTES: usize = 96 * 1024 * 1024;
+const DECODE_TARGET_LEAD_FRAMES: usize = 10;
 const AUDIO_CLOCK_START_TIMEOUT_MS: u64 = 3_000;
 const LATE_VIDEO_DROP_THRESHOLD_US: u64 = 250_000;
 const SEEK_COALESCE_DELAY_MS: u64 = 35;
@@ -947,7 +948,7 @@ fn start_decoder_thread(
     stream_socket_path: Option<String>,
 ) {
     thread::spawn(move || {
-        let display_queue = Arc::new(DisplayQueue::new());
+        let display_queue = Arc::new(DisplayQueue::new(clock.clone()));
         start_display_thread(
             frame_store.clone(),
             paint_signal.clone(),
@@ -4455,6 +4456,7 @@ enum QueuePush {
 
 struct DisplayQueue {
     inner: Mutex<DisplayQueueInner>,
+    clock: Option<Arc<AudioClock>>,
 }
 
 struct DisplayQueueInner {
@@ -4464,19 +4466,27 @@ struct DisplayQueueInner {
 }
 
 impl DisplayQueue {
-    fn new() -> Self {
+    fn new(clock: Option<Arc<AudioClock>>) -> Self {
         Self {
             inner: Mutex::new(DisplayQueueInner {
                 items: VecDeque::new(),
                 bytes: 0,
                 closed: false,
             }),
+            clock,
         }
     }
 
     fn push_frame(&self, item: DisplayItem, controls: &ControlsOverlay) -> QueuePush {
         let item_bytes = item.estimated_bytes();
         let seek_epoch = item.seek_epoch();
+        let pts = match &item {
+            DisplayItem::Frame {
+                presentation_time_us,
+                ..
+            } => Some(*presentation_time_us),
+            DisplayItem::EndOfPass { .. } => None,
+        };
         loop {
             let mut inner = self.inner.lock();
             if inner.closed {
@@ -4488,9 +4498,43 @@ impl DisplayQueue {
             if Self::can_fit(&inner, item_bytes) {
                 inner.items.push_back(item);
                 inner.bytes = inner.bytes.saturating_add(item_bytes);
+                drop(inner);
+                if let (Some(presentation_time_us), Some(clock)) = (pts, self.clock.as_deref()) {
+                    Self::pace_to_audio(clock, controls, seek_epoch, presentation_time_us);
+                }
                 return QueuePush::Pushed;
             }
             drop(inner);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Keep decode a fixed lead (`DECODE_TARGET_LEAD_FRAMES`) ahead of audio
+    /// time once the audio clock is running, instead of racing to fill the
+    /// whole queue. Smooths the burst-then-block decode CPU pattern into a
+    /// steady ~realtime duty cycle while leaving a cushion for GOP-boundary
+    /// decode jitter. Inactive before audio starts (or if absent) so the
+    /// initial buffer still builds at full speed.
+    fn pace_to_audio(
+        clock: &AudioClock,
+        controls: &ControlsOverlay,
+        seek_epoch: u32,
+        presentation_time_us: u64,
+    ) {
+        let target_lead_us = DECODE_TARGET_LEAD_FRAMES as u64 * FRAME_INTERVAL_MS * 1_000;
+        loop {
+            if controls.current_seek_epoch() != seek_epoch {
+                return;
+            }
+            if clock.is_unavailable() || clock.is_finished() {
+                return;
+            }
+            let Some(audio_us) = clock.elapsed_us() else {
+                return;
+            };
+            if presentation_time_us <= audio_us.saturating_add(target_lead_us) {
+                return;
+            }
             thread::sleep(Duration::from_millis(1));
         }
     }
