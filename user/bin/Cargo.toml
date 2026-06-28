@@ -192,7 +192,7 @@ sas-client = { path = "../lib/sas-client", default-features = false, features = 
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
-rust_h264 = { path = "../../rust_h264", default-features = false, features = ["portable-simd"] }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "cd5ed47bd5fb1d65878457e8262e2cfbbba8b898", default-features = false, features = ["portable-simd"] }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 
