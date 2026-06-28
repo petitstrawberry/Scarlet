@@ -31,6 +31,14 @@ fn is_sws_debug_enabled() -> bool {
     enabled
 }
 
+macro_rules! sws_debug {
+    ($($arg:tt)*) => {
+        if is_sws_debug_enabled() {
+            std::println!($($arg)*);
+        }
+    };
+}
+
 // NOTE: The compositor intentionally opens the modern display surface endpoint,
 // not the legacy framebuffer node. The endpoint may internally use mmap.
 
@@ -2104,8 +2112,8 @@ impl Compositor {
             if self.has_pending_redraw(needs_redraw) {
                 let mut present_damage = self.composite_pending_to_display()?;
                 needs_redraw |= self.wait_for_frame_batch()?;
-                if self.full_redraw_needed && is_sws_debug_enabled() {
-                    println!("[Compositor] Full redraw triggered");
+                if self.full_redraw_needed {
+                    sws_debug!("[Compositor] Full redraw triggered");
                 }
                 if self.has_pending_redraw(needs_redraw) {
                     let next_damage = self.composite_pending_to_display()?;
@@ -2184,7 +2192,7 @@ impl Compositor {
                         .map(|w| (w.x, w.y, w.width, w.height));
                     let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
                     let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
-                    println!(
+                    sws_debug!(
                         "[Compositor] Move drag: window #{} start=({}, {}) grab=({}, {}) cursor=({}, {}) new=({}, {})",
                         state.window_id,
                         state.start_window_x,
@@ -2389,7 +2397,7 @@ impl Compositor {
 
                 if button == key_codes::BTN_LEFT {
                     self.left_button_down = pressed;
-                    println!(
+                    sws_debug!(
                         "[Compositor] Left button {} at cursor=({}, {})",
                         if pressed { "down" } else { "up" },
                         self.cursor.x,
@@ -3204,13 +3212,16 @@ impl Compositor {
                 self.add_pending_damage((sx0, sy0, w, h));
             }
             IpcEvent::RequestMove { window_id } => {
-                println!("[Compositor] Window #{} requested move", window_id);
-                println!(
+                sws_debug!("[Compositor] Window #{} requested move", window_id);
+                sws_debug!(
                     "[Compositor] RequestMove state: left_down={} last_left_down={:?} cursor=({}, {})",
-                    self.left_button_down, self.last_left_down_cursor, self.cursor.x, self.cursor.y
+                    self.left_button_down,
+                    self.last_left_down_cursor,
+                    self.cursor.x,
+                    self.cursor.y
                 );
                 if !self.left_button_down {
-                    println!(
+                    sws_debug!(
                         "[Compositor] Ignoring move request for window #{} (left button not down)",
                         window_id
                     );
@@ -3226,9 +3237,13 @@ impl Compositor {
                 let (grab_cursor_x, grab_cursor_y) = self
                     .last_left_down_cursor
                     .unwrap_or((self.cursor.x, self.cursor.y));
-                println!(
+                sws_debug!(
                     "[Compositor] Move start: window #{} grab=({}, {}) cursor=({}, {})",
-                    window_id, grab_cursor_x, grab_cursor_y, self.cursor.x, self.cursor.y
+                    window_id,
+                    grab_cursor_x,
+                    grab_cursor_y,
+                    self.cursor.x,
+                    self.cursor.y
                 );
 
                 // Bring the window to front for the drag (focus is handled by click routing).
@@ -3614,17 +3629,15 @@ impl Compositor {
                 damage_width,
                 damage_height,
             } => {
-                if is_sws_debug_enabled() {
-                    println!(
-                        "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
-                        external_client_id,
-                        window_id,
-                        damage_x,
-                        damage_y,
-                        damage_width,
-                        damage_height
-                    );
-                }
+                sws_debug!(
+                    "[Compositor] IPC: ExtensionUpdateBuffer ext_client={} window={} damage=[{},{} {}x{}]",
+                    external_client_id,
+                    window_id,
+                    damage_x,
+                    damage_y,
+                    damage_width,
+                    damage_height
+                );
 
                 // Mark window as damaged and trigger redraw
                 if let Some(w) = self.window_manager.get_window(window_id) {
