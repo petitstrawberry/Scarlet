@@ -48,15 +48,15 @@ fn read_ok(socket: &mut Socket) -> Result<(), Error> {
         return Err(Error::ProtocolError);
     }
 
+    let mut payload = Vec::new();
+    payload.resize(payload_len, 0);
     if payload_len > 0 {
-        let mut payload = Vec::new();
-        payload.resize(payload_len, 0);
         read_exact(socket, &mut payload)?;
     }
 
     match header.msg_type {
         protocol::MSG_OK => Ok(()),
-        protocol::MSG_ERROR => Err(Error::InvalidResponse),
+        protocol::MSG_ERROR => Err(Error::server_error(&payload)),
         _ => Err(Error::InvalidResponse),
     }
 }
@@ -82,7 +82,33 @@ fn read_control_state(socket: &mut Socket) -> Result<protocol::ControlState, Err
         protocol::MSG_CONTROL_STATE => {
             protocol::ControlState::from_payload(&payload).ok_or(Error::ProtocolError)
         }
-        protocol::MSG_ERROR => Err(Error::InvalidResponse),
+        protocol::MSG_ERROR => Err(Error::server_error(&payload)),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
+/// Read one framed response and expect `MSG_OUTPUT_LIST`.
+fn read_output_list(socket: &mut Socket) -> Result<Vec<protocol::OutputInfo>, Error> {
+    let mut header_bytes = [0u8; protocol::HEADER_SIZE];
+    read_exact(socket, &mut header_bytes)?;
+    let header = protocol::Header::from_le_bytes(header_bytes);
+
+    let payload_len = header.payload_size as usize;
+    if payload_len > protocol::MAX_PAYLOAD_SIZE {
+        return Err(Error::ProtocolError);
+    }
+
+    let mut payload = Vec::new();
+    payload.resize(payload_len, 0);
+    if payload_len > 0 {
+        read_exact(socket, &mut payload)?;
+    }
+
+    match header.msg_type {
+        protocol::MSG_OUTPUT_LIST => {
+            protocol::output_list_from_payload(&payload).ok_or(Error::ProtocolError)
+        }
+        protocol::MSG_ERROR => Err(Error::server_error(&payload)),
         _ => Err(Error::InvalidResponse),
     }
 }
@@ -186,6 +212,23 @@ impl SasClient {
         let frame = protocol::frame(protocol::MSG_SET_MASTER_MUTE, &payload);
         write_all(&mut self.socket, &frame)?;
         read_control_state(&mut self.socket)
+    }
+
+    /// Switch SAS output device.
+    pub fn set_output(
+        &mut self,
+        request: protocol::OutputRequest,
+    ) -> Result<protocol::ControlState, Error> {
+        let frame = protocol::frame(protocol::MSG_SET_OUTPUT, &request.to_le_bytes());
+        write_all(&mut self.socket, &frame)?;
+        read_control_state(&mut self.socket)
+    }
+
+    /// List SAS output devices.
+    pub fn list_outputs(&mut self) -> Result<Vec<protocol::OutputInfo>, Error> {
+        let frame = protocol::frame(protocol::MSG_LIST_OUTPUTS, &[]);
+        write_all(&mut self.socket, &frame)?;
+        read_output_list(&mut self.socket)
     }
 
     /// Send `MSG_DRAIN` and wait for `MSG_OK`.

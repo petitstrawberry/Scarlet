@@ -7,4 +7,4 @@
 
 extern crate scarlet_std as std;
 
-pub mod sas_protocol;
+pub use sas_protocol;

@@ -60,5 +60,5 @@ pub(crate) use logln;
 
 pub use client::SasClient;
 pub use error::Error;
-pub use sas_protocol::ControlState;
+pub use sas_protocol::{ControlState, OutputInfo, OutputRequest};
 pub use stream::{SasStream, StreamConfig};

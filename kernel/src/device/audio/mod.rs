@@ -772,13 +772,16 @@ impl AudioCharDevice {
             ring.state = AUDIO_STATE_STOPPED;
             (was_running, was_xrun)
         };
+        let mut result = Ok(());
         if was_running || was_xrun {
-            self.backend.stop()?;
+            if let Err(error) = self.backend.stop() {
+                result = Err(error);
+            }
         }
         if let Some(ring) = self.ring.lock().as_mut() {
             ring.discard_pending();
         }
-        Ok(0)
+        result.map(|_| 0)
     }
 
     fn handle_get_status(&self, arg: usize) -> Result<i32, &'static str> {
@@ -794,6 +797,7 @@ impl AudioCharDevice {
         let Some(was_running) = ({
             let mut guard = self.ring.lock();
             let Some(ring) = guard.as_mut() else {
+                *self.opened.lock() = false;
                 return Ok(0);
             };
             let was_running = ring.state == AUDIO_STATE_RUNNING;
@@ -802,12 +806,20 @@ impl AudioCharDevice {
         }) else {
             return Ok(0);
         };
+        let mut result = Ok(());
         if was_running {
-            self.backend.stop()?;
+            if let Err(error) = self.backend.stop() {
+                result = Err(error);
+            }
         }
-        self.backend.release()?;
+        if let Err(error) = self.backend.release()
+            && result.is_ok()
+        {
+            result = Err(error);
+        }
         *self.ring.lock() = None;
-        Ok(0)
+        *self.opened.lock() = false;
+        result.map(|_| 0)
     }
 }
 

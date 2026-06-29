@@ -14,9 +14,9 @@ use scarlet::{
     device::{
         DeviceInfo,
         audio::{
-            AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S32LE,
-            AUDIO_PCM_MAX_RATES, AudioCodec, AudioDaiProvider, AudioDeviceInfo,
-            AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
+            AUDIO_DEVICE_KIND_HEADPHONES, AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE,
+            AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec, AudioDaiProvider,
+            AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
             register_playback_device_with_info,
         },
         clk::ClkHandle,
@@ -91,7 +91,13 @@ const DMA_ADAPTER_RX_NCHANS_SHIFT: u32 = 13;
 const DMA_ADAPTER_NCHANS_SHIFT: u32 = 20;
 const DMA_ADAPTER_FIXED_NCHANS: u32 = 0x2;
 
-static APPLE_MCA_DEVICES: Mutex<Vec<Arc<AppleMca>>> = Mutex::new(Vec::new());
+static APPLE_MCA_DEVICES: Mutex<Vec<AppleMcaRegisteredDevice>> = Mutex::new(Vec::new());
+static APPLE_MCA_OUTPUTS: Mutex<Vec<(u32, usize)>> = Mutex::new(Vec::new());
+
+struct AppleMcaRegisteredDevice {
+    phandle: u32,
+    mca: Arc<AppleMca>,
+}
 
 struct AppleMcaDma {
     name: String,
@@ -220,6 +226,14 @@ struct AppleMca {
     playback_ports: Mutex<Vec<usize>>,
 }
 
+struct AppleMcaOutput {
+    mca: Arc<AppleMca>,
+    fe_cluster: usize,
+    ports: Vec<usize>,
+    codec_routes: Vec<AppleMcaPlaybackCodec>,
+    stream: Mutex<Option<AppleMcaStream>>,
+}
+
 impl AppleMca {
     fn new(
         base: usize,
@@ -341,17 +355,25 @@ impl AppleMca {
         APPLE_MCA_PLAYBACK_CLUSTER
     }
 
-    fn playback_slots(&self, params: &AudioPcmParams) -> usize {
+    fn playback_slots_for(params: &AudioPcmParams) -> usize {
         (APPLE_MCA_BCLK_RATIO as usize / APPLE_MCA_SLOT_WIDTH).max(params.channels as usize)
     }
 
-    fn playback_tx_mask(&self, params: &AudioPcmParams) -> u32 {
-        let slots = self.playback_slots(params);
+    fn playback_tx_mask_for(params: &AudioPcmParams) -> u32 {
+        let slots = Self::playback_slots_for(params);
         if slots >= u32::BITS as usize {
             u32::MAX
         } else {
             (1u32 << slots) - 1
         }
+    }
+
+    fn playback_slots(&self, params: &AudioPcmParams) -> usize {
+        Self::playback_slots_for(params)
+    }
+
+    fn playback_tx_mask(&self, params: &AudioPcmParams) -> u32 {
+        Self::playback_tx_mask_for(params)
     }
 
     fn enable_cluster_power_domain(&self, cluster: usize) -> Result<(), &'static str> {
@@ -395,8 +417,22 @@ impl AppleMca {
         cluster: usize,
         params: &AudioPcmParams,
     ) -> Result<(), &'static str> {
-        let slots = self.playback_slots(params);
-        let slot_mask = self.playback_tx_mask(params);
+        self.configure_serdes_with_mask(
+            cluster_base,
+            cluster,
+            params,
+            self.playback_tx_mask(params),
+        )
+    }
+
+    fn configure_serdes_with_mask(
+        &self,
+        cluster_base: usize,
+        cluster: usize,
+        params: &AudioPcmParams,
+        slot_mask: u32,
+    ) -> Result<(), &'static str> {
+        let slots = Self::playback_slots_for(params);
         let data_mask = Self::crop_mask(slot_mask, params.channels as usize);
         let width = match APPLE_MCA_SLOT_WIDTH {
             16 => SERDES_CONF_WIDTH_16BIT,
@@ -626,6 +662,12 @@ fn dma_error_to_str(error: DmaError) -> &'static str {
     }
 }
 
+fn keep_first_error(result: &mut Result<(), &'static str>, error: &'static str) {
+    if result.is_ok() {
+        *result = Err(error);
+    }
+}
+
 fn read_phandle(device: &PlatformDeviceInfo) -> Result<u32, &'static str> {
     device
         .property("phandle")
@@ -737,6 +779,12 @@ impl AudioDaiProvider for AppleMca {
 
         let mut routes = self.playback_codec_routes.lock();
         let effective_tx_mask = tx_mask.max(0x1);
+        if routes
+            .iter()
+            .any(|route| route.tx_mask == effective_tx_mask && Arc::ptr_eq(&route.codec, &codec))
+        {
+            return Ok(());
+        }
         self.playback_codecs.lock().push(Arc::clone(&codec));
         routes.push(AppleMcaPlaybackCodec {
             codec,
@@ -889,48 +937,314 @@ impl AudioPlaybackDevice for AppleMca {
 
     fn stop(&self) -> Result<(), &'static str> {
         let fe_cluster_base = self.cluster_base(self.playback_fe_cluster())?;
-        let mut codec_result = Ok(());
+        let mut result = Ok(());
         for route in &self.playback_codec_routes() {
             if let Err(error) = route.codec.set_playback_muted(true) {
-                codec_result = Err(error);
+                keep_first_error(&mut result, error);
             }
         }
         let channel = {
             let mut guard = self.stream.lock();
             let Some(stream) = guard.as_mut() else {
                 self.disable_serdes(fe_cluster_base);
-                codec_result?;
-                return Ok(());
+                return result;
             };
             stream.running = false;
             Some(stream.channel.clone())
         };
 
         if let Some(channel) = channel {
-            channel.stop().map_err(dma_error_to_str)?;
+            if let Err(error) = channel.stop().map_err(dma_error_to_str) {
+                keep_first_error(&mut result, error);
+            }
         }
         self.disable_serdes(fe_cluster_base);
         if let Some(stream) = self.stream.lock().as_mut() {
             stream.reset_queue();
             stream.clear();
         }
-        codec_result?;
-        Ok(())
+        result
     }
 
     fn release(&self) -> Result<(), &'static str> {
         let had_stream = self.stream.lock().is_some();
         if had_stream {
+            let mut result = Ok(());
             let codec_routes = self.playback_codec_routes();
             let fe_cluster = self.playback_fe_cluster();
-            self.stop()?;
             let fe_cluster_base = self.cluster_base(fe_cluster)?;
+            if let Err(error) = self.stop() {
+                keep_first_error(&mut result, error);
+            }
             self.disable_playback_ports();
             *self.stream.lock() = None;
             for route in &codec_routes {
-                route.codec.set_playback_powered(false)?;
+                if let Err(error) = route.codec.set_playback_powered(false) {
+                    keep_first_error(&mut result, error);
+                }
             }
             self.disable_clocks_and_syncgen(fe_cluster_base, fe_cluster);
+            return result;
+        }
+        Ok(())
+    }
+
+    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str> {
+        let mut guard = self.stream.lock();
+        let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
+        stream.copy_period(pcm)
+    }
+
+    fn process_completions(&self) -> usize {
+        let mut guard = self.stream.lock();
+        let Some(stream) = guard.as_mut() else {
+            return 0;
+        };
+        stream.take_completions()
+    }
+
+    fn max_in_flight_periods(&self) -> usize {
+        self.stream
+            .lock()
+            .as_ref()
+            .map(|stream| stream.period_count)
+            .unwrap_or(4)
+    }
+}
+
+impl AppleMcaOutput {
+    fn new(
+        mca: Arc<AppleMca>,
+        fe_cluster: usize,
+        ports: Vec<usize>,
+        codec_routes: Vec<AppleMcaPlaybackCodec>,
+    ) -> Self {
+        Self {
+            mca,
+            fe_cluster,
+            ports,
+            codec_routes,
+            stream: Mutex::new(None),
+        }
+    }
+
+    fn playback_slots(&self, params: &AudioPcmParams) -> usize {
+        AppleMca::playback_slots_for(params)
+    }
+
+    fn playback_tx_mask(&self, params: &AudioPcmParams) -> u32 {
+        AppleMca::playback_tx_mask_for(params)
+    }
+
+    fn disable_ports(&self) {
+        for port in &self.ports {
+            if let Ok(port_base) = self.mca.cluster_base(*port) {
+                self.mca.disable_port(port_base);
+            }
+        }
+    }
+
+    fn cleanup_failed_configure(&self, fe_cluster_base: usize) {
+        self.mca.disable_serdes(fe_cluster_base);
+        self.disable_ports();
+        self.mca
+            .disable_clocks_and_syncgen(fe_cluster_base, self.fe_cluster);
+        for route in &self.codec_routes {
+            let _ = route.codec.set_playback_muted(true);
+            let _ = route.codec.set_playback_powered(false);
+        }
+        *self.stream.lock() = None;
+    }
+}
+
+impl AudioPlaybackDevice for AppleMcaOutput {
+    fn capabilities(&self) -> AudioPcmCapabilities {
+        let max_rate = APPLE_MCA_MAX_BCLK / APPLE_MCA_BCLK_RATIO as u32;
+        let mut rates = [0u32; AUDIO_PCM_MAX_RATES];
+        let mut rate_count = 0usize;
+        for rate in [44_100, 48_000, 88_200, 96_000, 176_400, 192_000] {
+            if rate <= max_rate && rate_count < rates.len() {
+                rates[rate_count] = rate;
+                rate_count += 1;
+            }
+        }
+
+        AudioPcmCapabilities {
+            formats: (1 << AUDIO_PCM_FORMAT_S16LE) | (1 << AUDIO_PCM_FORMAT_S32LE),
+            rate_count: rate_count as u32,
+            rates,
+            min_channels: 1,
+            max_channels: 2,
+            min_period_frames: 64,
+            max_period_frames: APPLE_MCA_MAX_PERIOD_FRAMES,
+            min_buffer_frames: 128,
+            max_buffer_frames: APPLE_MCA_MAX_BUFFER_FRAMES,
+        }
+    }
+
+    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+        self.release()?;
+
+        let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
+        let mut path_touched = false;
+        let result = (|| {
+            let channel = self.mca.playback_dma(self.fe_cluster)?;
+            let buffer_bytes = params
+                .buffer_bytes()
+                .ok_or("apple-mca: PCM buffer overflow")?;
+            let period_bytes = params
+                .period_bytes()
+                .ok_or("apple-mca: PCM period overflow")?;
+            let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
+            let pages = ContiguousPages::new(mapped_bytes / PAGE_SIZE)
+                .ok_or("apple-mca: DMA alloc failed")?;
+
+            for port in &self.ports {
+                let port_base = self.mca.cluster_base(*port)?;
+                self.mca.configure_port(port_base, self.fe_cluster);
+            }
+            path_touched = true;
+            self.mca.configure_serdes_with_mask(
+                fe_cluster_base,
+                self.fe_cluster,
+                params,
+                self.playback_tx_mask(params),
+            )?;
+            self.mca.configure_dma_adapter(self.fe_cluster, params)?;
+            self.mca
+                .configure_syncgen_rate(fe_cluster_base, self.fe_cluster, params)?;
+            self.mca
+                .enable_clocks_and_syncgen(fe_cluster_base, self.fe_cluster)?;
+            for route in &self.codec_routes {
+                route.codec.configure_playback(
+                    params,
+                    route.tx_mask,
+                    self.playback_slots(params),
+                    APPLE_MCA_SLOT_WIDTH,
+                )?;
+                route.codec.set_playback_powered(true)?;
+                route.codec.set_playback_muted(true)?;
+            }
+
+            let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
+            stream.clear();
+
+            let burst_len = (params.channels as usize).min(4).max(1);
+            channel
+                .prepare_cyclic(DmaCyclicConfig {
+                    buffer_addr: stream.pages.as_paddr(),
+                    buffer_len: buffer_bytes,
+                    period_len: period_bytes,
+                    direction: DmaDirection::MemToDev,
+                    peripheral: Some(DmaPeripheralConfig {
+                        addr: 1,
+                        width: AppleMca::dma_width(params)?,
+                        burst_len,
+                    }),
+                })
+                .map_err(dma_error_to_str)?;
+
+            *self.stream.lock() = Some(stream);
+            Ok(())
+        })();
+
+        if result.is_err() && path_touched {
+            self.cleanup_failed_configure(fe_cluster_base);
+        }
+        result
+    }
+
+    fn start(&self) -> Result<(), &'static str> {
+        let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
+        let channel = {
+            let mut guard = self.stream.lock();
+            let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
+            if stream.running {
+                return Ok(());
+            }
+            stream.running = true;
+            stream.channel.clone()
+        };
+
+        if let Err(error) = channel.start() {
+            let mut guard = self.stream.lock();
+            if let Some(stream) = guard.as_mut() {
+                stream.running = false;
+            }
+            self.mca.disable_serdes(fe_cluster_base);
+            return Err(dma_error_to_str(error));
+        }
+        self.mca.enable_serdes(fe_cluster_base);
+        for route in &self.codec_routes {
+            if let Err(error) = route
+                .codec
+                .set_playback_powered(true)
+                .and_then(|_| route.codec.set_playback_muted(false))
+            {
+                let _ = channel.stop();
+                let mut guard = self.stream.lock();
+                if let Some(stream) = guard.as_mut() {
+                    stream.running = false;
+                }
+                for route in &self.codec_routes {
+                    let _ = route.codec.set_playback_muted(true);
+                }
+                self.mca.disable_serdes(fe_cluster_base);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), &'static str> {
+        let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
+        let mut result = Ok(());
+        for route in &self.codec_routes {
+            if let Err(error) = route.codec.set_playback_muted(true) {
+                keep_first_error(&mut result, error);
+            }
+        }
+        let channel = {
+            let mut guard = self.stream.lock();
+            let Some(stream) = guard.as_mut() else {
+                self.mca.disable_serdes(fe_cluster_base);
+                return result;
+            };
+            stream.running = false;
+            Some(stream.channel.clone())
+        };
+
+        if let Some(channel) = channel {
+            if let Err(error) = channel.stop().map_err(dma_error_to_str) {
+                keep_first_error(&mut result, error);
+            }
+        }
+        self.mca.disable_serdes(fe_cluster_base);
+        if let Some(stream) = self.stream.lock().as_mut() {
+            stream.reset_queue();
+            stream.clear();
+        }
+        result
+    }
+
+    fn release(&self) -> Result<(), &'static str> {
+        let had_stream = self.stream.lock().is_some();
+        if had_stream {
+            let mut result = Ok(());
+            let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
+            if let Err(error) = self.stop() {
+                keep_first_error(&mut result, error);
+            }
+            self.disable_ports();
+            *self.stream.lock() = None;
+            for route in &self.codec_routes {
+                if let Err(error) = route.codec.set_playback_powered(false) {
+                    keep_first_error(&mut result, error);
+                }
+            }
+            self.mca
+                .disable_clocks_and_syncgen(fe_cluster_base, self.fe_cluster);
+            return result;
         }
         Ok(())
     }
@@ -1111,7 +1425,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         audio_backend,
         AudioDeviceInfo::new(AUDIO_DEVICE_KIND_SPEAKERS, "speakers", "Built-in Speakers"),
     );
-    APPLE_MCA_DEVICES.lock().push(mca);
+    APPLE_MCA_DEVICES
+        .lock()
+        .push(AppleMcaRegisteredDevice { phandle, mca });
 
     println!(
         "[apple-mca] probed {} at phandle={:#x}, base={:#x}, switch={:#x}, clusters={}, dmas={}, audio={}",
@@ -1127,6 +1443,34 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn find_mca_by_phandle(phandle: u32) -> Option<Arc<AppleMca>> {
+    APPLE_MCA_DEVICES
+        .lock()
+        .iter()
+        .find(|device| device.phandle == phandle)
+        .map(|device| Arc::clone(&device.mca))
+}
+
+fn register_mca_output_once(
+    cpu_phandle: u32,
+    port_cluster: usize,
+    output: Arc<AppleMcaOutput>,
+    info: AudioDeviceInfo,
+) -> String {
+    let mut outputs = APPLE_MCA_OUTPUTS.lock();
+    if outputs
+        .iter()
+        .any(|(phandle, cluster)| *phandle == cpu_phandle && *cluster == port_cluster)
+    {
+        return "already-registered".to_string();
+    }
+
+    let backend: Arc<dyn AudioPlaybackDevice> = output;
+    let audio_name = register_playback_device_with_info(backend, info);
+    outputs.push((cpu_phandle, port_cluster));
+    audio_name
+}
+
 fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let fdt = FdtManager::get_manager()
         .get_fdt()
@@ -1135,7 +1479,7 @@ fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .find_node("/sound")
         .ok_or("apple-macaudio: missing /sound node")?;
     let manager = DeviceManager::get_manager();
-    let mut speaker_seen = false;
+    let mut playback_seen = false;
     let mut attached = 0usize;
 
     for link in sound.children() {
@@ -1146,31 +1490,78 @@ fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             .property("link-name")
             .and_then(|property| property.as_str())
             .unwrap_or(link.name);
-        if !link_name.starts_with("Speaker") {
+        let is_speakers = link_name.starts_with("Speaker");
+        let is_headphones = link_name == "Headphone Jack";
+        if !is_speakers && !is_headphones {
             continue;
         }
-        speaker_seen = true;
+        playback_seen = true;
 
         let cpu_node = link
             .children()
             .find(|child| child.name == "cpu")
-            .ok_or("apple-macaudio: missing Speaker CPU endpoint")?;
+            .ok_or("apple-macaudio: missing playback CPU endpoint")?;
         let codec_node = link
             .children()
             .find(|child| child.name == "codec")
-            .ok_or("apple-macaudio: missing Speaker codec endpoint")?;
+            .ok_or("apple-macaudio: missing playback codec endpoint")?;
         let cpu_dais = parse_cpu_sound_dais(
             cpu_node
                 .property("sound-dai")
-                .ok_or("apple-macaudio: missing Speaker CPU sound-dai")?
+                .ok_or("apple-macaudio: missing playback CPU sound-dai")?
                 .value,
         )?;
         let codec_dais = parse_codec_sound_dais(
             codec_node
                 .property("sound-dai")
-                .ok_or("apple-macaudio: missing Speaker codec sound-dai")?
+                .ok_or("apple-macaudio: missing playback codec sound-dai")?
                 .value,
         )?;
+
+        if is_headphones {
+            if cpu_dais.len() != 1 {
+                return Err("apple-macaudio: Headphone Jack must have one CPU DAI");
+            }
+            let cpu_dai = &cpu_dais[0];
+            if cpu_dai.spec.len() != APPLE_MCA_SOUND_DAI_CELLS {
+                return Err("apple-macaudio: invalid Headphone Jack CPU DAI spec");
+            }
+            let port_cluster = cpu_dai.spec[0] as usize;
+            let Some(mca) = find_mca_by_phandle(cpu_dai.phandle) else {
+                return probe_defer();
+            };
+            let fe_cluster = mca.playback_fe_cluster();
+            let routes = codec_dais
+                .iter()
+                .map(|(_, codec)| AppleMcaPlaybackCodec {
+                    codec: Arc::clone(codec),
+                    tx_mask: 0x3,
+                })
+                .collect::<Vec<_>>();
+            let output = Arc::new(AppleMcaOutput::new(
+                mca,
+                fe_cluster,
+                alloc::vec![port_cluster],
+                routes,
+            ));
+            let audio_name = register_mca_output_once(
+                cpu_dai.phandle,
+                port_cluster,
+                output,
+                AudioDeviceInfo::new(AUDIO_DEVICE_KIND_HEADPHONES, "headphones", "Headphone Jack"),
+            );
+            attached += codec_dais.len();
+            println!(
+                "[apple-macaudio] attached {} link cpu={:#x} port={} fe={} codecs={} tx_mask=0x3 audio={}",
+                link_name,
+                cpu_dai.phandle,
+                port_cluster,
+                fe_cluster,
+                codec_dais.len(),
+                audio_name
+            );
+            continue;
+        }
 
         let codecs_per_cpu = if codec_dais.len() % cpu_dais.len() == 0 {
             codec_dais.len() / cpu_dais.len()
@@ -1210,11 +1601,11 @@ fn probe_macaudio_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         attached += link_attached;
     }
 
-    if !speaker_seen {
-        return Err("apple-macaudio: no Speaker link found");
+    if !playback_seen {
+        return Err("apple-macaudio: no playback link found");
     }
     if attached == 0 {
-        return Err("apple-macaudio: no Speaker link attached");
+        return Err("apple-macaudio: no playback link attached");
     }
 
     Ok(())

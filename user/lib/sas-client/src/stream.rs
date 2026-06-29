@@ -1,6 +1,6 @@
 //! Shared-memory ring buffer stream for SAS.
 
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use sas_protocol::{self as protocol, RING_HEADER_SIZE};
 
@@ -16,7 +16,6 @@ pub struct StreamConfig {
     pub period_frames: u32,
     pub buffer_frames: u32,
 }
-
 
 /// A shared-memory ring buffer for streaming PCM samples to SAS.
 ///
@@ -72,10 +71,8 @@ impl SasStream {
         // SAFETY: `ring_addr` is a mapped SAS ring header.
         let buffer_frames =
             unsafe { core::ptr::addr_of!((*header).buffer_frames).read_volatile() as usize };
-        let read_frames =
-            unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
-        let write_frames =
-            unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
+        let read_frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
+        let write_frames = unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
         let queued = write_frames.saturating_sub(read_frames) as usize;
         buffer_frames.saturating_sub(queued)
     }
@@ -101,8 +98,7 @@ impl SasStream {
         let data_ptr = (self.ring_addr + RING_HEADER_SIZE) as *mut u8;
 
         // SAFETY: `ring_addr` is a mapped SAS ring header.
-        let write_frames =
-            unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
+        let write_frames = unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() };
         let ring_frame = write_frames as usize % self.buffer_frames;
         let first_chunk = frames.min(self.buffer_frames - ring_frame);
         let first_bytes = first_chunk * self.frame_bytes;
@@ -157,8 +153,7 @@ impl SasStream {
         unsafe {
             let buffer_frames =
                 core::ptr::addr_of!((*header).buffer_frames).read_volatile() as usize;
-            let frame_bytes =
-                core::ptr::addr_of!((*header).frame_bytes).read_volatile() as usize;
+            let frame_bytes = core::ptr::addr_of!((*header).frame_bytes).read_volatile() as usize;
             // Reset the producer index first so SAS sees the ring as empty
             // before the consumer index is rewound.
             core::ptr::addr_of_mut!((*header).write_frames).write_volatile(0);

@@ -1,8 +1,12 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use sas_client::{ControlState, SasClient};
-use sas_protocol::{CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16};
+use sas_client::{ControlState, OutputInfo, OutputRequest, SasClient};
+use sas_protocol::{
+    CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
+    OUTPUT_ENTRY_FLAG_CURRENT, OUTPUT_PREFERENCE_HEADPHONES, OUTPUT_PREFERENCE_NAME,
+    OUTPUT_PREFERENCE_PATH, OUTPUT_PREFERENCE_SPEAKERS,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "sasctl", version, about = "Control Scarlet Audio Server")]
@@ -26,6 +30,24 @@ enum Command {
     Unmute,
     /// Toggle SAS master mute.
     ToggleMute,
+    /// Control SAS output device.
+    Output {
+        #[command(subcommand)]
+        command: Option<OutputCommand>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OutputCommand {
+    /// Show current output device.
+    Status,
+    /// List output devices.
+    List,
+    /// Switch output device.
+    Set {
+        /// Output: speakers, headphones, /dev/audioN, or stable device name.
+        value: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -53,6 +75,24 @@ fn main() -> ExitCode {
         Command::ToggleMute => match client.control_state() {
             Ok(state) => client.set_master_muted(!state_muted(state)),
             Err(error) => Err(error),
+        },
+        Command::Output { command: None } => client.control_state(),
+        Command::Output {
+            command: Some(OutputCommand::Status),
+        } => client.control_state(),
+        Command::Output {
+            command: Some(OutputCommand::List),
+        } => {
+            return print_outputs(&mut client);
+        }
+        Command::Output {
+            command: Some(OutputCommand::Set { value }),
+        } => match parse_output_request(&value) {
+            Ok(request) => client.set_output(request),
+            Err(message) => {
+                eprintln!("sasctl: {message}");
+                return ExitCode::from(2);
+            }
         },
     };
 
@@ -97,10 +137,83 @@ fn state_muted(state: ControlState) -> bool {
     state.flags & CONTROL_FLAG_MUTED != 0
 }
 
+fn parse_output_request(input: &str) -> Result<OutputRequest, &'static str> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("output must be speakers, headphones, /dev/audioN, or a device name");
+    }
+
+    let (preference, value) = match trimmed {
+        "speaker" | "speakers" => (OUTPUT_PREFERENCE_SPEAKERS, ""),
+        "headphone" | "headphones" | "headset" => (OUTPUT_PREFERENCE_HEADPHONES, ""),
+        _ if trimmed.starts_with("/dev/audio") => (OUTPUT_PREFERENCE_PATH, trimmed),
+        _ => (OUTPUT_PREFERENCE_NAME, trimmed),
+    };
+    OutputRequest::new(preference, value).ok_or("output value is too long")
+}
+
+fn fixed_str(bytes: &[u8]) -> &str {
+    let len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).unwrap_or("")
+}
+
+fn output_kind_name(kind: u32) -> &'static str {
+    match kind {
+        1 => "speakers",
+        2 => "headphones",
+        _ => "unknown",
+    }
+}
+
+fn print_outputs(client: &mut SasClient) -> ExitCode {
+    match client.list_outputs() {
+        Ok(outputs) => {
+            for output in outputs {
+                print_output(output);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("sasctl: request failed: {}", error.as_str());
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn print_output(output: OutputInfo) {
+    let current = if output.flags & OUTPUT_ENTRY_FLAG_CURRENT != 0 {
+        "*"
+    } else {
+        " "
+    };
+    let compatible = if output.flags & OUTPUT_ENTRY_FLAG_COMPATIBLE != 0 {
+        "compatible"
+    } else {
+        "unsupported"
+    };
+    println!(
+        "{} {} kind={} type={} name={} description={} {}",
+        current,
+        fixed_str(&output.path),
+        output.kind,
+        output_kind_name(output.kind),
+        fixed_str(&output.name),
+        fixed_str(&output.description),
+        compatible
+    );
+}
+
 fn print_state(state: ControlState) {
     println!(
-        "master_volume={}%, muted={}",
+        "master_volume={}%, muted={}, output={} kind={} name={} description={}",
         q16_to_percent(state.master_volume_q16),
-        state_muted(state)
+        state_muted(state),
+        fixed_str(&state.output_path),
+        state.output_kind,
+        fixed_str(&state.output_name),
+        fixed_str(&state.output_description)
     );
 }
