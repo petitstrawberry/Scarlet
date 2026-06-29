@@ -10,8 +10,8 @@ use spin::{Mutex, RwLock};
 
 use crate::device::audio::{
     AUDIO_PCM_FORMAT_F32LE, AUDIO_PCM_FORMAT_S8, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3,
-    AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioPcmCapabilities, AudioPcmParams,
-    AudioPlaybackDevice, register_playback_device,
+    AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioPcmBuffer, AudioPcmCapabilities,
+    AudioPcmParams, AudioPcmPeriod, AudioPlaybackDevice, register_playback_device,
 };
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
@@ -179,6 +179,7 @@ pub struct VirtioSndDevice {
     stream_id: RwLock<Option<u32>>,
     capabilities: RwLock<AudioPcmCapabilities>,
     configured_periods: RwLock<usize>,
+    pcm_buffer: RwLock<Option<AudioPcmBuffer>>,
     in_flight: Mutex<Vec<TxPeriod>>,
     event_buffers: Mutex<Vec<(usize, ContiguousPages)>>,
 }
@@ -225,6 +226,7 @@ impl VirtioSndDevice {
             stream_id: RwLock::new(None),
             capabilities: RwLock::new(default_capabilities()),
             configured_periods: RwLock::new(4),
+            pcm_buffer: RwLock::new(None),
             in_flight: Mutex::new(Vec::new()),
             event_buffers: Mutex::new(Vec::new()),
         };
@@ -444,7 +446,11 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         *self.capabilities.read()
     }
 
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str> {
         let format =
             virtio_format_code(params.format).ok_or("Unsupported VirtIO sound PCM format")?;
         let rate = virtio_rate_code(params.rate).ok_or("Unsupported VirtIO sound sample rate")?;
@@ -469,8 +475,10 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         if status.code != VIRTIO_SND_S_OK {
             return Err("VirtIO sound SET_PARAMS failed");
         }
+        self.pcm_command(VIRTIO_SND_R_PCM_PREPARE)?;
         *self.configured_periods.write() = configured_periods;
-        self.pcm_command(VIRTIO_SND_R_PCM_PREPARE)
+        *self.pcm_buffer.write() = Some(buffer);
+        Ok(())
     }
 
     fn start(&self) -> Result<(), &'static str> {
@@ -484,13 +492,19 @@ impl AudioPlaybackDevice for VirtioSndDevice {
 
     fn release(&self) -> Result<(), &'static str> {
         self.pcm_command(VIRTIO_SND_R_PCM_RELEASE)?;
+        *self.pcm_buffer.write() = None;
         self.drain_tx_queue()
     }
 
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str> {
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
         let stream_id = (*self.stream_id.read()).ok_or("VirtIO sound has no playback stream")?;
-        if pcm.is_empty() || pcm.len() > PAGE_SIZE {
+        let buffer =
+            (*self.pcm_buffer.read()).ok_or("VirtIO sound PCM buffer is not configured")?;
+        if period.byte_len == 0 || period.byte_len > PAGE_SIZE {
             return Err("Invalid VirtIO sound period size");
+        }
+        if period.byte_offset + period.byte_len > buffer.buffer_bytes {
+            return Err("VirtIO sound period is outside PCM buffer");
         }
 
         let header = ContiguousPages::new(1).ok_or("Failed to allocate audio tx header")?;
@@ -499,7 +513,11 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         unsafe {
             let hdr = header.as_ptr() as *mut VirtioSndPcmXfer;
             core::ptr::write(hdr, VirtioSndPcmXfer { stream_id });
-            core::ptr::copy_nonoverlapping(pcm.as_ptr(), data.as_ptr() as *mut u8, pcm.len());
+            core::ptr::copy_nonoverlapping(
+                (buffer.vaddr + period.byte_offset) as *const u8,
+                data.as_ptr() as *mut u8,
+                period.byte_len,
+            );
             core::ptr::write(
                 status.as_ptr() as *mut VirtioSndPcmStatus,
                 VirtioSndPcmStatus::default(),
@@ -531,7 +549,7 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         queue.desc[header_desc].next = data_desc as u16;
 
         queue.desc[data_desc].addr = data.as_paddr() as u64;
-        queue.desc[data_desc].len = pcm.len() as u32;
+        queue.desc[data_desc].len = period.byte_len as u32;
         queue.desc[data_desc].flags = DescriptorFlag::Next as u16;
         queue.desc[data_desc].next = status_desc as u16;
 

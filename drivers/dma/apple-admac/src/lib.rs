@@ -75,7 +75,6 @@ struct AppleAdmacTransfer {
     config: DmaCyclicConfig,
     dma_addr: IommuDmaAddr,
     dma_len: usize,
-    submitted_pos: usize,
     reclaimed_pos: usize,
 }
 
@@ -85,13 +84,11 @@ impl AppleAdmacTransfer {
             config,
             dma_addr,
             dma_len,
-            submitted_pos: 0,
             reclaimed_pos: 0,
         }
     }
 
     fn reset_position(&mut self) {
-        self.submitted_pos = 0;
         self.reclaimed_pos = 0;
     }
 }
@@ -442,16 +439,19 @@ impl AppleAdmac {
             .unmap(transfer.dma_addr, transfer.dma_len);
     }
 
-    fn write_one_desc(
+    fn write_one_desc_at(
         &self,
         index: usize,
         transfer: &mut AppleAdmacTransfer,
+        byte_offset: usize,
     ) -> Result<(), DmaError> {
         let config = transfer.config;
-        let offset = transfer.submitted_pos % config.buffer_len;
+        if byte_offset >= config.buffer_len {
+            return Err(DmaError::InvalidConfig);
+        }
         let addr = config
             .buffer_addr
-            .checked_add(offset)
+            .checked_add(byte_offset)
             .ok_or(DmaError::InvalidConfig)?;
         let buffer_end = config
             .buffer_addr
@@ -470,26 +470,6 @@ impl AppleAdmac {
         self.write_reg(desc_reg, (addr >> 32) as u32);
         self.write_reg(desc_reg, config.period_len as u32);
         self.write_reg(desc_reg, FLAG_DESC_NOTIFY);
-
-        let wrap_len = config
-            .buffer_len
-            .checked_mul(2)
-            .ok_or(DmaError::InvalidConfig)?;
-        transfer.submitted_pos = (transfer.submitted_pos + config.period_len) % wrap_len;
-        Ok(())
-    }
-
-    fn write_available_descs(
-        &self,
-        index: usize,
-        transfer: &mut AppleAdmacTransfer,
-    ) -> Result<(), DmaError> {
-        for _ in 0..4 {
-            if self.read_reg(Self::desc_ring_reg(index)) & RING_FULL != 0 {
-                break;
-            }
-            self.write_one_desc(index, transfer)?;
-        }
         Ok(())
     }
 
@@ -598,11 +578,6 @@ impl AppleAdmac {
             if let Some(transfer) = transfer.as_mut() {
                 transfer.reclaimed_pos += reports * transfer.config.period_len;
                 transfer.reclaimed_pos %= 2 * transfer.config.buffer_len;
-                if self.write_available_descs(index, transfer).is_err() {
-                    state.error.store(true, Ordering::Release);
-                    self.stop_channel(index);
-                    state.running.store(false, Ordering::Release);
-                }
             }
         }
 
@@ -759,6 +734,11 @@ impl DmaChannel for AppleAdmacChannel {
             return Err(DmaError::InvalidConfig);
         }
 
+        self.controller.stop_channel(self.index);
+        self.controller.reset_rings(self.index);
+        self.controller
+            .write_reg(AppleAdmac::chan_ctl_reg(self.index), 0);
+
         let old_transfer = state.transfer.lock().take();
         if let Some(transfer) = old_transfer {
             self.controller.unmap_transfer(&transfer);
@@ -794,30 +774,21 @@ impl DmaChannel for AppleAdmacChannel {
         if state.running.load(Ordering::Acquire) {
             return Ok(());
         }
-
+        if state.transfer.lock().is_none() {
+            return Err(DmaError::NotPrepared);
+        }
+        if self
+            .controller
+            .read_reg(AppleAdmac::desc_ring_reg(self.index))
+            & RING_EMPTY
+            != 0
         {
-            let mut transfer = state.transfer.lock();
-            let transfer = transfer.as_mut().ok_or(DmaError::NotPrepared)?;
-            self.controller.reset_rings(self.index);
-            self.controller
-                .write_reg(AppleAdmac::chan_ctl_reg(self.index), 0);
-            self.controller.write_one_desc(self.index, transfer)?;
+            return Err(DmaError::NotPrepared);
         }
 
+        state.completed_periods.store(0, Ordering::Release);
         state.running.store(true, Ordering::Release);
         self.controller.start_channel(self.index);
-        let mut transfer = state.transfer.lock();
-        if let Some(transfer) = transfer.as_mut()
-            && self
-                .controller
-                .write_available_descs(self.index, transfer)
-                .is_err()
-        {
-            state.error.store(true, Ordering::Release);
-            state.running.store(false, Ordering::Release);
-            self.controller.stop_channel(self.index);
-            return Err(DmaError::InvalidConfig);
-        }
 
         Ok(())
     }
@@ -831,6 +802,7 @@ impl DmaChannel for AppleAdmacChannel {
         }
         state.running.store(false, Ordering::Release);
         state.completed_periods.store(0, Ordering::Release);
+        state.error.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -848,6 +820,14 @@ impl DmaChannel for AppleAdmacChannel {
         }
         if state.error.load(Ordering::Acquire) {
             return Err(DmaError::HardwareError);
+        }
+        if self
+            .controller
+            .read_reg(AppleAdmac::desc_ring_reg(self.index))
+            & RING_EMPTY
+            != 0
+        {
+            return Err(DmaError::NotPrepared);
         }
         self.controller.start_channel(self.index);
         state.running.store(true, Ordering::Release);
@@ -868,6 +848,26 @@ impl DmaChannel for AppleAdmacChannel {
             .map(|state| state.completed_periods.swap(0, Ordering::AcqRel))
             .unwrap_or(0);
         irq_completed.saturating_add(self.controller.poll_channel_completions(self.index))
+    }
+
+    fn queue_cyclic_period(&self, byte_offset: usize) -> Result<(), DmaError> {
+        let state = self.controller.channel_state(self.index)?;
+        if state.error.load(Ordering::Acquire) {
+            return Err(DmaError::HardwareError);
+        }
+        if self
+            .controller
+            .read_reg(AppleAdmac::desc_ring_reg(self.index))
+            & RING_FULL
+            != 0
+        {
+            return Err(DmaError::ChannelBusy);
+        }
+
+        let mut transfer = state.transfer.lock();
+        let transfer = transfer.as_mut().ok_or(DmaError::NotPrepared)?;
+        self.controller
+            .write_one_desc_at(self.index, transfer, byte_offset)
     }
 
     fn is_running(&self) -> bool {

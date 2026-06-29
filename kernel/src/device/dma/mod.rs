@@ -202,6 +202,23 @@ pub trait DmaChannel: Send + Sync {
         0
     }
 
+    /// Queue one period from a prepared cyclic buffer.
+    ///
+    /// This is used by clients that own the producer side of the cyclic buffer
+    /// and must only expose committed periods to hardware.
+    ///
+    /// # Arguments
+    ///
+    /// * `byte_offset` - Byte offset of the period within the prepared cyclic buffer.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the descriptor was queued.
+    fn queue_cyclic_period(&self, byte_offset: usize) -> Result<(), DmaError> {
+        let _ = byte_offset;
+        Err(DmaError::Unsupported)
+    }
+
     /// Report whether the channel is currently running.
     ///
     /// # Returns

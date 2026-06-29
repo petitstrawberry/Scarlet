@@ -16,8 +16,8 @@ use scarlet::{
         audio::{
             AUDIO_DEVICE_KIND_HEADPHONES, AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE,
             AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec, AudioDaiProvider,
-            AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
-            register_playback_device_with_info,
+            AudioDeviceInfo, AudioPcmBuffer, AudioPcmCapabilities, AudioPcmParams, AudioPcmPeriod,
+            AudioPlaybackDevice, register_playback_device_with_info,
         },
         clk::ClkHandle,
         dma::{
@@ -31,10 +31,7 @@ use scarlet::{
         },
         power::{PowerDomain, PowerManager},
     },
-    early_println,
-    environment::PAGE_SIZE,
-    mem::page::ContiguousPages,
-    println,
+    early_println, println,
 };
 
 const APPLE_MCA_T8103_CLUSTERS: usize = 6;
@@ -113,13 +110,11 @@ struct AppleMcaPlaybackCodec {
 
 struct AppleMcaStream {
     channel: Arc<dyn DmaChannel>,
-    pages: ContiguousPages,
     params: AudioPcmParams,
-    mapped_bytes: usize,
+    buffer_paddr: usize,
     buffer_bytes: usize,
     period_bytes: usize,
     period_count: usize,
-    submit_period: usize,
     in_flight_periods: usize,
     running: bool,
 }
@@ -127,9 +122,8 @@ struct AppleMcaStream {
 impl AppleMcaStream {
     fn new(
         channel: Arc<dyn DmaChannel>,
-        pages: ContiguousPages,
         params: AudioPcmParams,
-        mapped_bytes: usize,
+        buffer: AudioPcmBuffer,
     ) -> Result<Self, &'static str> {
         let buffer_bytes = params
             .buffer_bytes()
@@ -141,60 +135,36 @@ impl AppleMcaStream {
         if period_count == 0 {
             return Err("apple-mca: invalid period count");
         }
-        if buffer_bytes > mapped_bytes {
-            return Err("apple-mca: DMA allocation too small");
+        if buffer_bytes > buffer.buffer_bytes {
+            return Err("apple-mca: PCM buffer is too small");
         }
 
         Ok(Self {
             channel,
-            pages,
             params,
-            mapped_bytes,
+            buffer_paddr: buffer.paddr,
             buffer_bytes,
             period_bytes,
             period_count,
-            submit_period: 0,
             in_flight_periods: 0,
             running: false,
         })
     }
 
-    fn clear(&self) {
-        // SAFETY: `pages` owns `mapped_bytes` bytes of contiguous kernel
-        // memory for the DMA ring and the pointer is valid for writes.
-        unsafe {
-            core::ptr::write_bytes(self.pages.as_vaddr() as *mut u8, 0, self.mapped_bytes);
-        }
-        scarlet::arch::clean_dcache_to_poc_range(self.pages.as_vaddr(), self.mapped_bytes);
-    }
-
-    fn copy_period(&mut self, pcm: &[u8]) -> Result<(), &'static str> {
-        if pcm.len() != self.period_bytes {
+    fn queue_period(&mut self, period: AudioPcmPeriod) -> Result<(), &'static str> {
+        if period.byte_len != self.period_bytes {
             return Err("apple-mca: period size mismatch");
         }
         if self.in_flight_periods >= self.period_count {
             return Err("apple-mca: DMA ring is full");
         }
-
-        let offset = self.submit_period * self.period_bytes;
-        if offset + pcm.len() > self.buffer_bytes {
-            return Err("apple-mca: DMA ring write out of range");
+        if period.byte_offset + period.byte_len > self.buffer_bytes {
+            return Err("apple-mca: DMA period out of range");
         }
 
-        // SAFETY: The destination range is within the owned DMA ring and the
-        // source slice is valid for `pcm.len()` bytes. The regions do not
-        // overlap because user PCM data is copied from a temporary period
-        // buffer owned by the audio core.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                pcm.as_ptr(),
-                (self.pages.as_vaddr() + offset) as *mut u8,
-                pcm.len(),
-            );
-        }
-        scarlet::arch::clean_dcache_to_poc_range(self.pages.as_vaddr() + offset, pcm.len());
-
-        self.submit_period = (self.submit_period + 1) % self.period_count;
+        self.channel
+            .queue_cyclic_period(period.byte_offset)
+            .map_err(dma_error_to_str)?;
         self.in_flight_periods += 1;
         Ok(())
     }
@@ -207,7 +177,6 @@ impl AppleMcaStream {
     }
 
     fn reset_queue(&mut self) {
-        self.submit_period = 0;
         self.in_flight_periods = 0;
     }
 }
@@ -645,11 +614,6 @@ fn cluster_count_from_size(size: usize) -> usize {
     }
 }
 
-fn align_up(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    (value + align - 1) & !(align - 1)
-}
-
 fn dma_error_to_str(error: DmaError) -> &'static str {
     match error {
         DmaError::InvalidSpec => "apple-mca: invalid DMA spec",
@@ -824,7 +788,11 @@ impl AudioPlaybackDevice for AppleMca {
         }
     }
 
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str> {
         self.release()?;
 
         let fe_cluster = self.playback_fe_cluster();
@@ -838,9 +806,6 @@ impl AudioPlaybackDevice for AppleMca {
             let period_bytes = params
                 .period_bytes()
                 .ok_or("apple-mca: PCM period overflow")?;
-            let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
-            let pages = ContiguousPages::new(mapped_bytes / PAGE_SIZE)
-                .ok_or("apple-mca: DMA alloc failed")?;
 
             for port in self.playback_ports() {
                 let port_base = self.cluster_base(port)?;
@@ -863,13 +828,12 @@ impl AudioPlaybackDevice for AppleMca {
                 route.codec.set_playback_muted(true)?;
             }
 
-            let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
-            stream.clear();
+            let stream = AppleMcaStream::new(channel.clone(), *params, buffer)?;
 
             let burst_len = (params.channels as usize).min(4).max(1);
             channel
                 .prepare_cyclic(DmaCyclicConfig {
-                    buffer_addr: stream.pages.as_paddr(),
+                    buffer_addr: stream.buffer_paddr,
                     buffer_len: buffer_bytes,
                     period_len: period_bytes,
                     direction: DmaDirection::MemToDev,
@@ -961,7 +925,6 @@ impl AudioPlaybackDevice for AppleMca {
         self.disable_serdes(fe_cluster_base);
         if let Some(stream) = self.stream.lock().as_mut() {
             stream.reset_queue();
-            stream.clear();
         }
         result
     }
@@ -989,10 +952,10 @@ impl AudioPlaybackDevice for AppleMca {
         Ok(())
     }
 
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str> {
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
         let mut guard = self.stream.lock();
         let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
-        stream.copy_period(pcm)
+        stream.queue_period(period)
     }
 
     fn process_completions(&self) -> usize {
@@ -1007,7 +970,13 @@ impl AudioPlaybackDevice for AppleMca {
         self.stream
             .lock()
             .as_ref()
-            .map(|stream| stream.period_count)
+            .map(|stream| {
+                if stream.running {
+                    stream.period_count.min(4)
+                } else {
+                    1
+                }
+            })
             .unwrap_or(4)
     }
 }
@@ -1082,7 +1051,11 @@ impl AudioPlaybackDevice for AppleMcaOutput {
         }
     }
 
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str> {
         self.release()?;
 
         let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
@@ -1095,9 +1068,6 @@ impl AudioPlaybackDevice for AppleMcaOutput {
             let period_bytes = params
                 .period_bytes()
                 .ok_or("apple-mca: PCM period overflow")?;
-            let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
-            let pages = ContiguousPages::new(mapped_bytes / PAGE_SIZE)
-                .ok_or("apple-mca: DMA alloc failed")?;
 
             for port in &self.ports {
                 let port_base = self.mca.cluster_base(*port)?;
@@ -1126,13 +1096,12 @@ impl AudioPlaybackDevice for AppleMcaOutput {
                 route.codec.set_playback_muted(true)?;
             }
 
-            let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
-            stream.clear();
+            let stream = AppleMcaStream::new(channel.clone(), *params, buffer)?;
 
             let burst_len = (params.channels as usize).min(4).max(1);
             channel
                 .prepare_cyclic(DmaCyclicConfig {
-                    buffer_addr: stream.pages.as_paddr(),
+                    buffer_addr: stream.buffer_paddr,
                     buffer_len: buffer_bytes,
                     period_len: period_bytes,
                     direction: DmaDirection::MemToDev,
@@ -1222,7 +1191,6 @@ impl AudioPlaybackDevice for AppleMcaOutput {
         self.mca.disable_serdes(fe_cluster_base);
         if let Some(stream) = self.stream.lock().as_mut() {
             stream.reset_queue();
-            stream.clear();
         }
         result
     }
@@ -1249,10 +1217,10 @@ impl AudioPlaybackDevice for AppleMcaOutput {
         Ok(())
     }
 
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str> {
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
         let mut guard = self.stream.lock();
         let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
-        stream.copy_period(pcm)
+        stream.queue_period(period)
     }
 
     fn process_completions(&self) -> usize {
@@ -1267,7 +1235,13 @@ impl AudioPlaybackDevice for AppleMcaOutput {
         self.stream
             .lock()
             .as_ref()
-            .map(|stream| stream.period_count)
+            .map(|stream| {
+                if stream.running {
+                    stream.period_count.min(4)
+                } else {
+                    1
+                }
+            })
             .unwrap_or(4)
     }
 }

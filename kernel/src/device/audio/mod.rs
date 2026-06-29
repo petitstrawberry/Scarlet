@@ -299,6 +299,30 @@ impl AudioDeviceInfo {
     }
 }
 
+/// Kernel PCM ring memory exposed to a playback backend.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioPcmBuffer {
+    /// Physical address of the first byte of the PCM ring.
+    pub paddr: usize,
+    /// Kernel virtual address of the first byte of the PCM ring.
+    pub vaddr: usize,
+    /// Usable PCM ring length in bytes.
+    pub buffer_bytes: usize,
+    /// Page-aligned mapping length in bytes.
+    pub mapped_bytes: usize,
+}
+
+/// One committed period within a PCM ring.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioPcmPeriod {
+    /// Absolute frame position of this period.
+    pub start_frames: u64,
+    /// Byte offset within [`AudioPcmBuffer::buffer_bytes`].
+    pub byte_offset: usize,
+    /// Period length in bytes.
+    pub byte_len: usize,
+}
+
 /// Backend implemented by hardware audio drivers.
 pub trait AudioPlaybackDevice: Send + Sync {
     /// Return playback capabilities.
@@ -309,11 +333,16 @@ pub trait AudioPlaybackDevice: Send + Sync {
     /// # Arguments
     ///
     /// * `params` - PCM parameters selected by user space.
+    /// * `buffer` - DMA-capable PCM ring mapped by `/dev/audio`.
     ///
     /// # Returns
     ///
     /// `Ok(())` if the stream is ready for period submissions.
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str>;
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str>;
 
     /// Start playback on the backend.
     fn start(&self) -> Result<(), &'static str>;
@@ -324,16 +353,16 @@ pub trait AudioPlaybackDevice: Send + Sync {
     /// Release backend stream resources.
     fn release(&self) -> Result<(), &'static str>;
 
-    /// Submit one period of interleaved PCM data.
+    /// Submit one committed period from the configured PCM ring.
     ///
     /// # Arguments
     ///
-    /// * `pcm` - Period-sized PCM byte slice.
+    /// * `period` - Period position inside the configured PCM ring.
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the period was queued.
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str>;
+    /// `Ok(())` when the period was queued for playback.
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str>;
 
     /// Reclaim completed periods.
     ///
@@ -491,9 +520,24 @@ impl AudioPcmRing {
         self.params.buffer_frames.saturating_sub(queued as u32)
     }
 
+    fn clear_data(&mut self) {
+        // SAFETY: `pages` owns `mapped_bytes` bytes backing the mmap PCM ring.
+        unsafe {
+            core::ptr::write_bytes(self.vaddr() as *mut u8, 0, self.mapped_bytes);
+        }
+        crate::arch::clean_dcache_to_poc_range(self.vaddr(), self.mapped_bytes);
+    }
+
     fn discard_pending(&mut self) {
-        self.hw_ptr_frames = self.app_ptr_frames;
-        self.submitted_ptr_frames = self.app_ptr_frames;
+        let period_frames = u64::from(self.params.period_frames);
+        let next_period = self
+            .app_ptr_frames
+            .saturating_add(period_frames.saturating_sub(1))
+            / period_frames
+            * period_frames;
+        self.app_ptr_frames = next_period;
+        self.hw_ptr_frames = next_period;
+        self.submitted_ptr_frames = next_period;
     }
 
     fn buffer_info(&self) -> AudioPcmBufferInfo {
@@ -504,6 +548,15 @@ impl AudioPcmRing {
             period_bytes: self.period_bytes() as u32,
             buffer_frames: self.params.buffer_frames,
             period_frames: self.params.period_frames,
+        }
+    }
+
+    fn dma_buffer(&self) -> AudioPcmBuffer {
+        AudioPcmBuffer {
+            paddr: self.paddr(),
+            vaddr: self.vaddr(),
+            buffer_bytes: self.buffer_bytes(),
+            mapped_bytes: self.mapped_bytes,
         }
     }
 
@@ -575,24 +628,23 @@ impl AudioPcmRing {
         Ok(copied)
     }
 
-    fn copy_period_at(&self, start_frames: u64, out: &mut [u8]) {
+    fn period_at(&self, start_frames: u64) -> Result<AudioPcmPeriod, &'static str> {
         let frame_bytes = self.frame_bytes();
-        let mut copied = 0usize;
-        let mut byte_offset =
-            (start_frames as usize % self.params.buffer_frames as usize) * frame_bytes;
-        let buffer_bytes = self.buffer_bytes();
-        while copied < out.len() {
-            let chunk = (out.len() - copied).min(buffer_bytes - byte_offset);
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (self.vaddr() + byte_offset) as *const u8,
-                    out[copied..copied + chunk].as_mut_ptr(),
-                    chunk,
-                );
-            }
-            copied += chunk;
-            byte_offset = 0;
+        let buffer_frames = self.params.buffer_frames as usize;
+        let byte_offset = (start_frames as usize % buffer_frames) * frame_bytes;
+        let byte_len = self.period_bytes();
+        if byte_offset + byte_len > self.buffer_bytes() {
+            return Err("PCM period crosses ring boundary");
         }
+        Ok(AudioPcmPeriod {
+            start_frames,
+            byte_offset,
+            byte_len,
+        })
+    }
+
+    fn clean_period(&self, period: AudioPcmPeriod) {
+        crate::arch::clean_dcache_to_poc_range(self.vaddr() + period.byte_offset, period.byte_len);
     }
 }
 
@@ -651,7 +703,6 @@ impl AudioCharDevice {
 
         let max_in_flight = self.backend.max_in_flight_periods() as u64;
         let period_frames = u64::from(ring.params.period_frames);
-        let period_bytes = ring.period_bytes();
         while ring.submitted_ptr_frames + period_frames <= ring.app_ptr_frames {
             let in_flight =
                 (ring.submitted_ptr_frames.saturating_sub(ring.hw_ptr_frames)) / period_frames;
@@ -659,16 +710,24 @@ impl AudioCharDevice {
                 break;
             }
 
-            let mut period = alloc::vec![0u8; period_bytes];
-            ring.copy_period_at(ring.submitted_ptr_frames, &mut period);
-            match self.backend.submit_period(&period) {
+            let period = match ring.period_at(ring.submitted_ptr_frames) {
+                Ok(period) => period,
+                Err(error) => {
+                    ring.xruns = ring.xruns.saturating_add(1);
+                    ring.state = AUDIO_STATE_XRUN;
+                    println!("[audio] pump: XRUN on submit: {}", error);
+                    break;
+                }
+            };
+            ring.clean_period(period);
+            match self.backend.submit_period(period) {
                 Ok(()) => {
                     ring.submitted_ptr_frames += period_frames;
                 }
-                Err(_) => {
+                Err(error) => {
                     ring.xruns = ring.xruns.saturating_add(1);
                     ring.state = AUDIO_STATE_XRUN;
-                    println!("[audio] pump: XRUN on submit");
+                    println!("[audio] pump: XRUN on submit: {}", error);
                     break;
                 }
             }
@@ -716,8 +775,9 @@ impl AudioCharDevice {
         if should_release {
             self.backend.release()?;
         }
-        self.backend.configure(&params)?;
-        let ring = AudioPcmRing::new(params)?;
+        let mut ring = AudioPcmRing::new(params)?;
+        ring.clear_data();
+        self.backend.configure(&params, ring.dma_buffer())?;
         *self.ring.lock() = Some(ring);
         Ok(0)
     }
