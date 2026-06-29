@@ -2,6 +2,7 @@
 
 use core::sync::atomic::{Ordering, compiler_fence};
 
+use crate::os;
 use sas_protocol::{self as protocol, RING_HEADER_SIZE};
 
 /// Stream configuration parameters.
@@ -65,8 +66,24 @@ impl SasStream {
         unsafe { core::ptr::addr_of!((*header).write_frames).read_volatile() }
     }
 
+    /// Ring status flags written by SAS.
+    pub fn flags(&self) -> u32 {
+        let header = self.ring_addr as *const protocol::RingHeader;
+        // SAFETY: `ring_addr` is a mapped SAS ring header.
+        unsafe { core::ptr::addr_of!((*header).flags).read_volatile() }
+    }
+
+    /// Returns true if SAS closed this stream.
+    pub fn is_closed(&self) -> bool {
+        self.flags() & protocol::RING_FLAG_CLOSED != 0
+    }
+
     /// Number of frames that can be written without overflowing the ring.
     pub fn writable_frames(&self) -> usize {
+        if self.is_closed() {
+            return 0;
+        }
+
         let header = self.ring_addr as *const protocol::RingHeader;
         // SAFETY: `ring_addr` is a mapped SAS ring header.
         let buffer_frames =
@@ -83,6 +100,10 @@ impl SasStream {
     /// Returns the number of frames written (may be less than requested if the
     /// ring is nearly full).
     pub fn write(&mut self, data: &[u8]) -> usize {
+        if self.is_closed() {
+            return 0;
+        }
+
         if data.is_empty() || self.frame_bytes == 0 {
             return 0;
         }
@@ -191,5 +212,15 @@ impl SasStream {
     /// Total ring mapping size in bytes (header + data).
     pub fn ring_size(&self) -> usize {
         self.ring_size
+    }
+}
+
+impl Drop for SasStream {
+    fn drop(&mut self) {
+        if self.ring_addr != 0 && self.ring_size != 0 {
+            let _ = os::munmap(self.ring_addr, self.ring_size);
+            self.ring_addr = 0;
+            self.ring_size = 0;
+        }
     }
 }

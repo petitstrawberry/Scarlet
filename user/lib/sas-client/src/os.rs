@@ -6,6 +6,8 @@ use core::time::Duration;
 #[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::flags as mmap_flags;
 #[cfg(feature = "std")]
+pub use scarlet_os::handle::capability::memory_mapping::munmap;
+#[cfg(feature = "std")]
 pub use scarlet_os::handle::capability::memory_mapping::prot;
 #[cfg(feature = "std")]
 pub use scarlet_os::{SharedMemory, Socket};
@@ -14,6 +16,8 @@ pub use std::vec::Vec;
 
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
+#[cfg(not(feature = "std"))]
+pub use scarlet_std::handle::capability::memory_mapping::munmap;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::handle::capability::memory_mapping::prot;
 #[cfg(not(feature = "std"))]

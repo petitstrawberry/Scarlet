@@ -31,10 +31,12 @@ use userprogram::sas_protocol as protocol;
 
 const OUTPUT_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: u16 = 2;
-const OUTPUT_PERIOD_FRAMES: u32 = 480;
+const OUTPUT_PERIOD_FRAMES: u32 = 960;
 const OUTPUT_BUFFER_FRAMES: u32 = 9_600;
 const OUTPUT_START_PREFILL_PERIODS: u32 = 4;
+const OUTPUT_SLOW_WAIT_LOG_MS: u32 = 50;
 const OUTPUT_WRITE_TIMEOUT_MS: u32 = 200;
+const AUDIO_STATE_XRUN: u32 = 4;
 const CLIENT_DRAIN_TIMEOUT_MS: u32 = 3_000;
 const CLIENT_DRAIN_POLL_MS: u32 = 5;
 const MAX_OUTPUT_DEVICES: usize = 8;
@@ -72,6 +74,19 @@ impl ClientStream {
             configured: false,
             closed: false,
         }
+    }
+
+    fn unmap_ring(&mut self) {
+        if let Some(ring_addr) = self.ring_addr.take() {
+            let _ = munmap(ring_addr, self.ring_size);
+        }
+        self.ring_size = 0;
+    }
+}
+
+impl Drop for ClientStream {
+    fn drop(&mut self) {
+        self.unmap_ring();
     }
 }
 
@@ -122,7 +137,6 @@ struct OutputDevice {
     ring: *mut u8,
     mapped_bytes: usize,
     buffer_frames: usize,
-    frame_bytes: usize,
     started: bool,
     dirty: bool,
 }
@@ -204,6 +218,9 @@ impl OutputDevice {
             .audio
             .buffer_info()
             .map_err(|_| "failed to get audio ring info")?;
+        if ring_info.frame_bytes != u32::from(params.channels) * 2 {
+            return Err("audio output frame size mismatch");
+        }
         let ring = output
             .audio
             .mmap_buffer(&ring_info)
@@ -218,7 +235,6 @@ impl OutputDevice {
             ring,
             mapped_bytes: ring_info.buffer_bytes as usize,
             buffer_frames: ring_info.buffer_frames as usize,
-            frame_bytes: ring_info.frame_bytes as usize,
             started: false,
             dirty: false,
         })
@@ -237,50 +253,91 @@ impl OutputDevice {
         )
     }
 
-    fn write_period(&mut self, samples: &[i16], force_start: bool) -> Result<(), &'static str> {
+    fn wait_writable_period(&self) -> Result<(), &'static str> {
         let period_frames = self.params.period_frames as usize;
-        let period_bytes = period_frames * self.frame_bytes;
-        let mut bytes = Vec::with_capacity(period_bytes);
-        for sample in samples.iter() {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-
         let mut waited_ms = 0u32;
+        let mut logged_slow_wait = false;
         loop {
             let status = self
                 .audio
                 .status()
                 .map_err(|_| "failed to query audio status")?;
+            if status.state == AUDIO_STATE_XRUN {
+                println!(
+                    "sas: output xrun state={} hw={} app={} submitted={} writable={} delay={} xruns={}",
+                    status.state,
+                    status.hw_ptr_frames,
+                    status.app_ptr_frames,
+                    status.submitted_ptr_frames,
+                    status.writable_frames,
+                    status.delay_frames,
+                    status.xruns
+                );
+                return Err("audio output xrun");
+            }
             if status.writable_frames as usize >= period_frames {
-                unsafe {
-                    write_ring_bytes(
-                        self.ring,
-                        self.buffer_frames,
-                        self.frame_bytes,
-                        status.app_ptr_frames,
-                        &bytes,
-                    );
-                }
-                self.audio
-                    .commit_frames(self.params.period_frames)
-                    .map_err(|_| "failed to commit audio frames")?;
-                self.dirty = true;
-                let queued_after_commit = status
-                    .app_ptr_frames
-                    .saturating_add(u64::from(self.params.period_frames))
-                    .saturating_sub(status.hw_ptr_frames);
-                if !self.started && queued_after_commit >= self.start_prefill_frames(force_start) {
-                    self.audio.start().map_err(|_| "failed to start audio")?;
-                    self.started = true;
-                }
                 return Ok(());
             }
             sleep(Duration::from_millis(1));
             waited_ms += 1;
+            if !logged_slow_wait && waited_ms >= OUTPUT_SLOW_WAIT_LOG_MS {
+                println!(
+                    "sas: output slow wait {}ms state={} hw={} app={} submitted={} writable={} delay={} xruns={}",
+                    waited_ms,
+                    status.state,
+                    status.hw_ptr_frames,
+                    status.app_ptr_frames,
+                    status.submitted_ptr_frames,
+                    status.writable_frames,
+                    status.delay_frames,
+                    status.xruns
+                );
+                logged_slow_wait = true;
+            }
             if waited_ms >= OUTPUT_WRITE_TIMEOUT_MS {
+                println!(
+                    "sas: output wait timeout state={} hw={} app={} submitted={} writable={} delay={} xruns={}",
+                    status.state,
+                    status.hw_ptr_frames,
+                    status.app_ptr_frames,
+                    status.submitted_ptr_frames,
+                    status.writable_frames,
+                    status.delay_frames,
+                    status.xruns
+                );
                 return Err("audio output write timeout");
             }
         }
+    }
+
+    fn write_period(&mut self, samples: &[i16], force_start: bool) -> Result<(), &'static str> {
+        self.wait_writable_period()?;
+        let status = self
+            .audio
+            .status()
+            .map_err(|_| "failed to query audio status")?;
+        unsafe {
+            write_ring_samples(
+                self.ring,
+                self.buffer_frames,
+                self.params.channels as usize,
+                status.app_ptr_frames,
+                samples,
+            );
+        }
+        self.audio
+            .commit_frames(self.params.period_frames)
+            .map_err(|_| "failed to commit audio frames")?;
+        self.dirty = true;
+        let queued_after_commit = status
+            .app_ptr_frames
+            .saturating_add(u64::from(self.params.period_frames))
+            .saturating_sub(status.hw_ptr_frames);
+        if !self.started && queued_after_commit >= self.start_prefill_frames(force_start) {
+            self.audio.start().map_err(|_| "failed to start audio")?;
+            self.started = true;
+        }
+        Ok(())
     }
 
     fn is_started(&self) -> bool {
@@ -300,7 +357,9 @@ impl OutputDevice {
         if !self.started && !self.dirty {
             return;
         }
-        let _ = self.audio.stop();
+        if let Err(error) = self.audio.stop() {
+            println!("sas: failed to stop audio output: {:?}", error);
+        }
         self.started = false;
         self.dirty = false;
     }
@@ -613,46 +672,65 @@ fn audio_thread(state: Arc<Mutex<ServerState>>, output: OutputDevice) {
     let mut output = Some(output);
     loop {
         apply_pending_output(&state, &mut output);
-        let Some(output) = output.as_mut() else {
+        let Some(output_device) = output.as_mut() else {
             discard_client_queues(&state);
             sleep(Duration::from_millis(5));
             continue;
         };
         let samples_per_period =
-            output.params.period_frames as usize * output.params.channels as usize;
+            output_device.params.period_frames as usize * output_device.params.channels as usize;
         if mixed.len() != samples_per_period {
             mixed.resize(samples_per_period, 0);
+        }
+
+        let has_clients = has_configured_clients(&state);
+        if output_device.is_started() && has_clients {
+            if let Err(e) = output_device.wait_writable_period() {
+                println!("sas: output error: {}", e);
+                output_device.stop_stream();
+                discard_client_queues(&state);
+                sleep(Duration::from_millis(20));
+                continue;
+            }
         }
 
         let result = mix_period(
             &state,
             &mut mixer,
             &mut mixed,
-            output.params.period_frames as usize,
+            output_device.params.period_frames as usize,
         );
         if result.active {
-            if let Err(e) = output.write_period(&mixed, result.draining) {
+            if let Err(e) = output_device.write_period(&mixed, result.draining) {
                 println!("sas: output error: {}", e);
-                output.stop_stream();
+                output_device.stop_stream();
+                discard_client_queues(&state);
+                sleep(Duration::from_millis(20));
+            }
+        } else if result.has_clients && output_device.is_started() {
+            if let Err(e) = output_device.write_period(&mixed, false) {
+                println!("sas: output error: {}", e);
+                output_device.stop_stream();
                 discard_client_queues(&state);
                 sleep(Duration::from_millis(20));
             }
         } else if result.pending {
             sleep(Duration::from_millis(1));
-        } else if result.has_clients && output.is_started() {
-            if let Err(e) = output.write_period(&mixed, true) {
-                println!("sas: output error: {}", e);
-                output.stop_stream();
-                discard_client_queues(&state);
-                sleep(Duration::from_millis(20));
-            }
         } else {
             if !result.has_clients {
-                output.stop_stream();
+                output_device.stop_stream();
             }
             sleep(Duration::from_millis(5));
         }
     }
+}
+
+fn has_configured_clients(state: &Arc<Mutex<ServerState>>) -> bool {
+    state
+        .lock()
+        .clients
+        .values()
+        .any(|stream| !stream.closed && stream.configured && stream.ring_addr.is_some())
 }
 
 fn apply_pending_output(state: &Arc<Mutex<ServerState>>, output: &mut Option<OutputDevice>) {
@@ -1222,6 +1300,7 @@ fn handle_configure(
         .clients
         .get_mut(&client_id)
         .ok_or("unknown SAS client")?;
+    stream.unmap_ring();
     stream.shm = Some(shm);
     stream.ring_addr = Some(ring_addr);
     stream.ring_size = ring_size;
@@ -1270,11 +1349,16 @@ fn handle_drain(client_id: usize, state: &Arc<Mutex<ServerState>>) -> Result<(),
 fn mark_client_closed(client_id: usize, state: &Arc<Mutex<ServerState>>) {
     let mut guard = state.lock();
     if let Some(stream) = guard.clients.get_mut(&client_id) {
-        stream.closed = true;
-        if let Some(ring_addr) = stream.ring_addr {
-            unsafe {
-                set_ring_flag(ring_addr, protocol::RING_FLAG_CLOSED);
-            }
+        close_stream(stream);
+    }
+}
+
+fn close_stream(stream: &mut ClientStream) {
+    stream.closed = true;
+    if let Some(ring_addr) = stream.ring_addr {
+        unsafe {
+            set_ring_flag(ring_addr, protocol::RING_FLAG_CLOSED);
+            discard_client_ring(stream, ring_addr);
         }
     }
 }
@@ -1386,29 +1470,30 @@ fn write_all(socket: &mut Socket, bytes: &[u8]) -> Result<(), &'static str> {
     socket.flush().map_err(|_| "socket flush failed")
 }
 
-unsafe fn write_ring_bytes(
+unsafe fn write_ring_samples(
     ring: *mut u8,
     buffer_frames: usize,
-    frame_bytes: usize,
+    channels: usize,
     start_frame: u64,
-    data: &[u8],
+    samples: &[i16],
 ) {
-    let mut data_offset = 0usize;
-    let mut frames_left = data.len() / frame_bytes;
+    let frame_bytes = channels * 2;
+    let mut sample_offset = 0usize;
+    let mut frames_left = samples.len() / channels;
     let mut current_frame = start_frame;
     while frames_left > 0 {
         let ring_frame = current_frame as usize % buffer_frames;
         let chunk_frames = frames_left.min(buffer_frames - ring_frame);
-        let chunk_bytes = chunk_frames * frame_bytes;
         let ring_offset = ring_frame * frame_bytes;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                data[data_offset..data_offset + chunk_bytes].as_ptr(),
-                ring.add(ring_offset),
-                chunk_bytes,
-            );
+        for sample_index in 0..chunk_frames * channels {
+            let sample = samples[sample_offset + sample_index].to_le_bytes();
+            let byte_offset = ring_offset + sample_index * 2;
+            unsafe {
+                ring.add(byte_offset).write(sample[0]);
+                ring.add(byte_offset + 1).write(sample[1]);
+            }
         }
-        data_offset += chunk_bytes;
+        sample_offset += chunk_frames * channels;
         frames_left -= chunk_frames;
         current_frame += chunk_frames as u64;
     }

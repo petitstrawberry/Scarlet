@@ -5215,11 +5215,17 @@ impl SasPcmWriter {
         let mut pos_frame = 0usize;
 
         while pos_frame < total_data_frames {
+            if self.stream.is_closed() {
+                return Err(String::from("SAS stream closed"));
+            }
             if controls.current_seek_epoch() != seek_epoch {
                 return Ok(true);
             }
             clock.update_read_frames(self.stream.read_frames());
             while controls.is_paused() {
+                if self.stream.is_closed() {
+                    return Err(String::from("SAS stream closed"));
+                }
                 if controls.current_seek_epoch() != seek_epoch {
                     return Ok(true);
                 }
@@ -5231,6 +5237,9 @@ impl SasPcmWriter {
                 .writable_frames()
                 .min(total_data_frames - pos_frame);
             if frames == 0 {
+                if self.stream.is_closed() {
+                    return Err(String::from("SAS stream closed"));
+                }
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
@@ -5245,10 +5254,16 @@ impl SasPcmWriter {
     }
 
     fn drain_close(mut self, clock: &AudioClock) -> Result<(), String> {
+        if self.stream.is_closed() {
+            return Err(String::from("SAS stream closed"));
+        }
         self.client
             .drain()
             .map_err(|_| String::from("SAS drain failed"))?;
         while !self.stream.is_empty() {
+            if self.stream.is_closed() {
+                return Err(String::from("SAS stream closed"));
+            }
             clock.update_read_frames(self.stream.read_frames());
             thread::sleep(Duration::from_millis(10));
         }
