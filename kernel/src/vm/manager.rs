@@ -305,8 +305,15 @@ impl VirtualMemoryManager {
             return Vec::new();
         }
 
-        let remove_start = vaddr;
-        let remove_end = vaddr + len - 1;
+        let remove_start = vaddr & !(PAGE_SIZE - 1);
+        let remove_end = match vaddr
+            .checked_add(len)
+            .and_then(|end| end.checked_add(PAGE_SIZE - 1))
+            .map(|end| (end & !(PAGE_SIZE - 1)).saturating_sub(1))
+        {
+            Some(end) if remove_start <= end => end,
+            _ => return Vec::new(),
+        };
         let mut removed_maps = Vec::new();
         let mut mappings_to_add = Vec::new();
 
@@ -2185,6 +2192,39 @@ mod tests {
         let right = manager.search_memory_map(0x7000).unwrap();
         assert_eq!(right.vmarea.start, 0x7000);
         assert_eq!(right.vmarea.end, 0x7fff);
+    }
+
+    #[test_case]
+    fn test_remove_memory_map_range_rounds_unaligned_length_to_pages() {
+        let manager = VirtualMemoryManager::new();
+        let map = VirtualMemoryMap::new(
+            MemoryArea {
+                start: 0x8000_0000,
+                end: 0x8000_4fff,
+            },
+            MemoryArea {
+                start: 0x4000,
+                end: 0x8fff,
+            },
+            0o644,
+            false,
+            None,
+        );
+        manager.add_memory_map(map).unwrap();
+
+        let removed = manager.remove_memory_map_range(0x4000, PAGE_SIZE + 0x123);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].vmarea.start, 0x4000);
+        assert_eq!(removed[0].vmarea.end, 0x5fff);
+
+        assert!(manager.search_memory_map(0x4000).is_none());
+        assert!(manager.search_memory_map(0x5fff).is_none());
+
+        let right = manager.search_memory_map(0x6000).unwrap();
+        assert_eq!(right.vmarea.start, 0x6000);
+        assert_eq!(right.vmarea.end, 0x8fff);
+        assert_eq!(right.pmarea.start, 0x6000);
+        assert_eq!(right.pmarea.end, 0x8fff);
     }
 
     #[test_case]

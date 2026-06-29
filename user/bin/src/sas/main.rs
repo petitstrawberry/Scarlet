@@ -20,7 +20,7 @@ use std::audio::{
     AudioDeviceInfo, AudioPcmCapabilities, AudioPcmParams,
 };
 use std::env;
-use std::handle::capability::memory_mapping::{flags as mmap_flags, prot};
+use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
 use std::println;
@@ -120,6 +120,7 @@ struct OutputDevice {
     path: String,
     params: AudioPcmParams,
     ring: *mut u8,
+    mapped_bytes: usize,
     buffer_frames: usize,
     frame_bytes: usize,
     started: bool,
@@ -215,6 +216,7 @@ impl OutputDevice {
             path: output.path,
             params,
             ring,
+            mapped_bytes: ring_info.buffer_bytes as usize,
             buffer_frames: ring_info.buffer_frames as usize,
             frame_bytes: ring_info.frame_bytes as usize,
             started: false,
@@ -396,6 +398,10 @@ fn fixed_str(bytes: &[u8]) -> &str {
 impl Drop for OutputDevice {
     fn drop(&mut self) {
         self.stop_stream();
+        if self.mapped_bytes != 0 {
+            let _ = munmap(self.ring as usize, self.mapped_bytes);
+            self.mapped_bytes = 0;
+        }
         let _ = self.audio.release();
     }
 }
@@ -1053,13 +1059,6 @@ fn handle_set_output(
         }
         if guard.pending_output.is_some() || guard.output_switch_in_progress {
             return Err("SAS output switch already pending");
-        }
-        if guard
-            .clients
-            .values()
-            .any(|stream| stream.configured && !stream.closed)
-        {
-            return Err("stop playback before switching output");
         }
     }
 
