@@ -10,16 +10,25 @@ pub const SERVICE_NAME: &str = "org.scarlet-os.sas";
 pub const MSG_CONFIGURE: u32 = 0x0001;
 pub const MSG_DRAIN: u32 = 0x0003;
 pub const MSG_CLOSE: u32 = 0x0004;
+pub const MSG_GET_CONTROL_STATE: u32 = 0x0005;
+pub const MSG_SET_MASTER_VOLUME: u32 = 0x0006;
+pub const MSG_SET_MASTER_MUTE: u32 = 0x0007;
 pub const MSG_OK: u32 = 0x1000;
 pub const MSG_ERROR: u32 = 0x1001;
+pub const MSG_CONTROL_STATE: u32 = 0x1002;
 
 pub const HEADER_SIZE: usize = 8;
 pub const CONFIG_SIZE: usize = 20;
+pub const CONTROL_STATE_SIZE: usize = 8;
+pub const MASTER_VOLUME_SIZE: usize = 4;
+pub const MASTER_MUTE_SIZE: usize = 4;
 pub const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
 pub const RING_MAGIC: u32 = 0x5341_5352;
 pub const RING_VERSION: u32 = 1;
 pub const RING_FLAG_DRAINING: u32 = 1 << 0;
 pub const RING_FLAG_CLOSED: u32 = 1 << 1;
+pub const MASTER_VOLUME_UNITY_Q16: u32 = 1 << 16;
+pub const CONTROL_FLAG_MUTED: u32 = 1 << 0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +80,71 @@ pub struct Config {
     pub reserved: u16,
     pub period_frames: u32,
     pub buffer_frames: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ControlState {
+    pub master_volume_q16: u32,
+    pub flags: u32,
+}
+
+impl ControlState {
+    pub fn to_le_bytes(self) -> [u8; CONTROL_STATE_SIZE] {
+        let mut out = [0u8; CONTROL_STATE_SIZE];
+        out[0..4].copy_from_slice(&self.master_volume_q16.to_le_bytes());
+        out[4..8].copy_from_slice(&self.flags.to_le_bytes());
+        out
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != CONTROL_STATE_SIZE {
+            return None;
+        }
+        Some(Self {
+            master_volume_q16: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            flags: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MasterVolume {
+    pub master_volume_q16: u32,
+}
+
+impl MasterVolume {
+    pub fn to_le_bytes(self) -> [u8; MASTER_VOLUME_SIZE] {
+        self.master_volume_q16.to_le_bytes()
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != MASTER_VOLUME_SIZE {
+            return None;
+        }
+        Some(Self {
+            master_volume_q16: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MasterMute {
+    pub muted: bool,
+}
+
+impl MasterMute {
+    pub fn to_le_bytes(self) -> [u8; MASTER_MUTE_SIZE] {
+        (self.muted as u32).to_le_bytes()
+    }
+
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != MASTER_MUTE_SIZE {
+            return None;
+        }
+        Some(Self {
+            muted: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) != 0,
+        })
+    }
 }
 
 impl Config {

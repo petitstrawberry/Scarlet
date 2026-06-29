@@ -30,16 +30,29 @@ pub const SERVICE_NAME: &str = "org.scarlet-os.sas";
 pub const MSG_CONFIGURE: u32 = 0x0001;
 pub const MSG_DRAIN: u32 = 0x0003;
 pub const MSG_CLOSE: u32 = 0x0004;
+pub const MSG_GET_CONTROL_STATE: u32 = 0x0005;
+pub const MSG_SET_MASTER_VOLUME: u32 = 0x0006;
+pub const MSG_SET_MASTER_MUTE: u32 = 0x0007;
 
 // Server -> client message types.
 pub const MSG_OK: u32 = 0x1000;
 pub const MSG_ERROR: u32 = 0x1001;
+pub const MSG_CONTROL_STATE: u32 = 0x1002;
 
 /// Framed message header size in bytes.
 pub const HEADER_SIZE: usize = 8;
 
 /// `Config` payload size in bytes.
 pub const CONFIG_SIZE: usize = 20;
+
+/// `ControlState` payload size in bytes.
+pub const CONTROL_STATE_SIZE: usize = 8;
+
+/// `MasterVolume` payload size in bytes.
+pub const MASTER_VOLUME_SIZE: usize = 4;
+
+/// `MasterMute` payload size in bytes.
+pub const MASTER_MUTE_SIZE: usize = 4;
 
 /// Maximum payload size accepted from the socket.
 pub const MAX_PAYLOAD_SIZE: usize = 64 * 1024;
@@ -55,6 +68,12 @@ pub const RING_FLAG_DRAINING: u32 = 1 << 0;
 
 /// Ring flag: stream has been closed.
 pub const RING_FLAG_CLOSED: u32 = 1 << 1;
+
+/// Master volume unity gain in unsigned Q16.16 fixed point.
+pub const MASTER_VOLUME_UNITY_Q16: u32 = 1 << 16;
+
+/// Master output is muted.
+pub const CONTROL_FLAG_MUTED: u32 = 1 << 0;
 
 /// Shared-memory ring buffer header.
 ///
@@ -126,6 +145,80 @@ pub struct Config {
     pub buffer_frames: u32,
 }
 
+/// Current SAS output control state.
+#[derive(Clone, Copy, Debug)]
+pub struct ControlState {
+    pub master_volume_q16: u32,
+    pub flags: u32,
+}
+
+impl ControlState {
+    /// Serialize the control state to little-endian bytes.
+    pub fn to_le_bytes(self) -> [u8; CONTROL_STATE_SIZE] {
+        let mut out = [0u8; CONTROL_STATE_SIZE];
+        out[0..4].copy_from_slice(&self.master_volume_q16.to_le_bytes());
+        out[4..8].copy_from_slice(&self.flags.to_le_bytes());
+        out
+    }
+
+    /// Deserialize the control state from a payload slice.
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != CONTROL_STATE_SIZE {
+            return None;
+        }
+        Some(Self {
+            master_volume_q16: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            flags: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        })
+    }
+}
+
+/// Master volume request.
+#[derive(Clone, Copy, Debug)]
+pub struct MasterVolume {
+    pub master_volume_q16: u32,
+}
+
+impl MasterVolume {
+    /// Serialize the master volume request to little-endian bytes.
+    pub fn to_le_bytes(self) -> [u8; MASTER_VOLUME_SIZE] {
+        self.master_volume_q16.to_le_bytes()
+    }
+
+    /// Deserialize the master volume request from a payload slice.
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != MASTER_VOLUME_SIZE {
+            return None;
+        }
+        Some(Self {
+            master_volume_q16: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+        })
+    }
+}
+
+/// Master mute request.
+#[derive(Clone, Copy, Debug)]
+pub struct MasterMute {
+    pub muted: bool,
+}
+
+impl MasterMute {
+    /// Serialize the mute request to little-endian bytes.
+    pub fn to_le_bytes(self) -> [u8; MASTER_MUTE_SIZE] {
+        (self.muted as u32).to_le_bytes()
+    }
+
+    /// Deserialize the mute request from a payload slice.
+    pub fn from_payload(payload: &[u8]) -> Option<Self> {
+        if payload.len() != MASTER_MUTE_SIZE {
+            return None;
+        }
+        Some(Self {
+            muted: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) != 0,
+        })
+    }
+}
+
 impl Config {
     /// Serialize the configuration to little-endian bytes.
     pub fn to_le_bytes(self) -> [u8; CONFIG_SIZE] {
@@ -149,12 +242,8 @@ impl Config {
             rate: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
             channels: u16::from_le_bytes([payload[8], payload[9]]),
             reserved: u16::from_le_bytes([payload[10], payload[11]]),
-            period_frames: u32::from_le_bytes([
-                payload[12], payload[13], payload[14], payload[15],
-            ]),
-            buffer_frames: u32::from_le_bytes([
-                payload[16], payload[17], payload[18], payload[19],
-            ]),
+            period_frames: u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]),
+            buffer_frames: u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]),
         })
     }
 }

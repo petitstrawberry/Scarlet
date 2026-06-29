@@ -46,9 +46,11 @@ const TAS2770_PLAY_CFG_REG0: u8 = 0x03;
 const TAS5770L_SAFE_AMP_GAIN: u8 = 0x0f;
 const TAS2770_PLAY_CFG_REG2: u8 = 0x05;
 const TAS2770_PLAY_CFG_REG2_VMAX: u8 = 0xc9;
-const TAS5770L_SAFE_PLAYBACK_LEVEL: u8 = 0x65;
 // Asahi exposes Speaker Playback Volume as an inverted ALSA control:
 // register 0x00 is the loudest setting and user-visible 0x65 is -50 dB.
+// Keep a higher hardware ceiling and let SAS apply the user-visible trim:
+// user-visible 0x8d corresponds to about -30 dB.
+const TAS5770L_SAFE_PLAYBACK_LEVEL: u8 = 0x8d;
 const TAS5770L_SAFE_PLAYBACK_VOLUME: u8 = TAS2770_PLAY_CFG_REG2_VMAX - TAS5770L_SAFE_PLAYBACK_LEVEL;
 const TAS2770_TDM_CFG_REG0: u8 = 0x0a;
 const TAS2770_TDM_CFG_REG0_SMP_MASK: u8 = 1 << 5;

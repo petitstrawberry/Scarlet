@@ -37,6 +37,7 @@ const MAX_OUTPUT_DEVICES: usize = 8;
 const MIN_CLIENT_RATE: u32 = 8_000;
 const MAX_CLIENT_RATE: u32 = 192_000;
 const MAX_CLIENT_RING_FRAMES: usize = MAX_CLIENT_RATE as usize * 2;
+const DEFAULT_MASTER_VOLUME_Q16: u32 = protocol::MASTER_VOLUME_UNITY_Q16 / 4;
 
 struct ClientStream {
     shm: Option<SharedMemory>,
@@ -72,12 +73,27 @@ impl ClientStream {
 
 struct ServerState {
     clients: BTreeMap<usize, ClientStream>,
+    master_volume_q16: u32,
+    master_muted: bool,
 }
 
 impl ServerState {
     fn new() -> Self {
         Self {
             clients: BTreeMap::new(),
+            master_volume_q16: DEFAULT_MASTER_VOLUME_Q16,
+            master_muted: false,
+        }
+    }
+
+    fn control_state(&self) -> protocol::ControlState {
+        protocol::ControlState {
+            master_volume_q16: self.master_volume_q16,
+            flags: if self.master_muted {
+                protocol::CONTROL_FLAG_MUTED
+            } else {
+                0
+            },
         }
     }
 }
@@ -311,7 +327,7 @@ trait MixerBackend {
         available_frames: usize,
     );
 
-    fn finish_s16le(&self, out: &mut [i16]);
+    fn finish_s16le(&self, out: &mut [i16], master_gain: f32);
 }
 
 struct ScalarF32Mixer {
@@ -367,11 +383,20 @@ impl MixerBackend for ScalarF32Mixer {
         }
     }
 
-    fn finish_s16le(&self, out: &mut [i16]) {
+    fn finish_s16le(&self, out: &mut [i16], master_gain: f32) {
         for (dst, sample) in out.iter_mut().zip(self.acc.iter()) {
-            *dst = f32_to_s16(*sample);
+            *dst = f32_to_s16(*sample * master_gain);
         }
     }
+}
+
+fn q16_to_gain(volume_q16: u32) -> f32 {
+    volume_q16 as f32 / protocol::MASTER_VOLUME_UNITY_Q16 as f32
+}
+
+fn q16_to_percent(volume_q16: u32) -> u32 {
+    (volume_q16.saturating_mul(100) + protocol::MASTER_VOLUME_UNITY_Q16 / 2)
+        / protocol::MASTER_VOLUME_UNITY_Q16
 }
 
 fn f32_to_s16(sample: f32) -> i16 {
@@ -446,11 +471,12 @@ fn main() -> i32 {
 
 fn audio_thread(state: Arc<Mutex<ServerState>>, mut output: OutputDevice) {
     println!(
-        "sas: output configured S16LE {} Hz {}ch period={} buffer={}",
+        "sas: output configured S16LE {} Hz {}ch period={} buffer={} master_volume={}%",
         output.params.rate,
         output.params.channels,
         output.params.period_frames,
-        output.params.buffer_frames
+        output.params.buffer_frames,
+        q16_to_percent(DEFAULT_MASTER_VOLUME_Q16)
     );
 
     let samples_per_period = output.params.period_frames as usize * output.params.channels as usize;
@@ -491,10 +517,16 @@ fn mix_period(
     let mut pending = false;
     let mut draining = false;
     let mut has_clients = false;
+    let master_gain;
     let mut to_remove = Vec::new();
 
     {
         let mut guard = state.lock();
+        master_gain = if guard.master_muted {
+            0.0
+        } else {
+            q16_to_gain(guard.master_volume_q16)
+        };
         for (client_id, stream) in guard.clients.iter_mut() {
             if stream.closed {
                 to_remove.push(*client_id);
@@ -519,7 +551,7 @@ fn mix_period(
         }
     }
 
-    mixer.finish_s16le(out);
+    mixer.finish_s16le(out, master_gain);
     MixPeriodResult {
         active,
         pending,
@@ -675,6 +707,11 @@ fn client_thread(client_id: usize, mut socket: Socket, state: Arc<Mutex<ServerSt
             protocol::MSG_DRAIN => {
                 handle_drain(client_id, &state).and_then(|_| write_ok(&mut socket))
             }
+            protocol::MSG_GET_CONTROL_STATE => handle_get_control_state(&state, &mut socket),
+            protocol::MSG_SET_MASTER_VOLUME => {
+                handle_set_master_volume(&payload, &state, &mut socket)
+            }
+            protocol::MSG_SET_MASTER_MUTE => handle_set_master_mute(&payload, &state, &mut socket),
             protocol::MSG_CLOSE => {
                 mark_client_closed(client_id, &state);
                 println!("sas: client {} disconnected: close requested", client_id);
@@ -688,6 +725,55 @@ fn client_thread(client_id: usize, mut socket: Socket, state: Arc<Mutex<ServerSt
             return;
         }
     }
+}
+
+fn handle_get_control_state(
+    state: &Arc<Mutex<ServerState>>,
+    socket: &mut Socket,
+) -> Result<(), &'static str> {
+    let control = state.lock().control_state();
+    write_control_state(socket, control)
+}
+
+fn handle_set_master_volume(
+    payload: &[u8],
+    state: &Arc<Mutex<ServerState>>,
+    socket: &mut Socket,
+) -> Result<(), &'static str> {
+    let volume =
+        protocol::MasterVolume::from_payload(payload).ok_or("invalid SAS master volume")?;
+    if volume.master_volume_q16 > protocol::MASTER_VOLUME_UNITY_Q16 {
+        return Err("SAS master volume must be 0..100%");
+    }
+
+    let control = {
+        let mut guard = state.lock();
+        guard.master_volume_q16 = volume.master_volume_q16;
+        guard.control_state()
+    };
+    println!(
+        "sas: master volume set to {}%",
+        q16_to_percent(control.master_volume_q16)
+    );
+    write_control_state(socket, control)
+}
+
+fn handle_set_master_mute(
+    payload: &[u8],
+    state: &Arc<Mutex<ServerState>>,
+    socket: &mut Socket,
+) -> Result<(), &'static str> {
+    let mute = protocol::MasterMute::from_payload(payload).ok_or("invalid SAS master mute")?;
+    let control = {
+        let mut guard = state.lock();
+        guard.master_muted = mute.muted;
+        guard.control_state()
+    };
+    println!(
+        "sas: master {}",
+        if mute.muted { "muted" } else { "unmuted" }
+    );
+    write_control_state(socket, control)
 }
 
 fn handle_configure(
@@ -876,6 +962,13 @@ fn read_exact(socket: &mut Socket, out: &mut [u8]) -> Result<(), &'static str> {
 
 fn write_ok(socket: &mut Socket) -> Result<(), &'static str> {
     write_frame(socket, protocol::MSG_OK, &[])
+}
+
+fn write_control_state(
+    socket: &mut Socket,
+    control: protocol::ControlState,
+) -> Result<(), &'static str> {
+    write_frame(socket, protocol::MSG_CONTROL_STATE, &control.to_le_bytes())
 }
 
 fn write_error(socket: &mut Socket, message: &str) -> Result<(), &'static str> {

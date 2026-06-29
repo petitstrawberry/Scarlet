@@ -61,6 +61,32 @@ fn read_ok(socket: &mut Socket) -> Result<(), Error> {
     }
 }
 
+/// Read one framed response and expect `MSG_CONTROL_STATE`.
+fn read_control_state(socket: &mut Socket) -> Result<protocol::ControlState, Error> {
+    let mut header_bytes = [0u8; protocol::HEADER_SIZE];
+    read_exact(socket, &mut header_bytes)?;
+    let header = protocol::Header::from_le_bytes(header_bytes);
+
+    let payload_len = header.payload_size as usize;
+    if payload_len > protocol::MAX_PAYLOAD_SIZE {
+        return Err(Error::ProtocolError);
+    }
+
+    let mut payload = Vec::new();
+    payload.resize(payload_len, 0);
+    if payload_len > 0 {
+        read_exact(socket, &mut payload)?;
+    }
+
+    match header.msg_type {
+        protocol::MSG_CONTROL_STATE => {
+            protocol::ControlState::from_payload(&payload).ok_or(Error::ProtocolError)
+        }
+        protocol::MSG_ERROR => Err(Error::InvalidResponse),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
 /// Client connection to the Scarlet Audio Server.
 ///
 /// A single `SasClient` manages the Unix domain socket connection.  Create one
@@ -131,6 +157,35 @@ impl SasClient {
             .map_err(|_| Error::RingMapFailed)?;
 
         Ok(SasStream::new(ring_addr, ring_size, config))
+    }
+
+    /// Query current SAS output control state.
+    pub fn control_state(&mut self) -> Result<protocol::ControlState, Error> {
+        let frame = protocol::frame(protocol::MSG_GET_CONTROL_STATE, &[]);
+        write_all(&mut self.socket, &frame)?;
+        read_control_state(&mut self.socket)
+    }
+
+    /// Set SAS master volume in unsigned Q16.16 fixed point.
+    ///
+    /// `sas_protocol::MASTER_VOLUME_UNITY_Q16` is unity gain. SAS rejects
+    /// values above unity to keep the software mixer attenuating only.
+    pub fn set_master_volume_q16(
+        &mut self,
+        master_volume_q16: u32,
+    ) -> Result<protocol::ControlState, Error> {
+        let payload = protocol::MasterVolume { master_volume_q16 }.to_le_bytes();
+        let frame = protocol::frame(protocol::MSG_SET_MASTER_VOLUME, &payload);
+        write_all(&mut self.socket, &frame)?;
+        read_control_state(&mut self.socket)
+    }
+
+    /// Set SAS master mute state.
+    pub fn set_master_muted(&mut self, muted: bool) -> Result<protocol::ControlState, Error> {
+        let payload = protocol::MasterMute { muted }.to_le_bytes();
+        let frame = protocol::frame(protocol::MSG_SET_MASTER_MUTE, &payload);
+        write_all(&mut self.socket, &frame)?;
+        read_control_state(&mut self.socket)
     }
 
     /// Send `MSG_DRAIN` and wait for `MSG_OK`.
