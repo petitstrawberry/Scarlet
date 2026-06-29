@@ -11,7 +11,7 @@ extern crate scarlet_ui_macros;
 
 use core::f32;
 
-use sas_client::SasClient;
+use sas_client::{Error as SasError, SasClient};
 use sas_protocol::{
     CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
     OUTPUT_ENTRY_FLAG_CURRENT, OUTPUT_PREFERENCE_PATH, OutputInfo, OutputRequest,
@@ -21,6 +21,7 @@ use scarlet_std::format;
 use scarlet_std::fs;
 use scarlet_std::println;
 use scarlet_std::string::String;
+use scarlet_std::sync::Mutex;
 use scarlet_std::vec::Vec;
 use scarlet_ui::{
     Icon, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack, zstack,
@@ -39,6 +40,8 @@ const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
 const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
 const SWS_CONFIG_DIR: &str = "/etc/sws";
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
+
+static AUDIO_SAS_CLIENT: Mutex<Option<SasClient>> = Mutex::new(None);
 
 const PRESET_COLORS: &[PresetColor] = &[
     PresetColor {
@@ -149,54 +152,81 @@ fn audio_status_text(state: ControlState) -> String {
     }
 }
 
+fn should_drop_sas_client(error: SasError) -> bool {
+    !matches!(error, SasError::ServerError { .. })
+}
+
+fn with_sas_client<T>(
+    operation: impl FnOnce(&mut SasClient) -> core::result::Result<T, SasError>,
+) -> core::result::Result<T, SasError> {
+    let mut client = AUDIO_SAS_CLIENT.lock();
+    if client.is_none() {
+        *client = Some(SasClient::connect()?);
+    }
+
+    let result = operation(client.as_mut().unwrap());
+    if let Err(error) = result.as_ref()
+        && should_drop_sas_client(*error)
+    {
+        *client = None;
+    }
+    result
+}
+
 fn load_audio_controls() -> (Vec<OutputInfo>, usize, f32, bool, String) {
-    let Ok(mut client) = SasClient::connect() else {
-        return (
+    let result = with_sas_client(|client| {
+        let state = client.control_state()?;
+
+        let current_path = fixed_sas_str(&state.output_path);
+        let mut outputs = match client.list_outputs() {
+            Ok(outputs) => outputs,
+            Err(error) if should_drop_sas_client(error) => return Err(error),
+            Err(_) => Vec::new(),
+        };
+        if outputs.is_empty() {
+            outputs.push(OutputInfo::new(
+                state.output_kind,
+                OUTPUT_ENTRY_FLAG_CURRENT | OUTPUT_ENTRY_FLAG_COMPATIBLE,
+                current_path,
+                fixed_sas_str(&state.output_name),
+                fixed_sas_str(&state.output_description),
+            ));
+        }
+
+        let selected = outputs
+            .iter()
+            .position(|output| {
+                output.flags & OUTPUT_ENTRY_FLAG_CURRENT != 0
+                    || fixed_sas_str(&output.path) == current_path
+            })
+            .unwrap_or(0);
+
+        Ok((
+            outputs,
+            selected,
+            q16_to_percent(state.master_volume_q16).min(100) as f32,
+            state.flags & CONTROL_FLAG_MUTED != 0,
+            audio_status_text(state),
+        ))
+    });
+
+    match result {
+        Ok(controls) => controls,
+        Err(SasError::ConnectionFailed) => (
             Vec::new(),
             0,
             25.0,
             false,
             String::from("SAS is not running"),
-        );
-    };
-
-    let Ok(state) = client.control_state() else {
-        return (
+        ),
+        Err(error) => (
             Vec::new(),
             0,
             25.0,
             false,
-            String::from("Failed to query SAS"),
-        );
-    };
-
-    let current_path = fixed_sas_str(&state.output_path);
-    let mut outputs = client.list_outputs().unwrap_or_else(|_| Vec::new());
-    if outputs.is_empty() {
-        outputs.push(OutputInfo::new(
-            state.output_kind,
-            OUTPUT_ENTRY_FLAG_CURRENT | OUTPUT_ENTRY_FLAG_COMPATIBLE,
-            current_path,
-            fixed_sas_str(&state.output_name),
-            fixed_sas_str(&state.output_description),
-        ));
+            format!("Failed to query SAS: {}", error.as_str()),
+        ),
     }
-
-    let selected = outputs
-        .iter()
-        .position(|output| {
-            output.flags & OUTPUT_ENTRY_FLAG_CURRENT != 0
-                || fixed_sas_str(&output.path) == current_path
-        })
-        .unwrap_or(0);
-
-    (
-        outputs,
-        selected,
-        q16_to_percent(state.master_volume_q16).min(100) as f32,
-        state.flags & CONTROL_FLAG_MUTED != 0,
-        audio_status_text(state),
-    )
 }
 
 fn audio_output_labels(outputs: &[OutputInfo]) -> Vec<String> {
@@ -456,32 +486,21 @@ impl SettingsApp {
         self.audio_status.set(status);
     }
 
-    fn apply_audio_volume(&self) {
-        let percent = f32_to_percent(self.audio_volume_percent.get());
-        match SasClient::connect() {
-            Ok(mut client) => match client.set_master_volume_q16(percent_to_q16(percent)) {
-                Ok(state) => self.apply_audio_state(state),
-                Err(error) => self
-                    .audio_status
-                    .set(format!("Failed to set volume: {}", error.as_str())),
-            },
+    fn set_audio_muted(&self, muted: bool) {
+        match with_sas_client(|client| client.set_master_muted(muted)) {
+            Ok(state) => self.apply_audio_state(state),
             Err(error) => self
                 .audio_status
-                .set(format!("Failed to connect to SAS: {}", error.as_str())),
+                .set(format!("Failed to set mute: {}", error.as_str())),
         }
     }
 
-    fn set_audio_muted(&self, muted: bool) {
-        match SasClient::connect() {
-            Ok(mut client) => match client.set_master_muted(muted) {
-                Ok(state) => self.apply_audio_state(state),
-                Err(error) => self
-                    .audio_status
-                    .set(format!("Failed to set mute: {}", error.as_str())),
-            },
+    fn set_audio_volume_percent(&self, percent: u32) {
+        match with_sas_client(|client| client.set_master_volume_q16(percent_to_q16(percent))) {
+            Ok(state) => self.apply_audio_state(state),
             Err(error) => self
                 .audio_status
-                .set(format!("Failed to connect to SAS: {}", error.as_str())),
+                .set(format!("Failed to set volume: {}", error.as_str())),
         }
     }
 
@@ -499,20 +518,15 @@ impl SettingsApp {
             return;
         };
 
-        match SasClient::connect() {
-            Ok(mut client) => match client.set_output(request) {
-                Ok(state) => {
-                    self.audio_output_index.set(index);
-                    self.apply_audio_state(state);
-                    self.refresh_audio();
-                }
-                Err(error) => self
-                    .audio_status
-                    .set(format!("Failed to switch output: {}", error.as_str())),
-            },
+        match with_sas_client(|client| client.set_output(request)) {
+            Ok(state) => {
+                self.audio_output_index.set(index);
+                self.apply_audio_state(state);
+                self.refresh_audio();
+            }
             Err(error) => self
                 .audio_status
-                .set(format!("Failed to connect to SAS: {}", error.as_str())),
+                .set(format!("Failed to switch output: {}", error.as_str())),
         }
     }
 }
@@ -925,11 +939,14 @@ fn audio_page(app: SettingsApp) -> impl View {
             Text::new("Master Volume").font_size(14.0),
             hstack! {
                 Text::new("Volume").font_size(13.0).frame_width(100.0),
-                Slider::new(volume).min(0.0).max(100.0).frame(300.0, 20.0),
+                Slider::new(volume)
+                    .min(0.0)
+                    .max(100.0)
+                    .on_changed(move |value| {
+                        volume_app.set_audio_volume_percent(f32_to_percent(value));
+                    })
+                    .frame(300.0, 20.0),
                 Text::new(format!("{}%", volume_label)).font_size(12.0).frame_width(48.0),
-                Button::new("Apply").on_click(move || {
-                    volume_app.apply_audio_volume();
-                }),
             }
             .padding(10.0),
             hstack! {
