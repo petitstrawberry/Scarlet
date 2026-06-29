@@ -11,6 +11,11 @@ extern crate scarlet_ui_macros;
 
 use core::f32;
 
+use sas_client::SasClient;
+use sas_protocol::{
+    CONTROL_FLAG_MUTED, ControlState, MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE,
+    OUTPUT_ENTRY_FLAG_CURRENT, OUTPUT_PREFERENCE_PATH, OutputInfo, OutputRequest,
+};
 use scarlet_desktop_config::BackgroundStyle;
 use scarlet_std::format;
 use scarlet_std::fs;
@@ -69,6 +74,134 @@ const PRESET_COLORS: &[PresetColor] = &[
         color: [90, 200, 250],
     },
 ];
+
+fn fixed_sas_str(bytes: &[u8]) -> &str {
+    let len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).unwrap_or("")
+}
+
+fn q16_to_percent(volume_q16: u32) -> u32 {
+    ((volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
+        / MASTER_VOLUME_UNITY_Q16 as u64) as u32
+}
+
+fn percent_to_q16(percent: u32) -> u32 {
+    ((percent.min(100) as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100) as u32
+}
+
+fn f32_to_percent(value: f32) -> u32 {
+    (value.max(0.0).min(100.0) + 0.5) as u32
+}
+
+fn output_kind_name(kind: u32) -> &'static str {
+    match kind {
+        1 => "Speakers",
+        2 => "Headphones",
+        _ => "Audio",
+    }
+}
+
+fn output_label_from_parts(kind: u32, name: &str, description: &str, path: &str) -> String {
+    let primary = if !description.is_empty() {
+        description
+    } else if !name.is_empty() {
+        name
+    } else {
+        output_kind_name(kind)
+    };
+
+    if path.is_empty() {
+        String::from(primary)
+    } else {
+        format!("{} ({})", primary, path)
+    }
+}
+
+fn output_label_from_info(output: &OutputInfo) -> String {
+    output_label_from_parts(
+        output.kind,
+        fixed_sas_str(&output.name),
+        fixed_sas_str(&output.description),
+        fixed_sas_str(&output.path),
+    )
+}
+
+fn output_label_from_state(state: ControlState) -> String {
+    output_label_from_parts(
+        state.output_kind,
+        fixed_sas_str(&state.output_name),
+        fixed_sas_str(&state.output_description),
+        fixed_sas_str(&state.output_path),
+    )
+}
+
+fn audio_status_text(state: ControlState) -> String {
+    let muted = state.flags & CONTROL_FLAG_MUTED != 0;
+    let volume = q16_to_percent(state.master_volume_q16).min(100);
+    let label = output_label_from_state(state);
+    if muted {
+        format!("Muted - {} - {}%", label, volume)
+    } else {
+        format!("{} - {}%", label, volume)
+    }
+}
+
+fn load_audio_controls() -> (Vec<OutputInfo>, usize, f32, bool, String) {
+    let Ok(mut client) = SasClient::connect() else {
+        return (
+            Vec::new(),
+            0,
+            25.0,
+            false,
+            String::from("SAS is not running"),
+        );
+    };
+
+    let Ok(state) = client.control_state() else {
+        return (
+            Vec::new(),
+            0,
+            25.0,
+            false,
+            String::from("Failed to query SAS"),
+        );
+    };
+
+    let current_path = fixed_sas_str(&state.output_path);
+    let mut outputs = client.list_outputs().unwrap_or_else(|_| Vec::new());
+    if outputs.is_empty() {
+        outputs.push(OutputInfo::new(
+            state.output_kind,
+            OUTPUT_ENTRY_FLAG_CURRENT | OUTPUT_ENTRY_FLAG_COMPATIBLE,
+            current_path,
+            fixed_sas_str(&state.output_name),
+            fixed_sas_str(&state.output_description),
+        ));
+    }
+
+    let selected = outputs
+        .iter()
+        .position(|output| {
+            output.flags & OUTPUT_ENTRY_FLAG_CURRENT != 0
+                || fixed_sas_str(&output.path) == current_path
+        })
+        .unwrap_or(0);
+
+    (
+        outputs,
+        selected,
+        q16_to_percent(state.master_volume_q16).min(100) as f32,
+        state.flags & CONTROL_FLAG_MUTED != 0,
+        audio_status_text(state),
+    )
+}
+
+fn audio_output_labels(outputs: &[OutputInfo]) -> Vec<String> {
+    outputs.iter().map(output_label_from_info).collect()
+}
 
 fn save_output_scale_config(scale_milli: u32) {
     let config_content = match scale_milli {
@@ -177,6 +310,11 @@ struct SettingsApp {
     timezone_region_index: State<usize>,
     timezone_cities: State<Vec<String>>,
     timezone_city_index: State<usize>,
+    audio_outputs: State<Vec<OutputInfo>>,
+    audio_output_index: State<usize>,
+    audio_volume_percent: State<f32>,
+    audio_muted: State<bool>,
+    audio_status: State<String>,
 }
 
 impl SettingsApp {
@@ -206,6 +344,8 @@ impl SettingsApp {
             .iter()
             .position(|c| c == cur_city)
             .unwrap_or(0);
+        let (audio_outputs, audio_output_index, audio_volume, audio_muted, audio_status) =
+            load_audio_controls();
         Self {
             background_style: State::new(StateId::new(0), style),
             red_value: State::new(StateId::new(1), color[0] as f32),
@@ -217,6 +357,11 @@ impl SettingsApp {
             timezone_region_index: State::new(StateId::new(7), region_index),
             timezone_cities: State::new(StateId::new(8), timezone_cities),
             timezone_city_index: State::new(StateId::new(9), city_index),
+            audio_outputs: State::new(StateId::new(10), audio_outputs),
+            audio_output_index: State::new(StateId::new(11), audio_output_index),
+            audio_volume_percent: State::new(StateId::new(12), audio_volume),
+            audio_muted: State::new(StateId::new(13), audio_muted),
+            audio_status: State::new(StateId::new(14), audio_status),
         }
     }
 
@@ -292,6 +437,82 @@ impl SettingsApp {
                 Err(e) => println!("[settings] Failed to select input method: {:?}", e),
             },
             Err(e) => println!("[settings] Failed to connect to SWS: {:?}", e),
+        }
+    }
+
+    fn apply_audio_state(&self, state: ControlState) {
+        self.audio_volume_percent
+            .set(q16_to_percent(state.master_volume_q16).min(100) as f32);
+        self.audio_muted.set(state.flags & CONTROL_FLAG_MUTED != 0);
+        self.audio_status.set(audio_status_text(state));
+    }
+
+    fn refresh_audio(&self) {
+        let (outputs, output_index, volume, muted, status) = load_audio_controls();
+        self.audio_outputs.set(outputs);
+        self.audio_output_index.set(output_index);
+        self.audio_volume_percent.set(volume);
+        self.audio_muted.set(muted);
+        self.audio_status.set(status);
+    }
+
+    fn apply_audio_volume(&self) {
+        let percent = f32_to_percent(self.audio_volume_percent.get());
+        match SasClient::connect() {
+            Ok(mut client) => match client.set_master_volume_q16(percent_to_q16(percent)) {
+                Ok(state) => self.apply_audio_state(state),
+                Err(error) => self
+                    .audio_status
+                    .set(format!("Failed to set volume: {}", error.as_str())),
+            },
+            Err(error) => self
+                .audio_status
+                .set(format!("Failed to connect to SAS: {}", error.as_str())),
+        }
+    }
+
+    fn set_audio_muted(&self, muted: bool) {
+        match SasClient::connect() {
+            Ok(mut client) => match client.set_master_muted(muted) {
+                Ok(state) => self.apply_audio_state(state),
+                Err(error) => self
+                    .audio_status
+                    .set(format!("Failed to set mute: {}", error.as_str())),
+            },
+            Err(error) => self
+                .audio_status
+                .set(format!("Failed to connect to SAS: {}", error.as_str())),
+        }
+    }
+
+    fn select_audio_output(&self, index: usize) {
+        let outputs = self.audio_outputs.get();
+        let Some(output) = outputs.get(index) else {
+            self.audio_status
+                .set(format!("Invalid audio output index: {}", index));
+            return;
+        };
+        let path = fixed_sas_str(&output.path);
+        let Some(request) = OutputRequest::new(OUTPUT_PREFERENCE_PATH, path) else {
+            self.audio_status
+                .set(String::from("Audio output path is too long"));
+            return;
+        };
+
+        match SasClient::connect() {
+            Ok(mut client) => match client.set_output(request) {
+                Ok(state) => {
+                    self.audio_output_index.set(index);
+                    self.apply_audio_state(state);
+                    self.refresh_audio();
+                }
+                Err(error) => self
+                    .audio_status
+                    .set(format!("Failed to switch output: {}", error.as_str())),
+            },
+            Err(error) => self
+                .audio_status
+                .set(format!("Failed to connect to SAS: {}", error.as_str())),
         }
     }
 }
@@ -591,6 +812,7 @@ fn appearance_page(
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+#[allow(dead_code)]
 fn about_page() -> impl View {
     vstack! {
         Text::new("About").font_size(28.0),
@@ -620,6 +842,7 @@ fn about_page() -> impl View {
     .frame(f32::INFINITY, f32::INFINITY)
 }
 
+#[allow(dead_code)]
 fn network_page() -> impl View {
     vstack! {
         Text::new("Network").font_size(28.0),
@@ -649,6 +872,71 @@ fn display_page() -> impl View {
                 Button::new("x1.0").on_click(|| { save_output_scale_config(1000); }),
                 Spacer::new().frame_width(8.0),
                 Button::new("x2.0").on_click(|| { save_output_scale_config(2000); }),
+            }
+            .padding(10.0),
+        }
+        .padding(10.0),
+    }
+    .padding(10.0)
+    .frame(f32::INFINITY, f32::INFINITY)
+}
+
+fn audio_page(app: SettingsApp) -> impl View {
+    let outputs = app.audio_outputs.get();
+    let labels = audio_output_labels(&outputs);
+    let selected_output = app.audio_output_index.clone();
+    let volume = app.audio_volume_percent.clone();
+    let volume_label = f32_to_percent(app.audio_volume_percent.get());
+    let status = app.audio_status.get();
+    let muted = app.audio_muted.get();
+    let select_app = app.clone();
+    let refresh_app = app.clone();
+    let volume_app = app.clone();
+    let mute_app = app.clone();
+
+    vstack! {
+        Text::new("Audio").font_size(28.0),
+        Text::new("Playback").font_size(13.0),
+        Divider::new(),
+
+        vstack! {
+            Text::new("Output Device").font_size(14.0),
+            hstack! {
+                Text::new("Output").font_size(13.0).frame_width(100.0),
+                Select::new(labels, selected_output)
+                    .width(380.0)
+                    .placeholder("No SAS output")
+                    .on_change(move |index| {
+                        select_app.select_audio_output(index);
+                    }),
+                Spacer::new().frame_width(8.0),
+                Button::new("Refresh").on_click(move || {
+                    refresh_app.refresh_audio();
+                }),
+            }
+            .padding(10.0),
+            Text::new(status).font_size(12.0),
+        }
+        .padding(10.0),
+
+        Divider::new(),
+
+        vstack! {
+            Text::new("Master Volume").font_size(14.0),
+            hstack! {
+                Text::new("Volume").font_size(13.0).frame_width(100.0),
+                Slider::new(volume).min(0.0).max(100.0).frame(300.0, 20.0),
+                Text::new(format!("{}%", volume_label)).font_size(12.0).frame_width(48.0),
+                Button::new("Apply").on_click(move || {
+                    volume_app.apply_audio_volume();
+                }),
+            }
+            .padding(10.0),
+            hstack! {
+                Text::new("Mute").font_size(13.0).frame_width(100.0),
+                Button::new(if muted { "Unmute" } else { "Mute" }).on_click(move || {
+                    mute_app.set_audio_muted(!muted);
+                }),
             }
             .padding(10.0),
         }
@@ -758,6 +1046,7 @@ fn datetime_page(
 impl Application for SettingsApp {
     fn scenes(&self) -> impl Scene {
         let app = self.clone();
+        let audio_app = self.clone();
         let input_app = self.clone();
         let tz_regions = self.timezone_regions.get();
         let tz_region_idx = self.timezone_region_index.clone();
@@ -830,6 +1119,7 @@ impl Application for SettingsApp {
                     )
                 }),
                 NavigationLink::new("Display", Icon::Search, display_page),
+                NavigationLink::new("Audio", Icon::Settings, move || audio_page(audio_app.clone())),
                 NavigationLink::new("Input", Icon::Settings, move || input_page(input_app.clone())),
                 NavigationLink::new("Date & Time", Icon::Search, move || {
                     datetime_page(
@@ -839,7 +1129,6 @@ impl Application for SettingsApp {
                         tz_city_idx.clone(),
                     )
                 }),
-                NavigationLink::new("About", Icon::Info, about_page),
             }
             .sidebar_width(150.0)
             .frame(f32::INFINITY, f32::INFINITY),
