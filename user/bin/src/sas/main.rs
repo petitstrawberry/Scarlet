@@ -7,13 +7,18 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, compiler_fence};
 use core::time::Duration;
 
 use sbus_client as sbus;
-use std::audio::{AUDIO_PCM_FORMAT_S16LE, AudioDevice, AudioPcmParams};
+use std::audio::{
+    AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE, AudioDevice, AudioDeviceInfo,
+    AudioPcmCapabilities, AudioPcmParams,
+};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, prot};
 use std::io::{Read, Write};
 use std::ipc::{SharedMemory, permissions};
@@ -26,8 +31,9 @@ use userprogram::sas_protocol as protocol;
 const OUTPUT_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: u16 = 2;
 const OUTPUT_PERIOD_FRAMES: u32 = 480;
-const OUTPUT_BUFFER_FRAMES: u32 = 1_920;
-const OUTPUT_START_PREFILL_PERIODS: u32 = 3;
+const OUTPUT_BUFFER_FRAMES: u32 = 9_600;
+const OUTPUT_START_PREFILL_PERIODS: u32 = 4;
+const MAX_OUTPUT_DEVICES: usize = 8;
 const MIN_CLIENT_RATE: u32 = 8_000;
 const MAX_CLIENT_RATE: u32 = 192_000;
 const MAX_CLIENT_RING_FRAMES: usize = MAX_CLIENT_RATE as usize * 2;
@@ -104,20 +110,23 @@ struct ClientMixResult {
     draining: bool,
 }
 
+struct AudioOutputCandidate {
+    audio: AudioDevice,
+    info: AudioDeviceInfo,
+    caps: AudioPcmCapabilities,
+    path: String,
+}
+
 impl OutputDevice {
     fn open() -> Result<Self, &'static str> {
-        println!("sas: opening /dev/audio0");
-        let audio = AudioDevice::open("/dev/audio0").map_err(|_| "failed to open /dev/audio0")?;
-        println!("sas: querying /dev/audio0 capabilities");
-        let caps = audio
-            .capabilities()
-            .map_err(|_| "failed to query audio capabilities")?;
-        if !caps.supports_format(AUDIO_PCM_FORMAT_S16LE) || !caps.supports_rate(OUTPUT_RATE) {
-            return Err("audio0 does not support SAS output format");
-        }
-        if OUTPUT_CHANNELS < caps.min_channels || OUTPUT_CHANNELS > caps.max_channels {
-            return Err("audio0 does not support SAS output channels");
-        }
+        let output = select_audio_output()?;
+        println!(
+            "sas: selected {} kind={} name={} description={}",
+            output.path,
+            output.info.kind,
+            fixed_str(&output.info.name),
+            fixed_str(&output.info.description)
+        );
 
         let params = AudioPcmParams {
             format: AUDIO_PCM_FORMAT_S16LE,
@@ -125,34 +134,37 @@ impl OutputDevice {
             channels: OUTPUT_CHANNELS,
             _reserved: 0,
             period_frames: OUTPUT_PERIOD_FRAMES
-                .max(caps.min_period_frames)
-                .min(caps.max_period_frames),
+                .max(output.caps.min_period_frames)
+                .min(output.caps.max_period_frames),
             buffer_frames: OUTPUT_BUFFER_FRAMES
-                .max(caps.min_buffer_frames)
-                .min(caps.max_buffer_frames),
+                .max(output.caps.min_buffer_frames)
+                .min(output.caps.max_buffer_frames),
         };
         println!(
-            "sas: configuring /dev/audio0 S16LE {} Hz {}ch period={} buffer={}",
-            params.rate, params.channels, params.period_frames, params.buffer_frames
+            "sas: configuring {} S16LE {} Hz {}ch period={} buffer={}",
+            output.path, params.rate, params.channels, params.period_frames, params.buffer_frames
         );
-        audio
+        output
+            .audio
             .set_params(&params)
-            .map_err(|_| "failed to configure audio0")?;
-        println!("sas: mapping /dev/audio0 ring");
-        let info = audio
+            .map_err(|_| "failed to configure audio output")?;
+        println!("sas: mapping {} ring", output.path);
+        let ring_info = output
+            .audio
             .buffer_info()
             .map_err(|_| "failed to get audio ring info")?;
-        let ring = audio
-            .mmap_buffer(&info)
+        let ring = output
+            .audio
+            .mmap_buffer(&ring_info)
             .map_err(|_| "failed to mmap audio ring")?;
-        println!("sas: /dev/audio0 ready");
+        println!("sas: {} ready", output.path);
 
         Ok(Self {
-            audio,
+            audio: output.audio,
             params,
             ring,
-            buffer_frames: info.buffer_frames as usize,
-            frame_bytes: info.frame_bytes as usize,
+            buffer_frames: ring_info.buffer_frames as usize,
+            frame_bytes: ring_info.frame_bytes as usize,
             started: false,
             dirty: false,
         })
@@ -224,6 +236,60 @@ impl OutputDevice {
         self.started = false;
         self.dirty = false;
     }
+}
+
+fn select_audio_output() -> Result<AudioOutputCandidate, &'static str> {
+    println!("sas: probing audio outputs");
+    let mut fallback = None;
+
+    for index in 0..MAX_OUTPUT_DEVICES {
+        let path = format!("/dev/audio{}", index);
+        let Ok(audio) = AudioDevice::open(&path) else {
+            continue;
+        };
+        let info = audio.info().unwrap_or_default();
+        let Ok(caps) = audio.capabilities() else {
+            println!("sas: skipping {}: failed to query capabilities", path);
+            continue;
+        };
+        if !supports_sas_output(&caps) {
+            println!(
+                "sas: skipping {}: unsupported S16LE {} Hz {}ch output",
+                path, OUTPUT_RATE, OUTPUT_CHANNELS
+            );
+            continue;
+        }
+
+        let candidate = AudioOutputCandidate {
+            audio,
+            info,
+            caps,
+            path,
+        };
+        if candidate.info.kind == AUDIO_DEVICE_KIND_SPEAKERS {
+            return Ok(candidate);
+        }
+        if fallback.is_none() {
+            fallback = Some(candidate);
+        }
+    }
+
+    fallback.ok_or("no compatible audio output found")
+}
+
+fn supports_sas_output(caps: &AudioPcmCapabilities) -> bool {
+    caps.supports_format(AUDIO_PCM_FORMAT_S16LE)
+        && caps.supports_rate(OUTPUT_RATE)
+        && OUTPUT_CHANNELS >= caps.min_channels
+        && OUTPUT_CHANNELS <= caps.max_channels
+}
+
+fn fixed_str(bytes: &[u8]) -> &str {
+    let len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).unwrap_or("")
 }
 
 impl Drop for OutputDevice {
@@ -640,12 +706,24 @@ fn handle_configure(
     if config.channels == 0 || config.channels > OUTPUT_CHANNELS {
         return Err("SAS accepts only mono or stereo streams");
     }
+    if config.period_frames == 0 || config.buffer_frames == 0 {
+        return Err("SAS stream period/buffer size is invalid");
+    }
 
     let frame_bytes = config.channels as usize * 2;
-    let buffer_frames = (config.buffer_frames as usize)
-        .max(OUTPUT_BUFFER_FRAMES as usize)
-        .min(MAX_CLIENT_RING_FRAMES);
-    let ring_size = protocol::RING_HEADER_SIZE + buffer_frames * frame_bytes;
+    let buffer_frames = config.buffer_frames as usize;
+    let min_buffer_frames = (config.period_frames as usize)
+        .checked_mul(4)
+        .ok_or("SAS stream buffer size overflow")?;
+    if buffer_frames < min_buffer_frames || buffer_frames > MAX_CLIENT_RING_FRAMES {
+        return Err("SAS stream buffer size is unsupported");
+    }
+    let ring_data_bytes = buffer_frames
+        .checked_mul(frame_bytes)
+        .ok_or("SAS stream ring size overflow")?;
+    let ring_size = protocol::RING_HEADER_SIZE
+        .checked_add(ring_data_bytes)
+        .ok_or("SAS stream ring size overflow")?;
     let shm = SharedMemory::create(ring_size, permissions::READ_WRITE)
         .map_err(|_| "failed to create SAS shared ring")?;
     let mapper = shm

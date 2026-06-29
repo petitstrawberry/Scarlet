@@ -14,9 +14,10 @@ use scarlet::{
     device::{
         DeviceInfo,
         audio::{
-            AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec,
-            AudioDaiProvider, AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
-            register_playback_device,
+            AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S32LE,
+            AUDIO_PCM_MAX_RATES, AudioCodec, AudioDaiProvider, AudioDeviceInfo,
+            AudioPcmCapabilities, AudioPcmParams, AudioPlaybackDevice,
+            register_playback_device_with_info,
         },
         clk::ClkHandle,
         dma::{
@@ -902,8 +903,6 @@ impl AudioPlaybackDevice for AppleMca {
                 return Ok(());
             };
             stream.running = false;
-            stream.reset_queue();
-            stream.clear();
             Some(stream.channel.clone())
         };
 
@@ -911,6 +910,10 @@ impl AudioPlaybackDevice for AppleMca {
             channel.stop().map_err(dma_error_to_str)?;
         }
         self.disable_serdes(fe_cluster_base);
+        if let Some(stream) = self.stream.lock().as_mut() {
+            stream.reset_queue();
+            stream.clear();
+        }
         codec_result?;
         Ok(())
     }
@@ -1104,7 +1107,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let dai_provider: Arc<dyn AudioDaiProvider> = mca.clone();
     DeviceManager::get_manager().register_audio_dai_provider(phandle, dai_provider);
     let audio_backend: Arc<dyn AudioPlaybackDevice> = mca.clone();
-    let audio_name = register_playback_device(audio_backend);
+    let audio_name = register_playback_device_with_info(
+        audio_backend,
+        AudioDeviceInfo::new(AUDIO_DEVICE_KIND_SPEAKERS, "speakers", "Built-in Speakers"),
+    );
     APPLE_MCA_DEVICES.lock().push(mca);
 
     println!(

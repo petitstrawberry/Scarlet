@@ -47,7 +47,21 @@ pub mod commands {
     pub const AUDIO_GET_STATUS: u32 = 0x4106;
     /// Ask the backend to release stream resources.
     pub const AUDIO_RELEASE: u32 = 0x4107;
+    /// Query stable device identity and routing metadata.
+    pub const AUDIO_GET_INFO: u32 = 0x4108;
 }
+
+/// Unknown or unspecified audio output kind.
+pub const AUDIO_DEVICE_KIND_UNKNOWN: u32 = 0;
+/// Built-in speaker output.
+pub const AUDIO_DEVICE_KIND_SPEAKERS: u32 = 1;
+/// Headphone or headset output.
+pub const AUDIO_DEVICE_KIND_HEADPHONES: u32 = 2;
+
+/// Maximum bytes in a stable audio device name, including trailing zero padding.
+pub const AUDIO_DEVICE_NAME_LEN: usize = 32;
+/// Maximum bytes in an audio device description, including trailing zero padding.
+pub const AUDIO_DEVICE_DESCRIPTION_LEN: usize = 64;
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
@@ -238,6 +252,51 @@ pub struct AudioPcmStatus {
     pub delay_frames: u32,
     /// Number of detected underruns/backend submission failures.
     pub xruns: u32,
+}
+
+/// Stable identity for a native Scarlet audio output device.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioDeviceInfo {
+    /// One of `AUDIO_DEVICE_KIND_*`.
+    pub kind: u32,
+    /// Reserved device flags; currently zero.
+    pub flags: u32,
+    /// Stable ASCII device name, zero padded.
+    pub name: [u8; AUDIO_DEVICE_NAME_LEN],
+    /// Human-readable ASCII description, zero padded.
+    pub description: [u8; AUDIO_DEVICE_DESCRIPTION_LEN],
+}
+
+impl Default for AudioDeviceInfo {
+    fn default() -> Self {
+        Self::new(AUDIO_DEVICE_KIND_UNKNOWN, "unknown", "Unknown Audio Output")
+    }
+}
+
+impl AudioDeviceInfo {
+    /// Create fixed-size audio device identity metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Device kind exposed through `AUDIO_DEVICE_KIND_*`.
+    /// * `name` - Stable short ASCII name.
+    /// * `description` - Human-readable ASCII description.
+    ///
+    /// # Returns
+    ///
+    /// A zero-padded device info structure safe to copy to user space.
+    pub fn new(kind: u32, name: &str, description: &str) -> Self {
+        let mut info = Self {
+            kind,
+            flags: 0,
+            name: [0; AUDIO_DEVICE_NAME_LEN],
+            description: [0; AUDIO_DEVICE_DESCRIPTION_LEN],
+        };
+        copy_cstr_bytes(&mut info.name, name.as_bytes());
+        copy_cstr_bytes(&mut info.description, description.as_bytes());
+        info
+    }
 }
 
 /// Backend implemented by hardware audio drivers.
@@ -540,6 +599,7 @@ impl AudioPcmRing {
 /// Character device exposing a playback PCM ring as `/dev/audioN`.
 pub struct AudioCharDevice {
     backend: Arc<dyn AudioPlaybackDevice>,
+    info: AudioDeviceInfo,
     ring: Mutex<Option<AudioPcmRing>>,
     opened: Mutex<bool>,
 }
@@ -555,8 +615,23 @@ impl AudioCharDevice {
     ///
     /// A new audio character device.
     pub fn new(backend: Arc<dyn AudioPlaybackDevice>) -> Self {
+        Self::new_with_info(backend, AudioDeviceInfo::default())
+    }
+
+    /// Create a new audio character device with stable identity metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Hardware playback backend.
+    /// * `info` - Device identity returned by `AUDIO_GET_INFO`.
+    ///
+    /// # Returns
+    ///
+    /// A new audio character device.
+    pub fn new_with_info(backend: Arc<dyn AudioPlaybackDevice>, info: AudioDeviceInfo) -> Self {
         Self {
             backend,
+            info,
             ring: Mutex::new(None),
             opened: Mutex::new(false),
         }
@@ -613,6 +688,11 @@ impl AudioCharDevice {
     fn handle_get_caps(&self, arg: usize) -> Result<i32, &'static str> {
         let caps = self.backend.capabilities();
         write_user_value(arg, &caps)?;
+        Ok(0)
+    }
+
+    fn handle_get_info(&self, arg: usize) -> Result<i32, &'static str> {
+        write_user_value(arg, &self.info)?;
         Ok(0)
     }
 
@@ -741,9 +821,26 @@ impl AudioCharDevice {
 ///
 /// The registered character device name.
 pub fn register_playback_device(backend: Arc<dyn AudioPlaybackDevice>) -> String {
+    register_playback_device_with_info(backend, AudioDeviceInfo::default())
+}
+
+/// Register a playback backend as a native Scarlet audio device with identity metadata.
+///
+/// # Arguments
+///
+/// * `backend` - Hardware playback backend to expose.
+/// * `info` - Device identity returned by `AUDIO_GET_INFO`.
+///
+/// # Returns
+///
+/// The registered character device name.
+pub fn register_playback_device_with_info(
+    backend: Arc<dyn AudioPlaybackDevice>,
+    info: AudioDeviceInfo,
+) -> String {
     let id = AUDIO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = alloc::format!("audio{}", id);
-    let audio_char: Arc<dyn Device> = Arc::new(AudioCharDevice::new(backend));
+    let audio_char: Arc<dyn Device> = Arc::new(AudioCharDevice::new_with_info(backend, info));
     crate::device::manager::DeviceManager::get_manager()
         .register_device_with_name(name.clone(), audio_char);
     name
@@ -844,6 +941,7 @@ impl ControlOps for AudioCharDevice {
 
         match command {
             AUDIO_GET_CAPS => self.handle_get_caps(arg),
+            AUDIO_GET_INFO => self.handle_get_info(arg),
             AUDIO_SET_PARAMS => self.handle_set_params(arg),
             AUDIO_GET_BUFFER => self.handle_get_buffer(arg),
             AUDIO_COMMIT_FRAMES => self.handle_commit_frames(arg),
@@ -859,6 +957,7 @@ impl ControlOps for AudioCharDevice {
         use commands::*;
         alloc::vec![
             (AUDIO_GET_CAPS, "Get audio playback capabilities"),
+            (AUDIO_GET_INFO, "Get audio device identity"),
             (AUDIO_SET_PARAMS, "Set PCM playback parameters"),
             (AUDIO_GET_BUFFER, "Get mmap PCM ring buffer layout"),
             (AUDIO_COMMIT_FRAMES, "Commit mmap-written PCM frames"),
@@ -930,6 +1029,14 @@ impl Selectable for AudioCharDevice {
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn copy_cstr_bytes(dst: &mut [u8], src: &[u8]) {
+    if dst.is_empty() {
+        return;
+    }
+    let len = src.len().min(dst.len() - 1);
+    dst[..len].copy_from_slice(&src[..len]);
 }
 
 fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
