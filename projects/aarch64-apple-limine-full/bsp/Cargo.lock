@@ -225,6 +225,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-cs42l83"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
 name = "scarlet-driver-dcpext"
 version = "0.1.0"
 dependencies = [
@@ -289,6 +296,7 @@ dependencies = [
  "scarlet-driver-apple-spi",
  "scarlet-driver-apple-spi-hid",
  "scarlet-driver-apple-wdt",
+ "scarlet-driver-cs42l83",
  "scarlet-driver-dcpext",
  "scarlet-driver-dpxbar",
  "scarlet-driver-s5l-uart",
