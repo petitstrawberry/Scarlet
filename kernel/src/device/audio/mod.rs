@@ -358,6 +358,27 @@ pub trait AudioDaiProvider: Send + Sync {
         spec: &[u32],
         codec: Arc<dyn AudioCodec>,
     ) -> Result<(), &'static str>;
+
+    /// Attach a playback codec with an explicit CPU-side TDM slot mask.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Firmware specifier cells following the provider phandle.
+    /// * `codec` - Codec endpoint to control for playback on this DAI.
+    /// * `tx_mask` - TDM transmit slot mask assigned to this codec.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the route was accepted.
+    fn attach_playback_codec_tdm(
+        &self,
+        spec: &[u32],
+        codec: Arc<dyn AudioCodec>,
+        tx_mask: u32,
+    ) -> Result<(), &'static str> {
+        let _ = tx_mask;
+        self.attach_playback_codec(spec, codec)
+    }
 }
 
 struct AudioPcmRing {
