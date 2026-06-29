@@ -18,6 +18,9 @@ static mut STDIN: Option<Handle> = None;
 static mut STDOUT: Option<Handle> = None;
 static mut STDERR: Option<Handle> = None;
 
+const FALLBACK_ROOT_TMPFS_OPTIONS: &str = "size=512M";
+const VOLATILE_TMPFS_OPTIONS: &str = "size=128M";
+
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
 
@@ -39,7 +42,13 @@ fn setup_new_root() -> bool {
             println!("init: Failed to mount ext2 at /mnt/newroot, trying fallback...");
             // Fallback to tmpfs if ext2 fails
             println!("init: Falling back to tmpfs for new root");
-            match mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) {
+            match mount(
+                "tmpfs",
+                "/mnt/newroot",
+                "tmpfs",
+                0,
+                Some(FALLBACK_ROOT_TMPFS_OPTIONS),
+            ) {
                 Ok(_) => {
                     println!("init: Fallback tmpfs mounted successfully");
                     using_tmpfs_fallback = true;
@@ -78,7 +87,13 @@ fn setup_new_root() -> bool {
     }
 
     // Try mounting tmpfs on the new /tmp. Non-fatal if it fails.
-    match mount("tmpfs", "/mnt/newroot/tmp", "tmpfs", 0, Some("size=32M")) {
+    match mount(
+        "tmpfs",
+        "/mnt/newroot/tmp",
+        "tmpfs",
+        0,
+        Some(VOLATILE_TMPFS_OPTIONS),
+    ) {
         Ok(_) => println!("init: tmpfs mounted at /mnt/newroot/tmp"),
         Err(_) => println!("init: Warning: Failed to mount tmpfs at /mnt/newroot/tmp"),
     }

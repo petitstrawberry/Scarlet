@@ -1,9 +1,67 @@
 #[cfg(test)]
 mod tests {
+    use super::parse_tmpfs_size_option;
     use crate::fs::drivers::tmpfs::TmpFS;
     use crate::fs::vfs_v2::manager::VfsManager;
     use crate::fs::{FileSystemErrorKind, FileType};
+    use crate::object::capability::StreamError;
     use alloc::string::ToString;
+
+    fn assert_no_space_error(error: StreamError) {
+        match error {
+            StreamError::NoSpace => {}
+            StreamError::FileSystemError(error) => {
+                assert!(matches!(error.kind, FileSystemErrorKind::NoSpace));
+            }
+            other => panic!("expected no space error, got {:?}", other),
+        }
+    }
+
+    /// Test tmpfs size option parsing.
+    #[test_case]
+    fn test_tmpfs_size_option_parsing() {
+        assert_eq!(parse_tmpfs_size_option("size=32M"), Some(32 * 1024 * 1024));
+        assert_eq!(
+            parse_tmpfs_size_option("mode=1777,size=1G"),
+            Some(1024 * 1024 * 1024)
+        );
+        assert_eq!(parse_tmpfs_size_option("size=4K"), Some(4 * 1024));
+        assert_eq!(parse_tmpfs_size_option("size=4096"), Some(4096));
+        assert_eq!(parse_tmpfs_size_option("mode=1777"), None);
+    }
+
+    /// Test that regular file writes are bounded by the tmpfs memory limit.
+    #[test_case]
+    fn test_memory_limit_enforced_for_regular_file_writes() {
+        let tmpfs = TmpFS::new(8);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/limited.txt", FileType::RegularFile)
+            .unwrap();
+        let file = vfs.open("/limited.txt", 0x02).unwrap();
+        if let crate::object::KernelObject::File(file_obj) = file {
+            assert_eq!(file_obj.write(b"12345678").unwrap(), 8);
+            assert_no_space_error(file_obj.write(b"9").unwrap_err());
+        }
+    }
+
+    /// Test that truncation growth is bounded and shrink frees tmpfs memory.
+    #[test_case]
+    fn test_memory_limit_enforced_for_truncate_growth() {
+        let tmpfs = TmpFS::new(8);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        vfs.create_file("/limited.txt", FileType::RegularFile)
+            .unwrap();
+        let file = vfs.open("/limited.txt", 0x02).unwrap();
+        if let crate::object::KernelObject::File(file_obj) = file {
+            file_obj.write(b"12345678").unwrap();
+            assert_no_space_error(file_obj.truncate(9).unwrap_err());
+            file_obj.truncate(4).unwrap();
+            file_obj.truncate(8).unwrap();
+            assert_no_space_error(file_obj.truncate(9).unwrap_err());
+        }
+    }
 
     /// Test basic hard link creation and functionality
     #[test_case]
