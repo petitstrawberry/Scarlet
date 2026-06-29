@@ -28,7 +28,6 @@ use crate::println;
 use crate::task::mytask;
 
 static AUDIO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-const USEC_PER_SEC: u64 = 1_000_000;
 
 /// Native audio control command namespace.
 pub mod commands {
@@ -412,6 +411,11 @@ impl AudioPcmRing {
         self.params.buffer_frames.saturating_sub(queued as u32)
     }
 
+    fn discard_pending(&mut self) {
+        self.hw_ptr_frames = self.app_ptr_frames;
+        self.submitted_ptr_frames = self.app_ptr_frames;
+    }
+
     fn buffer_info(&self) -> AudioPcmBufferInfo {
         AudioPcmBufferInfo {
             mmap_offset: 0,
@@ -585,80 +589,6 @@ impl AudioCharDevice {
         Ok(result)
     }
 
-    fn sleep_for_audio_frames(&self, params: AudioPcmParams, frames: u64) {
-        if params.rate == 0 || frames == 0 {
-            return;
-        }
-        let us = frames
-            .saturating_mul(USEC_PER_SEC)
-            .div_ceil(u64::from(params.rate));
-        let ticks = crate::timer::us_to_ticks(us).max(1);
-        if let Some(task) = mytask() {
-            let trapframe = task.get_trapframe();
-            task.sleep(trapframe, ticks);
-        }
-    }
-
-    fn flush_silence_after_stop(&self, params: AudioPcmParams) -> Result<(), &'static str> {
-        let period_bytes = params.period_bytes().ok_or("PCM period size overflow")?;
-        if period_bytes == 0 || period_bytes > PAGE_SIZE {
-            return Ok(());
-        }
-
-        let total_periods = (params.buffer_frames / params.period_frames) as usize;
-        let max_in_flight = self.backend.max_in_flight_periods().max(1);
-        let silence = alloc::vec![0u8; period_bytes];
-
-        let mut submitted = 0usize;
-        let mut completed = 0usize;
-        let mut stalled_periods = 0usize;
-        while submitted < total_periods && submitted.saturating_sub(completed) < max_in_flight {
-            self.backend.submit_period(&silence)?;
-            submitted += 1;
-        }
-        self.backend.start()?;
-
-        while submitted < total_periods {
-            self.sleep_for_audio_frames(params, u64::from(params.period_frames));
-            let newly_completed = self.backend.process_completions();
-            completed = completed.saturating_add(newly_completed).min(submitted);
-
-            if newly_completed == 0 && submitted.saturating_sub(completed) >= max_in_flight {
-                stalled_periods = stalled_periods.saturating_add(1);
-                if stalled_periods > max_in_flight {
-                    let _ = self.backend.stop();
-                    return Err("Audio silence flush stalled");
-                }
-                continue;
-            }
-            stalled_periods = 0;
-
-            while submitted < total_periods && submitted.saturating_sub(completed) < max_in_flight {
-                if let Err(e) = self.backend.submit_period(&silence) {
-                    let _ = self.backend.stop();
-                    return Err(e);
-                }
-                submitted += 1;
-            }
-        }
-
-        let mut drain_waits = 0usize;
-        while completed < submitted && drain_waits < max_in_flight {
-            self.sleep_for_audio_frames(params, u64::from(params.period_frames));
-            completed = completed
-                .saturating_add(self.backend.process_completions())
-                .min(submitted);
-            drain_waits += 1;
-        }
-
-        self.backend.stop()
-    }
-
-    fn stop_backend_with_silence(&self, params: AudioPcmParams) -> Result<(), &'static str> {
-        self.backend.stop()?;
-        self.flush_silence_after_stop(params)
-    }
-
     fn handle_get_caps(&self, arg: usize) -> Result<i32, &'static str> {
         let caps = self.backend.capabilities();
         write_user_value(arg, &caps)?;
@@ -712,22 +642,41 @@ impl AudioCharDevice {
         {
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
+            if ring.state == AUDIO_STATE_XRUN {
+                return Err("PCM stream is in XRUN");
+            }
             ring.state = AUDIO_STATE_RUNNING;
             self.pump_locked(ring);
+            if ring.state != AUDIO_STATE_RUNNING {
+                return Err("PCM submit failed during start");
+            }
         }
-        self.backend.start()?;
+        if let Err(error) = self.backend.start() {
+            let mut guard = self.ring.lock();
+            if let Some(ring) = guard.as_mut() {
+                ring.state = AUDIO_STATE_XRUN;
+            }
+            let _ = self.backend.stop();
+            return Err(error);
+        }
         Ok(0)
     }
 
     fn handle_stop(&self) -> Result<i32, &'static str> {
-        let params = {
+        let (was_running, was_xrun) = {
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
-            let params = ring.params;
+            let was_running = ring.state == AUDIO_STATE_RUNNING;
+            let was_xrun = ring.state == AUDIO_STATE_XRUN;
             ring.state = AUDIO_STATE_STOPPED;
-            params
+            (was_running, was_xrun)
         };
-        self.stop_backend_with_silence(params)?;
+        if was_running || was_xrun {
+            self.backend.stop()?;
+        }
+        if let Some(ring) = self.ring.lock().as_mut() {
+            ring.discard_pending();
+        }
         Ok(0)
     }
 
@@ -741,20 +690,19 @@ impl AudioCharDevice {
     }
 
     fn handle_release(&self) -> Result<i32, &'static str> {
-        let Some((params, was_running)) = ({
+        let Some(was_running) = ({
             let mut guard = self.ring.lock();
             let Some(ring) = guard.as_mut() else {
                 return Ok(0);
             };
-            let params = ring.params;
             let was_running = ring.state == AUDIO_STATE_RUNNING;
             ring.state = AUDIO_STATE_STOPPED;
-            Some((params, was_running))
+            Some(was_running)
         }) else {
             return Ok(0);
         };
         if was_running {
-            self.stop_backend_with_silence(params)?;
+            self.backend.stop()?;
         }
         self.backend.release()?;
         *self.ring.lock() = None;
@@ -794,15 +742,14 @@ impl Device for AudioCharDevice {
         let stream = {
             let mut ring = self.ring.lock();
             ring.as_mut().map(|ring| {
-                let params = ring.params;
                 let was_running = ring.state == AUDIO_STATE_RUNNING;
                 ring.state = AUDIO_STATE_STOPPED;
-                (params, was_running)
+                was_running
             })
         };
-        if let Some((params, was_running)) = stream {
+        if let Some(was_running) = stream {
             if was_running {
-                let _ = self.stop_backend_with_silence(params);
+                let _ = self.backend.stop();
             }
             let _ = self.backend.release();
             *self.ring.lock() = None;

@@ -89,6 +89,11 @@ impl AppleAdmacTransfer {
             reclaimed_pos: 0,
         }
     }
+
+    fn reset_position(&mut self) {
+        self.submitted_pos = 0;
+        self.reclaimed_pos = 0;
+    }
 }
 
 struct AppleAdmacChannelState {
@@ -821,7 +826,11 @@ impl DmaChannel for AppleAdmacChannel {
         let state = self.controller.channel_state(self.index)?;
         self.controller.stop_channel(self.index);
         self.controller.reset_rings(self.index);
+        if let Some(transfer) = state.transfer.lock().as_mut() {
+            transfer.reset_position();
+        }
         state.running.store(false, Ordering::Release);
+        state.completed_periods.store(0, Ordering::Release);
         Ok(())
     }
 

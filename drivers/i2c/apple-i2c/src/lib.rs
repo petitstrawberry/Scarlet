@@ -352,7 +352,10 @@ impl AppleI2cController {
             self.write_reg(REG_MTXFIFO, value);
         }
 
-        self.poll_transfer_done()
+        if stop {
+            self.poll_transfer_done()?;
+        }
+        Ok(())
     }
 
     fn transfer_read(&self, msg: &mut I2cMessage, start: bool, stop: bool) -> Result<(), I2cError> {

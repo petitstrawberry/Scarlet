@@ -27,6 +27,7 @@ const OUTPUT_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: u16 = 2;
 const OUTPUT_PERIOD_FRAMES: u32 = 480;
 const OUTPUT_BUFFER_FRAMES: u32 = 1_920;
+const OUTPUT_START_PREFILL_PERIODS: u32 = 3;
 const MIN_CLIENT_RATE: u32 = 8_000;
 const MAX_CLIENT_RATE: u32 = 192_000;
 const MAX_CLIENT_RING_FRAMES: usize = MAX_CLIENT_RATE as usize * 2;
@@ -82,12 +83,26 @@ struct OutputDevice {
     buffer_frames: usize,
     frame_bytes: usize,
     started: bool,
+    dirty: bool,
 }
 
 // SAFETY: `OutputDevice` is moved into the audio thread before use and is not
 // shared with other threads afterwards. The mapped ring pointer is only accessed
 // by that owning thread.
 unsafe impl Send for OutputDevice {}
+
+struct MixPeriodResult {
+    active: bool,
+    pending: bool,
+    draining: bool,
+    has_clients: bool,
+}
+
+struct ClientMixResult {
+    frames: usize,
+    pending: bool,
+    draining: bool,
+}
 
 impl OutputDevice {
     fn open() -> Result<Self, &'static str> {
@@ -139,10 +154,24 @@ impl OutputDevice {
             buffer_frames: info.buffer_frames as usize,
             frame_bytes: info.frame_bytes as usize,
             started: false,
+            dirty: false,
         })
     }
 
-    fn write_period(&mut self, samples: &[i16]) -> Result<(), &'static str> {
+    fn start_prefill_frames(&self, force_start: bool) -> u64 {
+        if force_start {
+            return u64::from(self.params.period_frames);
+        }
+
+        u64::from(
+            self.params
+                .period_frames
+                .saturating_mul(OUTPUT_START_PREFILL_PERIODS)
+                .min(self.params.buffer_frames),
+        )
+    }
+
+    fn write_period(&mut self, samples: &[i16], force_start: bool) -> Result<(), &'static str> {
         let period_frames = self.params.period_frames as usize;
         let period_bytes = period_frames * self.frame_bytes;
         let mut bytes = Vec::with_capacity(period_bytes);
@@ -168,7 +197,12 @@ impl OutputDevice {
                 self.audio
                     .commit_frames(self.params.period_frames)
                     .map_err(|_| "failed to commit audio frames")?;
-                if !self.started {
+                self.dirty = true;
+                let queued_after_commit = status
+                    .app_ptr_frames
+                    .saturating_add(u64::from(self.params.period_frames))
+                    .saturating_sub(status.hw_ptr_frames);
+                if !self.started && queued_after_commit >= self.start_prefill_frames(force_start) {
                     self.audio.start().map_err(|_| "failed to start audio")?;
                     self.started = true;
                 }
@@ -178,22 +212,23 @@ impl OutputDevice {
         }
     }
 
-    fn stop_if_drained(&mut self) {
-        if !self.started {
+    fn is_started(&self) -> bool {
+        self.started
+    }
+
+    fn stop_stream(&mut self) {
+        if !self.started && !self.dirty {
             return;
         }
-        if let Ok(status) = self.audio.status()
-            && status.hw_ptr_frames >= status.app_ptr_frames
-        {
-            let _ = self.audio.stop();
-            self.started = false;
-        }
+        let _ = self.audio.stop();
+        self.started = false;
+        self.dirty = false;
     }
 }
 
 impl Drop for OutputDevice {
     fn drop(&mut self) {
-        let _ = self.audio.stop();
+        self.stop_stream();
         let _ = self.audio.release();
     }
 }
@@ -355,20 +390,25 @@ fn audio_thread(state: Arc<Mutex<ServerState>>, mut output: OutputDevice) {
     let samples_per_period = output.params.period_frames as usize * output.params.channels as usize;
     let mut mixer = ScalarF32Mixer::new();
     let mut mixed = alloc::vec![0i16; samples_per_period];
-    let mut idle_ticks = 0usize;
     loop {
-        let active = mix_period(&state, &mut mixer, &mut mixed);
-        if active {
-            idle_ticks = 0;
-            if let Err(e) = output.write_period(&mixed) {
+        let result = mix_period(&state, &mut mixer, &mut mixed);
+        if result.active {
+            if let Err(e) = output.write_period(&mixed, result.draining) {
                 println!("sas: output error: {}", e);
+                output.stop_stream();
+                sleep(Duration::from_millis(20));
+            }
+        } else if result.pending {
+            sleep(Duration::from_millis(1));
+        } else if result.has_clients && output.is_started() {
+            if let Err(e) = output.write_period(&mixed, true) {
+                println!("sas: output error: {}", e);
+                output.stop_stream();
                 sleep(Duration::from_millis(20));
             }
         } else {
-            idle_ticks = idle_ticks.saturating_add(1);
-            if idle_ticks >= 50 {
-                output.stop_if_drained();
-                idle_ticks = 0;
+            if !result.has_clients {
+                output.stop_stream();
             }
             sleep(Duration::from_millis(5));
         }
@@ -379,9 +419,12 @@ fn mix_period(
     state: &Arc<Mutex<ServerState>>,
     mixer: &mut dyn MixerBackend,
     out: &mut [i16],
-) -> bool {
+) -> MixPeriodResult {
     mixer.reset(out.len());
     let mut active = false;
+    let mut pending = false;
+    let mut draining = false;
+    let mut has_clients = false;
     let mut to_remove = Vec::new();
 
     {
@@ -391,15 +434,18 @@ fn mix_period(
                 to_remove.push(*client_id);
                 continue;
             }
+            has_clients = true;
 
             let Some(ring_addr) = stream.ring_addr else {
                 continue;
             };
 
-            let frames = unsafe { mix_client_ring(mixer, stream, ring_addr) };
-            if frames != 0 {
+            let result = unsafe { mix_client_ring(mixer, stream, ring_addr) };
+            if result.frames != 0 {
                 active = true;
             }
+            pending |= result.pending;
+            draining |= result.draining;
         }
 
         for client_id in to_remove {
@@ -408,14 +454,19 @@ fn mix_period(
     }
 
     mixer.finish_s16le(out);
-    active
+    MixPeriodResult {
+        active,
+        pending,
+        draining,
+        has_clients,
+    }
 }
 
 unsafe fn mix_client_ring(
     mixer: &mut dyn MixerBackend,
     stream: &mut ClientStream,
     ring_addr: usize,
-) -> usize {
+) -> ClientMixResult {
     let header = ring_addr as *mut protocol::RingHeader;
     // SAFETY: `ring_addr` is a server-side mapping of a SAS shared-memory ring.
     let read_frames = unsafe { core::ptr::addr_of!((*header).read_frames).read_volatile() };
@@ -424,9 +475,10 @@ unsafe fn mix_client_ring(
     compiler_fence(Ordering::Acquire);
 
     let available = write_frames.saturating_sub(read_frames) as usize;
+    let draining = is_ring_draining(header);
     let frames = resampled_output_frames(stream, available);
     if frames == 0 {
-        if is_ring_draining(header) && available != 0 {
+        if draining && available != 0 {
             compiler_fence(Ordering::Release);
             // SAFETY: `ring_addr` is a server-side mapping of a SAS shared-memory ring.
             unsafe {
@@ -434,7 +486,19 @@ unsafe fn mix_client_ring(
             }
             stream.resample_pos_num = 0;
         }
-        return 0;
+        return ClientMixResult {
+            frames: 0,
+            pending: available != 0 && !draining,
+            draining,
+        };
+    }
+
+    if frames < OUTPUT_PERIOD_FRAMES as usize && !draining {
+        return ClientMixResult {
+            frames: 0,
+            pending: true,
+            draining,
+        };
     }
 
     // SAFETY: the ring was created by SAS and `frames` is bounded by readable
@@ -452,7 +516,11 @@ unsafe fn mix_client_ring(
         core::ptr::addr_of_mut!((*header).read_frames)
             .write_volatile(read_frames + consumed as u64);
     }
-    frames
+    ClientMixResult {
+        frames,
+        pending: false,
+        draining,
+    }
 }
 
 fn resampled_output_frames(stream: &ClientStream, available: usize) -> usize {

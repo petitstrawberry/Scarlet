@@ -34,7 +34,6 @@ use scarlet::{
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
     println,
-    time::udelay,
 };
 
 const APPLE_MCA_T8103_CLUSTERS: usize = 6;
@@ -190,6 +189,11 @@ impl AppleMcaStream {
         let completed = completed.min(self.in_flight_periods);
         self.in_flight_periods -= completed;
         completed
+    }
+
+    fn reset_queue(&mut self) {
+        self.submit_period = 0;
+        self.in_flight_periods = 0;
     }
 }
 
@@ -454,6 +458,21 @@ impl AppleMca {
         Ok(())
     }
 
+    fn disable_clocks_and_syncgen(&self, cluster_base: usize, cluster: usize) {
+        self.modify_reg(cluster_base, REG_SYNCGEN_STATUS, SYNCGEN_STATUS_EN, 0);
+        self.modify_reg(cluster_base, REG_STATUS, STATUS_MCLK_EN, 0);
+
+        if let Some(Some(domain)) = self.cluster_power_domains.get(cluster)
+            && domain.is_enabled()
+        {
+            let _ = domain.disable();
+        }
+
+        if let Some(clock) = self.clocks.get(cluster) {
+            clock.disable_unprepare();
+        }
+    }
+
     fn configure_dma_adapter(
         &self,
         cluster: usize,
@@ -471,42 +490,6 @@ impl AppleMca {
             | (pad << DMA_ADAPTER_RX_MSB_PAD_SHIFT);
         self.write_reg(self.switch_base, Self::dma_adapter_a_reg(cluster), value);
         Ok(())
-    }
-
-    fn early_start_serdes(&self, cluster_base: usize, cluster: usize) {
-        let serdes = CLUSTER_TXA_OFF;
-        self.modify_reg(
-            cluster_base,
-            serdes + REG_TX_SERDES_CONF,
-            SERDES_CONF_SYNC_SEL_MASK,
-            0,
-        );
-        self.modify_reg(
-            cluster_base,
-            serdes + REG_TX_SERDES_CONF,
-            SERDES_CONF_SYNC_SEL_MASK,
-            7 << SERDES_CONF_SYNC_SEL_SHIFT,
-        );
-        self.modify_reg(
-            cluster_base,
-            serdes + REG_SERDES_STATUS,
-            SERDES_STATUS_EN | SERDES_STATUS_RST,
-            SERDES_STATUS_RST,
-        );
-        udelay(50);
-        self.modify_reg(
-            cluster_base,
-            serdes + REG_TX_SERDES_CONF,
-            SERDES_CONF_SYNC_SEL_MASK,
-            0,
-        );
-        self.modify_reg(
-            cluster_base,
-            serdes + REG_TX_SERDES_CONF,
-            SERDES_CONF_SYNC_SEL_MASK,
-            ((cluster + 1) as u32) << SERDES_CONF_SYNC_SEL_SHIFT,
-        );
-        udelay(100);
     }
 
     fn enable_serdes(&self, cluster_base: usize) {
@@ -530,6 +513,17 @@ impl AppleMca {
     fn disable_port(&self, cluster_base: usize) {
         self.modify_reg(cluster_base, REG_PORT_ENABLES, PORT_ENABLES_TX_DATA, 0);
         self.write_reg(cluster_base, REG_PORT_DATA_SEL, 0);
+    }
+
+    fn cleanup_failed_configure(&self, cluster_base: usize, cluster: usize) {
+        self.disable_serdes(cluster_base);
+        self.disable_port(cluster_base);
+        self.disable_clocks_and_syncgen(cluster_base, cluster);
+        for codec in &self.playback_codecs() {
+            let _ = codec.set_playback_muted(true);
+            let _ = codec.set_playback_powered(false);
+        }
+        *self.stream.lock() = None;
     }
 }
 
@@ -693,54 +687,63 @@ impl AudioPlaybackDevice for AppleMca {
 
         let cluster = APPLE_MCA_PLAYBACK_CLUSTER;
         let cluster_base = self.cluster_base(cluster)?;
-        let channel = self.playback_dma()?;
-        let buffer_bytes = params
-            .buffer_bytes()
-            .ok_or("apple-mca: PCM buffer overflow")?;
-        let period_bytes = params
-            .period_bytes()
-            .ok_or("apple-mca: PCM period overflow")?;
-        let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
-        let pages =
-            ContiguousPages::new(mapped_bytes / PAGE_SIZE).ok_or("apple-mca: DMA alloc failed")?;
+        let mut path_touched = false;
+        let result = (|| {
+            let channel = self.playback_dma()?;
+            let buffer_bytes = params
+                .buffer_bytes()
+                .ok_or("apple-mca: PCM buffer overflow")?;
+            let period_bytes = params
+                .period_bytes()
+                .ok_or("apple-mca: PCM period overflow")?;
+            let mapped_bytes = align_up(buffer_bytes, PAGE_SIZE);
+            let pages = ContiguousPages::new(mapped_bytes / PAGE_SIZE)
+                .ok_or("apple-mca: DMA alloc failed")?;
 
-        self.configure_port(cluster_base, cluster);
-        self.configure_serdes(cluster_base, cluster, params)?;
-        self.configure_dma_adapter(cluster, params)?;
-        self.configure_syncgen_rate(cluster_base, cluster, params)?;
-        self.enable_clocks_and_syncgen(cluster_base, cluster)?;
-        let codecs = self.playback_codecs();
-        for codec in &codecs {
-            codec.configure_playback(
-                params,
-                Self::playback_tx_mask(params),
-                Self::playback_slots(params),
-                APPLE_MCA_SLOT_WIDTH,
-            )?;
-            codec.set_playback_powered(true)?;
-            codec.set_playback_muted(true)?;
+            self.configure_port(cluster_base, cluster);
+            path_touched = true;
+            self.configure_serdes(cluster_base, cluster, params)?;
+            self.configure_dma_adapter(cluster, params)?;
+            self.configure_syncgen_rate(cluster_base, cluster, params)?;
+            self.enable_clocks_and_syncgen(cluster_base, cluster)?;
+            let codecs = self.playback_codecs();
+            for codec in &codecs {
+                codec.configure_playback(
+                    params,
+                    Self::playback_tx_mask(params),
+                    Self::playback_slots(params),
+                    APPLE_MCA_SLOT_WIDTH,
+                )?;
+                codec.set_playback_powered(true)?;
+                codec.set_playback_muted(true)?;
+            }
+
+            let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
+            stream.clear();
+
+            let burst_len = (params.channels as usize).min(4).max(1);
+            channel
+                .prepare_cyclic(DmaCyclicConfig {
+                    buffer_addr: stream.pages.as_paddr(),
+                    buffer_len: buffer_bytes,
+                    period_len: period_bytes,
+                    direction: DmaDirection::MemToDev,
+                    peripheral: Some(DmaPeripheralConfig {
+                        addr: 1,
+                        width: Self::dma_width(params)?,
+                        burst_len,
+                    }),
+                })
+                .map_err(dma_error_to_str)?;
+
+            *self.stream.lock() = Some(stream);
+            Ok(())
+        })();
+
+        if result.is_err() && path_touched {
+            self.cleanup_failed_configure(cluster_base, cluster);
         }
-
-        let stream = AppleMcaStream::new(channel.clone(), pages, *params, mapped_bytes)?;
-        stream.clear();
-
-        let burst_len = (params.channels as usize).min(4).max(1);
-        channel
-            .prepare_cyclic(DmaCyclicConfig {
-                buffer_addr: stream.pages.as_paddr(),
-                buffer_len: buffer_bytes,
-                period_len: period_bytes,
-                direction: DmaDirection::MemToDev,
-                peripheral: Some(DmaPeripheralConfig {
-                    addr: 1,
-                    width: Self::dma_width(params)?,
-                    burst_len,
-                }),
-            })
-            .map_err(dma_error_to_str)?;
-
-        *self.stream.lock() = Some(stream);
-        Ok(())
+        result
     }
 
     fn start(&self) -> Result<(), &'static str> {
@@ -757,7 +760,6 @@ impl AudioPlaybackDevice for AppleMca {
         };
         let codecs = self.playback_codecs();
 
-        self.early_start_serdes(cluster_base, cluster);
         if let Err(error) = channel.start() {
             let mut guard = self.stream.lock();
             if let Some(stream) = guard.as_mut() {
@@ -776,6 +778,9 @@ impl AudioPlaybackDevice for AppleMca {
                 let mut guard = self.stream.lock();
                 if let Some(stream) = guard.as_mut() {
                     stream.running = false;
+                }
+                for codec in &codecs {
+                    let _ = codec.set_playback_muted(true);
                 }
                 self.disable_serdes(cluster_base);
                 return Err(error);
@@ -800,6 +805,8 @@ impl AudioPlaybackDevice for AppleMca {
                 return Ok(());
             };
             stream.running = false;
+            stream.reset_queue();
+            stream.clear();
             Some(stream.channel.clone())
         };
 
@@ -822,6 +829,7 @@ impl AudioPlaybackDevice for AppleMca {
             for codec in &codecs {
                 codec.set_playback_powered(false)?;
             }
+            self.disable_clocks_and_syncgen(cluster_base, APPLE_MCA_PLAYBACK_CLUSTER);
         }
         Ok(())
     }
