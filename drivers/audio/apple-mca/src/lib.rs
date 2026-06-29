@@ -15,9 +15,10 @@ use scarlet::{
         DeviceInfo,
         audio::{
             AUDIO_DEVICE_KIND_HEADPHONES, AUDIO_DEVICE_KIND_SPEAKERS, AUDIO_PCM_FORMAT_S16LE,
-            AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec, AudioDaiProvider,
-            AudioDeviceInfo, AudioPcmBuffer, AudioPcmCapabilities, AudioPcmParams, AudioPcmPeriod,
-            AudioPlaybackDevice, register_playback_device_with_info,
+            AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioCodec, AudioCompletionCallback,
+            AudioDaiProvider, AudioDeviceInfo, AudioPcmBuffer, AudioPcmCapabilities,
+            AudioPcmParams, AudioPcmPeriod, AudioPlaybackDevice,
+            register_playback_device_with_info,
         },
         clk::ClkHandle,
         dma::{
@@ -32,6 +33,7 @@ use scarlet::{
         power::{PowerDomain, PowerManager},
     },
     early_println, println,
+    sync::IrqGuard,
 };
 
 const APPLE_MCA_T8103_CLUSTERS: usize = 6;
@@ -190,6 +192,7 @@ struct AppleMca {
     cluster_power_domains: Vec<Option<Arc<dyn PowerDomain>>>,
     dmas: Vec<AppleMcaDma>,
     stream: Mutex<Option<AppleMcaStream>>,
+    completion_callback: Mutex<Option<AudioCompletionCallback>>,
     playback_codecs: Mutex<Vec<Arc<dyn AudioCodec>>>,
     playback_codec_routes: Mutex<Vec<AppleMcaPlaybackCodec>>,
     playback_ports: Mutex<Vec<usize>>,
@@ -201,6 +204,7 @@ struct AppleMcaOutput {
     ports: Vec<usize>,
     codec_routes: Vec<AppleMcaPlaybackCodec>,
     stream: Mutex<Option<AppleMcaStream>>,
+    completion_callback: Mutex<Option<AudioCompletionCallback>>,
 }
 
 impl AppleMca {
@@ -222,6 +226,7 @@ impl AppleMca {
             cluster_power_domains,
             dmas,
             stream: Mutex::new(None),
+            completion_callback: Mutex::new(None),
             playback_codecs: Mutex::new(Vec::new()),
             playback_codec_routes: Mutex::new(Vec::new()),
             playback_ports: Mutex::new(Vec::new()),
@@ -844,7 +849,15 @@ impl AudioPlaybackDevice for AppleMca {
                     }),
                 })
                 .map_err(dma_error_to_str)?;
+            let completion_callback = {
+                let _irq_guard = IrqGuard::new();
+                self.completion_callback.lock().clone()
+            };
+            channel
+                .set_completion_callback(completion_callback)
+                .map_err(dma_error_to_str)?;
 
+            let _irq_guard = IrqGuard::new();
             *self.stream.lock() = Some(stream);
             Ok(())
         })();
@@ -859,6 +872,7 @@ impl AudioPlaybackDevice for AppleMca {
         let fe_cluster = self.playback_fe_cluster();
         let fe_cluster_base = self.cluster_base(fe_cluster)?;
         let channel = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
             if stream.running {
@@ -870,6 +884,7 @@ impl AudioPlaybackDevice for AppleMca {
         let codec_routes = self.playback_codec_routes();
 
         if let Err(error) = channel.start() {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             if let Some(stream) = guard.as_mut() {
                 stream.running = false;
@@ -885,6 +900,7 @@ impl AudioPlaybackDevice for AppleMca {
                 .and_then(|_| route.codec.set_playback_muted(false))
             {
                 let _ = channel.stop();
+                let _irq_guard = IrqGuard::new();
                 let mut guard = self.stream.lock();
                 if let Some(stream) = guard.as_mut() {
                     stream.running = false;
@@ -908,6 +924,7 @@ impl AudioPlaybackDevice for AppleMca {
             }
         }
         let channel = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             let Some(stream) = guard.as_mut() else {
                 self.disable_serdes(fe_cluster_base);
@@ -923,6 +940,7 @@ impl AudioPlaybackDevice for AppleMca {
             }
         }
         self.disable_serdes(fe_cluster_base);
+        let _irq_guard = IrqGuard::new();
         if let Some(stream) = self.stream.lock().as_mut() {
             stream.reset_queue();
         }
@@ -930,7 +948,10 @@ impl AudioPlaybackDevice for AppleMca {
     }
 
     fn release(&self) -> Result<(), &'static str> {
-        let had_stream = self.stream.lock().is_some();
+        let had_stream = {
+            let _irq_guard = IrqGuard::new();
+            self.stream.lock().is_some()
+        };
         if had_stream {
             let mut result = Ok(());
             let codec_routes = self.playback_codec_routes();
@@ -940,7 +961,14 @@ impl AudioPlaybackDevice for AppleMca {
                 keep_first_error(&mut result, error);
             }
             self.disable_playback_ports();
-            *self.stream.lock() = None;
+            {
+                let _irq_guard = IrqGuard::new();
+                let mut guard = self.stream.lock();
+                if let Some(stream) = guard.as_ref() {
+                    let _ = stream.channel.set_completion_callback(None);
+                }
+                *guard = None;
+            }
             for route in &codec_routes {
                 if let Err(error) = route.codec.set_playback_powered(false) {
                     keep_first_error(&mut result, error);
@@ -953,12 +981,14 @@ impl AudioPlaybackDevice for AppleMca {
     }
 
     fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.stream.lock();
         let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
         stream.queue_period(period)
     }
 
     fn process_completions(&self) -> usize {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.stream.lock();
         let Some(stream) = guard.as_mut() else {
             return 0;
@@ -967,6 +997,7 @@ impl AudioPlaybackDevice for AppleMca {
     }
 
     fn max_in_flight_periods(&self) -> usize {
+        let _irq_guard = IrqGuard::new();
         self.stream
             .lock()
             .as_ref()
@@ -978,6 +1009,17 @@ impl AudioPlaybackDevice for AppleMca {
                 }
             })
             .unwrap_or(4)
+    }
+
+    fn set_completion_callback(&self, callback: Option<AudioCompletionCallback>) {
+        {
+            let _irq_guard = IrqGuard::new();
+            *self.completion_callback.lock() = callback.clone();
+        }
+        let _irq_guard = IrqGuard::new();
+        if let Some(stream) = self.stream.lock().as_ref() {
+            let _ = stream.channel.set_completion_callback(callback);
+        }
     }
 }
 
@@ -994,6 +1036,7 @@ impl AppleMcaOutput {
             ports,
             codec_routes,
             stream: Mutex::new(None),
+            completion_callback: Mutex::new(None),
         }
     }
 
@@ -1112,7 +1155,15 @@ impl AudioPlaybackDevice for AppleMcaOutput {
                     }),
                 })
                 .map_err(dma_error_to_str)?;
+            let completion_callback = {
+                let _irq_guard = IrqGuard::new();
+                self.completion_callback.lock().clone()
+            };
+            channel
+                .set_completion_callback(completion_callback)
+                .map_err(dma_error_to_str)?;
 
+            let _irq_guard = IrqGuard::new();
             *self.stream.lock() = Some(stream);
             Ok(())
         })();
@@ -1126,6 +1177,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
     fn start(&self) -> Result<(), &'static str> {
         let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
         let channel = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
             if stream.running {
@@ -1136,6 +1188,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
         };
 
         if let Err(error) = channel.start() {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             if let Some(stream) = guard.as_mut() {
                 stream.running = false;
@@ -1151,6 +1204,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
                 .and_then(|_| route.codec.set_playback_muted(false))
             {
                 let _ = channel.stop();
+                let _irq_guard = IrqGuard::new();
                 let mut guard = self.stream.lock();
                 if let Some(stream) = guard.as_mut() {
                     stream.running = false;
@@ -1174,6 +1228,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
             }
         }
         let channel = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.stream.lock();
             let Some(stream) = guard.as_mut() else {
                 self.mca.disable_serdes(fe_cluster_base);
@@ -1189,6 +1244,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
             }
         }
         self.mca.disable_serdes(fe_cluster_base);
+        let _irq_guard = IrqGuard::new();
         if let Some(stream) = self.stream.lock().as_mut() {
             stream.reset_queue();
         }
@@ -1196,7 +1252,10 @@ impl AudioPlaybackDevice for AppleMcaOutput {
     }
 
     fn release(&self) -> Result<(), &'static str> {
-        let had_stream = self.stream.lock().is_some();
+        let had_stream = {
+            let _irq_guard = IrqGuard::new();
+            self.stream.lock().is_some()
+        };
         if had_stream {
             let mut result = Ok(());
             let fe_cluster_base = self.mca.cluster_base(self.fe_cluster)?;
@@ -1204,7 +1263,14 @@ impl AudioPlaybackDevice for AppleMcaOutput {
                 keep_first_error(&mut result, error);
             }
             self.disable_ports();
-            *self.stream.lock() = None;
+            {
+                let _irq_guard = IrqGuard::new();
+                let mut guard = self.stream.lock();
+                if let Some(stream) = guard.as_ref() {
+                    let _ = stream.channel.set_completion_callback(None);
+                }
+                *guard = None;
+            }
             for route in &self.codec_routes {
                 if let Err(error) = route.codec.set_playback_powered(false) {
                     keep_first_error(&mut result, error);
@@ -1218,12 +1284,14 @@ impl AudioPlaybackDevice for AppleMcaOutput {
     }
 
     fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.stream.lock();
         let stream = guard.as_mut().ok_or("apple-mca: stream not configured")?;
         stream.queue_period(period)
     }
 
     fn process_completions(&self) -> usize {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.stream.lock();
         let Some(stream) = guard.as_mut() else {
             return 0;
@@ -1232,6 +1300,7 @@ impl AudioPlaybackDevice for AppleMcaOutput {
     }
 
     fn max_in_flight_periods(&self) -> usize {
+        let _irq_guard = IrqGuard::new();
         self.stream
             .lock()
             .as_ref()
@@ -1243,6 +1312,17 @@ impl AudioPlaybackDevice for AppleMcaOutput {
                 }
             })
             .unwrap_or(4)
+    }
+
+    fn set_completion_callback(&self, callback: Option<AudioCompletionCallback>) {
+        {
+            let _irq_guard = IrqGuard::new();
+            *self.completion_callback.lock() = callback.clone();
+        }
+        let _irq_guard = IrqGuard::new();
+        if let Some(stream) = self.stream.lock().as_ref() {
+            let _ = stream.channel.set_completion_callback(callback);
+        }
     }
 }
 

@@ -4,8 +4,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-use crate::device::platform::PlatformDeviceInfo;
 use crate::device::DeviceInfo;
+use crate::device::platform::PlatformDeviceInfo;
 
 /// Power-domain operations exposed by platform PM controllers.
 pub trait PowerDomain: Send + Sync {

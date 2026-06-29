@@ -13,6 +13,9 @@ use alloc::vec::Vec;
 /// DMA address visible to a DMA controller.
 pub type DmaAddr = usize;
 
+/// Callback invoked after a DMA channel observes completed periods.
+pub type DmaCompletionCallback = Arc<dyn Fn() + Send + Sync>;
+
 /// Direction of a DMA transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaDirection {
@@ -217,6 +220,24 @@ pub trait DmaChannel: Send + Sync {
     fn queue_cyclic_period(&self, byte_offset: usize) -> Result<(), DmaError> {
         let _ = byte_offset;
         Err(DmaError::Unsupported)
+    }
+
+    /// Install a completion callback for cyclic transfers.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Callback to invoke when the channel observes completed periods,
+    ///   or `None` to clear the callback.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the callback state was updated.
+    fn set_completion_callback(
+        &self,
+        callback: Option<DmaCompletionCallback>,
+    ) -> Result<(), DmaError> {
+        let _ = callback;
+        Ok(())
     }
 
     /// Report whether the channel is currently running.

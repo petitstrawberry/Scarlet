@@ -14,8 +14,8 @@ use scarlet::{
     device::{
         DeviceInfo,
         dma::{
-            DmaBusWidth, DmaChannel, DmaController, DmaCyclicConfig, DmaDirection, DmaError,
-            DmaSpec,
+            DmaBusWidth, DmaChannel, DmaCompletionCallback, DmaController, DmaCyclicConfig,
+            DmaDirection, DmaError, DmaSpec,
         },
         events::InterruptCapableDevice,
         iommu::{
@@ -28,6 +28,8 @@ use scarlet::{
     },
     early_println,
     interrupt::{InterruptId, InterruptResult},
+    println,
+    sync::IrqGuard,
 };
 
 const NCHANNELS_MAX: usize = 64;
@@ -99,6 +101,7 @@ struct AppleAdmacChannelState {
     transfer: Mutex<Option<AppleAdmacTransfer>>,
     carveout: Mutex<Option<u32>>,
     completed_periods: AtomicUsize,
+    completion_callback: Mutex<Option<DmaCompletionCallback>>,
     error: AtomicBool,
 }
 
@@ -110,6 +113,7 @@ impl AppleAdmacChannelState {
             transfer: Mutex::new(None),
             carveout: Mutex::new(None),
             completed_periods: AtomicUsize::new(0),
+            completion_callback: Mutex::new(None),
             error: AtomicBool::new(false),
         }
     }
@@ -521,12 +525,35 @@ impl AppleAdmac {
 
     fn handle_status_err(&self, index: usize) {
         let mut handled = false;
-        if self.read_reg(Self::desc_ring_reg(index)) & RING_ERR != 0 {
+        let intstatus = self.read_reg(Self::chan_intstatus_reg(index, self.inner.irq_index));
+        let intmask = self.read_reg(Self::chan_intmask_reg(index, self.inner.irq_index));
+        let desc_ring = self.read_reg(Self::desc_ring_reg(index));
+        let report_ring = self.read_reg(Self::report_ring_reg(index));
+        let residue = self.read_reg(Self::residue_reg(index));
+        let ctl = self.read_reg(Self::chan_ctl_reg(index));
+        let running = self
+            .inner
+            .channels
+            .get(index)
+            .map(|state| state.running.load(Ordering::Acquire))
+            .unwrap_or(false);
+
+        println!(
+            "[apple-admac] status err: ch={} intstatus={:#010x} intmask={:#010x} ctl={:#010x} desc={:#010x} report={:#010x} residue={:#010x} running={}",
+            index, intstatus, intmask, ctl, desc_ring, report_ring, residue, running
+        );
+
+        if desc_ring & RING_ERR != 0 {
             self.write_reg(Self::desc_ring_reg(index), RING_ERR);
+            println!(
+                "[apple-admac] status err: ch={} descriptor ring error",
+                index
+            );
             handled = true;
         }
-        if self.read_reg(Self::report_ring_reg(index)) & RING_ERR != 0 {
+        if report_ring & RING_ERR != 0 {
             self.write_reg(Self::report_ring_reg(index), RING_ERR);
+            println!("[apple-admac] status err: ch={} report ring error", index);
             handled = true;
         }
         if !handled {
@@ -552,8 +579,14 @@ impl AppleAdmac {
             return;
         }
 
-        if let Some(state) = self.inner.channels.get(index) {
+        let callback = if let Some(state) = self.inner.channels.get(index) {
             state.completed_periods.fetch_add(reports, Ordering::AcqRel);
+            state.completion_callback.lock().clone()
+        } else {
+            None
+        };
+        if let Some(callback) = callback {
+            callback();
         }
     }
 
@@ -568,17 +601,20 @@ impl AppleAdmac {
     }
 
     fn reclaim_completed_reports(&self, index: usize) -> usize {
+        let Some(state) = self.inner.channels.get(index) else {
+            return 0;
+        };
+
+        let _irq_guard = IrqGuard::new();
+        let mut transfer = state.transfer.lock();
         let reports = self.drain_reports(index);
         if reports == 0 {
             return 0;
         }
 
-        if let Some(state) = self.inner.channels.get(index) {
-            let mut transfer = state.transfer.lock();
-            if let Some(transfer) = transfer.as_mut() {
-                transfer.reclaimed_pos += reports * transfer.config.period_len;
-                transfer.reclaimed_pos %= 2 * transfer.config.buffer_len;
-            }
+        if let Some(transfer) = transfer.as_mut() {
+            transfer.reclaimed_pos += reports * transfer.config.period_len;
+            transfer.reclaimed_pos %= 2 * transfer.config.buffer_len;
         }
 
         reports
@@ -704,11 +740,13 @@ impl Drop for AppleAdmacChannel {
         if let Ok(state) = self.controller.channel_state(self.index) {
             self.controller.stop_channel(self.index);
             self.controller.reset_rings(self.index);
+            let _irq_guard = IrqGuard::new();
             if let Some(transfer) = state.transfer.lock().take() {
                 self.controller.unmap_transfer(&transfer);
             }
             state.running.store(false, Ordering::Release);
             state.completed_periods.store(0, Ordering::Release);
+            *state.completion_callback.lock() = None;
             state.error.store(false, Ordering::Release);
             if let Some(carveout) = state.carveout.lock().take() {
                 self.controller
@@ -739,9 +777,12 @@ impl DmaChannel for AppleAdmacChannel {
         self.controller
             .write_reg(AppleAdmac::chan_ctl_reg(self.index), 0);
 
-        let old_transfer = state.transfer.lock().take();
-        if let Some(transfer) = old_transfer {
-            self.controller.unmap_transfer(&transfer);
+        {
+            let _irq_guard = IrqGuard::new();
+            let old_transfer = state.transfer.lock().take();
+            if let Some(transfer) = old_transfer {
+                self.controller.unmap_transfer(&transfer);
+            }
         }
 
         let (mapped_config, dma_addr) = self.controller.map_cyclic_config(config)?;
@@ -756,6 +797,7 @@ impl DmaChannel for AppleAdmacChannel {
         state.completed_periods.store(0, Ordering::Release);
         state.error.store(false, Ordering::Release);
         {
+            let _irq_guard = IrqGuard::new();
             let mut transfer = state.transfer.lock();
             *transfer = Some(AppleAdmacTransfer::new(
                 mapped_config,
@@ -774,8 +816,11 @@ impl DmaChannel for AppleAdmacChannel {
         if state.running.load(Ordering::Acquire) {
             return Ok(());
         }
-        if state.transfer.lock().is_none() {
-            return Err(DmaError::NotPrepared);
+        {
+            let _irq_guard = IrqGuard::new();
+            if state.transfer.lock().is_none() {
+                return Err(DmaError::NotPrepared);
+            }
         }
         if self
             .controller
@@ -797,8 +842,11 @@ impl DmaChannel for AppleAdmacChannel {
         let state = self.controller.channel_state(self.index)?;
         self.controller.stop_channel(self.index);
         self.controller.reset_rings(self.index);
-        if let Some(transfer) = state.transfer.lock().as_mut() {
-            transfer.reset_position();
+        {
+            let _irq_guard = IrqGuard::new();
+            if let Some(transfer) = state.transfer.lock().as_mut() {
+                transfer.reset_position();
+            }
         }
         state.running.store(false, Ordering::Release);
         state.completed_periods.store(0, Ordering::Release);
@@ -815,8 +863,11 @@ impl DmaChannel for AppleAdmacChannel {
 
     fn resume(&self) -> Result<(), DmaError> {
         let state = self.controller.channel_state(self.index)?;
-        if state.transfer.lock().is_none() {
-            return Err(DmaError::NotPrepared);
+        {
+            let _irq_guard = IrqGuard::new();
+            if state.transfer.lock().is_none() {
+                return Err(DmaError::NotPrepared);
+            }
         }
         if state.error.load(Ordering::Acquire) {
             return Err(DmaError::HardwareError);
@@ -836,6 +887,7 @@ impl DmaChannel for AppleAdmacChannel {
 
     fn residue(&self) -> Result<usize, DmaError> {
         let state = self.controller.channel_state(self.index)?;
+        let _irq_guard = IrqGuard::new();
         let transfer = state.transfer.lock();
         let transfer = transfer.as_ref().ok_or(DmaError::NotPrepared)?;
         Ok(self.controller.read_residue_locked(self.index, transfer))
@@ -852,6 +904,7 @@ impl DmaChannel for AppleAdmacChannel {
 
     fn queue_cyclic_period(&self, byte_offset: usize) -> Result<(), DmaError> {
         let state = self.controller.channel_state(self.index)?;
+        let _irq_guard = IrqGuard::new();
         if state.error.load(Ordering::Acquire) {
             return Err(DmaError::HardwareError);
         }
@@ -868,6 +921,16 @@ impl DmaChannel for AppleAdmacChannel {
         let transfer = transfer.as_mut().ok_or(DmaError::NotPrepared)?;
         self.controller
             .write_one_desc_at(self.index, transfer, byte_offset)
+    }
+
+    fn set_completion_callback(
+        &self,
+        callback: Option<DmaCompletionCallback>,
+    ) -> Result<(), DmaError> {
+        let state = self.controller.channel_state(self.index)?;
+        let _irq_guard = IrqGuard::new();
+        *state.completion_callback.lock() = callback;
+        Ok(())
     }
 
     fn is_running(&self) -> bool {

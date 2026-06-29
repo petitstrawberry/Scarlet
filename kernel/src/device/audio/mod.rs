@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +25,7 @@ use crate::object::capability::selectable::{
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::println;
+use crate::sync::IrqGuard;
 use crate::task::mytask;
 
 static AUDIO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -75,6 +76,9 @@ pub const AUDIO_PCM_FORMAT_F32LE: u32 = 4;
 pub const AUDIO_PCM_FORMAT_S8: u32 = 5;
 /// Maximum sample rates returned in one capability query.
 pub const AUDIO_PCM_MAX_RATES: usize = 16;
+
+/// Callback invoked by playback backends when DMA has completed periods.
+pub type AudioCompletionCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Stream is configured but not running.
 pub const AUDIO_STATE_PREPARED: u32 = 1;
@@ -370,6 +374,16 @@ pub trait AudioPlaybackDevice: Send + Sync {
     ///
     /// Number of completed periods.
     fn process_completions(&self) -> usize;
+
+    /// Install a completion callback for backend-driven refill.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Callback to invoke when the backend has completed periods,
+    ///   or `None` to clear the callback.
+    fn set_completion_callback(&self, callback: Option<AudioCompletionCallback>) {
+        let _ = callback;
+    }
 
     /// Maximum backend periods that may be queued at once.
     fn max_in_flight_periods(&self) -> usize {
@@ -689,6 +703,23 @@ impl AudioCharDevice {
         }
     }
 
+    fn install_completion_callback(this: &Arc<Self>) {
+        let weak: Weak<Self> = Arc::downgrade(this);
+        this.backend.set_completion_callback(Some(Arc::new(move || {
+            if let Some(device) = weak.upgrade() {
+                device.handle_backend_completion();
+            }
+        })));
+    }
+
+    fn handle_backend_completion(&self) {
+        let _irq_guard = IrqGuard::new();
+        let mut guard = self.ring.lock();
+        if let Some(ring) = guard.as_mut() {
+            self.pump_locked(ring);
+        }
+    }
+
     fn pump_locked(&self, ring: &mut AudioPcmRing) {
         let completed = self.backend.process_completions();
         if completed != 0 {
@@ -738,6 +769,7 @@ impl AudioCharDevice {
         &self,
         f: impl FnOnce(&mut AudioPcmRing) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.ring.lock();
         let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
         let result = f(ring)?;
@@ -762,6 +794,7 @@ impl AudioCharDevice {
             return Err("Unsupported PCM parameters");
         }
         let should_release = {
+            let _irq_guard = IrqGuard::new();
             let guard = self.ring.lock();
             if let Some(ring) = guard.as_ref() {
                 match ring.state {
@@ -778,6 +811,7 @@ impl AudioCharDevice {
         let mut ring = AudioPcmRing::new(params)?;
         ring.clear_data();
         self.backend.configure(&params, ring.dma_buffer())?;
+        let _irq_guard = IrqGuard::new();
         *self.ring.lock() = Some(ring);
         Ok(0)
     }
@@ -801,6 +835,7 @@ impl AudioCharDevice {
 
     fn handle_start(&self) -> Result<i32, &'static str> {
         {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
             if ring.state == AUDIO_STATE_XRUN {
@@ -813,6 +848,7 @@ impl AudioCharDevice {
             }
         }
         if let Err(error) = self.backend.start() {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             if let Some(ring) = guard.as_mut() {
                 ring.state = AUDIO_STATE_XRUN;
@@ -825,6 +861,7 @@ impl AudioCharDevice {
 
     fn handle_stop(&self) -> Result<i32, &'static str> {
         let (was_running, was_xrun) = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
             let was_running = ring.state == AUDIO_STATE_RUNNING;
@@ -838,6 +875,7 @@ impl AudioCharDevice {
                 result = Err(error);
             }
         }
+        let _irq_guard = IrqGuard::new();
         if let Some(ring) = self.ring.lock().as_mut() {
             ring.discard_pending();
         }
@@ -855,6 +893,7 @@ impl AudioCharDevice {
 
     fn handle_release(&self) -> Result<i32, &'static str> {
         let Some(was_running) = ({
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             let Some(ring) = guard.as_mut() else {
                 *self.opened.lock() = false;
@@ -877,6 +916,7 @@ impl AudioCharDevice {
         {
             result = Err(error);
         }
+        let _irq_guard = IrqGuard::new();
         *self.ring.lock() = None;
         *self.opened.lock() = false;
         result.map(|_| 0)
@@ -912,7 +952,9 @@ pub fn register_playback_device_with_info(
 ) -> String {
     let id = AUDIO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = alloc::format!("audio{}", id);
-    let audio_char: Arc<dyn Device> = Arc::new(AudioCharDevice::new_with_info(backend, info));
+    let audio_char = Arc::new(AudioCharDevice::new_with_info(backend, info));
+    AudioCharDevice::install_completion_callback(&audio_char);
+    let audio_char: Arc<dyn Device> = audio_char;
     crate::device::manager::DeviceManager::get_manager()
         .register_device_with_name(name.clone(), audio_char);
     name
@@ -930,6 +972,7 @@ impl Device for AudioCharDevice {
 
     fn close(&self) {
         let stream = {
+            let _irq_guard = IrqGuard::new();
             let mut ring = self.ring.lock();
             ring.as_mut().map(|ring| {
                 let was_running = ring.state == AUDIO_STATE_RUNNING;
@@ -942,6 +985,7 @@ impl Device for AudioCharDevice {
                 let _ = self.backend.stop();
             }
             let _ = self.backend.release();
+            let _irq_guard = IrqGuard::new();
             *self.ring.lock() = None;
         }
         *self.opened.lock() = false;
@@ -991,6 +1035,7 @@ impl CharDevice for AudioCharDevice {
     }
 
     fn can_write(&self) -> bool {
+        let _irq_guard = IrqGuard::new();
         self.ring
             .lock()
             .as_ref()
@@ -1047,6 +1092,7 @@ impl MemoryMappingOps for AudioCharDevice {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
+        let _irq_guard = IrqGuard::new();
         let guard = self.ring.lock();
         let ring = guard.as_ref().ok_or("PCM ring is not configured")?;
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
@@ -1066,6 +1112,7 @@ impl MemoryMappingOps for AudioCharDevice {
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
     fn supports_mmap(&self) -> bool {
+        let _irq_guard = IrqGuard::new();
         self.ring.lock().as_ref().is_some()
     }
 }
@@ -1074,6 +1121,7 @@ impl Selectable for AudioCharDevice {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         if interest.write {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             if let Some(ring) = guard.as_mut() {
                 self.pump_locked(ring);
