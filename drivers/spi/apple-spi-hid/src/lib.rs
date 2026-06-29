@@ -13,7 +13,7 @@ use scarlet::device::events::InterruptCapableDevice;
 use scarlet::device::gpio::GpioIrqTrigger;
 use scarlet::device::input::event_device::EventDevice;
 use scarlet::device::input::event_types::{EV_KEY, EV_REL, EV_SYN};
-use scarlet::device::input::key_codes::{BTN_LEFT, BTN_RIGHT};
+use scarlet::device::input::key_codes::BTN_LEFT;
 use scarlet::device::input::key_values::{KEY_PRESS, KEY_RELEASE};
 use scarlet::device::input::rel_codes::{REL_X, REL_Y};
 use scarlet::device::input::syn_codes::SYN_REPORT;
@@ -71,6 +71,8 @@ const KEY_6: u16 = 7;
 const KEY_7: u16 = 8;
 const KEY_8: u16 = 9;
 const KEY_9: u16 = 10;
+const KEY_MINUS: u16 = 12;
+const KEY_EQUAL: u16 = 13;
 
 const KEY_A: u16 = 30;
 const KEY_B: u16 = 48;
@@ -104,6 +106,16 @@ const KEY_ESC: u16 = 1;
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
 const KEY_SPACE: u16 = 57;
+const KEY_LEFTBRACE: u16 = 26;
+const KEY_RIGHTBRACE: u16 = 27;
+const KEY_SEMICOLON: u16 = 39;
+const KEY_APOSTROPHE: u16 = 40;
+const KEY_GRAVE: u16 = 41;
+const KEY_BACKSLASH: u16 = 43;
+const KEY_COMMA: u16 = 51;
+const KEY_DOT: u16 = 52;
+const KEY_SLASH: u16 = 53;
+const KEY_CAPSLOCK: u16 = 58;
 
 const KEY_F1: u16 = 59;
 const KEY_F2: u16 = 60;
@@ -175,6 +187,18 @@ fn hid_usage_to_key(usage: u8) -> Option<u16> {
         0x2a => Some(KEY_BACKSPACE),
         0x2b => Some(KEY_TAB),
         0x2c => Some(KEY_SPACE),
+        0x2d => Some(KEY_MINUS),
+        0x2e => Some(KEY_EQUAL),
+        0x2f => Some(KEY_LEFTBRACE),
+        0x30 => Some(KEY_RIGHTBRACE),
+        0x31 => Some(KEY_BACKSLASH),
+        0x33 => Some(KEY_SEMICOLON),
+        0x34 => Some(KEY_APOSTROPHE),
+        0x35 => Some(KEY_GRAVE),
+        0x36 => Some(KEY_COMMA),
+        0x37 => Some(KEY_DOT),
+        0x38 => Some(KEY_SLASH),
+        0x39 => Some(KEY_CAPSLOCK),
         0x3a => Some(KEY_F1),
         0x3b => Some(KEY_F2),
         0x3c => Some(KEY_F3),
@@ -850,19 +874,30 @@ impl AppleSpiHidTransport {
 
         if finger_count > 0 && report.len() >= base + TP_FINGER_SIZE {
             let finger = &report[base..base + TP_FINGER_SIZE];
-            let touch_major = i16::from_le_bytes([
-                finger[FINGER_TOUCH_MAJOR],
-                finger[FINGER_TOUCH_MAJOR + 1],
-            ]);
+            let touch_major =
+                i16::from_le_bytes([finger[FINGER_TOUCH_MAJOR], finger[FINGER_TOUCH_MAJOR + 1]]);
 
             if REPORT_LOGS.fetch_add(1, Ordering::Relaxed) < REPORT_LOG_LIMIT {
                 let abs_x = i16::from_le_bytes([finger[FINGER_ABS_X], finger[FINGER_ABS_X + 1]]);
                 let abs_y = i16::from_le_bytes([finger[FINGER_ABS_Y], finger[FINGER_ABS_Y + 1]]);
                 early_println!(
                     "tp: nf={} tm={} ax={} ay={} f0={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                    finger_count, touch_major, abs_x, abs_y,
-                    finger[0], finger[1], finger[2], finger[3], finger[4], finger[5],
-                    finger[6], finger[7], finger[8], finger[9], finger[10], finger[11]
+                    finger_count,
+                    touch_major,
+                    abs_x,
+                    abs_y,
+                    finger[0],
+                    finger[1],
+                    finger[2],
+                    finger[3],
+                    finger[4],
+                    finger[5],
+                    finger[6],
+                    finger[7],
+                    finger[8],
+                    finger[9],
+                    finger[10],
+                    finger[11]
                 );
             }
 
@@ -1158,8 +1193,7 @@ fn ensure_repeat_worker_started() {
         return;
     }
 
-    let task =
-        scarlet::task::new_kernel_task("spi-hid-repeat".to_string(), 1, repeat_worker_entry);
+    let task = scarlet::task::new_kernel_task("spi-hid-repeat".to_string(), 1, repeat_worker_entry);
     task.init();
     scarlet::sched::scheduler::add_task(task, scarlet::arch::get_cpu().get_cpuid());
 }

@@ -219,11 +219,13 @@ pub mod key_code {
     pub const KEY_SLASH: u16 = 0x35;
     pub const KEY_SEMICOLON: u16 = 0x27;
     pub const KEY_APOSTROPHE: u16 = 0x28;
+    pub const KEY_GRAVE: u16 = 0x29;
     pub const KEY_LEFTBRACE: u16 = 0x1a;
     pub const KEY_RIGHTBRACE: u16 = 0x1b;
     pub const KEY_BACKSLASH: u16 = 0x2b;
     pub const KEY_MINUS: u16 = 0x0c;
     pub const KEY_EQUAL: u16 = 0x0d;
+    pub const KEY_CAPSLOCK: u16 = 0x3a;
     pub const KEY_HOME: u16 = 0x66;
     pub const KEY_UP: u16 = 0x67;
     pub const KEY_PAGEUP: u16 = 0x68;

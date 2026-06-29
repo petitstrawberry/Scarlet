@@ -278,6 +278,46 @@ fn parse_key_code_name(value: &str) -> Option<u16> {
         return Some(code);
     }
 
+    if value == "-" || value.eq_ignore_ascii_case("minus") {
+        return Some(key_codes::KEY_MINUS);
+    }
+    if value == "=" || value.eq_ignore_ascii_case("equal") || value.eq_ignore_ascii_case("equals") {
+        return Some(key_codes::KEY_EQUAL);
+    }
+    if value == "["
+        || value.eq_ignore_ascii_case("leftbrace")
+        || value.eq_ignore_ascii_case("lbracket")
+    {
+        return Some(key_codes::KEY_LEFTBRACE);
+    }
+    if value == "]"
+        || value.eq_ignore_ascii_case("rightbrace")
+        || value.eq_ignore_ascii_case("rbracket")
+    {
+        return Some(key_codes::KEY_RIGHTBRACE);
+    }
+    if value == ";" || value.eq_ignore_ascii_case("semicolon") {
+        return Some(key_codes::KEY_SEMICOLON);
+    }
+    if value == "'"
+        || value.eq_ignore_ascii_case("apostrophe")
+        || value.eq_ignore_ascii_case("quote")
+    {
+        return Some(key_codes::KEY_APOSTROPHE);
+    }
+    if value == "`" || value.eq_ignore_ascii_case("grave") || value.eq_ignore_ascii_case("backtick")
+    {
+        return Some(key_codes::KEY_GRAVE);
+    }
+    if value == "," || value.eq_ignore_ascii_case("comma") {
+        return Some(key_codes::KEY_COMMA);
+    }
+    if value == "." || value.eq_ignore_ascii_case("dot") || value.eq_ignore_ascii_case("period") {
+        return Some(key_codes::KEY_DOT);
+    }
+    if value == "/" || value.eq_ignore_ascii_case("slash") {
+        return Some(key_codes::KEY_SLASH);
+    }
     if value == "\\" || value.eq_ignore_ascii_case("backslash") {
         return Some(key_codes::KEY_BACKSLASH);
     }
