@@ -15,10 +15,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
 use sas_client::SasClient;
-use sas_protocol::{
-    CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16, OUTPUT_PREFERENCE_HEADPHONES,
-    OUTPUT_PREFERENCE_SPEAKERS, OutputRequest,
-};
+use sas_protocol::{CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16};
 use scarlet_os::time;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
@@ -174,16 +171,13 @@ struct MenuEntryPayload {
 }
 
 fn default_root_menu_items() -> Vec<TaskMenuItem> {
-    vec![
-        TaskMenuItem {
-            id: String::from("system_scarlet"),
-            title: String::from("Scarlet"),
-            enabled: true,
-            shortcut: None,
-            children: default_system_menu_entries(),
-        },
-        default_audio_menu_item(),
-    ]
+    vec![TaskMenuItem {
+        id: String::from("system_scarlet"),
+        title: String::from("Scarlet"),
+        enabled: true,
+        shortcut: None,
+        children: default_system_menu_entries(),
+    }]
 }
 
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
@@ -220,61 +214,6 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     ]
 }
 
-fn default_audio_menu_item() -> TaskMenuItem {
-    TaskMenuItem {
-        id: String::from("system_audio"),
-        title: String::from("Audio"),
-        enabled: true,
-        shortcut: None,
-        children: vec![
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_volume_down"),
-                title: String::from("Volume Down"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_volume_up"),
-                title: String::from("Volume Up"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_mute_toggle"),
-                title: String::from("Toggle Mute"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-            TaskMenuEntry::Separator,
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_speakers"),
-                title: String::from("Speakers"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_headphones"),
-                title: String::from("Headphones"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-            TaskMenuEntry::Separator,
-            TaskMenuEntry::Item(TaskMenuItem {
-                id: String::from("system_audio_settings"),
-                title: String::from("Audio Settings"),
-                enabled: true,
-                shortcut: None,
-                children: Vec::new(),
-            }),
-        ],
-    }
-}
-
 fn fixed_sas_str(bytes: &[u8]) -> &str {
     let len = bytes
         .iter()
@@ -286,10 +225,6 @@ fn fixed_sas_str(bytes: &[u8]) -> &str {
 fn q16_to_percent(volume_q16: u32) -> u32 {
     ((volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
         / MASTER_VOLUME_UNITY_Q16 as u64) as u32
-}
-
-fn percent_to_q16(percent: u32) -> u32 {
-    ((percent.min(100) as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100) as u32
 }
 
 fn output_label(kind: u32, name: &str) -> String {
@@ -304,52 +239,35 @@ fn output_label(kind: u32, name: &str) -> String {
 }
 
 fn refresh_taskbar_audio_state(
+    client: &mut SasClient,
     volume_percent: &State<u8>,
     muted: &State<bool>,
     output: &State<String>,
-) {
-    let Ok(mut client) = SasClient::connect() else {
-        return;
-    };
-    let Ok(state) = client.control_state() else {
-        return;
-    };
+) -> core::result::Result<(), ()> {
+    let state = client.control_state().map_err(|_| ())?;
     volume_percent.set(q16_to_percent(state.master_volume_q16).min(100) as u8);
     muted.set(state.flags & CONTROL_FLAG_MUTED != 0);
     output.set(output_label(
         state.output_kind,
         fixed_sas_str(&state.output_name),
     ));
+    Ok(())
 }
 
-fn adjust_sas_volume(delta: i32) {
-    let Ok(mut client) = SasClient::connect() else {
-        return;
-    };
-    let Ok(state) = client.control_state() else {
-        return;
-    };
-    let current = q16_to_percent(state.master_volume_q16) as i32;
-    let next = (current + delta).clamp(0, 100) as u32;
-    let _ = client.set_master_volume_q16(percent_to_q16(next));
-}
+fn poll_taskbar_audio_state(volume_percent: State<u8>, muted: State<bool>, output: State<String>) {
+    let mut client = None;
+    loop {
+        if client.is_none() {
+            client = SasClient::connect().ok();
+        }
 
-fn toggle_sas_mute() {
-    let Ok(mut client) = SasClient::connect() else {
-        return;
-    };
-    let Ok(state) = client.control_state() else {
-        return;
-    };
-    let _ = client.set_master_muted(state.flags & CONTROL_FLAG_MUTED == 0);
-}
+        if let Some(active_client) = client.as_mut()
+            && refresh_taskbar_audio_state(active_client, &volume_percent, &muted, &output).is_err()
+        {
+            client = None;
+        }
 
-fn set_sas_output(preference: u32) {
-    let Some(request) = OutputRequest::new(preference, "") else {
-        return;
-    };
-    if let Ok(mut client) = SasClient::connect() {
-        let _ = client.set_output(request);
+        std::thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -664,30 +582,6 @@ fn build_menu_items(
                         println!("[TaskBar] System shutdown requested");
                         return;
                     }
-                    if item_id == "system_audio_volume_down" {
-                        adjust_sas_volume(-5);
-                        return;
-                    }
-                    if item_id == "system_audio_volume_up" {
-                        adjust_sas_volume(5);
-                        return;
-                    }
-                    if item_id == "system_audio_mute_toggle" {
-                        toggle_sas_mute();
-                        return;
-                    }
-                    if item_id == "system_audio_speakers" {
-                        set_sas_output(OUTPUT_PREFERENCE_SPEAKERS);
-                        return;
-                    }
-                    if item_id == "system_audio_headphones" {
-                        set_sas_output(OUTPUT_PREFERENCE_HEADPHONES);
-                        return;
-                    }
-                    if item_id == "system_audio_settings" {
-                        launch_app(b"org.scarlet-os.desktop.settings");
-                        return;
-                    }
                     // Handle application menu items
                     if window_id == 0 || item_id.starts_with("system_") {
                         return;
@@ -961,10 +855,7 @@ impl TaskBarApp {
         });
 
         std::thread::spawn(move || {
-            loop {
-                refresh_taskbar_audio_state(&audio_volume, &audio_muted, &audio_output);
-                std::thread::sleep(Duration::from_secs(2));
-            }
+            poll_taskbar_audio_state(audio_volume, audio_muted, audio_output);
         });
 
         // Menu popup handling thread (still needed for interactive menu popup)
