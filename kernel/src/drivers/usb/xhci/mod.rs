@@ -12,15 +12,21 @@ pub mod trb;
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use spin::Mutex;
 
 use crate::device::Device;
+use crate::device::block::{
+    BlockDevice,
+    request::{BlockIORequest, BlockIORequestType, BlockIOResult},
+};
 use crate::device::events::InterruptCapableDevice;
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig};
@@ -47,6 +53,7 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::early_println;
 use crate::interrupt::InterruptId;
 use crate::mem::page::ContiguousPages;
+use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
 
@@ -55,7 +62,10 @@ const EVENT_RING_TRBS: usize = 256;
 const COMMAND_COMPLETION_SUCCESS: u8 = 1;
 const TRANSFER_EVENT_SHORT_PACKET: u8 = 13;
 const USBSTS_EVENT_INTERRUPT: u32 = 1 << 3;
+const USBSTS_HOST_SYSTEM_ERROR: u32 = 1 << 2;
 const USBSTS_PORT_CHANGE_DETECT: u32 = 1 << 4;
+const USBSTS_WRITE_1_TO_CLEAR: u32 =
+    USBSTS_HOST_SYSTEM_ERROR | USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT;
 const ERDP_EVENT_HANDLER_BUSY: u64 = 1 << 3;
 const USB_REQ_GET_DESCRIPTOR: u8 = 0x06;
 const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
@@ -65,9 +75,18 @@ const USB_DT_CONFIGURATION: u8 = 2;
 const USB_DT_INTERFACE: u8 = 4;
 const USB_DT_ENDPOINT: u8 = 5;
 const USB_CLASS_HID: u8 = 3;
+const USB_CLASS_MASS_STORAGE: u8 = 0x08;
+const USB_MSC_SUBCLASS_SCSI: u8 = 0x06;
+const USB_MSC_PROTOCOL_BULK_ONLY: u8 = 0x50;
 const USB_ENDPOINT_XFER_INT: u8 = 3;
+const USB_ENDPOINT_XFER_BULK: u8 = 2;
 const EP0_DCI: u8 = 1;
 const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
+const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
+const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
+const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
+const USB_STORAGE_CBW_LEN: usize = 31;
+const USB_STORAGE_CSW_LEN: usize = 13;
 
 #[derive(Clone, Copy)]
 struct BootInterfaceConfig {
@@ -77,6 +96,29 @@ struct BootInterfaceConfig {
     endpoint_address: u8,
     max_packet_size: u16,
     interval: u8,
+}
+
+#[derive(Clone, Copy)]
+struct MassStorageInterfaceConfig {
+    configuration_value: u8,
+    interface_number: u8,
+    bulk_in_endpoint: u8,
+    bulk_in_max_packet_size: u16,
+    bulk_out_endpoint: u8,
+    bulk_out_max_packet_size: u16,
+}
+
+struct BulkEndpointRuntime {
+    endpoint_address: u8,
+    dci: u8,
+    max_packet_size: u16,
+    ring: DmaTrbRing,
+}
+
+struct MassStorageRuntime {
+    input_context: ContiguousPages,
+    bulk_in: BulkEndpointRuntime,
+    bulk_out: BulkEndpointRuntime,
 }
 
 /// PCI base class for serial bus controllers.
@@ -246,6 +288,7 @@ struct SlotRuntime {
     interrupt_dci: Option<u8>,
     interrupt_endpoint_address: Option<u8>,
     interrupt_max_packet_size: Option<u16>,
+    storage: Option<MassStorageRuntime>,
     hid: Option<HidDeviceState>,
 }
 
@@ -456,19 +499,35 @@ impl XhciController {
 
     /// Start the xHCI controller
     pub fn start(&self) -> Result<(), &'static str> {
+        let stale_status = self.operational.read_usbsts() & USBSTS_WRITE_1_TO_CLEAR;
+        if stale_status != 0 {
+            early_println!("[xHCI] Clearing stale USBSTS bits {:#x}", stale_status);
+            self.operational.write_usbsts(stale_status);
+        }
+
         let usbcmd = self.operational.read_usbcmd();
         // Set Run/Stop bit (bit 0)
         self.operational.write_usbcmd(usbcmd | 0x1);
 
-        // Verify controller is running
-        let usbsts = self.operational.read_usbsts();
-        if (usbsts & 0x1) != 0 {
-            return Err("Controller not running after start");
+        let deadline = crate::time::current_time() + 500_000;
+        while crate::time::current_time() < deadline {
+            let usbsts = self.operational.read_usbsts();
+            if (usbsts & 0x1) == 0 {
+                *self.state.lock() = XhciState::Running;
+                early_println!("[xHCI] Controller started");
+                return Ok(());
+            }
+            core::hint::spin_loop();
         }
 
-        *self.state.lock() = XhciState::Running;
-        early_println!("[xHCI] Controller started");
-        Ok(())
+        let usbcmd = self.operational.read_usbcmd();
+        let usbsts = self.operational.read_usbsts();
+        early_println!(
+            "[xHCI] Start timeout: USBCMD={:#x} USBSTS={:#x}",
+            usbcmd,
+            usbsts
+        );
+        Err("Timeout waiting for xHCI start")
     }
 
     fn setup_dcbaa(&self) -> Result<(), &'static str> {
@@ -728,6 +787,7 @@ impl XhciController {
             interrupt_dci: None,
             interrupt_endpoint_address: None,
             interrupt_max_packet_size: None,
+            storage: None,
             hid: None,
         })
     }
@@ -1022,6 +1082,182 @@ impl XhciController {
         Ok(true)
     }
 
+    fn configure_mass_storage_slot(self: &Arc<Self>, slot_id: u8) -> Result<bool, &'static str> {
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for mass storage setup")?;
+            if slot.storage.is_some() {
+                return Ok(true);
+            }
+        }
+
+        let config_blob = {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for storage config fetch")?;
+
+            let mut header_buffer =
+                ContiguousPages::new(1).ok_or("Failed to allocate config header buffer")?;
+            unsafe {
+                core::ptr::write_bytes(
+                    header_buffer.as_vaddr() as *mut u8,
+                    0,
+                    crate::environment::PAGE_SIZE,
+                )
+            };
+            self.control_transfer(
+                slot,
+                0x80,
+                USB_REQ_GET_DESCRIPTOR,
+                (USB_DT_CONFIGURATION as u16) << 8,
+                0,
+                Some(&mut header_buffer),
+                ConfigurationDescriptor::encoded_size() as u16,
+            )?;
+            let header = unsafe {
+                read_unaligned(header_buffer.as_vaddr() as *const ConfigurationDescriptor)
+            };
+            self.get_configuration_blob(slot, header.total_length)?
+        };
+
+        let storage = match self.parse_mass_storage_interface(&config_blob) {
+            Ok(storage) => storage,
+            Err(_) => return Ok(false),
+        };
+
+        early_println!(
+            "[xHCI] Slot {} mass storage interface: cfg={} if={} bulk_in={:#x}/{} bulk_out={:#x}/{}",
+            slot_id,
+            storage.configuration_value,
+            storage.interface_number,
+            storage.bulk_in_endpoint,
+            storage.bulk_in_max_packet_size,
+            storage.bulk_out_endpoint,
+            storage.bulk_out_max_packet_size
+        );
+
+        let bulk_in_dci = Self::endpoint_dci(storage.bulk_in_endpoint);
+        let bulk_out_dci = Self::endpoint_dci(storage.bulk_out_endpoint);
+        let max_dci = bulk_in_dci.max(bulk_out_dci);
+        let bulk_in_ring = DmaTrbRing::new(64).ok_or("Failed to allocate bulk IN ring")?;
+        let bulk_out_ring = DmaTrbRing::new(64).ok_or("Failed to allocate bulk OUT ring")?;
+        bulk_in_ring.clear();
+        bulk_out_ring.clear();
+        let input_pages = ContiguousPages::new(
+            full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+        )
+        .ok_or("Failed to allocate mass storage endpoint context")?;
+
+        unsafe {
+            core::ptr::write_bytes(
+                input_pages.as_vaddr() as *mut u8,
+                0,
+                input_pages.len() * crate::environment::PAGE_SIZE,
+            );
+            let input = InputContextBuffer::new(input_pages.as_vaddr(), self.context_size);
+            let control = &mut *input.control_mut();
+            control.add_slot_context();
+            control.add_endpoint(bulk_in_dci);
+            control.add_endpoint(bulk_out_dci);
+            control.configuration_value = storage.configuration_value as u32;
+            control.alternate_settings = storage.interface_number as u32;
+
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for mass storage endpoint config")?;
+            let existing_ctx =
+                DeviceContextBuffer::new(slot.device_context.as_vaddr(), self.context_size);
+            let mut slot_ctx = core::ptr::read(existing_ctx.slot());
+            slot_ctx.set_context_entries(max_dci);
+            core::ptr::write(input.slot_mut(), slot_ctx);
+
+            let (_, bulk_in_ctx) = InputContext::bulk_endpoint_context(
+                bulk_in_dci,
+                storage.bulk_in_max_packet_size,
+                bulk_in_ring.physical_address() as u64,
+                true,
+            );
+            let (_, bulk_out_ctx) = InputContext::bulk_endpoint_context(
+                bulk_out_dci,
+                storage.bulk_out_max_packet_size,
+                bulk_out_ring.physical_address() as u64,
+                false,
+            );
+            core::ptr::write(input.endpoint_mut(bulk_in_dci)?, bulk_in_ctx);
+            core::ptr::write(input.endpoint_mut(bulk_out_dci)?, bulk_out_ctx);
+        }
+
+        let event = self.send_command(Trb::configure_endpoint_command(
+            input_pages.as_paddr() as u64,
+            slot_id,
+            false,
+        ))?;
+        if event.slot_id() != slot_id {
+            return Err("Configure Endpoint completion slot mismatch");
+        }
+
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for mass storage set configuration")?;
+            self.control_transfer(
+                slot,
+                0x00,
+                USB_REQ_SET_CONFIGURATION,
+                storage.configuration_value as u16,
+                0,
+                None,
+                0,
+            )?;
+        }
+
+        {
+            let mut slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter_mut()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for mass storage runtime update")?;
+            slot.usb_device.set_state(UsbDeviceState::Configured);
+            slot.storage = Some(MassStorageRuntime {
+                input_context: input_pages,
+                bulk_in: BulkEndpointRuntime {
+                    endpoint_address: storage.bulk_in_endpoint,
+                    dci: bulk_in_dci,
+                    max_packet_size: storage.bulk_in_max_packet_size,
+                    ring: bulk_in_ring,
+                },
+                bulk_out: BulkEndpointRuntime {
+                    endpoint_address: storage.bulk_out_endpoint,
+                    dci: bulk_out_dci,
+                    max_packet_size: storage.bulk_out_max_packet_size,
+                    ring: bulk_out_ring,
+                },
+            });
+        }
+
+        let block_device = Arc::new(UsbMassStorageBlockDevice::new(
+            self.clone(),
+            slot_id,
+            storage.bulk_in_endpoint,
+            storage.bulk_out_endpoint,
+        ));
+        block_device.initialize()?;
+        let name = next_usb_block_device_name();
+        DeviceManager::get_manager().register_device_with_name(name.clone(), block_device);
+        early_println!("[usb-storage] registered {}", name);
+
+        Ok(true)
+    }
+
     fn get_device_descriptor(&self, slot: &SlotRuntime) -> Result<DeviceDescriptor, &'static str> {
         let mut buffer =
             ContiguousPages::new(1).ok_or("Failed to allocate device descriptor buffer")?;
@@ -1133,7 +1369,89 @@ impl XhciController {
         Err("No HID boot interface found")
     }
 
+    fn parse_mass_storage_interface(
+        &self,
+        blob: &ContiguousPages,
+    ) -> Result<MassStorageInterfaceConfig, &'static str> {
+        let total = blob.len() * crate::environment::PAGE_SIZE;
+        let base = blob.as_vaddr();
+        let mut offset = 0usize;
+        let mut current_config = 0u8;
+        let mut current_interface: Option<u8> = None;
+        let mut bulk_in: Option<(u8, u16)> = None;
+        let mut bulk_out: Option<(u8, u16)> = None;
+
+        while offset + size_of::<DescriptorHeader>() <= total {
+            let header = unsafe { read_unaligned((base + offset) as *const DescriptorHeader) };
+            if header.length == 0 {
+                break;
+            }
+
+            match header.descriptor_type {
+                USB_DT_CONFIGURATION
+                    if header.length as usize >= ConfigurationDescriptor::encoded_size() =>
+                {
+                    let cfg = unsafe {
+                        read_unaligned((base + offset) as *const ConfigurationDescriptor)
+                    };
+                    current_config = cfg.configuration_value;
+                }
+                USB_DT_INTERFACE
+                    if header.length as usize >= InterfaceDescriptor::encoded_size() =>
+                {
+                    let interface =
+                        unsafe { read_unaligned((base + offset) as *const InterfaceDescriptor) };
+                    let is_msc = interface.interface_class == USB_CLASS_MASS_STORAGE
+                        && interface.interface_subclass == USB_MSC_SUBCLASS_SCSI
+                        && interface.interface_protocol == USB_MSC_PROTOCOL_BULK_ONLY;
+                    current_interface = is_msc.then_some(interface.interface_number);
+                    bulk_in = None;
+                    bulk_out = None;
+                }
+                USB_DT_ENDPOINT if header.length as usize >= EndpointDescriptor::encoded_size() => {
+                    if let Some(interface_number) = current_interface {
+                        let endpoint =
+                            unsafe { read_unaligned((base + offset) as *const EndpointDescriptor) };
+                        if endpoint.attributes & 0x3 == USB_ENDPOINT_XFER_BULK {
+                            let endpoint_address = endpoint.endpoint_address;
+                            let max_packet_size = endpoint.max_packet_size;
+                            if endpoint_address & 0x80 != 0 {
+                                bulk_in = Some((endpoint_address, max_packet_size));
+                            } else {
+                                bulk_out = Some((endpoint_address, max_packet_size));
+                            }
+
+                            if let (
+                                Some((bulk_in_endpoint, bulk_in_max_packet_size)),
+                                Some((bulk_out_endpoint, bulk_out_max_packet_size)),
+                            ) = (bulk_in, bulk_out)
+                            {
+                                return Ok(MassStorageInterfaceConfig {
+                                    configuration_value: current_config,
+                                    interface_number,
+                                    bulk_in_endpoint,
+                                    bulk_in_max_packet_size,
+                                    bulk_out_endpoint,
+                                    bulk_out_max_packet_size,
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            offset += header.length as usize;
+        }
+
+        Err("No USB mass storage bulk-only interface found")
+    }
+
     fn interrupt_dci(endpoint_address: u8) -> u8 {
+        Self::endpoint_dci(endpoint_address)
+    }
+
+    fn endpoint_dci(endpoint_address: u8) -> u8 {
         let ep_num = endpoint_address & 0x0f;
         if endpoint_address & 0x80 != 0 {
             ep_num * 2 + 1
@@ -1167,6 +1485,14 @@ impl XhciController {
             if !self.port_connected(port_id) {
                 continue;
             }
+            if self
+                .devices
+                .lock()
+                .iter()
+                .any(|device| device.port_id() == port_id)
+            {
+                continue;
+            }
             let speed = self.port_speed(port_id);
             early_println!("[xHCI] Port {} connected, speed {:?}", port_id, speed);
             let completion = self.send_command(Trb::enable_slot_command())?;
@@ -1189,6 +1515,79 @@ impl XhciController {
 
     pub fn devices(&self) -> Vec<UsbDevice> {
         self.devices.lock().clone()
+    }
+
+    fn bulk_transfer(
+        &self,
+        slot_id: u8,
+        endpoint_address: u8,
+        buffer: &mut ContiguousPages,
+        length: usize,
+    ) -> Result<usize, &'static str> {
+        if length > USB_BULK_MAX_TRANSFER {
+            return Err("USB bulk transfer too large");
+        }
+
+        let dci = Self::endpoint_dci(endpoint_address);
+        {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for bulk transfer")?;
+            let storage = slot
+                .storage
+                .as_ref()
+                .ok_or("Mass storage endpoints not configured")?;
+            let _context_paddr = storage.input_context.as_paddr();
+
+            let ring = if storage.bulk_in.endpoint_address == endpoint_address {
+                if storage.bulk_in.dci != dci {
+                    return Err("Bulk IN endpoint DCI mismatch");
+                }
+                let _max_packet_size = storage.bulk_in.max_packet_size;
+                &storage.bulk_in.ring
+            } else if storage.bulk_out.endpoint_address == endpoint_address {
+                if storage.bulk_out.dci != dci {
+                    return Err("Bulk OUT endpoint DCI mismatch");
+                }
+                let _max_packet_size = storage.bulk_out.max_packet_size;
+                &storage.bulk_out.ring
+            } else {
+                return Err("Bulk endpoint not configured for slot");
+            };
+
+            ring.enqueue(Trb::normal_transfer(
+                buffer.as_paddr() as u64,
+                length as u32,
+            ))?;
+        }
+
+        self.ring_endpoint_doorbell(slot_id, dci);
+        let event = self.wait_for_transfer_event(slot_id, dci)?;
+        Ok(length.saturating_sub(event.transfer_length() as usize))
+    }
+
+    fn attach_mass_storage_devices(self: &Arc<Self>) {
+        let slot_ids: Vec<u8> = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .map(|slot| slot.usb_device.slot_id())
+            .collect();
+        for slot_id in slot_ids {
+            match self.configure_mass_storage_slot(slot_id) {
+                Ok(true) => early_println!("[xHCI] Slot {} mass storage configured", slot_id),
+                Ok(false) => {}
+                Err(error) => {
+                    early_println!(
+                        "[xHCI] Slot {} mass storage setup failed: {}",
+                        slot_id,
+                        error
+                    )
+                }
+            }
+        }
     }
 
     fn slot_runtime_mut(&self, slot_id: u8) -> Option<spin::MutexGuard<'_, Vec<SlotRuntime>>> {
@@ -1309,6 +1708,335 @@ impl XhciController {
     /// Get the MMIO base address
     pub fn mmio_base(&self) -> usize {
         self.mmio_base
+    }
+}
+
+static USB_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn next_usb_block_device_name() -> alloc::string::String {
+    alloc::format!("usbblk{}", USB_BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst))
+}
+
+struct UsbMassStorageBlockDevice {
+    controller: Arc<XhciController>,
+    slot_id: u8,
+    bulk_in_endpoint: u8,
+    bulk_out_endpoint: u8,
+    sector_size: Mutex<usize>,
+    sector_count: Mutex<usize>,
+    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
+    next_tag: AtomicUsize,
+}
+
+impl UsbMassStorageBlockDevice {
+    fn new(
+        controller: Arc<XhciController>,
+        slot_id: u8,
+        bulk_in_endpoint: u8,
+        bulk_out_endpoint: u8,
+    ) -> Self {
+        Self {
+            controller,
+            slot_id,
+            bulk_in_endpoint,
+            bulk_out_endpoint,
+            sector_size: Mutex::new(512),
+            sector_count: Mutex::new(0),
+            request_queue: Mutex::new(VecDeque::new()),
+            next_tag: AtomicUsize::new(1),
+        }
+    }
+
+    fn initialize(&self) -> Result<(), &'static str> {
+        let mut inquiry = ContiguousPages::new(1).ok_or("Failed to allocate INQUIRY buffer")?;
+        self.scsi_command(&[0x12, 0, 0, 0, 36, 0], Some((&mut inquiry, 36, true)))?;
+
+        self.scsi_command(&[0x00, 0, 0, 0, 0, 0], None)?;
+
+        let mut capacity = ContiguousPages::new(1).ok_or("Failed to allocate capacity buffer")?;
+        self.scsi_command(
+            &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            Some((&mut capacity, 8, true)),
+        )?;
+
+        let data = unsafe { core::slice::from_raw_parts(capacity.as_vaddr() as *const u8, 8) };
+        let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let block_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        if block_len == 0 {
+            return Err("USB storage reported zero block size");
+        }
+
+        *self.sector_size.lock() = block_len;
+        *self.sector_count.lock() = last_lba.saturating_add(1);
+        early_println!(
+            "[usb-storage] capacity sectors={} sector_size={}",
+            last_lba.saturating_add(1),
+            block_len
+        );
+        Ok(())
+    }
+
+    fn scsi_command(
+        &self,
+        command: &[u8],
+        data_stage: Option<(&mut ContiguousPages, usize, bool)>,
+    ) -> Result<(), &'static str> {
+        if command.len() > 16 {
+            return Err("SCSI command too large for BOT CBW");
+        }
+
+        let (data_len, direction_in) = data_stage
+            .as_ref()
+            .map(|(_, len, direction_in)| (*len, *direction_in))
+            .unwrap_or((0, false));
+        let tag = self.next_tag.fetch_add(1, Ordering::SeqCst) as u32;
+
+        let mut cbw = ContiguousPages::new(1).ok_or("Failed to allocate USB BOT CBW")?;
+        unsafe {
+            core::ptr::write_bytes(cbw.as_vaddr() as *mut u8, 0, crate::environment::PAGE_SIZE);
+            let bytes =
+                core::slice::from_raw_parts_mut(cbw.as_vaddr() as *mut u8, USB_STORAGE_CBW_LEN);
+            bytes[0..4].copy_from_slice(&USB_STORAGE_CBW_SIGNATURE.to_le_bytes());
+            bytes[4..8].copy_from_slice(&tag.to_le_bytes());
+            bytes[8..12].copy_from_slice(&(data_len as u32).to_le_bytes());
+            bytes[12] = if direction_in { 0x80 } else { 0x00 };
+            bytes[13] = 0;
+            bytes[14] = command.len() as u8;
+            bytes[15..15 + command.len()].copy_from_slice(command);
+        }
+
+        let transferred = self.controller.bulk_transfer(
+            self.slot_id,
+            self.bulk_out_endpoint,
+            &mut cbw,
+            USB_STORAGE_CBW_LEN,
+        )?;
+        if transferred != USB_STORAGE_CBW_LEN {
+            return Err("Short USB BOT CBW transfer");
+        }
+
+        if let Some((buffer, len, is_in)) = data_stage {
+            let endpoint = if is_in {
+                self.bulk_in_endpoint
+            } else {
+                self.bulk_out_endpoint
+            };
+            let transferred = self
+                .controller
+                .bulk_transfer(self.slot_id, endpoint, buffer, len)?;
+            if transferred != len {
+                return Err("Short USB BOT data transfer");
+            }
+        }
+
+        let mut csw = ContiguousPages::new(1).ok_or("Failed to allocate USB BOT CSW")?;
+        unsafe {
+            core::ptr::write_bytes(csw.as_vaddr() as *mut u8, 0, crate::environment::PAGE_SIZE);
+        }
+        let transferred = self.controller.bulk_transfer(
+            self.slot_id,
+            self.bulk_in_endpoint,
+            &mut csw,
+            USB_STORAGE_CSW_LEN,
+        )?;
+        if transferred != USB_STORAGE_CSW_LEN {
+            return Err("Short USB BOT CSW transfer");
+        }
+
+        let csw_bytes = unsafe {
+            core::slice::from_raw_parts(csw.as_vaddr() as *const u8, USB_STORAGE_CSW_LEN)
+        };
+        let signature =
+            u32::from_le_bytes([csw_bytes[0], csw_bytes[1], csw_bytes[2], csw_bytes[3]]);
+        let returned_tag =
+            u32::from_le_bytes([csw_bytes[4], csw_bytes[5], csw_bytes[6], csw_bytes[7]]);
+        let status = csw_bytes[12];
+        if signature != USB_STORAGE_CSW_SIGNATURE {
+            return Err("Invalid USB BOT CSW signature");
+        }
+        if returned_tag != tag {
+            return Err("USB BOT CSW tag mismatch");
+        }
+        if status != 0 {
+            return Err("USB storage SCSI command failed");
+        }
+
+        Ok(())
+    }
+
+    fn read_sectors(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
+        let sector_size = *self.sector_size.lock();
+        let sector_count = *self.sector_count.lock();
+        if sector_size == 0 {
+            return Err("USB storage sector size not initialized");
+        }
+        if request.sector_count == 0 {
+            request.buffer.clear();
+            return Ok(());
+        }
+        if request.sector >= sector_count
+            || request.sector_count > sector_count.saturating_sub(request.sector)
+        {
+            return Err("USB storage read out of range");
+        }
+
+        let total_len = request
+            .sector_count
+            .checked_mul(sector_size)
+            .ok_or("USB storage read length overflow")?;
+        if request.buffer.len() != total_len {
+            request.buffer.resize(total_len, 0);
+        }
+
+        let max_blocks = (USB_BULK_MAX_TRANSFER / sector_size)
+            .max(1)
+            .min(u16::MAX as usize);
+        let mut done_blocks = 0usize;
+        while done_blocks < request.sector_count {
+            let blocks = (request.sector_count - done_blocks).min(max_blocks);
+            let bytes = blocks * sector_size;
+            let pages = bytes.div_ceil(crate::environment::PAGE_SIZE);
+            let mut buffer =
+                ContiguousPages::new(pages).ok_or("Failed to allocate USB read buffer")?;
+            unsafe {
+                core::ptr::write_bytes(
+                    buffer.as_vaddr() as *mut u8,
+                    0,
+                    pages * crate::environment::PAGE_SIZE,
+                );
+            }
+
+            let lba = request.sector + done_blocks;
+            if lba > u32::MAX as usize {
+                return Err("USB storage LBA exceeds READ(10) range");
+            }
+            let transfer_blocks = blocks as u16;
+            let lba_be = (lba as u32).to_be_bytes();
+            let blocks_be = transfer_blocks.to_be_bytes();
+            let command = [
+                0x28,
+                0,
+                lba_be[0],
+                lba_be[1],
+                lba_be[2],
+                lba_be[3],
+                0,
+                blocks_be[0],
+                blocks_be[1],
+                0,
+            ];
+            self.scsi_command(&command, Some((&mut buffer, bytes, true)))?;
+
+            let dst_offset = done_blocks * sector_size;
+            unsafe {
+                let src = core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, bytes);
+                request.buffer[dst_offset..dst_offset + bytes].copy_from_slice(src);
+            }
+            done_blocks += blocks;
+        }
+
+        Ok(())
+    }
+
+    fn process_request(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
+        match request.request_type {
+            BlockIORequestType::Read => self.read_sectors(request),
+            BlockIORequestType::Write => Err("USB storage writes are not supported yet"),
+        }
+    }
+}
+
+impl Device for UsbMassStorageBlockDevice {
+    fn device_type(&self) -> crate::device::DeviceType {
+        crate::device::DeviceType::Block
+    }
+
+    fn name(&self) -> &'static str {
+        "usb-storage"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_block_device(&self) -> Option<&dyn BlockDevice> {
+        Some(self)
+    }
+
+    fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
+        Some(self)
+    }
+}
+
+impl BlockDevice for UsbMassStorageBlockDevice {
+    fn get_disk_name(&self) -> &'static str {
+        "usb-storage"
+    }
+
+    fn get_disk_size(&self) -> usize {
+        *self.sector_count.lock() * *self.sector_size.lock()
+    }
+
+    fn enqueue_request(&self, request: Box<BlockIORequest>) {
+        self.request_queue.lock().push_back(request);
+    }
+
+    fn process_requests(&self) -> Vec<BlockIOResult> {
+        let requests = {
+            let mut queue = self.request_queue.lock();
+            let mut requests = Vec::new();
+            while let Some(request) = queue.pop_front() {
+                requests.push(request);
+            }
+            requests
+        };
+
+        let mut results = Vec::new();
+        for mut request in requests {
+            let result = self.process_request(&mut request);
+            results.push(BlockIOResult { request, result });
+        }
+        results
+    }
+}
+
+impl ControlOps for UsbMassStorageBlockDevice {
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for UsbMassStorageBlockDevice {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by USB storage")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
+impl Selectable for UsbMassStorageBlockDevice {
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 }
 
@@ -1455,6 +2183,7 @@ pub fn bind_xhci_mmio(
         Ok(count) => early_println!("[xHCI] Enumerated {} device(s)", count),
         Err(error) => early_println!("[xHCI] Enumeration deferred: {}", error),
     }
+    controller.attach_mass_storage_devices();
 
     if let Some(interrupt_id) = interrupt {
         controller.enable_interrupts(interrupt_id)?;

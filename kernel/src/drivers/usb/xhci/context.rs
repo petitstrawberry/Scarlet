@@ -222,6 +222,41 @@ impl InputContext {
         (dci, endpoint)
     }
 
+    /// Build an endpoint context for a bulk endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `dci` - xHCI device context index for the endpoint.
+    /// * `max_packet_size` - USB endpoint maximum packet size.
+    /// * `dequeue_pointer` - Physical address of the endpoint transfer ring.
+    /// * `is_in` - Whether this endpoint transfers device-to-host data.
+    ///
+    /// # Returns
+    ///
+    /// The DCI and initialized endpoint context.
+    pub fn bulk_endpoint_context(
+        dci: u8,
+        max_packet_size: u16,
+        dequeue_pointer: u64,
+        is_in: bool,
+    ) -> (u8, EndpointContext) {
+        let mut endpoint = EndpointContext::default();
+        endpoint.set_endpoint_state(0);
+        endpoint.set_endpoint_type(if is_in {
+            ep_type::BULK_IN
+        } else {
+            ep_type::BULK_OUT
+        });
+        endpoint.set_error_count(3);
+        endpoint.set_max_burst_size(0);
+        endpoint.set_max_packet_size(max_packet_size);
+        endpoint.set_interval(0);
+        endpoint.set_dequeue_pointer(dequeue_pointer);
+        endpoint.set_dequeue_cycle(true);
+        endpoint.set_average_trb_length(max_packet_size);
+        (dci, endpoint)
+    }
+
     fn default_max_packet(speed: u8) -> u16 {
         match speed {
             speed::LOW => 8,
