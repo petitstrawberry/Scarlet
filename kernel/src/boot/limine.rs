@@ -89,8 +89,14 @@ pub fn capture_date_at_boot() {
         secs,
         secs
     );
-    if secs >= 0 {
-        DATE_AT_BOOT_NS.store(secs as u64 * 1_000_000_000, Ordering::SeqCst);
+    if secs > 0 {
+        if let Some(ns) = (secs as u64).checked_mul(1_000_000_000) {
+            DATE_AT_BOOT_NS.store(ns, Ordering::SeqCst);
+        } else {
+            crate::early_println!("[boot] Limine Date at Boot: timestamp overflow, ignored");
+        }
+    } else if secs == 0 {
+        crate::early_println!("[boot] Limine Date at Boot: zero timestamp, ignored");
     } else {
         crate::early_println!("[boot] Limine Date at Boot: negative timestamp, ignored");
     }

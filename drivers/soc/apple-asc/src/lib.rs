@@ -333,10 +333,36 @@ impl MailboxController for AppleAscMailboxController {
 
 /// Registry of probed ASC mailbox instances.
 static ASC_REGISTRY: Mutex<Vec<Arc<AppleAsc>>> = Mutex::new(Vec::new());
+static ASC_PHANDLE_REGISTRY: Mutex<Vec<(u32, Arc<AppleAsc>)>> = Mutex::new(Vec::new());
 
 /// Get a probed ASC mailbox instance by index.
+///
+/// # Arguments
+///
+/// * `id` - Zero-based ASC registration index.
+///
+/// # Returns
+///
+/// ASC instance registered at `id`, or `None` when missing.
 pub fn get_apple_asc(id: u32) -> Option<Arc<AppleAsc>> {
     ASC_REGISTRY.lock().get(id as usize).map(Arc::clone)
+}
+
+/// Get a probed ASC mailbox instance by firmware phandle.
+///
+/// # Arguments
+///
+/// * `phandle` - Firmware phandle of the ASC mailbox controller node.
+///
+/// # Returns
+///
+/// ASC instance registered for `phandle`, or `None` when the ASC has not probed.
+pub fn get_apple_asc_by_phandle(phandle: u32) -> Option<Arc<AppleAsc>> {
+    ASC_PHANDLE_REGISTRY
+        .lock()
+        .iter()
+        .find(|(registered, _)| *registered == phandle)
+        .map(|(_, asc)| Arc::clone(asc))
 }
 
 #[inline(always)]
@@ -377,6 +403,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 .map(|v| v as u32)
         })
         .unwrap_or(0);
+
+    if phandle != 0 {
+        ASC_PHANDLE_REGISTRY
+            .lock()
+            .push((phandle, Arc::clone(&asc)));
+    }
 
     let controller = Arc::new(AppleAscMailboxController::new(asc, phandle));
     DeviceManager::get_manager().register_mailbox_controller(controller.phandle(), controller);

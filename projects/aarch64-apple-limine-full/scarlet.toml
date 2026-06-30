@@ -29,6 +29,8 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-pmgr" = { path = "../../drivers/soc/apple-pmgr", enabled = true }
 "scarlet-driver-apple-asc" = { path = "../../drivers/soc/apple-asc", enabled = true }
 "scarlet-driver-apple-rtkit" = { path = "../../drivers/soc/apple-rtkit", enabled = true }
+"scarlet-driver-apple-smc" = { path = "../../drivers/soc/apple-smc", enabled = true }
+"scarlet-driver-apple-spmi" = { path = "../../drivers/spmi/apple-spmi", enabled = true }
 "scarlet-driver-apple-afk" = { path = "../../drivers/soc/apple-afk", enabled = true }
 "scarlet-driver-apple-epic" = { path = "../../drivers/soc/apple-epic", enabled = true }
 "scarlet-driver-apple-dart" = { path = "../../drivers/iommu/apple-dart", enabled = true }

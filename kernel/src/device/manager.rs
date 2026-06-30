@@ -333,6 +333,39 @@ impl DeviceManager {
             .map(|provider| provider.cell_cells())
     }
 
+    /// Return the firmware phandle for an FDT node, allocating a stable
+    /// synthetic phandle when the node has none.
+    ///
+    /// Device Tree nodes such as fixed NVMEM layouts are sometimes referenced
+    /// indirectly by child-cell phandles while the provider node itself has no
+    /// explicit `phandle`. The platform device enumerator already assigns
+    /// stable synthetic phandles for such nodes; this helper exposes the same
+    /// mapping to platform drivers that need to register providers discovered
+    /// by walking the FDT subtree themselves.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - FDT node whose explicit or synthetic phandle is requested.
+    ///
+    /// # Returns
+    ///
+    /// Explicit `phandle`/`linux,phandle` value, or a stable synthetic phandle.
+    pub fn phandle_for_fdt_node(&self, node: &fdt::node::FdtNode) -> u32 {
+        Self::get_u32_prop(node, "phandle")
+            .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
+            .unwrap_or_else(|| {
+                let node_key = node.name.as_ptr() as usize;
+                let mut cache = self.auto_phandle_cache.lock();
+                if let Some(&cached) = cache.get(&node_key) {
+                    cached
+                } else {
+                    let phandle = self.next_auto_phandle.fetch_add(1, Ordering::Relaxed);
+                    cache.insert(node_key, phandle);
+                    phandle
+                }
+            })
+    }
+
     fn get_phy_cells_for_phandle(&self, phandle: u32) -> Option<usize> {
         self.get_phy_provider_by_phandle(phandle)
             .map(|provider| provider.phy_cells())
@@ -491,6 +524,11 @@ impl DeviceManager {
             index += 1;
 
             if self.get_nvmem_provider_by_phandle(phandle).is_none() {
+                if let Some(spec) = self.resolve_nvmem_child_cell_spec(phandle)? {
+                    specs.push(spec);
+                    continue;
+                }
+
                 return probe_defer();
             }
 
@@ -507,6 +545,55 @@ impl DeviceManager {
         }
 
         Ok(specs)
+    }
+
+    fn resolve_nvmem_child_cell_spec(
+        &self,
+        phandle: u32,
+    ) -> Result<Option<OwnedNvmemSpec>, &'static str> {
+        #[cfg(test)]
+        let fdt = {
+            // SAFETY: Unit tests may exercise parser helpers before boot initializes the
+            // global FDT manager. These tests run single-threaded in the kernel harness.
+            unsafe { crate::device::fdt::FdtManager::get_mut_manager() }.get_fdt()
+        };
+
+        #[cfg(not(test))]
+        let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt();
+
+        let Some(fdt) = fdt else {
+            return Ok(None);
+        };
+
+        let Some((cell_node, parent_node)) =
+            Self::find_node_and_immediate_parent_by_phandle(fdt, phandle)
+        else {
+            return Ok(None);
+        };
+        let Some(parent_node) = parent_node else {
+            return Ok(None);
+        };
+
+        let Some(reg_prop) = cell_node.property("reg") else {
+            return Ok(None);
+        };
+        let reg = Self::read_be_u32_cells(reg_prop.value).ok_or("nvmem: malformed child reg")?;
+        if reg.len() < 2 {
+            return Err("nvmem: truncated child reg");
+        }
+
+        let provider_phandle = self.phandle_for_fdt_node(&parent_node);
+        if self
+            .get_nvmem_provider_by_phandle(provider_phandle)
+            .is_none()
+        {
+            return probe_defer();
+        }
+
+        Ok(Some(OwnedNvmemSpec {
+            phandle: provider_phandle,
+            cells: alloc::vec![reg[0], reg[1]],
+        }))
     }
 
     fn parse_phy_specs(&self, bytes: &[u8]) -> Result<Vec<OwnedPhySpec>, &'static str> {
@@ -839,6 +926,39 @@ impl DeviceManager {
                 .or(parent_phandle);
             for child in node.children() {
                 stack.push((child, this_phandle));
+            }
+        }
+
+        None
+    }
+
+    fn find_node_and_immediate_parent_by_phandle<'a>(
+        fdt: &'a fdt::Fdt<'a>,
+        phandle: u32,
+    ) -> Option<(
+        fdt::node::FdtNode<'a, 'a>,
+        Option<fdt::node::FdtNode<'a, 'a>>,
+    )> {
+        let mut stack: Vec<(
+            fdt::node::FdtNode<'a, 'a>,
+            Option<fdt::node::FdtNode<'a, 'a>>,
+        )> = Vec::new();
+        stack.push((fdt.find_node("/")?, None));
+
+        while let Some((node, parent)) = stack.pop() {
+            if let Some(p) = Self::get_u32_prop(&node, "phandle")
+                && p == phandle
+            {
+                return Some((node, parent));
+            }
+            if let Some(p) = Self::get_u32_prop(&node, "linux,phandle")
+                && p == phandle
+            {
+                return Some((node, parent));
+            }
+
+            for child in node.children() {
+                stack.push((child, Some(node)));
             }
         }
 
@@ -1742,6 +1862,36 @@ impl DeviceManager {
         let spec = specs.get(index).ok_or("nvmem: cell index out of range")?;
 
         self.resolve_nvmem_spec(spec, "nvmem-cell")
+    }
+
+    /// Resolve an NVMEM fixed-layout child cell by its firmware phandle.
+    ///
+    /// This is useful for parent drivers that discover child nodes manually
+    /// instead of receiving a separate [`PlatformDeviceInfo`] for the child.
+    /// The phandle must identify a cell node with a `reg = <offset size>`
+    /// property whose immediate parent is a registered NVMEM provider.
+    ///
+    /// Missing providers return [`probe_defer`] so platform probing can retry
+    /// once provider drivers register their NVMEM providers.
+    ///
+    /// # Arguments
+    ///
+    /// * `phandle` - Firmware phandle of the NVMEM cell node.
+    /// * `name` - Static cell name used for diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// A cell handle backed by the registered provider.
+    pub fn resolve_nvmem_cell_by_phandle(
+        &self,
+        phandle: u32,
+        name: &'static str,
+    ) -> Result<NvmemCell, &'static str> {
+        let spec = self
+            .resolve_nvmem_child_cell_spec(phandle)?
+            .ok_or("nvmem: cell phandle not found")?;
+
+        self.resolve_nvmem_spec(&spec, name)
     }
 
     /// Resolve a named PHY for a platform device from FDT properties.

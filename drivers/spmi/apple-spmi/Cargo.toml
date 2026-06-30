@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-driver-apple-spmi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+fdt = "0.1.5"
+scarlet = { path = "../../../kernel" }

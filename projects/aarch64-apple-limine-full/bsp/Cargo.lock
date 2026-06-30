@@ -203,6 +203,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-apple-smc"
+version = "0.1.0"
+dependencies = [
+ "fdt",
+ "scarlet",
+ "scarlet-driver-apple-asc",
+ "scarlet-driver-apple-rtkit",
+]
+
+[[package]]
 name = "scarlet-driver-apple-spi"
 version = "0.1.0"
 dependencies = [
@@ -215,6 +225,14 @@ version = "0.1.0"
 dependencies = [
  "scarlet",
  "scarlet-driver-apple-spi",
+]
+
+[[package]]
+name = "scarlet-driver-apple-spmi"
+version = "0.1.0"
+dependencies = [
+ "fdt",
+ "scarlet",
 ]
 
 [[package]]
@@ -293,8 +311,10 @@ dependencies = [
  "scarlet-driver-apple-pinctrl",
  "scarlet-driver-apple-pmgr",
  "scarlet-driver-apple-rtkit",
+ "scarlet-driver-apple-smc",
  "scarlet-driver-apple-spi",
  "scarlet-driver-apple-spi-hid",
+ "scarlet-driver-apple-spmi",
  "scarlet-driver-apple-wdt",
  "scarlet-driver-cs42l83",
  "scarlet-driver-dcpext",
