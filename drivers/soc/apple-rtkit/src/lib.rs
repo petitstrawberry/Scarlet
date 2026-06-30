@@ -424,10 +424,10 @@ impl AppleRtkit {
             let done = (msg & MGMT_MSG_EPMAP_DONE) != 0;
             let reply_payload = field_prep(MGMT_MSG_EPMAP_BASE, base as u64)
                 | if done {
-                MGMT_MSG_EPMAP_REPLY_DONE
-            } else {
-                MGMT_MSG_EPMAP_REPLY_MORE
-            };
+                    MGMT_MSG_EPMAP_REPLY_DONE
+                } else {
+                    MGMT_MSG_EPMAP_REPLY_MORE
+                };
 
             self.send(&RtkitMessage {
                 ep: RTKIT_EP_MGMT,
