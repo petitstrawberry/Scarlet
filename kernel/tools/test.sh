@@ -145,6 +145,7 @@ fi
 if [ ! -f "$EFI_VARS" ]; then
     cp "${SCARLET_EFI_VARS_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}" "$EFI_VARS"
 fi
+chmod u+w "$EFI_VARS"
 
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: start with gdb server
