@@ -2,7 +2,7 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
+use crate::fs::{FileType, SeekFrom, VfsManager, drivers::tmpfs::TmpFS};
 use crate::task::new_user_task;
 
 use super::*;
@@ -198,8 +198,7 @@ fn test_load_elf() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -254,8 +253,7 @@ fn test_load_elf_invalid_magic() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -291,8 +289,7 @@ fn test_load_elf_invalid_alignment() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");
@@ -353,8 +350,7 @@ fn test_load_elf_bss_zeroed() {
     use crate::task::elf_loader::load_elf_into_task;
 
     let manager = VfsManager::new();
-    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
-    let fs = TmpFS::new(params.memory_limit);
+    let fs = TmpFS::new(0);
     manager
         .mount(fs.clone(), "/", 0)
         .expect("Failed to mount test filesystem");

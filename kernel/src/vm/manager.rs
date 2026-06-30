@@ -2223,8 +2223,8 @@ mod tests {
         let right = manager.search_memory_map(0x6000).unwrap();
         assert_eq!(right.vmarea.start, 0x6000);
         assert_eq!(right.vmarea.end, 0x8fff);
-        assert_eq!(right.pmarea.start, 0x6000);
-        assert_eq!(right.pmarea.end, 0x8fff);
+        assert_eq!(right.pmarea.start, 0x8000_2000);
+        assert_eq!(right.pmarea.end, 0x8000_4fff);
     }
 
     #[test_case]
