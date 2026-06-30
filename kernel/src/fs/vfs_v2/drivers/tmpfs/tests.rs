@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::parse_tmpfs_size_option;
+    use super::super::parse_tmpfs_size_option;
     use crate::fs::drivers::tmpfs::TmpFS;
     use crate::fs::vfs_v2::manager::VfsManager;
     use crate::fs::{FileSystemErrorKind, FileType};
