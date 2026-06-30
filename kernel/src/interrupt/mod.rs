@@ -583,10 +583,18 @@ impl InterruptManager {
         &self,
         request: controllers::MsiRequest,
     ) -> InterruptResult<controllers::MsiAllocation> {
+        self.allocate_msi_vectors_from_device_manager(DeviceManager::get_manager(), request)
+    }
+
+    fn allocate_msi_vectors_from_device_manager(
+        &self,
+        device_manager: &DeviceManager,
+        request: controllers::MsiRequest,
+    ) -> InterruptResult<controllers::MsiAllocation> {
         let mut result = Err(InterruptError::NotSupported);
         let mut controller_seen = false;
 
-        DeviceManager::get_manager().for_each_msi_controller(|controller| {
+        device_manager.for_each_msi_controller(|controller| {
             controller_seen = true;
             match controller.allocate_vectors(request) {
                 Ok(allocation) => {
@@ -906,48 +914,48 @@ mod tests {
 
     #[test_case]
     fn test_allocate_msi_vectors_returns_not_supported_when_no_controller_registered() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let manager = InterruptManager::new();
 
-        let error = manager.allocate_msi_vectors(test_request()).unwrap_err();
+        let error = manager
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
+            .unwrap_err();
 
         assert_eq!(error, InterruptError::NotSupported);
     }
 
     #[test_case]
     fn test_allocate_msi_vectors_returns_allocation_when_controller_succeeds() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let controller = Arc::new(FakeMsiController::new(Ok(test_allocation(64))));
-        DeviceManager::get_manager().register_msi_controller(1, controller.clone());
+        devices.register_msi_controller(1, controller.clone());
         let manager = InterruptManager::new();
 
         let allocation = manager
-            .allocate_msi_vectors(test_request())
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
             .expect("expected MSI allocation");
 
         assert_eq!(controller.calls(), 1);
         assert_eq!(allocation.vectors.len(), 1);
         assert_eq!(allocation.vectors[0].virq, 64);
         assert_eq!(allocation.vectors[0].hwirq, 96);
-        DeviceManager::get_manager().clear_for_test();
     }
 
     #[test_case]
     fn test_allocate_msi_vectors_iterates_until_success() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let first = Arc::new(FakeMsiController::new(Err(MsiError::NoVectors)));
         let second = Arc::new(FakeMsiController::new(Ok(test_allocation(80))));
-        DeviceManager::get_manager().register_msi_controller(1, first.clone());
-        DeviceManager::get_manager().register_msi_controller(2, second.clone());
+        devices.register_msi_controller(1, first.clone());
+        devices.register_msi_controller(2, second.clone());
         let manager = InterruptManager::new();
 
         let allocation = manager
-            .allocate_msi_vectors(test_request())
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
             .expect("expected second controller to allocate");
 
         assert_eq!(first.calls(), 1);
         assert_eq!(second.calls(), 1);
         assert_eq!(allocation.vectors[0].virq, 80);
-        DeviceManager::get_manager().clear_for_test();
     }
 }

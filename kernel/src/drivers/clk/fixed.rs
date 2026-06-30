@@ -77,7 +77,10 @@ fn read_clock_name(device: &PlatformDeviceInfo) -> &'static str {
     }
 }
 
-fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+fn register_fixed_clock_provider(
+    manager: &DeviceManager,
+    device: &PlatformDeviceInfo,
+) -> Result<(), &'static str> {
     let rate = device
         .property("clock-frequency")
         .and_then(|property| property.as_usize())
@@ -91,8 +94,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let clk = ClkHandle::new(Arc::new(ClkFixedRate::new(clock_name, rate)));
     let provider = Arc::new(FixedClockProvider::new(clock_cells, clk));
 
-    DeviceManager::get_manager().register_clk_provider(phandle, provider);
+    manager.register_clk_provider(phandle, provider);
     Ok(())
+}
+
+fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    register_fixed_clock_provider(DeviceManager::get_manager(), device)
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
@@ -121,8 +128,7 @@ mod tests {
 
     #[test_case]
     fn test_fixed_clock_probe_registers_provider() {
-        let manager = DeviceManager::get_manager();
-        manager.clear_for_test();
+        let manager = DeviceManager::new_for_test();
         let device = PlatformDeviceInfo::new(
             "fixed-clock-test",
             0,
@@ -137,7 +143,7 @@ mod tests {
             None,
         );
 
-        assert!(probe_fn(&device).is_ok());
+        assert!(register_fixed_clock_provider(&manager, &device).is_ok());
         let provider = manager.get_clk_provider_by_phandle(0x55).unwrap();
         assert_eq!(provider.clock_cells(), 0);
         assert_eq!(provider.get_clk(&[]).unwrap().rate(), 24_000_000);

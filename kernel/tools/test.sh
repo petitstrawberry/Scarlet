@@ -236,5 +236,5 @@ elif grep -q "running 0 tests" "$TEMP_OUTPUT"; then
 else
     echo "Could not determine test result, QEMU exit code: $QEMU_EXIT_CODE"
     rm -f "$TEMP_OUTPUT"
-    exit $QEMU_EXIT_CODE
+    exit 1
 fi
