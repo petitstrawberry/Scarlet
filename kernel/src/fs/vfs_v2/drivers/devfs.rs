@@ -782,7 +782,7 @@ impl MemoryMappingOps for DevFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         // For device files, delegate to the underlying device if it supports memory mapping
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
@@ -996,7 +996,7 @@ impl MemoryMappingOps for DevDirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
 

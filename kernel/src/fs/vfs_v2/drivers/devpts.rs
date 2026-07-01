@@ -623,7 +623,7 @@ impl MemoryMappingOps for DevPtsFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.get_mapping_info(offset, length),
             DevPtsEndpoint::Slave(slave) => slave.get_mapping_info(offset, length),
@@ -782,7 +782,7 @@ impl MemoryMappingOps for DevPtsDirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for DevPTS directories")
     }
 

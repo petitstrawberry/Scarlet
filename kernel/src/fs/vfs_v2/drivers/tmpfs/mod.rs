@@ -1497,7 +1497,7 @@ impl MemoryMappingOps for TmpFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 {
             return Err("Offset not page aligned");
         }
@@ -1522,7 +1522,9 @@ impl MemoryMappingOps for TmpFileObject {
             return Err("Backing address not aligned");
         }
 
-        Ok((paddr, 0x3, false))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr, 0x3, false,
+        ))
     }
 
     fn get_mapping_info_with(
@@ -1530,7 +1532,7 @@ impl MemoryMappingOps for TmpFileObject {
         offset: usize,
         length: usize,
         is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if is_shared {
             if offset % PAGE_SIZE != 0 {
                 return Err("Offset not page aligned");
@@ -1542,7 +1544,9 @@ impl MemoryMappingOps for TmpFileObject {
             }
 
             let _ = length;
-            return Ok((0, 0x3, true));
+            return Ok(crate::object::capability::MemoryMappingInfo::new(
+                0, 0x3, true,
+            ));
         }
 
         self.get_mapping_info(offset, length)

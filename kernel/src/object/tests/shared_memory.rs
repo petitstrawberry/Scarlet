@@ -40,10 +40,10 @@ fn test_shared_memory_memory_mapping_ops() {
         let result = mem_mappable.get_mapping_info(0, 4096);
         assert!(result.is_ok());
 
-        let (mapped_paddr, mapped_perms, is_shared) = result.unwrap();
-        assert_eq!(mapped_paddr, paddr);
-        assert_eq!(mapped_perms, permissions);
-        assert!(is_shared); // Shared memory should always be shared
+        let info = result.unwrap();
+        assert_eq!(info.paddr, paddr);
+        assert_eq!(info.permissions, permissions);
+        assert!(info.is_shared); // Shared memory should always be shared
 
         // Test supports_mmap
         assert!(mem_mappable.supports_mmap());
@@ -119,20 +119,20 @@ fn test_shared_memory_mapping_offset() {
         let offset1 = 0;
         let result1 = mem_mappable.get_mapping_info(offset1, 4096);
         assert!(result1.is_ok());
-        let (paddr1, _, _) = result1.unwrap();
-        assert_eq!(paddr1, paddr + offset1);
+        let info1 = result1.unwrap();
+        assert_eq!(info1.paddr, paddr + offset1);
 
         let offset2 = 4096;
         let result2 = mem_mappable.get_mapping_info(offset2, 4096);
         assert!(result2.is_ok());
-        let (paddr2, _, _) = result2.unwrap();
-        assert_eq!(paddr2, paddr + offset2);
+        let info2 = result2.unwrap();
+        assert_eq!(info2.paddr, paddr + offset2);
 
         let offset3 = 8192;
         let result3 = mem_mappable.get_mapping_info(offset3, 4096);
         assert!(result3.is_ok());
-        let (paddr3, _, _) = result3.unwrap();
-        assert_eq!(paddr3, paddr + offset3);
+        let info3 = result3.unwrap();
+        assert_eq!(info3.paddr, paddr + offset3);
 
         // Test out of bounds mapping
         let result_oob = mem_mappable.get_mapping_info(size, 1);

@@ -157,7 +157,7 @@ impl MemoryMappingOps for Pl011Uart {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for UART")
     }
 

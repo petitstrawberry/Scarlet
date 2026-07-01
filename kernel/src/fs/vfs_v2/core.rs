@@ -467,7 +467,7 @@ impl MemoryMappingOps for VfsFileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         self.inner.get_mapping_info(offset, length)
     }
 
@@ -476,7 +476,7 @@ impl MemoryMappingOps for VfsFileObject {
         offset: usize,
         length: usize,
         is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         self.inner.get_mapping_info_with(offset, length, is_shared)
     }
 

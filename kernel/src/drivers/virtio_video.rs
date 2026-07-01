@@ -1731,7 +1731,7 @@ impl MemoryMappingOps for VirtioVideoDevice {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
             return Err("VirtIO video mmap offset and length must be page-aligned");
         }
@@ -1749,7 +1749,11 @@ impl MemoryMappingOps for VirtioVideoDevice {
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("VirtIO video mmap buffer is not available")?;
-        Ok((buffer.as_paddr() + session_offset, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            buffer.as_paddr() + session_offset,
+            0x3,
+            true,
+        ))
     }
 
     fn supports_mmap(&self) -> bool {

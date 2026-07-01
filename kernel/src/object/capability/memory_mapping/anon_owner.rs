@@ -43,7 +43,7 @@ impl MemoryMappingOps for AnonymousPageOwner {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("AnonymousPageOwner does not support get_mapping_info")
     }
 
@@ -140,7 +140,7 @@ impl MemoryMappingOps for ForkCowPageOwner {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("ForkCowPageOwner does not support get_mapping_info")
     }
 

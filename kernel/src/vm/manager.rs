@@ -354,6 +354,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     removed_maps.push(removed_portion);
@@ -380,6 +381,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     mappings_to_add.push(before_map);
@@ -396,6 +398,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     mappings_to_add.push(after_map);
@@ -611,6 +614,7 @@ impl VirtualMemoryManager {
                                 vm_start: memory_map.vm_start,
                                 permissions: perms,
                                 is_shared: false,
+                                memory_attribute: memory_map.memory_attribute,
                                 owner: None,
                             };
                             match self.add_memory_map_fixed(cow_map) {
@@ -1008,6 +1012,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     overwritten_mappings.push(overwritten_map);
@@ -1031,6 +1036,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     mappings_to_add.push(before_map);
@@ -1047,6 +1053,7 @@ impl VirtualMemoryManager {
                         vm_start: existing_map.vm_start,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
+                        memory_attribute: existing_map.memory_attribute,
                         owner: existing_map.owner.clone(),
                     };
                     mappings_to_add.push(after_map);
@@ -1132,6 +1139,7 @@ impl VirtualMemoryManager {
                         vm_start: prev_memory_map.vm_start,
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
+                        memory_attribute: prev_memory_map.memory_attribute,
                         owner: prev_memory_map.owner.clone(),
                     };
 
@@ -1183,6 +1191,7 @@ impl VirtualMemoryManager {
         // 3. Physical addresses are also contiguous
         map1.permissions == map2.permissions
             && map1.is_shared == map2.is_shared
+            && map1.memory_attribute == map2.memory_attribute
             && map1.pmarea.end + 1 == map2.pmarea.start
     }
 }
@@ -1262,6 +1271,7 @@ mod tests {
             vm_start: vma.start,
             permissions: 0,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         vmm.add_memory_map(map).unwrap();
@@ -1292,6 +1302,7 @@ mod tests {
             vm_start: vma.start,
             permissions: 0,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         vmm.add_memory_map(map).unwrap();
@@ -1319,6 +1330,7 @@ mod tests {
             vm_start: vma1.start,
             permissions: 0,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         let vma2 = MemoryArea {
@@ -1331,6 +1343,7 @@ mod tests {
             vm_start: vma2.start,
             permissions: 0,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         vmm.add_memory_map(map1).unwrap();
@@ -2115,6 +2128,7 @@ mod tests {
             vm_start: vma.start,
             permissions: 0o644,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         let asid = alloc_virtual_address_space();
@@ -2154,6 +2168,7 @@ mod tests {
             vm_start: 0x2000,
             permissions: 0,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
 
@@ -2240,6 +2255,7 @@ mod tests {
             vm_start: 0x4000,
             permissions: 0o644,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: Some(owner),
         };
         manager.add_memory_map(map).unwrap();
@@ -2256,6 +2272,7 @@ mod tests {
             vm_start: 0x5000,
             permissions: 0o600,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         let removed = manager.add_memory_map_fixed(replacement).unwrap();

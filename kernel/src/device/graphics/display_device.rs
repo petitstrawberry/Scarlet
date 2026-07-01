@@ -423,7 +423,7 @@ impl MemoryMappingOps for DisplayCharDevice {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let info = self.current_backing_info()?;
 
         if offset % crate::environment::PAGE_SIZE != 0 {
@@ -447,7 +447,12 @@ impl MemoryMappingOps for DisplayCharDevice {
             return Err("Requested length exceeds available display backing size");
         }
 
-        Ok((info.physical_addr + offset, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            info.physical_addr + offset,
+            0x3,
+            true,
+        )
+        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::NonCacheable))
     }
 
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {

@@ -6,7 +6,56 @@
 pub mod anon_owner;
 pub mod syscall;
 
+use crate::vm::vmem::MemoryAttribute;
+
 pub use syscall::{sys_memory_map, sys_memory_unmap};
+
+/// Information needed to map a region of an object into virtual memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryMappingInfo {
+    /// Physical address backing the mapping.
+    pub paddr: usize,
+    /// Scarlet virtual-memory permission bits allowed by the object.
+    pub permissions: usize,
+    /// Whether the mapping is shared with other tasks.
+    pub is_shared: bool,
+    /// Cacheability/device attribute requested for the mapping.
+    pub memory_attribute: MemoryAttribute,
+}
+
+impl MemoryMappingInfo {
+    /// Creates mapping information for normal cacheable memory.
+    ///
+    /// # Arguments
+    /// * `paddr` - Physical address backing the mapping
+    /// * `permissions` - Scarlet virtual-memory permission bits allowed by the object
+    /// * `is_shared` - Whether the mapping is shared with other tasks
+    ///
+    /// # Returns
+    /// Mapping information with [`MemoryAttribute::Normal`].
+    pub const fn new(paddr: usize, permissions: usize, is_shared: bool) -> Self {
+        Self {
+            paddr,
+            permissions,
+            is_shared,
+            memory_attribute: MemoryAttribute::Normal,
+        }
+    }
+
+    /// Returns this mapping information with an explicit memory attribute.
+    ///
+    /// # Arguments
+    /// * `memory_attribute` - Cacheability/device attribute requested for the mapping
+    ///
+    /// # Returns
+    /// The mapping information with the supplied memory attribute.
+    pub const fn with_memory_attribute(self, memory_attribute: MemoryAttribute) -> Self {
+        Self {
+            memory_attribute,
+            ..self
+        }
+    }
+}
 
 /// Memory mapping operations capability
 ///
@@ -17,31 +66,39 @@ pub use syscall::{sys_memory_map, sys_memory_unmap};
 pub trait MemoryMappingOps: Send + Sync {
     /// Get mapping information for a region of the object
     ///
-    /// Returns the physical address, permissions, and sharing information
-    /// for mapping a region of this object into virtual memory.
+    /// Returns the physical address, permissions, sharing information, and
+    /// memory attribute for mapping a region of this object into virtual memory.
     ///
     /// # Arguments
     /// * `offset` - Offset within the object to start mapping from
     /// * `length` - Length of the mapping in bytes
     ///
     /// # Returns
-    /// * `Result<(usize, usize, bool), &'static str>` - (paddr, permissions, is_shared) on success
+    /// * `Result<MemoryMappingInfo, &'static str>` - Mapping information on success
     fn get_mapping_info(
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str>;
+    ) -> Result<MemoryMappingInfo, &'static str>;
 
     /// Get mapping information with sharing intent.
     ///
     /// Default implementation ignores `is_shared` and delegates to
     /// `get_mapping_info` for backward compatibility.
+    ///
+    /// # Arguments
+    /// * `offset` - Offset within the object to start mapping from
+    /// * `length` - Length of the mapping in bytes
+    /// * `is_shared` - Whether the caller requested a shared mapping
+    ///
+    /// # Returns
+    /// Mapping information on success.
     fn get_mapping_info_with(
         &self,
         offset: usize,
         length: usize,
         _is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<MemoryMappingInfo, &'static str> {
         self.get_mapping_info(offset, length)
     }
 
@@ -82,10 +139,22 @@ pub trait MemoryMappingOps: Send + Sync {
     /// Default implementation returns a generic "object" string. Implementers
     /// (e.g. VfsFileObject) should override to provide more meaningful names
     /// such as file paths.
+    ///
+    /// # Returns
+    /// A short diagnostic name for this mapping owner.
     fn mmap_owner_name(&self) -> alloc::string::String {
         alloc::string::String::from("object")
     }
 
+    /// Resolve the physical backing page for a fault on an owner-backed mapping.
+    ///
+    /// # Arguments
+    /// * `access` - Access that caused the fault
+    /// * `page_idx` - Page index within the original mapping
+    /// * `vm_start` - Original virtual start address for the mapping
+    ///
+    /// # Returns
+    /// The resolved backing page, or an error describing why the fault cannot be resolved.
     fn resolve_fault(
         &self,
         access: &crate::object::capability::memory_mapping::AccessKind,
@@ -143,8 +212,17 @@ pub trait MemoryMappingOps: Send + Sync {
         true
     }
 
+    /// Release a range of pages owned by this mapping object.
+    ///
+    /// # Arguments
+    /// * `start_page_idx` - First page index to release
+    /// * `page_count` - Number of pages to release
     fn release_pages(&self, _start_page_idx: usize, _page_count: usize) {}
 
+    /// Clone this mapping owner for a forked task.
+    ///
+    /// # Returns
+    /// A cloned mapping owner when the object supports fork-specific ownership.
     fn fork_clone(&self) -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> {
         None
     }
@@ -200,12 +278,12 @@ mod tests {
             &self,
             offset: usize,
             _length: usize,
-        ) -> Result<(usize, usize, bool), &'static str> {
+        ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
             if self.should_fail {
                 Err("Mock get_mapping_info failure")
             } else {
                 // Return mock physical address, read/write permissions, not shared
-                Ok((0x80000000 + offset, 0x3, false))
+                Ok(MemoryMappingInfo::new(0x80000000 + offset, 0x3, false))
             }
         }
 
@@ -247,10 +325,11 @@ mod tests {
         // Test successful get_mapping_info
         let result = mock_obj.get_mapping_info(1024, 8192);
         assert!(result.is_ok());
-        let (paddr, permissions, is_shared) = result.unwrap();
-        assert_eq!(paddr, 0x80000400); // 0x80000000 + 1024
-        assert_eq!(permissions, 0x3);
-        assert!(!is_shared);
+        let info = result.unwrap();
+        assert_eq!(info.paddr, 0x80000400); // 0x80000000 + 1024
+        assert_eq!(info.permissions, 0x3);
+        assert!(!info.is_shared);
+        assert_eq!(info.memory_attribute, MemoryAttribute::Normal);
 
         // Test on_mapped notification
         mock_obj.on_mapped(0x10000000, 0x80000400, 8192, 1024);
