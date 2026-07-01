@@ -3,14 +3,16 @@
 //! This module provides a comprehensive interrupt management system for the Scarlet kernel.
 //! It supports both local interrupts (via CLINT) and external interrupts (via PLIC) on RISC-V architecture.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 use hashbrown::HashMap;
 
 use crate::arch::{self, interrupt::enable_external_interrupts};
+use crate::device::manager::DeviceManager;
 use crate::device::platform::resource::PlatformDeviceResource;
 
 pub mod controllers;
+pub mod msi;
 
 static INTERRUPT_MANAGER: spin::Once<InterruptManager> = spin::Once::new();
 
@@ -102,6 +104,7 @@ pub struct InterruptManager {
     controllers: spin::Once<spin::Mutex<controllers::InterruptControllers>>,
     irq_descs: spin::Lazy<spin::Mutex<HashMap<Virq, IrqDesc>>>,
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
+    enabled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, CpuId>>>,
     interrupt_devices: spin::Lazy<
         spin::Mutex<
             HashMap<
@@ -118,6 +121,7 @@ impl InterruptManager {
             controllers: spin::Once::new(),
             irq_descs: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             external_handlers: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
+            enabled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             interrupt_devices: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
         }
     }
@@ -134,12 +138,36 @@ impl InterruptManager {
     pub fn init_controllers(&self) {
         crate::early_println!("[interrupt] init: external controller...");
 
+        let enabled_external_interrupts: Vec<_> = self
+            .enabled_external_interrupts
+            .lock()
+            .iter()
+            .map(|(interrupt_id, cpu_id)| (self.irq_desc_or_legacy(*interrupt_id), *cpu_id))
+            .collect();
+
         let mut controllers = self.controllers().lock();
         match controllers.init_external_controller() {
             Ok(()) => {}
             Err(e) => {
                 crate::early_println!("Failed to initialize external controller: {}", e);
             }
+        }
+        if let Some(controller) = controllers.external_controller() {
+            let reenable_count = enabled_external_interrupts.len();
+            for (desc, cpu_id) in enabled_external_interrupts {
+                if let Err(e) = controller.enable_interrupt(desc.mapping.hwirq, cpu_id) {
+                    crate::early_println!(
+                        "[interrupt] failed to re-enable IRQ {} for CPU {} after controller init: {}",
+                        desc.mapping.virq,
+                        cpu_id,
+                        e
+                    );
+                }
+            }
+            crate::early_println!(
+                "[interrupt] re-enabled {} external IRQs after controller init",
+                reenable_count
+            );
         }
 
         crate::early_println!("[interrupt] init: external controller done");
@@ -275,10 +303,19 @@ impl InterruptManager {
         })
     }
 
-    pub fn claim_and_handle_external_interrupt(
+    /// Claim and handle one pending external interrupt, preserving its mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// The handled pending IRQ, or `None` when no external interrupt is pending.
+    pub fn claim_and_handle_pending_external_interrupt(
         &self,
         cpu_id: CpuId,
-    ) -> InterruptResult<Option<InterruptId>> {
+    ) -> InterruptResult<Option<controllers::PendingIrq>> {
         let pending = {
             let controllers = self.controllers().lock();
             if let Some(controller) = controllers.external_controller() {
@@ -289,12 +326,28 @@ impl InterruptManager {
         };
 
         if let Some(pending) = pending {
-            let virq = pending.mapping.virq;
             self.handle_pending_irq(pending)?;
-            Ok(Some(virq))
+            Ok(Some(pending))
         } else {
             Ok(None)
         }
+    }
+
+    /// Claim and handle one pending external interrupt.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU receiving the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// The handled virtual IRQ number, or `None` when no external interrupt is pending.
+    pub fn claim_and_handle_external_interrupt(
+        &self,
+        cpu_id: CpuId,
+    ) -> InterruptResult<Option<InterruptId>> {
+        self.claim_and_handle_pending_external_interrupt(cpu_id)
+            .map(|pending| pending.map(|pending| pending.mapping.virq))
     }
 
     pub fn enable_local_interrupt(
@@ -506,7 +559,11 @@ impl InterruptManager {
         let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)
+            controller.enable_interrupt(desc.mapping.hwirq, cpu_id)?;
+            self.enabled_external_interrupts
+                .lock()
+                .insert(interrupt_id, cpu_id);
+            Ok(())
         } else {
             Err(InterruptError::ControllerNotFound)
         }
@@ -526,20 +583,56 @@ impl InterruptManager {
         &self,
         request: controllers::MsiRequest,
     ) -> InterruptResult<controllers::MsiAllocation> {
-        let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.external_controller() {
-            let allocation = controller.allocate_msi_vectors(request)?;
-            drop(controllers);
-            for vector in &allocation.vectors {
-                self.register_irq_mapping(controllers::IrqMapping {
-                    virq: vector.virq,
-                    hwirq: vector.hwirq,
-                    flow: controllers::IrqFlow::Msi,
-                });
+        self.allocate_msi_vectors_from_device_manager(DeviceManager::get_manager(), request)
+    }
+
+    fn allocate_msi_vectors_from_device_manager(
+        &self,
+        device_manager: &DeviceManager,
+        request: controllers::MsiRequest,
+    ) -> InterruptResult<controllers::MsiAllocation> {
+        let mut result = Err(InterruptError::NotSupported);
+        let mut controller_seen = false;
+
+        device_manager.for_each_msi_controller(|controller| {
+            controller_seen = true;
+            match controller.allocate_vectors(request) {
+                Ok(allocation) => {
+                    result = Ok(allocation);
+                    false
+                }
+                Err(error) => {
+                    result = Err(Self::msi_error_to_interrupt_error(error));
+                    true
+                }
             }
-            Ok(allocation)
-        } else {
-            Err(InterruptError::ControllerNotFound)
+        });
+
+        let allocation = match result {
+            Ok(allocation) => allocation,
+            Err(_) if !controller_seen => return Err(InterruptError::NotSupported),
+            Err(error) => return Err(error),
+        };
+
+        for vector in &allocation.vectors {
+            self.register_irq_mapping(controllers::IrqMapping {
+                virq: vector.virq,
+                hwirq: vector.hwirq,
+                flow: controllers::IrqFlow::Msi,
+            });
+        }
+
+        Ok(allocation)
+    }
+
+    fn msi_error_to_interrupt_error(error: msi::MsiError) -> InterruptError {
+        match error {
+            msi::MsiError::ControllerNotFound => InterruptError::ControllerNotFound,
+            msi::MsiError::NoVectors => InterruptError::NotSupported,
+            msi::MsiError::InvalidRequest => InterruptError::InvalidOperation,
+            msi::MsiError::NotSupported => InterruptError::NotSupported,
+            msi::MsiError::HardwareError => InterruptError::HardwareError,
+            msi::MsiError::Busy => InterruptError::InvalidOperation,
         }
     }
 
@@ -551,7 +644,11 @@ impl InterruptManager {
         let desc = self.irq_desc_or_legacy(interrupt_id);
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
-            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)
+            controller.disable_interrupt(desc.mapping.hwirq, cpu_id)?;
+            self.enabled_external_interrupts
+                .lock()
+                .remove(&interrupt_id);
+            Ok(())
         } else {
             Err(InterruptError::ControllerNotFound)
         }
@@ -742,4 +839,123 @@ pub fn enable_software_interrupts() {
 pub fn enable_cpu_interrupts() {
     enable_external_interrupts();
     enable_software_interrupts();
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::interrupt::msi::{
+        MsiAllocation, MsiController, MsiError, MsiMessage, MsiRequest, MsiRequestFlags, MsiVector,
+    };
+
+    struct FakeMsiController {
+        result: Result<controllers::MsiAllocation, msi::MsiError>,
+        calls: AtomicUsize,
+    }
+
+    impl FakeMsiController {
+        fn new(result: Result<controllers::MsiAllocation, msi::MsiError>) -> Self {
+            Self {
+                result,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl MsiController for FakeMsiController {
+        fn name(&self) -> &'static str {
+            "fake-msi"
+        }
+
+        fn allocate_vectors(&self, _request: MsiRequest) -> Result<MsiAllocation, MsiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+
+        fn free_vectors(&self, _allocation: &MsiAllocation) {}
+
+        fn mask_vector(&self, _vector: &MsiVector) -> Result<(), MsiError> {
+            Ok(())
+        }
+
+        fn unmask_vector(&self, _vector: &MsiVector) -> Result<(), MsiError> {
+            Ok(())
+        }
+    }
+
+    fn test_request() -> controllers::MsiRequest {
+        controllers::MsiRequest {
+            count: 1,
+            target_cpu: 0,
+            requester: None,
+            flags: MsiRequestFlags::NONE,
+        }
+    }
+
+    fn test_allocation(virq: Virq) -> controllers::MsiAllocation {
+        controllers::MsiAllocation {
+            vectors: vec![controllers::MsiVector {
+                virq,
+                hwirq: virq + 32,
+                message: MsiMessage {
+                    address: 0xfee0_0000,
+                    data: virq,
+                },
+            }],
+        }
+    }
+
+    #[test_case]
+    fn test_allocate_msi_vectors_returns_not_supported_when_no_controller_registered() {
+        let devices = DeviceManager::new_for_test();
+        let manager = InterruptManager::new();
+
+        let error = manager
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
+            .unwrap_err();
+
+        assert_eq!(error, InterruptError::NotSupported);
+    }
+
+    #[test_case]
+    fn test_allocate_msi_vectors_returns_allocation_when_controller_succeeds() {
+        let devices = DeviceManager::new_for_test();
+        let controller = Arc::new(FakeMsiController::new(Ok(test_allocation(64))));
+        devices.register_msi_controller(1, controller.clone());
+        let manager = InterruptManager::new();
+
+        let allocation = manager
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
+            .expect("expected MSI allocation");
+
+        assert_eq!(controller.calls(), 1);
+        assert_eq!(allocation.vectors.len(), 1);
+        assert_eq!(allocation.vectors[0].virq, 64);
+        assert_eq!(allocation.vectors[0].hwirq, 96);
+    }
+
+    #[test_case]
+    fn test_allocate_msi_vectors_iterates_until_success() {
+        let devices = DeviceManager::new_for_test();
+        let first = Arc::new(FakeMsiController::new(Err(MsiError::NoVectors)));
+        let second = Arc::new(FakeMsiController::new(Ok(test_allocation(80))));
+        devices.register_msi_controller(1, first.clone());
+        devices.register_msi_controller(2, second.clone());
+        let manager = InterruptManager::new();
+
+        let allocation = manager
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
+            .expect("expected second controller to allocate");
+
+        assert_eq!(first.calls(), 1);
+        assert_eq!(second.calls(), 1);
+        assert_eq!(allocation.vectors[0].virq, 80);
+    }
 }

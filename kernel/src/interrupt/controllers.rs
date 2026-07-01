@@ -2,11 +2,22 @@
 //!
 //! This module defines the basic traits for local and external interrupt controllers.
 
+use alloc::boxed::Box;
+
 use crate::device::platform::resource::{PlatformDeviceResource, PlatformDeviceResourceType};
 use crate::interrupt::InterruptError;
 
 use super::{CpuId, Hwirq, InterruptId, InterruptResult, Priority, Virq};
-use alloc::boxed::Box;
+
+pub use super::msi::{
+    MsiAllocation, MsiMessage, MsiRequest, MsiRequestFlags, MsiRequester, MsiVector,
+};
+
+/// Virtual IRQ used for controller-provided reschedule IPIs without a normal SGI virq.
+pub const RESCHEDULE_IPI_VIRQ: Virq = Virq::MAX;
+
+/// Hardware IRQ sentinel used for software IPIs that have no external IRQ line.
+pub const SOFTWARE_IPI_HWIRQ: Hwirq = Hwirq::MAX;
 
 /// Interrupt handling flow used by the interrupt core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,57 +70,6 @@ pub struct PendingIrq {
     pub mapping: IrqMapping,
     /// CPU that observed the interrupt.
     pub cpu_id: CpuId,
-}
-
-/// PCI requester identity used by MSI/MSI-X routing domains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiRequester {
-    /// PCI segment/domain.
-    pub segment: u16,
-    /// PCI bus number.
-    pub bus: u8,
-    /// PCI device number.
-    pub device: u8,
-    /// PCI function number.
-    pub function: u8,
-}
-
-/// MSI/MSI-X allocation request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiRequest {
-    /// Number of vectors requested.
-    pub count: usize,
-    /// Preferred target CPU.
-    pub target_cpu: CpuId,
-    /// Optional requester identity for routing domains that need requester IDs.
-    pub requester: Option<MsiRequester>,
-}
-
-/// Message written by a PCI MSI/MSI-X requester to raise an interrupt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiMessage {
-    /// MSI doorbell address.
-    pub address: u64,
-    /// MSI message data payload.
-    pub data: u32,
-}
-
-/// One interrupt vector allocated for MSI/MSI-X.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiVector {
-    /// Kernel virtual IRQ associated with this vector.
-    pub virq: Virq,
-    /// Controller-local hardware IRQ associated with this vector.
-    pub hwirq: Hwirq,
-    /// Doorbell message programmed into the PCI device.
-    pub message: MsiMessage,
-}
-
-/// A contiguous or controller-defined MSI/MSI-X allocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MsiAllocation {
-    /// Allocated vectors.
-    pub vectors: alloc::vec::Vec<MsiVector>,
 }
 
 /// Trait for per-CPU timer controllers.
@@ -495,21 +455,6 @@ pub trait ExternalInterruptController: Send + Sync {
     /// `Ok(())` on success.
     fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
         self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
-    }
-
-    /// Allocate MSI/MSI-X vectors for a device.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - MSI allocation request.
-    ///
-    /// # Returns
-    ///
-    /// Allocated MSI vectors and message programming data, or `NotSupported`
-    /// when this controller has no MSI domain.
-    fn allocate_msi_vectors(&self, request: MsiRequest) -> InterruptResult<MsiAllocation> {
-        let _ = request;
-        Err(InterruptError::NotSupported)
     }
 
     /// Send an inter-processor interrupt through this controller.

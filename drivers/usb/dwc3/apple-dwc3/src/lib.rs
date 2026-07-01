@@ -9,7 +9,8 @@ use scarlet::{
     arch::mmio,
     device::{
         DeviceInfo,
-        manager::{DeviceManager, DriverPriority},
+        clk::ClkHandle,
+        manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -17,6 +18,7 @@ use scarlet::{
     early_println,
     interrupt::InterruptId,
     mem::pmm,
+    sync::Mutex,
 };
 use scarlet_driver_apple_atcphy::get_atcphy_by_phandle;
 
@@ -62,25 +64,55 @@ const APPLE_CTRL1_UTMI_REDUCE: u32 = 1 << 1;
 const GUSB2PHYCFG_SUSPHY: u32 = 1 << 6;
 const GUSB3PIPECTL_SUSPHY: u32 = 1 << 17;
 
+/// Synopsys DWC3 core register access wrapper.
 pub struct Dwc3Core {
     base_addr: usize,
 }
 
 impl Dwc3Core {
+    /// Create a DWC3 core wrapper for an MMIO base address.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_addr` - Virtual MMIO base address for the DWC3 register block.
+    ///
+    /// # Returns
+    ///
+    /// A DWC3 core register accessor.
     pub fn new(base_addr: usize) -> Self {
         Self { base_addr }
     }
 
+    /// Read a 32-bit DWC3 register.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Register offset from the DWC3 MMIO base.
+    ///
+    /// # Returns
+    ///
+    /// The register value.
     #[inline]
     pub fn read32(&self, offset: usize) -> u32 {
         unsafe { mmio::read32(self.base_addr + offset) }
     }
 
+    /// Write a 32-bit DWC3 register.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - Register offset from the DWC3 MMIO base.
+    /// * `val` - Value to write.
     #[inline]
     pub fn write32(&self, offset: usize, val: u32) {
         unsafe { mmio::write32(self.base_addr + offset, val) }
     }
 
+    /// Read the DWC3 Synopsys revision.
+    ///
+    /// # Returns
+    ///
+    /// A `(major, minor)` revision tuple decoded from `GSNPSID`.
     pub fn read_revision(&self) -> (u32, u32) {
         let snpsid = self.read32(DWC3_GSNPSID) & GSNPSID_MASK;
         let major = snpsid >> 12 & 0xf;
@@ -88,25 +120,49 @@ impl Dwc3Core {
         (major, minor)
     }
 
+    /// Check whether the DWC3 core advertises USB3 capability.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the hardware parameters indicate USB3 support.
     pub fn is_usb3(&self) -> bool {
         let mode = (self.read32(DWC3_GHWPARAMS1) & GHWPARAMS1_MODE_BITS) >> GHWPARAMS1_MODE_SHIFT;
         mode >= 3
     }
 }
 
+/// Apple-integrated DWC3 controller state.
 pub struct AppleDwc3 {
     core: Dwc3Core,
     dr_mode: alloc::string::String,
+    _bus_clk: Option<ClkHandle>,
 }
 
 impl AppleDwc3 {
-    pub fn new(base_addr: usize, dr_mode: &str) -> Self {
+    /// Create an Apple DWC3 controller instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_addr` - Virtual MMIO base address for the controller.
+    /// * `dr_mode` - USB dual-role mode string from firmware.
+    /// * `bus_clk` - Optional prepared bus clock handle kept alive for this controller.
+    ///
+    /// # Returns
+    ///
+    /// A controller instance ready for hardware initialization.
+    pub fn new(base_addr: usize, dr_mode: &str, bus_clk: Option<ClkHandle>) -> Self {
         Self {
             core: Dwc3Core::new(base_addr),
             dr_mode: alloc::string::String::from(dr_mode),
+            _bus_clk: bus_clk,
         }
     }
 
+    /// Initialize Apple DWC3 controller registers and event resources.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the controller initialization completed, otherwise a static error string.
     pub fn init(&mut self) -> Result<(), &'static str> {
         early_println!("[apple-dwc3] initializing...");
 
@@ -168,6 +224,10 @@ impl AppleDwc3 {
     }
 }
 
+/// Probe an Apple DWC3 platform device.
+///
+/// The optional `bus` clock is resolved and enabled before MMIO access. Clock lookup failure is
+/// non-fatal because older or incomplete firmware descriptions may omit a clock provider.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resource = device
         .get_resources()
@@ -184,6 +244,27 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         paddr,
         size
     );
+
+    let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            early_println!("[apple-dwc3] bus clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
+            early_println!("[apple-dwc3] warning: bus clock unavailable: {}", e);
+            None
+        }
+        Err(e) => {
+            early_println!("[apple-dwc3] bus clock lookup failed: {}", e);
+            return Err(e);
+        }
+    };
 
     let base_addr = scarlet::vm::ioremap(paddr, size).map_err(|_| "dwc3: ioremap failed")?;
 
@@ -203,16 +284,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 early_println!("[apple-dwc3] ATC PHY ready (phandle={:#x})", phy_phandle);
             } else {
                 early_println!(
-                    "[apple-dwc3] ATC PHY not found (phandle={:#x})",
+                    "[apple-dwc3] ATC PHY not yet registered, deferring (phandle={:#x})",
                     phy_phandle
                 );
+                return probe_defer();
             }
             offset += entry_size;
         }
     }
 
-    let mut dwc3 = AppleDwc3::new(base_addr, dr_mode);
+    let mut dwc3 = AppleDwc3::new(base_addr, dr_mode, bus_clk);
     dwc3.init()?;
+    *APPLE_DWC3.lock() = Some(dwc3);
 
     early_println!("[apple-dwc3] registered");
 
@@ -225,10 +308,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
         let interrupt_id = irq_resource.map(|r| r.start as InterruptId);
 
-        scarlet::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id).map_err(|e| {
+        if let Err(e) = scarlet::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id) {
             early_println!("[apple-dwc3] xHCI bind failed: {}", e);
-            e
-        })?;
+            *APPLE_DWC3.lock() = None;
+            return Err(e);
+        }
         early_println!("[apple-dwc3] xHCI bound successfully");
     }
 
@@ -236,8 +320,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    *APPLE_DWC3.lock() = None;
     Ok(())
 }
+
+static APPLE_DWC3: Mutex<Option<AppleDwc3>> = Mutex::new(None);
 
 fn register_dwc3_driver() {
     let driver = PlatformDeviceDriver::new(
@@ -260,5 +347,6 @@ scarlet::driver_initcall!(register_dwc3_driver);
 #[used]
 static SCARLET_DRIVER_APPLE_DWC3_ANCHOR: fn() = force_link;
 
+/// Force this crate to be linked into driver builds.
 #[inline(never)]
 pub fn force_link() {}

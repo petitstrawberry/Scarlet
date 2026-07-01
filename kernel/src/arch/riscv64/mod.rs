@@ -44,6 +44,38 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
 
+/// Synchronize instruction fetch after writing executable memory.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address used to write the executable bytes.
+/// * `len` - Number of bytes written.
+pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    if len == 0 {
+        return;
+    }
+
+    unsafe {
+        asm!("fence.i", options(nostack));
+    }
+}
+
+/// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
+///
+/// RISC-V targets supported by Scarlet currently do not require explicit data
+/// cache maintenance for coherent DMA, so this is a no-op API counterpart to
+/// AArch64.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to clean.
+pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    let _ = start_vaddr;
+    let _ = len;
+}
+
 /// Per-CPU initialization for secondary CPUs.
 ///
 /// Configures trap vectors, FPU, and vector extension for the given hart.

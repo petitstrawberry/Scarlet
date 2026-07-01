@@ -6,17 +6,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use scarlet::sync::Mutex;
-
 use scarlet::device::graphics::FramebufferConfig;
 use scarlet::device::graphics::output::DisplayOutput;
-use scarlet::device::manager::{DeviceManager, DriverPriority};
+use scarlet::device::manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
+use scarlet::device::remoteproc::RemoteProcessor;
 use scarlet::early_println;
+use scarlet::sync::Mutex;
 use scarlet::vm;
-use scarlet_driver_apple_afk::AfkEndpoint;
-use scarlet_driver_apple_asc::AppleAsc;
+use scarlet_driver_apple_asc::{AppleAsc, get_apple_asc};
 use scarlet_driver_apple_dart::{DartPageTable, get_dart_by_phandle};
 use scarlet_driver_apple_epic::EpicEndpoint;
 use scarlet_driver_apple_rtkit::AppleRtkit;
@@ -168,19 +167,30 @@ impl AppleDcpExt {
         self.coproc_base + DCP_ASC_OFFSET
     }
 
-    fn create_rtkit(&self) -> (Arc<AppleAsc>, Arc<AppleRtkit>) {
-        let asc = Arc::new(AppleAsc::new(self.asc_base()));
+    fn create_rtkit(&self) -> Result<(Arc<AppleAsc>, Arc<AppleRtkit>), &'static str> {
+        let asc = match get_apple_asc(0) {
+            Some(asc) => asc,
+            None => {
+                early_println!("[apple-dcpext] ASC provider not ready, deferring");
+                let defer: Result<(), &'static str> = probe_defer();
+                match defer {
+                    Err(e) => {
+                        debug_assert!(is_probe_defer(e));
+                        return Err(e);
+                    }
+                    Ok(()) => unreachable!(),
+                }
+            }
+        };
         let rtkit = Arc::new(AppleRtkit::new(Arc::clone(&asc)));
-        (asc, rtkit)
+        Ok((asc, rtkit))
     }
 
     fn create_epic_endpoint(
-        rtkit: Arc<AppleRtkit>,
+        remoteproc: Arc<dyn RemoteProcessor>,
         endpoint: u8,
     ) -> Result<EpicEndpoint, &'static str> {
-        let afk = Arc::new(Mutex::new(AfkEndpoint::new(rtkit, endpoint)));
-        afk.lock().start()?;
-        EpicEndpoint::new(afk)
+        EpicEndpoint::new(remoteproc, endpoint)
     }
 
     fn wait_for_named_service(
@@ -215,12 +225,14 @@ impl AppleDcpExt {
             self.asc_base()
         );
 
-        let (asc, rtkit) = self.create_rtkit();
+        let (asc, rtkit) = self.create_rtkit()?;
         rtkit.boot()?;
 
-        let mut system_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_SYSTEM_EP)?;
-        let mut dptx_port_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_DPTX_PORT_EP)?;
-        let mut iboot_ep = Self::create_epic_endpoint(Arc::clone(&rtkit), DCP_IBOOT_EP)?;
+        let remoteproc: Arc<dyn RemoteProcessor> = rtkit.clone();
+
+        let mut system_ep = Self::create_epic_endpoint(remoteproc.clone(), DCP_SYSTEM_EP)?;
+        let mut dptx_port_ep = Self::create_epic_endpoint(remoteproc.clone(), DCP_DPTX_PORT_EP)?;
+        let mut iboot_ep = Self::create_epic_endpoint(remoteproc, DCP_IBOOT_EP)?;
 
         Self::wait_for_named_service(&mut system_ep, SYSTEM_SERVICE_PREFIX)
             .map_err(|_| "apple-dcpext: system service not announced")?;
@@ -550,15 +562,31 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         coproc_size
     );
 
+    let dart_phandle = if let Some(phandle) = parse_iommus_phandle(device) {
+        if get_dart_by_phandle(phandle).is_none() {
+            early_println!(
+                "[apple-dcpext] DART phandle={:#x} not ready, deferring",
+                phandle
+            );
+            let defer = probe_defer();
+            if let Err(e) = defer {
+                debug_assert!(is_probe_defer(e));
+                return Err(e);
+            }
+            return defer;
+        }
+
+        early_println!("[apple-dcpext] dart phandle: {:#x}", phandle);
+        Some(phandle)
+    } else {
+        None
+    };
+
     let mut dcp = AppleDcpExt::new(coproc_base, coproc_size);
     dcp.init()?;
 
     *DCP_EXT.lock() = Some(dcp);
-
-    if let Some(phandle) = parse_iommus_phandle(device) {
-        early_println!("[apple-dcpext] dart phandle: {:#x}", phandle);
-        *DCP_DART_PHANDLE.lock() = Some(phandle);
-    }
+    *DCP_DART_PHANDLE.lock() = dart_phandle;
 
     Ok(())
 }

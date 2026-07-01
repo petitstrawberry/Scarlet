@@ -946,13 +946,18 @@ pub fn wait_for_ap_release() {
     }
 }
 
+/// Start a secondary CPU after the bootstrap CPU releases the AP barrier.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the architecture boot code.
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     use core::sync::atomic::Ordering;
+
     crate::arch::vm::switch_to_kernel_page_table();
     crate::arch::init_ap_cpu(cpu_id);
-
-    println!("[Scarlet Kernel] AP {}: initializing...", cpu_id);
+    crate::arch::vm::register_trampoline_for_ap();
 
     crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
     crate::interrupt::enable_cpu_interrupts();
@@ -962,8 +967,6 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
-
-    crate::arch::vm::register_trampoline_for_ap();
 
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 

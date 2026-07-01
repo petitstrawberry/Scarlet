@@ -488,13 +488,19 @@ fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
 
 fn next_pseudo_random_u64() -> u64 {
     loop {
-        let mut state = XORSHIFT_STATE.load(Ordering::Relaxed);
+        let state = XORSHIFT_STATE.load(Ordering::Relaxed);
         if state == 0 {
-            state = crate::time::current_time() ^ 0x9e3779b97f4a7c15;
-            if state == 0 {
-                state = 0x4f1bbcdcb7a43413;
+            let seed = crate::time::current_time() ^ 0x9e3779b97f4a7c15;
+            let seed = if seed == 0 { 0x4f1bbcdcb7a43413 } else { seed };
+            if XORSHIFT_STATE
+                .compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return seed;
             }
+            continue;
         }
+
         let mut x = state;
         x ^= x << 13;
         x ^= x >> 7;

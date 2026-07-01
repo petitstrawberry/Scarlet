@@ -2,18 +2,25 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio;
+use scarlet::device::mailbox::{
+    MailboxChannel, MailboxChannelId, MailboxClient, MailboxController, MailboxError,
+    MailboxMessage, MailboxSpec,
+};
 use scarlet::device::manager::{DeviceManager, DriverPriority};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
-use scarlet::driver_initcall;
 use scarlet::time;
 use scarlet::vm;
 
@@ -44,6 +51,31 @@ pub struct AscMessage {
 /// Apple ASC mailbox MMIO driver.
 pub struct AppleAsc {
     base: usize,
+}
+
+/// Mailbox channel wrapper for one Apple ASC mailbox queue.
+///
+/// ASC hardware exchanges messages as `(msg0: u64, msg1: u32)` pairs. This
+/// channel maps them to the generic [`MailboxMessage`] layout by storing
+/// `msg0` in `words[0]`, storing zero-extended `msg1` in `words[1]`, and
+/// setting `len` to `2`. Messages submitted through [`MailboxChannel::try_send`]
+/// must therefore provide at least two words and keep the upper 32 bits of
+/// `words[1]` clear.
+pub struct AppleAscChannel {
+    asc: Arc<AppleAsc>,
+    id: MailboxChannelId,
+    client: Mutex<Option<Arc<dyn MailboxClient>>>,
+}
+
+/// Mailbox controller wrapper for one Apple ASC instance.
+///
+/// ASC exposes a single AP↔IOP mailbox queue, so every requested mailbox channel
+/// is backed by the same hardware queue. Channel release is a no-op because the
+/// queue lifetime is owned by the controller and dropped with the ASC instance.
+pub struct AppleAscMailboxController {
+    asc: Arc<AppleAsc>,
+    phandle: u32,
+    next_channel_id: AtomicU32,
 }
 
 impl AppleAsc {
@@ -145,12 +177,192 @@ impl AppleAsc {
     }
 }
 
+impl AppleAscChannel {
+    /// Create a mailbox channel for one ASC queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `asc` - ASC hardware instance backing this channel.
+    /// * `id` - Controller-local channel identifier.
+    /// * `client` - Optional callback sink installed before use.
+    ///
+    /// # Returns
+    ///
+    /// A new mailbox channel wrapper.
+    pub fn new(
+        asc: Arc<AppleAsc>,
+        id: MailboxChannelId,
+        client: Option<Arc<dyn MailboxClient>>,
+    ) -> Self {
+        Self {
+            asc,
+            id,
+            client: Mutex::new(client),
+        }
+    }
+
+    fn mailbox_to_asc(message: &MailboxMessage) -> Result<AscMessage, MailboxError> {
+        if message.len < 2 || message.words[1] > u32::MAX as u64 {
+            return Err(MailboxError::InvalidChannel);
+        }
+
+        Ok(AscMessage {
+            msg0: message.words[0],
+            msg1: message.words[1] as u32,
+        })
+    }
+
+    fn asc_to_mailbox(message: &AscMessage) -> MailboxMessage {
+        MailboxMessage {
+            words: [message.msg0, message.msg1 as u64, 0, 0],
+            len: 2,
+        }
+    }
+}
+
+impl MailboxChannel for AppleAscChannel {
+    fn id(&self) -> MailboxChannelId {
+        self.id
+    }
+
+    fn try_send(&self, message: &MailboxMessage) -> Result<(), MailboxError> {
+        let asc_message = Self::mailbox_to_asc(message)?;
+        self.asc
+            .send(&asc_message)
+            .map_err(|_| MailboxError::HardwareError)?;
+
+        if let Some(client) = self.client.lock().as_ref() {
+            client.tx_done(self.id);
+        }
+
+        Ok(())
+    }
+
+    fn try_recv(&self) -> Result<Option<MailboxMessage>, MailboxError> {
+        if !self.asc.can_recv() {
+            return Ok(None);
+        }
+
+        let mut asc_message = AscMessage { msg0: 0, msg1: 0 };
+        self.asc
+            .recv(&mut asc_message)
+            .map_err(|_| MailboxError::HardwareError)?;
+
+        Ok(Some(Self::asc_to_mailbox(&asc_message)))
+    }
+
+    /// Send using ASC's built-in mailbox-full timeout.
+    ///
+    /// The current ASC MMIO primitive already waits up to `ASC_SEND_TIMEOUT_US`
+    /// while polling the transmit FIFO, so this implementation accepts
+    /// `timeout_us` for the generic trait contract but delegates to
+    /// [`Self::try_send`] instead of overriding the hardware timeout.
+    fn send_timeout(&self, message: &MailboxMessage, timeout_us: u64) -> Result<(), MailboxError> {
+        let _ = timeout_us;
+        self.try_send(message)
+    }
+
+    fn set_client(&self, client: Option<Arc<dyn MailboxClient>>) -> Result<(), MailboxError> {
+        *self.client.lock() = client;
+        Ok(())
+    }
+
+    fn poll(&self) -> Result<(), MailboxError> {
+        if self.asc.can_recv() {
+            if let Some(client) = self.client.lock().as_ref() {
+                client.rx_ready(self.id);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl AppleAscMailboxController {
+    /// Create a mailbox controller for an ASC hardware instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `asc` - ASC hardware instance backing requested channels.
+    /// * `phandle` - Firmware phandle used to register this controller.
+    ///
+    /// # Returns
+    ///
+    /// A new ASC mailbox controller wrapper.
+    pub const fn new(asc: Arc<AppleAsc>, phandle: u32) -> Self {
+        Self {
+            asc,
+            phandle,
+            next_channel_id: AtomicU32::new(0),
+        }
+    }
+
+    /// Return the firmware phandle used to register this controller.
+    ///
+    /// # Returns
+    ///
+    /// Firmware phandle for this controller.
+    pub const fn phandle(&self) -> u32 {
+        self.phandle
+    }
+}
+
+impl MailboxController for AppleAscMailboxController {
+    fn name(&self) -> &'static str {
+        "apple-asc-mailbox"
+    }
+
+    fn request_channel(
+        &self,
+        spec: &MailboxSpec,
+        client: Option<Arc<dyn MailboxClient>>,
+    ) -> Result<Arc<dyn MailboxChannel>, MailboxError> {
+        let _ = spec;
+        let channel_id = MailboxChannelId(self.next_channel_id.fetch_add(1, Ordering::Relaxed));
+        Ok(Arc::new(AppleAscChannel::new(
+            Arc::clone(&self.asc),
+            channel_id,
+            client,
+        )))
+    }
+
+    fn release_channel(&self, channel: MailboxChannelId) {
+        let _ = channel;
+    }
+}
+
 /// Registry of probed ASC mailbox instances.
 static ASC_REGISTRY: Mutex<Vec<Arc<AppleAsc>>> = Mutex::new(Vec::new());
+static ASC_PHANDLE_REGISTRY: Mutex<Vec<(u32, Arc<AppleAsc>)>> = Mutex::new(Vec::new());
 
 /// Get a probed ASC mailbox instance by index.
+///
+/// # Arguments
+///
+/// * `id` - Zero-based ASC registration index.
+///
+/// # Returns
+///
+/// ASC instance registered at `id`, or `None` when missing.
 pub fn get_apple_asc(id: u32) -> Option<Arc<AppleAsc>> {
     ASC_REGISTRY.lock().get(id as usize).map(Arc::clone)
+}
+
+/// Get a probed ASC mailbox instance by firmware phandle.
+///
+/// # Arguments
+///
+/// * `phandle` - Firmware phandle of the ASC mailbox controller node.
+///
+/// # Returns
+///
+/// ASC instance registered for `phandle`, or `None` when the ASC has not probed.
+pub fn get_apple_asc_by_phandle(phandle: u32) -> Option<Arc<AppleAsc>> {
+    ASC_PHANDLE_REGISTRY
+        .lock()
+        .iter()
+        .find(|(registered, _)| *registered == phandle)
+        .map(|(_, asc)| Arc::clone(asc))
 }
 
 #[inline(always)]
@@ -176,7 +388,30 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-asc: invalid memory resource")?;
 
     let base = vm::ioremap(paddr, size).map_err(|_| "apple-asc: ioremap failed")?;
-    ASC_REGISTRY.lock().push(Arc::new(AppleAsc::new(base)));
+    let asc = Arc::new(AppleAsc::new(base));
+
+    ASC_REGISTRY.lock().push(Arc::clone(&asc));
+
+    let phandle = device
+        .property("phandle")
+        .and_then(|p| p.as_usize())
+        .map(|v| v as u32)
+        .or_else(|| {
+            device
+                .property("linux,phandle")
+                .and_then(|p| p.as_usize())
+                .map(|v| v as u32)
+        })
+        .unwrap_or(0);
+
+    if phandle != 0 {
+        ASC_PHANDLE_REGISTRY
+            .lock()
+            .push((phandle, Arc::clone(&asc)));
+    }
+
+    let controller = Arc::new(AppleAscMailboxController::new(asc, phandle));
+    DeviceManager::get_manager().register_mailbox_controller(controller.phandle(), controller);
 
     Ok(())
 }
@@ -207,3 +442,57 @@ static SCARLET_DRIVER_APPLE_ASC_ANCHOR: fn() = force_link;
 
 #[inline(never)]
 pub fn force_link() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_to_asc_uses_first_two_words() {
+        let message = MailboxMessage {
+            words: [0x1122_3344_5566_7788, 0xaabb_ccdd, 0xffff, 0xeeee],
+            len: 2,
+        };
+
+        let asc_message = AppleAscChannel::mailbox_to_asc(&message).unwrap();
+
+        assert_eq!(asc_message.msg0, 0x1122_3344_5566_7788);
+        assert_eq!(asc_message.msg1, 0xaabb_ccdd);
+    }
+
+    #[test]
+    fn asc_to_mailbox_zero_extends_msg1_and_sets_len() {
+        let asc_message = AscMessage {
+            msg0: 0x8877_6655_4433_2211,
+            msg1: 0x1234_5678,
+        };
+
+        let message = AppleAscChannel::asc_to_mailbox(&asc_message);
+
+        assert_eq!(message.words, [0x8877_6655_4433_2211, 0x1234_5678, 0, 0]);
+        assert_eq!(message.len, 2);
+    }
+
+    #[test]
+    fn mailbox_to_asc_rejects_missing_second_word() {
+        let message = MailboxMessage::one(0x1234);
+
+        assert_eq!(
+            AppleAscChannel::mailbox_to_asc(&message),
+            Err(MailboxError::InvalidChannel)
+        );
+    }
+
+    #[test]
+    fn mailbox_to_asc_rejects_msg1_upper_bits() {
+        let message = MailboxMessage {
+            words: [0x1, 0x1_0000_0000, 0, 0],
+            len: 2,
+        };
+
+        assert_eq!(
+            AppleAscChannel::mailbox_to_asc(&message),
+            Err(MailboxError::InvalidChannel)
+        );
+    }
+}

@@ -108,12 +108,31 @@ pub mod abs_codes {
 }
 
 /// Key codes
+#[allow(dead_code)]
 pub mod key_codes {
     pub const BTN_LEFT: u16 = 0x110;
     #[allow(dead_code)]
     pub const BTN_RIGHT: u16 = 0x111;
     #[allow(dead_code)]
     pub const BTN_MIDDLE: u16 = 0x112;
+    pub const KEY_ESC: u16 = 0x01;
+    pub const KEY_1: u16 = 0x02;
+    pub const KEY_2: u16 = 0x03;
+    pub const KEY_3: u16 = 0x04;
+    pub const KEY_4: u16 = 0x05;
+    pub const KEY_5: u16 = 0x06;
+    pub const KEY_6: u16 = 0x07;
+    pub const KEY_7: u16 = 0x08;
+    pub const KEY_8: u16 = 0x09;
+    pub const KEY_9: u16 = 0x0a;
+    pub const KEY_0: u16 = 0x0b;
+    pub const KEY_MINUS: u16 = 0x0c;
+    pub const KEY_EQUAL: u16 = 0x0d;
+    pub const KEY_BACKSPACE: u16 = 0x0e;
+    pub const KEY_TAB: u16 = 0x0f;
+    pub const KEY_LEFTBRACE: u16 = 0x1a;
+    pub const KEY_RIGHTBRACE: u16 = 0x1b;
+    pub const KEY_ENTER: u16 = 0x1c;
     pub const KEY_SPACE: u16 = 0x39;
     pub const KEY_LEFTCTRL: u16 = 0x1d;
     pub const KEY_RIGHTCTRL: u16 = 0x61;
@@ -128,6 +147,13 @@ pub mod key_codes {
     pub const KEY_LEFTMETA: u16 = 0x7d;
     pub const KEY_RIGHTMETA: u16 = 0x7e;
     pub const KEY_BACKSLASH: u16 = 0x2b;
+    pub const KEY_SEMICOLON: u16 = 0x27;
+    pub const KEY_APOSTROPHE: u16 = 0x28;
+    pub const KEY_GRAVE: u16 = 0x29;
+    pub const KEY_COMMA: u16 = 0x33;
+    pub const KEY_DOT: u16 = 0x34;
+    pub const KEY_SLASH: u16 = 0x35;
+    pub const KEY_CAPSLOCK: u16 = 0x3a;
 }
 
 /// Input manager - handles input devices and event reading

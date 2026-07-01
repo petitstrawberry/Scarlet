@@ -3,6 +3,7 @@
 //! This module encapsulates various device drivers for the Scarlet kernel.
 
 pub mod block;
+pub mod clk;
 pub mod display;
 pub mod gpio;
 pub mod graphics;

@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -24,10 +24,11 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::println;
+use crate::sync::IrqGuard;
 use crate::task::mytask;
 
 static AUDIO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-const USEC_PER_SEC: u64 = 1_000_000;
 
 /// Native audio control command namespace.
 pub mod commands {
@@ -47,7 +48,21 @@ pub mod commands {
     pub const AUDIO_GET_STATUS: u32 = 0x4106;
     /// Ask the backend to release stream resources.
     pub const AUDIO_RELEASE: u32 = 0x4107;
+    /// Query stable device identity and routing metadata.
+    pub const AUDIO_GET_INFO: u32 = 0x4108;
 }
+
+/// Unknown or unspecified audio output kind.
+pub const AUDIO_DEVICE_KIND_UNKNOWN: u32 = 0;
+/// Built-in speaker output.
+pub const AUDIO_DEVICE_KIND_SPEAKERS: u32 = 1;
+/// Headphone or headset output.
+pub const AUDIO_DEVICE_KIND_HEADPHONES: u32 = 2;
+
+/// Maximum bytes in a stable audio device name, including trailing zero padding.
+pub const AUDIO_DEVICE_NAME_LEN: usize = 32;
+/// Maximum bytes in an audio device description, including trailing zero padding.
+pub const AUDIO_DEVICE_DESCRIPTION_LEN: usize = 64;
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
@@ -61,6 +76,9 @@ pub const AUDIO_PCM_FORMAT_F32LE: u32 = 4;
 pub const AUDIO_PCM_FORMAT_S8: u32 = 5;
 /// Maximum sample rates returned in one capability query.
 pub const AUDIO_PCM_MAX_RATES: usize = 16;
+
+/// Callback invoked by playback backends when DMA has completed periods.
+pub type AudioCompletionCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Stream is configured but not running.
 pub const AUDIO_STATE_PREPARED: u32 = 1;
@@ -240,6 +258,75 @@ pub struct AudioPcmStatus {
     pub xruns: u32,
 }
 
+/// Stable identity for a native Scarlet audio output device.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioDeviceInfo {
+    /// One of `AUDIO_DEVICE_KIND_*`.
+    pub kind: u32,
+    /// Reserved device flags; currently zero.
+    pub flags: u32,
+    /// Stable ASCII device name, zero padded.
+    pub name: [u8; AUDIO_DEVICE_NAME_LEN],
+    /// Human-readable ASCII description, zero padded.
+    pub description: [u8; AUDIO_DEVICE_DESCRIPTION_LEN],
+}
+
+impl Default for AudioDeviceInfo {
+    fn default() -> Self {
+        Self::new(AUDIO_DEVICE_KIND_UNKNOWN, "unknown", "Unknown Audio Output")
+    }
+}
+
+impl AudioDeviceInfo {
+    /// Create fixed-size audio device identity metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Device kind exposed through `AUDIO_DEVICE_KIND_*`.
+    /// * `name` - Stable short ASCII name.
+    /// * `description` - Human-readable ASCII description.
+    ///
+    /// # Returns
+    ///
+    /// A zero-padded device info structure safe to copy to user space.
+    pub fn new(kind: u32, name: &str, description: &str) -> Self {
+        let mut info = Self {
+            kind,
+            flags: 0,
+            name: [0; AUDIO_DEVICE_NAME_LEN],
+            description: [0; AUDIO_DEVICE_DESCRIPTION_LEN],
+        };
+        copy_cstr_bytes(&mut info.name, name.as_bytes());
+        copy_cstr_bytes(&mut info.description, description.as_bytes());
+        info
+    }
+}
+
+/// Kernel PCM ring memory exposed to a playback backend.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioPcmBuffer {
+    /// Physical address of the first byte of the PCM ring.
+    pub paddr: usize,
+    /// Kernel virtual address of the first byte of the PCM ring.
+    pub vaddr: usize,
+    /// Usable PCM ring length in bytes.
+    pub buffer_bytes: usize,
+    /// Page-aligned mapping length in bytes.
+    pub mapped_bytes: usize,
+}
+
+/// One committed period within a PCM ring.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioPcmPeriod {
+    /// Absolute frame position of this period.
+    pub start_frames: u64,
+    /// Byte offset within [`AudioPcmBuffer::buffer_bytes`].
+    pub byte_offset: usize,
+    /// Period length in bytes.
+    pub byte_len: usize,
+}
+
 /// Backend implemented by hardware audio drivers.
 pub trait AudioPlaybackDevice: Send + Sync {
     /// Return playback capabilities.
@@ -250,11 +337,16 @@ pub trait AudioPlaybackDevice: Send + Sync {
     /// # Arguments
     ///
     /// * `params` - PCM parameters selected by user space.
+    /// * `buffer` - DMA-capable PCM ring mapped by `/dev/audio`.
     ///
     /// # Returns
     ///
     /// `Ok(())` if the stream is ready for period submissions.
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str>;
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str>;
 
     /// Start playback on the backend.
     fn start(&self) -> Result<(), &'static str>;
@@ -265,16 +357,16 @@ pub trait AudioPlaybackDevice: Send + Sync {
     /// Release backend stream resources.
     fn release(&self) -> Result<(), &'static str>;
 
-    /// Submit one period of interleaved PCM data.
+    /// Submit one committed period from the configured PCM ring.
     ///
     /// # Arguments
     ///
-    /// * `pcm` - Period-sized PCM byte slice.
+    /// * `period` - Period position inside the configured PCM ring.
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the period was queued.
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str>;
+    /// `Ok(())` when the period was queued for playback.
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str>;
 
     /// Reclaim completed periods.
     ///
@@ -283,9 +375,111 @@ pub trait AudioPlaybackDevice: Send + Sync {
     /// Number of completed periods.
     fn process_completions(&self) -> usize;
 
+    /// Install a completion callback for backend-driven refill.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Callback to invoke when the backend has completed periods,
+    ///   or `None` to clear the callback.
+    fn set_completion_callback(&self, callback: Option<AudioCompletionCallback>) {
+        let _ = callback;
+    }
+
     /// Maximum backend periods that may be queued at once.
     fn max_in_flight_periods(&self) -> usize {
         4
+    }
+}
+
+/// Audio codec endpoint controlled by a machine or controller driver.
+pub trait AudioCodec: Send + Sync {
+    /// Configure codec playback parameters for one DAI link.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - PCM parameters selected for the stream.
+    /// * `tx_mask` - TDM transmit slot mask used by the CPU DAI.
+    /// * `slots` - Total number of TDM slots in the frame.
+    /// * `slot_width` - Width of each TDM slot in bits.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when codec playback registers were configured.
+    fn configure_playback(
+        &self,
+        params: &AudioPcmParams,
+        tx_mask: u32,
+        slots: usize,
+        slot_width: usize,
+    ) -> Result<(), &'static str>;
+
+    /// Change codec playback mute state.
+    ///
+    /// # Arguments
+    ///
+    /// * `muted` - `true` to mute playback output, `false` to unmute it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the mute state was applied.
+    fn set_playback_muted(&self, muted: bool) -> Result<(), &'static str>;
+
+    /// Change codec playback power state.
+    ///
+    /// # Arguments
+    ///
+    /// * `powered` - `true` to power playback circuitry, `false` to shut it down.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the power state was applied.
+    fn set_playback_powered(&self, powered: bool) -> Result<(), &'static str>;
+}
+
+/// CPU-side audio DAI provider that can be routed to codecs.
+pub trait AudioDaiProvider: Send + Sync {
+    /// Number of firmware cells consumed after the provider phandle.
+    ///
+    /// # Returns
+    ///
+    /// Number of `sound-dai` specifier cells expected by this provider.
+    fn sound_dai_cells(&self) -> usize;
+
+    /// Attach a playback codec to a CPU DAI endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Firmware specifier cells following the provider phandle.
+    /// * `codec` - Codec endpoint to control for playback on this DAI.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the route was accepted.
+    fn attach_playback_codec(
+        &self,
+        spec: &[u32],
+        codec: Arc<dyn AudioCodec>,
+    ) -> Result<(), &'static str>;
+
+    /// Attach a playback codec with an explicit CPU-side TDM slot mask.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Firmware specifier cells following the provider phandle.
+    /// * `codec` - Codec endpoint to control for playback on this DAI.
+    /// * `tx_mask` - TDM transmit slot mask assigned to this codec.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the route was accepted.
+    fn attach_playback_codec_tdm(
+        &self,
+        spec: &[u32],
+        codec: Arc<dyn AudioCodec>,
+        tx_mask: u32,
+    ) -> Result<(), &'static str> {
+        let _ = tx_mask;
+        self.attach_playback_codec(spec, codec)
     }
 }
 
@@ -340,6 +534,26 @@ impl AudioPcmRing {
         self.params.buffer_frames.saturating_sub(queued as u32)
     }
 
+    fn clear_data(&mut self) {
+        // SAFETY: `pages` owns `mapped_bytes` bytes backing the mmap PCM ring.
+        unsafe {
+            core::ptr::write_bytes(self.vaddr() as *mut u8, 0, self.mapped_bytes);
+        }
+        crate::arch::clean_dcache_to_poc_range(self.vaddr(), self.mapped_bytes);
+    }
+
+    fn discard_pending(&mut self) {
+        let period_frames = u64::from(self.params.period_frames);
+        let next_period = self
+            .app_ptr_frames
+            .saturating_add(period_frames.saturating_sub(1))
+            / period_frames
+            * period_frames;
+        self.app_ptr_frames = next_period;
+        self.hw_ptr_frames = next_period;
+        self.submitted_ptr_frames = next_period;
+    }
+
     fn buffer_info(&self) -> AudioPcmBufferInfo {
         AudioPcmBufferInfo {
             mmap_offset: 0,
@@ -348,6 +562,15 @@ impl AudioPcmRing {
             period_bytes: self.period_bytes() as u32,
             buffer_frames: self.params.buffer_frames,
             period_frames: self.params.period_frames,
+        }
+    }
+
+    fn dma_buffer(&self) -> AudioPcmBuffer {
+        AudioPcmBuffer {
+            paddr: self.paddr(),
+            vaddr: self.vaddr(),
+            buffer_bytes: self.buffer_bytes(),
+            mapped_bytes: self.mapped_bytes,
         }
     }
 
@@ -419,30 +642,30 @@ impl AudioPcmRing {
         Ok(copied)
     }
 
-    fn copy_period_at(&self, start_frames: u64, out: &mut [u8]) {
+    fn period_at(&self, start_frames: u64) -> Result<AudioPcmPeriod, &'static str> {
         let frame_bytes = self.frame_bytes();
-        let mut copied = 0usize;
-        let mut byte_offset =
-            (start_frames as usize % self.params.buffer_frames as usize) * frame_bytes;
-        let buffer_bytes = self.buffer_bytes();
-        while copied < out.len() {
-            let chunk = (out.len() - copied).min(buffer_bytes - byte_offset);
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (self.vaddr() + byte_offset) as *const u8,
-                    out[copied..copied + chunk].as_mut_ptr(),
-                    chunk,
-                );
-            }
-            copied += chunk;
-            byte_offset = 0;
+        let buffer_frames = self.params.buffer_frames as usize;
+        let byte_offset = (start_frames as usize % buffer_frames) * frame_bytes;
+        let byte_len = self.period_bytes();
+        if byte_offset + byte_len > self.buffer_bytes() {
+            return Err("PCM period crosses ring boundary");
         }
+        Ok(AudioPcmPeriod {
+            start_frames,
+            byte_offset,
+            byte_len,
+        })
+    }
+
+    fn clean_period(&self, period: AudioPcmPeriod) {
+        crate::arch::clean_dcache_to_poc_range(self.vaddr() + period.byte_offset, period.byte_len);
     }
 }
 
 /// Character device exposing a playback PCM ring as `/dev/audioN`.
 pub struct AudioCharDevice {
     backend: Arc<dyn AudioPlaybackDevice>,
+    info: AudioDeviceInfo,
     ring: Mutex<Option<AudioPcmRing>>,
     opened: Mutex<bool>,
 }
@@ -458,10 +681,42 @@ impl AudioCharDevice {
     ///
     /// A new audio character device.
     pub fn new(backend: Arc<dyn AudioPlaybackDevice>) -> Self {
+        Self::new_with_info(backend, AudioDeviceInfo::default())
+    }
+
+    /// Create a new audio character device with stable identity metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Hardware playback backend.
+    /// * `info` - Device identity returned by `AUDIO_GET_INFO`.
+    ///
+    /// # Returns
+    ///
+    /// A new audio character device.
+    pub fn new_with_info(backend: Arc<dyn AudioPlaybackDevice>, info: AudioDeviceInfo) -> Self {
         Self {
             backend,
+            info,
             ring: Mutex::new(None),
             opened: Mutex::new(false),
+        }
+    }
+
+    fn install_completion_callback(this: &Arc<Self>) {
+        let weak: Weak<Self> = Arc::downgrade(this);
+        this.backend.set_completion_callback(Some(Arc::new(move || {
+            if let Some(device) = weak.upgrade() {
+                device.handle_backend_completion();
+            }
+        })));
+    }
+
+    fn handle_backend_completion(&self) {
+        let _irq_guard = IrqGuard::new();
+        let mut guard = self.ring.lock();
+        if let Some(ring) = guard.as_mut() {
+            self.pump_locked(ring);
         }
     }
 
@@ -479,7 +734,6 @@ impl AudioCharDevice {
 
         let max_in_flight = self.backend.max_in_flight_periods() as u64;
         let period_frames = u64::from(ring.params.period_frames);
-        let period_bytes = ring.period_bytes();
         while ring.submitted_ptr_frames + period_frames <= ring.app_ptr_frames {
             let in_flight =
                 (ring.submitted_ptr_frames.saturating_sub(ring.hw_ptr_frames)) / period_frames;
@@ -487,15 +741,24 @@ impl AudioCharDevice {
                 break;
             }
 
-            let mut period = alloc::vec![0u8; period_bytes];
-            ring.copy_period_at(ring.submitted_ptr_frames, &mut period);
-            match self.backend.submit_period(&period) {
+            let period = match ring.period_at(ring.submitted_ptr_frames) {
+                Ok(period) => period,
+                Err(error) => {
+                    ring.xruns = ring.xruns.saturating_add(1);
+                    ring.state = AUDIO_STATE_XRUN;
+                    println!("[audio] pump: XRUN on submit: {}", error);
+                    break;
+                }
+            };
+            ring.clean_period(period);
+            match self.backend.submit_period(period) {
                 Ok(()) => {
                     ring.submitted_ptr_frames += period_frames;
                 }
-                Err(_) => {
+                Err(error) => {
                     ring.xruns = ring.xruns.saturating_add(1);
                     ring.state = AUDIO_STATE_XRUN;
+                    println!("[audio] pump: XRUN on submit: {}", error);
                     break;
                 }
             }
@@ -506,89 +769,21 @@ impl AudioCharDevice {
         &self,
         f: impl FnOnce(&mut AudioPcmRing) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
+        let _irq_guard = IrqGuard::new();
         let mut guard = self.ring.lock();
         let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
         let result = f(ring)?;
         Ok(result)
     }
 
-    fn sleep_for_audio_frames(&self, params: AudioPcmParams, frames: u64) {
-        if params.rate == 0 || frames == 0 {
-            return;
-        }
-        let us = frames
-            .saturating_mul(USEC_PER_SEC)
-            .div_ceil(u64::from(params.rate));
-        let ticks = crate::timer::us_to_ticks(us).max(1);
-        if let Some(task) = mytask() {
-            let trapframe = task.get_trapframe();
-            task.sleep(trapframe, ticks);
-        }
-    }
-
-    fn flush_silence_after_stop(&self, params: AudioPcmParams) -> Result<(), &'static str> {
-        let period_bytes = params.period_bytes().ok_or("PCM period size overflow")?;
-        if period_bytes == 0 || period_bytes > PAGE_SIZE {
-            return Ok(());
-        }
-
-        let total_periods = (params.buffer_frames / params.period_frames) as usize;
-        let max_in_flight = self.backend.max_in_flight_periods().max(1);
-        let silence = alloc::vec![0u8; period_bytes];
-
-        let mut submitted = 0usize;
-        let mut completed = 0usize;
-        let mut stalled_periods = 0usize;
-        while submitted < total_periods && submitted.saturating_sub(completed) < max_in_flight {
-            self.backend.submit_period(&silence)?;
-            submitted += 1;
-        }
-        self.backend.start()?;
-
-        while submitted < total_periods {
-            self.sleep_for_audio_frames(params, u64::from(params.period_frames));
-            let newly_completed = self.backend.process_completions();
-            completed = completed.saturating_add(newly_completed).min(submitted);
-
-            if newly_completed == 0 && submitted.saturating_sub(completed) >= max_in_flight {
-                stalled_periods = stalled_periods.saturating_add(1);
-                if stalled_periods > max_in_flight {
-                    let _ = self.backend.stop();
-                    return Err("Audio silence flush stalled");
-                }
-                continue;
-            }
-            stalled_periods = 0;
-
-            while submitted < total_periods && submitted.saturating_sub(completed) < max_in_flight {
-                if let Err(e) = self.backend.submit_period(&silence) {
-                    let _ = self.backend.stop();
-                    return Err(e);
-                }
-                submitted += 1;
-            }
-        }
-
-        let mut drain_waits = 0usize;
-        while completed < submitted && drain_waits < max_in_flight {
-            self.sleep_for_audio_frames(params, u64::from(params.period_frames));
-            completed = completed
-                .saturating_add(self.backend.process_completions())
-                .min(submitted);
-            drain_waits += 1;
-        }
-
-        self.backend.stop()
-    }
-
-    fn stop_backend_with_silence(&self, params: AudioPcmParams) -> Result<(), &'static str> {
-        self.backend.stop()?;
-        self.flush_silence_after_stop(params)
-    }
-
     fn handle_get_caps(&self, arg: usize) -> Result<i32, &'static str> {
         let caps = self.backend.capabilities();
         write_user_value(arg, &caps)?;
+        Ok(0)
+    }
+
+    fn handle_get_info(&self, arg: usize) -> Result<i32, &'static str> {
+        write_user_value(arg, &self.info)?;
         Ok(0)
     }
 
@@ -598,18 +793,26 @@ impl AudioCharDevice {
         if !self.backend.capabilities().supports_params(&params) {
             return Err("Unsupported PCM parameters");
         }
-        let mut guard = self.ring.lock();
-        if let Some(ring) = guard.as_ref() {
-            match ring.state {
-                AUDIO_STATE_STOPPED | AUDIO_STATE_XRUN => {
-                    self.backend.release()?;
+        let should_release = {
+            let _irq_guard = IrqGuard::new();
+            let guard = self.ring.lock();
+            if let Some(ring) = guard.as_ref() {
+                match ring.state {
+                    AUDIO_STATE_STOPPED | AUDIO_STATE_XRUN => true,
+                    _ => return Err("PCM stream is busy"),
                 }
-                _ => return Err("PCM stream is busy"),
+            } else {
+                false
             }
+        };
+        if should_release {
+            self.backend.release()?;
         }
-        self.backend.configure(&params)?;
-        let ring = AudioPcmRing::new(params)?;
-        *guard = Some(ring);
+        let mut ring = AudioPcmRing::new(params)?;
+        ring.clear_data();
+        self.backend.configure(&params, ring.dma_buffer())?;
+        let _irq_guard = IrqGuard::new();
+        *self.ring.lock() = Some(ring);
         Ok(0)
     }
 
@@ -631,24 +834,52 @@ impl AudioCharDevice {
     }
 
     fn handle_start(&self) -> Result<i32, &'static str> {
-        self.with_ring_mut(|ring| {
+        {
+            let _irq_guard = IrqGuard::new();
+            let mut guard = self.ring.lock();
+            let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
+            if ring.state == AUDIO_STATE_XRUN {
+                return Err("PCM stream is in XRUN");
+            }
             ring.state = AUDIO_STATE_RUNNING;
             self.pump_locked(ring);
-            self.backend.start()?;
-            Ok(0)
-        })
+            if ring.state != AUDIO_STATE_RUNNING {
+                return Err("PCM submit failed during start");
+            }
+        }
+        if let Err(error) = self.backend.start() {
+            let _irq_guard = IrqGuard::new();
+            let mut guard = self.ring.lock();
+            if let Some(ring) = guard.as_mut() {
+                ring.state = AUDIO_STATE_XRUN;
+            }
+            let _ = self.backend.stop();
+            return Err(error);
+        }
+        Ok(0)
     }
 
     fn handle_stop(&self) -> Result<i32, &'static str> {
-        let params = {
+        let (was_running, was_xrun) = {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             let ring = guard.as_mut().ok_or("PCM ring is not configured")?;
-            let params = ring.params;
+            let was_running = ring.state == AUDIO_STATE_RUNNING;
+            let was_xrun = ring.state == AUDIO_STATE_XRUN;
             ring.state = AUDIO_STATE_STOPPED;
-            params
+            (was_running, was_xrun)
         };
-        self.stop_backend_with_silence(params)?;
-        Ok(0)
+        let mut result = Ok(());
+        if was_running || was_xrun {
+            if let Err(error) = self.backend.stop() {
+                result = Err(error);
+            }
+        }
+        let _irq_guard = IrqGuard::new();
+        if let Some(ring) = self.ring.lock().as_mut() {
+            ring.discard_pending();
+        }
+        result.map(|_| 0)
     }
 
     fn handle_get_status(&self, arg: usize) -> Result<i32, &'static str> {
@@ -661,24 +892,34 @@ impl AudioCharDevice {
     }
 
     fn handle_release(&self) -> Result<i32, &'static str> {
-        let Some((params, was_running)) = ({
+        let Some(was_running) = ({
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             let Some(ring) = guard.as_mut() else {
+                *self.opened.lock() = false;
                 return Ok(0);
             };
-            let params = ring.params;
             let was_running = ring.state == AUDIO_STATE_RUNNING;
             ring.state = AUDIO_STATE_STOPPED;
-            Some((params, was_running))
+            Some(was_running)
         }) else {
             return Ok(0);
         };
+        let mut result = Ok(());
         if was_running {
-            self.stop_backend_with_silence(params)?;
+            if let Err(error) = self.backend.stop() {
+                result = Err(error);
+            }
         }
-        self.backend.release()?;
+        if let Err(error) = self.backend.release()
+            && result.is_ok()
+        {
+            result = Err(error);
+        }
+        let _irq_guard = IrqGuard::new();
         *self.ring.lock() = None;
-        Ok(0)
+        *self.opened.lock() = false;
+        result.map(|_| 0)
     }
 }
 
@@ -692,9 +933,28 @@ impl AudioCharDevice {
 ///
 /// The registered character device name.
 pub fn register_playback_device(backend: Arc<dyn AudioPlaybackDevice>) -> String {
+    register_playback_device_with_info(backend, AudioDeviceInfo::default())
+}
+
+/// Register a playback backend as a native Scarlet audio device with identity metadata.
+///
+/// # Arguments
+///
+/// * `backend` - Hardware playback backend to expose.
+/// * `info` - Device identity returned by `AUDIO_GET_INFO`.
+///
+/// # Returns
+///
+/// The registered character device name.
+pub fn register_playback_device_with_info(
+    backend: Arc<dyn AudioPlaybackDevice>,
+    info: AudioDeviceInfo,
+) -> String {
     let id = AUDIO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = alloc::format!("audio{}", id);
-    let audio_char: Arc<dyn Device> = Arc::new(AudioCharDevice::new(backend));
+    let audio_char = Arc::new(AudioCharDevice::new_with_info(backend, info));
+    AudioCharDevice::install_completion_callback(&audio_char);
+    let audio_char: Arc<dyn Device> = audio_char;
     crate::device::manager::DeviceManager::get_manager()
         .register_device_with_name(name.clone(), audio_char);
     name
@@ -712,19 +972,20 @@ impl Device for AudioCharDevice {
 
     fn close(&self) {
         let stream = {
+            let _irq_guard = IrqGuard::new();
             let mut ring = self.ring.lock();
             ring.as_mut().map(|ring| {
-                let params = ring.params;
                 let was_running = ring.state == AUDIO_STATE_RUNNING;
                 ring.state = AUDIO_STATE_STOPPED;
-                (params, was_running)
+                was_running
             })
         };
-        if let Some((params, was_running)) = stream {
+        if let Some(was_running) = stream {
             if was_running {
-                let _ = self.stop_backend_with_silence(params);
+                let _ = self.backend.stop();
             }
             let _ = self.backend.release();
+            let _irq_guard = IrqGuard::new();
             *self.ring.lock() = None;
         }
         *self.opened.lock() = false;
@@ -774,6 +1035,7 @@ impl CharDevice for AudioCharDevice {
     }
 
     fn can_write(&self) -> bool {
+        let _irq_guard = IrqGuard::new();
         self.ring
             .lock()
             .as_ref()
@@ -796,6 +1058,7 @@ impl ControlOps for AudioCharDevice {
 
         match command {
             AUDIO_GET_CAPS => self.handle_get_caps(arg),
+            AUDIO_GET_INFO => self.handle_get_info(arg),
             AUDIO_SET_PARAMS => self.handle_set_params(arg),
             AUDIO_GET_BUFFER => self.handle_get_buffer(arg),
             AUDIO_COMMIT_FRAMES => self.handle_commit_frames(arg),
@@ -811,6 +1074,7 @@ impl ControlOps for AudioCharDevice {
         use commands::*;
         alloc::vec![
             (AUDIO_GET_CAPS, "Get audio playback capabilities"),
+            (AUDIO_GET_INFO, "Get audio device identity"),
             (AUDIO_SET_PARAMS, "Set PCM playback parameters"),
             (AUDIO_GET_BUFFER, "Get mmap PCM ring buffer layout"),
             (AUDIO_COMMIT_FRAMES, "Commit mmap-written PCM frames"),
@@ -828,6 +1092,7 @@ impl MemoryMappingOps for AudioCharDevice {
         offset: usize,
         length: usize,
     ) -> Result<(usize, usize, bool), &'static str> {
+        let _irq_guard = IrqGuard::new();
         let guard = self.ring.lock();
         let ring = guard.as_ref().ok_or("PCM ring is not configured")?;
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
@@ -847,6 +1112,7 @@ impl MemoryMappingOps for AudioCharDevice {
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
 
     fn supports_mmap(&self) -> bool {
+        let _irq_guard = IrqGuard::new();
         self.ring.lock().as_ref().is_some()
     }
 }
@@ -855,6 +1121,7 @@ impl Selectable for AudioCharDevice {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         if interest.write {
+            let _irq_guard = IrqGuard::new();
             let mut guard = self.ring.lock();
             if let Some(ring) = guard.as_mut() {
                 self.pump_locked(ring);
@@ -882,6 +1149,14 @@ impl Selectable for AudioCharDevice {
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn copy_cstr_bytes(dst: &mut [u8], src: &[u8]) {
+    if dst.is_empty() {
+        return;
+    }
+    let len = src.len().min(dst.len() - 1);
+    dst[..len].copy_from_slice(&src[..len]);
 }
 
 fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {

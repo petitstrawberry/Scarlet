@@ -50,13 +50,6 @@ fn get_esr_el1() -> u64 {
     val
 }
 
-/// Get FAR_EL1 value  
-fn get_far_el1() -> u64 {
-    let val: u64;
-    unsafe { asm!("mrs {}, far_el1", out(reg) val) };
-    val
-}
-
 /// Exception Class (ESR_EL1[31:26])
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -170,14 +163,14 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Data abort from lower EL
         ExceptionClass::DataAbortLowerEl => {
-            let far = get_far_el1() as usize;
+            let far = trapframe.far_el1 as usize;
             let is_write = (esr >> 6) & 1 == 1; // WnR bit
             handle_data_fault(trapframe, far, is_write);
         }
 
         // Instruction abort from same EL (kernel bug)
         ExceptionClass::InstructionAbortSameEl => {
-            let far = get_far_el1();
+            let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
             crate::println!("Kernel instruction abort at FAR={:#x}", far);
             loop {
@@ -187,7 +180,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Data abort from same EL (kernel bug)
         ExceptionClass::DataAbortSameEl => {
-            let far = get_far_el1();
+            let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
             crate::println!("Kernel data abort at FAR={:#x}", far);
             loop {
@@ -206,7 +199,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 trap_kind,
                 kind_str,
                 esr,
-                get_far_el1(),
+                trapframe.far_el1,
                 trapframe.elr,
                 current_el_number(),
                 trapframe.spsr,
@@ -319,7 +312,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
 
 /// Print trap information for debugging
 fn print_trap_info(trapframe: &Trapframe, esr: u64) {
-    let far = get_far_el1();
+    let far = trapframe.far_el1;
     let ec = (esr >> 26) & 0x3f;
     let iss = esr & 0x1ffffff;
     let fsc = iss & 0x3f;
@@ -328,8 +321,11 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     crate::println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
     crate::println!("FAR_EL1: {:#018x}", far);
     crate::println!("ELR_EL1: {:#018x}", trapframe.elr);
+    match read_user_instruction(trapframe.elr as usize) {
+        Some(instr) => crate::println!("INSN_ELR: {:#010x}", instr),
+        None => crate::println!("INSN_ELR: <unmapped>"),
+    }
 
-    // Print first 8 general registers
     crate::println!(
         "x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
         trapframe.regs.reg[0],
@@ -343,5 +339,48 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
         trapframe.regs.reg[5],
         trapframe.regs.reg[6],
         trapframe.regs.reg[7]
+    );
+    crate::println!(
+        "x8={:#x} x9={:#x} x10={:#x} x11={:#x}",
+        trapframe.regs.reg[8],
+        trapframe.regs.reg[9],
+        trapframe.regs.reg[10],
+        trapframe.regs.reg[11]
+    );
+    crate::println!(
+        "x12={:#x} x13={:#x} x14={:#x} x15={:#x}",
+        trapframe.regs.reg[12],
+        trapframe.regs.reg[13],
+        trapframe.regs.reg[14],
+        trapframe.regs.reg[15]
+    );
+    crate::println!(
+        "x16={:#x} x17={:#x} x18={:#x} x19={:#x}",
+        trapframe.regs.reg[16],
+        trapframe.regs.reg[17],
+        trapframe.regs.reg[18],
+        trapframe.regs.reg[19]
+    );
+    crate::println!(
+        "x20={:#x} x21={:#x} x22={:#x} x23={:#x}",
+        trapframe.regs.reg[20],
+        trapframe.regs.reg[21],
+        trapframe.regs.reg[22],
+        trapframe.regs.reg[23]
+    );
+    crate::println!(
+        "x24={:#x} x25={:#x} x26={:#x} x27={:#x}",
+        trapframe.regs.reg[24],
+        trapframe.regs.reg[25],
+        trapframe.regs.reg[26],
+        trapframe.regs.reg[27]
+    );
+    crate::println!(
+        "x28={:#x} x29={:#x} x30={:#x} sp={:#x} spsr={:#x}",
+        trapframe.regs.reg[28],
+        trapframe.regs.reg[29],
+        trapframe.regs.reg[30],
+        trapframe.sp,
+        trapframe.spsr
     );
 }

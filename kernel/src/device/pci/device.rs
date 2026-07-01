@@ -10,6 +10,7 @@ use core::any::Any;
 
 use super::PciAddress;
 use super::config::{PciBar, PciInterruptCapabilities};
+use crate::device::iommu::IommuSpec;
 use crate::device::{DeviceInfo, DeviceType};
 
 /// PCI device class codes
@@ -121,6 +122,10 @@ pub struct PciDeviceInfo {
     bars: Vec<PciBar>,
     /// Decoded interrupt-related capabilities.
     interrupt_capabilities: PciInterruptCapabilities,
+    /// Optional IOMMU specifier resolved from the PCI host bridge `iommu-map`.
+    pub iommu_spec: Option<IommuSpec>,
+    /// Optional MSI parent phandle inherited from the PCI host bridge or endpoint.
+    pub msi_parent: Option<u32>,
 }
 
 impl PciDeviceInfo {
@@ -171,6 +176,8 @@ impl PciDeviceInfo {
             id,
             bars: Vec::new(),
             interrupt_capabilities: PciInterruptCapabilities::default(),
+            iommu_spec: None,
+            msi_parent: None,
         }
     }
 
@@ -202,6 +209,34 @@ impl PciDeviceInfo {
         interrupt_capabilities: PciInterruptCapabilities,
     ) -> Self {
         self.interrupt_capabilities = interrupt_capabilities;
+        self
+    }
+
+    /// Attach an IOMMU firmware specifier to this PCI device information.
+    ///
+    /// # Arguments
+    ///
+    /// * `iommu_spec` - IOMMU specifier resolved from the host bridge `iommu-map`.
+    ///
+    /// # Returns
+    ///
+    /// The updated PCI device information.
+    pub fn with_iommu_spec(mut self, iommu_spec: IommuSpec) -> Self {
+        self.iommu_spec = Some(iommu_spec);
+        self
+    }
+
+    /// Attach an MSI parent phandle to this PCI device information.
+    ///
+    /// # Arguments
+    ///
+    /// * `msi_parent` - Firmware phandle for the MSI controller.
+    ///
+    /// # Returns
+    ///
+    /// The updated PCI device information.
+    pub fn with_msi_parent(mut self, msi_parent: u32) -> Self {
+        self.msi_parent = Some(msi_parent);
         self
     }
 
@@ -355,6 +390,24 @@ impl PciDeviceInfo {
     pub const fn interrupt_capabilities(&self) -> PciInterruptCapabilities {
         self.interrupt_capabilities
     }
+
+    /// Get the optional IOMMU specifier decoded during PCI enumeration.
+    ///
+    /// # Returns
+    ///
+    /// IOMMU specifier for this device, or `None` when no host mapping exists.
+    pub fn iommu_spec(&self) -> Option<&IommuSpec> {
+        self.iommu_spec.as_ref()
+    }
+
+    /// Get the optional MSI parent phandle decoded during PCI enumeration.
+    ///
+    /// # Returns
+    ///
+    /// MSI controller phandle for this device, or `None` when no parent exists.
+    pub const fn msi_parent(&self) -> Option<u32> {
+        self.msi_parent
+    }
 }
 
 impl DeviceInfo for PciDeviceInfo {
@@ -441,5 +494,78 @@ mod tests {
         assert_eq!(PciClass::from(0x02), PciClass::Network);
         assert_eq!(PciClass::from(0x03), PciClass::Display);
         assert_eq!(PciClass::from(0xFF), PciClass::Unknown);
+    }
+
+    #[test_case]
+    fn test_pci_device_info_holds_iommu_spec() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        )
+        .with_iommu_spec(IommuSpec {
+            controller_phandle: 0x40,
+            cells: alloc::vec![0x10],
+        });
+
+        let spec = device.iommu_spec().expect("expected IOMMU spec");
+        assert_eq!(spec.controller_phandle, 0x40);
+        assert_eq!(spec.cells, alloc::vec![0x10]);
+    }
+
+    #[test_case]
+    fn test_pci_host_msi_parent_propagates_to_endpoints() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        )
+        .with_msi_parent(0x50);
+
+        assert_eq!(device.msi_parent(), Some(0x50));
+    }
+
+    #[test_case]
+    fn test_pci_endpoint_without_msi_parent_is_none() {
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let device = PciDeviceInfo::new(
+            addr,
+            0,
+            0x8086,
+            0x1234,
+            0x030000,
+            0x01,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            None,
+            "pci_device",
+            1,
+        );
+
+        assert_eq!(device.msi_parent(), None);
     }
 }

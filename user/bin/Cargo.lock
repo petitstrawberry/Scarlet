@@ -219,7 +219,7 @@ dependencies = [
 [[package]]
 name = "rust_h264"
 version = "0.4.0"
-source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=edcf83ee2c99fa0087fa2d85a492a4c313e11ed0#edcf83ee2c99fa0087fa2d85a492a4c313e11ed0"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=a559fe2545fd88def12146dcc06286475b53ead3#a559fe2545fd88def12146dcc06286475b53ead3"
 
 [[package]]
 name = "ryu"
@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#478d34b9f116da0644fdbebea908f4bf0f3c343b"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#74daaab8369258cbc1ad227554204ebdbaa858b9"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#478d34b9f116da0644fdbebea908f4bf0f3c343b"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#74daaab8369258cbc1ad227554204ebdbaa858b9"
 dependencies = [
  "ab_glyph",
  "bitflags",
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#478d34b9f116da0644fdbebea908f4bf0f3c343b"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#74daaab8369258cbc1ad227554204ebdbaa858b9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -342,7 +342,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui#478d34b9f116da0644fdbebea908f4bf0f3c343b"
+source = "git+https://github.com/petitstrawberry/scarlet-ui#74daaab8369258cbc1ad227554204ebdbaa858b9"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",

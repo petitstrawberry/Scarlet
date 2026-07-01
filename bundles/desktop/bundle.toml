@@ -59,6 +59,19 @@ to = "/system/scarlet/bin/sas"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+bin = "sasctl"
+to = "/system/scarlet/bin/sasctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "mplayer"
+to = "/system/scarlet/bin/mplayer"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "ui-demo"

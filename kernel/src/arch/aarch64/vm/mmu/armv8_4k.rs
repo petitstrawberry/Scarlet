@@ -455,8 +455,8 @@ impl PageTable {
             }
         }
 
-        // Batched local TLB invalidation for all new mappings.
-        unsafe { asm!("dsb nsh", "tlbi vmalle1", "dsb nsh", "isb") };
+        // Publish new mappings to all PEs that may run this address space.
+        unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
 
         Ok(())
     }
@@ -484,8 +484,8 @@ impl PageTable {
         self.try_map_at_level(asid, vaddr, paddr, MapAttrs { permissions }, 0)
             .expect("map: couldn't install a 4 KiB leaf mapping");
 
-        // Local TLB invalidation for new mapping (no stale entries on other CPUs).
-        unsafe { asm!("dsb nsh", "tlbi vmalle1", "dsb nsh", "isb") };
+        // Publish new mappings to all PEs that may run this address space.
+        unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
     }
 
     /// Attempts to install a leaf mapping at the specified logical level.

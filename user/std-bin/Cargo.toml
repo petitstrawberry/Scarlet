@@ -3,6 +3,10 @@ name = "scarlet-std-bin"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["mp4-aac"]
+mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
+
 [profile.dev]
 panic = "abort"
 
@@ -13,10 +17,11 @@ panic = "abort"
 clap = { version = "4.5.32", features = ["derive"] }
 csv = "1.3"
 httparse = "1.9"
-scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
-rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "edcf83ee2c99fa0087fa2d85a492a4c313e11ed0", default-features = false }
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
+symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
+symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 url = "2.5"
 ratatui = { version = "0.29", default-features = false }
 regex = "1"
@@ -25,7 +30,10 @@ serde_json = "1"
 pulldown-cmark = "0.12"
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
+sas-client = { path = "../lib/sas-client", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
@@ -161,3 +169,7 @@ path = "src/clock.rs"
 [[bin]]
 name = "markdown_demo"
 path = "src/markdown_demo.rs"
+
+[[bin]]
+name = "sasctl"
+path = "src/sasctl.rs"

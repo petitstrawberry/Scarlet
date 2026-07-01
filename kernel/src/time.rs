@@ -108,7 +108,7 @@ pub fn is_system_time_available() -> bool {
 ///
 /// `Ok(())` on success, or an error string if the sample is invalid or the
 /// wall clock was already initialized.
-pub(crate) fn initialize_wall_clock_from_rtc_sample(
+pub fn initialize_wall_clock_from_rtc_sample(
     rtc_epoch_ns: u64,
     mono_before_ns: u64,
     mono_after_ns: u64,

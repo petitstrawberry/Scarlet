@@ -17,6 +17,11 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-wdt" = { path = "../../drivers/watchdog/apple-wdt", enabled = true }
 "scarlet-driver-apple-pinctrl" = { path = "../../drivers/gpio/apple-pinctrl", enabled = true }
 "scarlet-driver-apple-i2c" = { path = "../../drivers/i2c/apple-i2c", enabled = true }
+"scarlet-driver-apple-nco" = { path = "../../drivers/clk/apple-nco", enabled = true }
+"scarlet-driver-apple-admac" = { path = "../../drivers/dma/apple-admac", enabled = true }
+"scarlet-driver-apple-mca" = { path = "../../drivers/audio/apple-mca", enabled = true }
+"scarlet-driver-cs42l83" = { path = "../../drivers/audio/cs42l83", enabled = true }
+"scarlet-driver-tas5770l" = { path = "../../drivers/audio/tas5770l", enabled = true }
 "scarlet-driver-s5l-uart" = { path = "../../drivers/uart/s5l-uart", enabled = true }
 "scarlet-driver-apple-aic" = { path = "../../drivers/pic/apple-aic", enabled = true }
 "scarlet-driver-apple-msi" = { path = "../../drivers/pic/apple-msi", enabled = true }
@@ -24,6 +29,8 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-pmgr" = { path = "../../drivers/soc/apple-pmgr", enabled = true }
 "scarlet-driver-apple-asc" = { path = "../../drivers/soc/apple-asc", enabled = true }
 "scarlet-driver-apple-rtkit" = { path = "../../drivers/soc/apple-rtkit", enabled = true }
+"scarlet-driver-apple-smc" = { path = "../../drivers/soc/apple-smc", enabled = true }
+"scarlet-driver-apple-spmi" = { path = "../../drivers/spmi/apple-spmi", enabled = true }
 "scarlet-driver-apple-afk" = { path = "../../drivers/soc/apple-afk", enabled = true }
 "scarlet-driver-apple-epic" = { path = "../../drivers/soc/apple-epic", enabled = true }
 "scarlet-driver-apple-dart" = { path = "../../drivers/iommu/apple-dart", enabled = true }
@@ -33,3 +40,27 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-spi-hid" = { path = "../../drivers/spi/apple-spi-hid", enabled = true }
 "scarlet-driver-dpxbar" = { path = "../../drivers/display/dpxbar", enabled = true }
 "scarlet-driver-dcpext" = { path = "../../drivers/display/dcpext", enabled = true }
+
+[images]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-aarch64-apple-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/desktop/bundle.toml"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/limine-aarch64-apple-full.img"
+cmdline = "console=ttyS0"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/deploy_m1n1_usb.py"

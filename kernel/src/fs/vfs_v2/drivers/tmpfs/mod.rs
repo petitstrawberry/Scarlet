@@ -102,28 +102,27 @@ impl TmpFS {
         id
     }
 
-    /// Check memory limit
-    fn check_memory_limit(&self, additional_bytes: usize) -> Result<(), FileSystemError> {
-        if self.memory_limit == 0 {
-            return Ok(()); // Unlimited
+    /// Reserve memory usage.
+    fn reserve_memory_usage(&self, bytes: usize) -> Result<(), FileSystemError> {
+        if self.memory_limit == 0 || bytes == 0 {
+            return Ok(());
         }
 
-        let current = *self.current_memory.lock();
-        if current + additional_bytes > self.memory_limit {
+        let mut current = self.current_memory.lock();
+        let Some(next) = current.checked_add(bytes) else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "TmpFS memory limit exceeded",
+            ));
+        };
+        if next > self.memory_limit {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NoSpace,
                 "TmpFS memory limit exceeded",
             ));
         }
-
+        *current = next;
         Ok(())
-    }
-
-    /// Add to memory usage
-    fn add_memory_usage(&self, bytes: usize) {
-        if self.memory_limit > 0 {
-            *self.current_memory.lock() += bytes;
-        }
     }
 
     /// Subtract from memory usage
@@ -260,6 +259,20 @@ impl FileSystemOperations for TmpFS {
         }
         // Generate file ID
         let file_id = self.generate_file_id();
+        // Validate the parent filesystem reference before reserving memory.
+        let fs_ref = parent_node.filesystem().ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node does not have a filesystem reference",
+            )
+        })?;
+        if fs_ref.upgrade().is_none() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node's filesystem reference is dead (cannot upgrade)",
+            ));
+        }
+
         let new_node = match file_type {
             FileType::RegularFile => Arc::new(TmpNode::new_file(name.clone().to_string(), file_id)),
             FileType::Directory => {
@@ -267,7 +280,7 @@ impl FileSystemOperations for TmpFS {
             }
             FileType::SymbolicLink(target_path) => {
                 // Account for memory usage (target path length)
-                self.add_memory_usage(target_path.len());
+                self.reserve_memory_usage(target_path.len())?;
                 Arc::new(TmpNode::new_symlink(
                     name.clone().to_string(),
                     target_path,
@@ -284,19 +297,7 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         };
-        // After creation, set the filesystem reference (always check if upgrade is possible)
-        let fs_ref = parent_node.filesystem().ok_or_else(|| {
-            FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node does not have a filesystem reference",
-            )
-        })?;
-        if fs_ref.upgrade().is_none() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node's filesystem reference is dead (cannot upgrade)",
-            ));
-        }
+        // After creation, set the filesystem reference.
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
         }
@@ -1055,6 +1056,53 @@ impl TmpFileObject {
         Ok(())
     }
 
+    fn tmpfs(&self) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        self.node
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::IoError, "tmpfs is gone"))
+    }
+
+    fn reserve_growth(&self, old_size: usize, new_size: usize) -> Result<usize, FileSystemError> {
+        let growth = new_size.saturating_sub(old_size);
+        if growth == 0 {
+            return Ok(0);
+        }
+
+        let fs = self.tmpfs()?;
+        let tmpfs = fs.as_any().downcast_ref::<TmpFS>().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "node is not on tmpfs")
+        })?;
+        tmpfs.reserve_memory_usage(growth)?;
+        Ok(growth)
+    }
+
+    fn release_memory_usage(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+
+        let Ok(fs) = self.tmpfs() else {
+            return;
+        };
+        if let Some(tmpfs) = fs.as_any().downcast_ref::<TmpFS>() {
+            tmpfs.subtract_memory_usage(bytes);
+        }
+    }
+
+    fn subtract_memory_usage(&self, bytes: usize) -> Result<(), FileSystemError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+
+        let fs = self.tmpfs()?;
+        let tmpfs = fs.as_any().downcast_ref::<TmpFS>().ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::IoError, "node is not on tmpfs")
+        })?;
+        tmpfs.subtract_memory_usage(bytes);
+        Ok(())
+    }
+
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
@@ -1244,7 +1292,16 @@ impl TmpFileObject {
     }
 
     fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
         let mut pos = *self.position.read() as usize;
+        let old_size = self.node.metadata.read().size;
+        let requested_end = pos.checked_add(buffer.len()).ok_or_else(|| {
+            FileSystemError::new(FileSystemErrorKind::InvalidOperation, "write overflow")
+        })?;
+        let reserved_growth = self.reserve_growth(old_size, requested_end)?;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -1254,16 +1311,22 @@ impl TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
+            let pinned =
+                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
-                })
-                .map_err(|_| {
-                    FileSystemError::new(FileSystemErrorKind::IoError, "tmpfs page load error")
-                })?;
+                }) {
+                    Ok(pinned) => pinned,
+                    Err(_) => {
+                        self.release_memory_usage(reserved_growth);
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "tmpfs page load error",
+                        ));
+                    }
+                };
 
             unsafe {
                 let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
@@ -1627,6 +1690,16 @@ impl FileObject for TmpFileObject {
         }
 
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let old_size = self.node.metadata.read().size;
+        let requested_end = offset
+            .checked_add(buffer.len())
+            .ok_or(StreamError::InvalidArgument)?;
+        let reserved_growth = self
+            .reserve_growth(old_size, requested_end)
+            .map_err(StreamError::from)?;
         let mut written = 0usize;
         let cache_id = self.cache_id();
 
@@ -1637,14 +1710,19 @@ impl FileObject for TmpFileObject {
             let remain_in_page = PAGE_SIZE - page_off;
             let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
+            let pinned =
+                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
                     Ok(())
-                })
-                .map_err(|_| StreamError::IoError)?;
+                }) {
+                    Ok(pinned) => pinned,
+                    Err(_) => {
+                        self.release_memory_usage(reserved_growth);
+                        return Err(StreamError::IoError);
+                    }
+                };
 
             unsafe {
                 let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
@@ -1725,6 +1803,10 @@ impl FileObject for TmpFileObject {
         if new_size == old_size {
             return Ok(());
         }
+        if new_size > old_size {
+            self.reserve_growth(old_size, new_size)
+                .map_err(StreamError::from)?;
+        }
 
         let cache_id = self.cache_id();
         if new_size == 0 {
@@ -1759,6 +1841,10 @@ impl FileObject for TmpFileObject {
             let mut meta = self.node.metadata.write();
             meta.size = new_size;
             PageCacheManager::global().record_object_size(cache_id, meta.size);
+        }
+        if new_size < old_size {
+            self.subtract_memory_usage(old_size - new_size)
+                .map_err(StreamError::from)?;
         }
         Ok(())
     }

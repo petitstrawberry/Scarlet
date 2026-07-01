@@ -6,11 +6,14 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use core::mem;
 
+use scarlet::device::remoteproc::{
+    RemoteProcessor, RemoteprocError, RemoteprocMessage, RemoteprocService, RemoteprocServiceId,
+};
 use scarlet::early_println;
 use scarlet::mem::pmm;
 use scarlet::time;
 use scarlet::vm;
-use scarlet_driver_apple_rtkit::{AppleRtkit, RtkitMessage};
+use scarlet_driver_apple_rtkit::AppleRtkit;
 
 // =============================================================================
 // Constants
@@ -154,7 +157,7 @@ unsafe impl Sync for AfkSharedBuffer {}
 /// Manages a pair of ring buffers (TX and RX) within a single shared DMA
 /// buffer, communicating with one coprocessor endpoint via RBEP.
 pub struct AfkEndpoint {
-    rtkit: Arc<AppleRtkit>,
+    service: Arc<dyn RemoteprocService>,
     ep: u8,
     shared: Option<AfkSharedBuffer>,
     tx: AfkRingBuffer,
@@ -214,10 +217,23 @@ unsafe fn dma_mb() {
 impl AfkEndpoint {
     /// Create a new AFK endpoint (not started).
     ///
+    /// # Arguments
+    ///
+    /// * `remoteproc` - Remote processor exposing the AFK RTKit endpoint as a service.
+    /// * `ep` - RTKit endpoint number used by the AFK protocol.
+    ///
+    /// # Returns
+    ///
+    /// A new AFK endpoint bound to the requested remoteproc service.
+    ///
     /// Call [`start`](Self::start) to perform the full RBEP handshake.
-    pub fn new(rtkit: Arc<AppleRtkit>, ep: u8) -> Self {
-        Self {
-            rtkit,
+    pub fn new(remoteproc: Arc<dyn RemoteProcessor>, ep: u8) -> Result<Self, &'static str> {
+        let service = remoteproc
+            .get_service(RemoteprocServiceId(ep as u32))
+            .ok_or("apple-afk: RTKit service not found")?;
+
+        Ok(Self {
+            service,
             ep,
             shared: None,
             tx: AfkRingBuffer {
@@ -233,7 +249,22 @@ impl AfkEndpoint {
                 ready: false,
             },
             started: false,
-        }
+        })
+    }
+
+    /// Create a new AFK endpoint from an Apple RTKit instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `rtkit` - Apple RTKit processor implementing [`RemoteProcessor`].
+    /// * `ep` - RTKit endpoint number used by the AFK protocol.
+    ///
+    /// # Returns
+    ///
+    /// A new AFK endpoint bound to the requested RTKit service.
+    pub fn from_rtkit(rtkit: Arc<AppleRtkit>, ep: u8) -> Result<Self, &'static str> {
+        let remoteproc: Arc<dyn RemoteProcessor> = rtkit;
+        Self::new(remoteproc, ep)
     }
 
     /// Perform the full RBEP initialization handshake.
@@ -241,8 +272,6 @@ impl AfkEndpoint {
     /// Sequence: START_EP → INIT/INIT_ACK → GETBUF/GETBUF_ACK →
     ///           INIT_TX → INIT_RX → START/START_ACK
     pub fn start(&mut self) -> Result<(), &'static str> {
-        self.rtkit.start_ep(self.ep)?;
-
         self.send_rbep(RBEP_INIT, 0)?;
         self.wait_rbep_type(RBEP_INIT_ACK)?;
 
@@ -439,9 +468,9 @@ impl AfkEndpoint {
         Ok(())
     }
 
-    /// Get the underlying RTKit instance.
-    pub fn rtkit(&self) -> &Arc<AppleRtkit> {
-        &self.rtkit
+    /// Get the underlying remoteproc service.
+    pub fn service(&self) -> &Arc<dyn RemoteprocService> {
+        &self.service
     }
 
     /// Get the RTKit endpoint number.
@@ -454,10 +483,9 @@ impl AfkEndpoint {
     // =========================================================================
 
     fn send_rbep(&self, msg_type: u64, payload: u64) -> Result<(), &'static str> {
-        self.rtkit.send(&RtkitMessage {
-            ep: self.ep,
-            msg: rbep_msg(msg_type, payload),
-        })
+        self.service
+            .send(&RemoteprocMessage::one(rbep_msg(msg_type, payload)))
+            .map_err(remoteproc_error)
     }
 
     fn wait_rbep_type(&self, expected: u64) -> Result<u64, &'static str> {
@@ -468,19 +496,18 @@ impl AfkEndpoint {
                 return Err("apple-afk: timeout waiting for RBEP message");
             }
 
-            let mut msg = RtkitMessage { ep: 0, msg: 0 };
-            match self.rtkit.recv(&mut msg) {
-                Ok(true) => {
-                    if msg.ep == self.ep && rbep_type(msg.msg) == expected {
-                        return Ok(msg.msg);
+            match self.recv_rbep() {
+                Ok(Some(msg)) => {
+                    if rbep_type(msg) == expected {
+                        return Ok(msg);
                     }
                     early_println!(
                         "[apple-afk] ep {}: unexpected msg type={:#x} during handshake",
                         self.ep,
-                        rbep_type(msg.msg)
+                        rbep_type(msg)
                     );
                 }
-                Ok(false) => time::udelay(AFK_POLL_DELAY_US),
+                Ok(None) => time::udelay(AFK_POLL_DELAY_US),
                 Err(_) => time::udelay(AFK_POLL_DELAY_US),
             }
         }
@@ -541,39 +568,32 @@ impl AfkEndpoint {
                     return Err("apple-afk: timeout waiting for INIT_TX/INIT_RX");
                 }
 
-                let mut msg = RtkitMessage { ep: 0, msg: 0 };
-                match self.rtkit.recv(&mut msg) {
-                    Ok(true) => {
-                        if msg.ep == self.ep {
-                            got_msg = true;
-                            match rbep_type(msg.msg) {
-                                RBEP_INIT_TX => {
-                                    let shared = self
-                                        .shared
-                                        .as_ref()
-                                        .ok_or("apple-afk: no shared buffer")?;
-                                    Self::init_ring_buffer(&mut self.tx, shared, msg.msg, "TX")?;
-                                    tx_done = true;
-                                }
-                                RBEP_INIT_RX => {
-                                    let shared = self
-                                        .shared
-                                        .as_ref()
-                                        .ok_or("apple-afk: no shared buffer")?;
-                                    Self::init_ring_buffer(&mut self.rx, shared, msg.msg, "RX")?;
-                                    rx_done = true;
-                                }
-                                _ => {
-                                    early_println!(
-                                        "[apple-afk] ep {}: unexpected type={:#x}",
-                                        self.ep,
-                                        rbep_type(msg.msg)
-                                    );
-                                }
+                match self.recv_rbep() {
+                    Ok(Some(msg)) => {
+                        got_msg = true;
+                        match rbep_type(msg) {
+                            RBEP_INIT_TX => {
+                                let shared =
+                                    self.shared.as_ref().ok_or("apple-afk: no shared buffer")?;
+                                Self::init_ring_buffer(&mut self.tx, shared, msg, "TX")?;
+                                tx_done = true;
+                            }
+                            RBEP_INIT_RX => {
+                                let shared =
+                                    self.shared.as_ref().ok_or("apple-afk: no shared buffer")?;
+                                Self::init_ring_buffer(&mut self.rx, shared, msg, "RX")?;
+                                rx_done = true;
+                            }
+                            _ => {
+                                early_println!(
+                                    "[apple-afk] ep {}: unexpected type={:#x}",
+                                    self.ep,
+                                    rbep_type(msg)
+                                );
                             }
                         }
                     }
-                    Ok(false) => time::udelay(AFK_POLL_DELAY_US),
+                    Ok(None) => time::udelay(AFK_POLL_DELAY_US),
                     Err(_) => time::udelay(AFK_POLL_DELAY_US),
                 }
             }
@@ -667,6 +687,28 @@ impl AfkEndpoint {
                 needed < r
             }
         }
+    }
+
+    fn recv_rbep(&self) -> Result<Option<u64>, &'static str> {
+        self.service
+            .try_recv()
+            .map(|message| message.map(|message| message.words[0]))
+            .map_err(remoteproc_error)
+    }
+}
+
+fn remoteproc_error(error: RemoteprocError) -> &'static str {
+    match error {
+        RemoteprocError::InvalidState => "apple-afk: remoteproc invalid state",
+        RemoteprocError::FirmwareMissing => "apple-afk: remoteproc firmware missing",
+        RemoteprocError::LoadFailed => "apple-afk: remoteproc load failed",
+        RemoteprocError::BootFailed => "apple-afk: remoteproc boot failed",
+        RemoteprocError::ShutdownFailed => "apple-afk: remoteproc shutdown failed",
+        RemoteprocError::Crashed => "apple-afk: remoteproc crashed",
+        RemoteprocError::ServiceNotFound => "apple-afk: remoteproc service not found",
+        RemoteprocError::TransportError => "apple-afk: remoteproc transport error",
+        RemoteprocError::NotSupported => "apple-afk: remoteproc operation not supported",
+        RemoteprocError::Busy => "apple-afk: remoteproc busy",
     }
 }
 

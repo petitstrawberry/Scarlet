@@ -78,11 +78,27 @@ static DATE_AT_BOOT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
 /// bootloader provided no response.
 pub fn capture_date_at_boot() {
     let Some(resp) = DATE_AT_BOOT_REQUEST.response() else {
+        crate::early_println!(
+            "[boot] Limine Date at Boot: no response (request unfulfilled by bootloader)"
+        );
         return;
     };
     let secs = resp.timestamp;
-    if secs >= 0 {
-        DATE_AT_BOOT_NS.store(secs as u64 * 1_000_000_000, Ordering::SeqCst);
+    crate::early_println!(
+        "[boot] Limine Date at Boot: timestamp = {} (0x{:x})",
+        secs,
+        secs
+    );
+    if secs > 0 {
+        if let Some(ns) = (secs as u64).checked_mul(1_000_000_000) {
+            DATE_AT_BOOT_NS.store(ns, Ordering::SeqCst);
+        } else {
+            crate::early_println!("[boot] Limine Date at Boot: timestamp overflow, ignored");
+        }
+    } else if secs == 0 {
+        crate::early_println!("[boot] Limine Date at Boot: zero timestamp, ignored");
+    } else {
+        crate::early_println!("[boot] Limine Date at Boot: negative timestamp, ignored");
     }
 }
 

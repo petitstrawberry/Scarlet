@@ -10,8 +10,8 @@ use spin::{Mutex, RwLock};
 
 use crate::device::audio::{
     AUDIO_PCM_FORMAT_F32LE, AUDIO_PCM_FORMAT_S8, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3,
-    AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioPcmCapabilities, AudioPcmParams,
-    AudioPlaybackDevice, register_playback_device,
+    AUDIO_PCM_FORMAT_S32LE, AUDIO_PCM_MAX_RATES, AudioPcmBuffer, AudioPcmCapabilities,
+    AudioPcmParams, AudioPcmPeriod, AudioPlaybackDevice, register_playback_device,
 };
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{
@@ -179,6 +179,8 @@ pub struct VirtioSndDevice {
     stream_id: RwLock<Option<u32>>,
     capabilities: RwLock<AudioPcmCapabilities>,
     configured_periods: RwLock<usize>,
+    configured_params: RwLock<Option<AudioPcmParams>>,
+    pcm_buffer: RwLock<Option<AudioPcmBuffer>>,
     in_flight: Mutex<Vec<TxPeriod>>,
     event_buffers: Mutex<Vec<(usize, ContiguousPages)>>,
 }
@@ -225,6 +227,8 @@ impl VirtioSndDevice {
             stream_id: RwLock::new(None),
             capabilities: RwLock::new(default_capabilities()),
             configured_periods: RwLock::new(4),
+            configured_params: RwLock::new(None),
+            pcm_buffer: RwLock::new(None),
             in_flight: Mutex::new(Vec::new()),
             event_buffers: Mutex::new(Vec::new()),
         };
@@ -417,39 +421,11 @@ impl VirtioSndDevice {
         Ok(out)
     }
 
-    fn tx_in_flight_count(&self) -> usize {
-        self.in_flight.lock().len()
-    }
-
-    fn drain_tx_queue(&self) -> Result<(), &'static str> {
-        for _ in 0..TX_DRAIN_SPIN_LIMIT {
-            self.process_completions();
-            if self.tx_in_flight_count() == 0 {
-                return Ok(());
-            }
-            core::hint::spin_loop();
-        }
-
-        self.process_completions();
-        if self.tx_in_flight_count() == 0 {
-            Ok(())
-        } else {
-            Err("VirtIO sound TX drain timed out")
-        }
-    }
-}
-
-impl AudioPlaybackDevice for VirtioSndDevice {
-    fn capabilities(&self) -> AudioPcmCapabilities {
-        *self.capabilities.read()
-    }
-
-    fn configure(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
+    fn set_params_and_prepare(&self, params: &AudioPcmParams) -> Result<(), &'static str> {
         let format =
             virtio_format_code(params.format).ok_or("Unsupported VirtIO sound PCM format")?;
         let rate = virtio_rate_code(params.rate).ok_or("Unsupported VirtIO sound sample rate")?;
         let stream_id = (*self.stream_id.read()).ok_or("VirtIO sound has no playback stream")?;
-        let configured_periods = (params.buffer_frames / params.period_frames) as usize;
         let req = VirtioSndPcmSetParams {
             hdr: VirtioSndPcmHdr {
                 hdr: VirtioSndHdr {
@@ -469,8 +445,95 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         if status.code != VIRTIO_SND_S_OK {
             return Err("VirtIO sound SET_PARAMS failed");
         }
-        *self.configured_periods.write() = configured_periods;
         self.pcm_command(VIRTIO_SND_R_PCM_PREPARE)
+    }
+
+    fn tx_in_flight_count(&self) -> usize {
+        self.in_flight.lock().len()
+    }
+
+    fn process_tx_completions_locked(
+        queue: &mut VirtQueue<'static>,
+        in_flight: &mut Vec<TxPeriod>,
+    ) -> usize {
+        let mut completed = 0usize;
+        while let Some((desc_idx, _used_len)) = queue.pop_used() {
+            if let Some(index) = in_flight
+                .iter()
+                .position(|period| period.desc_idx == desc_idx)
+            {
+                let period = in_flight.remove(index);
+                let status = unsafe {
+                    core::ptr::read_volatile(period.status.as_ptr() as *const VirtioSndPcmStatus)
+                };
+                if status.status != VIRTIO_SND_S_OK && status.status != VIRTIO_SND_S_IO_ERR {
+                    crate::println!("[virtio-snd] unexpected tx status {:#x}", status.status);
+                }
+                let _ = (period.header.as_paddr(), period.data.as_paddr());
+                queue.free_desc_chain(desc_idx);
+                completed += 1;
+            }
+        }
+        completed
+    }
+
+    fn force_reclaim_tx_queue(&self) -> usize {
+        let mut virtqueues = self.virtqueues.lock();
+        let queue = &mut virtqueues[QUEUE_TX];
+        let mut in_flight = self.in_flight.lock();
+        let mut reclaimed = Self::process_tx_completions_locked(queue, &mut in_flight);
+
+        for period in in_flight.drain(..) {
+            queue.free_desc_chain(period.desc_idx);
+            reclaimed += 1;
+        }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        queue.last_used_idx = unsafe { core::ptr::read_volatile(queue.used.idx) };
+        reclaimed
+    }
+
+    fn drain_tx_queue(&self, force_on_timeout: bool) -> Result<(), &'static str> {
+        for _ in 0..TX_DRAIN_SPIN_LIMIT {
+            self.process_completions();
+            if self.tx_in_flight_count() == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+
+        self.process_completions();
+        if self.tx_in_flight_count() == 0 {
+            Ok(())
+        } else if force_on_timeout {
+            let reclaimed = self.force_reclaim_tx_queue();
+            crate::println!(
+                "[virtio-snd] forced reclaim of {} tx period(s) after release",
+                reclaimed
+            );
+            Ok(())
+        } else {
+            Err("VirtIO sound TX drain timed out")
+        }
+    }
+}
+
+impl AudioPlaybackDevice for VirtioSndDevice {
+    fn capabilities(&self) -> AudioPcmCapabilities {
+        *self.capabilities.read()
+    }
+
+    fn configure(
+        &self,
+        params: &AudioPcmParams,
+        buffer: AudioPcmBuffer,
+    ) -> Result<(), &'static str> {
+        let configured_periods = (params.buffer_frames / params.period_frames) as usize;
+        self.set_params_and_prepare(params)?;
+        *self.configured_periods.write() = configured_periods;
+        *self.configured_params.write() = Some(*params);
+        *self.pcm_buffer.write() = Some(buffer);
+        Ok(())
     }
 
     fn start(&self) -> Result<(), &'static str> {
@@ -478,19 +541,41 @@ impl AudioPlaybackDevice for VirtioSndDevice {
     }
 
     fn stop(&self) -> Result<(), &'static str> {
-        self.pcm_command(VIRTIO_SND_R_PCM_STOP)?;
-        self.drain_tx_queue()
+        // VirtIO sound STOP does not give the native Scarlet AUDIO_STOP
+        // semantics by itself: pending tx buffers can remain owned by the
+        // device. RELEASE is the synchronization point after which those
+        // buffers must be completed, so re-prepare the stream for the next
+        // native AUDIO_START.
+        let stop_result = self.pcm_command(VIRTIO_SND_R_PCM_STOP);
+        let release_result = self.pcm_command(VIRTIO_SND_R_PCM_RELEASE);
+        if release_result.is_err() {
+            stop_result?;
+            release_result?;
+        }
+        self.drain_tx_queue(true)?;
+        if let Some(params) = *self.configured_params.read() {
+            self.set_params_and_prepare(&params)?;
+        }
+        Ok(())
     }
 
     fn release(&self) -> Result<(), &'static str> {
         self.pcm_command(VIRTIO_SND_R_PCM_RELEASE)?;
-        self.drain_tx_queue()
+        self.drain_tx_queue(true)?;
+        *self.configured_params.write() = None;
+        *self.pcm_buffer.write() = None;
+        Ok(())
     }
 
-    fn submit_period(&self, pcm: &[u8]) -> Result<(), &'static str> {
+    fn submit_period(&self, period: AudioPcmPeriod) -> Result<(), &'static str> {
         let stream_id = (*self.stream_id.read()).ok_or("VirtIO sound has no playback stream")?;
-        if pcm.is_empty() || pcm.len() > PAGE_SIZE {
+        let buffer =
+            (*self.pcm_buffer.read()).ok_or("VirtIO sound PCM buffer is not configured")?;
+        if period.byte_len == 0 || period.byte_len > PAGE_SIZE {
             return Err("Invalid VirtIO sound period size");
+        }
+        if period.byte_offset + period.byte_len > buffer.buffer_bytes {
+            return Err("VirtIO sound period is outside PCM buffer");
         }
 
         let header = ContiguousPages::new(1).ok_or("Failed to allocate audio tx header")?;
@@ -499,7 +584,11 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         unsafe {
             let hdr = header.as_ptr() as *mut VirtioSndPcmXfer;
             core::ptr::write(hdr, VirtioSndPcmXfer { stream_id });
-            core::ptr::copy_nonoverlapping(pcm.as_ptr(), data.as_ptr() as *mut u8, pcm.len());
+            core::ptr::copy_nonoverlapping(
+                (buffer.vaddr + period.byte_offset) as *const u8,
+                data.as_ptr() as *mut u8,
+                period.byte_len,
+            );
             core::ptr::write(
                 status.as_ptr() as *mut VirtioSndPcmStatus,
                 VirtioSndPcmStatus::default(),
@@ -531,7 +620,7 @@ impl AudioPlaybackDevice for VirtioSndDevice {
         queue.desc[header_desc].next = data_desc as u16;
 
         queue.desc[data_desc].addr = data.as_paddr() as u64;
-        queue.desc[data_desc].len = pcm.len() as u32;
+        queue.desc[data_desc].len = period.byte_len as u32;
         queue.desc[data_desc].flags = DescriptorFlag::Next as u16;
         queue.desc[data_desc].next = status_desc as u16;
 
@@ -556,30 +645,10 @@ impl AudioPlaybackDevice for VirtioSndDevice {
     }
 
     fn process_completions(&self) -> usize {
-        let mut completed = 0usize;
         let mut virtqueues = self.virtqueues.lock();
         let queue = &mut virtqueues[QUEUE_TX];
         let mut in_flight = self.in_flight.lock();
-        while let Some((desc_idx, _used_len)) = queue.pop_used() {
-            if let Some(index) = in_flight
-                .iter()
-                .position(|period| period.desc_idx == desc_idx)
-            {
-                let period = in_flight.remove(index);
-                let status = unsafe {
-                    core::ptr::read_volatile(period.status.as_ptr() as *const VirtioSndPcmStatus)
-                };
-                if status.status != VIRTIO_SND_S_OK && status.status != VIRTIO_SND_S_IO_ERR {
-                    crate::println!("[virtio-snd] unexpected tx status {:#x}", status.status);
-                }
-                let _ = (period.header.as_paddr(), period.data.as_paddr());
-                queue.free_desc_chain(desc_idx);
-                completed += 1;
-            } else {
-                queue.free_desc_chain(desc_idx);
-            }
-        }
-        completed
+        Self::process_tx_completions_locked(queue, &mut in_flight)
     }
 
     fn max_in_flight_periods(&self) -> usize {

@@ -16,7 +16,20 @@ pub mod commands {
     pub const AUDIO_STOP: u32 = 0x4105;
     pub const AUDIO_GET_STATUS: u32 = 0x4106;
     pub const AUDIO_RELEASE: u32 = 0x4107;
+    pub const AUDIO_GET_INFO: u32 = 0x4108;
 }
+
+/// Unknown or unspecified audio output kind.
+pub const AUDIO_DEVICE_KIND_UNKNOWN: u32 = 0;
+/// Built-in speaker output.
+pub const AUDIO_DEVICE_KIND_SPEAKERS: u32 = 1;
+/// Headphone or headset output.
+pub const AUDIO_DEVICE_KIND_HEADPHONES: u32 = 2;
+
+/// Maximum bytes in a stable audio device name, including trailing zero padding.
+pub const AUDIO_DEVICE_NAME_LEN: usize = 32;
+/// Maximum bytes in an audio device description, including trailing zero padding.
+pub const AUDIO_DEVICE_DESCRIPTION_LEN: usize = 64;
 
 /// Signed 16-bit little-endian interleaved PCM.
 pub const AUDIO_PCM_FORMAT_S16LE: u32 = 1;
@@ -120,6 +133,26 @@ pub struct AudioPcmStatus {
     pub xruns: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AudioDeviceInfo {
+    pub kind: u32,
+    pub flags: u32,
+    pub name: [u8; AUDIO_DEVICE_NAME_LEN],
+    pub description: [u8; AUDIO_DEVICE_DESCRIPTION_LEN],
+}
+
+impl Default for AudioDeviceInfo {
+    fn default() -> Self {
+        Self {
+            kind: AUDIO_DEVICE_KIND_UNKNOWN,
+            flags: 0,
+            name: [0; AUDIO_DEVICE_NAME_LEN],
+            description: [0; AUDIO_DEVICE_DESCRIPTION_LEN],
+        }
+    }
+}
+
 /// Open PCM playback on `/dev/audio0`.
 pub fn open_default() -> Result<AudioDevice> {
     AudioDevice::open("/dev/audio0")
@@ -153,6 +186,16 @@ impl AudioDevice {
             .control(commands::AUDIO_GET_CAPS, &mut caps as *mut _ as usize)
             .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_CAPS failed"))?;
         Ok(caps)
+    }
+
+    /// Query stable device identity and routing metadata.
+    pub fn info(&self) -> Result<AudioDeviceInfo> {
+        let mut info = AudioDeviceInfo::default();
+        self.file
+            .as_handle()
+            .control(commands::AUDIO_GET_INFO, &mut info as *mut _ as usize)
+            .map_err(|_| Error::new(ErrorKind::Other, "AUDIO_GET_INFO failed"))?;
+        Ok(info)
     }
 
     /// Configure the playback stream.

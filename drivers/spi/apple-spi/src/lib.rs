@@ -5,13 +5,15 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use scarlet::sync::Mutex;
 
 use scarlet::arch::mmio;
+use scarlet::device::clk::ClkHandle;
 use scarlet::device::spi::{SpiBus, SpiError, SpiTransfer, SpiTransferFlags};
 use scarlet::device::{
     DeviceInfo,
-    manager::{DeviceManager, DriverPriority},
+    manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use scarlet::time;
@@ -46,6 +48,7 @@ const CFG_CPHA: u32 = 1 << 1;
 const CFG_CPOL: u32 = 1 << 2;
 const CFG_MODE_SHIFT: u32 = 5;
 const CFG_MODE_MASK: u32 = 0b11 << CFG_MODE_SHIFT;
+const CFG_MODE_IRQ: u8 = 1;
 const CFG_IE_RXCOMPLETE: u32 = 1 << 7;
 const CFG_IE_TXRXTHRESH: u32 = 1 << 8;
 const CFG_LSB_FIRST: u32 = 1 << 13;
@@ -56,10 +59,8 @@ const CFG_FIFO_THRESH_SHIFT: u32 = 17;
 const CFG_FIFO_THRESH_MASK: u32 = 0b11 << CFG_FIFO_THRESH_SHIFT;
 
 const STATUS_RXCOMPLETE: u32 = 1 << 0;
-const STATUS_TXRXTHRESH: u32 = 1 << 1;
 const STATUS_TXCOMPLETE: u32 = 1 << 2;
 
-const PIN_KEEP_MOSI: u32 = 1 << 0;
 const PIN_CS: u32 = 1 << 1;
 
 const FIFOSTAT_TXFULL: u32 = 1 << 4;
@@ -71,15 +72,12 @@ const FIFOSTAT_LEVEL_RX_MASK: u32 = 0xff << FIFOSTAT_LEVEL_RX_SHIFT;
 
 const SHIFTCFG_CLK_ENABLE: u32 = 1 << 0;
 const SHIFTCFG_CS_ENABLE: u32 = 1 << 1;
+const SHIFTCFG_RX_FIXUP: u32 = 1 << 2;
 const SHIFTCFG_TX_ENABLE: u32 = 1 << 10;
 const SHIFTCFG_RX_ENABLE: u32 = 1 << 11;
-const SHIFTCFG_BITS_SHIFT: u32 = 16;
-const SHIFTCFG_BITS_MASK: u32 = 0x3f << SHIFTCFG_BITS_SHIFT;
 const SHIFTCFG_OVERRIDE_CS: u32 = 1 << 24;
 
-const PINCFG_KEEP_CLK: u32 = 1 << 0;
 const PINCFG_KEEP_CS: u32 = 1 << 1;
-const PINCFG_KEEP_MOSI: u32 = 1 << 2;
 const PINCFG_CS_IDLE_VAL: u32 = 1 << 9;
 
 const DELAY_ENABLE: u32 = 1 << 0;
@@ -91,12 +89,21 @@ const DELAY_MOSI_VAL: u32 = 1 << 12;
 const DELAY_CYCLES_SHIFT: u32 = 16;
 
 const CLKDIV_MASK: u32 = 0x7ff;
+const CLKDIV_MIN: u32 = 0x002;
 
 const FIFO_DEPTH: usize = 16;
 const TIMEOUT_MS: u64 = 200;
 const TIMEOUT_US: u64 = TIMEOUT_MS * 1_000;
 const POLL_INTERVAL_US: u64 = 5;
-const PARENT_CLOCK_HZ: u32 = 200_000_000;
+const DEFAULT_PARENT_CLOCK_HZ: u32 = 200_000_000;
+const DEFAULT_BUS_SPEED_HZ: u32 = 1_000_000;
+const TIMEOUT_LOG_LIMIT: u32 = 8;
+const INIT_LOG_LIMIT: u32 = 8;
+const XFER_LOG_LIMIT: u32 = 8;
+
+static TIMEOUT_LOGS: AtomicU32 = AtomicU32::new(0);
+static INIT_LOGS: AtomicU32 = AtomicU32::new(0);
+static XFER_LOGS: AtomicU32 = AtomicU32::new(0);
 
 struct AppleSpiInner {
     speed_hz: u32,
@@ -107,18 +114,26 @@ struct AppleSpiInner {
 pub struct AppleSpiController {
     base: usize,
     bus_number: u32,
+    parent_clock_hz: u32,
+    _bus_clk: Option<ClkHandle>,
     inner: Mutex<AppleSpiInner>,
     transfer_lock: Mutex<()>,
 }
 
 impl AppleSpiController {
-    pub fn new(base: usize, bus_number: u32) -> Result<Self, SpiError> {
-        let speed_hz = Self::clkdiv_to_speed(Self::clkdiv_for_hz(1_000_000)?);
+    pub fn new(base: usize, bus_number: u32, bus_clk: Option<ClkHandle>) -> Result<Self, SpiError> {
+        let parent_clock_hz = bus_clk
+            .as_ref()
+            .map(|clk| clk.rate() as u32)
+            .filter(|rate| *rate != 0)
+            .unwrap_or(DEFAULT_PARENT_CLOCK_HZ);
         let controller = Self {
             base,
             bus_number,
+            parent_clock_hz,
+            _bus_clk: bus_clk,
             inner: Mutex::new(AppleSpiInner {
-                speed_hz,
+                speed_hz: DEFAULT_BUS_SPEED_HZ,
                 mode: 0,
                 lsb_first: false,
             }),
@@ -133,21 +148,34 @@ impl AppleSpiController {
         self.write_reg(REG_IE_FIFO, 0);
         self.clear_interrupt_flags();
 
-        self.write_reg(
-            REG_PINCFG,
-            PINCFG_KEEP_CLK | PINCFG_KEEP_CS | PINCFG_KEEP_MOSI | PINCFG_CS_IDLE_VAL,
-        );
-        self.write_reg(REG_SCKCFG, 0);
+        self.write_reg(REG_PIN, PIN_CS);
+        let shiftcfg = self.read_reg(REG_SHIFTCFG) & !SHIFTCFG_OVERRIDE_CS;
+        self.write_reg(REG_SHIFTCFG, shiftcfg);
+        let pincfg = (self.read_reg(REG_PINCFG) & !PINCFG_CS_IDLE_VAL) | PINCFG_KEEP_CS;
+        self.write_reg(REG_PINCFG, pincfg);
 
         let delay_cfg = Self::compose_delay(false, false, false, false, false, 0);
-        self.write_reg(REG_WORD_DELAY, delay_cfg);
         self.write_reg(REG_DELAY_PRE, delay_cfg);
         self.write_reg(REG_DELAY_POST, delay_cfg);
 
-        self.program_format(0, false)?;
-        self.program_bus_speed(self.inner.lock().speed_hz)?;
+        self.program_format(CFG_MODE_IRQ, false)?;
+        let speed_hz = self.inner.lock().speed_hz;
+        self.program_bus_speed(speed_hz)?;
         self.reset_fifos();
-        self.set_cs_inactive();
+        if INIT_LOGS.fetch_add(1, Ordering::Relaxed) < INIT_LOG_LIMIT {
+            scarlet::early_println!(
+                "[apple-spi] init bus={} base={:#x} parent_clk={} pin={:#x} cfg={:#x} shiftcfg={:#x} pincfg={:#x} clkdiv={:#x} fifostat={:#x}",
+                self.bus_number,
+                self.base,
+                self.parent_clock_hz,
+                self.read_reg(REG_PIN),
+                self.read_reg(REG_CFG),
+                self.read_reg(REG_SHIFTCFG),
+                self.read_reg(REG_PINCFG),
+                self.read_reg(REG_CLKDIV),
+                self.read_reg(REG_FIFOSTAT)
+            );
+        }
         Ok(())
     }
 
@@ -200,47 +228,44 @@ impl AppleSpiController {
     }
 
     fn set_cs_active(&self) {
-        let mut pin = self.read_reg(REG_PIN);
-        pin |= PIN_KEEP_MOSI;
-        pin &= !PIN_CS;
-        self.write_reg(REG_PIN, pin);
+        self.write_reg(REG_PIN, 0);
     }
 
     fn set_cs_inactive(&self) {
-        let mut pin = self.read_reg(REG_PIN);
-        pin |= PIN_KEEP_MOSI;
-        pin |= PIN_CS;
-        self.write_reg(REG_PIN, pin);
+        self.write_reg(REG_PIN, PIN_CS);
     }
 
-    fn clkdiv_for_hz(hz: u32) -> Result<u32, SpiError> {
+    fn clkdiv_for_hz(parent_clock_hz: u32, hz: u32) -> Result<u32, SpiError> {
         if hz == 0 {
             return Err(SpiError::InvalidArg);
         }
+        if parent_clock_hz == 0 {
+            return Err(SpiError::InvalidArg);
+        }
 
-        let divisor = PARENT_CLOCK_HZ.div_ceil(hz);
+        let divisor = parent_clock_hz.div_ceil(hz);
         if divisor == 0 {
             return Err(SpiError::InvalidArg);
         }
 
-        let divider = divisor - 1;
-        Ok(core::cmp::min(divider, CLKDIV_MASK))
+        Ok(divisor.clamp(CLKDIV_MIN, CLKDIV_MASK))
     }
 
-    fn clkdiv_to_speed(divider: u32) -> u32 {
+    fn clkdiv_to_speed(parent_clock_hz: u32, divider: u32) -> u32 {
         let clamped = core::cmp::min(divider, CLKDIV_MASK);
-        PARENT_CLOCK_HZ / (clamped + 1)
+        parent_clock_hz / (clamped + 1)
     }
 
     fn program_bus_speed(&self, hz: u32) -> Result<(), SpiError> {
-        let divider = Self::clkdiv_for_hz(hz)?;
+        let divider = Self::clkdiv_for_hz(self.parent_clock_hz, hz)?;
         self.write_reg(REG_CLKDIV, divider & CLKDIV_MASK);
-        self.inner.lock().speed_hz = Self::clkdiv_to_speed(divider);
+        let actual = Self::clkdiv_to_speed(self.parent_clock_hz, divider);
+        self.inner.lock().speed_hz = actual;
         Ok(())
     }
 
-    fn program_format(&self, mode: u8, lsb_first: bool) -> Result<(), SpiError> {
-        if mode > 3 {
+    fn program_format(&self, controller_mode: u8, lsb_first: bool) -> Result<(), SpiError> {
+        if controller_mode > 3 {
             return Err(SpiError::InvalidArg);
         }
 
@@ -254,13 +279,7 @@ impl AppleSpiController {
             | CFG_WORD_SIZE_MASK
             | CFG_FIFO_THRESH_MASK);
 
-        if (mode & 0b01) != 0 {
-            cfg |= CFG_CPHA;
-        }
-        if (mode & 0b10) != 0 {
-            cfg |= CFG_CPOL;
-        }
-        cfg |= ((mode as u32) << CFG_MODE_SHIFT) & CFG_MODE_MASK;
+        cfg |= ((controller_mode as u32) << CFG_MODE_SHIFT) & CFG_MODE_MASK;
         if lsb_first {
             cfg |= CFG_LSB_FIRST;
         }
@@ -269,16 +288,15 @@ impl AppleSpiController {
         self.write_reg(REG_CFG, cfg);
 
         let mut inner = self.inner.lock();
-        inner.mode = mode;
+        inner.mode = controller_mode;
         inner.lsb_first = lsb_first;
         Ok(())
     }
 
     fn program_shiftcfg(&self, tx_enable: bool, rx_enable: bool) {
-        let mut shiftcfg = SHIFTCFG_CLK_ENABLE
-            | SHIFTCFG_CS_ENABLE
-            | SHIFTCFG_OVERRIDE_CS
-            | ((7u32 << SHIFTCFG_BITS_SHIFT) & SHIFTCFG_BITS_MASK);
+        let mut shiftcfg = self.read_reg(REG_SHIFTCFG);
+        shiftcfg &= !(SHIFTCFG_TX_ENABLE | SHIFTCFG_RX_ENABLE | SHIFTCFG_OVERRIDE_CS);
+        shiftcfg |= SHIFTCFG_CLK_ENABLE | SHIFTCFG_CS_ENABLE | SHIFTCFG_RX_FIXUP;
         if tx_enable {
             shiftcfg |= SHIFTCFG_TX_ENABLE;
         }
@@ -347,31 +365,81 @@ impl AppleSpiController {
         self.write_reg(REG_CTRL, CTRL_RUN);
 
         let start = time::current_time();
+        let mut last_tx_written = tx_written;
+        let mut last_rx_read = rx_read;
         loop {
             self.drain_rx_fifo(rx_buf, &mut rx_read, rx_len);
             self.fill_tx_fifo(tx_buf, &mut tx_written, tx_len);
 
-            let status = self.read_reg(REG_STATUS);
-            let tx_done = tx_len == 0 || (status & STATUS_TXCOMPLETE) != 0;
-            let rx_done = rx_len == 0 || (status & STATUS_RXCOMPLETE) != 0;
-            if tx_done && rx_done && tx_written == tx_len && rx_read == rx_len {
+            if tx_written == tx_len && rx_read == rx_len {
                 break;
             }
 
             if time::current_time().saturating_sub(start) >= TIMEOUT_US {
+                let status = self.read_reg(REG_STATUS);
+                let fifostat = self.read_reg(REG_FIFOSTAT);
+                let if_xfer = self.read_reg(REG_IF_XFER);
+                let if_fifo = self.read_reg(REG_IF_FIFO);
+                let shiftcfg = self.read_reg(REG_SHIFTCFG);
+                if TIMEOUT_LOGS.fetch_add(1, Ordering::Relaxed) < TIMEOUT_LOG_LIMIT {
+                    scarlet::early_println!(
+                        "[apple-spi] timeout bus={} tx={}/{} rx={}/{} status={:#x} txdone={} rxdone={} fifostat={:#x} txlvl={} rxlvl={} if_xfer={:#x} if_fifo={:#x} shiftcfg={:#x}",
+                        self.bus_number,
+                        tx_written,
+                        tx_len,
+                        rx_read,
+                        rx_len,
+                        status,
+                        (status & STATUS_TXCOMPLETE) != 0,
+                        (status & STATUS_RXCOMPLETE) != 0,
+                        fifostat,
+                        Self::tx_fifo_level(fifostat),
+                        Self::rx_fifo_level(fifostat),
+                        if_xfer,
+                        if_fifo,
+                        shiftcfg
+                    );
+                }
                 self.write_reg(REG_CTRL, 0);
                 return Err(SpiError::Timeout);
             }
 
-            if (status & STATUS_TXRXTHRESH) == 0 {
+            if tx_written == last_tx_written && rx_read == last_rx_read {
                 time::udelay(POLL_INTERVAL_US);
             }
+            last_tx_written = tx_written;
+            last_rx_read = rx_read;
         }
 
         self.write_reg(REG_CTRL, 0);
         self.drain_rx_fifo(rx_buf, &mut rx_read, rx_len);
         if rx_read != rx_len {
             return Err(SpiError::FifoError);
+        }
+
+        if XFER_LOGS.fetch_add(1, Ordering::Relaxed) < XFER_LOG_LIMIT {
+            scarlet::early_println!(
+                "[apple-spi] xfer bus={} tx={} rx={} speed={} clkdiv={:#x} pin={:#x} status={:#x} fifostat={:#x} if_xfer={:#x} if_fifo={:#x} shiftcfg={:#x} rx0={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                self.bus_number,
+                tx_len,
+                rx_len,
+                self.inner.lock().speed_hz,
+                self.read_reg(REG_CLKDIV),
+                self.read_reg(REG_PIN),
+                self.read_reg(REG_STATUS),
+                self.read_reg(REG_FIFOSTAT),
+                self.read_reg(REG_IF_XFER),
+                self.read_reg(REG_IF_FIFO),
+                self.read_reg(REG_SHIFTCFG),
+                rx_buf.first().copied().unwrap_or(0),
+                rx_buf.get(1).copied().unwrap_or(0),
+                rx_buf.get(2).copied().unwrap_or(0),
+                rx_buf.get(3).copied().unwrap_or(0),
+                rx_buf.get(4).copied().unwrap_or(0),
+                rx_buf.get(5).copied().unwrap_or(0),
+                rx_buf.get(6).copied().unwrap_or(0),
+                rx_buf.get(7).copied().unwrap_or(0)
+            );
         }
 
         self.clear_interrupt_flags();
@@ -409,7 +477,8 @@ impl AppleSpiController {
             return Ok(());
         }
 
-        self.run_segment(&segment.data, &mut [])
+        let mut rx_dummy = alloc::vec![0u8; segment.data.len()];
+        self.run_segment(&segment.data, &mut rx_dummy)
     }
 }
 
@@ -420,14 +489,23 @@ impl SpiBus for AppleSpiController {
         }
 
         let _guard = self.transfer_lock.lock();
+        self.set_cs_active();
+        let mut result = Ok(());
         for segment in segments.iter_mut() {
-            self.set_cs_active();
-            let result = self.transfer_segment(segment);
-            self.set_cs_inactive();
-            result?;
+            if segment.delay_before_us != 0 {
+                time::udelay(segment.delay_before_us);
+            }
+            if let Err(err) = self.transfer_segment(segment) {
+                result = Err(err);
+                break;
+            }
+            if segment.delay_after_us != 0 {
+                time::udelay(segment.delay_after_us);
+            }
         }
+        self.set_cs_inactive();
 
-        Ok(())
+        result
     }
 
     fn set_bus_speed(&self, hz: u32) -> Result<(), SpiError> {
@@ -443,6 +521,7 @@ impl SpiBus for AppleSpiController {
     }
 }
 
+/// Probe an Apple SPI controller, optionally enabling its bus clock before MMIO setup.
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let mem_resources: Vec<_> = device
         .get_resources()
@@ -463,6 +542,28 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let base = vm::ioremap(paddr, size).map_err(|_| "apple-spi: ioremap failed")?;
 
+    // TODO: Confirm Apple SPI DT clock-names on all supported SoCs; current bring-up uses "bus".
+    let bus_clk = match DeviceManager::get_manager().resolve_clk(device, "bus") {
+        Ok(handle) => {
+            let _ = handle.prepare_enable();
+            Some(handle)
+        }
+        Err(e) if is_probe_defer(e) || e == "clk: provider not found" => {
+            scarlet::early_println!("[apple-spi] bus clock provider not ready, deferring");
+            return probe_defer();
+        }
+        Err(
+            e @ ("clk: clock-names missing" | "clk: clocks missing" | "clk: clock name not found"),
+        ) => {
+            scarlet::early_println!("[apple-spi] warning: bus clock unavailable: {}", e);
+            None
+        }
+        Err(e) => {
+            scarlet::early_println!("[apple-spi] bus clock lookup failed: {}", e);
+            return Err(e);
+        }
+    };
+
     let bus_number = device
         .property("reg")
         .and_then(|p| p.as_usize())
@@ -476,7 +577,22 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-spi: no phandle")?;
 
     let controller =
-        AppleSpiController::new(base, bus_number).map_err(|_| "apple-spi: init failed")?;
+        AppleSpiController::new(base, bus_number, bus_clk).map_err(|_| "apple-spi: init failed")?;
+    let pinctrl0 = device
+        .property("pinctrl-0")
+        .and_then(|p| p.as_usize())
+        .unwrap_or(0);
+    scarlet::early_println!(
+        "[apple-spi] probed name={} paddr={:#x} base={:#x} phandle={:#x} pinctrl0={:#x} bus={} parent_clk={} speed={}",
+        device.name(),
+        paddr,
+        base,
+        phandle,
+        pinctrl0,
+        controller.bus_number(),
+        controller.parent_clock_hz,
+        controller.bus_speed()
+    );
     let bus: Arc<dyn SpiBus> = Arc::new(controller);
 
     DeviceManager::get_manager().register_spi_bus(phandle, bus);
@@ -498,7 +614,7 @@ fn register_apple_spi_driver() {
     DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
 }
 
-// scarlet::driver_initcall!(register_apple_spi_driver);
+scarlet::driver_initcall!(register_apple_spi_driver);
 
 #[used]
 static SCARLET_DRIVER_APPLE_SPI_ANCHOR: fn() = force_link;

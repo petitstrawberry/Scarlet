@@ -65,6 +65,7 @@ name = "scarlet-os"
 version = "0.16.0"
 dependencies = [
  "scarlet-abi",
+ "scarlet-rt",
  "scarlet-sys",
 ]
 

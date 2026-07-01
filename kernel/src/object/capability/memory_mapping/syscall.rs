@@ -361,9 +361,34 @@ fn handle_anonymous_mapping(
         owner: Some(owner),
     };
 
-    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(removed) => removed,
-        Err(_) => return usize::MAX,
+    let removed_mappings = if is_map_fixed {
+        match task.vm_manager.add_memory_map_fixed(vm_map) {
+            Ok(removed) => removed,
+            Err(_) => return usize::MAX,
+        }
+    } else {
+        match task.vm_manager.add_memory_map(vm_map.clone()) {
+            Ok(()) => Vec::new(),
+            Err(_) => {
+                let retry_vaddr = match task
+                    .vm_manager
+                    .find_unmapped_area(aligned_length, PAGE_SIZE)
+                {
+                    Some(addr) => addr,
+                    None => return usize::MAX,
+                };
+                let retry_vmarea = MemoryArea::new(retry_vaddr, retry_vaddr + aligned_length - 1);
+                let retry_map = VirtualMemoryMap {
+                    vmarea: retry_vmarea,
+                    vm_start: retry_vaddr,
+                    ..vm_map
+                };
+                match task.vm_manager.add_memory_map(retry_map) {
+                    Ok(()) => Vec::new(),
+                    Err(_) => return usize::MAX,
+                }
+            }
+        }
     };
 
     for removed_map in &removed_mappings {

@@ -36,9 +36,8 @@ pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
-    unsafe {
-        naked_asm!(
-            r#"
+    naked_asm!(
+        r#"
         .align 11
         // -----------------------------------------------------------------
         // VBAR_EL1 Vector Table
@@ -147,9 +146,11 @@ pub extern "C" fn _user_trap_entry() {
             mrs x10, tpidrro_el0 // load user TPIDRRO_EL0
             str x10, [sp, #280] // Trapframe.tpidrro_el0 = user TPIDRRO_EL0
 
-            // Save ESR_EL1
+            // Save ESR_EL1/FAR_EL1 before any kernel-side fault can overwrite them.
             mrs x10, esr_el1 // load user ESR_EL1
             str x10, [sp, #288] // Trapframe.esr_el1 = user ESR_EL1
+            mrs x10, far_el1 // load user FAR_EL1
+            str x10, [sp, #296] // Trapframe.far_el1 = user FAR_EL1
 
             // 2. Switch TTBR (User -> Kernel)
             mrs x10, tpidr_el1    // x10 = CPU struct ptr
@@ -172,17 +173,15 @@ pub extern "C" fn _user_trap_entry() {
             ldr x10, [x10, #32] // arch_user_trap_handler (trampoline target)
             br  x10
         "#
-        );
-    }
+    );
 }
 
 #[unsafe(link_section = ".trampoline.text.1")]
 #[unsafe(export_name = "_switch_to_user")]
 #[unsafe(naked)]
 pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
-    unsafe {
-        naked_asm!(
-            r#"
+    naked_asm!(
+        r#"
         // x0 = trapframe pointer --> sp = trapframe pointer
         mov sp, x0 // Set SP to trapframe pointer for easy access
 
@@ -195,6 +194,7 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
         //   272:    tpidr_el0 (TLS)
         //   280:    tpidrro_el0 (read-only at EL0)
         //   288:    esr_el1 (not restore)
+        //   296:    far_el1 (not restore)
 
         // Check SPSR mode bits [3:0] to decide TTBR switch
         ldr x9, [sp, #264]  // Load Trapframe.spsr
@@ -254,8 +254,7 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
 
         eret
         "#
-        );
-    }
+    );
 }
 
 #[unsafe(export_name = "arch_switch_to_user")]

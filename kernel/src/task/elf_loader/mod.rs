@@ -1060,6 +1060,9 @@ fn load_elf_into_task_static(
                             kaddr as *mut u8,
                             ph.p_filesz as usize,
                         );
+                        if ph.p_flags & PF_X != 0 {
+                            crate::arch::sync_icache_for_execution(kaddr, ph.p_filesz as usize);
+                        }
                     },
                     None => {
                         return Err(ElfLoaderError {
@@ -1458,6 +1461,9 @@ fn load_elf_segment_at_address(
                     paddr as *mut u8,
                     ph.p_filesz as usize,
                 );
+                if ph.p_flags & PF_X != 0 {
+                    crate::arch::sync_icache_for_execution(paddr, ph.p_filesz as usize);
+                }
             },
             None => {
                 return Err(ElfLoaderError {

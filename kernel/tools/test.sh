@@ -145,6 +145,7 @@ fi
 if [ ! -f "$EFI_VARS" ]; then
     cp "${SCARLET_EFI_VARS_RV64:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}" "$EFI_VARS"
 fi
+chmod u+w "$EFI_VARS"
 
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: start with gdb server
@@ -236,5 +237,5 @@ elif grep -q "running 0 tests" "$TEMP_OUTPUT"; then
 else
     echo "Could not determine test result, QEMU exit code: $QEMU_EXIT_CODE"
     rm -f "$TEMP_OUTPUT"
-    exit $QEMU_EXIT_CODE
+    exit 1
 fi

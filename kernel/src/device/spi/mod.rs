@@ -61,6 +61,10 @@ pub struct SpiTransfer {
     pub cs: u8,
     /// SPI clock frequency in Hz for this segment (0 = use bus default).
     pub speed_hz: u32,
+    /// Delay in microseconds after asserting chip-select before this segment.
+    pub delay_before_us: u64,
+    /// Delay in microseconds after this segment before the next segment or chip-select deassertion.
+    pub delay_after_us: u64,
 }
 
 impl SpiTransfer {
@@ -71,6 +75,8 @@ impl SpiTransfer {
             data: data.to_vec(),
             cs,
             speed_hz: 0,
+            delay_before_us: 0,
+            delay_after_us: 0,
         }
     }
 
@@ -81,6 +87,8 @@ impl SpiTransfer {
             data: alloc::vec![0; len],
             cs,
             speed_hz: 0,
+            delay_before_us: 0,
+            delay_after_us: 0,
         }
     }
 
@@ -94,6 +102,8 @@ impl SpiTransfer {
             data: tx.to_vec(),
             cs,
             speed_hz: 0,
+            delay_before_us: 0,
+            delay_after_us: 0,
         }
     }
 
@@ -104,6 +114,8 @@ impl SpiTransfer {
             data,
             cs,
             speed_hz,
+            delay_before_us: 0,
+            delay_after_us: 0,
         }
     }
 }

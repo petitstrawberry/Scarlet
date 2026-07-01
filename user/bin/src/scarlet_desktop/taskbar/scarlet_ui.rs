@@ -14,6 +14,8 @@ extern crate scarlet_ui_macros;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::time::Duration;
+use sas_client::SasClient;
+use sas_protocol::{CONTROL_FLAG_MUTED, MASTER_VOLUME_UNITY_Q16};
 use scarlet_os::time;
 use scarlet_ui::buffer::Buffer;
 use scarlet_ui::color::Color;
@@ -105,35 +107,30 @@ struct TaskBarApp {
     open_menu_index: State<Option<usize>>,
     popup_surface_id: State<Option<u32>>,
     menu_titles_cache: State<BTreeMap<u32, String>>,
+    audio_volume_percent: State<u8>,
+    audio_muted: State<bool>,
+    audio_output_label: State<String>,
 }
 
 impl TaskBarApp {
     fn new() -> Self {
+        let root_menu = MenuTree {
+            items: default_root_menu_items(),
+        };
         Self {
             cpu_usage: State::new(StateId::new(0), 15),
             memory_usage: State::new(StateId::new(1), 42),
             clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
-            menu_bar: State::new(
-                StateId::new(4),
-                MenuBarModel::new(vec![MenuItemModel::new("system_scarlet", "Scarlet")]),
-            ),
+            menu_bar: State::new(StateId::new(4), menu_bar_from_tree(&root_menu)),
             active_window_id: State::new(StateId::new(5), 0),
-            menu_tree: State::new(
-                StateId::new(6),
-                MenuTree {
-                    items: vec![TaskMenuItem {
-                        id: String::from("system_scarlet"),
-                        title: String::from("Scarlet"),
-                        enabled: true,
-                        shortcut: None,
-                        children: default_system_menu_entries(),
-                    }],
-                },
-            ),
+            menu_tree: State::new(StateId::new(6), root_menu),
             open_menu_index: State::new(StateId::new(7), None),
             popup_surface_id: State::new(StateId::new(8), None),
             menu_titles_cache: State::new(StateId::new(9), BTreeMap::new()),
+            audio_volume_percent: State::new(StateId::new(10), 25),
+            audio_muted: State::new(StateId::new(11), false),
+            audio_output_label: State::new(StateId::new(12), String::from("Audio")),
         }
     }
 }
@@ -173,6 +170,16 @@ struct MenuEntryPayload {
     items: Option<Vec<MenuEntryPayload>>,
 }
 
+fn default_root_menu_items() -> Vec<TaskMenuItem> {
+    vec![TaskMenuItem {
+        id: String::from("system_scarlet"),
+        title: String::from("Scarlet"),
+        enabled: true,
+        shortcut: None,
+        children: default_system_menu_entries(),
+    }]
+}
+
 fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
     vec![
         TaskMenuEntry::Item(TaskMenuItem {
@@ -205,6 +212,63 @@ fn default_system_menu_entries() -> Vec<TaskMenuEntry> {
             children: Vec::new(),
         }),
     ]
+}
+
+fn fixed_sas_str(bytes: &[u8]) -> &str {
+    let len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).unwrap_or("")
+}
+
+fn q16_to_percent(volume_q16: u32) -> u32 {
+    ((volume_q16 as u64 * 100 + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
+        / MASTER_VOLUME_UNITY_Q16 as u64) as u32
+}
+
+fn output_label(kind: u32, name: &str) -> String {
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    match kind {
+        1 => String::from("Speakers"),
+        2 => String::from("Headphones"),
+        _ => String::from("Audio"),
+    }
+}
+
+fn refresh_taskbar_audio_state(
+    client: &mut SasClient,
+    volume_percent: &State<u8>,
+    muted: &State<bool>,
+    output: &State<String>,
+) -> core::result::Result<(), ()> {
+    let state = client.control_state().map_err(|_| ())?;
+    volume_percent.set(q16_to_percent(state.master_volume_q16).min(100) as u8);
+    muted.set(state.flags & CONTROL_FLAG_MUTED != 0);
+    output.set(output_label(
+        state.output_kind,
+        fixed_sas_str(&state.output_name),
+    ));
+    Ok(())
+}
+
+fn poll_taskbar_audio_state(volume_percent: State<u8>, muted: State<bool>, output: State<String>) {
+    let mut client = None;
+    loop {
+        if client.is_none() {
+            client = SasClient::connect().ok();
+        }
+
+        if let Some(active_client) = client.as_mut()
+            && refresh_taskbar_audio_state(active_client, &volume_percent, &muted, &output).is_err()
+        {
+            client = None;
+        }
+
+        std::thread::sleep(Duration::from_secs(2));
+    }
 }
 
 fn launch_app(app_id: &[u8]) {
@@ -266,14 +330,7 @@ fn menu_bar_popup_x(items: &[TaskMenuItem], index: usize) -> f32 {
 }
 
 fn build_menu_tree(app_name: &str, menu_titles: &str) -> MenuTree {
-    let mut items = Vec::new();
-    items.push(TaskMenuItem {
-        id: String::from("system_scarlet"),
-        title: String::from("Scarlet"),
-        enabled: true,
-        shortcut: None,
-        children: default_system_menu_entries(),
-    });
+    let mut items = default_root_menu_items();
 
     let cleaned = sanitize_menu_json(menu_titles);
     let trimmed = cleaned.trim();
@@ -670,6 +727,14 @@ impl Application for TaskBarApp {
 
         let hours = clock / 3600;
         let mins = (clock / 60) % 60;
+        let audio_volume = self.audio_volume_percent.get();
+        let audio_muted = self.audio_muted.get();
+        let audio_output = self.audio_output_label.get();
+        let audio_status = if audio_muted {
+            format!("Muted {}", audio_output)
+        } else {
+            format!("Vol {}% {}", audio_volume, audio_output)
+        };
 
         let bar_height = TASKBAR_HEIGHT as f32;
         let window_height = bar_height;
@@ -687,6 +752,13 @@ impl Application for TaskBarApp {
                 Text::new(format!("CPU {}%", cpu))
                     .font_size(12.0)
                     .color(Color::rgb(0.280, 0.280, 0.310)),
+                Text::new("•")
+                    .font_size(12.0)
+                    .color(Color::rgb(0.600, 0.600, 0.630)),
+                Text::new(audio_status)
+                    .font_size(12.0)
+                    .color(Color::rgb(0.280, 0.280, 0.310))
+                    .on_click(|| { launch_app(b"org.scarlet-os.desktop.settings"); }),
                 Text::new("•")
                     .font_size(12.0)
                     .color(Color::rgb(0.600, 0.600, 0.630)),
@@ -770,6 +842,9 @@ impl TaskBarApp {
         let popup_surface_id_popup = popup_surface_id.clone();
         let menu_tree_popup = menu_tree.clone();
         let active_window_id_popup = active_window_id.clone();
+        let audio_volume = self.audio_volume_percent.clone();
+        let audio_muted = self.audio_muted.clone();
+        let audio_output = self.audio_output_label.clone();
 
         std::thread::spawn(move || {
             loop {
@@ -777,6 +852,10 @@ impl TaskBarApp {
                 mem.update(|m| *m = (*m + 3) % 70 + 25);
                 std::thread::sleep(Duration::from_secs(1));
             }
+        });
+
+        std::thread::spawn(move || {
+            poll_taskbar_audio_state(audio_volume, audio_muted, audio_output);
         });
 
         // Menu popup handling thread (still needed for interactive menu popup)
@@ -1039,13 +1118,7 @@ impl TaskBarApp {
             self.active_window_id.set(0);
             self.open_menu_index.set(None);
             let tree = MenuTree {
-                items: vec![TaskMenuItem {
-                    id: String::from("system_scarlet"),
-                    title: String::from("Scarlet"),
-                    enabled: true,
-                    shortcut: None,
-                    children: default_system_menu_entries(),
-                }],
+                items: default_root_menu_items(),
             };
             self.menu_bar.set(menu_bar_from_tree(&tree));
             self.menu_tree.set(tree);

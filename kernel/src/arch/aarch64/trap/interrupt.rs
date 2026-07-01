@@ -2,8 +2,6 @@
 
 use crate::arch::{Trapframe, get_cpu};
 
-const RESCHEDULE_SGI: u32 = 0;
-
 /// Handle an IRQ taken at EL1.
 ///
 /// On QEMU virt (GICv2), the virtual timer arrives as a PPI (typically ID 27).
@@ -18,12 +16,13 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         return;
     }
 
-    let claimed =
-        crate::interrupt::InterruptManager::global().claim_and_handle_external_interrupt(cpu_id);
+    let claimed = crate::interrupt::InterruptManager::global()
+        .claim_and_handle_pending_external_interrupt(cpu_id);
 
     match claimed {
-        Ok(Some(interrupt_id)) => {
-            if interrupt_id == RESCHEDULE_SGI {
+        Ok(Some(pending)) => {
+            let interrupt_id = pending.mapping.virq;
+            if crate::arch::interrupt::is_reschedule_interrupt(&pending) {
                 crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id as usize, false, true);
                 crate::sched::scheduler::schedule(trapframe);
                 ran_scheduler = true;

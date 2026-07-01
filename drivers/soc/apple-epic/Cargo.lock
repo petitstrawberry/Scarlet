@@ -9,12 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "bitflags"
-version = "2.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -51,12 +45,9 @@ dependencies = [
 
 [[package]]
 name = "limine"
-version = "0.5.0"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af6d2ee42712e7bd2c787365cd1dab06ef59a61becbf87bec7b32b970bd2594b"
-dependencies = [
- "bitflags",
-]
+checksum = "29363c0f37e66e18575fadf7141c56ee7ea04ae5fecbeb25eff303f77af203a9"
 
 [[package]]
 name = "lock_api"
@@ -80,10 +71,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-apple-afk"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+ "scarlet-driver-apple-rtkit",
+]
+
+[[package]]
+name = "scarlet-driver-apple-asc"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+]
+
+[[package]]
 name = "scarlet-driver-apple-epic"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-afk",
+]
+
+[[package]]
+name = "scarlet-driver-apple-rtkit"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+ "scarlet-driver-apple-asc",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
+use crate::library::std::usercopy::copy_to_user;
 use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
 
 use crate::arch::Trapframe;
@@ -532,7 +533,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     // pid is namespace-local PID as seen by the calling task.
     let pid = trapframe.get_arg(0) as i32;
-    let status_ptr = trapframe.get_arg(1) as *mut i32;
+    let status_addr = trapframe.get_arg(1);
     let options = trapframe.get_arg(2) as i32;
 
     // WNOHANG flag (0x1): Return immediately if no child has exited
@@ -551,14 +552,16 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     && child_task.get_state() != TaskState::Zombie
                     && child_task.take_process_control_stop_report()
                 {
-                    if status_ptr != core::ptr::null_mut() {
-                        let status_ptr = task
-                            .vm_manager
-                            .translate_to_kva(status_ptr as usize)
-                            .unwrap() as *mut i32;
-                        unsafe {
-                            *status_ptr = PROCESS_CONTROL_STOP_STATUS;
-                        }
+                    if status_addr != 0
+                        && copy_to_user(
+                            task,
+                            status_addr,
+                            &PROCESS_CONTROL_STOP_STATUS.to_ne_bytes(),
+                        )
+                        .is_err()
+                    {
+                        trapframe.increment_pc_next(task);
+                        return usize::MAX;
                     }
                     trapframe.increment_pc_next(task);
                     if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
@@ -570,14 +573,11 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 match task.wait(child_pid) {
                     Ok(status) => {
                         // Child has exited, return the status
-                        if status_ptr != core::ptr::null_mut() {
-                            let status_ptr = task
-                                .vm_manager
-                                .translate_to_kva(status_ptr as usize)
-                                .unwrap() as *mut i32;
-                            unsafe {
-                                *status_ptr = status;
-                            }
+                        if status_addr != 0
+                            && copy_to_user(task, status_addr, &status.to_ne_bytes()).is_err()
+                        {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX;
                         }
                         trapframe.increment_pc_next(task);
                         // Return child's PID in caller's namespace (if visible)
@@ -631,14 +631,16 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             && child_task.get_state() != TaskState::Zombie
             && child_task.take_process_control_stop_report()
         {
-            if status_ptr != core::ptr::null_mut() {
-                let status_ptr = task
-                    .vm_manager
-                    .translate_to_kva(status_ptr as usize)
-                    .unwrap() as *mut i32;
-                unsafe {
-                    *status_ptr = PROCESS_CONTROL_STOP_STATUS;
-                }
+            if status_addr != 0
+                && copy_to_user(
+                    task,
+                    status_addr,
+                    &PROCESS_CONTROL_STOP_STATUS.to_ne_bytes(),
+                )
+                .is_err()
+            {
+                trapframe.increment_pc_next(task);
+                return usize::MAX;
             }
             trapframe.increment_pc_next(task);
             return pid as usize;
@@ -647,14 +649,11 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         match task.wait(target_global) {
             Ok(status) => {
                 // Child has exited, return the status
-                if status_ptr != core::ptr::null_mut() {
-                    let status_ptr = task
-                        .vm_manager
-                        .translate_to_kva(status_ptr as usize)
-                        .unwrap() as *mut i32;
-                    unsafe {
-                        *status_ptr = status;
-                    }
+                if status_addr != 0
+                    && copy_to_user(task, status_addr, &status.to_ne_bytes()).is_err()
+                {
+                    trapframe.increment_pc_next(task);
+                    return usize::MAX;
                 }
                 trapframe.increment_pc_next(task);
                 return pid as usize;

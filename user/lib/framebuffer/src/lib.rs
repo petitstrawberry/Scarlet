@@ -279,9 +279,59 @@ pub struct DisplaySurface {
     file: File,
     mapped_buffer: Option<(usize, usize)>,
     mapped_backing_id: usize,
+    scratch_line: alloc::vec::Vec<u8>,
+    cached_info: Option<DisplayInfo>,
 }
 
 impl DisplaySurface {
+    fn scale_component_to_field(value: u8, field: FbBitfield) -> u32 {
+        if field.length == 0 {
+            return 0;
+        }
+
+        let max = (1u32 << field.length) - 1;
+        let scaled = ((value as u32) * max + 127) / 255;
+
+        if field.msb_right == 0 {
+            scaled
+        } else {
+            scaled.reverse_bits() >> (u32::BITS - field.length)
+        }
+    }
+
+    fn pack_bgra_pixel(color: [u8; 4], var_info: &FbVarScreenInfo) -> u32 {
+        (Self::scale_component_to_field(color[2], var_info.red) << var_info.red.offset)
+            | (Self::scale_component_to_field(color[1], var_info.green) << var_info.green.offset)
+            | (Self::scale_component_to_field(color[0], var_info.blue) << var_info.blue.offset)
+            | (Self::scale_component_to_field(color[3], var_info.transp) << var_info.transp.offset)
+    }
+
+    fn write_packed_pixel_bytes(dst: &mut [u8], color: [u8; 4], var_info: &FbVarScreenInfo) {
+        let bytes_per_pixel = Self::display_bytes_per_pixel_from_var(var_info);
+        let pixel = Self::pack_bgra_pixel(color, var_info).to_le_bytes();
+        dst[..bytes_per_pixel].copy_from_slice(&pixel[..bytes_per_pixel]);
+    }
+
+    fn display_bytes_per_pixel_from_var(var_info: &FbVarScreenInfo) -> usize {
+        (var_info.bits_per_pixel as usize).div_ceil(8)
+    }
+
+    fn expand_8_to_10(value: u8) -> u32 {
+        let value = value as u32;
+        (value << 2) | (value >> 6)
+    }
+
+    fn convert_bgra_to_xrgb2101010_line(src: &[u8], dst: &mut [u8], width: usize) {
+        for pixel in 0..width {
+            let src_off = pixel * 4;
+            let b10 = Self::expand_8_to_10(src[src_off]);
+            let g10 = Self::expand_8_to_10(src[src_off + 1]);
+            let r10 = Self::expand_8_to_10(src[src_off + 2]);
+            let packed = (r10 << 20) | (g10 << 10) | b10;
+            dst[pixel * 4..pixel * 4 + 4].copy_from_slice(&packed.to_le_bytes());
+        }
+    }
+
     /// Open the primary display surface.
     ///
     /// # Returns
@@ -306,6 +356,8 @@ impl DisplaySurface {
             file,
             mapped_buffer: None,
             mapped_backing_id: 0,
+            scratch_line: alloc::vec::Vec::new(),
+            cached_info: None,
         };
         let _ = display.setup_mmap();
         Ok(display)
@@ -330,6 +382,7 @@ impl DisplaySurface {
             .map_err(|_| HandleError::SystemError(-1))?;
         self.mapped_buffer = Some((mapped_addr, info.buffer_len as usize));
         self.mapped_backing_id = info.backing_id;
+        self.cached_info = Some(info);
         Ok(())
     }
 
@@ -429,6 +482,28 @@ impl DisplaySurface {
                     msb_right: 0,
                 };
             }
+            DISPLAY_PIXEL_FORMAT_XRGB2101010 => {
+                var_info.red = FbBitfield {
+                    offset: 20,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.green = FbBitfield {
+                    offset: 10,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.blue = FbBitfield {
+                    offset: 0,
+                    length: 10,
+                    msb_right: 0,
+                };
+                var_info.transp = FbBitfield {
+                    offset: 30,
+                    length: 0,
+                    msb_right: 0,
+                };
+            }
             DISPLAY_PIXEL_FORMAT_RGB888 => {
                 var_info.red = FbBitfield {
                     offset: 0,
@@ -495,6 +570,22 @@ impl DisplaySurface {
         var_info
     }
 
+    fn ensure_info(&mut self) -> HandleResult<DisplayInfo> {
+        let info = match self.cached_info {
+            Some(info) => info,
+            None => {
+                let info = self.get_info()?;
+                self.cached_info = Some(info);
+                info
+            }
+        };
+        let line_bytes = info.width as usize * Self::display_bytes_per_pixel(info.format);
+        if self.scratch_line.len() < line_bytes {
+            self.scratch_line.resize(line_bytes, 0);
+        }
+        Ok(info)
+    }
+
     /// Get display surface information.
     ///
     /// # Returns
@@ -553,6 +644,7 @@ impl DisplaySurface {
             let _ = munmap(mapped_addr, mapped_size);
         }
         self.mapped_backing_id = 0;
+        self.cached_info = None;
 
         match self.setup_mmap() {
             Ok(()) => Ok(()),
@@ -638,10 +730,7 @@ impl DisplaySurface {
             return Ok(());
         }
 
-        let info = self.get_info()?;
-        if info.format != DISPLAY_PIXEL_FORMAT_BGRA8888 {
-            return Err(HandleError::InvalidParameter);
-        }
+        let info = self.ensure_info()?;
         if x >= info.width || y >= info.height {
             return Err(HandleError::InvalidParameter);
         }
@@ -650,7 +739,10 @@ impl DisplaySurface {
         }
 
         let line_length = info.stride as usize;
-        let dst_bytes_per_pixel = 4usize;
+        let dst_bytes_per_pixel = Self::display_bytes_per_pixel(info.format);
+        if dst_bytes_per_pixel == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
         let src_line_bytes = width as usize * 4;
         if src_stride_bytes < src_line_bytes {
             return Err(HandleError::InvalidParameter);
@@ -660,6 +752,101 @@ impl DisplaySurface {
             .saturating_add(src_line_bytes);
         if required > data.len() {
             return Err(HandleError::InvalidParameter);
+        }
+
+        if info.format == DISPLAY_PIXEL_FORMAT_XRGB2101010 {
+            let line_bytes = width as usize * 4;
+            let mapped_buffer = self.mapped_buffer;
+
+            for row in 0..height as usize {
+                let src_off = row.saturating_mul(src_stride_bytes);
+                let src_row = &data[src_off..src_off + src_line_bytes];
+                {
+                    let converted_line = &mut self.scratch_line[..line_bytes];
+                    Self::convert_bgra_to_xrgb2101010_line(src_row, converted_line, width as usize);
+                }
+
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * 4);
+                if let Some((mapped_addr, mapped_size)) = mapped_buffer {
+                    if dst_off.saturating_add(line_bytes) > mapped_size {
+                        return Err(HandleError::InvalidParameter);
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            self.scratch_line.as_ptr(),
+                            (mapped_addr + dst_off) as *mut u8,
+                            line_bytes,
+                        );
+                    }
+                } else {
+                    self.file
+                        .seek(SeekFrom::Start(dst_off as u64))
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                    self.file
+                        .write(&self.scratch_line[..line_bytes])
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                }
+            }
+
+            return Ok(());
+        }
+
+        if info.format != DISPLAY_PIXEL_FORMAT_BGRA8888 {
+            let var_info = Self::display_info_to_var_info(info);
+            let line_bytes = width as usize * dst_bytes_per_pixel;
+            let mapped_buffer = self.mapped_buffer;
+
+            for row in 0..height as usize {
+                let src_off = row.saturating_mul(src_stride_bytes);
+                let src_row = &data[src_off..src_off + src_line_bytes];
+
+                {
+                    let converted_line = &mut self.scratch_line[..line_bytes];
+                    for pixel in 0..width as usize {
+                        let src_pixel_offset = pixel * 4;
+                        let dst_pixel_offset = pixel * dst_bytes_per_pixel;
+                        let color = [
+                            src_row[src_pixel_offset],
+                            src_row[src_pixel_offset + 1],
+                            src_row[src_pixel_offset + 2],
+                            src_row[src_pixel_offset + 3],
+                        ];
+                        Self::write_packed_pixel_bytes(
+                            &mut converted_line
+                                [dst_pixel_offset..dst_pixel_offset + dst_bytes_per_pixel],
+                            color,
+                            &var_info,
+                        );
+                    }
+                }
+
+                let dst_off = (y as usize + row)
+                    .saturating_mul(line_length)
+                    .saturating_add(x as usize * dst_bytes_per_pixel);
+                if let Some((mapped_addr, mapped_size)) = mapped_buffer {
+                    if dst_off.saturating_add(line_bytes) > mapped_size {
+                        return Err(HandleError::InvalidParameter);
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            self.scratch_line.as_ptr(),
+                            (mapped_addr + dst_off) as *mut u8,
+                            line_bytes,
+                        );
+                    }
+                } else {
+                    self.file
+                        .seek(SeekFrom::Start(dst_off as u64))
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                    self.file
+                        .write(&self.scratch_line[..line_bytes])
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                }
+            }
+
+            return Ok(());
         }
 
         if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {

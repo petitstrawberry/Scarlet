@@ -1,0 +1,10 @@
+[package]
+name = "scarlet-driver-cs42l83"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel" }

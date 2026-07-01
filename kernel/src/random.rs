@@ -25,6 +25,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 use crate::device::char::CharDevice;
@@ -36,6 +37,9 @@ use crate::task::mytask;
 /// Size of the internal random pool buffer
 const RANDOM_POOL_SIZE: usize = 4096;
 const RANDOM_SYSCALL_CHUNK_SIZE: usize = 256;
+const FALLBACK_RANDOM_SEED: u64 = 0x4f1b_bcdc_b7a4_3413;
+
+static FALLBACK_RANDOM_STATE: AtomicU64 = AtomicU64::new(0);
 
 /// Trait for entropy sources that can provide random data
 pub trait EntropySource: Send + Sync {
@@ -193,6 +197,62 @@ impl RandomManager {
     }
 }
 
+fn next_fallback_random_u64() -> u64 {
+    loop {
+        let state = FALLBACK_RANDOM_STATE.load(Ordering::Relaxed);
+
+        // Lazily transition the atomic out of its initial 0. The xorshift
+        // advance below uses CAS(current, next), which can never succeed while
+        // the atomic is still 0, so we must install a seed first. xorshift64 is
+        // a bijection with 0 as its sole fixed point, so once nonzero the state
+        // can never become 0 again.
+        let current = if state == 0 {
+            let seed = crate::time::current_time()
+                ^ crate::timer::get_tick().rotate_left(17)
+                ^ FALLBACK_RANDOM_SEED;
+            let seed = if seed == 0 {
+                FALLBACK_RANDOM_SEED
+            } else {
+                seed
+            };
+            match FALLBACK_RANDOM_STATE.compare_exchange(
+                0,
+                seed,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => seed,
+                // Lost the race to another CPU; adopt the value they installed.
+                Err(actual) => actual,
+            }
+        } else {
+            state
+        };
+
+        let mut next = current;
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+
+        if FALLBACK_RANDOM_STATE
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn fill_fallback_random(buffer: &mut [u8]) {
+    let mut offset = 0usize;
+    while offset < buffer.len() {
+        let bytes = next_fallback_random_u64().to_le_bytes();
+        let count = core::cmp::min(bytes.len(), buffer.len() - offset);
+        buffer[offset..offset + count].copy_from_slice(&bytes[..count]);
+        offset += count;
+    }
+}
+
 /// Fill a user-space buffer with random bytes.
 ///
 /// # Arguments
@@ -228,21 +288,17 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
     while total_written < buffer_len {
         let chunk_len = core::cmp::min(chunk.len(), buffer_len - total_written);
         let bytes_read = RandomManager::get_random_bytes(&mut chunk[..chunk_len]);
-        if bytes_read == 0 {
-            break;
+        if bytes_read < chunk_len {
+            fill_fallback_random(&mut chunk[bytes_read..chunk_len]);
         }
 
-        if copy_to_user(task, buffer_ptr + total_written, &chunk[..bytes_read]).is_err() {
+        if copy_to_user(task, buffer_ptr + total_written, &chunk[..chunk_len]).is_err() {
             return usize::MAX;
         }
-        total_written += bytes_read;
+        total_written += chunk_len;
     }
 
-    if total_written == 0 {
-        usize::MAX
-    } else {
-        total_written
-    }
+    total_written
 }
 
 /// Character device interface for /dev/random
