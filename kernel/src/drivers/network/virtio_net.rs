@@ -35,7 +35,7 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
 use crate::environment::PAGE_SIZE;
-use crate::interrupt::InterruptId;
+use crate::interrupt::{InterruptClaim, InterruptId};
 use crate::mem::page::ContiguousPages;
 use crate::network::config::apply_pending_ip_for_interface;
 use crate::network::ethernet_interface::EthernetNetworkInterface;
@@ -683,16 +683,25 @@ impl ControlOps for VirtioNetDevice {
 
 impl InterruptCapableDevice for VirtioNetDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.interrupt_id.lock().clone()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         let isr = self.read32_register(Register::InterruptStatus);
         if isr == 0 {
-            return Ok(());
+            return Ok(InterruptClaim::NotMine);
         }
         // crate::println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
         let packets = self.process_received_packets().unwrap_or_default();
         if packets.is_empty() {
-            return Ok(());
+            return Ok(InterruptClaim::Handled);
         }
 
         if let Some(name) = self.interface_name.lock().clone() {
@@ -706,11 +715,7 @@ impl InterruptCapableDevice for VirtioNetDevice {
             crate::println!("[virtio-net] No interface name set!");
         }
 
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<InterruptId> {
-        self.interrupt_id.lock().clone()
+        Ok(InterruptClaim::Handled)
     }
 }
 

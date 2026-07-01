@@ -19,7 +19,7 @@ use crate::{
         },
     },
     driver_initcall,
-    interrupt::InterruptId,
+    interrupt::{InterruptClaim, InterruptId},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
 };
 
@@ -264,7 +264,19 @@ impl EventCapableDevice for Pl011Uart {
 
 impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.interrupt_id.read().clone()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         let ris = self.reg_read(UARTRIS);
+        if ris == 0 {
+            return Ok(InterruptClaim::NotMine);
+        }
 
         self.reg_write(UARTICR, 0x7FF);
 
@@ -275,11 +287,7 @@ impl InterruptCapableDevice for Pl011Uart {
             }
         }
 
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<InterruptId> {
-        self.interrupt_id.read().clone()
+        Ok(InterruptClaim::Handled)
     }
 }
 
