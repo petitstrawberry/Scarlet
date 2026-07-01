@@ -108,6 +108,8 @@ pub enum MemoryAttribute {
     Normal,
     /// Normal memory without CPU cache allocation.
     NonCacheable,
+    /// Framebuffer or VRAM memory that is non-cacheable but permits burst writes.
+    Framebuffer,
     /// Device memory for MMIO regions.
     Device,
 }

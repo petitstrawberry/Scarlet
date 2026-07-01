@@ -542,7 +542,7 @@ impl PageTable {
     /// Level 0 uses a page descriptor (`0b11`); levels 1 and 2 use block
     /// descriptors (`0b01`). Permission, memory type, shareability, and execute
     /// attributes are encoded from the mapping request.
-    fn make_leaf_entry(
+    pub(crate) fn make_leaf_entry(
         vaddr: usize,
         paddr: usize,
         permissions: usize,
@@ -552,14 +552,14 @@ impl PageTable {
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
         let memory_attr = match memory_attribute {
             MemoryAttribute::Normal => 1,
-            MemoryAttribute::NonCacheable => 2,
+            MemoryAttribute::NonCacheable | MemoryAttribute::Framebuffer => 2,
             MemoryAttribute::Device => 0,
         };
         let shareability = match memory_attribute {
             MemoryAttribute::Device => Shareability::OuterShareable as u64,
-            MemoryAttribute::Normal | MemoryAttribute::NonCacheable => {
-                Shareability::InnerShareable as u64
-            }
+            MemoryAttribute::Normal
+            | MemoryAttribute::NonCacheable
+            | MemoryAttribute::Framebuffer => Shareability::InnerShareable as u64,
         };
 
         let mut entry = 0u64;
@@ -993,6 +993,15 @@ mod tests {
             .walk_to_level(vaddr, 0, false, asid)
             .expect("leaf PTE not found");
         assert_eq!((pte.entry >> 2) & 0b111, 2);
+
+        let framebuffer_entry = PageTable::make_leaf_entry(
+            0x4300_0000,
+            0x8300_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Framebuffer,
+        );
+        assert_eq!((framebuffer_entry >> 2) & 0b111, 2);
 
         free_virtual_address_space(asid);
     }
