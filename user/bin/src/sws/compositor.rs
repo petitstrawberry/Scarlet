@@ -2141,6 +2141,10 @@ impl Compositor {
         self.process_pending_events()
     }
 
+    fn has_queued_event_work(&self) -> bool {
+        super::ipc::has_pending_ipc_events() || super::input::has_pending_input_events()
+    }
+
     /// Main event loop
     pub fn run(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Starting main loop (multithreaded)");
@@ -2166,7 +2170,11 @@ impl Compositor {
             // Sleep until IPC/input explicitly signals that new work is queued.
             // Signal writes are coalesced so producers cannot fill the pipe
             // while the compositor is busy processing a batch.
-            self.wait_for_event_signal();
+            if self.has_queued_event_work() {
+                self.consume_event_signal_if_ready();
+            } else {
+                self.wait_for_event_signal();
+            }
 
             // Periodically print Z-order (every 100 redraws)
             // if self.event_counter % 100 == 0 && self.event_counter > 0 {

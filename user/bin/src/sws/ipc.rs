@@ -539,6 +539,15 @@ pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
     core::mem::take(&mut *queue)
 }
 
+/// Return whether the compositor IPC queue has pending events.
+///
+/// # Returns
+///
+/// `true` if IPC events are queued for the compositor.
+pub fn has_pending_ipc_events() -> bool {
+    !EVENT_QUEUE.lock().is_empty()
+}
+
 /// Register a window for input event routing
 fn register_window(window_id: u32, _client_id: usize) {
     {
