@@ -100,6 +100,8 @@ const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
 const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
 const USB_STORAGE_CBW_LEN: usize = 31;
 const USB_STORAGE_CSW_LEN: usize = 13;
+const SCSI_READ_10: u8 = 0x28;
+const SCSI_WRITE_10: u8 = 0x2a;
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PED: u32 = 1 << 1;
 const PORTSC_PR: u32 = 1 << 4;
@@ -145,6 +147,30 @@ fn read_mmio64_lo_hi(addr: usize) -> u64 {
         let high = read_volatile((addr + 4) as *const u32);
         ((high as u64) << 32) | low as u64
     }
+}
+
+fn scsi_rw10_command(opcode: u8, lba: usize, blocks: usize) -> Result<[u8; 10], &'static str> {
+    if lba > u32::MAX as usize {
+        return Err("USB storage LBA exceeds SCSI(10) range");
+    }
+    if blocks == 0 || blocks > u16::MAX as usize {
+        return Err("USB storage invalid SCSI(10) block count");
+    }
+
+    let lba_be = (lba as u32).to_be_bytes();
+    let blocks_be = (blocks as u16).to_be_bytes();
+    Ok([
+        opcode,
+        0,
+        lba_be[0],
+        lba_be[1],
+        lba_be[2],
+        lba_be[3],
+        0,
+        blocks_be[0],
+        blocks_be[1],
+        0,
+    ])
 }
 
 #[inline]
@@ -3419,24 +3445,7 @@ impl UsbMassStorageBlockDevice {
             }
 
             let lba = request.sector + done_blocks;
-            if lba > u32::MAX as usize {
-                return Err("USB storage LBA exceeds READ(10) range");
-            }
-            let transfer_blocks = blocks as u16;
-            let lba_be = (lba as u32).to_be_bytes();
-            let blocks_be = transfer_blocks.to_be_bytes();
-            let command = [
-                0x28,
-                0,
-                lba_be[0],
-                lba_be[1],
-                lba_be[2],
-                lba_be[3],
-                0,
-                blocks_be[0],
-                blocks_be[1],
-                0,
-            ];
+            let command = scsi_rw10_command(SCSI_READ_10, lba, blocks)?;
             self.scsi_command(&command, Some((&mut buffer, bytes, true)))?;
 
             let dst_offset = done_blocks * sector_size;
@@ -3450,10 +3459,64 @@ impl UsbMassStorageBlockDevice {
         Ok(())
     }
 
+    fn write_sectors(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
+        let sector_size = *self.sector_size.lock();
+        let sector_count = *self.sector_count.lock();
+        if sector_size == 0 {
+            return Err("USB storage sector size not initialized");
+        }
+        if request.sector_count == 0 {
+            return Ok(());
+        }
+        if request.sector >= sector_count
+            || request.sector_count > sector_count.saturating_sub(request.sector)
+        {
+            return Err("USB storage write out of range");
+        }
+
+        let total_len = request
+            .sector_count
+            .checked_mul(sector_size)
+            .ok_or("USB storage write length overflow")?;
+        if request.buffer.len() < total_len {
+            return Err("USB storage write buffer too small");
+        }
+
+        let max_blocks = (USB_BULK_MAX_TRANSFER / sector_size)
+            .max(1)
+            .min(u16::MAX as usize);
+        let mut done_blocks = 0usize;
+        while done_blocks < request.sector_count {
+            let blocks = (request.sector_count - done_blocks).min(max_blocks);
+            let bytes = blocks * sector_size;
+            let pages = bytes.div_ceil(crate::environment::PAGE_SIZE);
+            let mut buffer =
+                ContiguousPages::new(pages).ok_or("Failed to allocate USB write buffer")?;
+            let src_offset = done_blocks * sector_size;
+            unsafe {
+                core::ptr::write_bytes(
+                    buffer.as_vaddr() as *mut u8,
+                    0,
+                    pages * crate::environment::PAGE_SIZE,
+                );
+                let dst = core::slice::from_raw_parts_mut(buffer.as_vaddr() as *mut u8, bytes);
+                dst.copy_from_slice(&request.buffer[src_offset..src_offset + bytes]);
+            }
+
+            let lba = request.sector + done_blocks;
+            let command = scsi_rw10_command(SCSI_WRITE_10, lba, blocks)?;
+            self.scsi_command(&command, Some((&mut buffer, bytes, false)))?;
+
+            done_blocks += blocks;
+        }
+
+        Ok(())
+    }
+
     fn process_request(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
         match request.request_type {
             BlockIORequestType::Read => self.read_sectors(request),
-            BlockIORequestType::Write => Err("USB storage writes are not supported yet"),
+            BlockIORequestType::Write => self.write_sectors(request),
         }
     }
 }
@@ -3963,5 +4026,24 @@ mod tests {
             XhciController::portsc_write_preserve_bits(portsc),
             PORTSC_PP
         );
+    }
+
+    #[test_case]
+    fn test_scsi_read10_command_encoding() {
+        let command = scsi_rw10_command(SCSI_READ_10, 0x0102_0304, 0x0506).unwrap();
+
+        assert_eq!(command, [0x28, 0, 0x01, 0x02, 0x03, 0x04, 0, 0x05, 0x06, 0]);
+    }
+
+    #[test_case]
+    fn test_scsi_write10_command_encoding() {
+        let command = scsi_rw10_command(SCSI_WRITE_10, 0x1020_3040, 0x1122).unwrap();
+
+        assert_eq!(command, [0x2a, 0, 0x10, 0x20, 0x30, 0x40, 0, 0x11, 0x22, 0]);
+    }
+
+    #[test_case]
+    fn test_scsi_rw10_command_rejects_zero_blocks() {
+        assert!(scsi_rw10_command(SCSI_READ_10, 0, 0).is_err());
     }
 }
