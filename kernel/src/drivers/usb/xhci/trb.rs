@@ -9,6 +9,7 @@ pub enum TrbType {
     DataStage = 3,
     StatusStage = 4,
     Link = 6,
+    NoOp = 8,
     EnableSlotCommand = 9,
     AddressDeviceCommand = 11,
     ConfigureEndpointCommand = 12,
@@ -128,6 +129,18 @@ impl Trb {
         trb
     }
 
+    /// Builds an IN Normal transfer TRB with IOC and ISP set.
+    pub fn normal_transfer_in(data_buffer: u64, len: u32) -> Self {
+        let mut trb = Self::normal_transfer(data_buffer, len);
+        trb.control |= 1 << 2;
+        trb
+    }
+
+    /// Builds a transfer-ring No-Op TRB without interrupt-on-completion.
+    pub const fn no_op_transfer() -> Self {
+        Self::new(TrbType::NoOp)
+    }
+
     /// Builds a Setup Stage transfer TRB.
     pub fn setup_stage(
         request_type: u8,
@@ -155,6 +168,7 @@ impl Trb {
         trb.parameter = data_buffer;
         trb.status = len & 0x1ffff;
         if direction_in {
+            trb.control |= 1 << 2;
             trb.control |= 1 << 16;
         }
         trb
@@ -197,5 +211,32 @@ mod tests {
         let mut trb = Trb::enable_slot_command();
         trb.set_slot_id(7);
         assert_eq!(trb.slot_id(), 7);
+    }
+
+    #[test_case]
+    fn test_data_stage_in_sets_isp_and_direction_without_chain() {
+        let trb = Trb::data_stage(0x1000, 9, true);
+
+        assert_eq!(trb.trb_type(), TrbType::DataStage as u8);
+        assert_ne!(trb.control & (1 << 2), 0);
+        assert_eq!(trb.control & (1 << 4), 0);
+        assert_ne!(trb.control & (1 << 16), 0);
+    }
+
+    #[test_case]
+    fn test_no_op_transfer_has_no_ioc() {
+        let trb = Trb::no_op_transfer();
+
+        assert_eq!(trb.trb_type(), TrbType::NoOp as u8);
+        assert_eq!(trb.control & (1 << 5), 0);
+    }
+
+    #[test_case]
+    fn test_normal_transfer_in_sets_isp() {
+        let trb = Trb::normal_transfer_in(0x1000, 36);
+
+        assert_eq!(trb.trb_type(), TrbType::Normal as u8);
+        assert_ne!(trb.control & (1 << 2), 0);
+        assert_ne!(trb.control & (1 << 5), 0);
     }
 }

@@ -25,8 +25,43 @@ impl SlotContext {
         size_of::<Self>()
     }
 
+    /// Set the xHCI route string used for devices behind external hubs.
+    ///
+    /// # Arguments
+    ///
+    /// * `route_string` - Up to five 4-bit hub port route entries.
+    pub fn set_route_string(&mut self, route_string: u32) {
+        self.route_string = (self.route_string & !0x000f_ffff) | (route_string & 0x000f_ffff);
+    }
+
     pub fn set_speed(&mut self, speed: u8) {
         self.route_string = (self.route_string & !(0xF << 20)) | ((speed as u32) << 20);
+    }
+
+    /// Mark this slot as an external USB hub.
+    ///
+    /// # Arguments
+    ///
+    /// * `hub` - Whether the slot represents a hub.
+    pub fn set_hub(&mut self, hub: bool) {
+        if hub {
+            self.route_string |= 1 << 26;
+        } else {
+            self.route_string &= !(1 << 26);
+        }
+    }
+
+    /// Mark this high-speed hub as supporting multiple transaction translators.
+    ///
+    /// # Arguments
+    ///
+    /// * `multi_tt` - Whether the hub has multiple TTs.
+    pub fn set_multi_tt(&mut self, multi_tt: bool) {
+        if multi_tt {
+            self.route_string |= 1 << 25;
+        } else {
+            self.route_string &= !(1 << 25);
+        }
     }
 
     pub fn set_context_entries(&mut self, entries: u8) {
@@ -39,6 +74,33 @@ impl SlotContext {
 
     pub fn set_root_hub_port(&mut self, port: u8) {
         self.speed_flags = (self.speed_flags & !(0xFF << 16)) | ((port as u32) << 16);
+    }
+
+    /// Set the number of downstream ports for a hub slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `ports` - Hub downstream port count.
+    pub fn set_num_ports(&mut self, ports: u8) {
+        self.speed_flags = (self.speed_flags & !(0xff << 24)) | ((ports as u32) << 24);
+    }
+
+    /// Set the high-speed TT hub slot ID used for full/low-speed children.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_id` - xHCI slot ID of the parent high-speed hub.
+    pub fn set_tt_hub_slot_id(&mut self, slot_id: u8) {
+        self.tt_info = (self.tt_info & !0xff) | slot_id as u32;
+    }
+
+    /// Set the parent hub port used by a full/low-speed child.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - One-based hub port number.
+    pub fn set_tt_port_number(&mut self, port: u8) {
+        self.tt_info = (self.tt_info & !(0xff << 8)) | ((port as u32) << 8);
     }
 
     pub fn set_interrupter_target(&mut self, interrupter: u16) {
@@ -177,15 +239,28 @@ impl InputContext {
         Self::default()
     }
 
-    pub fn configure_for_address(&mut self, slot: u8, port: u8, speed: u8) {
+    pub fn configure_for_address(
+        &mut self,
+        slot: u8,
+        root_port: u8,
+        speed: u8,
+        route_string: u32,
+        tt_hub_slot_id: Option<u8>,
+        tt_port: u8,
+    ) {
         let _ = slot;
         self.control.add_slot_context();
         self.control.add_endpoint(1);
 
+        self.slot.set_route_string(route_string);
         self.slot.set_speed(speed);
         self.slot.set_context_entries(1);
         self.slot.set_max_exit_latency(0);
-        self.slot.set_root_hub_port(port);
+        self.slot.set_root_hub_port(root_port);
+        if let Some(tt_hub_slot_id) = tt_hub_slot_id {
+            self.slot.set_tt_hub_slot_id(tt_hub_slot_id);
+            self.slot.set_tt_port_number(tt_port);
+        }
         self.slot.set_interrupter_target(0);
         self.slot.device_address = 0;
 
@@ -216,6 +291,41 @@ impl InputContext {
         endpoint.set_max_burst_size(0);
         endpoint.set_max_packet_size(max_packet_size);
         endpoint.set_interval(interval);
+        endpoint.set_dequeue_pointer(dequeue_pointer);
+        endpoint.set_dequeue_cycle(true);
+        endpoint.set_average_trb_length(max_packet_size);
+        (dci, endpoint)
+    }
+
+    /// Build an endpoint context for a bulk endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `dci` - xHCI device context index for the endpoint.
+    /// * `max_packet_size` - USB endpoint maximum packet size.
+    /// * `dequeue_pointer` - Physical address of the endpoint transfer ring.
+    /// * `is_in` - Whether this endpoint transfers device-to-host data.
+    ///
+    /// # Returns
+    ///
+    /// The DCI and initialized endpoint context.
+    pub fn bulk_endpoint_context(
+        dci: u8,
+        max_packet_size: u16,
+        dequeue_pointer: u64,
+        is_in: bool,
+    ) -> (u8, EndpointContext) {
+        let mut endpoint = EndpointContext::default();
+        endpoint.set_endpoint_state(0);
+        endpoint.set_endpoint_type(if is_in {
+            ep_type::BULK_IN
+        } else {
+            ep_type::BULK_OUT
+        });
+        endpoint.set_error_count(3);
+        endpoint.set_max_burst_size(0);
+        endpoint.set_max_packet_size(max_packet_size);
+        endpoint.set_interval(0);
         endpoint.set_dequeue_pointer(dequeue_pointer);
         endpoint.set_dequeue_cycle(true);
         endpoint.set_average_trb_length(max_packet_size);
@@ -353,7 +463,7 @@ mod tests {
     #[test_case]
     fn test_input_context_address_configuration() {
         let mut ctx = InputContext::new();
-        ctx.configure_for_address(1, 1, speed::FULL);
+        ctx.configure_for_address(1, 1, speed::FULL, 0, None, 0);
 
         assert_eq!(ctx.control.add_context_flags & 1, 1);
         assert_eq!(ctx.control.add_context_flags & 2, 2);

@@ -16,7 +16,9 @@ use scarlet::device::{
     manager::{DeviceManager, DriverPriority},
     platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
-use scarlet::interrupt::{InterruptId, InterruptManager, InterruptResult};
+use scarlet::interrupt::{
+    InterruptClaim, InterruptId, InterruptManager, InterruptResult, InterruptSource,
+};
 use scarlet::vm;
 
 const REG_IRQ_BASE: usize = 0x800;
@@ -52,6 +54,30 @@ pub struct ApplePinctrl {
     npins: u32,
     parent_irqs: Mutex<Vec<InterruptId>>,
     irq_handlers: Mutex<BTreeMap<u32, Arc<dyn InterruptCapableDevice>>>,
+}
+
+struct ApplePinctrlParentIrq {
+    interrupt_id: InterruptId,
+    pinctrl: Arc<ApplePinctrl>,
+}
+
+impl ApplePinctrlParentIrq {
+    fn new(interrupt_id: InterruptId, pinctrl: Arc<ApplePinctrl>) -> Self {
+        Self {
+            interrupt_id,
+            pinctrl,
+        }
+    }
+}
+
+impl InterruptSource for ApplePinctrlParentIrq {
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        Some(self.interrupt_id)
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        InterruptCapableDevice::claim_interrupt(&*self.pinctrl)
+    }
 }
 
 impl ApplePinctrl {
@@ -269,6 +295,51 @@ impl ApplePinctrl {
         );
     }
 
+    fn dispatch_pending_irqs(&self) -> bool {
+        let group_count = self.parent_irqs.lock().len();
+        let group_count = if group_count == 0 { 1 } else { group_count };
+        let word_count = self.npins.div_ceil(32);
+        let mut handled = false;
+
+        for group in 0..group_count {
+            for word in 0..word_count {
+                let first_pin = word * 32;
+                let offset = Self::irq_group_offset(group as u32, first_pin);
+                let mut pending = self.read_reg(offset);
+
+                while pending != 0 {
+                    handled = true;
+                    let bit = pending.trailing_zeros();
+                    let pin = first_pin + bit;
+                    let status_bit = 1 << bit;
+
+                    if pin < self.npins {
+                        let handler = self.irq_handlers.lock().get(&pin).cloned();
+                        if IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
+                            scarlet::early_println!(
+                                "[apple-pinctrl] pending base={:#x} group={} word={} pin={} pending={:#x} handler={}",
+                                self.base,
+                                group,
+                                word,
+                                pin,
+                                pending,
+                                handler.is_some()
+                            );
+                        }
+                        if let Some(handler) = handler {
+                            let _ = handler.handle_interrupt();
+                        }
+                    }
+
+                    self.write_reg(offset, status_bit);
+                    pending &= !status_bit;
+                }
+            }
+        }
+
+        handled
+    }
+
     fn register_parent_irqs(
         pinctrl: &Arc<Self>,
         device: &PlatformDeviceInfo,
@@ -291,14 +362,17 @@ impl ApplePinctrl {
             };
 
             InterruptManager::global()
-                .register_interrupt_device(irq_id, pinctrl.clone())
+                .register_interrupt_source(
+                    irq_id,
+                    Arc::new(ApplePinctrlParentIrq::new(irq_id, pinctrl.clone())),
+                )
                 .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
+
+            pinctrl.parent_irqs.lock().push(irq_id);
 
             InterruptManager::global()
                 .enable_external_interrupt(irq_id, 0)
                 .map_err(|_| "apple-pinctrl: failed to enable parent IRQ")?;
-
-            pinctrl.parent_irqs.lock().push(irq_id);
         }
 
         Ok(())
@@ -376,50 +450,20 @@ impl GpioController for ApplePinctrl {
 
 impl InterruptCapableDevice for ApplePinctrl {
     fn handle_interrupt(&self) -> InterruptResult<()> {
-        let group_count = self.parent_irqs.lock().len();
-        let group_count = if group_count == 0 { 1 } else { group_count };
-        let word_count = self.npins.div_ceil(32);
-
-        for group in 0..group_count {
-            for word in 0..word_count {
-                let first_pin = word * 32;
-                let offset = Self::irq_group_offset(group as u32, first_pin);
-                let mut pending = self.read_reg(offset);
-
-                while pending != 0 {
-                    let bit = pending.trailing_zeros();
-                    let pin = first_pin + bit;
-                    let status_bit = 1 << bit;
-
-                    if pin < self.npins {
-                        let handler = self.irq_handlers.lock().get(&pin).cloned();
-                        if IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
-                            scarlet::early_println!(
-                                "[apple-pinctrl] pending base={:#x} group={} word={} pin={} pending={:#x} handler={}",
-                                self.base,
-                                group,
-                                word,
-                                pin,
-                                pending,
-                                handler.is_some()
-                            );
-                        }
-                        if let Some(handler) = handler {
-                            let _ = handler.handle_interrupt();
-                        }
-                    }
-
-                    self.write_reg(offset, status_bit);
-                    pending &= !status_bit;
-                }
-            }
-        }
-
+        self.dispatch_pending_irqs();
         Ok(())
     }
 
     fn interrupt_id(&self) -> Option<InterruptId> {
         self.parent_irqs.lock().first().copied()
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        if self.dispatch_pending_irqs() {
+            Ok(InterruptClaim::Handled)
+        } else {
+            Ok(InterruptClaim::NotMine)
+        }
     }
 }
 

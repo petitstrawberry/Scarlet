@@ -675,6 +675,35 @@ pub fn clean_invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
     }
 }
 
+/// Invalidate D-cache to Point of Coherency (PoC) for a virtual range.
+///
+/// Use this after device-written DMA has completed and before the CPU reads the
+/// target memory. Dirty CPU lines for the range must already have been cleaned
+/// before device ownership was granted.
+///
+/// # Arguments
+///
+/// * `start_vaddr` - Kernel virtual address at the start of the range.
+/// * `len` - Number of bytes to invalidate.
+#[inline(always)]
+pub fn invalidate_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc ivac, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
+        asm!("dsb sy", options(nostack));
+    }
+}
+
 /// Clean D-cache to Point of Unification (PoU) for the given virtual address range.
 ///
 /// Required when code is written via the data cache and will later be executed

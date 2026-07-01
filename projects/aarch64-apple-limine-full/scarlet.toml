@@ -26,6 +26,7 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-aic" = { path = "../../drivers/pic/apple-aic", enabled = true }
 "scarlet-driver-apple-msi" = { path = "../../drivers/pic/apple-msi", enabled = true }
 "scarlet-driver-apple-atcphy" = { path = "../../drivers/phy/apple-atcphy", enabled = true }
+"scarlet-driver-apple-cd321x" = { path = "../../drivers/usb/typec/apple-cd321x", enabled = true }
 "scarlet-driver-apple-pmgr" = { path = "../../drivers/soc/apple-pmgr", enabled = true }
 "scarlet-driver-apple-asc" = { path = "../../drivers/soc/apple-asc", enabled = true }
 "scarlet-driver-apple-rtkit" = { path = "../../drivers/soc/apple-rtkit", enabled = true }

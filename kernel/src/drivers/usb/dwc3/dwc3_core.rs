@@ -8,35 +8,36 @@ pub const DWC3_GCTL: usize = 0xc110;
 pub const DWC3_GUCTL: usize = 0xc12c;
 pub const DWC3_GRXTHRCFG: usize = 0xc18c;
 pub const DWC3_GTXTHRCFG: usize = 0xc190;
-pub const DWC3_GUSB3PIPECTL: usize = 0xc2a0;
-pub const DWC3_GUSB2PHYACC: usize = 0xc2c0;
+pub const DWC3_GUSB2PHYACC: usize = 0xc280;
+pub const DWC3_GUSB3PIPECTL: usize = 0xc2c0;
 pub const DWC3_GEVNTADRLO: usize = 0xc400;
 pub const DWC3_GEVNTADRHI: usize = 0xc404;
 pub const DWC3_GEVNTSIZ: usize = 0xc408;
 pub const DWC3_GEVNTCOUNT: usize = 0xc40c;
-pub const DWC3_GHWPARAMS1: usize = 0xc440;
-pub const DWC3_GHWPARAMS3: usize = 0xc448;
+pub const DWC3_GHWPARAMS1: usize = 0xc144;
+pub const DWC3_GHWPARAMS3: usize = 0xc14c;
 pub const DWC3_GSNPSID: usize = 0xc120;
 pub const DWC3_GUCTL1: usize = 0xc4c4;
 pub const DWC3_GUSB3PIPEFMT: usize = 0xc660;
 
-pub const GCTL_CORESOFTRESET: u32 = 1 << 30;
-pub const GCTL_SCALEDOWN_MASK: u32 = 0x3 << 29;
+pub const GCTL_CORESOFTRESET: u32 = 1 << 11;
+pub const GCTL_SCALEDOWN_MASK: u32 = 0x3 << 4;
 pub const GCTL_PRTCAP_MASK: u32 = 0x3 << 12;
 pub const GCTL_PRTCAP_HOST: u32 = 1 << 12;
 pub const GCTL_PRTCAPDIR_HOST: u32 = 1 << 12;
 pub const GCTL_DSBLCLKGTNG: u32 = 1 << 0;
 pub const GCTL_SOFITPSYNC: u32 = 1 << 10;
 
-pub const GSBUSCFG0_INCR256B: u32 = 1 << 2;
+pub const GSBUSCFG0_INCRX: u32 = 1 << 0;
+pub const GSBUSCFG0_INCR4B: u32 = 1 << 1;
+pub const GSBUSCFG0_INCR8B: u32 = 1 << 2;
 pub const GSBUSCFG0_INCR16B: u32 = 1 << 3;
-pub const GSBUSCFG0_INCR8B: u32 = 1 << 4;
-pub const GSBUSCFG0_INCR4B: u32 = 1 << 5;
-pub const GSBUSCFG0_INCRX: u32 = 1 << 6;
-pub const GSBUSCFG0_INCR64B: u32 = 1 << 7;
+pub const GSBUSCFG0_INCR32B: u32 = 1 << 4;
+pub const GSBUSCFG0_INCR64B: u32 = 1 << 5;
+pub const GSBUSCFG0_INCR128B: u32 = 1 << 6;
+pub const GSBUSCFG0_INCR256B: u32 = 1 << 7;
 
-pub const GHWPARAMS1_MODE_BITS: u32 = 0x7 << 28;
-pub const GHWPARAMS1_MODE_SHIFT: u32 = 28;
+pub const GHWPARAMS3_SSPHY_IFC_MASK: u32 = 0x3;
 
 pub const GSNPSID_MASK: u32 = 0xfffff000;
 
@@ -73,8 +74,7 @@ impl Dwc3Core {
     }
 
     pub fn is_usb3(&self) -> bool {
-        let mode = (self.read32(DWC3_GHWPARAMS1) & GHWPARAMS1_MODE_BITS) >> GHWPARAMS1_MODE_SHIFT;
-        mode >= 3
+        (self.read32(DWC3_GHWPARAMS3) & GHWPARAMS3_SSPHY_IFC_MASK) != 0
     }
 
     pub fn global_soft_reset(&self) {

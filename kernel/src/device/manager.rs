@@ -67,6 +67,7 @@ use super::gpio::GpioController;
 use super::i2c::I2cBus;
 use super::iommu::{
     DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
+    IommuStreamId,
 };
 use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
 use super::nvmem::{NvmemCell, NvmemError, NvmemProvider};
@@ -74,7 +75,7 @@ use super::phy::{PhyError, PhyHandle, PhyProvider};
 use super::remoteproc::{RemoteProcessor, RemoteprocService, RemoteprocServiceId};
 use super::reset::{ResetController, ResetHandle};
 use super::spi::SpiBus;
-use super::usb::UsbHostController;
+use super::usb::{TypecPort, UsbHostController};
 use super::watchdog::Watchdog;
 use crate::DeviceSource;
 
@@ -219,6 +220,7 @@ pub struct DeviceManager {
     spi_buses: Mutex<BTreeMap<u32, Arc<dyn SpiBus>>>,
     i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
     usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
+    typec_ports: Mutex<BTreeMap<u32, Arc<dyn TypecPort>>>,
     gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
     audio_codecs: Mutex<BTreeMap<u32, Arc<dyn AudioCodec>>>,
     audio_dai_providers: Mutex<BTreeMap<u32, Arc<dyn AudioDaiProvider>>>,
@@ -250,6 +252,7 @@ impl DeviceManager {
             spi_buses: Mutex::new(BTreeMap::new()),
             i2c_buses: Mutex::new(BTreeMap::new()),
             usb_hosts: Mutex::new(BTreeMap::new()),
+            typec_ports: Mutex::new(BTreeMap::new()),
             gpio_controllers: Mutex::new(BTreeMap::new()),
             audio_codecs: Mutex::new(BTreeMap::new()),
             audio_dai_providers: Mutex::new(BTreeMap::new()),
@@ -902,6 +905,80 @@ impl DeviceManager {
         None
     }
 
+    fn find_platform_device_node<'a>(
+        &self,
+        fdt: &'a fdt::Fdt<'a>,
+        device: &PlatformDeviceInfo,
+    ) -> Option<fdt::node::FdtNode<'a, 'a>> {
+        if let Some(phandle) = device
+            .property("phandle")
+            .and_then(|property| property.as_usize())
+            .and_then(|value| u32::try_from(value).ok())
+            && let Some((node, parent_phandle)) =
+                Self::find_node_and_parent_by_phandle(fdt, phandle)
+            && Self::platform_node_matches(device, &device.compatible(), &node, parent_phandle)
+        {
+            return Some(node);
+        }
+
+        let device_compatible = device.compatible();
+        let mut stack: Vec<(fdt::node::FdtNode<'a, 'a>, Option<u32>)> = Vec::new();
+        stack.push((fdt.find_node("/")?, None));
+
+        while let Some((node, parent_phandle)) = stack.pop() {
+            if Self::platform_node_matches(device, &device_compatible, &node, parent_phandle) {
+                return Some(node);
+            }
+
+            let this_phandle = Some(self.phandle_for_fdt_node(&node));
+            for child in node.children() {
+                stack.push((child, this_phandle));
+            }
+        }
+
+        None
+    }
+
+    fn platform_node_matches(
+        device: &PlatformDeviceInfo,
+        device_compatible: &[&'static str],
+        node: &fdt::node::FdtNode,
+        parent_phandle: Option<u32>,
+    ) -> bool {
+        if node.name != device.name() {
+            return false;
+        }
+        if device.parent_phandle().is_some() && device.parent_phandle() != parent_phandle {
+            return false;
+        }
+
+        node.compatible().is_some_and(|compatible| {
+            compatible
+                .all()
+                .any(|node_compatible| device_compatible.contains(&node_compatible))
+        })
+    }
+
+    fn collect_endpoint_phandles(&self, node: &fdt::node::FdtNode, out: &mut Vec<u32>) {
+        if node.name.split('@').next() == Some("endpoint") {
+            Self::push_unique_phandle(out, self.phandle_for_fdt_node(node));
+        }
+
+        if let Some(remote) = Self::get_u32_prop(node, "remote-endpoint") {
+            Self::push_unique_phandle(out, remote);
+        }
+
+        for child in node.children() {
+            self.collect_endpoint_phandles(&child, out);
+        }
+    }
+
+    fn push_unique_phandle(out: &mut Vec<u32>, phandle: u32) {
+        if !out.contains(&phandle) {
+            out.push(phandle);
+        }
+    }
+
     fn find_node_and_parent_by_phandle<'a>(
         fdt: &'a fdt::Fdt<'a>,
         phandle: u32,
@@ -1151,6 +1228,75 @@ impl DeviceManager {
 
     pub fn get_usb_host(&self, id: u32) -> Option<Arc<dyn UsbHostController>> {
         self.usb_hosts.lock().get(&id).cloned()
+    }
+
+    /// Register a Type-C port provider for an endpoint phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_phandle` - FDT endpoint phandle belonging to the connector graph.
+    /// * `port` - Type-C port provider responsible for that endpoint.
+    pub fn register_typec_port_endpoint(&self, endpoint_phandle: u32, port: Arc<dyn TypecPort>) {
+        self.typec_ports.lock().insert(endpoint_phandle, port);
+    }
+
+    /// Look up a Type-C port provider by endpoint phandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_phandle` - FDT endpoint phandle belonging to the connector graph.
+    ///
+    /// # Returns
+    ///
+    /// Type-C port provider registered for `endpoint_phandle`, or `None` when missing.
+    pub fn get_typec_port_by_endpoint(&self, endpoint_phandle: u32) -> Option<Arc<dyn TypecPort>> {
+        self.typec_ports.lock().get(&endpoint_phandle).cloned()
+    }
+
+    /// Return all endpoint phandles reachable from a platform device node.
+    ///
+    /// The returned set includes each local `endpoint` phandle and any
+    /// `remote-endpoint` phandle referenced by that endpoint. This lets Type-C
+    /// connector controllers register a port against both sides of the DT graph
+    /// without making controller drivers depend on each other directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device whose FDT subtree should be scanned.
+    ///
+    /// # Returns
+    ///
+    /// Deduplicated endpoint phandles in discovery order.
+    pub fn endpoint_phandles_for_platform_device(&self, device: &PlatformDeviceInfo) -> Vec<u32> {
+        let Some(fdt) = crate::device::fdt::FdtManager::get_manager().get_fdt() else {
+            return Vec::new();
+        };
+        let Some(node) = self.find_platform_device_node(fdt, device) else {
+            return Vec::new();
+        };
+
+        let mut phandles = Vec::new();
+        self.collect_endpoint_phandles(&node, &mut phandles);
+        phandles
+    }
+
+    /// Look up the Type-C port provider connected to a platform device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Platform device whose endpoint graph should be resolved.
+    ///
+    /// # Returns
+    ///
+    /// Type-C port provider connected to the device, or `None` when no matching
+    /// endpoint has been registered.
+    pub fn get_typec_port_for_platform_device(
+        &self,
+        device: &PlatformDeviceInfo,
+    ) -> Option<Arc<dyn TypecPort>> {
+        self.endpoint_phandles_for_platform_device(device)
+            .into_iter()
+            .find_map(|phandle| self.get_typec_port_by_endpoint(phandle))
     }
 
     pub fn register_gpio_controller(&self, phandle: u32, gpio: Arc<dyn GpioController>) {
@@ -1663,28 +1809,49 @@ impl DeviceManager {
         device: &PlatformDeviceInfo,
         config: IommuDomainConfig,
     ) -> Result<Option<IommuAttachment>, &'static str> {
+        let mut attachments = self.resolve_platform_iommu_attachments(device, config)?;
+        match attachments.len() {
+            0 => Ok(None),
+            1 => Ok(attachments.pop()),
+            _ => Err("iommu: multiple controllers not supported"),
+        }
+    }
+
+    fn resolve_platform_iommu_attachments(
+        &self,
+        device: &PlatformDeviceInfo,
+        config: IommuDomainConfig,
+    ) -> Result<Vec<IommuAttachment>, &'static str> {
         let iommus = match device.property("iommus") {
-            Some(property) => property,
-            None => return Ok(None),
+            Some(property) => property.value(),
+            None => return Ok(Vec::new()),
         };
 
-        let specs = self.parse_iommu_specs(iommus.value())?;
+        let specs = self.parse_iommu_specs(iommus)?;
         if specs.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        let first_phandle = specs[0].phandle;
-        let controller = self
-            .get_iommu_controller_by_phandle(first_phandle)
-            .ok_or(PROBE_DEFER)?;
-        let mut streams = Vec::new();
+        let mut groups: Vec<(u32, Arc<dyn IommuController>, Vec<IommuStreamId>)> = Vec::new();
 
         for spec in &specs {
-            if spec.phandle != first_phandle {
-                return Err("iommu: multiple controllers not supported");
-            }
+            let group_index = match groups
+                .iter()
+                .position(|(phandle, _, _)| *phandle == spec.phandle)
+            {
+                Some(index) => index,
+                None => {
+                    let controller = self
+                        .get_iommu_controller_by_phandle(spec.phandle)
+                        .ok_or(PROBE_DEFER)?;
+                    groups.push((spec.phandle, controller, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+
+            let (phandle, controller, streams) = &mut groups[group_index];
             let iommu_spec = IommuSpec {
-                controller_phandle: spec.phandle,
+                controller_phandle: *phandle,
                 cells: spec.cells.clone(),
             };
             let mut decoded_streams = controller
@@ -1693,20 +1860,25 @@ impl DeviceManager {
             streams.append(&mut decoded_streams);
         }
 
-        let domain = controller
-            .alloc_domain(config)
-            .map_err(Self::iommu_error_to_str)?;
-        for stream in &streams {
-            domain
-                .attach_stream(*stream)
+        let mut attachments = Vec::new();
+        for (_, controller, streams) in groups {
+            let domain = controller
+                .alloc_domain(config)
                 .map_err(Self::iommu_error_to_str)?;
+            for stream in &streams {
+                domain
+                    .attach_stream(*stream)
+                    .map_err(Self::iommu_error_to_str)?;
+            }
+
+            attachments.push(IommuAttachment {
+                controller,
+                domain,
+                streams,
+            });
         }
 
-        Ok(Some(IommuAttachment {
-            controller,
-            domain,
-            streams,
-        }))
+        Ok(attachments)
     }
 
     /// Resolve a platform device DMA context from its firmware properties.
@@ -1724,8 +1896,15 @@ impl DeviceManager {
         device: &PlatformDeviceInfo,
         config: IommuDomainConfig,
     ) -> Result<DmaContext, &'static str> {
+        let mut attachments = self.resolve_platform_iommu_attachments(device, config)?;
+        let primary = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments.remove(0))
+        };
         Ok(DmaContext {
-            iommu: self.resolve_platform_iommu(device, config)?,
+            iommu: primary,
+            additional_iommus: attachments,
             direct_dma_offset: 0,
         })
     }
@@ -3438,7 +3617,44 @@ mod tests {
             .resolve_platform_dma_context(&device, test_iommu_config())
             .unwrap();
         assert!(context.iommu.is_none());
+        assert!(context.additional_iommus.is_empty());
         assert_eq!(context.direct_dma_offset, 0);
+    }
+
+    #[test_case]
+    fn test_resolve_platform_dma_context_attaches_multiple_iommu_controllers() {
+        let manager = DeviceManager::new();
+        let first = Arc::new(TestIommuController::new());
+        let second = Arc::new(TestIommuController::new());
+        manager.register_iommu_controller(0x40, first.clone());
+        manager.register_iommu_controller(0x41, second.clone());
+        let device = iommu_test_device(vec![PlatformDeviceProperty::new(
+            "iommus",
+            &be_cells(&[0x40, 0x10, 0x41, 0x20]),
+        )]);
+
+        let context = manager
+            .resolve_platform_dma_context(&device, test_iommu_config())
+            .unwrap();
+
+        assert!(context.iommu.is_some());
+        assert_eq!(context.additional_iommus.len(), 1);
+        assert_eq!(first.alloc_count.load(Ordering::SeqCst), 1);
+        assert_eq!(second.alloc_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *first.domain.attached_streams.lock(),
+            vec![IommuStreamId {
+                id: 0x10,
+                substream_id: None,
+            }]
+        );
+        assert_eq!(
+            *second.domain.attached_streams.lock(),
+            vec![IommuStreamId {
+                id: 0x20,
+                substream_id: None,
+            }]
+        );
     }
 
     #[test_case]

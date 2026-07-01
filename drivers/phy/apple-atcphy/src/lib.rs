@@ -17,6 +17,7 @@ use scarlet::{
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
+        reset::ResetController,
     },
     early_println,
 };
@@ -66,6 +67,9 @@ const ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP: u32 = 0x10;
 const ACIOPHY_LANE_MODE_USB3: u32 = 0x3;
 const ACIOPHY_LANE_MODE_DP: u32 = 0x5;
 
+const PHY_TYPE_USB2: u32 = 3;
+const PHY_TYPE_USB3: u32 = 4;
+
 // =============================================================================
 // =============================================================================
 
@@ -75,6 +79,7 @@ const USB2PHY_SIG: usize = 0x08;
 const USB2PHY_MISCTUNE: usize = 0x1c;
 
 const USB2PHY_USBCTL_RUN: u32 = 1 << 1;
+const USB2PHY_USBCTL_ISOLATION: u32 = 1 << 2;
 
 const USB2PHY_CTL_RESET: u32 = 1 << 0;
 const USB2PHY_CTL_PORT_RESET: u32 = 1 << 1;
@@ -85,6 +90,7 @@ const USB2PHY_SIG_VBUSDET_FORCE_VAL: u32 = 1 << 0;
 const USB2PHY_SIG_VBUSDET_FORCE_EN: u32 = 1 << 1;
 const USB2PHY_SIG_VBUSVLDEXT_FORCE_VAL: u32 = 1 << 2;
 const USB2PHY_SIG_VBUSVLDEXT_FORCE_EN: u32 = 1 << 3;
+const USB2PHY_SIG_HOST: u32 = 7 << 12;
 
 const USB2PHY_MISCTUNE_APBCLK_GATE_OFF: u32 = 1 << 29;
 const USB2PHY_MISCTUNE_REFCLK_GATE_OFF: u32 = 1 << 30;
@@ -109,9 +115,15 @@ const PIPEHANDLER_MUX_CTRL_DATA_MASK: u32 = 0x7;
 const PIPEHANDLER_MUX_CTRL_CLK_MASK: u32 = 0x7 << 3;
 const PIPEHANDLER_MUX_CTRL_CLK_OFF: u32 = 0;
 const PIPEHANDLER_MUX_CTRL_CLK_USB3: u32 = 1;
+const PIPEHANDLER_MUX_CTRL_CLK_DUMMY: u32 = 4;
 const PIPEHANDLER_MUX_CTRL_DATA_USB3: u32 = 0;
+const PIPEHANDLER_MUX_CTRL_DATA_DUMMY: u32 = 2;
 
 const PIPEHANDLER_LOCK_EN: u32 = 1 << 0;
+
+const PIPEHANDLER_AON_GEN: usize = 0x1c;
+const PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN: u32 = 1 << 4;
+const PIPEHANDLER_AON_GEN_DWC3_RESET_N: u32 = 1 << 0;
 
 const PIPEHANDLER_NATIVE_RESET: u32 = 1 << 12;
 const PIPEHANDLER_DUMMY_PHY_EN: u32 = 1 << 15;
@@ -224,6 +236,7 @@ pub struct AppleAtcPhy {
     lane1_usb: Vec<HardwareTunable>,
     lane0_dp: Vec<HardwareTunable>,
     lane1_dp: Vec<HardwareTunable>,
+    pipehandler_up: bool,
 }
 
 impl AppleAtcPhy {
@@ -260,6 +273,7 @@ impl AppleAtcPhy {
             lane1_usb: Vec::new(),
             lane0_dp: Vec::new(),
             lane1_dp: Vec::new(),
+            pipehandler_up: false,
         }
     }
 
@@ -322,6 +336,11 @@ impl AppleAtcPhy {
         self.ph_write32(offset, self.ph_read32(offset) & !bits);
     }
 
+    fn ph_mask32(&self, offset: usize, mask: u32, set: u32) {
+        let old = self.ph_read32(offset);
+        self.ph_write32(offset, (old & !mask) | set);
+    }
+
     fn lpdptx_read32(&self, offset: usize) -> u32 {
         unsafe { mmio::read32(self.lpdptx_base.unwrap() + offset) }
     }
@@ -361,7 +380,8 @@ impl AppleAtcPhy {
             | USB2PHY_SIG_VBUSDET_FORCE_EN
             | USB2PHY_SIG_VBUSVLDEXT_FORCE_VAL
             | USB2PHY_SIG_VBUSVLDEXT_FORCE_EN;
-        self.usb2phy_write32(USB2PHY_SIG, sig);
+        let host = self.usb2phy_read32(USB2PHY_SIG) & USB2PHY_SIG_HOST;
+        self.usb2phy_write32(USB2PHY_SIG, sig | host);
         self.small_delay();
 
         self.usb2phy_clear32(USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
@@ -378,6 +398,40 @@ impl AppleAtcPhy {
         self.usb2phy_clear32(USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
 
         self.usb2phy_write32(USB2PHY_USBCTL, USB2PHY_USBCTL_RUN);
+    }
+
+    fn usb2_power_off(&self) {
+        self.usb2phy_write32(USB2PHY_USBCTL, USB2PHY_USBCTL_ISOLATION);
+        scarlet::time::udelay(10);
+
+        self.usb2phy_set32(USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
+        scarlet::time::udelay(10);
+
+        self.usb2phy_set32(USB2PHY_CTL, USB2PHY_CTL_PORT_RESET);
+        scarlet::time::udelay(10);
+        self.usb2phy_set32(USB2PHY_CTL, USB2PHY_CTL_RESET);
+        scarlet::time::udelay(10);
+        self.usb2phy_clear32(USB2PHY_CTL, USB2PHY_CTL_APB_RESET_N);
+        scarlet::time::udelay(10);
+
+        self.usb2phy_set32(USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_APBCLK_GATE_OFF);
+        self.usb2phy_set32(USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
+    }
+
+    fn usb2_set_mode(&self, mode: PhyMode) -> Result<(), PhyError> {
+        match mode {
+            PhyMode::UsbHost | PhyMode::UsbOtg => {
+                self.usb2phy_set32(USB2PHY_SIG, USB2PHY_SIG_HOST);
+                early_println!("[apple-atcphy] usb2 mode host");
+                Ok(())
+            }
+            PhyMode::UsbDevice => {
+                self.usb2phy_clear32(USB2PHY_SIG, USB2PHY_SIG_HOST);
+                early_println!("[apple-atcphy] usb2 mode device");
+                Ok(())
+            }
+            _ => Err(PhyError::InvalidMode),
+        }
     }
 
     fn core_power_on(&self) -> Result<(), &'static str> {
@@ -409,22 +463,28 @@ impl AppleAtcPhy {
         self.core_write32(ACIOPHY_LANE_MODE, lane_mode);
     }
 
-    fn configure_pipehandler_usb3(&self) {
+    fn configure_pipehandler_usb3(&mut self, host: bool) {
+        if self.pipehandler_up {
+            return;
+        }
+
         self.ph_clear32(
             PIPEHANDLER_OVERRIDE_VALUES,
             PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1,
         );
-        self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
-        self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
 
-        self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        if host {
+            self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
+            self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
+            self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
 
-        let nonselected = self.ph_read32(PIPEHANDLER_NONSELECTED_OVERRIDE);
-        self.ph_write32(
-            PIPEHANDLER_NONSELECTED_OVERRIDE,
-            (nonselected & !PIPEHANDLER_NATIVE_POWER_DOWN_MASK) | 3,
-        );
-        self.ph_clear32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
+            let nonselected = self.ph_read32(PIPEHANDLER_NONSELECTED_OVERRIDE);
+            self.ph_write32(
+                PIPEHANDLER_NONSELECTED_OVERRIDE,
+                (nonselected & !PIPEHANDLER_NATIVE_POWER_DOWN_MASK) | 3,
+            );
+            self.ph_clear32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
+        }
 
         let mut mux = self.ph_read32(PIPEHANDLER_MUX_CTRL);
         mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_OFF << 3);
@@ -442,7 +502,65 @@ impl AppleAtcPhy {
         self.ph_clear32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
         self.ph_clear32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
 
+        if host {
+            self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        }
+        self.pipehandler_up = true;
+    }
+
+    fn configure_pipehandler_dummy(&mut self) {
+        self.ph_clear32(
+            PIPEHANDLER_OVERRIDE_VALUES,
+            PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1,
+        );
+        self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
+        self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
+        self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_OFF << 3,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_DATA_MASK,
+            PIPEHANDLER_MUX_CTRL_DATA_DUMMY,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_DUMMY << 3,
+        );
+        scarlet::time::udelay(10);
+
         self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        self.ph_mask32(
+            PIPEHANDLER_NONSELECTED_OVERRIDE,
+            PIPEHANDLER_NATIVE_POWER_DOWN_MASK,
+            2,
+        );
+        self.ph_set32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
+        self.pipehandler_up = false;
+    }
+
+    fn dwc3_reset_assert(&mut self) {
+        early_println!("[apple-atcphy] dwc3 reset assert");
+        self.ph_clear32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+        self.ph_set32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+
+        if self.pipehandler_up {
+            self.configure_pipehandler_dummy();
+        }
+        self.usb2_power_off();
+    }
+
+    fn dwc3_reset_deassert(&mut self) {
+        early_println!("[apple-atcphy] dwc3 reset deassert");
+        self.ph_clear32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+        self.ph_set32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
     }
 
     fn configure_pipehandler_dp(&self, swap_lanes: bool) {
@@ -568,11 +686,9 @@ impl AppleAtcPhy {
         self.core_set32(CIO3PLL_CLK_CTRL, CIO3PLL_CLK_PCLK_EN);
         self.core_set32(CIO3PLL_CLK_CTRL, CIO3PLL_CLK_REFCLK_EN);
 
-        self.configure_pipehandler_usb3();
-
         self.core_set32(ATCPHY_POWER_CTRL, ATCPHY_POWER_PHY_RESET_N);
 
-        early_println!("[apple-atcphy] initialized (USB3 mode)");
+        early_println!("[apple-atcphy] initialized (USB3 PHY)");
         Ok(())
     }
 
@@ -599,14 +715,14 @@ impl AppleAtcPhy {
 
         match mode {
             AtcPhyMode::Usb3Dp => {
-                self.configure_pipehandler_usb3();
+                self.configure_pipehandler_usb3(true);
                 self.configure_pipehandler_dp(false);
             }
             AtcPhyMode::DisplayPort => {
                 self.configure_pipehandler_dp(false);
             }
             _ => {
-                self.configure_pipehandler_usb3();
+                self.configure_pipehandler_usb3(true);
             }
         }
 
@@ -616,15 +732,17 @@ impl AppleAtcPhy {
 }
 
 struct AppleAtcPhyProvider {
+    phy: Arc<Mutex<AppleAtcPhy>>,
     lanes: Vec<Arc<AppleAtcPhyLane>>,
 }
 
 impl AppleAtcPhyProvider {
     fn new(phy: Arc<Mutex<AppleAtcPhy>>) -> Self {
         Self {
+            phy: Arc::clone(&phy),
             lanes: alloc::vec![
-                Arc::new(AppleAtcPhyLane::new(Arc::clone(&phy), 0)),
-                Arc::new(AppleAtcPhyLane::new(phy, 1)),
+                Arc::new(AppleAtcPhyLane::new(Arc::clone(&phy), PHY_TYPE_USB2)),
+                Arc::new(AppleAtcPhyLane::new(phy, PHY_TYPE_USB3)),
             ],
         }
     }
@@ -644,8 +762,38 @@ impl PhyProvider for AppleAtcPhyProvider {
             return Err(PhyError::NotFound);
         }
 
-        let lane = self.lanes.get(spec[0] as usize).ok_or(PhyError::NotFound)?;
+        let lane = self
+            .lanes
+            .iter()
+            .find(|lane| lane.phy_type() == spec[0])
+            .ok_or(PhyError::NotFound)?;
         Ok(PhyHandle::new(lane.clone()))
+    }
+}
+
+impl ResetController for AppleAtcPhyProvider {
+    fn name(&self) -> &'static str {
+        "apple-atcphy-reset"
+    }
+
+    fn reset_cells(&self) -> usize {
+        0
+    }
+
+    fn assert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+        if !spec.is_empty() {
+            return Err("apple-atcphy: invalid reset specifier");
+        }
+        self.phy.lock().dwc3_reset_assert();
+        Ok(())
+    }
+
+    fn deassert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+        if !spec.is_empty() {
+            return Err("apple-atcphy: invalid reset specifier");
+        }
+        self.phy.lock().dwc3_reset_deassert();
+        Ok(())
     }
 }
 
@@ -656,12 +804,16 @@ struct AppleAtcPhyLane {
 }
 
 impl AppleAtcPhyLane {
-    fn new(phy: Arc<Mutex<AppleAtcPhy>>, lane: u32) -> Self {
+    fn new(phy: Arc<Mutex<AppleAtcPhy>>, phy_type: u32) -> Self {
         Self {
             phy,
-            lane,
+            lane: phy_type,
             mode: Mutex::new(None),
         }
+    }
+
+    fn phy_type(&self) -> u32 {
+        self.lane
     }
 
     fn atc_mode(&self) -> Result<AtcPhyMode, PhyError> {
@@ -679,19 +831,28 @@ impl AppleAtcPhyLane {
     fn power_on_current_mode(&self) -> Result<(), PhyError> {
         let mode = self.atc_mode()?;
         let mut phy = self.phy.lock();
-        match mode {
-            AtcPhyMode::Usb3 => phy.init(),
-            AtcPhyMode::DisplayPort | AtcPhyMode::Usb3Dp => phy.init_dp(mode),
+        match (self.lane, mode) {
+            (PHY_TYPE_USB2, AtcPhyMode::Usb3) => {
+                let phy_mode = (*self.mode.lock()).unwrap_or(PhyMode::UsbHost);
+                phy.usb2_set_mode(phy_mode)
+            }
+            (PHY_TYPE_USB3, AtcPhyMode::Usb3) => {
+                phy.init().map_err(|_| PhyError::PowerOnFailed)?;
+                Ok(())
+            }
+            (_, AtcPhyMode::DisplayPort | AtcPhyMode::Usb3Dp) => {
+                phy.init_dp(mode).map_err(|_| PhyError::PowerOnFailed)
+            }
+            _ => Err(PhyError::PowerOnFailed),
         }
-        .map_err(|_| PhyError::PowerOnFailed)
     }
 }
 
 impl Phy for AppleAtcPhyLane {
     fn name(&self) -> &'static str {
         match self.lane {
-            0 => "apple-atcphy-lane0",
-            1 => "apple-atcphy-lane1",
+            PHY_TYPE_USB2 => "apple-atcphy-usb2",
+            PHY_TYPE_USB3 => "apple-atcphy-usb3",
             _ => "apple-atcphy-lane",
         }
     }
@@ -720,6 +881,19 @@ impl Phy for AppleAtcPhyLane {
             | PhyMode::Other(0)
             | PhyMode::Other(1) => {
                 *self.mode.lock() = Some(mode);
+                if self.lane == PHY_TYPE_USB2 {
+                    self.phy.lock().usb2_set_mode(mode)?;
+                } else if self.lane == PHY_TYPE_USB3 {
+                    match mode {
+                        PhyMode::UsbHost | PhyMode::UsbOtg | PhyMode::Other(0) => {
+                            self.phy.lock().configure_pipehandler_usb3(true);
+                        }
+                        PhyMode::UsbDevice => {
+                            self.phy.lock().configure_pipehandler_usb3(false);
+                        }
+                        _ => {}
+                    }
+                }
                 Ok(())
             }
             _ => Err(PhyError::InvalidMode),
@@ -899,8 +1073,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .unwrap_or(0);
 
     let (_id, phy_instance) = register_atcphy_shared(phy, phandle);
+    let provider = Arc::new(AppleAtcPhyProvider::new(phy_instance));
     DeviceManager::get_manager()
-        .register_phy_controller(phandle, Arc::new(AppleAtcPhyProvider::new(phy_instance)));
+        .register_phy_controller(phandle, Arc::clone(&provider) as Arc<dyn PhyProvider>);
+    DeviceManager::get_manager()
+        .register_reset_controller(phandle, provider as Arc<dyn ResetController>);
 
     early_println!("[apple-atcphy] registered (id={})", _id);
     Ok(())
