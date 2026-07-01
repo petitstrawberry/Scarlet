@@ -2,7 +2,7 @@ use crate::arch::vm::mmu::{PageTable as ArchPageTable, PageTableEntry as ArchPag
 use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::mem::pmm;
 use crate::vm::addr::{boot_phys_to_virt, kernel_virt_to_phys};
-use crate::vm::vmem::{MemoryArea, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryPermission};
 
 const BOOT_ASID: u16 = 0;
 
@@ -72,7 +72,13 @@ fn boot_walk(
 }
 
 #[cfg(target_arch = "riscv64")]
-fn boot_map_page(root: *mut ArchPageTable, vaddr: usize, paddr: usize, permissions: usize) {
+fn boot_map_page(
+    root: *mut ArchPageTable,
+    vaddr: usize,
+    paddr: usize,
+    permissions: usize,
+    _memory_attribute: MemoryAttribute,
+) {
     let vaddr = vaddr & !(PAGE_SIZE - 1);
     let paddr = paddr & !(PAGE_SIZE - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
@@ -141,7 +147,13 @@ fn boot_walk(
 }
 
 #[cfg(target_arch = "aarch64")]
-fn boot_map_page(root: *mut ArchPageTable, vaddr: usize, paddr: usize, permissions: usize) {
+fn boot_map_page(
+    root: *mut ArchPageTable,
+    vaddr: usize,
+    paddr: usize,
+    permissions: usize,
+    memory_attribute: MemoryAttribute,
+) {
     let upper = vaddr >> 48;
     if upper != 0 && upper != 0xffff {
         panic!(
@@ -154,21 +166,13 @@ fn boot_map_page(root: *mut ArchPageTable, vaddr: usize, paddr: usize, permissio
     let paddr = paddr & !(PAGE_SIZE - 1);
     let pte = boot_walk(root, vaddr, true).expect("boot_map_page: failed to allocate walk path");
 
-    let is_write = VirtualMemoryPermission::Write.contained_in(permissions);
-    let ap = if is_write { 0b00 } else { 0b10 };
-
-    let mut entry = 0u64;
-    entry |= 0x3;
-    entry |= 1 << 10;
-    entry |= ((paddr >> 12) as u64 & 0xfffffffff) << 12;
-    entry |= 1 << 2;
-    entry |= (0b11_u64) << 8;
-    entry |= (ap as u64) << 6;
-    if !VirtualMemoryPermission::Execute.contained_in(permissions) {
-        entry |= (1 << 54) | (1 << 53);
-    }
-
-    pte.set_entry(entry);
+    pte.set_entry(ArchPageTable::make_leaf_entry(
+        vaddr,
+        paddr,
+        permissions,
+        0,
+        memory_attribute,
+    ));
     crate::arch::aarch64::clean_dcache_to_poc_range(
         (pte as *const ArchPageTableEntry) as usize,
         core::mem::size_of::<ArchPageTableEntry>(),
@@ -180,6 +184,7 @@ fn boot_map_range(
     varea: MemoryArea,
     parea: MemoryArea,
     permissions: usize,
+    memory_attribute: MemoryAttribute,
 ) {
     if varea.start % PAGE_SIZE != 0
         || parea.start % PAGE_SIZE != 0
@@ -195,7 +200,7 @@ fn boot_map_range(
     let mut vaddr = varea.start;
     let mut paddr = parea.start;
     while vaddr <= varea.end.saturating_sub(PAGE_SIZE - 1) {
-        boot_map_page(root, vaddr, paddr, permissions);
+        boot_map_page(root, vaddr, paddr, permissions, memory_attribute);
         vaddr = vaddr
             .checked_add(PAGE_SIZE)
             .expect("boot_map_range: vaddr overflow");
@@ -259,18 +264,21 @@ pub fn switch_to_boot_page_table(
         VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
+        MemoryAttribute::Normal,
     );
     boot_map_range(
         root,
         direct_map_area,
         direct_map_phys_area,
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+        MemoryAttribute::Normal,
     );
     boot_map_range(
         root,
         heap_area,
         heap_phys_area,
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+        MemoryAttribute::Normal,
     );
 
     if let Some(initramfs) = initramfs_paddr {
@@ -290,6 +298,7 @@ pub fn switch_to_boot_page_table(
                 initramfs_area,
                 initramfs_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                MemoryAttribute::Normal,
             );
         }
     }
@@ -311,6 +320,7 @@ pub fn switch_to_boot_page_table(
                 fb_area,
                 fb_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                MemoryAttribute::DeviceBurstable,
             );
         }
     }

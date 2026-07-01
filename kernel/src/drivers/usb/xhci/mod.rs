@@ -32,6 +32,7 @@ use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
+use crate::device::pci::intx::PciIntxInterruptSource;
 use crate::device::usb::UsbHostController;
 use crate::driver_initcall;
 use crate::drivers::usb::core::descriptor::{
@@ -51,7 +52,7 @@ use crate::drivers::usb::xhci::registers::{RegisterSpace, capability, operationa
 use crate::drivers::usb::xhci::ring::{DmaTrbRing, EventRing};
 use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::early_println;
-use crate::interrupt::InterruptId;
+use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
@@ -606,9 +607,7 @@ impl XhciController {
             );
         }
 
-        crate::interrupt::InterruptManager::global()
-            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
-            .map_err(|_| "Failed to enable xHCI interrupt")
+        Ok(())
     }
 
     fn ring_command_doorbell(&self) {
@@ -2143,9 +2142,18 @@ impl TimerHandler for XhciPollHandler {
 
 impl InterruptCapableDevice for XhciController {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         let status = self.operational.read_usbsts();
         if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) == 0 {
-            return Ok(());
+            return Ok(InterruptClaim::NotMine);
         }
 
         self.operational
@@ -2159,19 +2167,11 @@ impl InterruptCapableDevice for XhciController {
         }
 
         self.process_interrupt_events();
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<InterruptId> {
-        *self.interrupt_id.lock()
+        Ok(InterruptClaim::Handled)
     }
 }
 
-/// Probe function for xHCI PCI devices
-pub fn bind_xhci_mmio(
-    mmio_vaddr: usize,
-    interrupt: Option<InterruptId>,
-) -> Result<(), &'static str> {
+fn initialize_xhci_controller(mmio_vaddr: usize) -> Result<Arc<XhciController>, &'static str> {
     early_println!("[xHCI] Binding platform xHCI at {:#x}", mmio_vaddr);
 
     let controller = Arc::new(XhciController::new(mmio_vaddr)?);
@@ -2185,16 +2185,10 @@ pub fn bind_xhci_mmio(
     }
     controller.attach_mass_storage_devices();
 
-    if let Some(interrupt_id) = interrupt {
-        controller.enable_interrupts(interrupt_id)?;
-        crate::interrupt::InterruptManager::global()
-            .register_interrupt_device(interrupt_id, controller.clone())
-            .map_err(|_| "Failed to register xHCI interrupt device")?;
-        early_println!("[xHCI] Registered IRQ {}", interrupt_id);
-    } else {
-        early_println!("[xHCI] No interrupt provided for platform controller");
-    }
+    Ok(controller)
+}
 
+fn register_xhci_host(controller: Arc<XhciController>) {
     let host_id = NEXT_USB_HOST_ID.fetch_add(1, Ordering::SeqCst) as u32;
     let host: Arc<dyn UsbHostController> = controller.clone();
     DeviceManager::get_manager().register_usb_host(host_id, host);
@@ -2203,6 +2197,29 @@ pub fn bind_xhci_mmio(
     add_timer(get_tick() + ms_to_ticks(1000), &poll_handler, 0);
 
     early_println!("[xHCI] Platform controller registered successfully");
+}
+
+/// Probe function for xHCI PCI devices
+pub fn bind_xhci_mmio(
+    mmio_vaddr: usize,
+    interrupt: Option<InterruptId>,
+) -> Result<(), &'static str> {
+    let controller = initialize_xhci_controller(mmio_vaddr)?;
+
+    if let Some(interrupt_id) = interrupt {
+        InterruptManager::global()
+            .register_interrupt_device(interrupt_id, controller.clone())
+            .map_err(|_| "Failed to register xHCI interrupt device")?;
+        InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to enable xHCI interrupt")?;
+        controller.enable_interrupts(interrupt_id)?;
+        early_println!("[xHCI] Registered IRQ {}", interrupt_id);
+    } else {
+        early_println!("[xHCI] No interrupt provided for platform controller");
+    }
+
+    register_xhci_host(controller);
     Ok(())
 }
 
@@ -2221,7 +2238,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     config.write_u16(
         &addr,
         config::offset::COMMAND,
-        (command | config::command::BUS_MASTER) & !config::command::INTERRUPT_DISABLE,
+        command | config::command::BUS_MASTER | config::command::INTERRUPT_DISABLE,
     );
     early_println!("[xHCI] Bus mastering enabled");
 
@@ -2230,7 +2247,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
     config.write_u16(
         &addr,
         config::offset::COMMAND,
-        (command | config::command::MEMORY_SPACE) & !config::command::INTERRUPT_DISABLE,
+        command | config::command::MEMORY_SPACE | config::command::INTERRUPT_DISABLE,
     );
     early_println!("[xHCI] Memory access enabled");
 
@@ -2281,7 +2298,23 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         None
     };
 
-    bind_xhci_mmio(mmio_vaddr, interrupt_id)
+    let controller = initialize_xhci_controller(mmio_vaddr)?;
+
+    if let Some(interrupt_id) = interrupt_id {
+        controller.enable_interrupts(interrupt_id)?;
+        let source = PciIntxInterruptSource::new(device, controller.clone())
+            .ok_or("Failed to create xHCI INTx source")?;
+        let source: Arc<dyn crate::interrupt::MaskableInterruptSource> = Arc::new(source);
+        InterruptManager::global()
+            .register_and_enable_interrupt_source(source, crate::arch::get_cpu().get_cpuid() as u32)
+            .map_err(|_| "Failed to register xHCI interrupt device")?;
+        early_println!("[xHCI] Registered IRQ {}", interrupt_id);
+    } else {
+        early_println!("[xHCI] No usable legacy IRQ routing for controller");
+    }
+
+    register_xhci_host(controller);
+    Ok(())
 }
 
 /// Remove function for xHCI PCI devices

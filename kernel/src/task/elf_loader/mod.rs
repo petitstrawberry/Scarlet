@@ -1291,6 +1291,7 @@ fn map_elf_segment(
         vm_start: vmarea.start,
         permissions,
         is_shared: false,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
 

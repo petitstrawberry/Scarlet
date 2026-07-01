@@ -25,7 +25,7 @@ pub use file::{FileObject, SeekFrom};
 pub use control::ControlOps;
 
 // Re-export memory mapping types
-pub use memory_mapping::MemoryMappingOps;
+pub use memory_mapping::{MemoryMappingInfo, MemoryMappingOps};
 
 // Re-export IPC types
 pub use ipc::{EventReceiver, EventSender, EventSubscriber};

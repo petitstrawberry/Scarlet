@@ -4,7 +4,9 @@ A Type-2 hypervisor built into Scarlet OS.
 
 ## Overview
 
-SHV (Scarlet Hypervisor) is a Type-2 (hosted) hypervisor for running guest operating systems.
+SHV (Scarlet Hypervisor) is a Type-2 (hosted) hypervisor for running guest
+operating systems. It provides Scarlet-native hypervisor objects and a Linux
+`/dev/kvm` compatibility layer used by KVM-oriented VMMs.
 
 ### Architecture
 
@@ -14,10 +16,11 @@ SHV (Scarlet Hypervisor) is a Type-2 (hosted) hypervisor for running guest opera
 │  ┌─────────────────────────────────────────────────────┐│
 │  │                    U-SHV                            ││
 │  │  (Userspace VMM)                                    ││
-│  │  - Device emulation (UART, PLIC, etc.)              ││
+│  │  - Device emulation (UART/PL011, PLIC, etc.)        ││
 │  │  - Guest management                                 ││
 │  │  - MMIO handling                                    ││
-│  │  - SBI firmware emulation                           ││
+│  │  - SBI/PSCI firmware handling                       ││
+│  │  - KVM-oriented VMMs through Linux /dev/kvm          ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
                           │ syscalls
@@ -39,8 +42,8 @@ SHV (Scarlet Hypervisor) is a Type-2 (hosted) hypervisor for running guest opera
 
 | Architecture | Status | Notes |
 |--------------|--------|-------|
-| RISC-V 64-bit (H-extension) | Experimental | Primary development target |
-| AArch64 | Not Implemented | Stub code only |
+| RISC-V 64-bit (H-extension) | Implemented | SHV and Linux `/dev/kvm` paths, primary development target |
+| AArch64 | Implemented | EL2/VHE path with Stage-2 translation, guest entry/exit, trap handling, timer support, VGIC/PSCI work, and Linux `/dev/kvm` compatibility |
 
 ## Quick Start
 
@@ -56,6 +59,10 @@ ushv -m 512 /path/to/guest.bin
 # Specify initramfs
 ushv -i /path/to/initramfs.cpio /path/to/guest.bin
 ```
+
+Linux ABI guests can also use Scarlet's `/dev/kvm` compatibility layer. That
+path maps KVM ioctls onto SHV and is intended for KVM-oriented VMMs such as
+kvmtool and Firecracker-class microVM workloads.
 
 ### Programmatic Usage
 
@@ -98,7 +105,7 @@ loop {
 |-----------|------|-------------|
 | Kernel SHV | `kernel/src/hypervisor/` | Kernel-side hypervisor |
 | RISC-V H-ext | `kernel/src/arch/riscv64/hv/` | RISC-V specific implementation |
-| AArch64 virt | `kernel/src/arch/aarch64/hv/` | AArch64 specific implementation (stub) |
+| AArch64 virt | `kernel/src/arch/aarch64/hv/` | AArch64 specific implementation |
 | U-SHV | `user/bin/src/ushv/` | Userspace VMM |
 | User API | `user/lib/std/src/hypervisor/` | Userspace API |
 | Guest Tests | `guest_tests/` | Test guest programs |

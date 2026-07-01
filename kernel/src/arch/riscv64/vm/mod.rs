@@ -273,6 +273,7 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
 

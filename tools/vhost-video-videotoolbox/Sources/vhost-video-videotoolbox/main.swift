@@ -26,6 +26,9 @@ private let vhostUserResetDevice: UInt32 = 34
 private let vhostUserSetStatus: UInt32 = 39
 private let vhostUserGetStatus: UInt32 = 40
 
+private let vhostUserVringIndexMask: UInt32 = 0xff
+private let vhostUserVringNoFdMask: UInt32 = 0x100
+
 private let vhostUserVersion: UInt32 = 0x1
 private let vhostUserReply: UInt32 = 0x4
 private let vhostUserNeedReply: UInt32 = 0x8
@@ -1193,6 +1196,16 @@ private func closeFds(_ fds: [Int32]) {
     }
 }
 
+private func vringFileIndex(_ payload: Data) -> Int {
+    guard payload.count >= 4 else { return 0 }
+    return Int(payload.u32(0) & vhostUserVringIndexMask)
+}
+
+private func vringFileHasFd(_ payload: Data) -> Bool {
+    guard payload.count >= 4 else { return true }
+    return payload.u32(0) & vhostUserVringNoFdMask == 0
+}
+
 private func serve(socketPath: String, queues: Int) throws {
     unlink(socketPath)
     let listener = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -1322,17 +1335,27 @@ private func handle(message: VhostMessage, conn: Int32, backend: VideoBackend, q
         try sendReply(conn, request: message.request, payload: payload)
         closeFds(message.fds)
     case vhostUserSetVringKick:
-        let index = message.payload.count >= 8 ? Int(message.payload.u64(0)) : 0
+        let index = vringFileIndex(message.payload)
         let queue = try backend.queue(index)
         if let old = queue.kickFd { close(old) }
-        queue.kickFd = message.fds.first
-        closeFds(Array(message.fds.dropFirst()))
+        if vringFileHasFd(message.payload) {
+            queue.kickFd = message.fds.first
+            closeFds(Array(message.fds.dropFirst()))
+        } else {
+            queue.kickFd = nil
+            closeFds(message.fds)
+        }
     case vhostUserSetVringCall:
-        let index = message.payload.count >= 8 ? Int(message.payload.u64(0)) : 0
+        let index = vringFileIndex(message.payload)
         let queue = try backend.queue(index)
         if let old = queue.callFd { close(old) }
-        queue.callFd = message.fds.first
-        closeFds(Array(message.fds.dropFirst()))
+        if vringFileHasFd(message.payload) {
+            queue.callFd = message.fds.first
+            closeFds(Array(message.fds.dropFirst()))
+        } else {
+            queue.callFd = nil
+            closeFds(message.fds)
+        }
     case vhostUserSetVringEnable:
         let index = Int(message.payload.u32(0))
         try backend.queue(index).enabled = message.payload.u32(4) != 0

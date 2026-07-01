@@ -23,6 +23,7 @@ use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
 use crate::early_println;
 use crate::environment::PAGE_SIZE;
+use crate::interrupt::InterruptClaim;
 use crate::mem::page::ContiguousPages;
 
 /// VirtIO Input event structure (matches Linux virtio_input_event)
@@ -433,7 +434,7 @@ impl crate::object::capability::memory_mapping::MemoryMappingOps for VirtioInput
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported")
     }
 }
@@ -550,10 +551,19 @@ mod tests {
 // Implement InterruptCapableDevice for VirtioInputDevice
 impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         // Read ISR status to acknowledge interrupt
         let isr_status = self.read32_register(Register::InterruptStatus);
         if isr_status == 0 {
-            return Ok(());
+            return Ok(InterruptClaim::NotMine);
         }
 
         // Acknowledge the interrupt
@@ -562,10 +572,6 @@ impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
         // Process pending events
         self.process_events();
 
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
-        *self.interrupt_id.lock()
+        Ok(InterruptClaim::Handled)
     }
 }

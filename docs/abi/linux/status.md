@@ -1,14 +1,16 @@
 # Linux ABI Support Status
 
-Scarlet includes an early Linux ABI layer focused on running selected
-Buildroot-based userlands. This note captures the current scope, known gaps,
-and the recommended way to exercise the demo.
+Scarlet includes a partial Linux ABI layer used for selected Buildroot-based
+userlands, GUI applications, services, and KVM-oriented VMM workloads. This note
+captures the current scope, known gaps, and the recommended way to exercise it.
 
 ## Summary
 
 - **Architectures**: RISC-V 64-bit and AArch64 userlands built via Buildroot
 - **Kernel interface**: Direct syscall translation layer into Scarlet kernel primitives
-- **State**: Partial – intended for demos and experimentation rather than production workloads
+- **State**: Partial but actively used for selected workloads, including
+  BusyBox-style userlands, Wayland bridge applications, Mozc, and `/dev/kvm`
+  userspace VMMs
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
 ## System Call Support Matrix
@@ -131,6 +133,15 @@ Socket syscalls have real implementations backed by the kernel network stack.
 | `sendmsg`, `recvmsg` | ✅ Supported | |
 | `setsockopt`, `getsockopt` | ✅ Supported | |
 | `shutdown` | ✅ Supported | |
+
+### Hypervisor / KVM
+| Interface | Status | Notes |
+|-----------|--------|-------|
+| `/dev/kvm` | ✅ Supported | Linux KVM ioctl compatibility layer backed by SHV. |
+| KVM VM/vCPU lifecycle | ✅ Supported | `KVM_CREATE_VM`, `KVM_CREATE_VCPU`, `KVM_RUN`. |
+| KVM memory slots | ✅ Supported | `KVM_SET_USER_MEMORY_REGION`. |
+| KVM register access | ✅ Supported | Architecture-specific RISC-V and AArch64 register paths. |
+| KVM IRQ/device ioctls | ⚠️ Partial | Enough for current kvmtool/Firecracker-class workloads; not full KVM parity. |
 
 ## File System Implementation Notes
 

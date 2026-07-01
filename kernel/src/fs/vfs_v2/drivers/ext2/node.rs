@@ -554,7 +554,7 @@ impl MemoryMappingOps for Ext2FileObject {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 {
             return Err("Offset not page aligned");
         }
@@ -590,7 +590,9 @@ impl MemoryMappingOps for Ext2FileObject {
             return Err("Backing address not aligned");
         }
 
-        Ok((paddr, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr, 0x3, true,
+        ))
     }
 
     fn get_mapping_info_with(
@@ -598,7 +600,7 @@ impl MemoryMappingOps for Ext2FileObject {
         offset: usize,
         length: usize,
         is_shared: bool,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if is_shared {
             if offset % PAGE_SIZE != 0 {
                 return Err("Offset not page aligned");
@@ -624,7 +626,9 @@ impl MemoryMappingOps for Ext2FileObject {
             }
 
             let _ = length;
-            return Ok((0, 0x3, true));
+            return Ok(crate::object::capability::MemoryMappingInfo::new(
+                0, 0x3, true,
+            ));
         }
 
         self.get_mapping_info(offset, length)
@@ -1373,7 +1377,7 @@ impl MemoryMappingOps for Ext2DirectoryObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for directories")
     }
 }
@@ -1597,7 +1601,7 @@ impl MemoryMappingOps for Ext2CharDeviceFileObject {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         // Most character devices don't support memory mapping
         Err("Memory mapping not supported")
     }

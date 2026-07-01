@@ -812,7 +812,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let info = self.current_framebuffer_info()?;
 
         // VMM requires page-aligned physical mappings.
@@ -846,7 +846,10 @@ impl MemoryMappingOps for FramebufferCharDevice {
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
 
-        Ok((paddr, permissions, is_shared))
+        Ok(
+            crate::object::capability::MemoryMappingInfo::new(paddr, permissions, is_shared)
+                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+        )
     }
 
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
@@ -1896,10 +1899,14 @@ mod tests {
         // Test get_mapping_info
         let result = fb_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
-        let (paddr, permissions, is_shared) = result.unwrap();
-        assert_eq!(paddr, crate::vm::addr::virt_to_phys(fb_addr));
-        assert_eq!(permissions, 0x3); // Read and Write
-        assert!(is_shared);
+        let info = result.unwrap();
+        assert_eq!(info.paddr, crate::vm::addr::virt_to_phys(fb_addr));
+        assert_eq!(info.permissions, 0x3); // Read and Write
+        assert!(info.is_shared);
+        assert_eq!(
+            info.memory_attribute,
+            crate::vm::vmem::MemoryAttribute::DeviceBurstable
+        );
 
         // Test invalid offset
         let result = fb_device.get_mapping_info(fb_size + 1, 32);
@@ -1910,7 +1917,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test on_mapped callback
-        fb_device.on_mapped(0x1000, paddr, fb_pages * 4096, 0);
+        fb_device.on_mapped(0x1000, info.paddr, fb_pages * 4096, 0);
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 1);
@@ -1982,9 +1989,13 @@ mod tests {
         // Test get_mapping_info with valid parameters
         let result = char_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
-        let (paddr, permissions, is_shared) = result.unwrap();
-        assert_eq!(paddr, crate::vm::addr::virt_to_phys(fb_addr));
-        assert_eq!(permissions, 0x3);
-        assert!(is_shared);
+        let info = result.unwrap();
+        assert_eq!(info.paddr, crate::vm::addr::virt_to_phys(fb_addr));
+        assert_eq!(info.permissions, 0x3);
+        assert!(info.is_shared);
+        assert_eq!(
+            info.memory_attribute,
+            crate::vm::vmem::MemoryAttribute::DeviceBurstable
+        );
     }
 }

@@ -72,6 +72,23 @@ pub fn register_and_enable_platform_irq_device(
     InterruptManager::global().register_and_enable_platform_irq_device(resource, device, cpu_id)
 }
 
+/// Register and enable a maskable interrupt source in lifecycle-safe order.
+///
+/// # Arguments
+///
+/// * `source` - Maskable interrupt source to register.
+/// * `cpu_id` - CPU that should receive the interrupt.
+///
+/// # Returns
+///
+/// The virtual IRQ assigned to the source.
+pub fn register_and_enable_interrupt_source(
+    source: Arc<dyn MaskableInterruptSource>,
+    cpu_id: CpuId,
+) -> InterruptResult<InterruptId> {
+    InterruptManager::global().register_and_enable_interrupt_source(source, cpu_id)
+}
+
 /// Allocate MSI/MSI-X vectors from the active external interrupt controller.
 ///
 /// # Arguments
@@ -88,12 +105,95 @@ pub fn allocate_msi_vectors(
     InterruptManager::global().allocate_msi_vectors(request)
 }
 
-/// Handler function type for external interrupts
-pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<()>;
+/// Handler function type for external interrupts.
+pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<InterruptClaim>;
 
 /// Handler function type for local interrupts (timer, software)
 pub type LocalInterruptHandler =
     fn(cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()>;
+
+/// Result of asking an interrupt source to claim a shared interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptClaim {
+    /// The source owned and cleared this interrupt.
+    Handled,
+    /// The source did not assert this shared interrupt line.
+    NotMine,
+}
+
+impl InterruptClaim {
+    /// Check whether this claim handled the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the interrupt source claimed and cleared the interrupt.
+    pub const fn is_handled(self) -> bool {
+        matches!(self, Self::Handled)
+    }
+}
+
+/// Interrupt source that can participate in shared IRQ dispatch.
+pub trait InterruptSource: Send + Sync {
+    /// Return the interrupt line this source is attached to.
+    ///
+    /// # Returns
+    ///
+    /// The virtual IRQ number for this source, or `None` when it has not been
+    /// attached yet.
+    fn interrupt_id(&self) -> Option<InterruptId>;
+
+    /// Try to claim and clear this source's interrupt cause.
+    ///
+    /// # Returns
+    ///
+    /// `Handled` when this source owned the interrupt and cleared its device-side
+    /// cause, or `NotMine` when another source on the shared line asserted it.
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim>;
+}
+
+/// Interrupt source whose device-side assertion can be masked independently.
+pub trait MaskableInterruptSource: InterruptSource {
+    /// Mask this source before registering or reconfiguring it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the source can no longer assert its interrupt line.
+    fn mask_source(&self) -> InterruptResult<()>;
+
+    /// Unmask this source after its handler and controller line are ready.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the source may assert its interrupt line again.
+    fn unmask_source(&self) -> InterruptResult<()>;
+
+    /// Clear stale pending device-side interrupt state while the source is masked.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when any pending cause that can be cleared has been drained.
+    fn clear_pending_source(&self) -> InterruptResult<()>;
+}
+
+struct InterruptDeviceSource {
+    device: Arc<dyn crate::device::events::InterruptCapableDevice>,
+}
+
+impl InterruptDeviceSource {
+    fn new(device: Arc<dyn crate::device::events::InterruptCapableDevice>) -> Self {
+        Self { device }
+    }
+}
+
+impl InterruptSource for InterruptDeviceSource {
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.device.interrupt_id()
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        self.device.claim_interrupt()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IrqDesc {
@@ -105,14 +205,9 @@ pub struct InterruptManager {
     irq_descs: spin::Lazy<spin::Mutex<HashMap<Virq, IrqDesc>>>,
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
     enabled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, CpuId>>>,
-    interrupt_devices: spin::Lazy<
-        spin::Mutex<
-            HashMap<
-                InterruptId,
-                alloc::vec::Vec<Arc<dyn crate::device::events::InterruptCapableDevice>>,
-            >,
-        >,
-    >,
+    interrupt_sources:
+        spin::Lazy<spin::Mutex<HashMap<InterruptId, alloc::vec::Vec<Arc<dyn InterruptSource>>>>>,
+    unhandled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, usize>>>,
 }
 
 impl InterruptManager {
@@ -122,7 +217,8 @@ impl InterruptManager {
             irq_descs: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             external_handlers: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
             enabled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
-            interrupt_devices: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
+            interrupt_sources: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
+            unhandled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
         }
     }
 
@@ -254,6 +350,27 @@ impl InterruptManager {
         }
     }
 
+    fn record_unhandled_external_interrupt(&self, interrupt_id: InterruptId) -> usize {
+        let mut counts = self.unhandled_external_interrupts.lock();
+        let count = counts.entry(interrupt_id).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    fn clear_unhandled_external_interrupt_count(&self, interrupt_id: InterruptId) {
+        self.unhandled_external_interrupts
+            .lock()
+            .remove(&interrupt_id);
+    }
+
+    fn unhandled_external_interrupt_count(&self, interrupt_id: InterruptId) -> usize {
+        self.unhandled_external_interrupts
+            .lock()
+            .get(&interrupt_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn handle_pending_irq(&self, pending: controllers::PendingIrq) -> InterruptResult<()> {
         self.register_irq_mapping(pending.mapping);
         {
@@ -266,16 +383,45 @@ impl InterruptManager {
         }
 
         let interrupt_id = pending.mapping.virq;
-        let device = {
-            let devices = self.interrupt_devices.lock();
-            devices.get(&interrupt_id).cloned()
+        let sources = {
+            let sources = self.interrupt_sources.lock();
+            sources.get(&interrupt_id).cloned()
         };
 
-        if let Some(devices) = device {
-            for device in devices {
-                device.handle_interrupt()?;
+        if let Some(sources) = sources {
+            let mut handled = false;
+            let mut first_error = None;
+            for source in sources {
+                match source.claim_interrupt() {
+                    Ok(claim) => handled |= claim.is_handled(),
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
             }
-            self.finish_pending_irq(&pending)
+
+            if handled {
+                self.clear_unhandled_external_interrupt_count(interrupt_id);
+            } else {
+                let count = self.record_unhandled_external_interrupt(interrupt_id);
+                if count == 1 || count.is_power_of_two() {
+                    crate::early_println!(
+                        "[interrupt] IRQ {} was not claimed by any registered source (count={})",
+                        interrupt_id,
+                        count
+                    );
+                }
+            }
+
+            let finish_result = self.finish_pending_irq(&pending);
+            if let Some(error) = first_error {
+                finish_result?;
+                Err(error)
+            } else {
+                finish_result
+            }
         } else {
             let handler = {
                 let handlers = self.external_handlers.lock();
@@ -284,7 +430,20 @@ impl InterruptManager {
 
             if let Some(handler_fn) = handler {
                 let mut handle = InterruptHandle::new_pending(pending);
-                handler_fn(&mut handle)
+                let claim = handler_fn(&mut handle)?;
+                if claim.is_handled() {
+                    self.clear_unhandled_external_interrupt_count(interrupt_id);
+                } else {
+                    let count = self.record_unhandled_external_interrupt(interrupt_id);
+                    if count == 1 || count.is_power_of_two() {
+                        crate::early_println!(
+                            "[interrupt] IRQ {} was not claimed by its registered handler (count={})",
+                            interrupt_id,
+                            count
+                        );
+                    }
+                }
+                Ok(())
             } else {
                 self.finish_pending_irq(&pending)
             }
@@ -512,10 +671,73 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         device: Arc<dyn crate::device::events::InterruptCapableDevice>,
     ) -> InterruptResult<()> {
+        self.register_interrupt_source(interrupt_id, Arc::new(InterruptDeviceSource::new(device)))
+    }
+
+    /// Register an interrupt source on a virtual IRQ.
+    ///
+    /// # Arguments
+    ///
+    /// * `interrupt_id` - Virtual IRQ to dispatch to this source.
+    /// * `source` - Source to call when the IRQ is delivered.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the source is registered.
+    pub fn register_interrupt_source(
+        &self,
+        interrupt_id: InterruptId,
+        source: Arc<dyn InterruptSource>,
+    ) -> InterruptResult<()> {
+        if let Some(source_interrupt_id) = source.interrupt_id()
+            && source_interrupt_id != interrupt_id
+        {
+            return Err(InterruptError::InvalidInterruptId);
+        }
+
         self.irq_desc_or_legacy(interrupt_id);
-        let mut devices = self.interrupt_devices.lock();
-        devices.entry(interrupt_id).or_default().push(device);
+        let mut sources = self.interrupt_sources.lock();
+        sources.entry(interrupt_id).or_default().push(source);
         Ok(())
+    }
+
+    /// Register and enable a maskable interrupt source in lifecycle-safe order.
+    ///
+    /// The guaranteed order is:
+    ///
+    /// 1. mask the source;
+    /// 2. clear stale pending source state;
+    /// 3. register the source with the interrupt manager;
+    /// 4. enable the interrupt controller line;
+    /// 5. unmask the source.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Maskable interrupt source to register.
+    /// * `cpu_id` - CPU that should receive the interrupt.
+    ///
+    /// # Returns
+    ///
+    /// The virtual IRQ assigned to the source.
+    pub fn register_and_enable_interrupt_source(
+        &self,
+        source: Arc<dyn MaskableInterruptSource>,
+        cpu_id: CpuId,
+    ) -> InterruptResult<InterruptId> {
+        source.mask_source()?;
+        source.clear_pending_source()?;
+        let interrupt_id = source
+            .interrupt_id()
+            .ok_or(InterruptError::InvalidInterruptId)?;
+        self.register_interrupt_source(interrupt_id, source.clone())?;
+        self.enable_external_interrupt(interrupt_id, cpu_id)?;
+
+        if let Err(error) = source.unmask_source() {
+            let _ = self.disable_external_interrupt(interrupt_id, cpu_id);
+            return Err(error);
+        }
+
+        Ok(interrupt_id)
     }
 
     pub fn register_platform_interrupt_device(
@@ -583,10 +805,18 @@ impl InterruptManager {
         &self,
         request: controllers::MsiRequest,
     ) -> InterruptResult<controllers::MsiAllocation> {
+        self.allocate_msi_vectors_from_device_manager(DeviceManager::get_manager(), request)
+    }
+
+    fn allocate_msi_vectors_from_device_manager(
+        &self,
+        device_manager: &DeviceManager,
+        request: controllers::MsiRequest,
+    ) -> InterruptResult<controllers::MsiAllocation> {
         let mut result = Err(InterruptError::NotSupported);
         let mut controller_seen = false;
 
-        DeviceManager::get_manager().for_each_msi_controller(|controller| {
+        device_manager.for_each_msi_controller(|controller| {
             controller_seen = true;
             match controller.allocate_vectors(request) {
                 Ok(allocation) => {
@@ -835,6 +1065,7 @@ pub fn enable_cpu_interrupts() {
 
 #[cfg(test)]
 mod tests {
+    use alloc::boxed::Box;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -846,6 +1077,141 @@ mod tests {
     struct FakeMsiController {
         result: Result<controllers::MsiAllocation, msi::MsiError>,
         calls: AtomicUsize,
+    }
+
+    struct FakeExternalController {
+        events: Arc<spin::Mutex<Vec<&'static str>>>,
+    }
+
+    impl FakeExternalController {
+        fn new(events: Arc<spin::Mutex<Vec<&'static str>>>) -> Self {
+            Self { events }
+        }
+    }
+
+    impl controllers::ExternalInterruptController for FakeExternalController {
+        fn init(&mut self) -> InterruptResult<()> {
+            Ok(())
+        }
+
+        fn enable_interrupt(
+            &self,
+            _interrupt_id: InterruptId,
+            _cpu_id: CpuId,
+        ) -> InterruptResult<()> {
+            self.events.lock().push("controller-enable");
+            Ok(())
+        }
+
+        fn disable_interrupt(
+            &self,
+            _interrupt_id: InterruptId,
+            _cpu_id: CpuId,
+        ) -> InterruptResult<()> {
+            self.events.lock().push("controller-disable");
+            Ok(())
+        }
+
+        fn set_priority(
+            &mut self,
+            _interrupt_id: InterruptId,
+            _priority: Priority,
+        ) -> InterruptResult<()> {
+            Ok(())
+        }
+
+        fn get_priority(&self, _interrupt_id: InterruptId) -> InterruptResult<Priority> {
+            Ok(0)
+        }
+
+        fn set_threshold(&mut self, _cpu_id: CpuId, _threshold: Priority) -> InterruptResult<()> {
+            Ok(())
+        }
+
+        fn get_threshold(&self, _cpu_id: CpuId) -> InterruptResult<Priority> {
+            Ok(0)
+        }
+
+        fn claim_interrupt(&self, _cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
+            Ok(None)
+        }
+
+        fn complete_interrupt(
+            &self,
+            _cpu_id: CpuId,
+            _interrupt_id: InterruptId,
+        ) -> InterruptResult<()> {
+            self.events.lock().push("controller-eoi");
+            Ok(())
+        }
+
+        fn is_pending(&self, _interrupt_id: InterruptId) -> bool {
+            false
+        }
+
+        fn max_interrupts(&self) -> InterruptId {
+            256
+        }
+
+        fn max_cpus(&self) -> CpuId {
+            4
+        }
+
+        fn ack_irq(&self, _irq: &controllers::PendingIrq) -> InterruptResult<()> {
+            self.events.lock().push("controller-ack");
+            Ok(())
+        }
+    }
+
+    struct FakeInterruptSource {
+        interrupt_id: InterruptId,
+        claim: InterruptClaim,
+        event_name: &'static str,
+        events: Arc<spin::Mutex<Vec<&'static str>>>,
+    }
+
+    impl FakeInterruptSource {
+        fn new(
+            interrupt_id: InterruptId,
+            claim: InterruptClaim,
+            event_name: &'static str,
+            events: Arc<spin::Mutex<Vec<&'static str>>>,
+        ) -> Self {
+            Self {
+                interrupt_id,
+                claim,
+                event_name,
+                events,
+            }
+        }
+    }
+
+    impl InterruptSource for FakeInterruptSource {
+        fn interrupt_id(&self) -> Option<InterruptId> {
+            Some(self.interrupt_id)
+        }
+
+        fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+            self.events.lock().push(self.event_name);
+            Ok(self.claim)
+        }
+    }
+
+    impl MaskableInterruptSource for FakeInterruptSource {
+        fn mask_source(&self) -> InterruptResult<()> {
+            self.events.lock().push("source-mask");
+            Ok(())
+        }
+
+        fn unmask_source(&self) -> InterruptResult<()> {
+            self.events.lock().push("source-unmask");
+            Ok(())
+        }
+
+        fn clear_pending_source(&self) -> InterruptResult<()> {
+            self.events.lock().push("source-clear");
+            Ok(())
+        }
     }
 
     impl FakeMsiController {
@@ -906,48 +1272,149 @@ mod tests {
 
     #[test_case]
     fn test_allocate_msi_vectors_returns_not_supported_when_no_controller_registered() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let manager = InterruptManager::new();
 
-        let error = manager.allocate_msi_vectors(test_request()).unwrap_err();
+        let error = manager
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
+            .unwrap_err();
 
         assert_eq!(error, InterruptError::NotSupported);
     }
 
     #[test_case]
     fn test_allocate_msi_vectors_returns_allocation_when_controller_succeeds() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let controller = Arc::new(FakeMsiController::new(Ok(test_allocation(64))));
-        DeviceManager::get_manager().register_msi_controller(1, controller.clone());
+        devices.register_msi_controller(1, controller.clone());
         let manager = InterruptManager::new();
 
         let allocation = manager
-            .allocate_msi_vectors(test_request())
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
             .expect("expected MSI allocation");
 
         assert_eq!(controller.calls(), 1);
         assert_eq!(allocation.vectors.len(), 1);
         assert_eq!(allocation.vectors[0].virq, 64);
         assert_eq!(allocation.vectors[0].hwirq, 96);
-        DeviceManager::get_manager().clear_for_test();
     }
 
     #[test_case]
     fn test_allocate_msi_vectors_iterates_until_success() {
-        DeviceManager::get_manager().clear_for_test();
+        let devices = DeviceManager::new_for_test();
         let first = Arc::new(FakeMsiController::new(Err(MsiError::NoVectors)));
         let second = Arc::new(FakeMsiController::new(Ok(test_allocation(80))));
-        DeviceManager::get_manager().register_msi_controller(1, first.clone());
-        DeviceManager::get_manager().register_msi_controller(2, second.clone());
+        devices.register_msi_controller(1, first.clone());
+        devices.register_msi_controller(2, second.clone());
         let manager = InterruptManager::new();
 
         let allocation = manager
-            .allocate_msi_vectors(test_request())
+            .allocate_msi_vectors_from_device_manager(&devices, test_request())
             .expect("expected second controller to allocate");
 
         assert_eq!(first.calls(), 1);
         assert_eq!(second.calls(), 1);
         assert_eq!(allocation.vectors[0].virq, 80);
-        DeviceManager::get_manager().clear_for_test();
+    }
+
+    #[test_case]
+    fn test_shared_interrupt_sources_all_claim_before_controller_eoi() {
+        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let manager = InterruptManager::new();
+        manager
+            .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
+            .expect("fake external controller should register");
+        manager
+            .register_interrupt_source(
+                42,
+                Arc::new(FakeInterruptSource::new(
+                    42,
+                    InterruptClaim::NotMine,
+                    "source-a",
+                    events.clone(),
+                )),
+            )
+            .expect("first source should register");
+        manager
+            .register_interrupt_source(
+                42,
+                Arc::new(FakeInterruptSource::new(
+                    42,
+                    InterruptClaim::Handled,
+                    "source-b",
+                    events.clone(),
+                )),
+            )
+            .expect("second source should register");
+
+        manager
+            .handle_external_interrupt(42, 0)
+            .expect("shared IRQ should dispatch");
+
+        assert_eq!(
+            events.lock().as_slice(),
+            ["controller-ack", "source-a", "source-b", "controller-eoi"]
+        );
+        assert_eq!(manager.unhandled_external_interrupt_count(42), 0);
+    }
+
+    #[test_case]
+    fn test_unclaimed_shared_interrupt_is_counted_and_eoi_still_runs() {
+        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let manager = InterruptManager::new();
+        manager
+            .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
+            .expect("fake external controller should register");
+        manager
+            .register_interrupt_source(
+                43,
+                Arc::new(FakeInterruptSource::new(
+                    43,
+                    InterruptClaim::NotMine,
+                    "source-a",
+                    events.clone(),
+                )),
+            )
+            .expect("source should register");
+
+        manager
+            .handle_external_interrupt(43, 0)
+            .expect("unclaimed IRQ should still finish at controller");
+
+        assert_eq!(
+            events.lock().as_slice(),
+            ["controller-ack", "source-a", "controller-eoi"]
+        );
+        assert_eq!(manager.unhandled_external_interrupt_count(43), 1);
+    }
+
+    #[test_case]
+    fn test_register_and_enable_interrupt_source_orders_mask_clear_enable_unmask() {
+        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let manager = InterruptManager::new();
+        manager
+            .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
+            .expect("fake external controller should register");
+
+        let source = Arc::new(FakeInterruptSource::new(
+            44,
+            InterruptClaim::Handled,
+            "source-claim",
+            events.clone(),
+        ));
+        let interrupt_id = manager
+            .register_and_enable_interrupt_source(source, 0)
+            .expect("source lifecycle should complete");
+
+        assert_eq!(interrupt_id, 44);
+        assert_eq!(
+            events.lock().as_slice(),
+            [
+                "source-mask",
+                "source-clear",
+                "controller-enable",
+                "source-unmask"
+            ]
+        );
     }
 }

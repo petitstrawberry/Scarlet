@@ -75,6 +75,15 @@ pub fn pop_all_input_events() -> Vec<CompositorInputEvent> {
     core::mem::take(&mut *queue)
 }
 
+/// Return whether the compositor input queue has pending events.
+///
+/// # Returns
+///
+/// `true` if input events are queued for the compositor.
+pub fn has_pending_input_events() -> bool {
+    !INPUT_EVENT_QUEUE.lock().is_empty()
+}
+
 /// Event types
 pub mod event_types {
     pub const EV_SYN: u16 = 0x00;

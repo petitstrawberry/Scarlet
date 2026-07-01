@@ -49,6 +49,7 @@
 pub mod config;
 pub mod device;
 pub mod driver;
+pub mod intx;
 pub mod scan;
 
 extern crate alloc;

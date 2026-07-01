@@ -1091,7 +1091,7 @@ impl MemoryMappingOps for AudioCharDevice {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let _irq_guard = IrqGuard::new();
         let guard = self.ring.lock();
         let ring = guard.as_ref().ok_or("PCM ring is not configured")?;
@@ -1104,7 +1104,11 @@ impl MemoryMappingOps for AudioCharDevice {
         if length > ring.mapped_bytes - offset {
             return Err("PCM mmap length exceeds ring size");
         }
-        Ok((ring.paddr() + offset, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            ring.paddr() + offset,
+            0x3,
+            true,
+        ))
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}

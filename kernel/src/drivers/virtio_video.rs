@@ -21,7 +21,7 @@ use crate::drivers::virtio::{
     queue::{DescriptorFlag, VirtQueue},
 };
 use crate::environment::PAGE_SIZE;
-use crate::interrupt::InterruptId;
+use crate::interrupt::{InterruptClaim, InterruptId};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
@@ -1731,7 +1731,7 @@ impl MemoryMappingOps for VirtioVideoDevice {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
             return Err("VirtIO video mmap offset and length must be page-aligned");
         }
@@ -1749,7 +1749,11 @@ impl MemoryMappingOps for VirtioVideoDevice {
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("VirtIO video mmap buffer is not available")?;
-        Ok((buffer.as_paddr() + session_offset, 0x3, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            buffer.as_paddr() + session_offset,
+            0x3,
+            true,
+        ))
     }
 
     fn supports_mmap(&self) -> bool {
@@ -1777,20 +1781,25 @@ impl Selectable for VirtioVideoDevice {
 
 impl crate::device::events::InterruptCapableDevice for VirtioVideoDevice {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         let isr_status = self.read32_register(Register::InterruptStatus);
         if isr_status == 0 {
-            return Ok(());
+            return Ok(InterruptClaim::NotMine);
         }
 
         self.write32_register(Register::InterruptAck, isr_status);
         if let Err(e) = self.try_complete_pending_decode() {
             self.decoded_frame.lock().last_error = Some(e);
         }
-        Ok(())
-    }
-
-    fn interrupt_id(&self) -> Option<InterruptId> {
-        *self.interrupt_id.lock()
+        Ok(InterruptClaim::Handled)
     }
 }
 

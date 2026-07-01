@@ -130,6 +130,30 @@ impl DeviceEvent for ErrorEvent {
 ///
 /// Devices that can handle interrupts must implement this trait.
 pub trait InterruptCapableDevice: Send + Sync {
+    /// Handle an interrupt delivered to this device.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when interrupt processing completed successfully.
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()>;
+
+    /// Return the interrupt line associated with this device.
+    ///
+    /// # Returns
+    ///
+    /// The virtual IRQ number for this device, or `None` before registration.
     fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId>;
+
+    /// Try to claim a shared interrupt line for this device.
+    ///
+    /// # Returns
+    ///
+    /// `Handled` when this device owned and cleared the interrupt, or `NotMine`
+    /// when another source asserted the shared line.
+    fn claim_interrupt(
+        &self,
+    ) -> crate::interrupt::InterruptResult<crate::interrupt::InterruptClaim> {
+        self.handle_interrupt()?;
+        Ok(crate::interrupt::InterruptClaim::Handled)
+    }
 }

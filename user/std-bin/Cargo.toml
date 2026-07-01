@@ -171,9 +171,5 @@ name = "markdown_demo"
 path = "src/markdown_demo.rs"
 
 [[bin]]
-name = "video_player"
-path = "src/video_player.rs"
-
-[[bin]]
 name = "sasctl"
 path = "src/sasctl.rs"

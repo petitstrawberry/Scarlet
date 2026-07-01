@@ -194,8 +194,8 @@ script_runner = "@shell"
 script = '''
 mkdir -p .build/clang-module-cache
 env -u DEVELOPER_DIR -u SDKROOT CLANG_MODULE_CACHE_PATH=.build/clang-module-cache /usr/bin/xcrun swift build --disable-sandbox -c release --product vhost-video-videotoolbox
-mkdir -p "${CARGO_MAKE_WORKING_DIRECTORY}/dist/host"
-cp .build/release/vhost-video-videotoolbox "${CARGO_MAKE_WORKING_DIRECTORY}/dist/host/vhost_video_videotoolbox"
+mkdir -p ../../dist/host
+cp .build/release/vhost-video-videotoolbox ../../dist/host/vhost_video_videotoolbox
 '''
 
 [tasks.run-vhost-video-videotoolbox]

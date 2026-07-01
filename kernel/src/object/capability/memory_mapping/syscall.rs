@@ -184,6 +184,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             vm_start: final_vaddr,
             permissions: prot_perm,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: Some(owner),
         };
 
@@ -211,17 +212,17 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         return final_vaddr;
     }
 
-    // Shared path: need get_mapping_info_with for pmarea and permissions
-    let (paddr, obj_permissions, _obj_is_shared) =
+    // Shared path: need get_mapping_info_with for pmarea, permissions, and memory attribute.
+    let mapping_info =
         match memory_mappable.get_mapping_info_with(offset, aligned_length, is_shared) {
             Ok(info) => info,
             Err(_) => return usize::MAX,
         };
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-    let pmarea = MemoryArea::new(paddr, paddr + aligned_length - 1);
+    let pmarea = MemoryArea::new(mapping_info.paddr, mapping_info.paddr + aligned_length - 1);
 
-    let final_permissions = obj_permissions & {
+    let final_permissions = mapping_info.permissions & {
         let mut perm = 0;
         if (prot & PROT_READ) != 0 {
             perm |= 0x1;
@@ -239,7 +240,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         .handle_table
         .get_arc_clone(handle)
         .and_then(|obj| obj.as_memory_mappable_arc());
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
+        .with_memory_attribute(mapping_info.memory_attribute);
 
     if !is_map_fixed {
         if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
@@ -251,28 +253,30 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 None => return usize::MAX,
             };
             let vmarea = MemoryArea::new(chosen_vaddr, chosen_vaddr + aligned_length - 1);
-            let pmarea = MemoryArea::new(paddr, paddr + aligned_length - 1);
+            let pmarea =
+                MemoryArea::new(mapping_info.paddr, mapping_info.paddr + aligned_length - 1);
             let owner = task
                 .handle_table
                 .get_arc_clone(handle)
                 .and_then(|obj| obj.as_memory_mappable_arc());
             let retry_map =
-                VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
+                VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
+                    .with_memory_attribute(mapping_info.memory_attribute);
             if task.vm_manager.add_memory_map(retry_map).is_err() {
                 return usize::MAX;
             }
 
-            memory_mappable.on_mapped(chosen_vaddr, paddr, aligned_length, offset);
+            memory_mappable.on_mapped(chosen_vaddr, mapping_info.paddr, aligned_length, offset);
             return chosen_vaddr;
         }
 
-        memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+        memory_mappable.on_mapped(final_vaddr, mapping_info.paddr, aligned_length, offset);
         return final_vaddr;
     }
 
     match task.vm_manager.add_memory_map_fixed(vm_map) {
         Ok(removed_mappings) => {
-            memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+            memory_mappable.on_mapped(final_vaddr, mapping_info.paddr, aligned_length, offset);
 
             for removed_map in &removed_mappings {
                 if removed_map.is_shared {
@@ -358,6 +362,7 @@ fn handle_anonymous_mapping(
         vm_start: final_vaddr,
         permissions,
         is_shared,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: Some(owner),
     };
 

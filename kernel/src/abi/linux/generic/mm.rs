@@ -175,6 +175,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             vm_start: final_vaddr,
             permissions: final_permissions,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: Some(owner),
         };
 
@@ -207,11 +208,11 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return final_vaddr;
     }
 
-    // Shared path: need get_mapping_info_with for pmarea and permissions
+    // Shared path: need get_mapping_info_with for pmarea, permissions, and memory attribute.
     let mut ok_len = aligned_length;
-    let (mapping_base, obj_permissions, _obj_is_shared) = loop {
+    let mapping_info = loop {
         match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
-            Ok(info) => break info,
+            Ok(info) => break Some(info),
             Err(_e) => {
                 if ok_len >= PAGE_SIZE {
                     ok_len -= PAGE_SIZE;
@@ -219,24 +220,23 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     ok_len = 0;
                 }
                 if ok_len == 0 {
-                    break (0, 0, false);
+                    break None;
                 }
             }
         }
     };
-    let paddr = if mapping_base != 0 && is_direct_mapped(mapping_base) {
-        virt_to_phys(mapping_base)
+    let Some(mapping_info) = mapping_info else {
+        return to_result(errno::EINVAL);
+    };
+    let paddr = if mapping_info.paddr != 0 && is_direct_mapped(mapping_info.paddr) {
+        virt_to_phys(mapping_info.paddr)
     } else {
-        mapping_base
+        mapping_info.paddr
     };
 
-    final_permissions = obj_permissions & prot_mask;
+    final_permissions = mapping_info.permissions & prot_mask;
     if prot != 0 {
         final_permissions |= 0x08;
-    }
-
-    if paddr == 0 && ok_len == 0 {
-        return to_result(errno::EINVAL);
     }
 
     let ok_len_aligned = (ok_len / PAGE_SIZE) * PAGE_SIZE;
@@ -251,7 +251,8 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .handle_table
         .get_arc_clone(handle)
         .and_then(|obj| obj.as_memory_mappable_arc());
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
+        .with_memory_attribute(mapping_info.memory_attribute);
 
     let map_result = if is_fixed {
         task.vm_manager
@@ -367,6 +368,7 @@ fn handle_anonymous_mapping(
         vm_start: final_vaddr,
         permissions,
         is_shared,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: Some(owner),
     };
 
@@ -446,8 +448,8 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         if let Some(owner) = &original_mapping.owner {
             let offset = page_addr - original_mapping.vmarea.start;
-            if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, PAGE_SIZE) {
-                if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
+            if let Ok(info) = owner.get_mapping_info(offset, PAGE_SIZE) {
+                if (new_permissions & info.permissions) != (new_permissions & 0x7) {
                     return usize::MAX;
                 }
             }

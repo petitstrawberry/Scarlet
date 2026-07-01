@@ -975,7 +975,7 @@ impl crate::object::capability::MemoryMappingOps for GpuCharDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("GPU device memory mapping is not implemented")
     }
 

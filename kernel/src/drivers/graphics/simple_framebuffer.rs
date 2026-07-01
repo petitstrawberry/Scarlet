@@ -69,7 +69,7 @@ impl MemoryMappingOps for SimpleFramebufferDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by simple framebuffer device")
     }
 
