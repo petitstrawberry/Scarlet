@@ -18,6 +18,7 @@ use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig, capability, command, status, vendor};
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
+use crate::device::pci::intx::PciIntxInterruptSource;
 use crate::driver_initcall;
 use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
@@ -281,7 +282,7 @@ fn enable_pci_device(config: &PciConfig, device: &PciDeviceInfo) {
     config.write_u16(
         &addr,
         config::offset::COMMAND,
-        (command_bits | command::MEMORY_SPACE | command::BUS_MASTER) & !command::INTERRUPT_DISABLE,
+        command_bits | command::MEMORY_SPACE | command::BUS_MASTER | command::INTERRUPT_DISABLE,
     );
 }
 
@@ -289,33 +290,16 @@ fn register_legacy_intx(
     device: &PciDeviceInfo,
     handler: Arc<dyn crate::device::events::InterruptCapableDevice>,
 ) -> Option<InterruptId> {
-    let interrupt_pin = device.interrupt_pin();
-    let interrupt_id = device.routed_irq().or_else(|| {
-        let line = device.interrupt_line();
-        (line != 0 && line != 0xff).then_some(line as InterruptId)
-    })?;
-
-    if interrupt_pin == 0 {
-        return None;
-    }
+    let interrupt_id = PciIntxInterruptSource::interrupt_id_for_device(device)?;
+    let source = PciIntxInterruptSource::new(device, handler)?;
+    let source: Arc<dyn crate::interrupt::MaskableInterruptSource> = Arc::new(source);
 
     let manager = InterruptManager::global();
-    if let Err(e) = manager.register_interrupt_device(interrupt_id, handler) {
-        early_println!(
-            "[virtio-pci] Failed to register INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
-            interrupt_id,
-            device.address().bus,
-            device.address().device,
-            device.address().function,
-            e
-        );
-        return None;
-    }
-    if let Err(e) =
-        manager.enable_external_interrupt(interrupt_id, crate::arch::get_cpu().get_cpuid() as u32)
+    if let Err(e) = manager
+        .register_and_enable_interrupt_source(source, crate::arch::get_cpu().get_cpuid() as u32)
     {
         early_println!(
-            "[virtio-pci] Failed to enable INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
+            "[virtio-pci] Failed to register and enable INTx IRQ {} for {:02x}:{:02x}.{}: {:?}",
             interrupt_id,
             device.address().bus,
             device.address().device,
@@ -328,7 +312,7 @@ fn register_legacy_intx(
     early_println!(
         "[virtio-pci] Registered INTx IRQ {} pin {} for {:02x}:{:02x}.{}",
         interrupt_id,
-        interrupt_pin,
+        device.interrupt_pin(),
         device.address().bus,
         device.address().device,
         device.address().function
