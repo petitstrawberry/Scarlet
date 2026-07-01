@@ -148,7 +148,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         "[apple-cd321x] registered {} bus-phandle={:#x} addr={:#x} vid=0x{:08x} mode={}{}{}{} status=0x{:08x} power=0x{:08x} data=0x{:08x}",
         device.name(),
         controller.bus_phandle,
-        address.raw(),
+        controller.address.raw(),
         snapshot.vendor_id,
         printable_ascii(snapshot.mode[0]),
         printable_ascii(snapshot.mode[1]),
@@ -175,7 +175,7 @@ fn register_driver() {
         alloc::vec!["apple,cd321x"],
     );
 
-    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Standard);
+    DeviceManager::get_manager().register_driver(Box::new(driver), DriverPriority::Core);
 }
 
 static APPLE_CD321X: Mutex<Vec<Arc<AppleCd321x>>> = Mutex::new(Vec::new());
