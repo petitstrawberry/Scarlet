@@ -54,7 +54,7 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::early_println;
 use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
-use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
+use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
 
@@ -2014,7 +2014,7 @@ impl MemoryMappingOps for UsbMassStorageBlockDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by USB storage")
     }
 

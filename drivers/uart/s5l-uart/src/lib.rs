@@ -22,7 +22,7 @@ use scarlet::{
         },
     },
     interrupt::{InterruptId, InterruptResult},
-    object::capability::{ControlOps, MemoryMappingOps, Selectable},
+    object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable},
 };
 
 // =============================================================================
@@ -181,7 +181,7 @@ impl MemoryMappingOps for S5lUart {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported for UART")
     }
 
