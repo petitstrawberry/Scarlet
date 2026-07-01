@@ -88,6 +88,61 @@ const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
 const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
 const USB_STORAGE_CBW_LEN: usize = 31;
 const USB_STORAGE_CSW_LEN: usize = 13;
+const PORTSC_CCS: u32 = 1 << 0;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_PR: u32 = 1 << 4;
+const PORTSC_PLS_SHIFT: u32 = 5;
+const PORTSC_PLS_MASK: u32 = 0xf << PORTSC_PLS_SHIFT;
+const PORTSC_PP: u32 = 1 << 9;
+const PORTSC_SPEED_SHIFT: u32 = 10;
+const PORTSC_SPEED_MASK: u32 = 0xf << PORTSC_SPEED_SHIFT;
+const PORTSC_CSC: u32 = 1 << 17;
+const PORTSC_PEC: u32 = 1 << 18;
+const PORTSC_WRC: u32 = 1 << 19;
+const PORTSC_OCC: u32 = 1 << 20;
+const PORTSC_PRC: u32 = 1 << 21;
+const PORTSC_PLC: u32 = 1 << 22;
+const PORTSC_CEC: u32 = 1 << 23;
+const PORTSC_CAS: u32 = 1 << 24;
+const PORTSC_CHANGE_BITS: u32 =
+    PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortStatus {
+    connected: bool,
+    enabled: bool,
+    resetting: bool,
+    link_state: u32,
+    powered: bool,
+    speed_raw: u32,
+    change_bits: u32,
+    config_error: bool,
+}
+
+impl PortStatus {
+    const fn from_portsc(portsc: u32) -> Self {
+        Self {
+            connected: (portsc & PORTSC_CCS) != 0,
+            enabled: (portsc & PORTSC_PED) != 0,
+            resetting: (portsc & PORTSC_PR) != 0,
+            link_state: (portsc & PORTSC_PLS_MASK) >> PORTSC_PLS_SHIFT,
+            powered: (portsc & PORTSC_PP) != 0,
+            speed_raw: (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT,
+            change_bits: portsc & PORTSC_CHANGE_BITS,
+            config_error: (portsc & PORTSC_CAS) != 0,
+        }
+    }
+
+    const fn speed(self) -> UsbSpeed {
+        match self.speed_raw {
+            1 => UsbSpeed::Full,
+            2 => UsbSpeed::Low,
+            3 => UsbSpeed::High,
+            4 => UsbSpeed::Super,
+            _ => UsbSpeed::Full,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct BootInterfaceConfig {
@@ -688,18 +743,42 @@ impl XhciController {
         unsafe { read_volatile((self.regs.operational_base + offset) as *const u32) }
     }
 
-    fn port_connected(&self, port_id: u8) -> bool {
-        (self.read_portsc(port_id) & 1) != 0
+    fn write_portsc(&self, port_id: u8, value: u32) {
+        let offset =
+            operational::PORTSC_BASE + ((port_id as usize - 1) * operational::PORT_REGISTER_STRIDE);
+        // SAFETY: Category 11 - provenance-sensitive MMIO access.
+        // The controller maps `regs.operational_base` from a live xHCI MMIO region, and
+        // `port_id` is only produced from 1..=max_ports. The computed address is inside
+        // the operational port register space and must be accessed with volatile writes.
+        unsafe {
+            write_volatile((self.regs.operational_base + offset) as *mut u32, value);
+        }
     }
 
-    fn port_speed(&self, port_id: u8) -> UsbSpeed {
-        match (self.read_portsc(port_id) >> 10) & 0xf {
-            1 => UsbSpeed::Full,
-            2 => UsbSpeed::Low,
-            3 => UsbSpeed::High,
-            4 => UsbSpeed::Super,
-            _ => UsbSpeed::Full,
+    fn clear_port_change_bits(&self, port_id: u8, portsc: u32) {
+        let status = PortStatus::from_portsc(portsc);
+        if status.change_bits == 0 {
+            return;
         }
+        let clear_value = (portsc & !PORTSC_CHANGE_BITS) | status.change_bits;
+        self.write_portsc(port_id, clear_value);
+    }
+
+    fn log_port_status(&self, port_id: u8, portsc: u32) {
+        let status = PortStatus::from_portsc(portsc);
+        early_println!(
+            "[xHCI] Port {} PORTSC={:#x} ccs={} ped={} pr={} pls={} pp={} speed={} change={:#x} cas={}",
+            port_id,
+            portsc,
+            status.connected,
+            status.enabled,
+            status.resetting,
+            status.link_state,
+            status.powered,
+            status.speed_raw,
+            status.change_bits,
+            status.config_error
+        );
     }
 
     fn context_speed(speed: UsbSpeed) -> u8 {
@@ -873,7 +952,7 @@ impl XhciController {
                         }
                     }
                     value if value == TrbType::PortStatusChangeEvent as u8 => {
-                        let _ = self.enumerate_ports();
+                        self.handle_port_change_detected();
                     }
                     _ => {}
                 }
@@ -1480,8 +1559,10 @@ impl XhciController {
         let mut discovered = 0usize;
         for port_id in 1..=self.max_ports {
             let portsc = self.read_portsc(port_id);
-            early_println!("[xHCI] Port {} PORTSC={:#x}", port_id, portsc);
-            if !self.port_connected(port_id) {
+            let status = PortStatus::from_portsc(portsc);
+            self.log_port_status(port_id, portsc);
+            self.clear_port_change_bits(port_id, portsc);
+            if !status.connected {
                 continue;
             }
             if self
@@ -1492,7 +1573,7 @@ impl XhciController {
             {
                 continue;
             }
-            let speed = self.port_speed(port_id);
+            let speed = status.speed();
             early_println!("[xHCI] Port {} connected, speed {:?}", port_id, speed);
             let completion = self.send_command(Trb::enable_slot_command())?;
             let slot_id = completion.slot_id();
@@ -1687,10 +1768,22 @@ impl XhciController {
             match event.trb_type() {
                 value if value == TrbType::TransferEvent as u8 => self.handle_transfer_event(event),
                 value if value == TrbType::PortStatusChangeEvent as u8 => {
-                    let _ = self.enumerate_ports();
+                    self.handle_port_change_detected();
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn handle_port_change_detected(&self) {
+        early_println!("[xHCI] Port change detected");
+        match self.enumerate_ports() {
+            Ok(count) => {
+                if count != 0 {
+                    early_println!("[xHCI] Port change enumerated {} device(s)", count);
+                }
+            }
+            Err(error) => early_println!("[xHCI] Port change enumeration failed: {}", error),
         }
     }
 
@@ -2117,10 +2210,14 @@ fn determine_bar_size(
 impl UsbHostController for XhciController {
     fn poll_events(&self) {
         let status = self.operational.read_usbsts();
-        if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) != 0 {
-            self.operational
-                .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+        let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
+        if pending != 0 {
+            let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
+            self.operational.write_usbsts(pending);
             self.process_interrupt_events();
+            if port_change {
+                self.handle_port_change_detected();
+            }
         }
     }
 }
@@ -2152,12 +2249,13 @@ impl InterruptCapableDevice for XhciController {
 
     fn claim_interrupt(&self) -> crate::interrupt::InterruptResult<InterruptClaim> {
         let status = self.operational.read_usbsts();
-        if status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT) == 0 {
+        let pending = status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT);
+        if pending == 0 {
             return Ok(InterruptClaim::NotMine);
         }
 
-        self.operational
-            .write_usbsts(status & (USBSTS_EVENT_INTERRUPT | USBSTS_PORT_CHANGE_DETECT));
+        let port_change = (pending & USBSTS_PORT_CHANGE_DETECT) != 0;
+        self.operational.write_usbsts(pending);
 
         unsafe {
             write_volatile(
@@ -2167,6 +2265,9 @@ impl InterruptCapableDevice for XhciController {
         }
 
         self.process_interrupt_events();
+        if port_change {
+            self.handle_port_change_detected();
+        }
         Ok(InterruptClaim::Handled)
     }
 }
@@ -2395,5 +2496,26 @@ mod tests {
     fn test_pci_bar_struct_size() {
         // Verify PciBar size
         assert!(size_of::<PciBar>() <= 32);
+    }
+
+    #[test_case]
+    fn test_port_status_decodes_rxdetect_unconnected_port() {
+        let status = PortStatus::from_portsc(0x2a0);
+
+        assert!(!status.connected);
+        assert!(!status.enabled);
+        assert_eq!(status.link_state, 5);
+        assert!(status.powered);
+        assert_eq!(status.speed_raw, 0);
+        assert_eq!(status.change_bits, 0);
+    }
+
+    #[test_case]
+    fn test_port_status_extracts_change_bits() {
+        let portsc = PORTSC_CCS | PORTSC_CSC | PORTSC_PLC | PORTSC_CEC;
+        let status = PortStatus::from_portsc(portsc);
+
+        assert!(status.connected);
+        assert_eq!(status.change_bits, PORTSC_CSC | PORTSC_PLC | PORTSC_CEC);
     }
 }
