@@ -67,6 +67,7 @@ use super::gpio::GpioController;
 use super::i2c::I2cBus;
 use super::iommu::{
     DmaContext, IommuAttachment, IommuController, IommuDomainConfig, IommuError, IommuSpec,
+    IommuStreamId,
 };
 use super::mailbox::{MailboxChannel, MailboxClient, MailboxController, MailboxError, MailboxSpec};
 use super::nvmem::{NvmemCell, NvmemError, NvmemProvider};
@@ -1808,28 +1809,49 @@ impl DeviceManager {
         device: &PlatformDeviceInfo,
         config: IommuDomainConfig,
     ) -> Result<Option<IommuAttachment>, &'static str> {
+        let mut attachments = self.resolve_platform_iommu_attachments(device, config)?;
+        match attachments.len() {
+            0 => Ok(None),
+            1 => Ok(attachments.pop()),
+            _ => Err("iommu: multiple controllers not supported"),
+        }
+    }
+
+    fn resolve_platform_iommu_attachments(
+        &self,
+        device: &PlatformDeviceInfo,
+        config: IommuDomainConfig,
+    ) -> Result<Vec<IommuAttachment>, &'static str> {
         let iommus = match device.property("iommus") {
-            Some(property) => property,
-            None => return Ok(None),
+            Some(property) => property.value(),
+            None => return Ok(Vec::new()),
         };
 
-        let specs = self.parse_iommu_specs(iommus.value())?;
+        let specs = self.parse_iommu_specs(iommus)?;
         if specs.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        let first_phandle = specs[0].phandle;
-        let controller = self
-            .get_iommu_controller_by_phandle(first_phandle)
-            .ok_or(PROBE_DEFER)?;
-        let mut streams = Vec::new();
+        let mut groups: Vec<(u32, Arc<dyn IommuController>, Vec<IommuStreamId>)> = Vec::new();
 
         for spec in &specs {
-            if spec.phandle != first_phandle {
-                return Err("iommu: multiple controllers not supported");
-            }
+            let group_index = match groups
+                .iter()
+                .position(|(phandle, _, _)| *phandle == spec.phandle)
+            {
+                Some(index) => index,
+                None => {
+                    let controller = self
+                        .get_iommu_controller_by_phandle(spec.phandle)
+                        .ok_or(PROBE_DEFER)?;
+                    groups.push((spec.phandle, controller, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+
+            let (phandle, controller, streams) = &mut groups[group_index];
             let iommu_spec = IommuSpec {
-                controller_phandle: spec.phandle,
+                controller_phandle: *phandle,
                 cells: spec.cells.clone(),
             };
             let mut decoded_streams = controller
@@ -1838,20 +1860,25 @@ impl DeviceManager {
             streams.append(&mut decoded_streams);
         }
 
-        let domain = controller
-            .alloc_domain(config)
-            .map_err(Self::iommu_error_to_str)?;
-        for stream in &streams {
-            domain
-                .attach_stream(*stream)
+        let mut attachments = Vec::new();
+        for (_, controller, streams) in groups {
+            let domain = controller
+                .alloc_domain(config)
                 .map_err(Self::iommu_error_to_str)?;
+            for stream in &streams {
+                domain
+                    .attach_stream(*stream)
+                    .map_err(Self::iommu_error_to_str)?;
+            }
+
+            attachments.push(IommuAttachment {
+                controller,
+                domain,
+                streams,
+            });
         }
 
-        Ok(Some(IommuAttachment {
-            controller,
-            domain,
-            streams,
-        }))
+        Ok(attachments)
     }
 
     /// Resolve a platform device DMA context from its firmware properties.
@@ -1869,8 +1896,15 @@ impl DeviceManager {
         device: &PlatformDeviceInfo,
         config: IommuDomainConfig,
     ) -> Result<DmaContext, &'static str> {
+        let mut attachments = self.resolve_platform_iommu_attachments(device, config)?;
+        let primary = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments.remove(0))
+        };
         Ok(DmaContext {
-            iommu: self.resolve_platform_iommu(device, config)?,
+            iommu: primary,
+            additional_iommus: attachments,
             direct_dma_offset: 0,
         })
     }
@@ -3583,7 +3617,44 @@ mod tests {
             .resolve_platform_dma_context(&device, test_iommu_config())
             .unwrap();
         assert!(context.iommu.is_none());
+        assert!(context.additional_iommus.is_empty());
         assert_eq!(context.direct_dma_offset, 0);
+    }
+
+    #[test_case]
+    fn test_resolve_platform_dma_context_attaches_multiple_iommu_controllers() {
+        let manager = DeviceManager::new();
+        let first = Arc::new(TestIommuController::new());
+        let second = Arc::new(TestIommuController::new());
+        manager.register_iommu_controller(0x40, first.clone());
+        manager.register_iommu_controller(0x41, second.clone());
+        let device = iommu_test_device(vec![PlatformDeviceProperty::new(
+            "iommus",
+            &be_cells(&[0x40, 0x10, 0x41, 0x20]),
+        )]);
+
+        let context = manager
+            .resolve_platform_dma_context(&device, test_iommu_config())
+            .unwrap();
+
+        assert!(context.iommu.is_some());
+        assert_eq!(context.additional_iommus.len(), 1);
+        assert_eq!(first.alloc_count.load(Ordering::SeqCst), 1);
+        assert_eq!(second.alloc_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *first.domain.attached_streams.lock(),
+            vec![IommuStreamId {
+                id: 0x10,
+                substream_id: None,
+            }]
+        );
+        assert_eq!(
+            *second.domain.attached_streams.lock(),
+            vec![IommuStreamId {
+                id: 0x20,
+                substream_id: None,
+            }]
+        );
     }
 
     #[test_case]

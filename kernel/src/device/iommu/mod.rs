@@ -253,6 +253,8 @@ pub struct IommuAttachment {
 pub struct DmaContext {
     /// Optional IOMMU attachment. `None` means direct DMA.
     pub iommu: Option<IommuAttachment>,
+    /// Additional IOMMU attachments for devices whose DMA reaches multiple controllers.
+    pub additional_iommus: Vec<IommuAttachment>,
     /// Offset applied to physical addresses for direct DMA.
     pub direct_dma_offset: isize,
 }
@@ -266,6 +268,7 @@ impl DmaContext {
     pub fn direct() -> Self {
         Self {
             iommu: None,
+            additional_iommus: Vec::new(),
             direct_dma_offset: 0,
         }
     }
@@ -290,6 +293,9 @@ impl DmaContext {
         if let Some(attachment) = &self.iommu {
             let iova = paddr as Iova;
             attachment.domain.map(iova, paddr, len, flags)?;
+            for attachment in &self.additional_iommus {
+                attachment.domain.map(iova, paddr, len, flags)?;
+            }
             Ok(iova)
         } else {
             Ok((paddr as isize + self.direct_dma_offset) as DmaAddr)
@@ -308,7 +314,11 @@ impl DmaContext {
     /// `Ok(())` when the mapping is removed or direct DMA needs no action.
     pub fn unmap(&self, dma_addr: DmaAddr, len: usize) -> Result<(), IommuError> {
         if let Some(attachment) = &self.iommu {
-            attachment.domain.unmap(dma_addr as Iova, len)
+            attachment.domain.unmap(dma_addr as Iova, len)?;
+            for attachment in &self.additional_iommus {
+                attachment.domain.unmap(dma_addr as Iova, len)?;
+            }
+            Ok(())
         } else {
             Ok(())
         }
@@ -456,6 +466,7 @@ mod tests {
                 domain: domain.clone(),
                 streams: Vec::new(),
             }),
+            additional_iommus: Vec::new(),
             direct_dma_offset: 0,
         };
 
@@ -472,6 +483,43 @@ mod tests {
                 flags: IommuMapFlags::READ | IommuMapFlags::WRITE,
             })
         );
+    }
+
+    #[test_case]
+    fn test_dma_context_maps_additional_iommus() {
+        let primary_domain = Arc::new(TestDomain::new());
+        let primary_controller = Arc::new(TestController {
+            domain: primary_domain.clone(),
+        });
+        let secondary_domain = Arc::new(TestDomain::new());
+        let secondary_controller = Arc::new(TestController {
+            domain: secondary_domain.clone(),
+        });
+        let context = DmaContext {
+            iommu: Some(IommuAttachment {
+                controller: primary_controller,
+                domain: primary_domain.clone(),
+                streams: Vec::new(),
+            }),
+            additional_iommus: alloc::vec![IommuAttachment {
+                controller: secondary_controller,
+                domain: secondary_domain.clone(),
+                streams: Vec::new(),
+            }],
+            direct_dma_offset: 0,
+        };
+
+        let flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
+        let dma_addr = context.map_phys(0x3000, 0x400, flags).unwrap();
+        assert_eq!(dma_addr, 0x3000);
+        let expected = Some(RecordedMap {
+            iova: 0x3000,
+            paddr: 0x3000,
+            len: 0x400,
+            flags,
+        });
+        assert_eq!(primary_domain.last_map(), expected);
+        assert_eq!(secondary_domain.last_map(), expected);
     }
 
     #[test_case]

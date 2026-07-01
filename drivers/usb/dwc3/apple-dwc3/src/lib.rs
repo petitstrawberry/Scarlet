@@ -10,6 +10,7 @@ use scarlet::{
     device::{
         DeviceInfo,
         clk::ClkHandle,
+        iommu::{IommuDomainConfig, IommuDomainType},
         manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         phy::{PhyError, PhyHandle, PhyMode},
         platform::{
@@ -404,8 +405,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             .find(|r| matches!(r.res_type, PlatformDeviceResourceType::IRQ));
 
         let interrupt_id = irq_resource.map(|r| r.start as InterruptId);
+        let dma_context = DeviceManager::get_manager().resolve_platform_dma_context(
+            device,
+            IommuDomainConfig {
+                domain_type: IommuDomainType::Dma,
+                iova_base: 0,
+                iova_size: 1u64 << 36,
+            },
+        )?;
 
-        if let Err(e) = scarlet::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id) {
+        if let Err(e) =
+            scarlet::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id, dma_context)
+        {
             early_println!("[apple-dwc3] xHCI bind failed: {}", e);
             *APPLE_DWC3.lock() = None;
             return Err(e);
