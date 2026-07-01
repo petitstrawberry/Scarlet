@@ -328,12 +328,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
     };
 
-    let base_addr = scarlet::vm::ioremap(paddr, size).map_err(|_| "dwc3: ioremap failed")?;
-
     let dr_mode = device
         .property("dr_mode")
         .and_then(|p| p.as_str())
         .unwrap_or("otg");
+
+    log_typec_role_switch_status(device)?;
+
+    let base_addr = scarlet::vm::ioremap(paddr, size).map_err(|_| "dwc3: ioremap failed")?;
 
     if let Some(phys_prop) = device.property("phys") {
         let bytes = phys_prop.value();
@@ -426,6 +428,35 @@ fn phy_error_to_str(error: PhyError) -> &'static str {
         PhyError::Timeout => "phy: timeout",
         PhyError::HardwareError => "phy: hardware error",
     }
+}
+
+fn log_typec_role_switch_status(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    if device.property("usb-role-switch").is_none() {
+        return Ok(());
+    }
+
+    let Some(port) = DeviceManager::get_manager().get_typec_port_for_platform_device(device) else {
+        early_println!(
+            "[apple-dwc3] Type-C role switch provider not ready for {}, deferring",
+            device.name()
+        );
+        return probe_defer();
+    };
+
+    let status = port.status()?;
+    early_println!(
+        "[apple-dwc3] Type-C {} status connected={} role={:?} orientation={:?} usb2={} usb3={} raw_status=0x{:08x} raw_power=0x{:08x} raw_data=0x{:08x}",
+        port.name(),
+        status.connected,
+        status.data_role,
+        status.orientation,
+        status.usb2,
+        status.usb3,
+        status.raw_status,
+        status.raw_power_status,
+        status.raw_data_status,
+    );
+    Ok(())
 }
 
 fn prepare_phy(

@@ -12,6 +12,7 @@ use scarlet::{
         i2c::{I2cAddress, I2cBus, I2cError, I2cMessage},
         manager::{DeviceManager, DriverPriority, probe_defer},
         platform::{PlatformDeviceDriver, PlatformDeviceInfo},
+        usb::{TypecOrientation, TypecPort, TypecPortStatus, UsbDataRole},
     },
     early_println,
     sync::Mutex,
@@ -27,6 +28,12 @@ const TPS_REG_MODE: u8 = 0x03;
 const TPS_REG_STATUS: u8 = 0x1a;
 const TPS_REG_POWER_STATUS: u8 = 0x3f;
 const TPS_REG_DATA_STATUS: u8 = 0x5f;
+
+const TPS_STATUS_PLUG_PRESENT: u32 = 1 << 0;
+const TPS_STATUS_PLUG_UPSIDE_DOWN: u32 = 1 << 4;
+const TPS_DATA_STATUS_USB2_CONNECTION: u32 = 1 << 4;
+const TPS_DATA_STATUS_USB3_CONNECTION: u32 = 1 << 5;
+const TPS_DATA_STATUS_USB_DATA_ROLE: u32 = 1 << 7;
 
 struct AppleCd321x {
     bus: Arc<dyn I2cBus>,
@@ -89,6 +96,51 @@ impl AppleCd321x {
             power_status: self.read_u32(TPS_REG_POWER_STATUS)?,
             data_status: self.read_u32(TPS_REG_DATA_STATUS)?,
         })
+    }
+
+    fn status_from_snapshot(snapshot: Cd321xSnapshot) -> TypecPortStatus {
+        let connected = snapshot.status & TPS_STATUS_PLUG_PRESENT != 0;
+        let usb2 = snapshot.data_status & TPS_DATA_STATUS_USB2_CONNECTION != 0;
+        let usb3 = snapshot.data_status & TPS_DATA_STATUS_USB3_CONNECTION != 0;
+        let data_role = if usb2 || usb3 {
+            if snapshot.data_status & TPS_DATA_STATUS_USB_DATA_ROLE != 0 {
+                UsbDataRole::Device
+            } else {
+                UsbDataRole::Host
+            }
+        } else {
+            UsbDataRole::None
+        };
+        let orientation = if !connected {
+            TypecOrientation::None
+        } else if snapshot.status & TPS_STATUS_PLUG_UPSIDE_DOWN != 0 {
+            TypecOrientation::Reverse
+        } else {
+            TypecOrientation::Normal
+        };
+
+        TypecPortStatus {
+            connected,
+            usb2,
+            usb3,
+            data_role,
+            orientation,
+            raw_status: snapshot.status,
+            raw_power_status: snapshot.power_status,
+            raw_data_status: snapshot.data_status,
+        }
+    }
+}
+
+impl TypecPort for AppleCd321x {
+    fn name(&self) -> &'static str {
+        "apple-cd321x"
+    }
+
+    fn status(&self) -> Result<TypecPortStatus, &'static str> {
+        self.snapshot()
+            .map(Self::status_from_snapshot)
+            .map_err(|_| "apple-cd321x: failed to read status")
     }
 }
 
@@ -158,6 +210,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         snapshot.power_status,
         snapshot.data_status,
     );
+
+    let manager = DeviceManager::get_manager();
+    for endpoint in manager.endpoint_phandles_for_platform_device(device) {
+        let port: Arc<dyn TypecPort> = controller.clone();
+        manager.register_typec_port_endpoint(endpoint, port);
+        early_println!(
+            "[apple-cd321x] endpoint {:#x} mapped to {} addr={:#x}",
+            endpoint,
+            device.name(),
+            controller.address.raw(),
+        );
+    }
 
     APPLE_CD321X.lock().push(controller);
     Ok(())
