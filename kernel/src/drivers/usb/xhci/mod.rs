@@ -94,6 +94,7 @@ const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
 const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
 const XHCI_COMMAND_TIMEOUT_US: u64 = 500_000;
 const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
+const XHCI_PENDING_EVENT_LIMIT: usize = 64;
 const XHCI_VERBOSE_TRACE: bool = false;
 const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
 const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
@@ -528,6 +529,7 @@ pub struct XhciController {
     scratchpads: Mutex<Option<ScratchpadBuffers>>,
     cmd_ring: Mutex<Option<DmaTrbRing>>,
     event_ring: Mutex<Option<EventRing>>,
+    pending_events: Mutex<Vec<Trb>>,
     devices: Mutex<Vec<UsbDevice>>,
     slot_runtime: Mutex<Vec<SlotRuntime>>,
     interrupt_id: Mutex<Option<InterruptId>>,
@@ -612,6 +614,7 @@ impl XhciController {
             scratchpads: Mutex::new(None),
             cmd_ring: Mutex::new(None),
             event_ring: Mutex::new(None),
+            pending_events: Mutex::new(Vec::new()),
             devices: Mutex::new(Vec::new()),
             slot_runtime: Mutex::new(Vec::new()),
             interrupt_id: Mutex::new(None),
@@ -1041,6 +1044,35 @@ impl XhciController {
         );
     }
 
+    fn queue_pending_event(&self, event: Trb) {
+        let mut pending = self.pending_events.lock();
+        if pending.len() >= XHCI_PENDING_EVENT_LIMIT {
+            pending.remove(0);
+        }
+        pending.push(event);
+    }
+
+    fn take_pending_event<F>(&self, mut predicate: F) -> Option<Trb>
+    where
+        F: FnMut(&Trb) -> bool,
+    {
+        let mut pending = self.pending_events.lock();
+        let index = pending.iter().position(&mut predicate)?;
+        Some(pending.remove(index))
+    }
+
+    fn take_pending_command_completion(&self) -> Option<Trb> {
+        self.take_pending_event(|event| event.trb_type() == TrbType::CommandCompletionEvent as u8)
+    }
+
+    fn take_pending_transfer_event(&self, slot_id: u8, endpoint_id: u8) -> Option<Trb> {
+        self.take_pending_event(|event| {
+            event.trb_type() == TrbType::TransferEvent as u8
+                && event.slot_id() == slot_id
+                && event.endpoint_id() == endpoint_id
+        })
+    }
+
     fn log_command_timeout_state(&self) {
         println!(
             "[xHCI] Command timeout regs: USBCMD={:#x} USBSTS={:#x} CRCR={:#x} DCBAAP={:#x} CONFIG={:#x}",
@@ -1146,6 +1178,17 @@ impl XhciController {
     fn poll_command_completion(&self) -> Result<Trb, &'static str> {
         let deadline = crate::time::current_time() + XHCI_COMMAND_TIMEOUT_US;
         while crate::time::current_time() < deadline {
+            if let Some(event) = self.take_pending_command_completion() {
+                if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
+                    if XHCI_VERBOSE_TRACE {
+                        Self::log_event("Command completion event", event);
+                    }
+                    return Ok(event);
+                }
+                Self::log_event("Command completion event", event);
+                return Err("xHCI command completion failed");
+            }
+
             let event_ring_guard = self.event_ring.lock();
             let event_ring = event_ring_guard
                 .as_ref()
@@ -1164,8 +1207,13 @@ impl XhciController {
                     }
                     Self::log_event("Command completion event", event);
                     return Err("xHCI command completion failed");
-                } else if XHCI_VERBOSE_TRACE {
-                    Self::log_event("Event while waiting command", event);
+                } else {
+                    if XHCI_VERBOSE_TRACE {
+                        Self::log_event("Event while waiting command", event);
+                    }
+                    if event.trb_type() == TrbType::TransferEvent as u8 {
+                        self.queue_pending_event(event);
+                    }
                 }
             }
             core::hint::spin_loop();
@@ -1478,6 +1526,17 @@ impl XhciController {
     fn wait_for_transfer_event(&self, slot_id: u8, endpoint_id: u8) -> Result<Trb, &'static str> {
         let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
         while crate::time::current_time() < deadline {
+            if let Some(event) = self.take_pending_transfer_event(slot_id, endpoint_id) {
+                if Self::transfer_successful(event) {
+                    if XHCI_VERBOSE_TRACE {
+                        Self::log_event("Transfer event", event);
+                    }
+                    return Ok(event);
+                }
+                Self::log_event("Transfer event", event);
+                return Err("xHCI transfer event failed");
+            }
+
             if let Some(event) = self.poll_event() {
                 match event.trb_type() {
                     value if value == TrbType::TransferEvent as u8 => {
@@ -1492,6 +1551,9 @@ impl XhciController {
                             return Err("xHCI transfer event failed");
                         } else if XHCI_VERBOSE_TRACE {
                             Self::log_event("Event while waiting", event);
+                            self.queue_pending_event(event);
+                        } else {
+                            self.queue_pending_event(event);
                         }
                     }
                     value if value == TrbType::PortStatusChangeEvent as u8 => {
@@ -1499,6 +1561,9 @@ impl XhciController {
                             Self::log_event("Event while waiting", event);
                         }
                         self.handle_port_change_detected();
+                    }
+                    value if value == TrbType::CommandCompletionEvent as u8 => {
+                        self.queue_pending_event(event);
                     }
                     _ if XHCI_VERBOSE_TRACE => {
                         Self::log_event("Event while waiting", event);
@@ -3062,7 +3127,7 @@ impl XhciController {
         Ok(())
     }
 
-    fn handle_transfer_event(&self, event: Trb) {
+    fn handle_transfer_event(&self, event: Trb) -> bool {
         let slot_id = event.slot_id();
         let endpoint_id = event.endpoint_id();
         let mut slots = self.slot_runtime.lock();
@@ -3070,15 +3135,15 @@ impl XhciController {
             .iter_mut()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
         else {
-            return;
+            return false;
         };
 
         if slot.interrupt_dci != Some(endpoint_id) {
-            return;
+            return false;
         }
 
         let Some(buffer) = slot.interrupt_buffer.as_ref() else {
-            return;
+            return true;
         };
 
         match slot.hid.as_mut() {
@@ -3108,14 +3173,22 @@ impl XhciController {
                 slot_id, error
             );
         }
+        true
     }
 
     fn process_interrupt_events(&self) {
         while let Some(event) = self.poll_event() {
             match event.trb_type() {
-                value if value == TrbType::TransferEvent as u8 => self.handle_transfer_event(event),
+                value if value == TrbType::TransferEvent as u8 => {
+                    if !self.handle_transfer_event(event) {
+                        self.queue_pending_event(event);
+                    }
+                }
                 value if value == TrbType::PortStatusChangeEvent as u8 => {
                     self.handle_port_change_detected();
+                }
+                value if value == TrbType::CommandCompletionEvent as u8 => {
+                    self.queue_pending_event(event);
                 }
                 _ => {}
             }

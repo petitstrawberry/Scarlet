@@ -51,6 +51,7 @@ use super::super::core::{DirectoryEntryInternal, FileSystemId, FileSystemOperati
 
 const DEVPTS_MOUNT_NODE_ID: u64 = 1024;
 const PTMX_SYMLINK_NODE_ID: u64 = 1025;
+const DEVFS_BLOCK_SECTOR_SIZE: usize = 512;
 
 /// DevFS - Device filesystem implementation
 ///
@@ -613,14 +614,32 @@ impl DevFileObject {
                 }
                 DeviceType::Block => {
                     if let Some(block_device) = device_guard_ref.as_block_device() {
-                        // For block devices, we read sectors using the request system
+                        let disk_size = block_device.get_disk_size();
+                        let position = if position > usize::MAX as u64 {
+                            return Ok(0);
+                        } else {
+                            position as usize
+                        };
+                        if buffer.is_empty() || position >= disk_size {
+                            return Ok(0);
+                        }
+
+                        let bytes_to_read = core::cmp::min(buffer.len(), disk_size - position);
+                        let sector_offset = position % DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector = position / DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector_count =
+                            (sector_offset + bytes_to_read).div_ceil(DEVFS_BLOCK_SECTOR_SIZE);
+                        let request_len = sector_count * DEVFS_BLOCK_SECTOR_SIZE;
+                        let mut request_buffer = Vec::new();
+                        request_buffer.resize(request_len, 0);
+
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Read,
-                            sector: 0,
-                            sector_count: 1,
+                            sector,
+                            sector_count,
                             head: 0,
                             cylinder: 0,
-                            buffer: buffer.to_vec(),
+                            buffer: request_buffer,
                         });
 
                         block_device.enqueue_request(request);
@@ -629,11 +648,14 @@ impl DevFileObject {
                         if let Some(result) = results.first() {
                             match &result.result {
                                 Ok(_) => {
-                                    // Copy the data back to the buffer
-                                    let bytes_to_copy =
-                                        core::cmp::min(buffer.len(), result.request.buffer.len());
-                                    buffer[..bytes_to_copy]
-                                        .copy_from_slice(&result.request.buffer[..bytes_to_copy]);
+                                    let available =
+                                        result.request.buffer.len().saturating_sub(sector_offset);
+                                    let bytes_to_copy = core::cmp::min(bytes_to_read, available);
+                                    buffer[..bytes_to_copy].copy_from_slice(
+                                        &result.request.buffer
+                                            [sector_offset..sector_offset + bytes_to_copy],
+                                    );
+                                    *self.position.write() += bytes_to_copy as u64;
                                     return Ok(bytes_to_copy);
                                 }
                                 Err(e) => {
@@ -697,13 +719,65 @@ impl DevFileObject {
                 }
                 DeviceType::Block => {
                     if let Some(block_device) = device_guard_ref.as_block_device() {
+                        let disk_size = block_device.get_disk_size();
+                        let position = if position > usize::MAX as u64 {
+                            return Ok(0);
+                        } else {
+                            position as usize
+                        };
+                        if buffer.is_empty() || position >= disk_size {
+                            return Ok(0);
+                        }
+
+                        let bytes_to_write = core::cmp::min(buffer.len(), disk_size - position);
+                        let sector_offset = position % DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector = position / DEVFS_BLOCK_SECTOR_SIZE;
+                        let sector_count =
+                            (sector_offset + bytes_to_write).div_ceil(DEVFS_BLOCK_SECTOR_SIZE);
+                        let request_len = sector_count * DEVFS_BLOCK_SECTOR_SIZE;
+                        let mut request_buffer = Vec::new();
+                        request_buffer.resize(request_len, 0);
+
+                        if sector_offset != 0 || bytes_to_write != request_len {
+                            let read_request =
+                                Box::new(crate::device::block::request::BlockIORequest {
+                                    request_type:
+                                        crate::device::block::request::BlockIORequestType::Read,
+                                    sector,
+                                    sector_count,
+                                    head: 0,
+                                    cylinder: 0,
+                                    buffer: request_buffer,
+                                });
+                            block_device.enqueue_request(read_request);
+                            let results = block_device.process_requests();
+                            let result = results.first().ok_or_else(|| {
+                                FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    "Block device read-modify-write produced no result",
+                                )
+                            })?;
+                            if let Err(e) = &result.result {
+                                return Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Block device read-modify-write failed: {}", e),
+                                ));
+                            }
+                            request_buffer = result.request.buffer.clone();
+                            if request_buffer.len() < request_len {
+                                request_buffer.resize(request_len, 0);
+                            }
+                        }
+
+                        request_buffer[sector_offset..sector_offset + bytes_to_write]
+                            .copy_from_slice(&buffer[..bytes_to_write]);
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Write,
-                            sector: 0,
-                            sector_count: 1,
+                            sector,
+                            sector_count,
                             head: 0,
                             cylinder: 0,
-                            buffer: buffer.to_vec(),
+                            buffer: request_buffer,
                         });
 
                         block_device.enqueue_request(request);
@@ -711,7 +785,10 @@ impl DevFileObject {
 
                         if let Some(result) = results.first() {
                             match &result.result {
-                                Ok(_) => return Ok(buffer.len()),
+                                Ok(_) => {
+                                    *self.position.write() += bytes_to_write as u64;
+                                    return Ok(bytes_to_write);
+                                }
                                 Err(e) => {
                                     return Err(FileSystemError::new(
                                         FileSystemErrorKind::IoError,
@@ -1348,6 +1425,75 @@ mod tests {
             truncate_result.is_err(),
             "Truncate should fail for device files"
         );
+    }
+
+    #[test_case]
+    fn test_devfs_block_device_read_advances_position() {
+        use crate::device::block::{
+            BlockDevice,
+            mockblk::MockBlockDevice,
+            request::{BlockIORequest, BlockIORequestType},
+        };
+
+        let device_manager = DeviceManager::get_manager();
+        let block_device = Arc::new(MockBlockDevice::new(
+            "test_devfs_block_position",
+            DEVFS_BLOCK_SECTOR_SIZE,
+            2,
+        ));
+
+        let mut sector0 = Vec::new();
+        sector0.resize(DEVFS_BLOCK_SECTOR_SIZE, b'A');
+        block_device.enqueue_request(Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Write,
+            sector: 0,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: sector0,
+        }));
+
+        let mut sector1 = Vec::new();
+        sector1.resize(DEVFS_BLOCK_SECTOR_SIZE, b'B');
+        block_device.enqueue_request(Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Write,
+            sector: 1,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: sector1,
+        }));
+        let results = block_device.process_requests();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.result.is_ok()));
+
+        device_manager.register_device_with_name(
+            "test_devfs_block_position".to_string(),
+            block_device.clone(),
+        );
+
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+        let device_node = devfs
+            .lookup(&root, &"test_devfs_block_position".to_string())
+            .expect("block device should be visible in devfs");
+        let file = devfs
+            .open(&device_node, 0)
+            .expect("block device should open through devfs");
+
+        let mut first = [0u8; DEVFS_BLOCK_SECTOR_SIZE];
+        let first_len = file
+            .read(&mut first)
+            .expect("first sector read should work");
+        assert_eq!(first_len, DEVFS_BLOCK_SECTOR_SIZE);
+        assert!(first.iter().all(|byte| *byte == b'A'));
+
+        let mut second = [0u8; DEVFS_BLOCK_SECTOR_SIZE];
+        let second_len = file
+            .read(&mut second)
+            .expect("second sector read should work");
+        assert_eq!(second_len, DEVFS_BLOCK_SECTOR_SIZE);
+        assert!(second.iter().all(|byte| *byte == b'B'));
     }
 
     #[test_case]

@@ -88,6 +88,9 @@ case "$QEMU_GPU" in
 esac
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
+QEMU_USB_STORAGE="${SCARLET_QEMU_USB_STORAGE:-0}"
+QEMU_USB_STORAGE_IMAGE="${SCARLET_QEMU_USB_STORAGE_IMAGE:-$PROJECT_DIR/.scarlet/images/qemu-usb-storage.img}"
+QEMU_USB_STORAGE_SIZE="${SCARLET_QEMU_USB_STORAGE_SIZE:-64M}"
 
 case ",$QEMU_MACHINE," in
     *,virtualization=*)
@@ -347,6 +350,37 @@ if [ "$QEMU_AUDIO" = "1" ] || [ "$QEMU_AUDIO" = "true" ]; then
     QEMU_AUDIO_ARGS=(-audiodev "$QEMU_AUDIO_DRIVER,id=audio0" -device virtio-sound-pci,audiodev=audio0,bus=pcie.0)
 fi
 
+ensure_qemu_usb_storage_image() {
+    local image="$1"
+    local size="$2"
+
+    if [ -f "$image" ]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$image")"
+    echo "Creating QEMU USB storage image: $image ($size)"
+    if ! truncate -s "$size" "$image"; then
+        echo "Error: failed to create QEMU USB storage image: $image"
+        exit 1
+    fi
+}
+
+QEMU_USB_STORAGE_ARGS=()
+if [ "$QEMU_USB_STORAGE" = "1" ] || [ "$QEMU_USB_STORAGE" = "true" ]; then
+    if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q 'qemu-xhci'; then
+        echo "Error: qemu-system-aarch64 does not provide qemu-xhci"
+        exit 1
+    fi
+    ensure_qemu_usb_storage_image "$QEMU_USB_STORAGE_IMAGE" "$QEMU_USB_STORAGE_SIZE"
+    echo "Enabling QEMU USB storage: $QEMU_USB_STORAGE_IMAGE"
+    QEMU_USB_STORAGE_ARGS=(
+        -device qemu-xhci,id=xhci,bus=pcie.0
+        -drive id=usb_storage0,file="$QEMU_USB_STORAGE_IMAGE",format=raw,if=none
+        -device usb-storage,bus=xhci.0,drive=usb_storage0,removable=on
+    )
+fi
+
 QEMU_VHOST_USER_VIDEO_ARGS=()
 if [ "${SCARLET_VHOST_USER_VIDEO:-0}" = "1" ] || [ "${SCARLET_VHOST_USER_VIDEO:-}" = "true" ]; then
     VHOST_USER_VIDEO_SOCKET="${SCARLET_VHOST_USER_VIDEO_SOCKET:-/private/tmp/scarlet-video.sock}"
@@ -421,6 +455,7 @@ QEMU_CMD=(qemu-system-aarch64
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \
     "${QEMU_AUDIO_ARGS[@]}" \
+    "${QEMU_USB_STORAGE_ARGS[@]}" \
     "${QEMU_VHOST_USER_VIDEO_ARGS[@]}" \
     -device virtio-rng-device,bus=virtio-mmio-bus.6 \
     $QEMU_DEBUG_ARGS \
