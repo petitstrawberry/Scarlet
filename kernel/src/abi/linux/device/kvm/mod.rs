@@ -256,7 +256,7 @@ impl MemoryMappingOps for KvmCreatedDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("KVM device does not support mmap")
     }
 
@@ -1410,7 +1410,7 @@ impl MemoryMappingOps for KvmSystemDevice {
         &self,
         _offset: usize,
         _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         Err("Memory mapping not supported by KVM system device")
     }
 

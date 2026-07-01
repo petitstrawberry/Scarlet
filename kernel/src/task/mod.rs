@@ -1127,6 +1127,7 @@ impl Task {
             vm_start: vaddr,
             permissions,
             is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         self.vm_manager
@@ -1165,6 +1166,7 @@ impl Task {
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            memory_attribute: mmap.memory_attribute,
                             owner: mmap.owner.clone(),
                         };
                         self.vm_manager
@@ -1190,6 +1192,7 @@ impl Task {
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            memory_attribute: mmap.memory_attribute,
                             owner: mmap.owner.clone(),
                         };
                         self.vm_manager
@@ -1354,6 +1357,7 @@ impl Task {
             vm_start: vaddr,
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         Ok(mmap)
@@ -1640,6 +1644,7 @@ impl Task {
                         vm_start: mmap.vm_start,
                         permissions: mmap.permissions,
                         is_shared: true,
+                        memory_attribute: mmap.memory_attribute,
                         owner: mmap.owner.clone(),
                     };
                     child
@@ -1668,6 +1673,7 @@ impl Task {
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: false,
+                            memory_attribute: mmap.memory_attribute,
                             owner: Some(cloned_owner),
                         };
                         child
@@ -1683,6 +1689,7 @@ impl Task {
                                 vm_start: mmap.vm_start,
                                 permissions: mmap.permissions,
                                 is_shared: false,
+                                memory_attribute: mmap.memory_attribute,
                                 owner: Some(Arc::clone(owner)),
                             };
                             child
@@ -1708,6 +1715,7 @@ impl Task {
                                 vm_start: vaddr,
                                 permissions,
                                 is_shared: false,
+                                memory_attribute: mmap.memory_attribute,
                                 owner: None,
                             };
                             // SAFETY: src/dst are valid page-aligned ranges of `size` bytes.
@@ -1739,6 +1747,7 @@ impl Task {
                             vm_start: mmap.vm_start,
                             permissions: mmap.permissions,
                             is_shared: false,
+                            memory_attribute: mmap.memory_attribute,
                             owner: Some(cow_owner),
                         };
                         self.vm_manager.with_memmaps_mut(|maps| {
@@ -1773,6 +1782,7 @@ impl Task {
                         vm_start: vaddr,
                         permissions,
                         is_shared: false,
+                        memory_attribute: mmap.memory_attribute,
                         owner: None,
                     };
 
@@ -1800,6 +1810,7 @@ impl Task {
                         vm_start: mmap.vm_start,
                         permissions: mmap.permissions,
                         is_shared: false,
+                        memory_attribute: mmap.memory_attribute,
                         owner: None,
                     };
                     child
@@ -3267,6 +3278,7 @@ mod tests {
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
 

@@ -16,6 +16,7 @@ use core::fmt;
 ///   compute correct page indices even after partial unmapping.
 /// * `permissions` - The access permissions for this mapping
 /// * `is_shared` - Whether this mapping is shared between processes
+/// * `memory_attribute` - Cacheability/device attribute requested for this mapping
 /// * `owner` - Optional strong reference to the object that provides page fault resolution.
 ///   The mapping owns this reference, so the owner stays alive as long as the mapping exists.
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct VirtualMemoryMap {
     pub vm_start: usize,
     pub permissions: usize,
     pub is_shared: bool,
+    pub memory_attribute: MemoryAttribute,
     pub owner: Option<Arc<dyn MemoryMappingOps>>,
 }
 
@@ -36,6 +38,7 @@ impl fmt::Debug for VirtualMemoryMap {
             .field("vm_start", &self.vm_start)
             .field("permissions", &self.permissions)
             .field("is_shared", &self.is_shared)
+            .field("memory_attribute", &self.memory_attribute)
             .field("has_owner", &self.owner.is_some())
             .finish()
     }
@@ -49,6 +52,7 @@ impl Default for VirtualMemoryMap {
             vm_start: 0,
             permissions: 0,
             is_shared: false,
+            memory_attribute: MemoryAttribute::Normal,
             owner: None,
         }
     }
@@ -79,9 +83,33 @@ impl VirtualMemoryMap {
             vm_start: vmarea.start,
             permissions,
             is_shared,
+            memory_attribute: MemoryAttribute::Normal,
             owner,
         }
     }
+
+    /// Returns this mapping with the requested memory attribute.
+    ///
+    /// # Arguments
+    /// * `memory_attribute` - Cacheability/device attribute to apply when installing the mapping
+    ///
+    /// # Returns
+    /// The mapping descriptor with the supplied memory attribute.
+    pub fn with_memory_attribute(mut self, memory_attribute: MemoryAttribute) -> Self {
+        self.memory_attribute = memory_attribute;
+        self
+    }
+}
+
+/// Cacheability and device attributes for a virtual memory mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAttribute {
+    /// Normal cacheable memory.
+    Normal,
+    /// Normal memory without CPU cache allocation.
+    NonCacheable,
+    /// Device memory for MMIO regions.
+    Device,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

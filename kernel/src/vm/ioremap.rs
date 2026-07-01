@@ -36,7 +36,7 @@ use spin::{Mutex, Once};
 
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
 use crate::vm::get_kernel_vm_manager;
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 // ---------------------------------------------------------------------------
 // Internal allocator
@@ -163,7 +163,8 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
         true, // shared: accessible from any address space using the kernel PT
         None,
-    );
+    )
+    .with_memory_attribute(MemoryAttribute::Device);
 
     let km = get_kernel_vm_manager();
 

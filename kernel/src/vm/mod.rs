@@ -124,6 +124,7 @@ pub fn kernel_vm_init(
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
         is_shared: true, // Kernel memory should be shared across all processes
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     get_kernel_vm_manager()
@@ -143,6 +144,7 @@ pub fn kernel_vm_init(
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     get_kernel_vm_manager()
@@ -161,6 +163,7 @@ pub fn kernel_vm_init(
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     get_kernel_vm_manager()
@@ -188,6 +191,7 @@ pub fn kernel_vm_init(
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
         if initramfs_hhdm_area.start < hhdm_area.start || initramfs_hhdm_area.end > hhdm_area.end {
@@ -301,6 +305,7 @@ pub fn user_kernel_vm_init(task: &Task) {
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
         is_shared: true, // Kernel memory should be shared across all processes
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     task.vm_manager
@@ -324,6 +329,7 @@ pub fn user_kernel_vm_init(task: &Task) {
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     task.vm_manager
@@ -342,6 +348,7 @@ pub fn user_kernel_vm_init(task: &Task) {
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
     task.vm_manager
@@ -456,6 +463,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
+        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
         owner: None,
     };
 

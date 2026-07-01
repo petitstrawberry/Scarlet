@@ -403,6 +403,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
             vm_start: base_vaddr,
             permissions,
             is_shared: true,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
         };
 

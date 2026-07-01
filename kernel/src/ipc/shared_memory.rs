@@ -247,7 +247,7 @@ impl MemoryMappingOps for SharedMemory {
         &self,
         offset: usize,
         length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let state = self.state.read();
 
         if !state.valid {
@@ -265,13 +265,17 @@ impl MemoryMappingOps for SharedMemory {
             return Err("Mapping request exceeds shared memory size");
         }
 
-        // Return physical address (base + offset), permissions, and shared flag
+        // Return physical address (base + offset), permissions, and shared flag.
         let paddr = state
             .paddr
             .checked_add(offset)
             .ok_or("Physical address overflow in shared memory mapping")?;
 
-        Ok((paddr, state.permissions, true))
+        Ok(crate::object::capability::MemoryMappingInfo::new(
+            paddr,
+            state.permissions,
+            true,
+        ))
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
@@ -426,20 +430,20 @@ mod tests {
 
         // Test valid mapping request
         match shmem.get_mapping_info(0, 4096) {
-            Ok((mapped_paddr, mapped_perms, is_shared)) => {
-                assert_eq!(mapped_paddr, paddr);
-                assert_eq!(mapped_perms, permissions);
-                assert!(is_shared); // Shared memory should always be shared
+            Ok(info) => {
+                assert_eq!(info.paddr, paddr);
+                assert_eq!(info.permissions, permissions);
+                assert!(info.is_shared); // Shared memory should always be shared
             }
             Err(e) => panic!("Mapping info failed: {}", e),
         }
 
         // Test mapping with offset
         match shmem.get_mapping_info(1024, 2048) {
-            Ok((mapped_paddr, mapped_perms, is_shared)) => {
-                assert_eq!(mapped_paddr, paddr + 1024);
-                assert_eq!(mapped_perms, permissions);
-                assert!(is_shared);
+            Ok(info) => {
+                assert_eq!(info.paddr, paddr + 1024);
+                assert_eq!(info.permissions, permissions);
+                assert!(info.is_shared);
             }
             Err(e) => panic!("Mapping info with offset failed: {}", e),
         }

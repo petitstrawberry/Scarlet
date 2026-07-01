@@ -11,8 +11,9 @@ use core::arch::asm;
 use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
-use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
+use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
+use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
@@ -37,11 +38,11 @@ const MAX_BLOCK_LEVEL: usize = 2;
 
 /// Attributes carried while installing a mapping.
 ///
-/// Currently this only stores Scarlet virtual-memory permissions, but keeping
-/// the attributes bundled makes the level-specific mapping path explicit.
+/// Keeping the attributes bundled makes the level-specific mapping path explicit.
 #[derive(Clone, Copy)]
 struct MapAttrs {
     permissions: usize,
+    memory_attribute: MemoryAttribute,
 }
 
 /// Returns the page size represented by a logical page-table level.
@@ -287,14 +288,6 @@ pub enum Shareability {
     InnerShareable = 0b11,
 }
 
-/// Memory attribute indices for MAIR_EL1
-#[repr(u8)]
-pub enum MemoryAttribute {
-    Device = 0,
-    Normal = 1,
-    NonCacheable = 2,
-}
-
 /// Page table structure aligned to 4KB
 #[repr(align(4096))]
 #[derive(Debug)]
@@ -423,6 +416,7 @@ impl PageTable {
 
         let attrs = MapAttrs {
             permissions: mmap.permissions,
+            memory_attribute: mmap.memory_attribute,
         };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
@@ -481,8 +475,17 @@ impl PageTable {
         let vaddr = vaddr & !0xfff;
         let paddr = paddr & !0xfff;
 
-        self.try_map_at_level(asid, vaddr, paddr, MapAttrs { permissions }, 0)
-            .expect("map: couldn't install a 4 KiB leaf mapping");
+        self.try_map_at_level(
+            asid,
+            vaddr,
+            paddr,
+            MapAttrs {
+                permissions,
+                memory_attribute: MemoryAttribute::Normal,
+            },
+            0,
+        )
+        .expect("map: couldn't install a 4 KiB leaf mapping");
 
         // Publish new mappings to all PEs that may run this address space.
         unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
@@ -515,7 +518,13 @@ impl PageTable {
             return Err("Cannot replace existing page table with a leaf");
         }
 
-        let entry = Self::make_leaf_entry(vaddr, paddr, attrs.permissions, level);
+        let entry = Self::make_leaf_entry(
+            vaddr,
+            paddr,
+            attrs.permissions,
+            level,
+            attrs.memory_attribute,
+        );
         pte.set_entry(entry);
 
         // Ensure the updated PTE is visible to the hardware table walker.
@@ -533,18 +542,24 @@ impl PageTable {
     /// Level 0 uses a page descriptor (`0b11`); levels 1 and 2 use block
     /// descriptors (`0b01`). Permission, memory type, shareability, and execute
     /// attributes are encoded from the mapping request.
-    fn make_leaf_entry(vaddr: usize, paddr: usize, permissions: usize, level: usize) -> u64 {
+    fn make_leaf_entry(
+        vaddr: usize,
+        paddr: usize,
+        permissions: usize,
+        level: usize,
+        memory_attribute: MemoryAttribute,
+    ) -> u64 {
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
-        let is_device = !is_user && (IOREMAP_START..=IOREMAP_END).contains(&vaddr);
-        let memory_attr = if is_device {
-            MemoryAttribute::Device as u64
-        } else {
-            MemoryAttribute::Normal as u64
+        let memory_attr = match memory_attribute {
+            MemoryAttribute::Normal => 1,
+            MemoryAttribute::NonCacheable => 2,
+            MemoryAttribute::Device => 0,
         };
-        let shareability = if is_device {
-            Shareability::OuterShareable as u64
-        } else {
-            Shareability::InnerShareable as u64
+        let shareability = match memory_attribute {
+            MemoryAttribute::Device => Shareability::OuterShareable as u64,
+            MemoryAttribute::Normal | MemoryAttribute::NonCacheable => {
+                Shareability::InnerShareable as u64
+            }
         };
 
         let mut entry = 0u64;
@@ -582,7 +597,7 @@ impl PageTable {
                 paddr,
                 permissions,
                 is_user,
-                is_device,
+                memory_attribute == MemoryAttribute::Device,
                 entry,
             );
         }
@@ -952,6 +967,55 @@ mod tests {
         );
         let pte = page_table.walk(0xffff_ffff_8000_0000, false, 1).unwrap();
         assert_eq!(pte.entry & 0xfff, 0x707);
+    }
+
+    #[test_case]
+    fn test_leaf_encoding_uses_declared_memory_attribute() {
+        let asid = alloc_virtual_address_space();
+        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let vaddr = 0x4100_0000;
+        let paddr = 0x8100_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(paddr, paddr + PAGE_SIZE - 1),
+            MemoryArea::new(vaddr, vaddr + PAGE_SIZE - 1),
+            VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize
+                | VirtualMemoryPermission::User as usize,
+            true,
+            None,
+        )
+        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::NonCacheable);
+
+        root.map_memory_area(asid, mmap, true, true)
+            .expect("non-cacheable mapping failed");
+
+        let pte = root
+            .walk_to_level(vaddr, 0, false, asid)
+            .expect("leaf PTE not found");
+        assert_eq!((pte.entry >> 2) & 0b111, 2);
+
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_leaf_encoding_does_not_infer_device_from_ioremap_va() {
+        let normal_entry = PageTable::make_leaf_entry(
+            crate::environment::IOREMAP_START,
+            0x8100_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Normal,
+        );
+        assert_eq!((normal_entry >> 2) & 0b111, 1);
+
+        let device_entry = PageTable::make_leaf_entry(
+            0x4200_0000,
+            0x8200_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Device,
+        );
+        assert_eq!((device_entry >> 2) & 0b111, 0);
     }
 
     #[test_case]
