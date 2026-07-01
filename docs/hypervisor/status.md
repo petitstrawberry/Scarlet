@@ -6,12 +6,15 @@ This document tracks the implementation status of the Scarlet Hypervisor (SHV).
 
 | Feature | RISC-V 64-bit | AArch64 |
 |---------|---------------|---------|
-| Basic VM creation | ✅ Implemented | ❌ Not Implemented |
-| vCPU creation | ✅ Implemented | ❌ Not Implemented |
-| Stage-2 MMU | ✅ Implemented | ❌ Not Implemented |
-| Guest entry/exit | ✅ Implemented | ❌ Not Implemented |
-| Trap handling | ✅ Implemented | ❌ Not Implemented |
-| CSR/_sysreg management | ✅ Implemented | ❌ Not Implemented |
+| Basic VM creation | ✅ Implemented | ✅ Implemented |
+| vCPU creation | ✅ Implemented | ✅ Implemented |
+| Stage-2 MMU | ✅ Implemented | ✅ Implemented |
+| Guest entry/exit | ✅ Implemented | ✅ Implemented |
+| Trap handling | ✅ Implemented | ✅ Implemented |
+| CSR/sysreg management | ✅ Implemented | ✅ Implemented |
+| Timer virtualization | ✅ Implemented | ✅ Implemented |
+| Interrupt injection | ⚠️ Partial | ⚠️ Partial |
+| Linux `/dev/kvm` compatibility | ✅ Implemented | ✅ Implemented |
 
 ## RISC-V 64-bit (H-extension)
 
@@ -60,6 +63,16 @@ This document tracks the implementation status of the Scarlet Hypervisor (SHV).
 | PLIC | ✅ | Interrupt controller |
 | VirtIO devices | ❌ | Planned |
 
+### Linux KVM Compatibility
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `/dev/kvm` device | ✅ | Linux ABI ioctl dispatch maps to SHV |
+| VM/vCPU lifecycle ioctls | ✅ | `KVM_CREATE_VM`, `KVM_CREATE_VCPU`, `KVM_RUN` |
+| User memory regions | ✅ | `KVM_SET_USER_MEMORY_REGION` |
+| Register access | ✅ | RISC-V one-reg/core/timer/SBI registers |
+| IRQ line / interrupt ioctls | ⚠️ Partial | Enough for current guests, not complete |
+
 ### Missing Features
 
 | Feature | Priority | Notes |
@@ -77,25 +90,81 @@ This document tracks the implementation status of the Scarlet Hypervisor (SHV).
 
 ## AArch64
 
-**Status: Not Implemented**
+**Status: Implemented, active bring-up**
 
-The AArch64 hypervisor support exists only as stub code. The following are placeholder modules:
+The AArch64 hypervisor path is implemented under `kernel/src/arch/aarch64/hv/`.
+It is newer than the RISC-V path and still has rough edges around broader
+VGIC/device-model coverage, but it is no longer stub-only.
 
-- `kernel/src/arch/aarch64/hv/mod.rs` - Module structure only
-- `kernel/src/arch/aarch64/hv/vm.rs` - Stub `VmObject` implementation
-- `kernel/src/arch/aarch64/hv/guest_vcpu.rs` - Stub structures
-- `kernel/src/arch/aarch64/hv/mmu.rs` - Empty
-- `kernel/src/arch/aarch64/hv/switch.rs` - Empty
-- `kernel/src/arch/aarch64/hv/trap.rs` - Empty
+### Core Features
 
-### Required for AArch64 Support
+| Feature | Status | Notes |
+|---------|--------|-------|
+| VM creation (`sys_shv_vm_create`) | ✅ | |
+| vCPU creation (`sys_shv_vcpu_create`) | ✅ | |
+| vCPU run (`sys_shv_vcpu_run`) | ✅ | |
+| Handle-based API | ✅ | Via `HandleControl` |
+| Stage-2 page tables | ✅ | 4 KiB granule, 40-bit IPA configuration |
+| Guest memory slots | ✅ | |
+| VTTBR_EL2 / VTCR_EL2 setup | ✅ | Per-CPU VTCR setup and per-VM VTTBR root |
+| Guest EL1 sysreg state | ✅ | `GuestSystemRegs` and KVM one-reg conversion |
+| Guest entry/exit | ✅ | EL2/VHE world switch path |
+| Host EL2 context save/restore | ✅ | |
+| Linux KVM API compatibility | ✅ | `/dev/kvm` ioctl path, AArch64 one-reg/core/sysreg handling |
 
-1. Stage-2 translation page tables
-2. VTTBR_EL2 management
-3. VCPU state (ELR_EL2, SPSR_EL2, etc.)
-4. Exception handling from EL1 to EL2
-5. Timer virtualization
-6. GIC virtualization
+### Trap Handling
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Guest page faults | ✅ | Auto-maps RAM, exits on MMIO |
+| MMIO read/write | ✅ | Decodes trapped data aborts |
+| WFI/WFE | ✅ | |
+| HVC/SMC firmware calls | ✅ | PSCI/SMCCC handling is wired through the KVM compatibility path |
+| System register traps | ✅ | Timer and selected ID/cache/sysreg emulation |
+| Breakpoint / illegal instruction | ✅ | Exits to userspace |
+| Host interrupts while guest is running | ✅ | Exit path exists |
+
+### Timer and Interrupts
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Virtual timer state | ✅ | CNTV registers and virtual counter offset |
+| Guest timer PPI | ✅ | PPI 27 path |
+| VGICv3 list registers | ✅ | Probed and saved/restored |
+| GIC distributor/CPU interface MMIO | ⚠️ Partial | Emulation exists for the current guest path |
+| External interrupt injection | ⚠️ Partial | SPI/PPI injection paths exist, routing is still limited |
+
+### Linux KVM Compatibility
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `/dev/kvm` device | ✅ | Linux ABI ioctl dispatch maps to SHV |
+| VM/vCPU lifecycle ioctls | ✅ | `KVM_CREATE_VM`, `KVM_CREATE_VCPU`, `KVM_RUN` |
+| User memory regions | ✅ | `KVM_SET_USER_MEMORY_REGION` |
+| AArch64 register API | ✅ | Core registers, one-reg sysregs, PSCI firmware registers |
+| ARM vCPU init ioctls | ✅ | `KVM_ARM_PREFERRED_TARGET`, `KVM_ARM_VCPU_INIT`, finalize path |
+| VGIC device ioctls | ⚠️ Partial | vGICv3/ITS attributes handled for current VMM needs |
+| Firecracker-class VMM workloads | ✅ | Current compatibility target; full Linux KVM API parity is not claimed |
+
+### Device Emulation (U-SHV)
+
+| Device | Status | Notes |
+|--------|--------|-------|
+| PL011 UART | ✅ | |
+| VirtIO devices | ❌ | Planned |
+
+### Missing / Rough Areas
+
+| Feature | Priority | Notes |
+|---------|----------|-------|
+| SMP (multi-vCPU) | High | Current path is effectively single-vCPU focused |
+| Broader VGIC/GIC emulation | High | Enough for current bring-up, not complete |
+| VirtIO block/net/console | Medium | For guest storage, networking, and console |
+| Device passthrough | Low | Requires IOMMU |
+| Guest debug (GDB stub) | Low | |
+| Snapshot/restore | Low | |
+| Live migration | Low | |
+| Nested virtualization | Very Low | |
 
 ## API Stability
 
