@@ -17,7 +17,14 @@ use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
-const SCARLET_MAIR_EL1: u64 = 0x44ff00;
+const MAIR_DEVICE_NGNRNE: u64 = 0x00;
+const MAIR_NORMAL_WRITE_BACK: u64 = 0xff;
+const MAIR_NORMAL_NON_CACHEABLE: u64 = 0x44;
+const MAIR_DEVICE_GRE: u64 = 0x0c;
+const SCARLET_MAIR_EL1: u64 = MAIR_DEVICE_NGNRNE
+    | (MAIR_NORMAL_WRITE_BACK << 8)
+    | (MAIR_NORMAL_NON_CACHEABLE << 16)
+    | (MAIR_DEVICE_GRE << 24);
 // TCR_EL1.IPS=0b010 selects a 40-bit PA range; QEMU virt can place PCI ECAM above 36 bits.
 const SCARLET_TCR_EL1: u64 = 0x2_B510_3510;
 const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
@@ -542,7 +549,7 @@ impl PageTable {
     /// Level 0 uses a page descriptor (`0b11`); levels 1 and 2 use block
     /// descriptors (`0b01`). Permission, memory type, shareability, and execute
     /// attributes are encoded from the mapping request.
-    fn make_leaf_entry(
+    pub(crate) fn make_leaf_entry(
         vaddr: usize,
         paddr: usize,
         permissions: usize,
@@ -553,10 +560,13 @@ impl PageTable {
         let memory_attr = match memory_attribute {
             MemoryAttribute::Normal => 1,
             MemoryAttribute::NonCacheable => 2,
+            MemoryAttribute::DeviceBurstable => 3,
             MemoryAttribute::Device => 0,
         };
         let shareability = match memory_attribute {
-            MemoryAttribute::Device => Shareability::OuterShareable as u64,
+            MemoryAttribute::Device | MemoryAttribute::DeviceBurstable => {
+                Shareability::OuterShareable as u64
+            }
             MemoryAttribute::Normal | MemoryAttribute::NonCacheable => {
                 Shareability::InnerShareable as u64
             }
@@ -993,6 +1003,16 @@ mod tests {
             .walk_to_level(vaddr, 0, false, asid)
             .expect("leaf PTE not found");
         assert_eq!((pte.entry >> 2) & 0b111, 2);
+
+        let burstable_entry = PageTable::make_leaf_entry(
+            0x4300_0000,
+            0x8300_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::DeviceBurstable,
+        );
+        assert_eq!((burstable_entry >> 2) & 0b111, 3);
+        assert_eq!((SCARLET_MAIR_EL1 >> 24) & 0xff, 0x0c);
 
         free_virtual_address_space(asid);
     }

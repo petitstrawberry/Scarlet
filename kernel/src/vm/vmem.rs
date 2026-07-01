@@ -108,6 +108,11 @@ pub enum MemoryAttribute {
     Normal,
     /// Normal memory without CPU cache allocation.
     NonCacheable,
+    /// Device memory for bulk write windows where writes may be gathered.
+    ///
+    /// This is intended for device-backed buffers such as framebuffers or VRAM.
+    /// Use [`MemoryAttribute::Device`] for MMIO registers with side effects.
+    DeviceBurstable,
     /// Device memory for MMIO regions.
     Device,
 }

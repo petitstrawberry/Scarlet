@@ -848,7 +848,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
 
         Ok(
             crate::object::capability::MemoryMappingInfo::new(paddr, permissions, is_shared)
-                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::NonCacheable),
+                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
         )
     }
 
@@ -1905,7 +1905,7 @@ mod tests {
         assert!(info.is_shared);
         assert_eq!(
             info.memory_attribute,
-            crate::vm::vmem::MemoryAttribute::NonCacheable
+            crate::vm::vmem::MemoryAttribute::DeviceBurstable
         );
 
         // Test invalid offset
@@ -1995,7 +1995,7 @@ mod tests {
         assert!(info.is_shared);
         assert_eq!(
             info.memory_attribute,
-            crate::vm::vmem::MemoryAttribute::NonCacheable
+            crate::vm::vmem::MemoryAttribute::DeviceBurstable
         );
     }
 }

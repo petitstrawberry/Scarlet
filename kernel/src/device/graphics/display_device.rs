@@ -452,7 +452,7 @@ impl MemoryMappingOps for DisplayCharDevice {
             0x3,
             true,
         )
-        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::NonCacheable))
+        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable))
     }
 
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
