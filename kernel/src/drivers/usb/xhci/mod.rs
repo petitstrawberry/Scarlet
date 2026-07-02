@@ -148,7 +148,10 @@ const USB_HUB_PORT_ENABLE: u16 = 1 << 1;
 const USB_HUB_PORT_LOW_SPEED: u16 = 1 << 9;
 const USB_HUB_PORT_HIGH_SPEED: u16 = 1 << 10;
 const USB_HUB_PORT_CHANGE_CONNECTION: u16 = 1 << 0;
+const USB_HUB_PORT_CHANGE_ENABLE: u16 = 1 << 1;
 const USB_HUB_PORT_CHANGE_RESET: u16 = 1 << 4;
+const USB_HUB_PORT_CHANGE_BH_RESET: u16 = 1 << 5;
+const USB_HUB_PORT_CHANGE_LINK_STATE: u16 = 1 << 6;
 const USB_HUB_ROUTE_DEPTH_MAX: u8 = 5;
 
 #[inline]
@@ -347,6 +350,18 @@ impl HubPortStatus {
 
     const fn connection_changed(self) -> bool {
         (self.change & USB_HUB_PORT_CHANGE_CONNECTION) != 0
+    }
+
+    const fn enable_changed(self) -> bool {
+        (self.change & USB_HUB_PORT_CHANGE_ENABLE) != 0
+    }
+
+    const fn bh_reset_changed(self) -> bool {
+        (self.change & USB_HUB_PORT_CHANGE_BH_RESET) != 0
+    }
+
+    const fn link_state_changed(self) -> bool {
+        (self.change & USB_HUB_PORT_CHANGE_LINK_STATE) != 0
     }
 
     const fn speed(self, hub_is_superspeed: bool) -> UsbSpeed {
@@ -2556,11 +2571,9 @@ impl XhciController {
         let mut discovered = 0usize;
 
         for port in 1..=hub.num_ports {
-            let _ = self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_CONNECTION);
-            let _ = self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_ENABLE);
-
             let status = self.hub_get_port_status(slot_id, port)?;
             self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
+            self.clear_hub_port_changes(slot_id, port, status, hub.is_superspeed)?;
             if !status.connected() {
                 continue;
             }
@@ -2628,6 +2641,31 @@ impl XhciController {
         }
 
         Ok(discovered)
+    }
+
+    fn clear_hub_port_changes(
+        &self,
+        slot_id: u8,
+        port: u8,
+        status: HubPortStatus,
+        hub_is_superspeed: bool,
+    ) -> Result<(), &'static str> {
+        if status.connection_changed() {
+            self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_CONNECTION)?;
+        }
+        if status.enable_changed() {
+            self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_ENABLE)?;
+        }
+        if status.reset_complete_changed() {
+            self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_RESET)?;
+        }
+        if hub_is_superspeed && status.bh_reset_changed() {
+            self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_BH_PORT_RESET)?;
+        }
+        if hub_is_superspeed && status.link_state_changed() {
+            self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_LINK_STATE)?;
+        }
+        Ok(())
     }
 
     fn reset_hub_port(&self, slot_id: u8, port: u8) -> Result<HubPortStatus, &'static str> {
