@@ -44,7 +44,7 @@ to = "/"
 [images.boot]
 format = "limine-uefi"
 output = ".scarlet/images/limine-aarch64-full.img"
-cmdline = "console=ttyS0 root=/dev/vblk1"
+cmdline = "console=ttyS0 root=/dev/vblk0"
 deps = ["initramfs"]
 
 [[images.boot.layers]]
