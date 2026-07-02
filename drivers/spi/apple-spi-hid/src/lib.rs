@@ -54,6 +54,7 @@ const MAX_IRQ_DRAIN: usize = 8;
 const IRQ_LOG_LIMIT: u32 = 16;
 const REP_DELAY_US: u64 = 250_000;
 const REP_PERIOD_US: u64 = 33_000;
+const SPI_HID_VERBOSE_TRACE: bool = false;
 const PACKET_LOG_LIMIT: u32 = 32;
 const REPORT_LOG_LIMIT: u32 = 16;
 
@@ -387,9 +388,9 @@ impl AppleSpiHidTransport {
             let packet = self.recv_packet()?;
             let expected_crc = Self::crc16(&packet[..254]);
             let packet_crc = u16::from_le_bytes([packet[254], packet[255]]);
-            let packet_has_data = packet.iter().any(|byte| *byte != 0);
-            let packet_log_index = PACKET_LOGS.fetch_add(1, Ordering::Relaxed);
-            if packet_has_data || packet_log_index < PACKET_LOG_LIMIT {
+            if SPI_HID_VERBOSE_TRACE
+                && PACKET_LOGS.fetch_add(1, Ordering::Relaxed) < PACKET_LOG_LIMIT
+            {
                 early_println!(
                     "apple-spi-hid: packet flags={:#x} dev={:#x} offset={} remain={} len={} crc_ok={} data={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                     packet[0],
@@ -409,6 +410,13 @@ impl AppleSpiHidTransport {
                 );
             }
             if expected_crc != packet_crc {
+                early_println!(
+                    "apple-spi-hid: packet crc mismatch flags={:#x} dev={:#x} expected={:#06x} got={:#06x}",
+                    packet[0],
+                    packet[1],
+                    expected_crc,
+                    packet_crc
+                );
                 return Err(SpiError::BusError);
             }
 
@@ -877,7 +885,9 @@ impl AppleSpiHidTransport {
             let touch_major =
                 i16::from_le_bytes([finger[FINGER_TOUCH_MAJOR], finger[FINGER_TOUCH_MAJOR + 1]]);
 
-            if REPORT_LOGS.fetch_add(1, Ordering::Relaxed) < REPORT_LOG_LIMIT {
+            if SPI_HID_VERBOSE_TRACE
+                && REPORT_LOGS.fetch_add(1, Ordering::Relaxed) < REPORT_LOG_LIMIT
+            {
                 let abs_x = i16::from_le_bytes([finger[FINGER_ABS_X], finger[FINGER_ABS_X + 1]]);
                 let abs_y = i16::from_le_bytes([finger[FINGER_ABS_Y], finger[FINGER_ABS_Y + 1]]);
                 early_println!(
@@ -944,7 +954,7 @@ impl AppleSpiHidTransport {
     }
 
     fn handle_input_report(&self, device_id: u8, report: &[u8]) {
-        if REPORT_LOGS.fetch_add(1, Ordering::Relaxed) < REPORT_LOG_LIMIT {
+        if SPI_HID_VERBOSE_TRACE && REPORT_LOGS.fetch_add(1, Ordering::Relaxed) < REPORT_LOG_LIMIT {
             early_println!(
                 "apple-spi-hid: input report dev={} len={} data={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                 device_id,
@@ -984,7 +994,7 @@ impl AppleSpiHidTransport {
 impl InterruptCapableDevice for AppleSpiHidTransport {
     fn handle_interrupt(&self) -> InterruptResult<()> {
         let ready = self.is_ready();
-        if IRQ_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
+        if SPI_HID_VERBOSE_TRACE && IRQ_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
             early_println!(
                 "apple-spi-hid: irq value={:?} active={} booted={} ready={}",
                 self.irq_line_value(),
