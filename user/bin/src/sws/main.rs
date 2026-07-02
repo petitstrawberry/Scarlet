@@ -19,6 +19,7 @@ use sbus_client as sbus;
 use std::io::Write;
 use std::println;
 use std::socket::Socket;
+use std::task::{SCHED_UTIL_SCALE, set_sched_util_min};
 
 const STEMD_SERVICE_READY_CMD: u8 = 0x06;
 const STEMD_NOTIFY_RETRIES: usize = 100;
@@ -87,6 +88,10 @@ fn main() -> i32 {
 
     println!("Compositor ready. Starting main loop...");
     notify_service_ready("sws");
+
+    if set_sched_util_min(SCHED_UTIL_SCALE).is_err() {
+        println!("[sws] Failed to set compositor scheduler utilization hint");
+    }
 
     // Run main loop
     if let Err(e) = compositor.run() {
