@@ -151,6 +151,10 @@ fn register_cpu_topology_from_fdt() {
                 err
             ),
         }
+
+        if let Some(phandle) = cpu_performance_domain_phandle(&cpu) {
+            crate::device::cpufreq::register_cpu_performance_domain(cpu_id, phandle);
+        }
     }
 }
 
@@ -180,6 +184,11 @@ fn is_enabled_cpu_node(cpu: &fdt::node::FdtNode) -> bool {
 
 fn cpu_capacity_dmips_mhz(cpu: &fdt::node::FdtNode) -> Option<u32> {
     let prop = cpu.property("capacity-dmips-mhz")?;
+    read_be_u32(prop.value)
+}
+
+fn cpu_performance_domain_phandle(cpu: &fdt::node::FdtNode) -> Option<u32> {
+    let prop = cpu.property("performance-domains")?;
     read_be_u32(prop.value)
 }
 

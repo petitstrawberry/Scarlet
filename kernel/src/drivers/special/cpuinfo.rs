@@ -51,6 +51,25 @@ impl CpuInfoDevice {
             let _ = writeln!(output, "core class\t: {}", topology.core_class.as_str());
             let _ = writeln!(output, "cpu capacity\t: {}", topology.capacity);
             let _ = writeln!(output, "util scale\t: {}", SCHED_UTIL_SCALE);
+            if let Some(freq) = crate::device::cpufreq::cpu_frequency_info(cpu_id) {
+                let _ = writeln!(output, "perf domain\t: 0x{:x}", freq.performance_domain);
+                let _ = writeln!(output, "dvfs status\t: 0x{:08x}", freq.raw_status);
+                if let Some(pstate) = freq.current_pstate {
+                    let _ = writeln!(output, "cur pstate\t: {}", pstate);
+                }
+                if let Some(pstate) = freq.target_pstate {
+                    let _ = writeln!(output, "target pstate\t: {}", pstate);
+                }
+                if let Some(freq_khz) = freq.current_freq_khz {
+                    let _ = writeln!(output, "cur freq kHz\t: {}", freq_khz);
+                }
+                if let Some(freq_khz) = freq.target_freq_khz {
+                    let _ = writeln!(output, "target freq kHz\t: {}", freq_khz);
+                }
+                if let Some(freq_khz) = freq.max_freq_khz {
+                    let _ = writeln!(output, "max freq kHz\t: {}", freq_khz);
+                }
+            }
             let _ = writeln!(output);
         }
 
