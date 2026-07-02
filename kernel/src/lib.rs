@@ -864,11 +864,18 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         .unwrap()
         .set_cwd_by_path("/")
         .expect("Failed to set initial working directory");
-    let init_argv = ["/system/scarlet/bin/init"];
+    let init_cmdline = boot_info.get_cmdline();
+    let init_argv_default = ["/system/scarlet/bin/init"];
+    let init_argv_with_cmdline = ["/system/scarlet/bin/init", init_cmdline];
+    let init_argv: &[&str] = if init_cmdline.is_empty() {
+        &init_argv_default
+    } else {
+        &init_argv_with_cmdline
+    };
 
     match TransparentExecutor::execute_binary(
         "/system/scarlet/bin/init",
-        &init_argv,
+        init_argv,
         &[],
         &task,
         task.get_trapframe(),

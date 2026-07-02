@@ -4,6 +4,7 @@
 extern crate scarlet_std as std;
 
 use std::{
+    env, format,
     fs::{File, create_directory, mount, pivot_root},
     handle::Handle,
     println,
@@ -13,6 +14,18 @@ use std::{
 static mut STDIN: Option<Handle> = None;
 static mut STDOUT: Option<Handle> = None;
 static mut STDERR: Option<Handle> = None;
+
+const DEFAULT_ROOT_DEVICE: &str = "/dev/vblk0";
+const DEFAULT_ROOT_FSTYPE: &str = "ext2";
+
+fn cmdline_value<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix(key) {
+            return Some(value);
+        }
+    }
+    None
+}
 
 fn setup_devfs() -> Result<(), &'static str> {
     let _ = create_directory("/dev");
@@ -42,18 +55,21 @@ fn setup_stdio() -> Result<(), &'static str> {
     Ok(())
 }
 
-fn mount_rootfs() -> Result<(), &'static str> {
+fn mount_rootfs(cmdline: &str) -> Result<(), &'static str> {
     let _ = create_directory("/mnt");
     let _ = create_directory("/mnt/newroot");
 
+    let root_device = cmdline_value(cmdline, "root=").unwrap_or(DEFAULT_ROOT_DEVICE);
+    let root_fstype = cmdline_value(cmdline, "rootfstype=").unwrap_or(DEFAULT_ROOT_FSTYPE);
+    let root_options = format!("device={},rw", root_device);
     mount(
-        "/dev/vblk0",
+        root_device,
         "/mnt/newroot",
-        "ext2",
+        root_fstype,
         0,
-        Some("device=/dev/vblk0,rw"),
+        Some(&root_options),
     )
-    .map_err(|_| "failed to mount /dev/vblk0 as ext2")?;
+    .map_err(|_| "failed to mount configured rootfs")?;
 
     let _ = create_directory("/mnt/newroot/tmp");
     let _ = mount("tmpfs", "/mnt/newroot/tmp", "tmpfs", 0, Some("size=32M"));
@@ -96,6 +112,9 @@ fn exec_firecracker() -> ! {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    let args = env::args_vec();
+    let cmdline = args.get(1).map(|arg| arg.as_str()).unwrap_or("");
+
     if let Err(error) = setup_devfs() {
         println!("microvm-init: {}", error);
         return -1;
@@ -106,8 +125,11 @@ fn main() -> i32 {
     }
 
     println!("microvm-init: pid={}", getpid());
+    if !cmdline.is_empty() {
+        println!("microvm-init: boot cmdline: {}", cmdline);
+    }
 
-    if let Err(error) = mount_rootfs() {
+    if let Err(error) = mount_rootfs(cmdline) {
         println!("microvm-init: {}", error);
         return -1;
     }

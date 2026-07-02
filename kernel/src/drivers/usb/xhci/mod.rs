@@ -3263,6 +3263,7 @@ struct UsbMassStorageBlockDevice {
     sector_size: Mutex<usize>,
     sector_count: Mutex<usize>,
     request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
+    command_lock: Mutex<()>,
     next_tag: AtomicUsize,
 }
 
@@ -3281,6 +3282,7 @@ impl UsbMassStorageBlockDevice {
             sector_size: Mutex::new(512),
             sector_count: Mutex::new(0),
             request_queue: Mutex::new(VecDeque::new()),
+            command_lock: Mutex::new(()),
             next_tag: AtomicUsize::new(1),
         }
     }
@@ -3322,6 +3324,8 @@ impl UsbMassStorageBlockDevice {
         if command.len() > 16 {
             return Err("SCSI command too large for BOT CBW");
         }
+
+        let _command_guard = self.command_lock.lock();
 
         let (data_len, direction_in) = data_stage
             .as_ref()

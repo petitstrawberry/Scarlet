@@ -4,7 +4,7 @@
 extern crate scarlet_std as std;
 
 use std::{
-    format,
+    env, format,
     fs::{
         File, create_directory, list_directory, mount, pivot_root, remove_directory, remove_file,
     },
@@ -20,43 +20,75 @@ static mut STDERR: Option<Handle> = None;
 
 const FALLBACK_ROOT_TMPFS_OPTIONS: &str = "size=512M";
 const VOLATILE_TMPFS_OPTIONS: &str = "size=128M";
+const DEFAULT_ROOT_FSTYPE: &str = "ext2";
+const DEFAULT_ROOT_DEVICES: [&str; 2] = ["/dev/vblk0", "/dev/usbblk0"];
 
-fn setup_new_root() -> bool {
+fn cmdline_value<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix(key) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn mount_block_root(device: &str, fstype: &str) -> bool {
+    let options = format!("device={},rw", device);
+    println!(
+        "init: Mounting {} root from {} at /mnt/newroot",
+        fstype, device
+    );
+    match mount(device, "/mnt/newroot", fstype, 0, Some(&options)) {
+        Ok(_) => {
+            println!("init: {} root filesystem mounted from {}", fstype, device);
+            true
+        }
+        Err(_) => {
+            println!("init: Failed to mount {} root from {}", fstype, device);
+            false
+        }
+    }
+}
+
+fn mount_configured_root(cmdline: &str) -> bool {
+    let fstype = cmdline_value(cmdline, "rootfstype=").unwrap_or(DEFAULT_ROOT_FSTYPE);
+
+    if let Some(root_device) = cmdline_value(cmdline, "root=") {
+        return mount_block_root(root_device, fstype);
+    }
+
+    for device in DEFAULT_ROOT_DEVICES {
+        if mount_block_root(device, fstype) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn setup_new_root(cmdline: &str) -> bool {
     println!("init: Setting up new root filesystem...");
 
     let mut using_tmpfs_fallback = false;
 
-    // 1. Mount ext2 filesystem from first available block device (e.g., /dev/vblk0)
-    println!("init: Mounting ext2 for new root at /mnt/newroot");
-    match mount(
-        "/dev/vblk0",
-        "/mnt/newroot",
-        "ext2",
-        0,
-        Some("device=/dev/vblk0,rw"),
-    ) {
-        Ok(_) => {
-            println!("init: ext2 root filesystem mounted successfully");
-        }
-        Err(_) => {
-            println!("init: Failed to mount ext2 at /mnt/newroot, trying fallback...");
-            // Fallback to tmpfs if ext2 fails
-            println!("init: Falling back to tmpfs for new root");
-            match mount(
-                "tmpfs",
-                "/mnt/newroot",
-                "tmpfs",
-                0,
-                Some(FALLBACK_ROOT_TMPFS_OPTIONS),
-            ) {
-                Ok(_) => {
-                    println!("init: Fallback tmpfs mounted successfully");
-                    using_tmpfs_fallback = true;
-                }
-                Err(_) => {
-                    println!("init: Failed to mount fallback tmpfs at /mnt/newroot");
-                    return false;
-                }
+    // 1. Mount the configured root block device, or fall back to tmpfs.
+    if !mount_configured_root(cmdline) {
+        println!("init: Failed to mount block root at /mnt/newroot, trying fallback...");
+        println!("init: Falling back to tmpfs for new root");
+        match mount(
+            "tmpfs",
+            "/mnt/newroot",
+            "tmpfs",
+            0,
+            Some(FALLBACK_ROOT_TMPFS_OPTIONS),
+        ) {
+            Ok(_) => {
+                println!("init: Fallback tmpfs mounted successfully");
+                using_tmpfs_fallback = true;
+            }
+            Err(_) => {
+                println!("init: Failed to mount fallback tmpfs at /mnt/newroot");
+                return false;
             }
         }
     }
@@ -165,6 +197,7 @@ fn check_block_devices() -> bool {
                 println!("init:   - {}", entry.name);
                 // Check for common block device names
                 if entry.name.starts_with("vblk")
+                    || entry.name.starts_with("usbblk")
                     || entry.name.starts_with("vda")
                     || entry.name.starts_with("sda")
                     || entry.name.starts_with("hda")
@@ -460,6 +493,9 @@ fn copy_symlink(src: &str, dest: &str) -> bool {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    let args = env::args_vec();
+    let cmdline = args.get(1).map(|arg| arg.as_str()).unwrap_or("");
+
     // Initialize the device filesystem
     if setup_devfs().is_err() {
         return -1;
@@ -469,6 +505,9 @@ fn main() -> i32 {
     setup_stdio();
 
     println!("init: I'm the init process: PID={}", getpid());
+    if !cmdline.is_empty() {
+        println!("init: boot cmdline: {}", cmdline);
+    }
 
     // Check for available block devices
     if check_block_devices() {
@@ -480,7 +519,7 @@ fn main() -> i32 {
     println!("init: Starting root filesystem transition...");
 
     // Demonstrate pivot_root functionality with ext2 support
-    if setup_new_root() {
+    if setup_new_root(cmdline) {
         if perform_pivot_root() {
             println!("init: Root filesystem transition completed successfully");
 

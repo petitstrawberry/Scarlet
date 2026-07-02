@@ -5,7 +5,7 @@ use limine::mp::MpInfo;
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
-    MODULE_REQUEST, MP_REQUEST, ensure_base_revision_supported, framebuffer_area,
+    MODULE_REQUEST, MP_REQUEST, boot_cmdline, ensure_base_revision_supported, framebuffer_area,
     hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
@@ -174,9 +174,10 @@ pub extern "C" fn limine_entry() -> ! {
     let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
-    let cmdline = fdt_manager
+    let fdt_cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
+    let cmdline = boot_cmdline(fdt_cmdline);
     let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
     let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 

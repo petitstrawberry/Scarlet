@@ -88,8 +88,37 @@ case "$QEMU_GPU" in
 esac
 QEMU_NET="${SCARLET_QEMU_NET:-1}"
 QEMU_INPUT="${SCARLET_QEMU_INPUT:-1}"
-QEMU_USB_STORAGE="${SCARLET_QEMU_USB_STORAGE:-0}"
-QEMU_USB_STORAGE_IMAGE="${SCARLET_QEMU_USB_STORAGE_IMAGE:-$PROJECT_DIR/.scarlet/images/qemu-usb-storage.img}"
+if [ -n "${SCARLET_QEMU_ROOTFS_TRANSPORT:-}" ]; then
+    QEMU_ROOTFS_TRANSPORT="$SCARLET_QEMU_ROOTFS_TRANSPORT"
+elif grep -Eq 'cmdline = ".*root=/dev/usbblk0' "$PROJECT_DIR/scarlet.toml"; then
+    QEMU_ROOTFS_TRANSPORT="usb"
+else
+    QEMU_ROOTFS_TRANSPORT="virtio"
+fi
+case "$QEMU_ROOTFS_TRANSPORT" in
+    usb|virtio|none)
+        ;;
+    *)
+        echo "Error: unsupported SCARLET_QEMU_ROOTFS_TRANSPORT=$QEMU_ROOTFS_TRANSPORT (expected usb, virtio, or none)"
+        exit 1
+        ;;
+esac
+
+if [ -n "${SCARLET_QEMU_USB_STORAGE:-}" ]; then
+    QEMU_USB_STORAGE="$SCARLET_QEMU_USB_STORAGE"
+elif [ "$QEMU_ROOTFS_TRANSPORT" = "usb" ]; then
+    QEMU_USB_STORAGE=1
+else
+    QEMU_USB_STORAGE=0
+fi
+
+if [ -n "${SCARLET_QEMU_USB_STORAGE_IMAGE:-}" ]; then
+    QEMU_USB_STORAGE_IMAGE="$SCARLET_QEMU_USB_STORAGE_IMAGE"
+elif [ "$QEMU_ROOTFS_TRANSPORT" = "usb" ]; then
+    QEMU_USB_STORAGE_IMAGE="$ROOTFS_IMAGE"
+else
+    QEMU_USB_STORAGE_IMAGE="$PROJECT_DIR/.scarlet/images/qemu-usb-storage.img"
+fi
 QEMU_USB_STORAGE_SIZE="${SCARLET_QEMU_USB_STORAGE_SIZE:-64M}"
 
 case ",$QEMU_MACHINE," in
@@ -350,6 +379,18 @@ if [ "$QEMU_AUDIO" = "1" ] || [ "$QEMU_AUDIO" = "true" ]; then
     QEMU_AUDIO_ARGS=(-audiodev "$QEMU_AUDIO_DRIVER,id=audio0" -device virtio-sound-pci,audiodev=audio0,bus=pcie.0)
 fi
 
+QEMU_ROOTFS_ARGS=()
+case "$QEMU_ROOTFS_TRANSPORT" in
+    virtio)
+        QEMU_ROOTFS_ARGS=(
+            -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none
+            -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1
+        )
+        ;;
+    usb|none)
+        ;;
+esac
+
 ensure_qemu_usb_storage_image() {
     local image="$1"
     local size="$2"
@@ -449,8 +490,7 @@ QEMU_CMD=(qemu-system-aarch64
     -global virtio-mmio.force-legacy=false \
     -drive id=boot,file="$BOOT_IMAGE",format=raw,if=none \
     -device virtio-blk-pci,drive=boot,bus=pcie.0 \
-    -drive id=rootfs,file="$ROOTFS_IMAGE",format=raw,if=none \
-    -device virtio-blk-device,drive=rootfs,bus=virtio-mmio-bus.1 \
+    "${QEMU_ROOTFS_ARGS[@]}" \
     "${QEMU_GPU_ARGS[@]}" \
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \

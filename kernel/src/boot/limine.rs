@@ -1,11 +1,12 @@
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 use limine::BaseRevision;
 use limine::memmap;
 
 use limine::request::{
-    DateAtBootRequest, DtbRequest, ExecutableAddressRequest, FramebufferRequest,
-    FramebufferResponse, HhdmRequest, MemmapRequest, MemmapResponse, ModulesRequest,
-    ModulesResponse, MpRequest, MpResponse,
+    DateAtBootRequest, DtbRequest, ExecutableAddressRequest, ExecutableCmdlineRequest,
+    FramebufferRequest, FramebufferResponse, HhdmRequest, MemmapRequest, ModulesRequest,
+    ModulesResponse, MpRequest,
 };
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
@@ -27,6 +28,10 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 #[used]
 pub static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+#[unsafe(link_section = ".limine_requests")]
+#[used]
+pub static EXECUTABLE_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 
 #[unsafe(link_section = ".limine_requests")]
 #[used]
@@ -69,6 +74,48 @@ pub fn ensure_base_revision_supported() {
 ///
 /// `u64::MAX` is the "not captured" sentinel.
 static DATE_AT_BOOT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
+const CMDLINE_BUFFER_SIZE: usize = 4096;
+
+struct CmdlineBuffer(UnsafeCell<[u8; CMDLINE_BUFFER_SIZE]>);
+
+// SAFETY: The command line buffer is written once during single-threaded boot
+// before scheduler startup, then read immutably through the returned string.
+unsafe impl Sync for CmdlineBuffer {}
+
+static CMDLINE_BUFFER: CmdlineBuffer = CmdlineBuffer(UnsafeCell::new([0; CMDLINE_BUFFER_SIZE]));
+
+fn cache_cmdline(cmdline: &str) -> Option<&'static str> {
+    if cmdline.is_empty() {
+        return None;
+    }
+
+    let bytes = cmdline.as_bytes();
+    let len = bytes.len().min(CMDLINE_BUFFER_SIZE - 1);
+    if len < bytes.len() {
+        crate::early_println!(
+            "[boot] Limine cmdline truncated from {} to {} bytes",
+            bytes.len(),
+            len
+        );
+    }
+
+    let buffer = unsafe { &mut *CMDLINE_BUFFER.0.get() };
+    buffer[..len].copy_from_slice(&bytes[..len]);
+    buffer[len] = 0;
+
+    Some(unsafe { core::str::from_utf8_unchecked(&buffer[..len]) })
+}
+
+pub fn boot_cmdline(fdt_cmdline: Option<&'static str>) -> Option<&'static str> {
+    if let Some(cmdline) = EXECUTABLE_CMDLINE_REQUEST
+        .response()
+        .and_then(|response| cache_cmdline(response.cmdline()))
+    {
+        Some(cmdline)
+    } else {
+        fdt_cmdline
+    }
+}
 
 /// Read Limine's `Date at Boot` response and cache the wall-clock nanoseconds.
 ///
