@@ -3,7 +3,7 @@ use crate::handle::capability::memory_mapping::{
     flags as mmap_flags, mmap_anonymous, munmap, prot,
 };
 use crate::syscall::{Syscall, syscall0, syscall1, syscall5};
-use crate::task::{CloneFlags, CloneFlagsDef};
+use crate::task::{CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 
@@ -183,6 +183,7 @@ pub fn yield_now() {
 /// Thread builder (simplified)
 pub struct Builder {
     name: Option<&'static str>,
+    util_min: Option<u32>,
 }
 
 impl Default for Builder {
@@ -193,7 +194,10 @@ impl Default for Builder {
 
 impl Builder {
     pub fn new() -> Self {
-        Builder { name: None }
+        Builder {
+            name: None,
+            util_min: None,
+        }
     }
 
     pub fn name(mut self, name: &'static str) -> Self {
@@ -201,11 +205,27 @@ impl Builder {
         self
     }
 
+    /// Set the minimum scheduler utilization inherited by the new thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `util_min` - Minimum utilization in scheduler capacity units.
+    pub fn util_min(mut self, util_min: u32) -> Self {
+        self.util_min = Some(util_min);
+        self
+    }
+
+    /// Request a full-capacity CPU for the new thread.
+    pub fn performance(mut self) -> Self {
+        self.util_min = Some(SCHED_UTIL_SCALE);
+        self
+    }
+
     pub fn spawn<F>(self, f: F) -> Result<JoinHandle, &'static str>
     where
         F: FnOnce() + Send + 'static,
     {
-        spawn_impl(f, self.name)
+        spawn_impl(f, self.name, self.util_min)
     }
 }
 
@@ -214,7 +234,7 @@ pub fn spawn<F>(f: F) -> JoinHandle
 where
     F: FnOnce() + Send + 'static,
 {
-    spawn_impl(f, None).expect("Failed to spawn thread")
+    spawn_impl(f, None, None).expect("Failed to spawn thread")
 }
 
 /// Join handle for waiting on thread completion
@@ -252,7 +272,11 @@ impl Drop for JoinHandle {
 }
 
 // Internal implementation
-fn spawn_impl<F>(f: F, _name: Option<&'static str>) -> Result<JoinHandle, &'static str>
+fn spawn_impl<F>(
+    f: F,
+    _name: Option<&'static str>,
+    util_min: Option<u32>,
+) -> Result<JoinHandle, &'static str>
 where
     F: FnOnce() + Send + 'static,
 {
@@ -291,6 +315,39 @@ where
     flags.set(CloneFlagsDef::Fs); // Share filesystem context
     flags.set(CloneFlagsDef::Files); // Share file descriptors
 
+    let previous_util_min = if let Some(util_min) = util_min {
+        let previous = match crate::task::sched_util_min() {
+            Ok(value) => value,
+            Err(_) => {
+                unsafe {
+                    let start = Box::from_raw(start_ptr as *mut ThreadStart<F>);
+                    cleanup_thread_mappings(
+                        start.stack_mapping_base,
+                        start.stack_mapping_len,
+                        start.tls_mapping_base,
+                        start.tls_mapping_len,
+                    );
+                }
+                return Err("Failed to read scheduler hint");
+            }
+        };
+        if crate::task::set_sched_util_min(util_min).is_err() {
+            unsafe {
+                let start = Box::from_raw(start_ptr as *mut ThreadStart<F>);
+                cleanup_thread_mappings(
+                    start.stack_mapping_base,
+                    start.stack_mapping_len,
+                    start.tls_mapping_base,
+                    start.tls_mapping_len,
+                );
+            }
+            return Err("Invalid scheduler utilization hint");
+        }
+        Some(previous)
+    } else {
+        None
+    };
+
     // Use a typed trampoline that knows about F.
     // Clone with: flags, stack, trampoline function, start packet, TLS pointer.
     let result = syscall5(
@@ -301,6 +358,10 @@ where
         start_ptr,
         tls_ptr, // TLS pointer as 5th argument
     );
+
+    if let Some(previous) = previous_util_min {
+        let _ = crate::task::set_sched_util_min(previous);
+    }
 
     if result == usize::MAX {
         // Failed to create thread

@@ -91,6 +91,197 @@ fn bootstrap_aps() {
     }
 }
 
+fn register_cpu_topology_from_fdt() {
+    let Some(fdt) = FdtManager::get_manager().get_fdt() else {
+        return;
+    };
+    let Some(cpus) = fdt.find_node("/cpus") else {
+        return;
+    };
+
+    let mut min_capacity = u32::MAX;
+    let mut max_capacity = 0u32;
+    for cpu in cpus.children() {
+        if !is_enabled_cpu_node(&cpu) {
+            continue;
+        }
+        if let Some(capacity) = cpu_capacity_dmips_mhz(&cpu) {
+            min_capacity = min_capacity.min(capacity);
+            max_capacity = max_capacity.max(capacity);
+        }
+    }
+
+    let has_capacity_range = min_capacity != u32::MAX && max_capacity > min_capacity;
+    let mut fallback_cpu_id = 0usize;
+    for cpu in cpus.children() {
+        if !is_enabled_cpu_node(&cpu) {
+            continue;
+        }
+
+        let cpu_id = cpu_logical_id_from_fdt(&cpu, fallback_cpu_id);
+        fallback_cpu_id += 1;
+
+        let raw_capacity = cpu_capacity_dmips_mhz(&cpu);
+        let core_class = classify_cpu_node(&cpu, raw_capacity, min_capacity, max_capacity);
+        let scheduler_capacity = if has_capacity_range {
+            raw_capacity
+                .map(|capacity| {
+                    capacity.saturating_mul(
+                        crate::sched::scheduler::CpuCoreClass::Balanced.default_capacity(),
+                    ) / max_capacity
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        match crate::sched::scheduler::register_cpu_topology(cpu_id, core_class, scheduler_capacity)
+        {
+            Ok(()) => early_println!(
+                "[aarch64] CPU topology: cpu={} class={:?} capacity={}",
+                cpu_id,
+                core_class,
+                crate::sched::scheduler::cpu_topology(cpu_id)
+                    .map(|topology| topology.capacity)
+                    .unwrap_or(0)
+            ),
+            Err(err) => early_println!(
+                "[aarch64] Failed to register CPU topology for cpu={}: {}",
+                cpu_id,
+                err
+            ),
+        }
+    }
+}
+
+fn is_enabled_cpu_node(cpu: &fdt::node::FdtNode) -> bool {
+    if let Some(dev_type) = cpu.property("device_type") {
+        if bytes_to_cstr(dev_type.value)
+            .map(|value| value != "cpu")
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    } else if cpu.name != "cpu" && !cpu.name.starts_with("cpu@") {
+        return false;
+    }
+
+    if let Some(status) = cpu.property("status") {
+        if bytes_to_cstr(status.value)
+            .map(|value| value == "disabled")
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn cpu_capacity_dmips_mhz(cpu: &fdt::node::FdtNode) -> Option<u32> {
+    let prop = cpu.property("capacity-dmips-mhz")?;
+    read_be_u32(prop.value)
+}
+
+fn classify_cpu_node(
+    cpu: &fdt::node::FdtNode,
+    raw_capacity: Option<u32>,
+    min_capacity: u32,
+    max_capacity: u32,
+) -> crate::sched::scheduler::CpuCoreClass {
+    use crate::sched::scheduler::CpuCoreClass;
+
+    if compatible_contains_any(cpu, &[b"icestorm", b"blizzard", b"efficiency", b"e-core"]) {
+        return CpuCoreClass::Efficiency;
+    }
+    if compatible_contains_any(
+        cpu,
+        &[
+            b"firestorm",
+            b"avalanche",
+            b"everest",
+            b"performance",
+            b"p-core",
+        ],
+    ) {
+        return CpuCoreClass::Performance;
+    }
+
+    if min_capacity != u32::MAX
+        && max_capacity > min_capacity
+        && let Some(capacity) = raw_capacity
+    {
+        if capacity == min_capacity {
+            return CpuCoreClass::Efficiency;
+        }
+        if capacity == max_capacity {
+            return CpuCoreClass::Performance;
+        }
+    }
+
+    CpuCoreClass::Balanced
+}
+
+fn compatible_contains_any(cpu: &fdt::node::FdtNode, needles: &[&[u8]]) -> bool {
+    let Some(prop) = cpu.property("compatible") else {
+        return false;
+    };
+
+    needles
+        .iter()
+        .any(|needle| bytes_contains_ascii_case_insensitive(prop.value, needle))
+}
+
+fn bytes_contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+fn cpu_logical_id_from_fdt(cpu: &fdt::node::FdtNode, fallback_cpu_id: usize) -> usize {
+    let Some(mpidr) = cpu_reg(cpu) else {
+        return fallback_cpu_id;
+    };
+
+    if let Some(mp_resp) = MP_REQUEST.response() {
+        for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
+            if cpu.mpidr == mpidr {
+                return cpu_id;
+            }
+        }
+    }
+
+    fallback_cpu_id
+}
+
+fn cpu_reg(cpu: &fdt::node::FdtNode) -> Option<u64> {
+    let prop = cpu.property("reg")?;
+    match prop.value.len() {
+        0..=3 => None,
+        4..=7 => read_be_u32(prop.value).map(|value| value as u64),
+        _ => Some(u64::from_be_bytes(prop.value[0..8].try_into().ok()?)),
+    }
+}
+
+fn read_be_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes(bytes[0..4].try_into().ok()?))
+}
+
+fn bytes_to_cstr(bytes: &[u8]) -> Option<&str> {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).ok()
+}
+
 #[inline(always)]
 fn current_el() -> u64 {
     let el: u64;
@@ -186,6 +377,7 @@ pub extern "C" fn limine_entry() -> ! {
     crate::boot::limine::capture_date_at_boot();
 
     bootstrap_aps();
+    register_cpu_topology_from_fdt();
 
     let bootinfo = BootInfo::new(
         cpu_id,

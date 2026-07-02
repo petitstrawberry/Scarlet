@@ -15,6 +15,13 @@ pub type Pid = u32;
 /// Raw thread identifier exposed by Scarlet Native thread syscalls.
 pub type Tid = u32;
 
+/// Scheduler utilization scale used by Scarlet Native util-clamp syscalls.
+///
+/// A task with `util_min == SCHED_UTIL_SCALE` requires a CPU with full
+/// scheduler capacity, which excludes lower-capacity efficiency cores on
+/// heterogeneous systems.
+pub const SCHED_UTIL_SCALE: u32 = 1024;
+
 /// Raw regular file type value used in [`RawFileMetadata::file_type`].
 pub const FILE_TYPE_REGULAR: u32 = 0;
 /// Raw directory file type value used in [`RawFileMetadata::file_type`].
@@ -103,6 +110,8 @@ pub enum Syscall {
     MonotonicTime = 35,
     GetCpuUsageInfo = 36,
     SystemTime = 37,
+    SetTaskUtilMin = 38,
+    GetTaskUtilMin = 39,
 
     // Process information
     GetTaskInfoCount = 24,

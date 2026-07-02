@@ -906,7 +906,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.lock().set_tls_pointer(tls);
             }
 
-            let cpu_id = crate::sched::scheduler::select_cpu();
+            let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let parent_id = parent_task.get_id();
 
             // Register first, complete clone metadata/TID writes, then enqueue.

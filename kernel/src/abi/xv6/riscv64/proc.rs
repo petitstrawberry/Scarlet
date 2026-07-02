@@ -42,7 +42,7 @@ pub fn sys_fork(
         Ok(child_task) => {
             child_task.vcpu.lock().iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
 
-            let cpu_id = crate::sched::scheduler::select_cpu();
+            let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let parent_id = parent_task.get_id();
 
             // Register first, complete parent/child metadata, then enqueue.

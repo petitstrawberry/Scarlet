@@ -33,7 +33,8 @@ use crate::sched::scheduler::{
     register_task, remove_task_from_queues, schedule,
 };
 use crate::task::{
-    CloneFlags, CloneFlagsDef, TaskState, WaitError, get_parent_waitpid_waker, get_waitpid_waker,
+    CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE, TaskState, WaitError, get_parent_waitpid_waker,
+    get_waitpid_waker,
 };
 use crate::timer::ns_to_ticks;
 
@@ -214,7 +215,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // Register the child first, finish parent/child metadata, then enqueue it.
             // On SMP, enqueueing before the metadata is complete lets a remote CPU
             // start the child immediately from the reschedule IPI.
-            let cpu_id = crate::sched::scheduler::select_cpu();
+            let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let child_id = register_task(child_task);
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
@@ -860,6 +861,44 @@ pub fn sys_set_process_group(trapframe: &mut Trapframe) -> usize {
 
     target.set_process_group_id(new_pgid);
     0
+}
+
+/// Set the current task's minimum scheduler utilization clamp.
+///
+/// # Arguments
+///
+/// * `trapframe.arg(0)` - Minimum utilization in scheduler capacity units,
+///   where [`SCHED_UTIL_SCALE`] is a full-capacity CPU.
+///
+/// # Returns
+///
+/// `0` on success, or `usize::MAX` if the utilization value is invalid.
+pub fn sys_set_task_util_min(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let util_min = trapframe.get_arg(0);
+    trapframe.increment_pc_next(task);
+
+    if util_min > SCHED_UTIL_SCALE as usize {
+        return usize::MAX;
+    }
+    task.set_sched_util_min(util_min as u32)
+        .map(|()| 0)
+        .unwrap_or(usize::MAX)
+}
+
+/// Return the current task's minimum scheduler utilization clamp.
+///
+/// # Arguments
+///
+/// None.
+///
+/// # Returns
+///
+/// Current minimum utilization in scheduler capacity units.
+pub fn sys_get_task_util_min(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    task.sched_util_min() as usize
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {

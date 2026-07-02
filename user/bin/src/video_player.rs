@@ -947,71 +947,75 @@ fn start_decoder_thread(
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
 ) {
-    thread::spawn(move || {
-        let display_queue = Arc::new(DisplayQueue::new(clock.clone()));
-        start_display_thread(
-            frame_store.clone(),
-            paint_signal.clone(),
-            controls.clone(),
-            clock.clone(),
-            display_queue.clone(),
-        );
+    thread::Builder::new()
+        .name("video-decode")
+        .performance()
+        .spawn(move || {
+            let display_queue = Arc::new(DisplayQueue::new(clock.clone()));
+            start_display_thread(
+                frame_store.clone(),
+                paint_signal.clone(),
+                controls.clone(),
+                clock.clone(),
+                display_queue.clone(),
+            );
 
-        let result = if hardware_decode {
-            if streaming {
-                if let Some(socket_path) = stream_socket_path.as_deref() {
-                    decode_loop_hardware_streaming_mp4_socket(
-                        socket_path,
-                        &frame_store,
-                        &paint_signal,
-                        &controls,
-                        clock.as_deref(),
-                        &display_queue,
-                    )
-                } else if is_mp4_path(&path) {
-                    decode_loop_hardware_streaming_mp4(
-                        &path,
-                        stream_complete_path.as_deref(),
-                        &frame_store,
-                        &paint_signal,
-                        &controls,
-                        clock.as_deref(),
-                        &display_queue,
-                    )
+            let result = if hardware_decode {
+                if streaming {
+                    if let Some(socket_path) = stream_socket_path.as_deref() {
+                        decode_loop_hardware_streaming_mp4_socket(
+                            socket_path,
+                            &frame_store,
+                            &paint_signal,
+                            &controls,
+                            clock.as_deref(),
+                            &display_queue,
+                        )
+                    } else if is_mp4_path(&path) {
+                        decode_loop_hardware_streaming_mp4(
+                            &path,
+                            stream_complete_path.as_deref(),
+                            &frame_store,
+                            &paint_signal,
+                            &controls,
+                            clock.as_deref(),
+                            &display_queue,
+                        )
+                    } else {
+                        Err(String::from(
+                            "hardware streaming decode currently requires an MP4 stream",
+                        ))
+                    }
                 } else {
-                    Err(String::from(
-                        "hardware streaming decode currently requires an MP4 stream",
-                    ))
+                    decode_loop_hardware(
+                        &path,
+                        mp4_data.as_deref().map(Vec::as_slice),
+                        &frame_store,
+                        &paint_signal,
+                        &controls,
+                        clock.as_deref(),
+                        &display_queue,
+                    )
                 }
             } else {
-                decode_loop_hardware(
+                decode_loop_software(
                     &path,
                     mp4_data.as_deref().map(Vec::as_slice),
-                    &frame_store,
-                    &paint_signal,
                     &controls,
                     clock.as_deref(),
                     &display_queue,
                 )
-            }
-        } else {
-            decode_loop_software(
-                &path,
-                mp4_data.as_deref().map(Vec::as_slice),
-                &controls,
-                clock.as_deref(),
-                &display_queue,
-            )
-        };
+            };
 
-        if let Err(err) = result {
-            if let Some(clock) = clock.as_deref() {
-                clock.mark_unavailable();
+            if let Err(err) = result {
+                if let Some(clock) = clock.as_deref() {
+                    clock.mark_unavailable();
+                }
+                println!("[{}] {}", APP_NAME, err);
             }
-            println!("[{}] {}", APP_NAME, err);
-        }
-        display_queue.close();
-    });
+            display_queue.close();
+        })
+        .expect("failed to spawn video decoder thread");
 }
 
 fn start_display_thread(
@@ -1021,65 +1025,69 @@ fn start_display_thread(
     clock: Option<Arc<AudioClock>>,
     queue: Arc<DisplayQueue>,
 ) {
-    thread::spawn(move || {
-        loop {
-            let Some(item) = queue.pop() else {
-                break;
-            };
-            match item {
-                DisplayItem::Frame {
-                    frame,
-                    presentation_time_us,
-                    display_index,
-                    total_frames,
-                    seek_epoch,
-                } => {
-                    if controls.current_seek_epoch() != seek_epoch {
-                        continue;
-                    }
-                    match pace_frame(
-                        &controls,
+    thread::Builder::new()
+        .name("video-display")
+        .performance()
+        .spawn(move || {
+            loop {
+                let Some(item) = queue.pop() else {
+                    break;
+                };
+                match item {
+                    DisplayItem::Frame {
+                        frame,
                         presentation_time_us,
+                        display_index,
+                        total_frames,
                         seek_epoch,
-                        clock.as_deref(),
-                    ) {
-                        PaceDecision::Stale => continue,
-                        PaceDecision::Drop { sync_time_us } => {
-                            controls.record_dropped_frame(presentation_time_us, sync_time_us);
+                    } => {
+                        if controls.current_seek_epoch() != seek_epoch {
+                            continue;
                         }
-                        PaceDecision::Present { sync_time_us } => {
-                            if let Err(err) = publish_frame(
-                                &frame_store,
-                                &paint_signal,
-                                &controls,
-                                frame,
-                                display_index,
-                                total_frames,
-                            ) {
-                                println!("[{}] {}", APP_NAME, err);
-                                continue;
+                        match pace_frame(
+                            &controls,
+                            presentation_time_us,
+                            seek_epoch,
+                            clock.as_deref(),
+                        ) {
+                            PaceDecision::Stale => continue,
+                            PaceDecision::Drop { sync_time_us } => {
+                                controls.record_dropped_frame(presentation_time_us, sync_time_us);
                             }
-                            controls.mark_video_ready_for_seek(seek_epoch);
-                            if let Some(clock) = clock.as_deref() {
-                                clock.mark_video_ready();
+                            PaceDecision::Present { sync_time_us } => {
+                                if let Err(err) = publish_frame(
+                                    &frame_store,
+                                    &paint_signal,
+                                    &controls,
+                                    frame,
+                                    display_index,
+                                    total_frames,
+                                ) {
+                                    println!("[{}] {}", APP_NAME, err);
+                                    continue;
+                                }
+                                controls.mark_video_ready_for_seek(seek_epoch);
+                                if let Some(clock) = clock.as_deref() {
+                                    clock.mark_video_ready();
+                                }
+                                controls.record_presented_frame(presentation_time_us, sync_time_us);
                             }
-                            controls.record_presented_frame(presentation_time_us, sync_time_us);
                         }
                     }
-                }
-                DisplayItem::EndOfPass { seek_epoch } => {
-                    if controls.current_seek_epoch() != seek_epoch {
-                        continue;
+                    DisplayItem::EndOfPass { seek_epoch } => {
+                        if controls.current_seek_epoch() != seek_epoch {
+                            continue;
+                        }
+                        frame_store.mark_complete();
+                        paint_signal.notify();
+                        let _ = wait_for_replay_request(&controls);
+                        frame_store.reset_for_replay();
+                        paint_signal.notify();
                     }
-                    frame_store.mark_complete();
-                    paint_signal.notify();
-                    let _ = wait_for_replay_request(&controls);
-                    frame_store.reset_for_replay();
-                    paint_signal.notify();
                 }
             }
-        }
-    });
+        })
+        .expect("failed to spawn video display thread");
 }
 
 fn start_controls_thread(controls: Arc<ControlsOverlay>, paint_signal: Arc<PaintSignal>) {

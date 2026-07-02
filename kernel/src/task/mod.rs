@@ -55,6 +55,8 @@ use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
+/// Scheduler utilization scale used for task placement hints.
+pub const SCHED_UTIL_SCALE: u32 = 1024;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -364,6 +366,32 @@ pub enum TaskType {
     User,
 }
 
+/// Scheduler hint for heterogeneous CPU placement.
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u8)]
+pub enum TaskCorePreference {
+    /// No explicit core-class preference.
+    Any = 0,
+    /// Prefer energy-efficient cores when load permits.
+    Efficiency = 1,
+    /// Prefer higher-capacity cores.
+    Performance = 2,
+}
+
+impl TaskCorePreference {
+    pub(crate) const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => TaskCorePreference::Efficiency,
+            2 => TaskCorePreference::Performance,
+            _ => TaskCorePreference::Any,
+        }
+    }
+}
+
 /// ABI Zone structure holding a memory range with an owned ABI module.
 pub struct AbiZone {
     pub range: Range<usize>,
@@ -462,6 +490,10 @@ pub struct Task {
     pub state: AtomicTaskState,
     /// Task priority
     pub priority: AtomicU32,
+    /// Scheduler hint for heterogeneous CPU placement.
+    core_preference: AtomicU8,
+    /// Minimum scheduler utilization required by this task.
+    sched_util_min: AtomicU32,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
@@ -648,6 +680,8 @@ impl Task {
             // Atomic fields
             state: AtomicTaskState::new(TaskState::NotInitialized),
             priority: AtomicU32::new(priority),
+            core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
+            sched_util_min: AtomicU32::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             cpu_time_ns: AtomicU64::new(0),
@@ -714,6 +748,53 @@ impl Task {
             self.default_time_slice.load(Ordering::SeqCst),
             Ordering::SeqCst,
         );
+    }
+
+    /// Return the scheduler core preference hint.
+    ///
+    /// # Returns
+    ///
+    /// The current heterogeneous CPU placement preference.
+    pub fn core_preference(&self) -> TaskCorePreference {
+        TaskCorePreference::from_u8(self.core_preference.load(Ordering::SeqCst))
+    }
+
+    /// Set the scheduler core preference hint.
+    ///
+    /// # Arguments
+    ///
+    /// * `preference` - Core class preference used for future CPU placement.
+    pub fn set_core_preference(&self, preference: TaskCorePreference) {
+        self.core_preference
+            .store(preference.to_u8(), Ordering::SeqCst);
+    }
+
+    /// Return the minimum scheduler utilization requested by this task.
+    ///
+    /// # Returns
+    ///
+    /// Minimum utilization in scheduler capacity units, where
+    /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
+    pub fn sched_util_min(&self) -> u32 {
+        self.sched_util_min.load(Ordering::SeqCst)
+    }
+
+    /// Set the minimum scheduler utilization requested by this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `util_min` - Minimum utilization in scheduler capacity units.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or an error if `util_min` is outside the supported
+    /// range.
+    pub fn set_sched_util_min(&self, util_min: u32) -> Result<(), &'static str> {
+        if util_min > SCHED_UTIL_SCALE {
+            return Err("scheduler util_min out of range");
+        }
+        self.sched_util_min.store(util_min, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Mark the task as running for CPU accounting.
@@ -1889,6 +1970,10 @@ impl Task {
             self.default_time_slice.load(Ordering::SeqCst),
             Ordering::SeqCst,
         );
+        child.set_core_preference(self.core_preference());
+        child
+            .sched_util_min
+            .store(self.sched_util_min(), Ordering::SeqCst);
         // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
         // as they are task-specific runtime state that should start fresh
 

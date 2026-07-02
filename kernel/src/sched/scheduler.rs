@@ -33,7 +33,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
@@ -51,11 +51,12 @@ use crate::{
     },
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
-    task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
+    task::{
+        Task, TaskCorePreference, TaskState, new_kernel_task, wake_parent_waiters,
+        wake_task_waiters,
+    },
     timer::{get_kernel_timer, get_time_ns},
 };
-
-use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
 /// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
@@ -401,6 +402,77 @@ static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 
+const DEFAULT_CPU_CAPACITY: u32 = 1024;
+const MIN_CPU_CAPACITY: u32 = 128;
+const EFFICIENCY_CPU_CAPACITY: u32 = 512;
+const PERFORMANCE_CPU_CAPACITY: u32 = 1536;
+const TASK_LOAD_SCALE: u64 = 1024;
+const MAX_PRIORITY_LOAD_BONUS: u64 = 1024;
+
+static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
+    [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
+static CPU_CAPACITIES: [AtomicU32; MAX_NUM_CPUS] =
+    [const { AtomicU32::new(DEFAULT_CPU_CAPACITY) }; MAX_NUM_CPUS];
+
+/// Coarse CPU core class used for heterogeneous scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CpuCoreClass {
+    /// Energy-efficient core.
+    Efficiency = 0,
+    /// Default homogeneous core.
+    Balanced = 1,
+    /// Higher-performance core.
+    Performance = 2,
+}
+
+impl CpuCoreClass {
+    /// Return a stable lowercase name for this core class.
+    ///
+    /// # Returns
+    ///
+    /// `"efficiency"`, `"balanced"`, or `"performance"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CpuCoreClass::Efficiency => "efficiency",
+            CpuCoreClass::Balanced => "balanced",
+            CpuCoreClass::Performance => "performance",
+        }
+    }
+
+    /// Return the default relative capacity for this core class.
+    ///
+    /// # Returns
+    ///
+    /// Capacity in scheduler units where `1024` is a normal homogeneous CPU.
+    pub const fn default_capacity(self) -> u32 {
+        match self {
+            CpuCoreClass::Efficiency => EFFICIENCY_CPU_CAPACITY,
+            CpuCoreClass::Balanced => DEFAULT_CPU_CAPACITY,
+            CpuCoreClass::Performance => PERFORMANCE_CPU_CAPACITY,
+        }
+    }
+
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => CpuCoreClass::Efficiency,
+            2 => CpuCoreClass::Performance,
+            _ => CpuCoreClass::Balanced,
+        }
+    }
+}
+
+/// Scheduler-visible CPU topology information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuTopology {
+    /// Scheduler CPU ID.
+    pub cpu_id: usize,
+    /// Coarse CPU core class.
+    pub core_class: CpuCoreClass,
+    /// Relative compute capacity in scheduler units.
+    pub capacity: u32,
+}
+
 /// Scheduler CPU accounting snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuUsageSnapshot {
@@ -619,6 +691,186 @@ pub fn register_online_cpu(cpu_id: usize) {
     }
 }
 
+fn sanitize_cpu_capacity(core_class: CpuCoreClass, capacity: u32) -> u32 {
+    let capacity = if capacity == 0 {
+        core_class.default_capacity()
+    } else {
+        capacity
+    };
+    capacity.max(MIN_CPU_CAPACITY)
+}
+
+/// Register scheduler topology information for a CPU.
+///
+/// Architecture code can call this during boot after discovering CPU topology
+/// from FDT, ACPI, firmware, or platform-specific tables. CPUs default to
+/// [`CpuCoreClass::Balanced`] with capacity `1024` if no topology is registered.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+/// * `core_class` - Coarse core class used for placement tie-breaking.
+/// * `capacity` - Relative compute capacity. Pass `0` to use the class default.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if `cpu_id` is outside the supported range.
+pub fn register_cpu_topology(
+    cpu_id: usize,
+    core_class: CpuCoreClass,
+    capacity: u32,
+) -> Result<(), &'static str> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return Err("CPU ID out of bounds");
+    }
+
+    CPU_CORE_CLASSES[cpu_id].store(core_class as u8, Ordering::SeqCst);
+    CPU_CAPACITIES[cpu_id].store(
+        sanitize_cpu_capacity(core_class, capacity),
+        Ordering::SeqCst,
+    );
+    Ok(())
+}
+
+/// Return scheduler topology information for a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// The registered topology information, or `None` if `cpu_id` is invalid.
+pub fn cpu_topology(cpu_id: usize) -> Option<CpuTopology> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+
+    let core_class = CpuCoreClass::from_u8(CPU_CORE_CLASSES[cpu_id].load(Ordering::SeqCst));
+    Some(CpuTopology {
+        cpu_id,
+        core_class,
+        capacity: sanitize_cpu_capacity(core_class, CPU_CAPACITIES[cpu_id].load(Ordering::SeqCst)),
+    })
+}
+
+fn cpu_capacity(cpu_id: usize) -> u32 {
+    cpu_topology(cpu_id)
+        .map(|topology| topology.capacity)
+        .unwrap_or(DEFAULT_CPU_CAPACITY)
+}
+
+fn task_load_weight(task: Option<&Task>) -> u64 {
+    let Some(task) = task else {
+        return TASK_LOAD_SCALE;
+    };
+
+    let priority = task.priority.load(Ordering::SeqCst) as u64;
+    let bonus = core::cmp::min(priority, MAX_PRIORITY_LOAD_BONUS);
+    TASK_LOAD_SCALE.saturating_add(bonus)
+}
+
+fn runnable_task_weight(task_id: usize) -> u64 {
+    task_load_weight(TaskPool::get_task(task_id))
+}
+
+fn cpu_runnable_weight(cpu_id: usize) -> u64 {
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let mut weight = 0u64;
+
+    if let Some(task_id) = current_task_id(cpu_id) {
+        if task_id != idle_id {
+            weight = weight.saturating_add(runnable_task_weight(task_id));
+        }
+    }
+
+    let queue = ready_queue(cpu_id).lock();
+    for &task_id in queue.iter() {
+        if task_id != idle_id {
+            weight = weight.saturating_add(runnable_task_weight(task_id));
+        }
+    }
+
+    weight
+}
+
+fn cpu_load_score(cpu_id: usize) -> u64 {
+    let capacity = cpu_capacity(cpu_id) as u64;
+    cpu_runnable_weight(cpu_id).saturating_mul(TASK_LOAD_SCALE) / capacity
+}
+
+fn task_min_cpu_capacity(task: Option<&Task>) -> u32 {
+    let preference_min = match task.map(Task::core_preference) {
+        Some(TaskCorePreference::Performance) => DEFAULT_CPU_CAPACITY,
+        _ => MIN_CPU_CAPACITY,
+    };
+    let util_min = task.map(Task::sched_util_min).unwrap_or(0);
+    core::cmp::max(preference_min, util_min)
+}
+
+fn cpu_better_for_preference(
+    candidate_cpu: usize,
+    best_cpu: usize,
+    preference: TaskCorePreference,
+) -> bool {
+    let candidate_capacity = cpu_capacity(candidate_cpu);
+    let best_capacity = cpu_capacity(best_cpu);
+
+    match preference {
+        TaskCorePreference::Efficiency => candidate_capacity < best_capacity,
+        TaskCorePreference::Performance => candidate_capacity > best_capacity,
+        TaskCorePreference::Any => false,
+    }
+}
+
+fn select_target_cpu(task: Option<&Task>) -> usize {
+    let cpus = ONLINE_CPUS.lock();
+    if cpus.is_empty() {
+        return 0;
+    }
+
+    let preference = task
+        .map(Task::core_preference)
+        .unwrap_or(TaskCorePreference::Any);
+    let min_capacity = task_min_cpu_capacity(task);
+    let start = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
+    let mut fallback: Option<(usize, u64)> = None;
+    let mut best: Option<(usize, u64)> = None;
+
+    for offset in 0..cpus.len() {
+        let cpu_id = cpus[(start + offset) % cpus.len()];
+        let score = cpu_load_score(cpu_id);
+
+        if fallback
+            .map(|(best_cpu, best_score)| {
+                score < best_score
+                    || (score == best_score
+                        && cpu_better_for_preference(cpu_id, best_cpu, preference))
+            })
+            .unwrap_or(true)
+        {
+            fallback = Some((cpu_id, score));
+        }
+
+        if cpu_capacity(cpu_id) < min_capacity {
+            continue;
+        }
+
+        if best
+            .map(|(best_cpu, best_score)| {
+                score < best_score
+                    || (score == best_score
+                        && cpu_better_for_preference(cpu_id, best_cpu, preference))
+            })
+            .unwrap_or(true)
+        {
+            best = Some((cpu_id, score));
+        }
+    }
+
+    best.or(fallback).map(|(cpu_id, _)| cpu_id).unwrap_or(0)
+}
+
 pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
     let cpus = ONLINE_CPUS.lock();
     for &cpu_id in cpus.iter() {
@@ -630,34 +882,46 @@ pub fn num_online_cpus() -> usize {
     ONLINE_CPUS.lock().len()
 }
 
+/// Select a target CPU for a new task.
+///
+/// This uses registered CPU capacity and the task's heterogeneous scheduling
+/// hint. If no CPU is online yet, CPU 0 is returned as the boot-time fallback.
+///
+/// # Arguments
+///
+/// * `task` - Task to place.
+///
+/// # Returns
+///
+/// Selected scheduler CPU ID.
+pub fn select_cpu_for_task(task: &Task) -> usize {
+    if let Some(pinned_cpu) = task.pinned_cpu {
+        return pinned_cpu;
+    }
+
+    select_target_cpu(Some(task))
+}
+
+/// Select a target CPU when no task-specific placement data is available.
+///
+/// # Returns
+///
+/// Selected scheduler CPU ID.
 pub fn select_cpu() -> usize {
-    let cpus = ONLINE_CPUS.lock();
-    if cpus.is_empty() {
-        return 0;
-    }
-    let idx = NEXT_CPU.fetch_add(1, Ordering::Relaxed) % cpus.len();
-    cpus[idx]
+    select_target_cpu(None)
 }
 
-fn is_cpu_online(cpu_id: usize) -> bool {
+/// Return whether a scheduler CPU is online.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// `true` if the CPU is registered as online.
+pub fn is_cpu_online(cpu_id: usize) -> bool {
     ONLINE_CPUS.lock().contains(&cpu_id)
-}
-
-fn find_least_loaded_cpu() -> usize {
-    let cpus = ONLINE_CPUS.lock();
-    if cpus.is_empty() {
-        return 0;
-    }
-    let mut best_cpu = cpus[0];
-    let mut best_len = ready_queue(best_cpu).lock().len();
-    for &cpu_id in cpus.iter().skip(1) {
-        let len = ready_queue(cpu_id).lock().len();
-        if len < best_len {
-            best_len = len;
-            best_cpu = cpu_id;
-        }
-    }
-    best_cpu
 }
 
 #[inline]
@@ -1137,14 +1401,16 @@ pub fn wake_task(task_id: usize) -> bool {
             pinned
         } else {
             let last = task.last_cpu.load(Ordering::SeqCst);
-            if is_cpu_online(last) {
+            if is_cpu_online(last) && cpu_capacity(last) >= task_min_cpu_capacity(Some(task)) {
                 last
             } else {
                 let current = get_cpu().get_cpuid();
-                if is_cpu_online(current) {
+                if is_cpu_online(current)
+                    && cpu_capacity(current) >= task_min_cpu_capacity(Some(task))
+                {
                     current
                 } else {
-                    find_least_loaded_cpu()
+                    select_target_cpu(Some(task))
                 }
             }
         }
@@ -1446,9 +1712,19 @@ pub fn reset() {
         set_current_task_id(cpu_id, None);
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
+        PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
+        CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
+        CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
     }
+    NEXT_CPU.store(0, Ordering::SeqCst);
+    DEBUG_TICK.store(0, Ordering::SeqCst);
+    DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
     TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
     TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
+    ONLINE_CPUS.lock().clear();
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
     get_task_pool().reset();
@@ -1526,7 +1802,7 @@ pub fn make_test_tasks() {
 
 #[cfg(test)]
 mod tests {
-    use crate::task::TaskType;
+    use crate::task::{TaskCorePreference, TaskType};
 
     use super::*;
 
@@ -1536,5 +1812,46 @@ mod tests {
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         add_task(task, 0);
         assert_eq!(READY_QUEUES[0].lock().len(), 1);
+    }
+
+    #[test_case]
+    fn test_register_cpu_topology() {
+        reset();
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        let topology = cpu_topology(0).unwrap();
+        assert_eq!(topology.cpu_id, 0);
+        assert_eq!(topology.core_class, CpuCoreClass::Efficiency);
+        assert_eq!(
+            topology.capacity,
+            CpuCoreClass::Efficiency.default_capacity()
+        );
+    }
+
+    #[test_case]
+    fn test_select_cpu_for_performance_task_prefers_big_core() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+
+        let task = Task::new("PerfTask".to_string(), 1, TaskType::Kernel);
+        task.set_core_preference(TaskCorePreference::Performance);
+
+        assert_eq!(select_cpu_for_task(&task), 1);
+    }
+
+    #[test_case]
+    fn test_select_cpu_for_efficiency_task_prefers_little_core_on_tie() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Efficiency, 0).unwrap();
+
+        let task = Task::new("EffTask".to_string(), 1, TaskType::Kernel);
+        task.set_core_preference(TaskCorePreference::Efficiency);
+
+        assert_eq!(select_cpu_for_task(&task), 1);
     }
 }

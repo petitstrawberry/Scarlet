@@ -3,6 +3,9 @@ use crate::string::ToString;
 use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use crate::vec::Vec;
 
+/// Scheduler utilization scale used by Scarlet task placement hints.
+pub const SCHED_UTIL_SCALE: u32 = scarlet_sys::SCHED_UTIL_SCALE;
+
 // Flags for execve system calls
 pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
 
@@ -203,6 +206,15 @@ pub enum TaskControlError {
     NotFound,
     /// The requested relationship or state transition is not permitted.
     PermissionDenied,
+}
+
+/// Errors returned by scheduler placement hint operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerHintError {
+    /// The requested utilization value is outside the supported range.
+    InvalidUtilization,
+    /// The kernel rejected the scheduler hint operation.
+    SyscallFailed,
 }
 
 fn task_control_result(value: usize) -> Result<usize, TaskControlError> {
@@ -1043,5 +1055,46 @@ pub fn cpu_usage() -> Option<CpuUsageInfo> {
         None
     } else {
         Some(raw.decode())
+    }
+}
+
+/// Set the current task's minimum scheduler utilization clamp.
+///
+/// This is a placement hint similar to Linux `uclamp.min`: a task with
+/// `util_min == SCHED_UTIL_SCALE` requires a full-capacity CPU and will avoid
+/// lower-capacity efficiency cores when the scheduler has suitable CPUs online.
+///
+/// # Arguments
+///
+/// * `util_min` - Minimum utilization in scheduler capacity units.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the value is invalid or the kernel
+/// rejects the request.
+pub fn set_sched_util_min(util_min: u32) -> Result<(), SchedulerHintError> {
+    if util_min > SCHED_UTIL_SCALE {
+        return Err(SchedulerHintError::InvalidUtilization);
+    }
+
+    let ret = syscall1(Syscall::SetTaskUtilMin, util_min as usize);
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(())
+    }
+}
+
+/// Return the current task's minimum scheduler utilization clamp.
+///
+/// # Returns
+///
+/// Minimum utilization in scheduler capacity units.
+pub fn sched_util_min() -> Result<u32, SchedulerHintError> {
+    let ret = syscall0(Syscall::GetTaskUtilMin);
+    if ret == usize::MAX {
+        Err(SchedulerHintError::SyscallFailed)
+    } else {
+        Ok(ret as u32)
     }
 }
