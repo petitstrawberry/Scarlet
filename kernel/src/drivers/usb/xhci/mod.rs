@@ -3560,6 +3560,10 @@ impl BlockDevice for UsbMassStorageBlockDevice {
         *self.sector_count.lock() * *self.sector_size.lock()
     }
 
+    fn get_sector_size(&self) -> usize {
+        *self.sector_size.lock()
+    }
+
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
         self.request_queue.lock().push_back(request);
     }

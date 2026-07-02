@@ -43,14 +43,29 @@ to = "/"
 
 [images.boot]
 format = "limine-uefi"
-output = ".scarlet/images/limine-aarch64-full.img"
-cmdline = "console=ttyS0 root=/dev/vblk0"
+output = ".scarlet/images/esp-aarch64-full.img"
+cmdline = "console=ttyS0 root=/dev/vblk0p2 rootfstype=ext2"
 deps = ["initramfs"]
 
 [[images.boot.layers]]
 kind = "image"
 source = "initramfs"
 to = "/boot/initramfs"
+
+[images.disk]
+format = "gpt"
+output = ".scarlet/images/limine-aarch64-full.img"
+deps = ["boot", "rootfs"]
+
+[[images.disk.partitions]]
+source = "boot"
+name = "SCARLET_BOOT"
+type = "efi-system"
+
+[[images.disk.partitions]]
+source = "rootfs"
+name = "SCARLET_ROOT"
+type = "linux-filesystem"
 
 [runner]
 command = "tools/run_aarch64.sh"

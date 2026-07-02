@@ -93,7 +93,7 @@ if [ -n "${SCARLET_QEMU_ROOTFS_TRANSPORT:-}" ]; then
 elif grep -Eq 'cmdline = ".*root=/dev/usbblk0' "$PROJECT_DIR/scarlet.toml"; then
     QEMU_ROOTFS_TRANSPORT="usb"
 else
-    QEMU_ROOTFS_TRANSPORT="virtio"
+    QEMU_ROOTFS_TRANSPORT="none"
 fi
 case "$QEMU_ROOTFS_TRANSPORT" in
     usb|virtio|none)
@@ -152,11 +152,11 @@ if [ -n "$QEMU_DEBUG_FLAGS" ]; then
 fi
 
 if [ ! -f "$BOOT_IMAGE" ]; then
-    echo "Error: Limine boot image not found at $BOOT_IMAGE"
+    echo "Error: boot disk image not found at $BOOT_IMAGE"
     exit 1
 fi
 
-if [ ! -f "$ROOTFS_IMAGE" ]; then
+if [ "$QEMU_ROOTFS_TRANSPORT" != "none" ] && [ ! -f "$ROOTFS_IMAGE" ]; then
     echo "Error: rootfs image not found at $ROOTFS_IMAGE"
     exit 1
 fi

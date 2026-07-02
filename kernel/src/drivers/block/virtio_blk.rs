@@ -835,6 +835,10 @@ impl BlockDevice for VirtioBlockDevice {
         (capacity * sector_size as u64) as usize
     }
 
+    fn get_sector_size(&self) -> usize {
+        *self.sector_size.read() as usize
+    }
+
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
         // Enqueue the request
         self.request_queue.lock().push_back(request);

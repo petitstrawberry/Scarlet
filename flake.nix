@@ -267,6 +267,7 @@
             pkgs.dejavu_fonts
 
             # Filesystem / image tools
+            pkgs.coreutils
             pkgs.mtools
             pkgs.dosfstools
             pkgs.e2fsprogs
