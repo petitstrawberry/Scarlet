@@ -6,7 +6,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec};
+use alloc::{boxed::Box, format, sync::Arc, vec};
 
 use crate::{
     arch::io_mb,
@@ -36,7 +36,6 @@ use crate::{
 // Static counters for device naming
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static RNG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
 ///
@@ -1243,25 +1242,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_manager().register_device(dev);
         }
         VirtioDeviceType::Rng => {
-            let id = RNG_COUNTER.fetch_add(1, Ordering::SeqCst);
             crate::early_println!("[Virtio] Detected Virtio RNG Device at {:#x}", base_addr);
 
             // Create and register the VirtIO RNG device as an entropy source
             let rng_device = Arc::new(VirtioRngDevice::new(base_addr));
             crate::random::RandomManager::register_entropy_source(rng_device);
-
-            // Register the RandomCharDevice as /dev/random (only for the first RNG device)
-            if id == 0 {
-                let random_char_dev: Arc<dyn Device> =
-                    Arc::new(crate::random::RandomCharDevice::new());
-                DeviceManager::get_manager()
-                    .register_device_with_name("random".to_string(), random_char_dev.clone());
-                DeviceManager::get_manager()
-                    .register_device_with_name("urandom".to_string(), random_char_dev);
-                crate::early_println!(
-                    "[Virtio] Registered /dev/random and /dev/urandom character devices"
-                );
-            }
         }
         VirtioDeviceType::Sound => {
             crate::early_println!("[Virtio] Detected Virtio Sound Device at {:#x}", base_addr);

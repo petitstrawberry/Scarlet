@@ -22,6 +22,7 @@
 //! ```
 
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -29,7 +30,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 use crate::device::char::CharDevice;
+use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
+use crate::driver_initcall;
 use crate::library::std::usercopy::copy_to_user;
 use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
 use crate::task::mytask;
@@ -307,6 +310,11 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
 pub struct RandomCharDevice;
 
 impl RandomCharDevice {
+    /// Create a random character device.
+    ///
+    /// # Returns
+    ///
+    /// A new random character device instance.
     pub fn new() -> Self {
         Self
     }
@@ -336,7 +344,17 @@ impl Device for RandomCharDevice {
 
 impl CharDevice for RandomCharDevice {
     fn read_byte(&self) -> Option<u8> {
-        RandomManager::get_random_byte()
+        let mut buffer = [0u8; 1];
+        self.read(&mut buffer);
+        Some(buffer[0])
+    }
+
+    fn read(&self, buffer: &mut [u8]) -> usize {
+        let bytes_read = RandomManager::get_random_bytes(buffer);
+        if bytes_read < buffer.len() {
+            fill_fallback_random(&mut buffer[bytes_read..]);
+        }
+        buffer.len()
     }
 
     fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
@@ -348,10 +366,7 @@ impl CharDevice for RandomCharDevice {
     }
 
     fn can_read(&self) -> bool {
-        // Check if we have any entropy sources available
-        let manager = RandomManager::instance();
-        let sources = manager.sources.lock();
-        !sources.is_empty() && sources.iter().any(|s| s.is_available())
+        true
     }
 
     fn can_write(&self) -> bool {
@@ -386,3 +401,12 @@ impl Selectable for RandomCharDevice {
         crate::object::capability::selectable::SelectWaitOutcome::Ready
     }
 }
+
+fn register_random_devices() {
+    let dm = DeviceManager::get_manager();
+    let random_char_dev: Arc<dyn Device> = Arc::new(RandomCharDevice::new());
+    dm.register_device_with_name(String::from("random"), random_char_dev.clone());
+    dm.register_device_with_name(String::from("urandom"), random_char_dev);
+}
+
+driver_initcall!(register_random_devices);
