@@ -168,7 +168,6 @@ pub mod key_codes {
 /// Input manager - handles input devices and event reading
 pub struct InputManager {
     mouse_file: File,
-    _keyboard_file: Option<File>,
     /// Maximum value for tablet absolute coordinates (typically 32767)
     tablet_max: i32,
     /// Current accumulated position for absolute positioning
@@ -207,21 +206,8 @@ impl InputManager {
             }
         };
 
-        // Try to open keyboard device
-        let keyboard_file = match File::open("/dev/keyboard0") {
-            Ok(file) => {
-                println!("[InputManager] Opened keyboard device");
-                Some(file)
-            }
-            Err(_) => {
-                println!("[InputManager] Keyboard device not found, keyboard input unavailable");
-                None
-            }
-        };
-
         Ok(Self {
             mouse_file,
-            _keyboard_file: keyboard_file,
             tablet_max: 32767, // Standard virtio-tablet range
             abs_x: None,
             abs_y: None,
@@ -279,12 +265,9 @@ impl InputManager {
             input_thread_main();
         });
 
-        // Start keyboard thread if keyboard device is available
-        if File::open("/dev/keyboard0").is_ok() {
-            thread::spawn(move || {
-                keyboard_thread_main();
-            });
-        }
+        thread::spawn(move || {
+            keyboard_thread_main();
+        });
 
         println!("[InputManager] Input thread started");
         Ok(())
@@ -295,11 +278,20 @@ impl InputManager {
 fn input_thread_main() {
     println!("[InputThread] Started");
 
-    let mut input_manager = match InputManager::new() {
-        Ok(mgr) => mgr,
-        Err(e) => {
-            println!("[InputThread] Failed to create InputManager: {}", e);
-            return;
+    let mut attempts = 0usize;
+    let mut input_manager = loop {
+        match InputManager::new() {
+            Ok(mgr) => break mgr,
+            Err(e) => {
+                attempts += 1;
+                if attempts == 1 || attempts % 20 == 0 {
+                    println!(
+                        "[InputThread] Waiting for pointer device: {} (attempt {})",
+                        e, attempts
+                    );
+                }
+                thread::sleep(core::time::Duration::from_millis(250));
+            }
         }
     };
 
@@ -405,11 +397,23 @@ fn process_mouse_event(input_manager: &mut InputManager, event: InputEvent) {
 fn keyboard_thread_main() {
     println!("[KeyboardThread] Started");
 
-    let mut keyboard_file = match File::open("/dev/keyboard0") {
-        Ok(file) => file,
-        Err(e) => {
-            println!("[KeyboardThread] Failed to open keyboard device: {:?}", e);
-            return;
+    let mut attempts = 0usize;
+    let mut keyboard_file = loop {
+        match File::open("/dev/keyboard0") {
+            Ok(file) => {
+                println!("[KeyboardThread] Opened keyboard device");
+                break file;
+            }
+            Err(e) => {
+                attempts += 1;
+                if attempts == 1 || attempts % 20 == 0 {
+                    println!(
+                        "[KeyboardThread] Waiting for keyboard device: {:?} (attempt {})",
+                        e, attempts
+                    );
+                }
+                thread::sleep(core::time::Duration::from_millis(250));
+            }
         }
     };
 
