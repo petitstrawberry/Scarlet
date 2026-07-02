@@ -13,6 +13,9 @@ pub enum TrbType {
     EnableSlotCommand = 9,
     AddressDeviceCommand = 11,
     ConfigureEndpointCommand = 12,
+    ResetEndpointCommand = 14,
+    StopEndpointCommand = 15,
+    SetTrDequeuePointerCommand = 16,
     CommandCompletionEvent = 33,
     PortStatusChangeEvent = 34,
     TransferEvent = 32,
@@ -116,6 +119,71 @@ impl Trb {
         if deconfigure {
             trb.control |= 1 << 9;
         }
+        trb.set_slot_id(slot_id);
+        trb
+    }
+
+    /// Builds a Reset Endpoint command TRB.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_id` - xHCI slot ID containing the endpoint.
+    /// * `endpoint_id` - xHCI endpoint context index.
+    /// * `preserve_streams` - True to preserve stream state.
+    ///
+    /// # Returns
+    ///
+    /// Encoded Reset Endpoint command TRB.
+    pub fn reset_endpoint_command(slot_id: u8, endpoint_id: u8, preserve_streams: bool) -> Self {
+        let mut trb = Self::new(TrbType::ResetEndpointCommand);
+        trb.control |= (endpoint_id as u32) << 16;
+        if preserve_streams {
+            trb.control |= 1 << 9;
+        }
+        trb.set_slot_id(slot_id);
+        trb
+    }
+
+    /// Builds a Stop Endpoint command TRB.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot_id` - xHCI slot ID containing the endpoint.
+    /// * `endpoint_id` - xHCI endpoint context index.
+    /// * `suspend` - True to suspend instead of stopping the endpoint.
+    ///
+    /// # Returns
+    ///
+    /// Encoded Stop Endpoint command TRB.
+    pub fn stop_endpoint_command(slot_id: u8, endpoint_id: u8, suspend: bool) -> Self {
+        let mut trb = Self::new(TrbType::StopEndpointCommand);
+        trb.control |= (endpoint_id as u32) << 16;
+        if suspend {
+            trb.control |= 1 << 23;
+        }
+        trb.set_slot_id(slot_id);
+        trb
+    }
+
+    /// Builds a Set TR Dequeue Pointer command TRB.
+    ///
+    /// # Arguments
+    ///
+    /// * `dequeue_pointer` - Transfer ring dequeue pointer including DCS in bit 0.
+    /// * `slot_id` - xHCI slot ID containing the endpoint.
+    /// * `endpoint_id` - xHCI endpoint context index.
+    ///
+    /// # Returns
+    ///
+    /// Encoded Set TR Dequeue Pointer command TRB.
+    pub fn set_tr_dequeue_pointer_command(
+        dequeue_pointer: u64,
+        slot_id: u8,
+        endpoint_id: u8,
+    ) -> Self {
+        let mut trb = Self::new(TrbType::SetTrDequeuePointerCommand);
+        trb.parameter = dequeue_pointer;
+        trb.control |= (endpoint_id as u32) << 16;
         trb.set_slot_id(slot_id);
         trb
     }
@@ -238,5 +306,27 @@ mod tests {
         assert_eq!(trb.trb_type(), TrbType::Normal as u8);
         assert_ne!(trb.control & (1 << 2), 0);
         assert_ne!(trb.control & (1 << 5), 0);
+    }
+
+    #[test_case]
+    fn test_endpoint_recovery_command_encoding() {
+        let reset = Trb::reset_endpoint_command(2, 5, false);
+        assert_eq!(reset.trb_type(), TrbType::ResetEndpointCommand as u8);
+        assert_eq!(reset.slot_id(), 2);
+        assert_eq!(reset.endpoint_id(), 5);
+
+        let stop = Trb::stop_endpoint_command(3, 4, false);
+        assert_eq!(stop.trb_type(), TrbType::StopEndpointCommand as u8);
+        assert_eq!(stop.slot_id(), 3);
+        assert_eq!(stop.endpoint_id(), 4);
+
+        let set_deq = Trb::set_tr_dequeue_pointer_command(0x1001, 4, 6);
+        assert_eq!(
+            set_deq.trb_type(),
+            TrbType::SetTrDequeuePointerCommand as u8
+        );
+        assert_eq!(set_deq.parameter, 0x1001);
+        assert_eq!(set_deq.slot_id(), 4);
+        assert_eq!(set_deq.endpoint_id(), 6);
     }
 }

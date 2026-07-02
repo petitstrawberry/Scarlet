@@ -304,6 +304,10 @@ impl IommuDomain for DartBypassDomain {
         Some(iova as PhysAddr)
     }
 
+    fn page_size(&self) -> usize {
+        PAGE_SIZE
+    }
+
     fn flush(&self) -> Result<(), IommuError> {
         Ok(())
     }
@@ -403,6 +407,10 @@ impl IommuDomain for DartDomain {
 
     fn iova_to_phys(&self, _iova: Iova) -> Option<PhysAddr> {
         None
+    }
+
+    fn page_size(&self) -> usize {
+        1usize << DART_PAGE_SHIFT
     }
 
     fn flush(&self) -> Result<(), IommuError> {

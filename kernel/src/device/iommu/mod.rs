@@ -197,6 +197,15 @@ pub trait IommuDomain: Send + Sync {
     /// Physical address backing `iova`, or `None` when unmapped.
     fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr>;
 
+    /// Return the minimum mapping granule for this domain.
+    ///
+    /// # Returns
+    ///
+    /// Smallest byte granule that can be independently mapped and unmapped.
+    fn page_size(&self) -> usize {
+        crate::environment::PAGE_SIZE
+    }
+
     /// Flush pending IOMMU translation updates.
     ///
     /// # Returns
@@ -259,6 +268,78 @@ pub struct DmaContext {
     pub direct_dma_offset: isize,
 }
 
+/// Owned DMA mapping that is unmapped when dropped.
+pub struct DmaMapping {
+    context: DmaContext,
+    dma_addr: DmaAddr,
+    len: usize,
+    mapped: bool,
+}
+
+impl DmaMapping {
+    fn new(context: DmaContext, dma_addr: DmaAddr, len: usize) -> Self {
+        Self {
+            context,
+            dma_addr,
+            len,
+            mapped: true,
+        }
+    }
+
+    /// Return the device-visible DMA address.
+    ///
+    /// # Returns
+    ///
+    /// DMA address to program into the device.
+    pub const fn dma_addr(&self) -> DmaAddr {
+        self.dma_addr
+    }
+
+    /// Return the mapped range length in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes covered by the DMA mapping.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Return whether this mapping covers no bytes.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the mapping length is zero.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Explicitly unmap this DMA mapping.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the mapping is removed or was already inactive.
+    pub fn unmap(mut self) -> Result<(), IommuError> {
+        if self.mapped {
+            let result = self.context.unmap(self.dma_addr, self.len);
+            if result.is_ok() {
+                self.mapped = false;
+            }
+            result
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for DmaMapping {
+    fn drop(&mut self) {
+        if self.mapped {
+            let _ = self.context.unmap(self.dma_addr, self.len);
+            self.mapped = false;
+        }
+    }
+}
+
 impl DmaContext {
     /// Create a direct-DMA context without an IOMMU attachment.
     ///
@@ -302,6 +383,48 @@ impl DmaContext {
         }
     }
 
+    /// Return the strictest mapping granule required by attached IOMMUs.
+    ///
+    /// # Returns
+    ///
+    /// DMA mappings should be aligned to this size and cover a multiple of it
+    /// to avoid sharing an IOMMU PTE with unrelated DMA objects.
+    pub fn mapping_granule(&self) -> usize {
+        let mut granule = crate::environment::PAGE_SIZE;
+        if let Some(attachment) = &self.iommu {
+            granule = granule.max(attachment.domain.page_size());
+        }
+        for attachment in &self.additional_iommus {
+            granule = granule.max(attachment.domain.page_size());
+        }
+        granule
+    }
+
+    /// Map a physical memory range and return an owned DMA mapping.
+    ///
+    /// The returned mapping automatically unmaps the DMA address when dropped.
+    /// Use this for short-lived transfer buffers; long-lived rings and device
+    /// contexts should keep using [`Self::map_phys`] and unmap during teardown.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical address backing the mapping.
+    /// * `len` - Mapping length in bytes.
+    /// * `flags` - Mapping permissions and behavior flags.
+    ///
+    /// # Returns
+    ///
+    /// Owned DMA mapping to program into the device.
+    pub fn map_phys_owned(
+        &self,
+        paddr: PhysAddr,
+        len: usize,
+        flags: IommuMapFlags,
+    ) -> Result<DmaMapping, IommuError> {
+        let dma_addr = self.map_phys(paddr, len, flags)?;
+        Ok(DmaMapping::new(self.clone(), dma_addr, len))
+    }
+
     /// Unmap a DMA address previously returned by [`Self::map_phys`].
     ///
     /// # Arguments
@@ -340,17 +463,35 @@ mod tests {
 
     struct TestDomain {
         last_map: Mutex<Option<RecordedMap>>,
+        last_unmap: Mutex<Option<(Iova, usize)>>,
+        unmap_count: Mutex<usize>,
+        page_size: usize,
     }
 
     impl TestDomain {
         fn new() -> Self {
+            Self::with_page_size(crate::environment::PAGE_SIZE)
+        }
+
+        fn with_page_size(page_size: usize) -> Self {
             Self {
                 last_map: Mutex::new(None),
+                last_unmap: Mutex::new(None),
+                unmap_count: Mutex::new(0),
+                page_size,
             }
         }
 
         fn last_map(&self) -> Option<RecordedMap> {
             *self.last_map.lock()
+        }
+
+        fn last_unmap(&self) -> Option<(Iova, usize)> {
+            *self.last_unmap.lock()
+        }
+
+        fn unmap_count(&self) -> usize {
+            *self.unmap_count.lock()
         }
     }
 
@@ -382,13 +523,18 @@ mod tests {
         }
 
         fn unmap(&self, iova: Iova, len: usize) -> Result<(), IommuError> {
-            let _ = (iova, len);
+            *self.last_unmap.lock() = Some((iova, len));
+            *self.unmap_count.lock() += 1;
             Ok(())
         }
 
         fn iova_to_phys(&self, iova: Iova) -> Option<PhysAddr> {
             let _ = iova;
             None
+        }
+
+        fn page_size(&self) -> usize {
+            self.page_size
         }
 
         fn flush(&self) -> Result<(), IommuError> {
@@ -523,8 +669,88 @@ mod tests {
     }
 
     #[test_case]
+    fn test_dma_context_mapping_granule_uses_largest_iommu_page_size() {
+        let primary_domain = Arc::new(TestDomain::with_page_size(0x1000));
+        let primary_controller = Arc::new(TestController {
+            domain: primary_domain.clone(),
+        });
+        let secondary_domain = Arc::new(TestDomain::with_page_size(0x4000));
+        let secondary_controller = Arc::new(TestController {
+            domain: secondary_domain.clone(),
+        });
+        let context = DmaContext {
+            iommu: Some(IommuAttachment {
+                controller: primary_controller,
+                domain: primary_domain,
+                streams: Vec::new(),
+            }),
+            additional_iommus: alloc::vec![IommuAttachment {
+                controller: secondary_controller,
+                domain: secondary_domain,
+                streams: Vec::new(),
+            }],
+            direct_dma_offset: 0,
+        };
+
+        assert_eq!(context.mapping_granule(), 0x4000);
+    }
+
+    #[test_case]
     fn test_dma_context_unmap_passthrough_when_no_iommu() {
         let context = DmaContext::direct();
         assert_eq!(context.unmap(0x1000, 0x100), Ok(()));
+    }
+
+    #[test_case]
+    fn test_dma_mapping_drop_unmaps_iommu_mapping() {
+        let domain = Arc::new(TestDomain::new());
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext {
+            iommu: Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            additional_iommus: Vec::new(),
+            direct_dma_offset: 0,
+        };
+
+        {
+            let mapping = context
+                .map_phys_owned(0x4000, 0x1000, IommuMapFlags::READ)
+                .unwrap();
+            assert_eq!(mapping.dma_addr(), 0x4000);
+            assert_eq!(mapping.len(), 0x1000);
+        }
+
+        assert_eq!(domain.last_unmap(), Some((0x4000, 0x1000)));
+        assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_mapping_explicit_unmap_runs_once() {
+        let domain = Arc::new(TestDomain::new());
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext {
+            iommu: Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            additional_iommus: Vec::new(),
+            direct_dma_offset: 0,
+        };
+
+        let mapping = context
+            .map_phys_owned(0x5000, 0x1000, IommuMapFlags::WRITE)
+            .unwrap();
+        mapping.unmap().unwrap();
+
+        assert_eq!(domain.last_unmap(), Some((0x5000, 0x1000)));
+        assert_eq!(domain.unmap_count(), 1);
     }
 }

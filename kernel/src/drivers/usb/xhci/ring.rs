@@ -18,15 +18,23 @@ pub struct DmaTrbRing {
     cycle_state: Mutex<bool>,
 }
 
-/// A TRB queued with its cycle bit withheld from the xHC.
-pub(crate) struct DeferredCycleTrb {
-    pub(crate) index: usize,
-    cycle: bool,
-}
-
 impl DmaTrbRing {
     pub fn new(capacity: usize) -> Option<Self> {
-        Self::new_inner(capacity, false)
+        Self::new_inner(capacity, false, PAGE_SIZE)
+    }
+
+    /// Create an event-style TRB ring with a minimum DMA alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Total TRB capacity.
+    /// * `align` - Minimum physical alignment for the backing allocation.
+    ///
+    /// # Returns
+    ///
+    /// A DMA-backed ring, or `None` if allocation fails.
+    pub fn new_aligned(capacity: usize, align: usize) -> Option<Self> {
+        Self::new_inner(capacity, false, align)
     }
 
     /// Create a TRB ring whose final entry links back to the first TRB.
@@ -43,15 +51,33 @@ impl DmaTrbRing {
     ///
     /// A DMA-backed ring, or `None` if allocation fails.
     pub fn new_linked(capacity: usize) -> Option<Self> {
-        Self::new_inner(capacity, true)
+        Self::new_inner(capacity, true, PAGE_SIZE)
     }
 
-    fn new_inner(capacity: usize, linked: bool) -> Option<Self> {
+    /// Create a linked TRB ring with a minimum DMA alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Total TRB capacity, including the final Link TRB.
+    /// * `align` - Minimum physical alignment for the backing allocation.
+    ///
+    /// # Returns
+    ///
+    /// A DMA-backed ring, or `None` if allocation fails.
+    pub fn new_linked_aligned(capacity: usize, align: usize) -> Option<Self> {
+        Self::new_inner(capacity, true, align)
+    }
+
+    fn new_inner(capacity: usize, linked: bool, align: usize) -> Option<Self> {
         let trb_size = size_of::<Trb>();
         let ring_bytes = capacity * trb_size;
-        let page_count = (ring_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        let align = align.max(PAGE_SIZE);
+        let granule_pages = align.div_ceil(PAGE_SIZE).max(1);
+        let page_count = ring_bytes
+            .div_ceil(PAGE_SIZE)
+            .next_multiple_of(granule_pages);
 
-        let pages = ContiguousPages::new(page_count)?;
+        let pages = ContiguousPages::new_aligned(page_count, align)?;
         let vaddr = pages.as_vaddr();
 
         for i in 0..capacity {
@@ -178,97 +204,6 @@ impl DmaTrbRing {
         }
 
         Ok(result)
-    }
-
-    /// Enqueue a TRB without publishing ownership to the host controller.
-    ///
-    /// The TRB contents are written and cleaned with the opposite cycle bit.
-    /// Call [`DmaTrbRing::publish_deferred_cycle`] after all TD state is
-    /// visible to hardware and immediately before ringing the endpoint
-    /// doorbell.
-    ///
-    /// # Arguments
-    ///
-    /// * `trb` - Transfer request block to queue.
-    ///
-    /// # Returns
-    ///
-    /// A token identifying the TRB whose cycle bit must be published.
-    pub(crate) fn enqueue_deferred_cycle(
-        &self,
-        trb: Trb,
-    ) -> Result<DeferredCycleTrb, &'static str> {
-        let mut index = self.producer_index.lock();
-        let mut cycle_state = self.cycle_state.lock();
-
-        if self.capacity < 2 {
-            return Err("Ring capacity too small");
-        }
-
-        if *index >= self.usable_capacity() {
-            return Err("Ring full");
-        }
-
-        let trb_ptr = unsafe { self.trb_ptr(*index) };
-        let cycle = *cycle_state;
-
-        let mut trb = trb;
-        trb.set_cycle(!cycle);
-
-        unsafe {
-            core::ptr::write_volatile(trb_ptr, trb);
-        }
-
-        let result = *index;
-        self.sync_trb_for_device(result);
-        *index += 1;
-
-        if *index == self.usable_capacity() {
-            self.write_link_trb(self.usable_capacity(), cycle, self.dma_address())?;
-            *index = 0;
-            *cycle_state = !cycle;
-        }
-
-        Ok(DeferredCycleTrb {
-            index: result,
-            cycle,
-        })
-    }
-
-    /// Publish a deferred TRB by updating its cycle bit.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - Token returned by [`DmaTrbRing::enqueue_deferred_cycle`].
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when the TRB ownership update is visible to hardware.
-    pub(crate) fn publish_deferred_cycle(
-        &self,
-        token: DeferredCycleTrb,
-    ) -> Result<(), &'static str> {
-        if token.index >= self.usable_capacity() {
-            return Err("Deferred TRB index out of bounds");
-        }
-
-        crate::arch::wmb();
-
-        unsafe {
-            let control_ptr =
-                (self.pages.as_vaddr() + token.index * size_of::<Trb>() + 12) as *mut u32;
-            let mut control = core::ptr::read_volatile(control_ptr);
-            if token.cycle {
-                control |= 1;
-            } else {
-                control &= !1;
-            }
-            core::ptr::write_volatile(control_ptr, control);
-        }
-
-        self.sync_trb_for_device(token.index);
-        crate::arch::wmb();
-        Ok(())
     }
 
     /// Ensure the next TRBs can be enqueued before the segment Link TRB.
@@ -527,10 +462,26 @@ pub struct EventRing {
 
 impl EventRing {
     pub fn new(capacity: usize) -> Option<Self> {
-        let ring = DmaTrbRing::new(capacity)?;
+        Self::new_aligned(capacity, PAGE_SIZE)
+    }
 
-        let erst_page_count = 1;
-        let erst = ContiguousPages::new(erst_page_count)?;
+    /// Create an event ring with a minimum DMA alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Number of event TRBs in the ring segment.
+    /// * `align` - Minimum physical alignment for DMA allocations.
+    ///
+    /// # Returns
+    ///
+    /// A DMA-backed event ring, or `None` if allocation fails.
+    pub fn new_aligned(capacity: usize, align: usize) -> Option<Self> {
+        let align = align.max(PAGE_SIZE);
+        let granule_pages = align.div_ceil(PAGE_SIZE).max(1);
+        let ring = DmaTrbRing::new_aligned(capacity, align)?;
+
+        let erst_page_count = 1usize.next_multiple_of(granule_pages);
+        let erst = ContiguousPages::new_aligned(erst_page_count, align)?;
 
         let entry = ErstEntry {
             ring_segment_base: ring.physical_address() as u64,

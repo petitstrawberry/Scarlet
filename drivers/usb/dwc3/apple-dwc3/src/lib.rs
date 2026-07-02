@@ -25,7 +25,6 @@ use scarlet::{
 };
 use scarlet_driver_apple_atcphy::get_atcphy_by_phandle;
 
-const DWC3_GSBUSCFG0: usize = 0xc100;
 const DWC3_GUSB2PHYCFG: usize = 0xc200;
 const DWC3_GCTL: usize = 0xc110;
 const DWC3_GUSB2PHYACC: usize = 0xc280;
@@ -43,15 +42,6 @@ const GCTL_PRTCAP_MASK: u32 = 0x3 << 12;
 const GCTL_PRTCAP_HOST: u32 = 1 << 12;
 const GCTL_DSBLCLKGTNG: u32 = 1 << 0;
 const GCTL_DISSCRAMBLE: u32 = 1 << 3;
-
-const GSBUSCFG0_INCRX: u32 = 1 << 0;
-const GSBUSCFG0_INCR4B: u32 = 1 << 1;
-const GSBUSCFG0_INCR8B: u32 = 1 << 2;
-const GSBUSCFG0_INCR16B: u32 = 1 << 3;
-const GSBUSCFG0_INCR32B: u32 = 1 << 4;
-const GSBUSCFG0_INCR64B: u32 = 1 << 5;
-const GSBUSCFG0_INCR128B: u32 = 1 << 6;
-const GSBUSCFG0_INCR256B: u32 = 1 << 7;
 
 const GHWPARAMS3_SSPHY_IFC_MASK: u32 = 0x3;
 const GSNPSID_MASK: u32 = 0xfffff000;
@@ -197,17 +187,6 @@ impl AppleDwc3 {
         gctl |= GCTL_PRTCAP_HOST;
         gctl |= GCTL_DSBLCLKGTNG;
         self.core.write32(DWC3_GCTL, gctl);
-
-        let buscfg = self.core.read32(DWC3_GSBUSCFG0)
-            | GSBUSCFG0_INCR256B
-            | GSBUSCFG0_INCR128B
-            | GSBUSCFG0_INCR64B
-            | GSBUSCFG0_INCR32B
-            | GSBUSCFG0_INCR16B
-            | GSBUSCFG0_INCR8B
-            | GSBUSCFG0_INCR4B
-            | GSBUSCFG0_INCRX;
-        self.core.write32(DWC3_GSBUSCFG0, buscfg);
 
         self.core.write32(DWC3_APPLE_CIO_LFPS, 0x0f800f80);
         self.core.write32(DWC3_APPLE_CIO_BW_NGT, 0x0fc00fc0);

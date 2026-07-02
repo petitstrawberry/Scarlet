@@ -28,7 +28,7 @@ use crate::device::block::{
     request::{BlockIORequest, BlockIORequestType, BlockIOResult},
 };
 use crate::device::events::InterruptCapableDevice;
-use crate::device::iommu::{DmaContext, IommuMapFlags};
+use crate::device::iommu::{DmaContext, DmaMapping, IommuMapFlags};
 use crate::device::manager::{DeviceManager, DriverPriority};
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
@@ -55,9 +55,9 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
-use crate::println;
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
+use crate::{print, println};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -76,6 +76,8 @@ const USB_REQ_SET_FEATURE: u8 = 0x03;
 const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
 const USB_REQ_SET_INTERFACE: u8 = 0x0b;
 const USB_REQ_SET_PROTOCOL: u8 = 0x0b;
+const USB_REQ_BULK_ONLY_MASS_STORAGE_RESET: u8 = 0xff;
+const USB_FEATURE_ENDPOINT_HALT: u16 = 0;
 const USB_DT_DEVICE: u8 = 1;
 const USB_DT_CONFIGURATION: u8 = 2;
 const USB_DT_INTERFACE: u8 = 4;
@@ -92,14 +94,19 @@ const EP0_DCI: u8 = 1;
 const HCC_PARAMS1_AC64: u32 = 1 << 0;
 const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
 const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
-const XHCI_COMMAND_TIMEOUT_US: u64 = 500_000;
+const XHCI_COMMAND_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_PENDING_EVENT_LIMIT: usize = 64;
-const XHCI_VERBOSE_TRACE: bool = false;
+const XHCI_VERBOSE_TRACE: bool = true;
+const XHCI_TRACE_BUFFER_POISON_LEN: usize = 512;
 const USB_STORAGE_CBW_SIGNATURE: u32 = 0x4342_5355;
 const USB_STORAGE_CSW_SIGNATURE: u32 = 0x5342_5355;
 const USB_STORAGE_CBW_LEN: usize = 31;
 const USB_STORAGE_CSW_LEN: usize = 13;
+const USB_STORAGE_RECOVERY_DELAY_US: u64 = 6_000_000;
+const SCSI_TEST_UNIT_READY: u8 = 0x00;
+const SCSI_INQUIRY: u8 = 0x12;
+const SCSI_READ_CAPACITY_10: u8 = 0x25;
 const SCSI_READ_10: u8 = 0x28;
 const SCSI_WRITE_10: u8 = 0x2a;
 const PORTSC_CCS: u32 = 1 << 0;
@@ -508,6 +515,7 @@ struct SlotRuntime {
     interrupt_input_context: Option<ContiguousPages>,
     interrupt_ring: Option<DmaTrbRing>,
     interrupt_buffer: Option<ContiguousPages>,
+    interrupt_buffer_mapping: Option<DmaMapping>,
     interrupt_dci: Option<u8>,
     interrupt_endpoint_address: Option<u8>,
     interrupt_max_packet_size: Option<u16>,
@@ -687,6 +695,12 @@ impl XhciController {
     /// 4. Configure max device slots
     pub fn init(&self) -> Result<(), &'static str> {
         println!("[xHCI] Initializing controller...");
+        println!(
+            "[xHCI] DMA context: iommu={} additional_iommus={} mapping_granule={}",
+            self.dma_context.iommu.is_some(),
+            self.dma_context.additional_iommus.len(),
+            self.dma_alignment()
+        );
 
         // Step 1: Halt the controller
         self.halt()?;
@@ -808,6 +822,36 @@ impl XhciController {
         )
     }
 
+    fn dma_map_owned_pages(
+        &self,
+        pages: &ContiguousPages,
+        flags: IommuMapFlags,
+    ) -> Result<DmaMapping, &'static str> {
+        let len = pages.len() * crate::environment::PAGE_SIZE;
+        self.dma_context
+            .map_phys_owned(pages.as_paddr(), len, flags)
+            .map_err(|_| "xHCI: failed to map DMA buffer")
+    }
+
+    fn dma_alignment(&self) -> usize {
+        self.dma_context
+            .mapping_granule()
+            .max(crate::environment::PAGE_SIZE)
+    }
+
+    fn dma_page_count(&self, pages: usize) -> usize {
+        let granule_pages = self
+            .dma_alignment()
+            .div_ceil(crate::environment::PAGE_SIZE)
+            .max(1);
+        pages.next_multiple_of(granule_pages)
+    }
+
+    fn dma_alloc_pages(&self, pages: usize) -> Option<ContiguousPages> {
+        let pages = self.dma_page_count(pages);
+        ContiguousPages::new_aligned(pages, self.dma_alignment())
+    }
+
     /// Start the xHCI controller
     pub fn start(&self) -> Result<(), &'static str> {
         let stale_status = self.operational.read_usbsts() & USBSTS_WRITE_1_TO_CLEAR;
@@ -853,8 +897,9 @@ impl XhciController {
 
     fn setup_scratchpads(&self, count: usize) -> Result<ScratchpadBuffers, &'static str> {
         let array_pages = (count * size_of::<u64>()).div_ceil(crate::environment::PAGE_SIZE);
-        let array =
-            ContiguousPages::new(array_pages).ok_or("Failed to allocate scratchpad array")?;
+        let array = self
+            .dma_alloc_pages(array_pages)
+            .ok_or("Failed to allocate scratchpad array")?;
         let mut buffers = Vec::new();
 
         unsafe {
@@ -866,7 +911,9 @@ impl XhciController {
         }
 
         for index in 0..count {
-            let buffer = ContiguousPages::new(1).ok_or("Failed to allocate scratchpad buffer")?;
+            let buffer = self
+                .dma_alloc_pages(1)
+                .ok_or("Failed to allocate scratchpad buffer")?;
             let buffer_dma_addr = self.dma_map_pages(&buffer, dma_rw_flags())?;
             unsafe {
                 let entry = (array.as_vaddr() as *mut u64).add(index);
@@ -897,7 +944,9 @@ impl XhciController {
     fn setup_dcbaa(&self) -> Result<(), &'static str> {
         let entries = self.max_slots as usize + 1;
         let dcbaa_pages = (entries * size_of::<u64>()).div_ceil(crate::environment::PAGE_SIZE);
-        let dcbaa = ContiguousPages::new(dcbaa_pages).ok_or("Failed to allocate DCBAA")?;
+        let dcbaa = self
+            .dma_alloc_pages(dcbaa_pages)
+            .ok_or("Failed to allocate DCBAA")?;
         println!("[xHCI] DCBAA paddr={:#x}", dcbaa.as_paddr());
         unsafe {
             core::ptr::write_bytes(
@@ -934,8 +983,8 @@ impl XhciController {
     }
 
     fn setup_command_ring(&self) -> Result<(), &'static str> {
-        let ring =
-            DmaTrbRing::new_linked(COMMAND_RING_TRBS).ok_or("Failed to allocate command ring")?;
+        let ring = DmaTrbRing::new_linked_aligned(COMMAND_RING_TRBS, self.dma_alignment())
+            .ok_or("Failed to allocate command ring")?;
         let ring_dma_addr = self.dma_map_phys(
             ring.physical_address(),
             ring.dma_len(),
@@ -960,7 +1009,8 @@ impl XhciController {
     }
 
     fn setup_event_ring(&self) -> Result<(), &'static str> {
-        let ring = EventRing::new(EVENT_RING_TRBS).ok_or("Failed to allocate event ring")?;
+        let ring = EventRing::new_aligned(EVENT_RING_TRBS, self.dma_alignment())
+            .ok_or("Failed to allocate event ring")?;
         let ring_dma_addr =
             self.dma_map_phys(ring.physical_address(), ring.dma_len(), dma_rw_flags())?;
         let erst_dma_addr = self.dma_map_phys(
@@ -1043,6 +1093,13 @@ impl XhciController {
         read_mmio64_lo_hi(self.regs.runtime_base + offset)
     }
 
+    fn write_event_ring_dequeue_pointer(&self, event_ring: &EventRing) {
+        write_mmio64_lo_hi(
+            self.regs.runtime_base + registers::runtime::IR0_ERDP,
+            event_ring.event_ring_dequeue_pointer() as u64 | ERDP_EVENT_HANDLER_BUSY,
+        );
+    }
+
     fn log_trb(label: &str, index: usize, trb: Trb) {
         println!(
             "[xHCI] {}[{}]: type={} cycle={} param={:#x} status={:#x} control={:#x}",
@@ -1068,6 +1125,72 @@ impl XhciController {
             event.status,
             event.trb_pointer()
         );
+    }
+
+    fn print_hex_bytes(bytes: &[u8]) {
+        for (index, byte) in bytes.iter().enumerate() {
+            if index != 0 {
+                print!(" ");
+            }
+            print!("{:02x}", byte);
+        }
+    }
+
+    fn log_buffer_prefix(label: &str, buffer: &ContiguousPages, length: usize) {
+        let available = buffer.len() * crate::environment::PAGE_SIZE;
+        let sample_len = core::cmp::min(
+            core::cmp::min(length, available),
+            XHCI_TRACE_BUFFER_POISON_LEN,
+        );
+        if sample_len == 0 {
+            println!("[xHCI] {} len={} sample=0", label, length);
+            return;
+        }
+
+        // SAFETY: The buffer comes from ContiguousPages and sample_len is capped
+        // to the allocated byte length.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(buffer.as_vaddr() as *const u8, sample_len) };
+        let poison_remaining = bytes.iter().filter(|byte| **byte == 0xa5).count();
+        let first_len = core::cmp::min(sample_len, 32);
+        let last_len = core::cmp::min(sample_len.saturating_sub(first_len), 32);
+
+        print!(
+            "[xHCI] {} len={} sample={} a5_remaining={} first{}=",
+            label, length, sample_len, poison_remaining, first_len
+        );
+        Self::print_hex_bytes(&bytes[..first_len]);
+        if last_len != 0 {
+            let last_start = sample_len - last_len;
+            print!(" last{}@{:#x}=", last_len, last_start);
+            Self::print_hex_bytes(&bytes[last_start..]);
+        }
+        if sample_len >= 512 {
+            print!(" mbr_sig={:02x} {:02x}", bytes[510], bytes[511]);
+        }
+        print!("\n");
+    }
+
+    fn poison_buffer_prefix_for_trace(buffer: &mut ContiguousPages, length: usize) {
+        if !XHCI_VERBOSE_TRACE {
+            return;
+        }
+
+        let available = buffer.len() * crate::environment::PAGE_SIZE;
+        let bytes_to_poison = core::cmp::min(
+            core::cmp::min(length, available),
+            XHCI_TRACE_BUFFER_POISON_LEN,
+        );
+        if bytes_to_poison == 0 {
+            return;
+        }
+
+        // SAFETY: The buffer comes from ContiguousPages and bytes_to_poison is
+        // capped to the allocated byte length.
+        unsafe {
+            core::ptr::write_bytes(buffer.as_vaddr() as *mut u8, 0xa5, bytes_to_poison);
+        }
+        crate::arch::clean_dcache_to_poc_range(buffer.as_vaddr(), bytes_to_poison);
     }
 
     fn queue_pending_event(&self, event: Trb) {
@@ -1097,6 +1220,15 @@ impl XhciController {
                 && event.slot_id() == slot_id
                 && event.endpoint_id() == endpoint_id
         })
+    }
+
+    fn drain_pending_transfer_events(&self, slot_id: u8, endpoint_id: u8) {
+        let mut pending = self.pending_events.lock();
+        pending.retain(|event| {
+            event.trb_type() != TrbType::TransferEvent as u8
+                || event.slot_id() != slot_id
+                || event.endpoint_id() != endpoint_id
+        });
     }
 
     fn log_command_timeout_state(&self) {
@@ -1131,6 +1263,14 @@ impl XhciController {
             for index in 0..core::cmp::min(capacity, 4) {
                 if let Some(trb) = cmd_ring.peek(index) {
                     Self::log_trb("cmd", index, trb);
+                }
+            }
+            let start = producer.saturating_sub(4);
+            for index in start..producer {
+                if index >= 4 && index < capacity {
+                    if let Some(trb) = cmd_ring.peek(index) {
+                        Self::log_trb("cmd", index, trb);
+                    }
                 }
             }
         } else {
@@ -1219,11 +1359,9 @@ impl XhciController {
             let event_ring = event_ring_guard
                 .as_ref()
                 .ok_or("Event ring not initialized")?;
-            if let Some(event) = event_ring.dequeue() {
-                write_mmio64_lo_hi(
-                    self.regs.runtime_base + registers::runtime::IR0_ERDP,
-                    event_ring.event_ring_dequeue_pointer() as u64 | ERDP_EVENT_HANDLER_BUSY,
-                );
+            let event = event_ring.dequeue();
+            self.write_event_ring_dequeue_pointer(event_ring);
+            if let Some(event) = event {
                 if event.trb_type() == TrbType::CommandCompletionEvent as u8 {
                     if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
                         if XHCI_VERBOSE_TRACE {
@@ -1251,12 +1389,9 @@ impl XhciController {
     fn poll_event(&self) -> Option<Trb> {
         let event_ring_guard = self.event_ring.lock();
         let event_ring = event_ring_guard.as_ref()?;
-        let event = event_ring.dequeue()?;
-        write_mmio64_lo_hi(
-            self.regs.runtime_base + registers::runtime::IR0_ERDP,
-            event_ring.event_ring_dequeue_pointer() as u64 | ERDP_EVENT_HANDLER_BUSY,
-        );
-        Some(event)
+        let event = event_ring.dequeue();
+        self.write_event_ring_dequeue_pointer(event_ring);
+        event
     }
 
     fn read_portsc(&self, port_id: u8) -> u32 {
@@ -1358,10 +1493,11 @@ impl XhciController {
     }
 
     fn assign_device_context(&self, slot_id: u8) -> Result<ContiguousPages, &'static str> {
-        let pages = ContiguousPages::new(
-            device_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
-        )
-        .ok_or("Failed to allocate device context")?;
+        let pages = self
+            .dma_alloc_pages(
+                device_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate device context")?;
         let device_context_dma_addr = self.dma_map_pages(&pages, dma_rw_flags())?;
         unsafe {
             core::ptr::write_bytes(
@@ -1383,7 +1519,8 @@ impl XhciController {
     }
 
     fn allocate_ep0_ring(&self) -> Result<DmaTrbRing, &'static str> {
-        let ring = DmaTrbRing::new_linked(64).ok_or("Failed to allocate EP0 transfer ring")?;
+        let ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate EP0 transfer ring")?;
         let ring_dma_addr =
             self.dma_map_phys(ring.physical_address(), ring.dma_len(), dma_rw_flags())?;
         ring.set_dma_address(ring_dma_addr)?;
@@ -1401,14 +1538,16 @@ impl XhciController {
         tt_port: u8,
     ) -> Result<SlotRuntime, &'static str> {
         let device_context = self.assign_device_context(slot_id)?;
-        let input_pages = ContiguousPages::new(
-            address_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
-        )
-        .ok_or("Failed to allocate input context")?;
+        let input_pages = self
+            .dma_alloc_pages(
+                address_input_context_bytes(self.context_size)
+                    .div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate input context")?;
         let ep0_ring = self.allocate_ep0_ring()?;
         ep0_ring.clear();
-        let input_dma_addr =
-            self.dma_map_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
         unsafe {
             core::ptr::write_bytes(
                 input_pages.as_vaddr() as *mut u8,
@@ -1436,7 +1575,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
         ep0_ring.sync_for_device();
         let event = self.send_command(Trb::address_device_command(
-            input_dma_addr as u64,
+            input_dma_mapping.dma_addr(),
             slot_id,
             false,
         ))?;
@@ -1457,6 +1596,7 @@ impl XhciController {
             interrupt_input_context: None,
             interrupt_ring: None,
             interrupt_buffer: None,
+            interrupt_buffer_mapping: None,
             interrupt_dci: None,
             interrupt_endpoint_address: None,
             interrupt_max_packet_size: None,
@@ -1506,6 +1646,7 @@ impl XhciController {
         let direction_in = (request_type & 0x80) != 0;
         let transfer_type = if data.is_some() { 3 } else { 0 };
         let required_trbs = if data.is_some() { 3 } else { 2 };
+        let _data_dma_mapping;
         slot.ep0_ring
             .ensure_contiguous_space(required_trbs, Trb::no_op_transfer())?;
         slot.ep0_ring.enqueue(Trb::setup_stage(
@@ -1527,16 +1668,18 @@ impl XhciController {
             } else {
                 sync_pages_for_device(buffer);
             }
-            let buffer_dma_addr = self.dma_map_pages(buffer, flags)?;
+            let mapping = self.dma_map_owned_pages(buffer, flags)?;
             slot.ep0_ring.enqueue(Trb::data_stage(
-                buffer_dma_addr as u64,
+                mapping.dma_addr(),
                 length as u32,
                 direction_in,
             ))?;
             slot.ep0_ring
                 .enqueue(Trb::status_stage(!direction_in, true))?;
+            _data_dma_mapping = Some(mapping);
         } else {
             slot.ep0_ring.enqueue(Trb::status_stage(true, true))?;
+            _data_dma_mapping = None;
         }
 
         self.ring_endpoint_doorbell(slot.usb_device.slot_id(), EP0_DCI);
@@ -1551,6 +1694,20 @@ impl XhciController {
 
     fn wait_for_transfer_event(&self, slot_id: u8, endpoint_id: u8) -> Result<Trb, &'static str> {
         let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
+        self.wait_for_transfer_event_until(slot_id, endpoint_id, deadline)
+    }
+
+    fn wait_for_transfer_event_until(
+        &self,
+        slot_id: u8,
+        endpoint_id: u8,
+        deadline: u64,
+    ) -> Result<Trb, &'static str> {
+        if crate::time::current_time() >= deadline {
+            self.log_transfer_timeout_state(slot_id, endpoint_id);
+            return Err("Timeout waiting for transfer event");
+        }
+
         while crate::time::current_time() < deadline {
             if let Some(event) = self.take_pending_transfer_event(slot_id, endpoint_id) {
                 if Self::transfer_successful(event) {
@@ -1607,6 +1764,23 @@ impl XhciController {
         println!(
             "[xHCI] Transfer wait timeout: slot={} ep={}",
             slot_id, endpoint_id
+        );
+        println!(
+            "[xHCI] Transfer timeout regs: USBCMD={:#x} USBSTS={:#x} CRCR={:#x} DCBAAP={:#x} CONFIG={:#x}",
+            self.operational.read_usbcmd(),
+            self.operational.read_usbsts(),
+            self.operational.read_crcr(),
+            self.operational.read_dcbaap(),
+            self.operational.read_config()
+        );
+        println!(
+            "[xHCI] Transfer timeout interrupter: MFINDEX={:#x} IMAN={:#x} IMOD={:#x} ERSTSZ={:#x} ERSTBA={:#x} ERDP={:#x}",
+            self.read_runtime_u32(registers::runtime::MFINDEX),
+            self.read_runtime_u32(registers::runtime::IR0_IMAN),
+            self.read_runtime_u32(registers::runtime::IR0_IMOD),
+            self.read_runtime_u32(registers::runtime::IR0_ERSTSZ),
+            self.read_runtime_u64(registers::runtime::IR0_ERSTBA),
+            self.read_runtime_u64(registers::runtime::IR0_ERDP)
         );
 
         if let Some(event_ring) = self.event_ring.lock().as_ref() {
@@ -1682,6 +1856,15 @@ impl XhciController {
                 Self::log_trb(label, index, trb);
             }
         }
+        let producer = ring.current_producer_index();
+        let start = producer.saturating_sub(4);
+        for index in start..producer {
+            if index >= 4 && index < ring.capacity() {
+                if let Some(trb) = ring.peek(index) {
+                    Self::log_trb(label, index, trb);
+                }
+            }
+        }
     }
 
     fn submit_interrupt_in_transfer(&self, slot_id: u8) -> Result<(), &'static str> {
@@ -1698,15 +1881,18 @@ impl XhciController {
             .interrupt_buffer
             .as_ref()
             .ok_or("Interrupt buffer not configured")?;
+        let buffer_mapping = slot
+            .interrupt_buffer_mapping
+            .as_ref()
+            .ok_or("Interrupt buffer DMA mapping not configured")?;
         let dci = slot.interrupt_dci.ok_or("Interrupt DCI not configured")?;
         let max_packet = slot
             .interrupt_max_packet_size
             .ok_or("Interrupt packet size not configured")?;
 
-        let buffer_dma_addr =
-            self.dma_map_pages(buffer, IommuMapFlags::WRITE | IommuMapFlags::COHERENT)?;
+        sync_pages_before_device_write(buffer);
         ring.enqueue(Trb::normal_transfer_in(
-            buffer_dma_addr as u64,
+            buffer_mapping.dma_addr(),
             max_packet as u32,
         ))?;
         self.ring_endpoint_doorbell(slot_id, dci);
@@ -1731,8 +1917,9 @@ impl XhciController {
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for config fetch")?;
 
-            let mut header_buffer =
-                ContiguousPages::new(1).ok_or("Failed to allocate config header buffer")?;
+            let mut header_buffer = self
+                .dma_alloc_pages(1)
+                .ok_or("Failed to allocate config header buffer")?;
             unsafe {
                 core::ptr::write_bytes(
                     header_buffer.as_vaddr() as *mut u8,
@@ -1773,8 +1960,8 @@ impl XhciController {
 
         let _ = descriptor;
         let interrupt_dci = Self::interrupt_dci(boot.endpoint_address);
-        let interrupt_ring =
-            DmaTrbRing::new_linked(64).ok_or("Failed to allocate interrupt ring")?;
+        let interrupt_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate interrupt ring")?;
         let interrupt_ring_dma_addr = self.dma_map_phys(
             interrupt_ring.physical_address(),
             interrupt_ring.dma_len(),
@@ -1789,14 +1976,20 @@ impl XhciController {
                 MouseBootReport::encoded_size().div_ceil(crate::environment::PAGE_SIZE)
             }
         };
-        let interrupt_buffer = ContiguousPages::new(interrupt_buffer_pages)
+        let interrupt_buffer = self
+            .dma_alloc_pages(interrupt_buffer_pages)
             .ok_or("Failed to allocate interrupt buffer")?;
-        let input_pages = ContiguousPages::new(
-            full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
-        )
-        .ok_or("Failed to allocate endpoint config context")?;
-        let input_dma_addr =
-            self.dma_map_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+        let interrupt_buffer_mapping = self.dma_map_owned_pages(
+            &interrupt_buffer,
+            IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+        )?;
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate endpoint config context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
 
         unsafe {
             core::ptr::write_bytes(
@@ -1837,7 +2030,7 @@ impl XhciController {
         interrupt_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_addr as u64,
+            input_dma_mapping.dma_addr(),
             slot_id,
             false,
         ))?;
@@ -1886,6 +2079,7 @@ impl XhciController {
             slot.interrupt_input_context = Some(input_pages);
             slot.interrupt_ring = Some(interrupt_ring);
             slot.interrupt_buffer = Some(interrupt_buffer);
+            slot.interrupt_buffer_mapping = Some(interrupt_buffer_mapping);
             slot.interrupt_dci = Some(interrupt_dci);
             slot.interrupt_endpoint_address = Some(boot.endpoint_address);
             slot.interrupt_max_packet_size = Some(boot.max_packet_size);
@@ -1915,8 +2109,9 @@ impl XhciController {
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for storage config fetch")?;
 
-            let mut header_buffer =
-                ContiguousPages::new(1).ok_or("Failed to allocate config header buffer")?;
+            let mut header_buffer = self
+                .dma_alloc_pages(1)
+                .ok_or("Failed to allocate config header buffer")?;
             unsafe {
                 core::ptr::write_bytes(
                     header_buffer.as_vaddr() as *mut u8,
@@ -1958,8 +2153,10 @@ impl XhciController {
         let bulk_in_dci = Self::endpoint_dci(storage.bulk_in_endpoint);
         let bulk_out_dci = Self::endpoint_dci(storage.bulk_out_endpoint);
         let max_dci = bulk_in_dci.max(bulk_out_dci);
-        let bulk_in_ring = DmaTrbRing::new_linked(64).ok_or("Failed to allocate bulk IN ring")?;
-        let bulk_out_ring = DmaTrbRing::new_linked(64).ok_or("Failed to allocate bulk OUT ring")?;
+        let bulk_in_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate bulk IN ring")?;
+        let bulk_out_ring = DmaTrbRing::new_linked_aligned(64, self.dma_alignment())
+            .ok_or("Failed to allocate bulk OUT ring")?;
         let bulk_in_dma_addr = self.dma_map_phys(
             bulk_in_ring.physical_address(),
             bulk_in_ring.dma_len(),
@@ -1972,12 +2169,13 @@ impl XhciController {
             dma_rw_flags(),
         )?;
         bulk_out_ring.set_dma_address(bulk_out_dma_addr)?;
-        let input_pages = ContiguousPages::new(
-            full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
-        )
-        .ok_or("Failed to allocate mass storage endpoint context")?;
-        let input_dma_addr =
-            self.dma_map_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate mass storage endpoint context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
 
         unsafe {
             core::ptr::write_bytes(
@@ -2025,7 +2223,7 @@ impl XhciController {
         bulk_out_ring.sync_for_device();
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_addr as u64,
+            input_dma_mapping.dma_addr(),
             slot_id,
             false,
         ))?;
@@ -2077,6 +2275,7 @@ impl XhciController {
         let block_device = Arc::new(UsbMassStorageBlockDevice::new(
             self.clone(),
             slot_id,
+            storage.interface_number,
             storage.bulk_in_endpoint,
             storage.bulk_out_endpoint,
         ));
@@ -2239,12 +2438,13 @@ impl XhciController {
         num_ports: u8,
         multi_tt: bool,
     ) -> Result<(), &'static str> {
-        let input_pages = ContiguousPages::new(
-            full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
-        )
-        .ok_or("Failed to allocate hub context")?;
-        let input_dma_addr =
-            self.dma_map_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
+        let input_pages = self
+            .dma_alloc_pages(
+                full_input_context_bytes(self.context_size).div_ceil(crate::environment::PAGE_SIZE),
+            )
+            .ok_or("Failed to allocate hub context")?;
+        let input_dma_mapping =
+            self.dma_map_owned_pages(&input_pages, IommuMapFlags::READ | IommuMapFlags::COHERENT)?;
 
         unsafe {
             core::ptr::write_bytes(
@@ -2274,7 +2474,7 @@ impl XhciController {
         sync_pages_for_device(&input_pages);
 
         let event = self.send_command(Trb::configure_endpoint_command(
-            input_dma_addr as u64,
+            input_dma_mapping.dma_addr(),
             slot_id,
             false,
         ))?;
@@ -2345,6 +2545,8 @@ impl XhciController {
                 continue;
             }
 
+            // xHCI Route String contains only downstream hub-port nibbles; the root
+            // hub port is carried separately in the Slot Context Root Hub Port Number.
             let child_route = hub.route_string | ((port as u32) << (hub.depth as u32 * 4));
             let child_depth = hub.depth + 1;
             if self.slot_runtime.lock().iter().any(|slot| {
@@ -2457,8 +2659,9 @@ impl XhciController {
     }
 
     fn hub_get_port_status(&self, slot_id: u8, port: u8) -> Result<HubPortStatus, &'static str> {
-        let mut buffer =
-            ContiguousPages::new(1).ok_or("Failed to allocate hub port status buffer")?;
+        let mut buffer = self
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate hub port status buffer")?;
         unsafe {
             core::ptr::write_bytes(
                 buffer.as_vaddr() as *mut u8,
@@ -2506,8 +2709,9 @@ impl XhciController {
     }
 
     fn get_device_descriptor(&self, slot: &SlotRuntime) -> Result<DeviceDescriptor, &'static str> {
-        let mut buffer =
-            ContiguousPages::new(1).ok_or("Failed to allocate device descriptor buffer")?;
+        let mut buffer = self
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate device descriptor buffer")?;
         unsafe {
             core::ptr::write_bytes(
                 buffer.as_vaddr() as *mut u8,
@@ -2533,8 +2737,9 @@ impl XhciController {
         &self,
         slot: &SlotRuntime,
     ) -> Result<ContiguousPages, &'static str> {
-        let mut header_buffer =
-            ContiguousPages::new(1).ok_or("Failed to allocate config header buffer")?;
+        let mut header_buffer = self
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate config header buffer")?;
         unsafe {
             core::ptr::write_bytes(
                 header_buffer.as_vaddr() as *mut u8,
@@ -2570,7 +2775,9 @@ impl XhciController {
             return Err("Invalid config descriptor length");
         }
         let pages = (total_length as usize).div_ceil(crate::environment::PAGE_SIZE);
-        let mut buffer = ContiguousPages::new(pages).ok_or("Failed to allocate config buffer")?;
+        let mut buffer = self
+            .dma_alloc_pages(pages)
+            .ok_or("Failed to allocate config buffer")?;
         unsafe {
             core::ptr::write_bytes(
                 buffer.as_vaddr() as *mut u8,
@@ -2592,8 +2799,9 @@ impl XhciController {
     }
 
     fn get_hub_descriptor(&self, slot: &SlotRuntime) -> Result<HubDescriptor, &'static str> {
-        let mut buffer =
-            ContiguousPages::new(1).ok_or("Failed to allocate hub descriptor buffer")?;
+        let mut buffer = self
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate hub descriptor buffer")?;
         unsafe {
             core::ptr::write_bytes(
                 buffer.as_vaddr() as *mut u8,
@@ -3012,12 +3220,29 @@ impl XhciController {
         buffer: &mut ContiguousPages,
         length: usize,
     ) -> Result<usize, &'static str> {
+        let deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
+        self.bulk_transfer_until(slot_id, endpoint_address, buffer, length, deadline)
+    }
+
+    fn bulk_transfer_until(
+        &self,
+        slot_id: u8,
+        endpoint_address: u8,
+        buffer: &mut ContiguousPages,
+        length: usize,
+        deadline: u64,
+    ) -> Result<usize, &'static str> {
+        if crate::time::current_time() >= deadline {
+            return Err("Timeout waiting for transfer event");
+        }
+
         if length > USB_BULK_MAX_TRANSFER {
             return Err("USB bulk transfer too large");
         }
 
         let dci = Self::endpoint_dci(endpoint_address);
         let direction_in;
+        let dma_mapping;
         {
             let slots = self.slot_runtime.lock();
             let slot = slots
@@ -3053,17 +3278,18 @@ impl XhciController {
                 IommuMapFlags::READ | IommuMapFlags::COHERENT
             };
             if direction_in {
+                Self::poison_buffer_prefix_for_trace(buffer, length);
                 sync_pages_before_device_write(buffer);
             } else {
                 sync_pages_for_device(buffer);
             }
-            let buffer_dma_addr = self.dma_map_pages(buffer, flags)?;
+            dma_mapping = self.dma_map_owned_pages(buffer, flags)?;
             let trb = if direction_in {
-                Trb::normal_transfer_in(buffer_dma_addr as u64, length as u32)
+                Trb::normal_transfer_in(dma_mapping.dma_addr(), length as u32)
             } else {
-                Trb::normal_transfer(buffer_dma_addr as u64, length as u32)
+                Trb::normal_transfer(dma_mapping.dma_addr(), length as u32)
             };
-            let deferred_trb = ring.enqueue_deferred_cycle(trb)?;
+            let trb_index = ring.enqueue(trb)?;
             if XHCI_VERBOSE_TRACE {
                 println!(
                     "[xHCI] Bulk submit: slot={} ep_addr={:#x} dci={} dir={} len={} buffer_dma={:#x} ring_dma={:#x} trb_index={}",
@@ -3072,16 +3298,24 @@ impl XhciController {
                     dci,
                     if direction_in { "in" } else { "out" },
                     length,
-                    buffer_dma_addr,
+                    dma_mapping.dma_addr(),
                     ring.dma_address(),
-                    deferred_trb.index
+                    trb_index
                 );
             }
-            ring.publish_deferred_cycle(deferred_trb)?;
         }
 
         self.ring_endpoint_doorbell(slot_id, dci);
-        let event = self.wait_for_transfer_event(slot_id, dci)?;
+        let event = match self.wait_for_transfer_event_until(slot_id, dci, deadline) {
+            Ok(event) => event,
+            Err(error) => {
+                if direction_in {
+                    sync_pages_after_device_write(buffer);
+                    Self::log_buffer_prefix("Bulk IN timeout buffer", buffer, length);
+                }
+                return Err(error);
+            }
+        };
         if direction_in {
             sync_pages_after_device_write(buffer);
         }
@@ -3258,6 +3492,7 @@ fn next_usb_block_device_name() -> alloc::string::String {
 struct UsbMassStorageBlockDevice {
     controller: Arc<XhciController>,
     slot_id: u8,
+    interface_number: u8,
     bulk_in_endpoint: u8,
     bulk_out_endpoint: u8,
     sector_size: Mutex<usize>,
@@ -3271,12 +3506,14 @@ impl UsbMassStorageBlockDevice {
     fn new(
         controller: Arc<XhciController>,
         slot_id: u8,
+        interface_number: u8,
         bulk_in_endpoint: u8,
         bulk_out_endpoint: u8,
     ) -> Self {
         Self {
             controller,
             slot_id,
+            interface_number,
             bulk_in_endpoint,
             bulk_out_endpoint,
             sector_size: Mutex::new(512),
@@ -3288,14 +3525,23 @@ impl UsbMassStorageBlockDevice {
     }
 
     fn initialize(&self) -> Result<(), &'static str> {
-        let mut inquiry = ContiguousPages::new(1).ok_or("Failed to allocate INQUIRY buffer")?;
-        self.scsi_command(&[0x12, 0, 0, 0, 36, 0], Some((&mut inquiry, 36, true)))?;
-
-        self.scsi_command(&[0x00, 0, 0, 0, 0, 0], None)?;
-
-        let mut capacity = ContiguousPages::new(1).ok_or("Failed to allocate capacity buffer")?;
+        let mut inquiry = self
+            .controller
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate INQUIRY buffer")?;
         self.scsi_command(
-            &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            &[SCSI_INQUIRY, 0, 0, 0, 36, 0],
+            Some((&mut inquiry, 36, true)),
+        )?;
+
+        self.scsi_command(&[SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0], None)?;
+
+        let mut capacity = self
+            .controller
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate capacity buffer")?;
+        self.scsi_command(
+            &[SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             Some((&mut capacity, 8, true)),
         )?;
 
@@ -3316,24 +3562,151 @@ impl UsbMassStorageBlockDevice {
         Ok(())
     }
 
-    fn scsi_command(
+    fn scsi_opcode_name(opcode: u8) -> &'static str {
+        match opcode {
+            SCSI_TEST_UNIT_READY => "TEST_UNIT_READY",
+            SCSI_INQUIRY => "INQUIRY",
+            SCSI_READ_CAPACITY_10 => "READ_CAPACITY_10",
+            SCSI_READ_10 => "READ_10",
+            SCSI_WRITE_10 => "WRITE_10",
+            _ => "UNKNOWN",
+        }
+    }
+
+    fn scsi_rw10_fields(command: &[u8]) -> Option<(u32, u16)> {
+        if command.len() < 10 || (command[0] != SCSI_READ_10 && command[0] != SCSI_WRITE_10) {
+            return None;
+        }
+        Some((
+            u32::from_be_bytes([command[2], command[3], command[4], command[5]]),
+            u16::from_be_bytes([command[7], command[8]]),
+        ))
+    }
+
+    fn log_scsi_failure(&self, tag: u32, command: &[u8], stage: &str, error: &'static str) {
+        let opcode = command.first().copied().unwrap_or(0xff);
+        if let Some((lba, blocks)) = Self::scsi_rw10_fields(command) {
+            println!(
+                "[usb-storage] SCSI failure tag={} opcode={}({:#x}) stage={} lba={} blocks={} error={}",
+                tag,
+                Self::scsi_opcode_name(opcode),
+                opcode,
+                stage,
+                lba,
+                blocks,
+                error
+            );
+        } else {
+            println!(
+                "[usb-storage] SCSI failure tag={} opcode={}({:#x}) stage={} cdb_len={} error={}",
+                tag,
+                Self::scsi_opcode_name(opcode),
+                opcode,
+                stage,
+                command.len(),
+                error
+            );
+        }
+    }
+
+    fn is_recoverable_scsi_error(error: &'static str) -> bool {
+        matches!(
+            error,
+            "Timeout waiting for transfer event"
+                | "xHCI transfer event failed"
+                | "Short USB BOT CBW transfer"
+                | "Short USB BOT data transfer"
+                | "Short USB BOT CSW transfer"
+                | "Invalid USB BOT CSW signature"
+                | "USB BOT CSW tag mismatch"
+                | "USB storage SCSI command failed"
+        )
+    }
+
+    fn recover_bot(&self, reason: &'static str) -> Result<(), &'static str> {
+        println!(
+            "[usb-storage] BOT recovery start: slot={} if={} bulk_in={:#x} bulk_out={:#x} reason={}",
+            self.slot_id,
+            self.interface_number,
+            self.bulk_in_endpoint,
+            self.bulk_out_endpoint,
+            reason
+        );
+
+        self.controller.drain_pending_transfer_events(
+            self.slot_id,
+            XhciController::endpoint_dci(self.bulk_in_endpoint),
+        );
+        self.controller.drain_pending_transfer_events(
+            self.slot_id,
+            XhciController::endpoint_dci(self.bulk_out_endpoint),
+        );
+
+        {
+            let slots = self.controller.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == self.slot_id)
+                .ok_or("Unknown slot for BOT recovery")?;
+            self.controller.control_transfer(
+                slot,
+                0x21,
+                USB_REQ_BULK_ONLY_MASS_STORAGE_RESET,
+                0,
+                self.interface_number as u16,
+                None,
+                0,
+            )?;
+        }
+
+        crate::time::udelay(USB_STORAGE_RECOVERY_DELAY_US);
+
+        {
+            let slots = self.controller.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == self.slot_id)
+                .ok_or("Unknown slot for BOT recovery")?;
+            self.controller.control_transfer(
+                slot,
+                0x02,
+                USB_REQ_CLEAR_FEATURE,
+                USB_FEATURE_ENDPOINT_HALT,
+                self.bulk_in_endpoint as u16,
+                None,
+                0,
+            )?;
+            self.controller.control_transfer(
+                slot,
+                0x02,
+                USB_REQ_CLEAR_FEATURE,
+                USB_FEATURE_ENDPOINT_HALT,
+                self.bulk_out_endpoint as u16,
+                None,
+                0,
+            )?;
+        }
+
+        println!("[usb-storage] BOT recovery complete");
+        Ok(())
+    }
+
+    fn scsi_command_once(
         &self,
         command: &[u8],
         data_stage: Option<(&mut ContiguousPages, usize, bool)>,
+        tag: u32,
     ) -> Result<(), &'static str> {
-        if command.len() > 16 {
-            return Err("SCSI command too large for BOT CBW");
-        }
-
-        let _command_guard = self.command_lock.lock();
-
         let (data_len, direction_in) = data_stage
             .as_ref()
             .map(|(_, len, direction_in)| (*len, *direction_in))
             .unwrap_or((0, false));
-        let tag = self.next_tag.fetch_add(1, Ordering::SeqCst) as u32;
+        let command_deadline = crate::time::current_time() + XHCI_TRANSFER_TIMEOUT_US;
 
-        let mut cbw = ContiguousPages::new(1).ok_or("Failed to allocate USB BOT CBW")?;
+        let mut cbw = self
+            .controller
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate USB BOT CBW")?;
         unsafe {
             core::ptr::write_bytes(cbw.as_vaddr() as *mut u8, 0, crate::environment::PAGE_SIZE);
             let bytes =
@@ -3346,14 +3719,36 @@ impl UsbMassStorageBlockDevice {
             bytes[14] = command.len() as u8;
             bytes[15..15 + command.len()].copy_from_slice(command);
         }
+        if XHCI_VERBOSE_TRACE {
+            let cbw_bytes = unsafe {
+                core::slice::from_raw_parts(cbw.as_vaddr() as *const u8, USB_STORAGE_CBW_LEN)
+            };
+            print!(
+                "[usb-storage] CBW tag={} opcode={}({:#x}) data_len={} dir={} bytes=",
+                tag,
+                Self::scsi_opcode_name(command.first().copied().unwrap_or(0xff)),
+                command.first().copied().unwrap_or(0xff),
+                data_len,
+                if direction_in { "in" } else { "out" }
+            );
+            XhciController::print_hex_bytes(cbw_bytes);
+            print!("\n");
+        }
 
-        let transferred = self.controller.bulk_transfer(
+        let transferred = match self.controller.bulk_transfer(
             self.slot_id,
             self.bulk_out_endpoint,
             &mut cbw,
             USB_STORAGE_CBW_LEN,
-        )?;
+        ) {
+            Ok(transferred) => transferred,
+            Err(error) => {
+                self.log_scsi_failure(tag, command, "cbw", error);
+                return Err(error);
+            }
+        };
         if transferred != USB_STORAGE_CBW_LEN {
+            self.log_scsi_failure(tag, command, "cbw-short", "Short USB BOT CBW transfer");
             return Err("Short USB BOT CBW transfer");
         }
 
@@ -3363,25 +3758,61 @@ impl UsbMassStorageBlockDevice {
             } else {
                 self.bulk_out_endpoint
             };
-            let transferred = self
-                .controller
-                .bulk_transfer(self.slot_id, endpoint, buffer, len)?;
+            let transferred = match self.controller.bulk_transfer_until(
+                self.slot_id,
+                endpoint,
+                buffer,
+                len,
+                command_deadline,
+            ) {
+                Ok(transferred) => transferred,
+                Err(error) => {
+                    self.log_scsi_failure(
+                        tag,
+                        command,
+                        if is_in { "data-in" } else { "data-out" },
+                        error,
+                    );
+                    return Err(error);
+                }
+            };
             if transferred != len {
+                self.log_scsi_failure(
+                    tag,
+                    command,
+                    if is_in {
+                        "data-in-short"
+                    } else {
+                        "data-out-short"
+                    },
+                    "Short USB BOT data transfer",
+                );
                 return Err("Short USB BOT data transfer");
             }
         }
 
-        let mut csw = ContiguousPages::new(1).ok_or("Failed to allocate USB BOT CSW")?;
+        let mut csw = self
+            .controller
+            .dma_alloc_pages(1)
+            .ok_or("Failed to allocate USB BOT CSW")?;
         unsafe {
             core::ptr::write_bytes(csw.as_vaddr() as *mut u8, 0, crate::environment::PAGE_SIZE);
         }
-        let transferred = self.controller.bulk_transfer(
+        let transferred = match self.controller.bulk_transfer_until(
             self.slot_id,
             self.bulk_in_endpoint,
             &mut csw,
             USB_STORAGE_CSW_LEN,
-        )?;
+            command_deadline,
+        ) {
+            Ok(transferred) => transferred,
+            Err(error) => {
+                self.log_scsi_failure(tag, command, "csw", error);
+                return Err(error);
+            }
+        };
         if transferred != USB_STORAGE_CSW_LEN {
+            self.log_scsi_failure(tag, command, "csw-short", "Short USB BOT CSW transfer");
             return Err("Short USB BOT CSW transfer");
         }
 
@@ -3392,18 +3823,69 @@ impl UsbMassStorageBlockDevice {
             u32::from_le_bytes([csw_bytes[0], csw_bytes[1], csw_bytes[2], csw_bytes[3]]);
         let returned_tag =
             u32::from_le_bytes([csw_bytes[4], csw_bytes[5], csw_bytes[6], csw_bytes[7]]);
+        let residue =
+            u32::from_le_bytes([csw_bytes[8], csw_bytes[9], csw_bytes[10], csw_bytes[11]]);
         let status = csw_bytes[12];
         if signature != USB_STORAGE_CSW_SIGNATURE {
+            self.log_scsi_failure(
+                tag,
+                command,
+                "csw-signature",
+                "Invalid USB BOT CSW signature",
+            );
             return Err("Invalid USB BOT CSW signature");
         }
         if returned_tag != tag {
+            self.log_scsi_failure(tag, command, "csw-tag", "USB BOT CSW tag mismatch");
             return Err("USB BOT CSW tag mismatch");
         }
         if status != 0 {
+            println!(
+                "[usb-storage] SCSI command status failed tag={} opcode={}({:#x}) status={} residue={}",
+                tag,
+                Self::scsi_opcode_name(command.first().copied().unwrap_or(0xff)),
+                command.first().copied().unwrap_or(0xff),
+                status,
+                residue
+            );
             return Err("USB storage SCSI command failed");
         }
 
         Ok(())
+    }
+
+    fn scsi_command(
+        &self,
+        command: &[u8],
+        mut data_stage: Option<(&mut ContiguousPages, usize, bool)>,
+    ) -> Result<(), &'static str> {
+        if command.len() > 16 {
+            return Err("SCSI command too large for BOT CBW");
+        }
+
+        let _command_guard = self.command_lock.lock();
+        let mut recovered = false;
+
+        loop {
+            let tag = self.next_tag.fetch_add(1, Ordering::SeqCst) as u32;
+            let stage = data_stage
+                .as_mut()
+                .map(|(buffer, len, direction_in)| (&mut **buffer, *len, *direction_in));
+            match self.scsi_command_once(command, stage, tag) {
+                Ok(()) => return Ok(()),
+                Err(error) if !recovered && Self::is_recoverable_scsi_error(error) => {
+                    println!(
+                        "[usb-storage] retrying SCSI opcode={}({:#x}) after recovery: {}",
+                        Self::scsi_opcode_name(command.first().copied().unwrap_or(0xff)),
+                        command.first().copied().unwrap_or(0xff),
+                        error
+                    );
+                    self.recover_bot(error)?;
+                    recovered = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn read_sectors(&self, request: &mut BlockIORequest) -> Result<(), &'static str> {
@@ -3438,8 +3920,10 @@ impl UsbMassStorageBlockDevice {
             let blocks = (request.sector_count - done_blocks).min(max_blocks);
             let bytes = blocks * sector_size;
             let pages = bytes.div_ceil(crate::environment::PAGE_SIZE);
-            let mut buffer =
-                ContiguousPages::new(pages).ok_or("Failed to allocate USB read buffer")?;
+            let mut buffer = self
+                .controller
+                .dma_alloc_pages(pages)
+                .ok_or("Failed to allocate USB read buffer")?;
             unsafe {
                 core::ptr::write_bytes(
                     buffer.as_vaddr() as *mut u8,
@@ -3494,8 +3978,10 @@ impl UsbMassStorageBlockDevice {
             let blocks = (request.sector_count - done_blocks).min(max_blocks);
             let bytes = blocks * sector_size;
             let pages = bytes.div_ceil(crate::environment::PAGE_SIZE);
-            let mut buffer =
-                ContiguousPages::new(pages).ok_or("Failed to allocate USB write buffer")?;
+            let mut buffer = self
+                .controller
+                .dma_alloc_pages(pages)
+                .ok_or("Failed to allocate USB write buffer")?;
             let src_offset = done_blocks * sector_size;
             unsafe {
                 core::ptr::write_bytes(

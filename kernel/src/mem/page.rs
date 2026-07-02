@@ -191,6 +191,31 @@ impl ContiguousPages {
         }
     }
 
+    /// Allocate contiguous pages with a minimum physical alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - Number of pages to allocate.
+    /// * `align` - Physical alignment in bytes. Values below `PAGE_SIZE` are
+    ///   rounded up to `PAGE_SIZE`.
+    ///
+    /// # Returns
+    ///
+    /// Aligned contiguous pages, or `None` when allocation fails.
+    pub fn new_aligned(count: usize, align: usize) -> Option<Self> {
+        if count == 0 {
+            return None;
+        }
+
+        let align = align.max(PAGE_SIZE);
+        let ptr = allocate_raw_pages_aligned(count, align);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr, count })
+        }
+    }
+
     /// Get a pointer to the first page.
     pub fn as_ptr(&self) -> *mut Page {
         self.ptr
