@@ -40,6 +40,7 @@ const GPIO_PULL_MASK: u32 = 0b11 << GPIO_PULL_SHIFT;
 const GPIO_INPUT_ENABLE: u32 = 1 << 9;
 const GPIO_IRQ_GROUP_SHIFT: u32 = 16;
 const GPIO_IRQ_GROUP_MASK: u32 = 0b111 << GPIO_IRQ_GROUP_SHIFT;
+const LOG_PENDING_IRQS: bool = false;
 const IRQ_LOG_LIMIT: u32 = 24;
 const PINMUX_LOG_LIMIT: u32 = 24;
 const GPIO_VALUE_LOG_LIMIT: u32 = 32;
@@ -315,7 +316,9 @@ impl ApplePinctrl {
 
                     if pin < self.npins {
                         let handler = self.irq_handlers.lock().get(&pin).cloned();
-                        if IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
+                        if LOG_PENDING_IRQS
+                            && IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT
+                        {
                             scarlet::early_println!(
                                 "[apple-pinctrl] pending base={:#x} group={} word={} pin={} pending={:#x} handler={}",
                                 self.base,
