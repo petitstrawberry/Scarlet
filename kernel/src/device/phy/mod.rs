@@ -52,6 +52,17 @@ pub enum PhyMode {
     Other(u32),
 }
 
+/// Cable or connector orientation for PHYs that need lane swapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhyOrientation {
+    /// No active orientation is known.
+    None,
+    /// Normal connector orientation.
+    Normal,
+    /// Reverse connector orientation.
+    Reverse,
+}
+
 /// Consumer-side PHY handle with refcounted power state.
 #[derive(Clone)]
 pub struct PhyHandle {
@@ -62,6 +73,7 @@ pub struct PhyHandle {
 struct PhyState {
     power_count: u32,
     mode: Option<PhyMode>,
+    orientation: Option<PhyOrientation>,
 }
 
 impl PhyHandle {
@@ -80,6 +92,7 @@ impl PhyHandle {
             state: Arc::new(Mutex::new(PhyState {
                 power_count: 0,
                 mode: None,
+                orientation: None,
             })),
         }
     }
@@ -159,6 +172,30 @@ impl PhyHandle {
     pub fn mode(&self) -> Option<PhyMode> {
         self.state.lock().mode
     }
+
+    /// Set the PHY connector orientation.
+    ///
+    /// # Arguments
+    ///
+    /// * `orientation` - Current connector orientation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the orientation was accepted by the PHY.
+    pub fn set_orientation(&self, orientation: PhyOrientation) -> Result<(), PhyError> {
+        self.phy.set_orientation(orientation)?;
+        self.state.lock().orientation = Some(orientation);
+        Ok(())
+    }
+
+    /// Return the last orientation set through this handle.
+    ///
+    /// # Returns
+    ///
+    /// The cached orientation, or `None` when no orientation was set.
+    pub fn orientation(&self) -> Option<PhyOrientation> {
+        self.state.lock().orientation
+    }
 }
 
 /// A single PHY instance.
@@ -208,6 +245,28 @@ pub trait Phy: Send + Sync {
     ///
     /// Current PHY mode, or `None` when unknown.
     fn get_mode(&self) -> Option<PhyMode>;
+
+    /// Set the PHY connector orientation.
+    ///
+    /// # Arguments
+    ///
+    /// * `orientation` - Current connector orientation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the PHY accepted the orientation.
+    fn set_orientation(&self, _orientation: PhyOrientation) -> Result<(), PhyError> {
+        Ok(())
+    }
+
+    /// Return the PHY connector orientation.
+    ///
+    /// # Returns
+    ///
+    /// Current PHY orientation, or `None` when unknown.
+    fn get_orientation(&self) -> Option<PhyOrientation> {
+        None
+    }
 }
 
 /// PHY controller that exposes one or more PHY instances.

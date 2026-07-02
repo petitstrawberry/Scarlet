@@ -13,7 +13,7 @@ use scarlet::{
     device::{
         DeviceInfo,
         manager::{DeviceManager, DriverPriority},
-        phy::{Phy, PhyError, PhyHandle, PhyMode, PhyProvider},
+        phy::{Phy, PhyError, PhyHandle, PhyMode, PhyOrientation, PhyProvider},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
@@ -63,9 +63,13 @@ const ACIOPHY_LANE_MODE: usize = 0x48;
 const ACIOPHY_CROSSBAR: usize = 0x4c;
 const ACIOPHY_CROSSBAR_PROTOCOL_MASK: u32 = 0x1f;
 const ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP: u32 = 0x10;
+const ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP_SWAPPED: u32 = 0x11;
+const ACIOPHY_CROSSBAR_DP_SINGLE_PMA_MASK: u32 = 0x1ffe0;
+const ACIOPHY_CROSSBAR_DP_SINGLE_PMA_UNK008: u32 = 0x008 << 5;
+const ACIOPHY_CROSSBAR_DP_BOTH_PMA: u32 = 1 << 17;
 
-const ACIOPHY_LANE_MODE_USB3: u32 = 0x3;
-const ACIOPHY_LANE_MODE_DP: u32 = 0x5;
+const ACIOPHY_LANE_MODE_USB3: u32 = 0x1;
+const ACIOPHY_LANE_MODE_DP: u32 = 0x2;
 
 const PHY_TYPE_USB2: u32 = 3;
 const PHY_TYPE_USB3: u32 = 4;
@@ -237,6 +241,7 @@ pub struct AppleAtcPhy {
     lane0_dp: Vec<HardwareTunable>,
     lane1_dp: Vec<HardwareTunable>,
     pipehandler_up: bool,
+    swap_lanes: bool,
 }
 
 impl AppleAtcPhy {
@@ -274,6 +279,7 @@ impl AppleAtcPhy {
             lane0_dp: Vec::new(),
             lane1_dp: Vec::new(),
             pipehandler_up: false,
+            swap_lanes: false,
         }
     }
 
@@ -450,16 +456,40 @@ impl AppleAtcPhy {
     }
 
     fn configure_crossbar(&self) {
+        let (lane0_mode, lane1_mode, protocol, set_swap) = if self.swap_lanes {
+            (
+                ACIOPHY_LANE_MODE_DP,
+                ACIOPHY_LANE_MODE_USB3,
+                ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP_SWAPPED,
+                true,
+            )
+        } else {
+            (
+                ACIOPHY_LANE_MODE_USB3,
+                ACIOPHY_LANE_MODE_DP,
+                ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP,
+                false,
+            )
+        };
+
         let crossbar = self.core_read32(ACIOPHY_CROSSBAR);
         self.core_write32(
             ACIOPHY_CROSSBAR,
-            (crossbar & !ACIOPHY_CROSSBAR_PROTOCOL_MASK) | ACIOPHY_CROSSBAR_PROTOCOL_USB3_DP,
+            (crossbar
+                & !(ACIOPHY_CROSSBAR_PROTOCOL_MASK
+                    | ACIOPHY_CROSSBAR_DP_SINGLE_PMA_MASK
+                    | ACIOPHY_CROSSBAR_DP_BOTH_PMA))
+                | protocol
+                | ACIOPHY_CROSSBAR_DP_SINGLE_PMA_UNK008,
         );
+        if set_swap {
+            self.core_set32(ATCPHY_MISC, ATCPHY_MISC_LANE_SWAP);
+        } else {
+            self.core_clear32(ATCPHY_MISC, ATCPHY_MISC_LANE_SWAP);
+        }
 
-        let lane_mode = (ACIOPHY_LANE_MODE_USB3 << 0)
-            | (ACIOPHY_LANE_MODE_USB3 << 3)
-            | (ACIOPHY_LANE_MODE_DP << 6)
-            | (ACIOPHY_LANE_MODE_DP << 9);
+        let lane_mode =
+            (lane0_mode << 0) | (lane0_mode << 3) | (lane1_mode << 6) | (lane1_mode << 9);
         self.core_write32(ACIOPHY_LANE_MODE, lane_mode);
     }
 
@@ -602,16 +632,12 @@ impl AppleAtcPhy {
         apply_tunables(&self.common_b, self.core_base);
 
         match mode {
-            AtcPhyMode::Usb3 => {
-                apply_tunables(&self.lane0_usb, self.core_base);
-                apply_tunables(&self.lane1_usb, self.core_base);
-            }
-            AtcPhyMode::DisplayPort => {
+            AtcPhyMode::Usb3 | AtcPhyMode::Usb3Dp => {
                 apply_tunables(
                     if lane0_idx == 0 {
-                        &self.lane0_dp
+                        &self.lane0_usb
                     } else {
-                        &self.lane1_dp
+                        &self.lane1_usb
                     },
                     self.core_base,
                 );
@@ -624,12 +650,12 @@ impl AppleAtcPhy {
                     self.core_base,
                 );
             }
-            AtcPhyMode::Usb3Dp => {
+            AtcPhyMode::DisplayPort => {
                 apply_tunables(
                     if lane0_idx == 0 {
-                        &self.lane0_usb
+                        &self.lane0_dp
                     } else {
-                        &self.lane1_usb
+                        &self.lane1_dp
                     },
                     self.core_base,
                 );
@@ -655,7 +681,7 @@ impl AppleAtcPhy {
 
         self.usb2_power_on();
         self.core_power_on()?;
-        self.apply_mode_tunables(AtcPhyMode::Usb3, false);
+        self.apply_mode_tunables(AtcPhyMode::Usb3, self.swap_lanes);
 
         self.core_write32(AUSPLL_FSM_CTRL, 0x1fe000);
         self.core_write32(AUSPLL_APB_CMD_OVERRIDE, AUSPLL_APB_CMD_OVERRIDE_UNK28);
@@ -711,15 +737,15 @@ impl AppleAtcPhy {
         self.usb2_power_on();
         self.core_power_on()?;
         self.configure_crossbar();
-        self.apply_mode_tunables(mode, false);
+        self.apply_mode_tunables(mode, self.swap_lanes);
 
         match mode {
             AtcPhyMode::Usb3Dp => {
                 self.configure_pipehandler_usb3(true);
-                self.configure_pipehandler_dp(false);
+                self.configure_pipehandler_dp(self.swap_lanes);
             }
             AtcPhyMode::DisplayPort => {
-                self.configure_pipehandler_dp(false);
+                self.configure_pipehandler_dp(self.swap_lanes);
             }
             _ => {
                 self.configure_pipehandler_usb3(true);
@@ -728,6 +754,21 @@ impl AppleAtcPhy {
 
         early_println!("[apple-atcphy] initialized ({:?} mode)", mode);
         Ok(())
+    }
+
+    fn set_orientation(&mut self, orientation: PhyOrientation) -> Result<(), PhyError> {
+        match orientation {
+            PhyOrientation::None | PhyOrientation::Normal => {
+                self.swap_lanes = false;
+                early_println!("[apple-atcphy] orientation normal");
+                Ok(())
+            }
+            PhyOrientation::Reverse => {
+                self.swap_lanes = true;
+                early_println!("[apple-atcphy] orientation reverse");
+                Ok(())
+            }
+        }
     }
 }
 
@@ -801,6 +842,7 @@ struct AppleAtcPhyLane {
     phy: Arc<Mutex<AppleAtcPhy>>,
     lane: u32,
     mode: Mutex<Option<PhyMode>>,
+    orientation: Mutex<Option<PhyOrientation>>,
 }
 
 impl AppleAtcPhyLane {
@@ -809,6 +851,7 @@ impl AppleAtcPhyLane {
             phy,
             lane: phy_type,
             mode: Mutex::new(None),
+            orientation: Mutex::new(None),
         }
     }
 
@@ -902,6 +945,26 @@ impl Phy for AppleAtcPhyLane {
 
     fn get_mode(&self) -> Option<PhyMode> {
         *self.mode.lock()
+    }
+
+    fn set_orientation(&self, orientation: PhyOrientation) -> Result<(), PhyError> {
+        *self.orientation.lock() = Some(orientation);
+        if self.lane == PHY_TYPE_USB3 {
+            let mut phy = self.phy.lock();
+            phy.set_orientation(orientation)?;
+            if self.mode.lock().is_some() {
+                match orientation {
+                    PhyOrientation::None | PhyOrientation::Normal | PhyOrientation::Reverse => {
+                        phy.configure_crossbar();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get_orientation(&self) -> Option<PhyOrientation> {
+        *self.orientation.lock()
     }
 }
 

@@ -12,11 +12,12 @@ use scarlet::{
         clk::ClkHandle,
         iommu::{IommuDomainConfig, IommuDomainType},
         manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
-        phy::{PhyError, PhyHandle, PhyMode},
+        phy::{PhyError, PhyHandle, PhyMode, PhyOrientation},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
         reset::ResetHandle,
+        usb::{TypecOrientation, TypecPortStatus},
     },
     early_println,
     interrupt::InterruptId,
@@ -313,7 +314,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .and_then(|p| p.as_str())
         .unwrap_or("otg");
 
-    log_typec_role_switch_status(device)?;
+    let typec_status = log_typec_role_switch_status(device)?;
 
     let base_addr = scarlet::vm::ioremap(paddr, size).map_err(|_| "dwc3: ioremap failed")?;
 
@@ -357,6 +358,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         None
     };
     if let Some(phy) = &usb3_phy {
+        apply_typec_orientation(phy, typec_status.map(|status| status.orientation))?;
         phy.power_on().map_err(phy_error_to_str)?;
         early_println!("[apple-dwc3] usb3-phy powered before reset deassert");
     }
@@ -420,9 +422,11 @@ fn phy_error_to_str(error: PhyError) -> &'static str {
     }
 }
 
-fn log_typec_role_switch_status(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+fn log_typec_role_switch_status(
+    device: &PlatformDeviceInfo,
+) -> Result<Option<TypecPortStatus>, &'static str> {
     if device.property("usb-role-switch").is_none() {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(port) = DeviceManager::get_manager().get_typec_port_for_platform_device(device) else {
@@ -445,6 +449,24 @@ fn log_typec_role_switch_status(device: &PlatformDeviceInfo) -> Result<(), &'sta
         status.raw_status,
         status.raw_power_status,
         status.raw_data_status,
+    );
+    Ok(Some(status))
+}
+
+fn apply_typec_orientation(
+    phy: &PhyHandle,
+    orientation: Option<TypecOrientation>,
+) -> Result<(), &'static str> {
+    let phy_orientation = match orientation.unwrap_or(TypecOrientation::None) {
+        TypecOrientation::None => PhyOrientation::None,
+        TypecOrientation::Normal => PhyOrientation::Normal,
+        TypecOrientation::Reverse => PhyOrientation::Reverse,
+    };
+    phy.set_orientation(phy_orientation)
+        .map_err(phy_error_to_str)?;
+    early_println!(
+        "[apple-dwc3] usb3-phy orientation configured for {:?}",
+        phy_orientation
     );
     Ok(())
 }

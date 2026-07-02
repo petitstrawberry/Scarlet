@@ -83,8 +83,11 @@ const USB_DT_CONFIGURATION: u8 = 2;
 const USB_DT_INTERFACE: u8 = 4;
 const USB_DT_ENDPOINT: u8 = 5;
 const USB_DT_HUB: u8 = 0x29;
+const USB_DT_SS_HUB: u8 = 0x2a;
+const USB_DT_SS_HUB_SIZE: usize = 12;
 const USB_CLASS_HID: u8 = 3;
 const USB_CLASS_HUB: u8 = 0x09;
+const USB_HUB_PROTOCOL_SUPERSPEED: u8 = 3;
 const USB_CLASS_MASS_STORAGE: u8 = 0x08;
 const USB_MSC_SUBCLASS_SCSI: u8 = 0x06;
 const USB_MSC_PROTOCOL_BULK_ONLY: u8 = 0x50;
@@ -132,11 +135,14 @@ const PORT_RESET_TIMEOUT_US: u64 = 500_000;
 const PORT_RESET_RECOVERY_US: u64 = 10_000;
 const USB_HUB_POWER_RECOVERY_US: u64 = 20_000;
 const USB_HUB_PORT_RESET_TIMEOUT_US: u64 = 500_000;
+const USB_HUB_REQ_SET_DEPTH: u8 = 12;
 const USB_HUB_FEATURE_PORT_RESET: u16 = 4;
 const USB_HUB_FEATURE_PORT_POWER: u16 = 8;
 const USB_HUB_FEATURE_C_PORT_CONNECTION: u16 = 16;
 const USB_HUB_FEATURE_C_PORT_ENABLE: u16 = 17;
 const USB_HUB_FEATURE_C_PORT_RESET: u16 = 20;
+const USB_HUB_FEATURE_C_PORT_LINK_STATE: u16 = 25;
+const USB_HUB_FEATURE_C_BH_PORT_RESET: u16 = 29;
 const USB_HUB_PORT_CONNECTION: u16 = 1 << 0;
 const USB_HUB_PORT_ENABLE: u16 = 1 << 1;
 const USB_HUB_PORT_LOW_SPEED: u16 = 1 << 9;
@@ -322,6 +328,7 @@ struct HubRuntime {
     depth: u8,
     num_ports: u8,
     multi_tt: bool,
+    is_superspeed: bool,
     power_good_time_us: u64,
 }
 
@@ -342,7 +349,11 @@ impl HubPortStatus {
         (self.change & USB_HUB_PORT_CHANGE_CONNECTION) != 0
     }
 
-    const fn speed(self) -> UsbSpeed {
+    const fn speed(self, hub_is_superspeed: bool) -> UsbSpeed {
+        if hub_is_superspeed {
+            return UsbSpeed::Super;
+        }
+
         if (self.status & USB_HUB_PORT_LOW_SPEED) != 0 {
             UsbSpeed::Low
         } else if (self.status & USB_HUB_PORT_HIGH_SPEED) != 0 {
@@ -2346,6 +2357,17 @@ impl XhciController {
             }
             Err(_) => return Ok(false),
         };
+        let (slot_speed, hub_depth) = {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown slot for hub speed fetch")?;
+            (slot.usb_device.speed(), slot.route_depth)
+        };
+        let is_superspeed_hub = matches!(slot_speed, UsbSpeed::Super | UsbSpeed::SuperPlus)
+            || device_protocol == USB_HUB_PROTOCOL_SUPERSPEED
+            || hub_interface.protocol == USB_HUB_PROTOCOL_SUPERSPEED;
 
         {
             let slots = self.slot_runtime.lock();
@@ -2374,6 +2396,9 @@ impl XhciController {
                 )?;
             }
         }
+        if is_superspeed_hub {
+            self.set_hub_depth(slot_id, hub_depth)?;
+        }
 
         let hub_descriptor = {
             let slots = self.slot_runtime.lock();
@@ -2381,7 +2406,7 @@ impl XhciController {
                 .iter()
                 .find(|slot| slot.usb_device.slot_id() == slot_id)
                 .ok_or("Unknown slot for hub descriptor fetch")?;
-            self.get_hub_descriptor(slot)?
+            self.get_hub_descriptor(slot, is_superspeed_hub)?
         };
         let num_ports = hub_descriptor.num_ports;
         if num_ports == 0 {
@@ -2392,9 +2417,10 @@ impl XhciController {
             (hub_descriptor.power_on_to_power_good as u64 * 2_000).max(USB_HUB_POWER_RECOVERY_US);
 
         println!(
-            "[xHCI] Slot {} hub: ports={} multi_tt={} power_good_us={} cfg={} if={} alt={}",
+            "[xHCI] Slot {} hub: ports={} superspeed={} multi_tt={} power_good_us={} cfg={} if={} alt={}",
             slot_id,
             num_ports,
+            is_superspeed_hub,
             multi_tt,
             power_good_time_us,
             hub_interface.configuration_value,
@@ -2416,6 +2442,7 @@ impl XhciController {
                 depth: slot.route_depth,
                 num_ports,
                 multi_tt,
+                is_superspeed: is_superspeed_hub,
                 power_good_time_us,
             });
         }
@@ -2485,6 +2512,16 @@ impl XhciController {
         Ok(())
     }
 
+    fn set_hub_depth(&self, slot_id: u8, depth: u8) -> Result<(), &'static str> {
+        let slots = self.slot_runtime.lock();
+        let slot = slots
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .ok_or("Unknown hub slot")?;
+        self.control_transfer(slot, 0x20, USB_HUB_REQ_SET_DEPTH, depth as u16, 0, None, 0)?;
+        Ok(())
+    }
+
     fn power_hub_ports(&self, slot_id: u8) -> Result<(), &'static str> {
         let (num_ports, power_good_time_us) = {
             let slots = self.slot_runtime.lock();
@@ -2523,7 +2560,7 @@ impl XhciController {
             let _ = self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_ENABLE);
 
             let status = self.hub_get_port_status(slot_id, port)?;
-            self.log_hub_port_status(slot_id, port, status);
+            self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
             if !status.connected() {
                 continue;
             }
@@ -2536,7 +2573,7 @@ impl XhciController {
             }
 
             let status = self.reset_hub_port(slot_id, port)?;
-            self.log_hub_port_status(slot_id, port, status);
+            self.log_hub_port_status(slot_id, port, status, hub.is_superspeed);
             if !status.enabled() {
                 println!(
                     "[xHCI] Slot {} hub port {} reset did not enable port",
@@ -2557,7 +2594,7 @@ impl XhciController {
                 continue;
             }
 
-            let speed = status.speed();
+            let speed = status.speed(hub.is_superspeed);
             let tt_hub_slot_id = if matches!(parent_speed, UsbSpeed::High)
                 && matches!(speed, UsbSpeed::Low | UsbSpeed::Full)
             {
@@ -2594,6 +2631,14 @@ impl XhciController {
     }
 
     fn reset_hub_port(&self, slot_id: u8, port: u8) -> Result<HubPortStatus, &'static str> {
+        let is_superspeed = {
+            let slots = self.slot_runtime.lock();
+            let slot = slots
+                .iter()
+                .find(|slot| slot.usb_device.slot_id() == slot_id)
+                .ok_or("Unknown hub slot")?;
+            slot.hub.ok_or("Slot is not a hub")?.is_superspeed
+        };
         self.hub_set_port_feature(slot_id, port, USB_HUB_FEATURE_PORT_RESET)?;
         let deadline = crate::time::current_time() + USB_HUB_PORT_RESET_TIMEOUT_US;
         let mut last_status = self.hub_get_port_status(slot_id, port)?;
@@ -2602,13 +2647,22 @@ impl XhciController {
             last_status = status;
             if status.reset_complete_changed() {
                 self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_PORT_RESET)?;
+                if is_superspeed {
+                    let _ =
+                        self.hub_clear_port_feature(slot_id, port, USB_HUB_FEATURE_C_BH_PORT_RESET);
+                    let _ = self.hub_clear_port_feature(
+                        slot_id,
+                        port,
+                        USB_HUB_FEATURE_C_PORT_LINK_STATE,
+                    );
+                }
                 crate::time::udelay(PORT_RESET_RECOVERY_US);
                 return Ok(status);
             }
             core::hint::spin_loop();
         }
 
-        self.log_hub_port_status(slot_id, port, last_status);
+        self.log_hub_port_status(slot_id, port, last_status, is_superspeed);
         Err("Timeout waiting for hub port reset")
     }
 
@@ -2693,7 +2747,13 @@ impl XhciController {
         })
     }
 
-    fn log_hub_port_status(&self, slot_id: u8, port: u8, status: HubPortStatus) {
+    fn log_hub_port_status(
+        &self,
+        slot_id: u8,
+        port: u8,
+        status: HubPortStatus,
+        hub_is_superspeed: bool,
+    ) {
         println!(
             "[xHCI] Slot {} hub port {} status={:#06x} change={:#06x} connected={} enabled={} c_connection={} c_reset={} speed={:?}",
             slot_id,
@@ -2704,7 +2764,7 @@ impl XhciController {
             status.enabled(),
             status.connection_changed(),
             status.reset_complete_changed(),
-            status.speed()
+            status.speed(hub_is_superspeed)
         );
     }
 
@@ -2798,7 +2858,11 @@ impl XhciController {
         Ok(buffer)
     }
 
-    fn get_hub_descriptor(&self, slot: &SlotRuntime) -> Result<HubDescriptor, &'static str> {
+    fn get_hub_descriptor(
+        &self,
+        slot: &SlotRuntime,
+        is_superspeed: bool,
+    ) -> Result<HubDescriptor, &'static str> {
         let mut buffer = self
             .dma_alloc_pages(1)
             .ok_or("Failed to allocate hub descriptor buffer")?;
@@ -2809,14 +2873,24 @@ impl XhciController {
                 crate::environment::PAGE_SIZE,
             )
         };
+        let requested_descriptor_type = if is_superspeed {
+            USB_DT_SS_HUB
+        } else {
+            USB_DT_HUB
+        };
+        let descriptor_size = if is_superspeed {
+            USB_DT_SS_HUB_SIZE
+        } else {
+            HubDescriptor::encoded_size()
+        };
         self.control_transfer(
             slot,
             0xa0,
             USB_REQ_GET_DESCRIPTOR,
-            (USB_DT_HUB as u16) << 8,
+            (requested_descriptor_type as u16) << 8,
             0,
             Some(&mut buffer),
-            HubDescriptor::encoded_size() as u16,
+            descriptor_size as u16,
         )?;
         let descriptor = unsafe { read_unaligned(buffer.as_vaddr() as *const HubDescriptor) };
         let length = descriptor.length;
@@ -2835,7 +2909,8 @@ impl XhciController {
             power_on_to_power_good,
             controller_current
         );
-        if descriptor_type != USB_DT_HUB || length < HubDescriptor::encoded_size() as u8 {
+        if descriptor.descriptor_type != requested_descriptor_type || length < descriptor_size as u8
+        {
             return Err("Invalid hub descriptor");
         }
 
