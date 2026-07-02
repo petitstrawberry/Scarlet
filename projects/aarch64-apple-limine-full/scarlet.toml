@@ -52,16 +52,39 @@ output = ".scarlet/images/initramfs-aarch64-apple-full.cpio"
 kind = "bundle"
 path = "../../bundles/desktop/bundle.toml"
 
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-aarch64-apple-full.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/full/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs"
+to = "/"
+
 [images.boot]
 format = "limine-uefi"
 output = ".scarlet/images/limine-aarch64-apple-full.img"
-cmdline = "console=ttyS0"
+cmdline = "console=ttyS0 root=/dev/usbblk0p1 rootfstype=ext2"
 deps = ["initramfs"]
 
 [[images.boot.layers]]
 kind = "image"
 source = "initramfs"
 to = "/boot/initramfs"
+
+[images.usb-rootfs]
+format = "gpt"
+output = ".scarlet/images/usb-rootfs-aarch64-apple-full.img"
+deps = ["rootfs"]
+
+[[images.usb-rootfs.partitions]]
+source = "rootfs"
+name = "SCARLET_ROOT"
+type = "linux-filesystem"
 
 [runner]
 command = "tools/deploy_m1n1_usb.py"
