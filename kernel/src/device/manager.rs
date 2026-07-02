@@ -1107,14 +1107,40 @@ impl DeviceManager {
     ///  * The id of the registered device.
     ///
     pub fn register_device_with_name(&self, name: String, device: Arc<dyn Device>) -> usize {
-        let mut devices = self.devices.lock();
-        let mut device_by_name = self.device_by_name.lock();
-        let mut name_to_id = self.name_to_id.lock();
-
         let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
-        devices.insert(id, device.clone());
-        device_by_name.insert(name.clone(), device);
-        name_to_id.insert(name, id);
+        let scan_name = name.clone();
+        let scan_device = device.clone();
+
+        {
+            let mut devices = self.devices.lock();
+            let mut device_by_name = self.device_by_name.lock();
+            let mut name_to_id = self.name_to_id.lock();
+
+            devices.insert(id, device.clone());
+            device_by_name.insert(name.clone(), device);
+            name_to_id.insert(name, id);
+        }
+
+        if crate::device::block::partition::is_partition_device(scan_device.as_ref()) {
+            return id;
+        }
+
+        let Some(block_device) = scan_device.into_block_device() else {
+            return id;
+        };
+
+        if let Err(error) = crate::device::block::partition::scan_and_register_partitions(
+            &scan_name,
+            block_device,
+            self,
+        ) {
+            crate::early_println!(
+                "[partition] Failed to scan {} for partitions: {}",
+                scan_name,
+                error
+            );
+        }
+
         id
     }
 

@@ -1,6 +1,7 @@
 use core::any::Any;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -54,6 +55,10 @@ impl Device for MockBlockDevice {
     }
 
     fn as_block_device(&self) -> Option<&dyn BlockDevice> {
+        Some(self)
+    }
+
+    fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
         Some(self)
     }
 }

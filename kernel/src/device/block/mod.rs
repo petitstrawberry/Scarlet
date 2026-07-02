@@ -1,6 +1,6 @@
 use core::any::Any;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use request::{BlockIORequest, BlockIOResult};
 use spin::Mutex;
 
@@ -8,6 +8,7 @@ use super::Device;
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
+pub mod partition;
 pub mod request;
 
 extern crate alloc;
@@ -18,13 +19,35 @@ extern crate alloc;
 /// It provides methods for querying device information and handling I/O requests.
 pub trait BlockDevice: Device {
     /// Get the disk name
+    ///
+    /// # Returns
+    ///
+    /// Static disk name used for diagnostics.
     fn get_disk_name(&self) -> &'static str;
 
     /// Get the disk size in bytes
+    ///
+    /// # Returns
+    ///
+    /// Total device size in bytes.
     fn get_disk_size(&self) -> usize;
 
     /// Enqueue a block I/O request
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Request to enqueue for later processing.
     fn enqueue_request(&self, request: Box<BlockIORequest>);
+
+    /// Get the logical sector size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Logical sector size in bytes. Devices that do not report a size default
+    /// to 512-byte sectors.
+    fn get_sector_size(&self) -> usize {
+        512
+    }
 
     /// Process all queued requests
     ///
@@ -35,6 +58,7 @@ pub trait BlockDevice: Device {
 }
 
 /// A generic implementation of a block device
+#[allow(clippy::vec_box)]
 pub struct GenericBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
@@ -75,6 +99,10 @@ impl Device for GenericBlockDevice {
     }
 
     fn as_block_device(&self) -> Option<&dyn BlockDevice> {
+        Some(self)
+    }
+
+    fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
         Some(self)
     }
 }
@@ -156,13 +184,13 @@ impl BlockDevice for GenericBlockDevice {
         // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
-            core::mem::replace(&mut *queue, Vec::new())
+            core::mem::take(&mut *queue)
         }; // Lock is automatically released here
 
         // Process all requests without holding any locks
         for mut request in requests {
             // Process the request using the function pointer
-            let result = (self.request_fn)(&mut *request);
+            let result = (self.request_fn)(&mut request);
 
             // Add the result to the results vector
             results.push(BlockIOResult { request, result });
