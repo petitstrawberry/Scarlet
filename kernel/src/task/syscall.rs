@@ -72,14 +72,19 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
     if let Some(ch) = char::from_u32(c) {
         let manager = DeviceManager::get_manager();
-        if let Some(device_id) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-            if let Some(char_device) = manager.get_device(device_id).unwrap().as_char_device() {
-                // Use CharDevice trait methods to write
-                if let Err(e) = char_device.write_byte(ch as u8) {
-                    crate::print!("Error writing character: {}", e);
-                    return usize::MAX; // -1
-                }
-                // Successfully written character
+        if let Some(device) = manager.get_device_by_name("tty0")
+            && let Some(char_device) = device.as_char_device()
+            && char_device.can_write()
+            && char_device.write_byte(ch as u8).is_ok()
+        {
+            return 0;
+        }
+
+        for (_name, device) in manager.get_named_devices() {
+            if let Some(char_device) = device.as_char_device()
+                && char_device.can_write()
+                && char_device.write_byte(ch as u8).is_ok()
+            {
                 return 0;
             }
         }
