@@ -516,6 +516,10 @@ pub struct Task {
     sched_util_avg: AtomicU32,
     /// Last timestamp at which measured scheduler utilization was updated.
     sched_util_last_update_ns: AtomicU64,
+    /// CPU runtime accumulated for the current scheduler utilization window.
+    sched_util_window_runtime_ns: AtomicU64,
+    /// Last timestamp charged into the scheduler utilization window.
+    sched_util_accounted_until_ns: AtomicU64,
     /// Last timestamp at which the scheduler migrated this task.
     ///
     /// Used to rate-limit scheduler-driven cross-CPU movement.
@@ -716,6 +720,8 @@ impl Task {
             sched_util_min: AtomicU32::new(0),
             sched_util_avg: AtomicU32::new(0),
             sched_util_last_update_ns: AtomicU64::new(0),
+            sched_util_window_runtime_ns: AtomicU64::new(0),
+            sched_util_accounted_until_ns: AtomicU64::new(0),
             sched_last_migration_ns: AtomicU64::new(0),
             sched_migration_count: AtomicU64::new(0),
             sched_low_util_since_ns: AtomicU64::new(0),
@@ -882,7 +888,11 @@ impl Task {
         Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
     }
 
-    /// Account a scheduler utilization sample while this task is running.
+    /// Account scheduler utilization runtime while this task is running.
+    ///
+    /// Utilization is based on CPU runtime accumulated over a sampling window,
+    /// not merely on whether the task ran at least once. This keeps short
+    /// wakeups from looking like full-capacity CPU-bound work.
     ///
     /// # Arguments
     ///
@@ -892,17 +902,37 @@ impl Task {
     ///
     /// Updated measured utilization in scheduler capacity units.
     pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
+        let last_accounted_ns = self
+            .sched_util_accounted_until_ns
+            .swap(now_ns, Ordering::SeqCst);
+        if last_accounted_ns != 0 {
+            let delta_ns = now_ns.saturating_sub(last_accounted_ns);
+            self.sched_util_window_runtime_ns
+                .fetch_add(delta_ns, Ordering::SeqCst);
+        }
+
         let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
-        if last_update_ns != 0
-            && now_ns.saturating_sub(last_update_ns) < SCHED_UTIL_DECAY_INTERVAL_NS
-        {
+        if last_update_ns == 0 {
+            self.sched_util_last_update_ns
+                .store(now_ns, Ordering::SeqCst);
             return self.sched_util_avg();
         }
 
+        let elapsed_ns = now_ns.saturating_sub(last_update_ns);
+        if elapsed_ns < SCHED_UTIL_DECAY_INTERVAL_NS {
+            return self.sched_util_avg();
+        }
+
+        let runtime_ns = self.sched_util_window_runtime_ns.swap(0, Ordering::SeqCst);
+        let sample = ((runtime_ns as u128 * SCHED_UTIL_SCALE as u128) / elapsed_ns as u128)
+            .min(SCHED_UTIL_SCALE as u128) as u32;
         let avg = self.sched_util_avg_snapshot(now_ns);
-        let next = avg
-            .saturating_add((SCHED_UTIL_SCALE.saturating_sub(avg).saturating_add(1)) / 2)
-            .min(SCHED_UTIL_SCALE);
+        let next = if sample > avg {
+            avg.saturating_add(sample.saturating_sub(avg).saturating_add(1) / 2)
+        } else {
+            avg.saturating_mul(7).saturating_add(sample) / 8
+        }
+        .min(SCHED_UTIL_SCALE);
         self.sched_util_avg.store(next, Ordering::SeqCst);
         self.sched_util_last_update_ns
             .store(now_ns, Ordering::SeqCst);
@@ -983,6 +1013,8 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
         self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_util_accounted_until_ns
+            .store(now_ns, Ordering::SeqCst);
     }
 
     /// Stop charging CPU time to this task and return the elapsed delta.
@@ -2862,6 +2894,38 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+    }
+
+    #[test_case]
+    fn test_sched_util_short_bursts_track_runtime_fraction() {
+        let task = super::Task::new("BurstyTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(task.account_sched_util_running(2 * MS), 0);
+
+        task.start_cpu_accounting(101 * MS);
+        let util = task.account_sched_util_running(102 * MS);
+        assert!(util < 64, "short burst util should stay low: {}", util);
+    }
+
+    #[test_case]
+    fn test_sched_util_sustained_runtime_rises() {
+        let task = super::Task::new("CpuTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS),
+            0
+        );
+        let util =
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS * 2);
+        assert!(
+            util >= super::SCHED_UTIL_SCALE / 2,
+            "sustained util={}",
+            util
+        );
     }
 
     #[test_case]
