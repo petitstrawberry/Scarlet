@@ -38,6 +38,7 @@
 extern crate alloc;
 use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use core::ops::Bound;
 use spin::RwLock;
 
 use crate::mem::page::ContiguousPages;
@@ -706,42 +707,74 @@ impl VirtualMemoryManager {
             // Lock scope
             let mut g = self.inner.write();
 
-            // Find a mapping whose vmarea.end < vaddr but might have an owner that has grown
+            // Find a mapping whose vmarea.end < vaddr and whose owner explicitly
+            // supports VMA growth after its backing object was resized.
             let mut found = None;
-            for (_, map) in g.memmap.iter_mut() {
-                // Check if vaddr is just past this mapping's end
-                if map.vmarea.end < vaddr {
-                    // Check if there's an owner that might support extended access
-                    if let Some(owner) = &map.owner {
-                        // Try resolve_fault to see if owner supports this offset
-                        let test_access = crate::object::capability::memory_mapping::AccessKind {
-                            vaddr: page_vaddr,
-                            op: access.op,
-                            size: access.size,
-                        };
-
-                        let page_idx = (page_vaddr - map.vm_start) / PAGE_SIZE;
-                        match owner.resolve_fault(&test_access, page_idx, map.vm_start) {
-                            Ok(res) => {
-                                let permissions =
-                                    owner.fault_page_permissions(&test_access, map.permissions);
-                                // Owner says this offset is valid - extend vmarea.end
-                                let new_end = page_vaddr + PAGE_SIZE - 1;
-                                crate::println!(
-                                    "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
-                                    map.vmarea.end,
-                                    new_end,
-                                    owner.mmap_owner_name()
-                                );
-                                map.vmarea.end = new_end;
-
-                                found = Some((res.paddr_page_base, permissions));
-                                break;
-                            }
-                            Err(_) => {
-                                // Owner doesn't support this offset, continue searching
-                            }
+            let candidate_keys: Vec<usize> = g.memmap.keys().copied().collect();
+            for key in candidate_keys {
+                let Some((old_end, vm_start, map_permissions, owner)) =
+                    g.memmap.get(&key).and_then(|map| {
+                        if map.vmarea.end >= vaddr {
+                            return None;
                         }
+
+                        let owner = map.owner.as_ref()?;
+                        if !owner.can_extend_vma_on_fault() {
+                            return None;
+                        }
+
+                        Some((map.vmarea.end, map.vm_start, map.permissions, owner.clone()))
+                    })
+                else {
+                    continue;
+                };
+
+                let Some(offset) = page_vaddr.checked_sub(vm_start) else {
+                    continue;
+                };
+                let Some(new_end) = page_vaddr.checked_add(PAGE_SIZE - 1) else {
+                    continue;
+                };
+                let overlaps_next = match g
+                    .memmap
+                    .range((Bound::Excluded(key), Bound::Unbounded))
+                    .next()
+                {
+                    Some((_, next_map)) => new_end >= next_map.vmarea.start,
+                    None => false,
+                };
+                if overlaps_next {
+                    continue;
+                }
+
+                // Try resolve_fault to see if owner supports this offset.
+                let test_access = crate::object::capability::memory_mapping::AccessKind {
+                    vaddr: page_vaddr,
+                    op: access.op,
+                    size: access.size,
+                };
+
+                let page_idx = offset / PAGE_SIZE;
+                match owner.resolve_fault(&test_access, page_idx, vm_start) {
+                    Ok(res) => {
+                        let permissions =
+                            owner.fault_page_permissions(&test_access, map_permissions);
+                        if let Some(map) = g.memmap.get_mut(&key) {
+                            crate::println!(
+                                "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
+                                old_end,
+                                new_end,
+                                owner.mmap_owner_name()
+                            );
+                            map.vmarea.end = new_end;
+                            g.last_search_cache = None;
+                        }
+
+                        found = Some((res.paddr_page_base, permissions));
+                        break;
+                    }
+                    Err(_) => {
+                        // Owner doesn't support this offset, continue searching.
                     }
                 }
             }
@@ -1248,6 +1281,7 @@ mod tests {
     use crate::arch::vm::alloc_virtual_address_space;
     use crate::environment::PAGE_SIZE;
     use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
+    use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
     use crate::vm::VirtualMemoryMap;
     use crate::vm::get_current_direct_map_phys_range;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
@@ -2297,5 +2331,39 @@ mod tests {
         assert_eq!(right.vmarea.start, 0x6000);
         assert_eq!(right.vmarea.end, 0x7fff);
         assert_eq!(right.pmarea, MemoryArea { start: 0, end: 0 });
+    }
+
+    #[test_case]
+    fn test_anonymous_owner_fault_past_vma_does_not_extend_mapping() {
+        let manager = VirtualMemoryManager::new();
+        let owner = Arc::new(AnonymousPageOwner::new());
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x4000,
+                end: 0x4fff,
+            },
+            pmarea: MemoryArea { start: 0, end: 0 },
+            vm_start: 0x4000,
+            permissions: 0x0b,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: Some(owner),
+        };
+        manager.add_memory_map(map).unwrap();
+
+        let fault_addr = usize::MAX - 7;
+        let result = manager.lazy_map_page_with(AccessKind {
+            op: AccessOp::Load,
+            vaddr: fault_addr,
+            size: None,
+        });
+
+        assert_eq!(
+            result,
+            Err("No extendable memory mapping found for virtual address")
+        );
+        let map = manager.get_memory_map_by_addr(0x4000).unwrap();
+        assert_eq!(map.vmarea.end, 0x4fff);
+        assert!(manager.search_memory_map(fault_addr).is_none());
     }
 }

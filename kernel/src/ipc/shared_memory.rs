@@ -308,6 +308,10 @@ impl MemoryMappingOps for SharedMemory {
         self.id.clone()
     }
 
+    fn can_extend_vma_on_fault(&self) -> bool {
+        true
+    }
+
     fn resolve_fault(
         &self,
         access: &AccessKind,
