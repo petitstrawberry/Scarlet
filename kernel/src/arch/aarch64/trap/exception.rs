@@ -10,8 +10,11 @@ use crate::abi::syscall_dispatcher;
 use crate::arch::{Trapframe, get_cpu};
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::println;
-use crate::sched::scheduler::current_task;
+use crate::sched::scheduler::{current_task, schedule};
 use crate::task::mytask;
+
+const USER_PAGE_FAULT_EXIT_STATUS: i32 = 139;
+const USER_ILLEGAL_INSTRUCTION_EXIT_STATUS: i32 = 132;
 
 /// Get CurrentEL value
 fn get_current_el() -> u64 {
@@ -34,6 +37,12 @@ fn get_hcr_el2() -> u64 {
     let val: u64;
     unsafe { asm!("mrs {}, hcr_el2", out(reg) val) };
     val
+}
+
+fn trap_from_user(trapframe: &Trapframe) -> bool {
+    // SPSR_EL1.M[3:0] records the previous exception level/mode.
+    // EL0t is encoded as 0b0000.
+    trapframe.spsr & 0xf == 0
 }
 
 /// Get DAIF value
@@ -128,6 +137,26 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 let instr_at_elr = read_user_instruction(trapframe.elr as usize);
                 let instr_before_elr =
                     read_user_instruction((trapframe.elr as usize).wrapping_sub(4));
+                if trap_from_user(trapframe) {
+                    crate::println!(
+                        "[trap] unsupported SVE access trap at ELR={:#x}; instr@ELR={:?} instr@ELR-4={:?}; SVE context is not implemented",
+                        trapframe.elr,
+                        instr_at_elr,
+                        instr_before_elr,
+                    );
+                    terminate_current_user_exception(
+                        trapframe,
+                        esr,
+                        "unsupported SVE instruction",
+                        trapframe.elr as usize,
+                        false,
+                        trapframe.elr,
+                        "SVE context is not implemented",
+                        USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                    );
+                    return;
+                }
+
                 print_trap_info(trapframe, esr);
                 crate::println!(
                     "[trap] unsupported SVE access trap at ELR={:#x}; instr@ELR={:?} instr@ELR-4={:?}; SVE context is not implemented",
@@ -188,10 +217,24 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             }
         }
 
-        // Unknown or unhandled exception.
-        // We must stop here: this indicates a real bring-up bug (e.g. unexpected
-        // asynchronous exception path) and masking would hide the root cause.
+        // Unknown or unhandled exception. User-origin exceptions are reported
+        // and terminate the current task; kernel-origin exceptions stop here
+        // because continuing would hide a real bring-up bug.
         _ => {
+            if trap_from_user(trapframe) {
+                terminate_current_user_exception(
+                    trapframe,
+                    esr,
+                    "unhandled user exception",
+                    trapframe.elr as usize,
+                    false,
+                    trapframe.elr,
+                    "Unhandled lower-EL exception",
+                    USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                );
+                return;
+            }
+
             print_trap_info(trapframe, esr);
 
             crate::println!(
@@ -244,14 +287,22 @@ fn handle_sve_access_trap(trapframe: &mut Trapframe) -> bool {
 }
 
 fn read_user_instruction(instr_addr: usize) -> Option<u32> {
-    let task = current_task(get_cpu().get_cpuid()).unwrap();
+    let (_kva, instr) = read_user_instruction_with_kva(instr_addr)?;
+    Some(instr)
+}
+
+fn read_user_instruction_with_kva(instr_addr: usize) -> Option<(usize, u32)> {
+    let task = current_task(get_cpu().get_cpuid())?;
     let instr_kva = task.vm_manager.translate_to_kva(instr_addr)?;
-    Some(unsafe { core::ptr::read_unaligned(instr_kva as *const u32) })
+    Some((instr_kva, unsafe {
+        core::ptr::read_unaligned(instr_kva as *const u32)
+    }))
 }
 
 /// Handle instruction page fault (like RISC-V cause 12)
 fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
     let task = current_task(get_cpu().get_cpuid()).unwrap();
+    let pc = trapframe.get_current_pc();
 
     let access = AccessKind {
         op: AccessOp::Instruction,
@@ -261,11 +312,15 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 
     match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
-        Err(_) => {
-            print_trap_info(trapframe, get_esr_el1());
-            panic!(
-                "Failed to map page for instruction fault at vaddr: {:#x}",
-                vaddr
+        Err(e) => {
+            terminate_current_user_fault(
+                trapframe,
+                get_esr_el1(),
+                "instruction",
+                vaddr,
+                false,
+                pc,
+                e,
             );
         }
     }
@@ -291,22 +346,152 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     match task.vm_manager.lazy_map_page_with(access) {
         Ok(_) => (),
         Err(e) => {
-            print_trap_info(trapframe, get_esr_el1());
-            if let Some(task) = current_task(get_cpu().get_cpuid()) {
-                println!(
-                    "Task {} (PID {}) caused data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
-                    task.name.read(),
-                    task.get_id(),
-                    vaddr,
-                    is_write,
-                    pc
-                );
-            }
-            panic!(
-                "Failed to map page for data fault at vaddr: {:#x} (write={}) from PC: {:#x}: {}",
-                vaddr, is_write, pc, e
+            terminate_current_user_fault(trapframe, get_esr_el1(), "data", vaddr, is_write, pc, e);
+        }
+    }
+}
+
+fn terminate_current_user_fault(
+    trapframe: &mut Trapframe,
+    esr: u64,
+    fault_kind: &str,
+    vaddr: usize,
+    is_write: bool,
+    pc: u64,
+    reason: &'static str,
+) {
+    let event_kind = match fault_kind {
+        "instruction" => "instruction fault",
+        "data" => "data fault",
+        other => other,
+    };
+    terminate_current_user_exception(
+        trapframe,
+        esr,
+        event_kind,
+        vaddr,
+        is_write,
+        pc,
+        reason,
+        USER_PAGE_FAULT_EXIT_STATUS,
+    );
+}
+
+fn terminate_current_user_exception(
+    trapframe: &mut Trapframe,
+    esr: u64,
+    event_kind: &str,
+    vaddr: usize,
+    is_write: bool,
+    pc: u64,
+    reason: &'static str,
+    exit_status: i32,
+) {
+    print_trap_info(trapframe, esr);
+    if let Some(task) = current_task(get_cpu().get_cpuid()) {
+        println!(
+            "Task {} (PID {}) caused {} at vaddr: {:#x} (write={}) from PC: {:#x}: {}",
+            task.name.read(),
+            task.get_id(),
+            event_kind,
+            vaddr,
+            is_write,
+            pc,
+            reason
+        );
+        log_user_fault_memory_context(&task, trapframe, vaddr);
+        log_user_code_context(&task, trapframe.elr as usize);
+        task.vcpu.lock().store(trapframe);
+        task.exit(exit_status);
+        schedule(trapframe);
+        return;
+    }
+
+    panic!(
+        "Unhandled {} at vaddr: {:#x} (write={}) from PC: {:#x}: {}",
+        event_kind, vaddr, is_write, pc, reason
+    );
+}
+
+fn log_user_fault_memory_context(task: &crate::task::Task, trapframe: &Trapframe, vaddr: usize) {
+    let brk = task.get_brk();
+    let text_size = task.text_size.load(core::sync::atomic::Ordering::SeqCst);
+    let data_size = task.data_size.load(core::sync::atomic::Ordering::SeqCst);
+    let vcpu_tls = task.vcpu.lock().get_tls_pointer();
+    println!(
+        "[fault] task memory: brk={:#x} text_size={:#x} data_size={:#x} trap_tls={:#x} vcpu_tls={:#x}",
+        brk, text_size, data_size, trapframe.tpidr_el0, vcpu_tls
+    );
+
+    if let Some(map) = task.vm_manager.search_memory_map(vaddr) {
+        println!(
+            "[fault] map hit: va={:#x}-{:#x} pa={:#x}-{:#x} vm_start={:#x} perm={:#x} shared={} attr={:?} owner={}",
+            map.vmarea.start,
+            map.vmarea.end,
+            map.pmarea.start,
+            map.pmarea.end,
+            map.vm_start,
+            map.permissions,
+            map.is_shared,
+            map.memory_attribute,
+            map.owner
+                .as_ref()
+                .map(|owner| owner.mmap_owner_name())
+                .unwrap_or_else(|| alloc::string::String::from("none"))
+        );
+        return;
+    }
+
+    let (prev, next) = task.vm_manager.with_memmaps(|maps| {
+        let prev = maps.range(..=vaddr).next_back().map(|(_, map)| {
+            (
+                map.vmarea.start,
+                map.vmarea.end,
+                map.vm_start,
+                map.permissions,
+            )
+        });
+        let next = maps.range(vaddr..).next().map(|(_, map)| {
+            (
+                map.vmarea.start,
+                map.vmarea.end,
+                map.vm_start,
+                map.permissions,
+            )
+        });
+        (prev, next)
+    });
+
+    match prev {
+        Some((start, end, vm_start, permissions)) => println!(
+            "[fault] previous map: va={:#x}-{:#x} vm_start={:#x} perm={:#x}",
+            start, end, vm_start, permissions
+        ),
+        None => println!("[fault] previous map: none"),
+    }
+
+    match next {
+        Some((start, end, vm_start, permissions)) => println!(
+            "[fault] next map: va={:#x}-{:#x} vm_start={:#x} perm={:#x}",
+            start, end, vm_start, permissions
+        ),
+        None => println!("[fault] next map: none"),
+    }
+}
+
+fn log_user_code_context(task: &crate::task::Task, pc: usize) {
+    match task.vm_manager.translate_to_kva(pc) {
+        Some(kva) => {
+            let w0 = unsafe { core::ptr::read_unaligned(kva as *const u32) };
+            let w1 = unsafe { core::ptr::read_unaligned((kva + 4) as *const u32) };
+            let w2 = unsafe { core::ptr::read_unaligned((kva + 8) as *const u32) };
+            let w3 = unsafe { core::ptr::read_unaligned((kva + 12) as *const u32) };
+            println!(
+                "[fault] code words: pc={:#x} kva={:#x} words={:08x} {:08x} {:08x} {:08x}",
+                pc, kva, w0, w1, w2, w3
             );
         }
+        None => println!("[fault] code words: pc={:#x} unmapped", pc),
     }
 }
 
@@ -321,8 +506,8 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     crate::println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
     crate::println!("FAR_EL1: {:#018x}", far);
     crate::println!("ELR_EL1: {:#018x}", trapframe.elr);
-    match read_user_instruction(trapframe.elr as usize) {
-        Some(instr) => crate::println!("INSN_ELR: {:#010x}", instr),
+    match read_user_instruction_with_kva(trapframe.elr as usize) {
+        Some((kva, instr)) => crate::println!("INSN_ELR: {:#010x} (kva={:#x})", instr, kva),
         None => crate::println!("INSN_ELR: <unmapped>"),
     }
 

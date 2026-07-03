@@ -125,6 +125,12 @@ impl VirtualMemoryManager {
         self.inner.write().private_page_allocations.push(alloc);
     }
 
+    fn sync_executable_page_for_mapping(permissions: usize, paddr: usize) {
+        if VirtualMemoryPermission::Execute.contained_in(permissions) {
+            crate::arch::sync_icache_for_execution(phys_to_virt(paddr), PAGE_SIZE);
+        }
+    }
+
     /// Sets the ASID (Address Space ID) for the virtual memory manager.
     ///
     /// # Arguments
@@ -637,6 +643,7 @@ impl VirtualMemoryManager {
                                 }
                             }
                             self.track_private_page_allocation(new_alloc);
+                            Self::sync_executable_page_for_mapping(perms, new_paddr);
                             root_pagetable.map(
                                 self.get_asid(),
                                 page_vaddr,
@@ -666,6 +673,7 @@ impl VirtualMemoryManager {
         };
 
         if let Some(root_pagetable) = self.get_root_page_table() {
+            Self::sync_executable_page_for_mapping(perms, page_paddr);
             root_pagetable.map(
                 self.get_asid(),
                 page_vaddr,
