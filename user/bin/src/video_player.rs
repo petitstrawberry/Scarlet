@@ -35,7 +35,7 @@ use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot}
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
 use std::sync::Mutex;
-use std::task::exit;
+use std::task::{SCHED_UTIL_SCALE, exit};
 use std::{format, println, thread};
 #[cfg(feature = "mp4-aac")]
 use symphonia_codec_aac::AacDecoder;
@@ -99,6 +99,8 @@ const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
+const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
+const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -949,7 +951,7 @@ fn start_decoder_thread(
 ) {
     thread::Builder::new()
         .name("video-decode")
-        .performance()
+        .util_min(VIDEO_DECODE_UTIL_MIN)
         .spawn(move || {
             let display_queue = Arc::new(DisplayQueue::new(clock.clone()));
             start_display_thread(
@@ -1027,7 +1029,7 @@ fn start_display_thread(
 ) {
     thread::Builder::new()
         .name("video-display")
-        .performance()
+        .util_min(VIDEO_DISPLAY_UTIL_MIN)
         .spawn(move || {
             loop {
                 let Some(item) = queue.pop() else {
