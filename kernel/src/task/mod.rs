@@ -1077,6 +1077,16 @@ impl Task {
         self.id
     }
 
+    /// Return the task ID if this task has been registered with the scheduler.
+    ///
+    /// # Returns
+    ///
+    /// `Some(task_id)` for scheduler-visible tasks, or `None` for freshly
+    /// constructed tasks that have not been inserted into the task pool yet.
+    pub(crate) fn registered_id(&self) -> Option<usize> {
+        (self.id != 0).then_some(self.id)
+    }
+
     /// Set the task ID (used by TaskPool during task addition)
     pub fn set_id(&mut self, id: usize) {
         self.id = id;

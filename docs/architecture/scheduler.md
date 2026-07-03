@@ -74,6 +74,10 @@ absorb more work on heterogeneous systems.
 
 Idle CPUs may steal ready work from busier queues. Work stealing observes the
 same capacity requirement and migration cooldown rules as direct migration.
+Within a topology domain, the scheduler may also move ready work laterally from
+an overloaded CPU to a less loaded peer CPU with the same effective capacity.
+This keeps P-core and E-core groups from piling runnable work onto one core
+while sibling cores are idle or lightly loaded.
 
 ## Promotion and Demotion
 
@@ -84,10 +88,13 @@ When a task finishes a run and remains ready, the scheduler may migrate it:
 - Demotion: if current capacity is well above required capacity, move to a
   lower-capacity CPU only after low utilization is sustained for a minimum
   window.
+- Lateral balance: if peer CPUs in the same topology domain have meaningfully
+  lower load, move ready work sideways without changing capacity class.
 - Cooldown: recently migrated tasks are not moved again immediately.
 
-This prevents rapid P/E bouncing and avoids demoting a task after one quiet
-sample.
+This prevents rapid P/E bouncing, avoids demoting a task after one quiet sample,
+and keeps load balancing local to the current performance domain unless a
+capacity change is actually needed.
 
 ## Priority and Fairness
 

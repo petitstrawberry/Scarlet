@@ -416,6 +416,7 @@ const SCHED_MIGRATION_COOLDOWN_NS: u64 = 100_000_000;
 const SCHED_DEMOTION_MARGIN: u32 = 128;
 const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
+const SCHED_LATERAL_BALANCE_MARGIN: u64 = TASK_LOAD_SCALE / 4;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
@@ -1019,6 +1020,22 @@ fn runnable_task_weight(task_id: usize) -> u64 {
     task_load_weight(TaskPool::get_task(task_id))
 }
 
+fn task_load_score_on_cpu(task: &Task, cpu_id: usize) -> u64 {
+    task_load_weight(Some(task)).saturating_mul(TASK_LOAD_SCALE) / cpu_capacity(cpu_id) as u64
+}
+
+fn task_present_on_cpu(cpu_id: usize, task_id: usize) -> bool {
+    if task_id == 0 {
+        return false;
+    }
+
+    if current_task_id(cpu_id) == Some(task_id) {
+        return true;
+    }
+
+    ready_queue(cpu_id).lock().contains(&task_id)
+}
+
 fn cpu_runnable_weight(cpu_id: usize) -> u64 {
     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
     let mut weight = 0u64;
@@ -1042,6 +1059,30 @@ fn cpu_runnable_weight(cpu_id: usize) -> u64 {
 fn cpu_load_score(cpu_id: usize) -> u64 {
     let capacity = cpu_capacity(cpu_id) as u64;
     cpu_runnable_weight(cpu_id).saturating_mul(TASK_LOAD_SCALE) / capacity
+}
+
+fn cpu_load_score_with_task(cpu_id: usize, task: &Task) -> u64 {
+    let score = cpu_load_score(cpu_id);
+    if task
+        .registered_id()
+        .is_some_and(|task_id| task_present_on_cpu(cpu_id, task_id))
+    {
+        score
+    } else {
+        score.saturating_add(task_load_score_on_cpu(task, cpu_id))
+    }
+}
+
+fn cpu_load_score_without_task(cpu_id: usize, task: &Task) -> u64 {
+    let score = cpu_load_score(cpu_id);
+    if task
+        .registered_id()
+        .is_some_and(|task_id| task_present_on_cpu(cpu_id, task_id))
+    {
+        score.saturating_sub(task_load_score_on_cpu(task, cpu_id))
+    } else {
+        score
+    }
 }
 
 fn task_effective_util(task: Option<&Task>, now_ns: u64) -> u32 {
@@ -1343,6 +1384,65 @@ fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32)
     best.map(|(cpu_id, _)| cpu_id)
 }
 
+fn same_balance_domain(current_cpu: usize, candidate_cpu: usize) -> bool {
+    match (
+        cpu_topology_domain(current_cpu),
+        cpu_topology_domain(candidate_cpu),
+    ) {
+        (Some(current_domain), Some(candidate_domain)) => current_domain == candidate_domain,
+        (None, None) => cpu_capacity(current_cpu) == cpu_capacity(candidate_cpu),
+        _ => false,
+    }
+}
+
+fn select_lateral_balance_cpu(
+    task: &Task,
+    current_cpu: usize,
+    now_ns: u64,
+    required_capacity: u32,
+) -> Option<usize> {
+    let cpus = ONLINE_CPUS.lock();
+    if cpus.len() <= 1 {
+        return None;
+    }
+
+    let current_score = cpu_load_score_with_task(current_cpu, task);
+    let current_after = cpu_load_score_without_task(current_cpu, task);
+    let mut best: Option<(usize, u64)> = None;
+
+    for &cpu_id in cpus.iter() {
+        if cpu_id == current_cpu {
+            continue;
+        }
+        if !same_balance_domain(current_cpu, cpu_id) {
+            continue;
+        }
+        if cpu_capacity(cpu_id) < required_capacity {
+            continue;
+        }
+        if !task_can_run_on_cpu(task, cpu_id, now_ns) {
+            continue;
+        }
+
+        let target_score = cpu_load_score(cpu_id);
+        let target_after = target_score.saturating_add(task_load_score_on_cpu(task, cpu_id));
+        let before_max = current_score.max(target_score);
+        let after_max = current_after.max(target_after);
+        if after_max.saturating_add(SCHED_LATERAL_BALANCE_MARGIN) >= before_max {
+            continue;
+        }
+
+        if best
+            .map(|(_, best_after)| target_after < best_after)
+            .unwrap_or(true)
+        {
+            best = Some((cpu_id, target_after));
+        }
+    }
+
+    best.map(|(cpu_id, _)| cpu_id)
+}
+
 fn migration_cooldown_active(task: &Task, now_ns: u64, record_skip: bool) -> bool {
     let last_migration_ns = task.sched_last_migration_ns();
     let active = last_migration_ns != 0
@@ -1388,21 +1488,29 @@ fn migration_target_for_task(
     }
 
     if current_capacity > required_capacity.saturating_add(SCHED_DEMOTION_MARGIN) {
-        let Some(target_cpu) = select_lower_capacity_cpu(task, current_cpu, required_capacity)
-        else {
+        if let Some(target_cpu) = select_lower_capacity_cpu(task, current_cpu, required_capacity) {
+            if demotion_low_util_sustained(task, now_ns) {
+                if migration_cooldown_active(task, now_ns, record_skip) {
+                    return None;
+                }
+                return Some(target_cpu);
+            }
+        } else {
             task.clear_sched_low_util();
-            return None;
-        };
-        if !demotion_low_util_sustained(task, now_ns) {
-            return None;
         }
+    } else {
+        task.clear_sched_low_util();
+    }
+
+    if let Some(target_cpu) =
+        select_lateral_balance_cpu(task, current_cpu, now_ns, required_capacity)
+    {
         if migration_cooldown_active(task, now_ns, record_skip) {
             return None;
         }
         return Some(target_cpu);
     }
 
-    task.clear_sched_low_util();
     None
 }
 
@@ -2636,6 +2744,79 @@ mod tests {
         assert_eq!(
             migration_target_for_task(&task, 0, 10_000_000 + SCHED_DEMOTION_SUSTAIN_NS, false),
             Some(1)
+        );
+    }
+
+    #[test_case]
+    fn test_migration_target_balances_within_topology_domain() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology_domain(0, 0xd).unwrap();
+        register_cpu_topology_domain(1, 0xd).unwrap();
+
+        let resident_id = register_task(Task::new("ResidentTask".to_string(), 1, TaskType::Kernel));
+        let resident = TaskPool::get_task(resident_id).unwrap();
+        resident.state.store(TaskState::Running, Ordering::SeqCst);
+        resident.running_cpu.store(0, Ordering::SeqCst);
+        set_current_task_id(0, Some(resident_id));
+
+        let migrating_id = register_task(Task::new("PackedTask".to_string(), 1, TaskType::Kernel));
+        let migrating = TaskPool::get_task(migrating_id).unwrap();
+        migrating.state.store(TaskState::Ready, Ordering::SeqCst);
+
+        assert_eq!(
+            migration_target_for_task(migrating, 0, 20_000_000, false),
+            Some(1)
+        );
+    }
+
+    #[test_case]
+    fn test_migration_target_keeps_single_task_local() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology_domain(0, 0xd).unwrap();
+        register_cpu_topology_domain(1, 0xd).unwrap();
+
+        let task_id = register_task(Task::new("SingleTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Running, Ordering::SeqCst);
+        task.running_cpu.store(0, Ordering::SeqCst);
+        set_current_task_id(0, Some(task_id));
+
+        assert_eq!(migration_target_for_task(task, 0, 20_000_000, false), None);
+    }
+
+    #[test_case]
+    fn test_lateral_balance_stays_inside_topology_domain() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology_domain(0, 0xd).unwrap();
+        register_cpu_topology_domain(1, 0xe).unwrap();
+
+        let resident_id =
+            register_task(Task::new("DomainResident".to_string(), 1, TaskType::Kernel));
+        let resident = TaskPool::get_task(resident_id).unwrap();
+        resident.state.store(TaskState::Running, Ordering::SeqCst);
+        resident.running_cpu.store(0, Ordering::SeqCst);
+        set_current_task_id(0, Some(resident_id));
+
+        let migrating_id =
+            register_task(Task::new("DomainPinned".to_string(), 1, TaskType::Kernel));
+        let migrating = TaskPool::get_task(migrating_id).unwrap();
+        migrating.state.store(TaskState::Ready, Ordering::SeqCst);
+
+        assert_eq!(
+            migration_target_for_task(migrating, 0, 20_000_000, false),
+            None
         );
     }
 
