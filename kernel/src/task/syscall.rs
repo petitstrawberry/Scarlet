@@ -1436,6 +1436,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             tgid,
             name,
             cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
+            sched_util_avg: target.sched_util_avg_snapshot(now_ns),
         };
 
         let info_bytes = unsafe {

@@ -57,6 +57,9 @@ const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 /// Scheduler utilization scale used for task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
+const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
+const SCHED_UTIL_DECAY_NUM: u32 = 7;
+const SCHED_UTIL_DECAY_DEN: u32 = 8;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -99,6 +102,8 @@ pub struct TaskInfo {
     pub name: [u8; 64],
     /// Cumulative CPU time consumed by this task, in nanoseconds.
     pub cpu_time_ns: u64,
+    /// Measured scheduler utilization in capacity units.
+    pub sched_util_avg: u32,
 }
 
 impl TaskInfo {
@@ -494,6 +499,10 @@ pub struct Task {
     core_preference: AtomicU8,
     /// Minimum scheduler utilization required by this task.
     sched_util_min: AtomicU32,
+    /// Measured scheduler utilization for this task.
+    sched_util_avg: AtomicU32,
+    /// Last timestamp at which measured scheduler utilization was updated.
+    sched_util_last_update_ns: AtomicU64,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
@@ -682,6 +691,8 @@ impl Task {
             priority: AtomicU32::new(priority),
             core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
             sched_util_min: AtomicU32::new(0),
+            sched_util_avg: AtomicU32::new(0),
+            sched_util_last_update_ns: AtomicU64::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             cpu_time_ns: AtomicU64::new(0),
@@ -795,6 +806,81 @@ impl Task {
         }
         self.sched_util_min.store(util_min, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn decay_sched_util_avg(avg: u32, elapsed_ns: u64) -> u32 {
+        let mut periods = elapsed_ns / SCHED_UTIL_DECAY_INTERVAL_NS;
+        if periods == 0 {
+            return avg;
+        }
+
+        let mut next = avg as u64;
+        periods = periods.min(64);
+        for _ in 0..periods {
+            next = next.saturating_mul(SCHED_UTIL_DECAY_NUM as u64) / SCHED_UTIL_DECAY_DEN as u64;
+            if next == 0 {
+                break;
+            }
+        }
+
+        next.min(SCHED_UTIL_SCALE as u64) as u32
+    }
+
+    /// Return the measured scheduler utilization for this task.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units, where
+    /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
+    pub fn sched_util_avg(&self) -> u32 {
+        self.sched_util_avg.load(Ordering::SeqCst)
+    }
+
+    /// Return a decayed measured scheduler utilization snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units after applying sleep
+    /// decay since the last update.
+    pub fn sched_util_avg_snapshot(&self, now_ns: u64) -> u32 {
+        let avg = self.sched_util_avg();
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if avg == 0 || last_update_ns == 0 {
+            return avg;
+        }
+
+        Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
+    }
+
+    /// Account a scheduler utilization sample while this task is running.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Updated measured utilization in scheduler capacity units.
+    pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if last_update_ns != 0
+            && now_ns.saturating_sub(last_update_ns) < SCHED_UTIL_DECAY_INTERVAL_NS
+        {
+            return self.sched_util_avg();
+        }
+
+        let avg = self.sched_util_avg_snapshot(now_ns);
+        let next = avg
+            .saturating_add((SCHED_UTIL_SCALE.saturating_sub(avg).saturating_add(1)) / 2)
+            .min(SCHED_UTIL_SCALE);
+        self.sched_util_avg.store(next, Ordering::SeqCst);
+        self.sched_util_last_update_ns
+            .store(now_ns, Ordering::SeqCst);
+        next
     }
 
     /// Mark the task as running for CPU accounting.

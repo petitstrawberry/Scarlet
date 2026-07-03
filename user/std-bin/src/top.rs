@@ -60,6 +60,7 @@ struct RawTaskInfo {
     tgid: usize,
     name: [u8; 64],
     cpu_time_ns: u64,
+    sched_util_avg: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +72,7 @@ struct TaskInfo {
     tgid: usize,
     name: String,
     cpu_time_ns: u64,
+    sched_util_avg: u32,
 }
 
 impl RawTaskInfo {
@@ -92,6 +94,7 @@ impl RawTaskInfo {
             tgid: self.tgid,
             name,
             cpu_time_ns: self.cpu_time_ns,
+            sched_util_avg: self.sched_util_avg,
         }
     }
 }
@@ -269,6 +272,7 @@ fn task_info() -> Vec<TaskInfo> {
             tgid: 0,
             name: [0; 64],
             cpu_time_ns: 0,
+            sched_util_avg: 0,
         };
         total
     ];
@@ -349,13 +353,14 @@ fn print_table(samples: &[TaskSample]) {
     }
 
     println!(
-        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>w_time$} {:<w_cmd$} {}",
+        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>w_time$} {:<w_cmd$} {}",
         "PID",
         "USER",
         "PR",
         "STAT",
         "CPU",
         "%CPU",
+        "UTIL",
         "TIME+",
         "COMMAND",
         "TGID",
@@ -372,13 +377,14 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>w_time$} {:<w_cmd$} {}",
+            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>w_time$} {:<w_cmd$} {}",
             task.pid,
             user,
             "-",
             format_stat(task.state),
             format!("CPU{}", task.cpu),
             format_percent_per_mille(sample.cpu_per_mille),
+            task.sched_util_avg,
             format_time_ns(task.cpu_time_ns),
             task.name,
             task.tgid,

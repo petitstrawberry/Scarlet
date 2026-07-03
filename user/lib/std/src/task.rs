@@ -850,6 +850,7 @@ pub struct TaskInfo {
     tgid: usize,
     name: crate::string::String,
     cpu_time_ns: u64,
+    sched_util_avg: u32,
 }
 
 impl TaskInfo {
@@ -888,6 +889,10 @@ impl TaskInfo {
     /// Cumulative CPU time consumed by this task, in nanoseconds.
     pub fn cpu_time_ns(&self) -> u64 {
         self.cpu_time_ns
+    }
+    /// Measured scheduler utilization in capacity units.
+    pub fn sched_util_avg(&self) -> u32 {
+        self.sched_util_avg
     }
 }
 
@@ -945,6 +950,7 @@ pub struct RawTaskInfo {
     pub tgid: usize,
     pub name: [u8; 64],
     pub cpu_time_ns: u64,
+    pub sched_util_avg: u32,
 }
 
 /// Opaque raw CPU usage layout shared with the kernel (`#[repr(C)]`).
@@ -979,6 +985,7 @@ impl RawTaskInfo {
             tgid: self.tgid,
             name,
             cpu_time_ns: self.cpu_time_ns,
+            sched_util_avg: self.sched_util_avg,
         }
     }
 }
@@ -1023,6 +1030,7 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
     let mut buf = crate::vec![RawTaskInfo {
         pid: 0, ppid: 0, state: 0, task_type: 0, cpu_id: 0,
         _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64], cpu_time_ns: 0,
+        sched_util_avg: 0,
     }; total];
     let n = syscall2(
         Syscall::GetTaskInfoList,

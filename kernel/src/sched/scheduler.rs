@@ -690,6 +690,10 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
         if let Some(task) = TaskPool::get_task(old_id) {
             let delta_ns = task.stop_cpu_accounting(now_ns);
             charge_finished_cpu_time(cpu_id, old_id, delta_ns);
+            let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+            if old_id != idle_id {
+                task.account_sched_util_running(now_ns);
+            }
         }
     }
 
@@ -1315,6 +1319,13 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
 pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
     let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
     update_cpu_util_avg(cpu_id);
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    if let Some(task_id) = current_task_id(cpu_id)
+        && task_id != idle_id
+        && let Some(task) = TaskPool::get_task(task_id)
+    {
+        task.account_sched_util_running(get_time_ns());
+    }
     crate::device::cpufreq::on_scheduler_tick(cpu_id);
 
     if let Some(task_id) = current_task_id(cpu_id) {
