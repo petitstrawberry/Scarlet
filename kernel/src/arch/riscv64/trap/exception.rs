@@ -2,11 +2,19 @@ use core::arch::asm;
 use core::panic;
 
 use crate::abi::syscall_dispatcher;
-use crate::arch::trap::print_traplog;
+use crate::arch::trap::{PRIV_U_MODE, prev_mode, print_traplog};
 use crate::arch::{Trapframe, get_cpu};
 use crate::println;
-use crate::sched::scheduler::current_task;
+use crate::sched::scheduler::{current_task, schedule};
 use crate::task::mytask;
+
+const USER_PAGE_FAULT_EXIT_STATUS: i32 = 139;
+const USER_ILLEGAL_INSTRUCTION_EXIT_STATUS: i32 = 132;
+const USER_BREAKPOINT_EXIT_STATUS: i32 = 133;
+
+fn trap_from_user() -> bool {
+    prev_mode() == PRIV_U_MODE
+}
 
 fn log_fatal_page_fault_context(
     trapframe: &Trapframe,
@@ -35,6 +43,43 @@ fn log_fatal_page_fault_context(
     println!(
         "[Trap] epc={:#x} vaddr={:#x} ra={:#x} sp={:#x} fp={:#x}",
         epc, vaddr, ra, sp, fp
+    );
+}
+
+fn terminate_current_user_exception(
+    trapframe: &mut Trapframe,
+    cause: usize,
+    event_kind: &str,
+    vaddr: usize,
+    exit_status: i32,
+) {
+    print_traplog(trapframe);
+    if let Some(task) = current_task(get_cpu().get_cpuid()) {
+        println!(
+            "Task {} (PID {}) caused {} at vaddr: {:#x} from PC: {:#x}",
+            task.name.read(),
+            task.get_id(),
+            event_kind,
+            vaddr,
+            trapframe.epc
+        );
+        log_fatal_page_fault_context(
+            trapframe,
+            cause,
+            vaddr,
+            task.get_id(),
+            &task.name.read(),
+            task.vm_manager.get_asid(),
+        );
+        task.vcpu.lock().store(trapframe);
+        task.exit_group(exit_status);
+        schedule(trapframe);
+        return;
+    }
+
+    panic!(
+        "Unhandled user {} at vaddr: {:#x} from PC: {:#x}",
+        event_kind, vaddr, trapframe.epc
     );
 }
 
@@ -190,6 +235,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 return;
             }
 
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "illegal instruction",
+                    trapframe.epc as usize,
+                    USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                );
+                return;
+            }
             print_traplog(trapframe);
             panic!(
                 "Unhandled illegal instruction: inst={:#x} epc={:#x}",
@@ -206,6 +261,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 unreachable!();
             }
 
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "breakpoint",
+                    trapframe.epc as usize,
+                    USER_BREAKPOINT_EXIT_STATUS,
+                );
+                return;
+            }
             print_traplog(trapframe);
             panic!("Unhandled breakpoint: epc={:#x}", trapframe.epc);
         }
@@ -240,6 +305,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
+                        if trap_from_user() {
+                            terminate_current_user_exception(
+                                trapframe,
+                                cause,
+                                "instruction page fault",
+                                vaddr,
+                                USER_PAGE_FAULT_EXIT_STATUS,
+                            );
+                            return;
+                        }
                         print_traplog(trapframe);
                         log_fatal_page_fault_context(
                             trapframe,
@@ -285,6 +360,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(e) => {
+                        if trap_from_user() {
+                            let event_kind = if cause == LOAD_PAGE_FAULT {
+                                "load page fault"
+                            } else {
+                                "store page fault"
+                            };
+                            terminate_current_user_exception(
+                                trapframe,
+                                cause,
+                                event_kind,
+                                vaddr,
+                                USER_PAGE_FAULT_EXIT_STATUS,
+                            );
+                            return;
+                        }
                         print_traplog(trapframe);
                         log_fatal_page_fault_context(
                             trapframe,
@@ -316,6 +406,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
         }
         _ => {
+            if trap_from_user() {
+                terminate_current_user_exception(
+                    trapframe,
+                    cause,
+                    "unhandled exception",
+                    trapframe.epc as usize,
+                    USER_ILLEGAL_INSTRUCTION_EXIT_STATUS,
+                );
+                return;
+            }
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
         }

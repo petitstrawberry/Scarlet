@@ -146,6 +146,20 @@ pub trait MemoryMappingOps: Send + Sync {
         alloc::string::String::from("object")
     }
 
+    /// Return whether this owner may grow an existing VMA on an out-of-range fault.
+    ///
+    /// Most mappings have a fixed virtual range determined by mmap. Owners should
+    /// only return true when their backing object can grow independently after
+    /// the VMA was created, and faults beyond the current VMA should make the
+    /// VMA cover the newly valid backing range.
+    ///
+    /// # Returns
+    /// `true` when the virtual memory manager may extend the VMA after a
+    /// successful out-of-range fault resolution.
+    fn can_extend_vma_on_fault(&self) -> bool {
+        false
+    }
+
     /// Resolve the physical backing page for a fault on an owner-backed mapping.
     ///
     /// # Arguments

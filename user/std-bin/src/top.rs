@@ -1,4 +1,6 @@
+use std::cmp::Ordering;
 use std::env;
+use std::fmt;
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -6,6 +8,7 @@ use std::time::{Duration, Instant};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const TASK_NAME_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskState {
@@ -60,6 +63,12 @@ struct RawTaskInfo {
     tgid: usize,
     name: [u8; 64],
     cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    _reserved2: [u8; 3],
+    sched_migration_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -69,29 +78,75 @@ struct TaskInfo {
     task_type: TaskType,
     cpu: u8,
     tgid: usize,
-    name: String,
+    name: TaskName,
     cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    sched_migration_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskName {
+    bytes: [u8; TASK_NAME_CAP],
+    len: usize,
+}
+
+impl TaskName {
+    fn from_raw(raw: &[u8; TASK_NAME_CAP]) -> Self {
+        let len = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+        let mut bytes = [0; TASK_NAME_CAP];
+        bytes[..len].copy_from_slice(&raw[..len]);
+        Self { bytes, len }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("<invalid>")
+    }
+
+    fn len(&self) -> usize {
+        self.as_str().len()
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.as_str().starts_with(prefix)
+    }
+}
+
+impl Ord for TaskName {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for TaskName {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for TaskName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl RawTaskInfo {
     fn decode(&self) -> TaskInfo {
-        let end = self
-            .name
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(self.name.len());
-        let name = std::str::from_utf8(&self.name[..end])
-            .unwrap_or("<invalid>")
-            .to_string();
-
         TaskInfo {
             pid: self.pid,
             state: TaskState::from_u8(self.state),
             task_type: TaskType::from_u8(self.task_type),
             cpu: self.cpu_id,
             tgid: self.tgid,
-            name,
+            name: TaskName::from_raw(&self.name),
             cpu_time_ns: self.cpu_time_ns,
+            sched_util_avg: self.sched_util_avg,
+            sched_util_min: self.sched_util_min,
+            sched_required_capacity: self.sched_required_capacity,
+            core_preference: self.core_preference,
+            sched_migration_count: self.sched_migration_count,
         }
     }
 }
@@ -209,8 +264,8 @@ fn main() -> ExitCode {
     println!("       {:>3} user,  {:>3} kernel", user_tasks, kernel_tasks);
     println!(
         "%Cpu(s): {:>5} busy, {:>5} idle",
-        format_percent_per_mille(busy_per_mille),
-        format_percent_per_mille(idle_per_mille),
+        Percent(busy_per_mille),
+        Percent(idle_per_mille),
     );
     println!();
 
@@ -269,6 +324,12 @@ fn task_info() -> Vec<TaskInfo> {
             tgid: 0,
             name: [0; 64],
             cpu_time_ns: 0,
+            sched_util_avg: 0,
+            sched_util_min: 0,
+            sched_required_capacity: 0,
+            core_preference: 0,
+            _reserved2: [0; 3],
+            sched_migration_count: 0,
         };
         total
     ];
@@ -342,20 +403,25 @@ fn print_table(samples: &[TaskSample]) {
 
     for sample in samples {
         let task = &sample.task;
-        max_pid = max_pid.max(task.pid.to_string().len());
+        max_pid = max_pid.max(decimal_digits_usize(task.pid));
         max_cmd = max_cmd.max(task.name.len());
-        max_cpu = max_cpu.max(format!("CPU{}", task.cpu).len());
-        max_time = max_time.max(format_time_ns(task.cpu_time_ns).len());
+        max_cpu = max_cpu.max(cpu_label_width(task.cpu));
+        max_time = max_time.max(time_width_ns(task.cpu_time_ns));
     }
 
     println!(
-        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>w_time$} {:<w_cmd$} {}",
+        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
         "PID",
         "USER",
         "PR",
         "STAT",
         "CPU",
         "%CPU",
+        "UTIL",
+        "MIN",
+        "REQ",
+        "PREF",
+        "MIG",
         "TIME+",
         "COMMAND",
         "TGID",
@@ -372,14 +438,19 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>w_time$} {:<w_cmd$} {}",
+            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
             task.pid,
             user,
             "-",
             format_stat(task.state),
-            format!("CPU{}", task.cpu),
-            format_percent_per_mille(sample.cpu_per_mille),
-            format_time_ns(task.cpu_time_ns),
+            CpuLabel(task.cpu),
+            Percent(sample.cpu_per_mille),
+            task.sched_util_avg,
+            task.sched_util_min,
+            task.sched_required_capacity,
+            format_core_preference(task.core_preference),
+            task.sched_migration_count,
+            TimeNs(task.cpu_time_ns),
             task.name,
             task.tgid,
             w_pid = max_pid,
@@ -428,6 +499,14 @@ fn format_stat(state: TaskState) -> &'static str {
     }
 }
 
+fn format_core_preference(preference: u8) -> &'static str {
+    match preference {
+        1 => "E",
+        2 => "P",
+        _ => "-",
+    }
+}
+
 fn state_rank(state: TaskState) -> u8 {
     match state {
         TaskState::NotInitialized => 0,
@@ -451,11 +530,36 @@ fn is_idle_task(task: &TaskInfo) -> bool {
     task.task_type == TaskType::Kernel && task.name.starts_with("idle")
 }
 
-fn format_percent_per_mille(per_mille: u64) -> String {
-    format!("{}.{:01}", per_mille / 10, per_mille % 10)
+struct Percent(u64);
+
+impl fmt::Display for Percent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{:01}", self.0 / 10, self.0 % 10)
+    }
 }
 
-fn format_time_ns(ns: u64) -> String {
+struct CpuLabel(u8);
+
+impl fmt::Display for CpuLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CPU{}", self.0)
+    }
+}
+
+struct TimeNs(u64);
+
+impl fmt::Display for TimeNs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (hours, mins, secs, ms) = split_time_ns(self.0);
+        if hours > 0 {
+            write!(f, "{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+        } else {
+            write!(f, "{:02}:{:02}.{:03}", mins, secs, ms)
+        }
+    }
+}
+
+fn split_time_ns(ns: u64) -> (u64, u64, u64, u64) {
     let total_ms = ns / 1_000_000;
     let ms = total_ms % 1000;
     let total_secs = total_ms / 1000;
@@ -463,9 +567,36 @@ fn format_time_ns(ns: u64) -> String {
     let mins = (total_secs / 60) % 60;
     let hours = total_secs / 3600;
 
+    (hours, mins, secs, ms)
+}
+
+fn time_width_ns(ns: u64) -> usize {
+    let (hours, _, _, _) = split_time_ns(ns);
     if hours > 0 {
-        format!("{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+        decimal_digits_u64(hours) + 10
     } else {
-        format!("{:02}:{:02}.{:03}", mins, secs, ms)
+        9
     }
+}
+
+fn cpu_label_width(cpu: u8) -> usize {
+    3 + decimal_digits_usize(usize::from(cpu))
+}
+
+fn decimal_digits_usize(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn decimal_digits_u64(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }

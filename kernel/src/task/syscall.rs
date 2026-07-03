@@ -72,14 +72,19 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
     if let Some(ch) = char::from_u32(c) {
         let manager = DeviceManager::get_manager();
-        if let Some(device_id) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-            if let Some(char_device) = manager.get_device(device_id).unwrap().as_char_device() {
-                // Use CharDevice trait methods to write
-                if let Err(e) = char_device.write_byte(ch as u8) {
-                    crate::print!("Error writing character: {}", e);
-                    return usize::MAX; // -1
-                }
-                // Successfully written character
+        if let Some(device) = manager.get_device_by_name("tty0")
+            && let Some(char_device) = device.as_char_device()
+            && char_device.can_write()
+            && char_device.write_byte(ch as u8).is_ok()
+        {
+            return 0;
+        }
+
+        for (_name, device) in manager.get_named_devices() {
+            if let Some(char_device) = device.as_char_device()
+                && char_device.can_write()
+                && char_device.write_byte(ch as u8).is_ok()
+            {
                 return 0;
             }
         }
@@ -237,7 +242,14 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             /* Return the child task PID (namespace-local) to the parent task */
             child_ns_pid
         }
-        Err(_) => {
+        Err(err) => {
+            crate::println!(
+                "[clone] failed: parent={} name={} flags={:#x} reason={}",
+                parent_task.get_id(),
+                parent_task.name.read().as_str(),
+                clone_flags.get_raw(),
+                err
+            );
             usize::MAX /* Return -1 on error */
         }
     }
@@ -329,8 +341,9 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    // Set TLS pointer using architecture-specific VCPU method
-    task.vcpu.lock().set_tls_pointer(tls_ptr);
+    // The current task's live register state is the syscall trapframe. The VCPU
+    // save area is updated from the trapframe only when the scheduler stores it.
+    trapframe.set_tls_pointer(tls_ptr);
 
     trapframe.increment_pc_next(task);
     0 // Success
@@ -1408,7 +1421,8 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             super::TaskType::Kernel => 0,
             super::TaskType::User => 1,
         };
-        let cpu_id = target.last_cpu.load(Ordering::SeqCst) as u8; // saturates on MAX
+        let last_cpu = target.last_cpu.load(Ordering::SeqCst);
+        let cpu_id = u8::try_from(last_cpu).unwrap_or(u8::MAX);
 
         let exit_status = target.exit_status.load(Ordering::SeqCst);
 
@@ -1436,6 +1450,14 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             tgid,
             name,
             cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
+            sched_util_avg: target.sched_util_avg_snapshot(now_ns),
+            sched_util_min: target.sched_util_min(),
+            sched_required_capacity: crate::sched::scheduler::task_required_capacity_snapshot(
+                target, now_ns,
+            ),
+            core_preference: target.core_preference().to_u8(),
+            _reserved2: [0; 3],
+            sched_migration_count: target.sched_migration_count(),
         };
 
         let info_bytes = unsafe {

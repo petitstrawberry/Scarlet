@@ -63,6 +63,14 @@ name = "top"
 path = "src/top.rs"
 
 [[bin]]
+name = "sched_bench"
+path = "src/sched_bench.rs"
+
+[[bin]]
+name = "task_manager"
+path = "src/task_manager.rs"
+
+[[bin]]
 name = "date"
 path = "src/date.rs"
 

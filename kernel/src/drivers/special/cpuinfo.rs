@@ -53,6 +53,30 @@ impl CpuInfoDevice {
 
     fn render() -> String {
         let mut output = String::new();
+        let migration_stats = crate::sched::scheduler::scheduler_migration_stats();
+
+        let _ = writeln!(output, "scheduler migrations\t: {}", migration_stats.total);
+        let _ = writeln!(
+            output,
+            "scheduler promotions\t: {}",
+            migration_stats.promotions
+        );
+        let _ = writeln!(
+            output,
+            "scheduler demotions\t: {}",
+            migration_stats.demotions
+        );
+        let _ = writeln!(
+            output,
+            "scheduler cooldown skips\t: {}",
+            migration_stats.cooldown_skips
+        );
+        let _ = writeln!(
+            output,
+            "scheduler work steals\t: {}",
+            migration_stats.work_steals
+        );
+        let _ = writeln!(output);
 
         for cpu_id in 0..MAX_NUM_CPUS {
             if !is_cpu_online(cpu_id) {
@@ -67,6 +91,13 @@ impl CpuInfoDevice {
             let _ = writeln!(output, "online\t\t: yes");
             let _ = writeln!(output, "core class\t: {}", topology.core_class.as_str());
             let _ = writeln!(output, "cpu capacity\t: {}", topology.capacity);
+            if let Some(domain_id) = topology.domain_id {
+                let _ = writeln!(output, "topology domain\t: 0x{:x}", domain_id);
+                let _ = writeln!(output, "domain cpus\t: 0x{:x}", topology.domain_cpus_mask);
+            } else {
+                let _ = writeln!(output, "topology domain\t: none");
+                let _ = writeln!(output, "domain cpus\t: 0x0");
+            }
             let _ = writeln!(output, "util scale\t: {}", SCHED_UTIL_SCALE);
             if let Some(util) = crate::sched::scheduler::cpu_util_snapshot(cpu_id) {
                 let _ = writeln!(output, "util avg\t: {}", util.util_avg);

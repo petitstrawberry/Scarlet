@@ -24,6 +24,7 @@ use std::task::{SCHED_UTIL_SCALE, set_sched_util_min};
 const STEMD_SERVICE_READY_CMD: u8 = 0x06;
 const STEMD_NOTIFY_RETRIES: usize = 100;
 const STEMD_NOTIFY_DELAY_MS: u64 = 50;
+const SWS_COMPOSITOR_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 
 fn notify_service_ready(service_name: &str) {
     for attempt in 0..STEMD_NOTIFY_RETRIES {
@@ -89,7 +90,7 @@ fn main() -> i32 {
     println!("Compositor ready. Starting main loop...");
     notify_service_ready("sws");
 
-    if set_sched_util_min(SCHED_UTIL_SCALE).is_err() {
+    if set_sched_util_min(SWS_COMPOSITOR_UTIL_MIN).is_err() {
         println!("[sws] Failed to set compositor scheduler utilization hint");
     }
 

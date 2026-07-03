@@ -57,6 +57,9 @@ const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
 /// Scheduler utilization scale used for task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
+const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
+const SCHED_UTIL_DECAY_NUM: u32 = 7;
+const SCHED_UTIL_DECAY_DEN: u32 = 8;
 
 /// Lock type used for the architecture kernel context.
 ///
@@ -87,7 +90,10 @@ pub struct TaskInfo {
     pub state: u8,
     /// Task type: 0 = Kernel, 1 = User.
     pub task_type: u8,
-    /// CPU the task last ran on (MAX_CPU = no CPU).
+    /// Scheduler CPU where the task is running or queued.
+    ///
+    /// For sleeping tasks, this remains the last scheduler CPU associated with
+    /// the task. `u8::MAX` means no CPU is currently known.
     pub cpu_id: u8,
     /// Reserved for future use.
     pub _reserved: u8,
@@ -99,6 +105,18 @@ pub struct TaskInfo {
     pub name: [u8; 64],
     /// Cumulative CPU time consumed by this task, in nanoseconds.
     pub cpu_time_ns: u64,
+    /// Measured scheduler utilization in capacity units.
+    pub sched_util_avg: u32,
+    /// Minimum scheduler utilization requested by this task.
+    pub sched_util_min: u32,
+    /// Effective CPU capacity required for placement.
+    pub sched_required_capacity: u32,
+    /// Scheduler core preference hint as a `TaskCorePreference` discriminant.
+    pub core_preference: u8,
+    /// Reserved for future use.
+    pub _reserved2: [u8; 3],
+    /// Number of scheduler-directed migrations for this task.
+    pub sched_migration_count: u64,
 }
 
 impl TaskInfo {
@@ -494,6 +512,24 @@ pub struct Task {
     core_preference: AtomicU8,
     /// Minimum scheduler utilization required by this task.
     sched_util_min: AtomicU32,
+    /// Measured scheduler utilization for this task.
+    sched_util_avg: AtomicU32,
+    /// Last timestamp at which measured scheduler utilization was updated.
+    sched_util_last_update_ns: AtomicU64,
+    /// CPU runtime accumulated for the current scheduler utilization window.
+    sched_util_window_runtime_ns: AtomicU64,
+    /// Last timestamp charged into the scheduler utilization window.
+    sched_util_accounted_until_ns: AtomicU64,
+    /// Last timestamp at which the scheduler migrated this task.
+    ///
+    /// Used to rate-limit scheduler-driven cross-CPU movement.
+    sched_last_migration_ns: AtomicU64,
+    /// Number of scheduler-directed migrations for this task.
+    sched_migration_count: AtomicU64,
+    /// First timestamp at which this task was observed below its current CPU capacity.
+    ///
+    /// Used to avoid demoting a task after only one low-utilization sample.
+    sched_low_util_since_ns: AtomicU64,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
@@ -682,6 +718,13 @@ impl Task {
             priority: AtomicU32::new(priority),
             core_preference: AtomicU8::new(TaskCorePreference::Any.to_u8()),
             sched_util_min: AtomicU32::new(0),
+            sched_util_avg: AtomicU32::new(0),
+            sched_util_last_update_ns: AtomicU64::new(0),
+            sched_util_window_runtime_ns: AtomicU64::new(0),
+            sched_util_accounted_until_ns: AtomicU64::new(0),
+            sched_last_migration_ns: AtomicU64::new(0),
+            sched_migration_count: AtomicU64::new(0),
+            sched_low_util_since_ns: AtomicU64::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             cpu_time_ns: AtomicU64::new(0),
@@ -797,6 +840,172 @@ impl Task {
         Ok(())
     }
 
+    fn decay_sched_util_avg(avg: u32, elapsed_ns: u64) -> u32 {
+        let mut periods = elapsed_ns / SCHED_UTIL_DECAY_INTERVAL_NS;
+        if periods == 0 {
+            return avg;
+        }
+
+        let mut next = avg as u64;
+        periods = periods.min(64);
+        for _ in 0..periods {
+            next = next.saturating_mul(SCHED_UTIL_DECAY_NUM as u64) / SCHED_UTIL_DECAY_DEN as u64;
+            if next == 0 {
+                break;
+            }
+        }
+
+        next.min(SCHED_UTIL_SCALE as u64) as u32
+    }
+
+    /// Return the measured scheduler utilization for this task.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units, where
+    /// [`SCHED_UTIL_SCALE`] represents a full-capacity CPU.
+    pub fn sched_util_avg(&self) -> u32 {
+        self.sched_util_avg.load(Ordering::SeqCst)
+    }
+
+    /// Return a decayed measured scheduler utilization snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Measured utilization in scheduler capacity units after applying sleep
+    /// decay since the last update.
+    pub fn sched_util_avg_snapshot(&self, now_ns: u64) -> u32 {
+        let avg = self.sched_util_avg();
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if avg == 0 || last_update_ns == 0 {
+            return avg;
+        }
+
+        Self::decay_sched_util_avg(avg, now_ns.saturating_sub(last_update_ns))
+    }
+
+    /// Account scheduler utilization runtime while this task is running.
+    ///
+    /// Utilization is based on CPU runtime accumulated over a sampling window,
+    /// not merely on whether the task ran at least once. This keeps short
+    /// wakeups from looking like full-capacity CPU-bound work.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// Updated measured utilization in scheduler capacity units.
+    pub fn account_sched_util_running(&self, now_ns: u64) -> u32 {
+        let last_accounted_ns = self
+            .sched_util_accounted_until_ns
+            .swap(now_ns, Ordering::SeqCst);
+        if last_accounted_ns != 0 {
+            let delta_ns = now_ns.saturating_sub(last_accounted_ns);
+            self.sched_util_window_runtime_ns
+                .fetch_add(delta_ns, Ordering::SeqCst);
+        }
+
+        let last_update_ns = self.sched_util_last_update_ns.load(Ordering::SeqCst);
+        if last_update_ns == 0 {
+            self.sched_util_last_update_ns
+                .store(now_ns, Ordering::SeqCst);
+            return self.sched_util_avg();
+        }
+
+        let elapsed_ns = now_ns.saturating_sub(last_update_ns);
+        if elapsed_ns < SCHED_UTIL_DECAY_INTERVAL_NS {
+            return self.sched_util_avg();
+        }
+
+        let runtime_ns = self.sched_util_window_runtime_ns.swap(0, Ordering::SeqCst);
+        let sample = ((runtime_ns as u128 * SCHED_UTIL_SCALE as u128) / elapsed_ns as u128)
+            .min(SCHED_UTIL_SCALE as u128) as u32;
+        let avg = self.sched_util_avg_snapshot(now_ns);
+        let next = if sample > avg {
+            avg.saturating_add(sample.saturating_sub(avg).saturating_add(1) / 2)
+        } else {
+            avg.saturating_mul(7).saturating_add(sample) / 8
+        }
+        .min(SCHED_UTIL_SCALE);
+        self.sched_util_avg.store(next, Ordering::SeqCst);
+        self.sched_util_last_update_ns
+            .store(now_ns, Ordering::SeqCst);
+        next
+    }
+
+    /// Return the last scheduler migration timestamp for this task.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic timestamp in nanoseconds, or `0` if this task has not been
+    /// migrated by the scheduler.
+    pub fn sched_last_migration_ns(&self) -> u64 {
+        self.sched_last_migration_ns.load(Ordering::SeqCst)
+    }
+
+    /// Return the number of scheduler-directed migrations for this task.
+    ///
+    /// # Returns
+    ///
+    /// Count of scheduler placement moves, including work steals.
+    pub fn sched_migration_count(&self) -> u64 {
+        self.sched_migration_count.load(Ordering::SeqCst)
+    }
+
+    /// Record that the scheduler migrated this task.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    pub fn mark_sched_migrated(&self, now_ns: u64) {
+        self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_migration_count.fetch_add(1, Ordering::SeqCst);
+        self.clear_sched_low_util();
+    }
+
+    /// Return the timestamp at which this task first looked eligible for demotion.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic timestamp in nanoseconds, or `0` if no low-utilization window
+    /// is currently being tracked.
+    pub fn sched_low_util_since_ns(&self) -> u64 {
+        self.sched_low_util_since_ns.load(Ordering::SeqCst)
+    }
+
+    /// Record that this task is still below its current CPU capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The first timestamp in the current low-utilization window.
+    pub fn note_sched_low_util(&self, now_ns: u64) -> u64 {
+        let observed_ns = now_ns.max(1);
+        match self.sched_low_util_since_ns.compare_exchange(
+            0,
+            observed_ns,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => observed_ns,
+            Err(since_ns) => since_ns,
+        }
+    }
+
+    /// Clear the tracked low-utilization demotion window for this task.
+    pub fn clear_sched_low_util(&self) {
+        self.sched_low_util_since_ns.store(0, Ordering::SeqCst);
+    }
+
     /// Mark the task as running for CPU accounting.
     ///
     /// # Arguments
@@ -804,6 +1013,8 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
         self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_util_accounted_until_ns
+            .store(now_ns, Ordering::SeqCst);
     }
 
     /// Stop charging CPU time to this task and return the elapsed delta.
@@ -864,6 +1075,16 @@ impl Task {
             "Task ID is 0 - task may not have been added to scheduler yet"
         );
         self.id
+    }
+
+    /// Return the task ID if this task has been registered with the scheduler.
+    ///
+    /// # Returns
+    ///
+    /// `Some(task_id)` for scheduler-visible tasks, or `None` for freshly
+    /// constructed tasks that have not been inserted into the task pool yet.
+    pub(crate) fn registered_id(&self) -> Option<usize> {
+        (self.id != 0).then_some(self.id)
     }
 
     /// Set the task ID (used by TaskPool during task addition)
@@ -2683,6 +2904,38 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+    }
+
+    #[test_case]
+    fn test_sched_util_short_bursts_track_runtime_fraction() {
+        let task = super::Task::new("BurstyTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(task.account_sched_util_running(2 * MS), 0);
+
+        task.start_cpu_accounting(101 * MS);
+        let util = task.account_sched_util_running(102 * MS);
+        assert!(util < 64, "short burst util should stay low: {}", util);
+    }
+
+    #[test_case]
+    fn test_sched_util_sustained_runtime_rises() {
+        let task = super::Task::new("CpuTask".to_string(), 1, super::TaskType::Kernel);
+        const MS: u64 = 1_000_000;
+
+        task.start_cpu_accounting(1 * MS);
+        assert_eq!(
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS),
+            0
+        );
+        let util =
+            task.account_sched_util_running(1 * MS + super::SCHED_UTIL_DECAY_INTERVAL_NS * 2);
+        assert!(
+            util >= super::SCHED_UTIL_SCALE / 2,
+            "sustained util={}",
+            util
+        );
     }
 
     #[test_case]

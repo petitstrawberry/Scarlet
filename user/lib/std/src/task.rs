@@ -825,6 +825,56 @@ impl core::fmt::Display for TaskType {
     }
 }
 
+/// Scheduler hint for heterogeneous CPU placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCorePreference {
+    /// No explicit core-class preference.
+    Any,
+    /// Prefer energy-efficient cores when load permits.
+    Efficiency,
+    /// Prefer higher-capacity cores.
+    Performance,
+}
+
+impl TaskCorePreference {
+    /// Decode a raw kernel discriminant.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Raw `TaskCorePreference` discriminant.
+    ///
+    /// # Returns
+    ///
+    /// Decoded core preference, or [`TaskCorePreference::Any`] for unknown
+    /// values.
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Efficiency,
+            2 => Self::Performance,
+            _ => Self::Any,
+        }
+    }
+
+    /// Return a compact string representation.
+    ///
+    /// # Returns
+    ///
+    /// `"any"`, `"efficiency"`, or `"performance"`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Efficiency => "efficiency",
+            Self::Performance => "performance",
+        }
+    }
+}
+
+impl core::fmt::Display for TaskCorePreference {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Snapshot of a single task's metadata.
 ///
 /// This is the user-space mirror of `kernel::task::TaskInfo`.
@@ -850,6 +900,11 @@ pub struct TaskInfo {
     tgid: usize,
     name: crate::string::String,
     cpu_time_ns: u64,
+    sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: TaskCorePreference,
+    sched_migration_count: u64,
 }
 
 impl TaskInfo {
@@ -888,6 +943,26 @@ impl TaskInfo {
     /// Cumulative CPU time consumed by this task, in nanoseconds.
     pub fn cpu_time_ns(&self) -> u64 {
         self.cpu_time_ns
+    }
+    /// Measured scheduler utilization in capacity units.
+    pub fn sched_util_avg(&self) -> u32 {
+        self.sched_util_avg
+    }
+    /// Minimum scheduler utilization requested by this task.
+    pub fn sched_util_min(&self) -> u32 {
+        self.sched_util_min
+    }
+    /// Effective CPU capacity required for scheduler placement.
+    pub fn sched_required_capacity(&self) -> u32 {
+        self.sched_required_capacity
+    }
+    /// Core preference hint used by scheduler placement.
+    pub fn core_preference(&self) -> TaskCorePreference {
+        self.core_preference
+    }
+    /// Number of scheduler-directed migrations for this task.
+    pub fn sched_migration_count(&self) -> u64 {
+        self.sched_migration_count
     }
 }
 
@@ -945,6 +1020,12 @@ pub struct RawTaskInfo {
     pub tgid: usize,
     pub name: [u8; 64],
     pub cpu_time_ns: u64,
+    pub sched_util_avg: u32,
+    pub sched_util_min: u32,
+    pub sched_required_capacity: u32,
+    pub core_preference: u8,
+    pub _reserved2: [u8; 3],
+    pub sched_migration_count: u64,
 }
 
 /// Opaque raw CPU usage layout shared with the kernel (`#[repr(C)]`).
@@ -979,6 +1060,11 @@ impl RawTaskInfo {
             tgid: self.tgid,
             name,
             cpu_time_ns: self.cpu_time_ns,
+            sched_util_avg: self.sched_util_avg,
+            sched_util_min: self.sched_util_min,
+            sched_required_capacity: self.sched_required_capacity,
+            core_preference: TaskCorePreference::from_u8(self.core_preference),
+            sched_migration_count: self.sched_migration_count,
         }
     }
 }
@@ -1023,6 +1109,8 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
     let mut buf = crate::vec![RawTaskInfo {
         pid: 0, ppid: 0, state: 0, task_type: 0, cpu_id: 0,
         _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64], cpu_time_ns: 0,
+        sched_util_avg: 0, sched_util_min: 0, sched_required_capacity: 0,
+        core_preference: 0, _reserved2: [0; 3], sched_migration_count: 0,
     }; total];
     let n = syscall2(
         Syscall::GetTaskInfoList,
