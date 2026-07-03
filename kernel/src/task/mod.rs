@@ -503,8 +503,6 @@ pub struct Task {
     sched_util_avg: AtomicU32,
     /// Last timestamp at which measured scheduler utilization was updated.
     sched_util_last_update_ns: AtomicU64,
-    /// Last timestamp at which the scheduler migrated this task.
-    sched_last_migration_ns: AtomicU64,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
@@ -695,7 +693,6 @@ impl Task {
             sched_util_min: AtomicU32::new(0),
             sched_util_avg: AtomicU32::new(0),
             sched_util_last_update_ns: AtomicU64::new(0),
-            sched_last_migration_ns: AtomicU64::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             cpu_time_ns: AtomicU64::new(0),
@@ -884,25 +881,6 @@ impl Task {
         self.sched_util_last_update_ns
             .store(now_ns, Ordering::SeqCst);
         next
-    }
-
-    /// Return the last scheduler migration timestamp for this task.
-    ///
-    /// # Returns
-    ///
-    /// Monotonic timestamp in nanoseconds, or `0` if this task has not been
-    /// migrated by the scheduler.
-    pub fn sched_last_migration_ns(&self) -> u64 {
-        self.sched_last_migration_ns.load(Ordering::SeqCst)
-    }
-
-    /// Record that the scheduler migrated this task.
-    ///
-    /// # Arguments
-    ///
-    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
-    pub fn mark_sched_migrated(&self, now_ns: u64) {
-        self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
     }
 
     /// Mark the task as running for CPU accounting.
