@@ -38,8 +38,7 @@ use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
 use crate::abi::EventProcessOutcome;
-use crate::arch::ArchCpuState;
-use crate::arch::get_trapvector;
+use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_next_mode;
 use crate::print;
 use crate::println;
@@ -2320,10 +2319,6 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
         }
 
         if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
-            let cpu = get_cpu();
-            let saved_arch_cpu_state = ArchCpuState::save(cpu);
-            let saved_trapvector = get_trapvector();
-
             #[cfg(feature = "hypervisor")]
             let guest_vcpu_switch_data = crate::arch::hv::switch::VcpuSwitchData::save();
             #[cfg(feature = "hypervisor")]
@@ -2378,15 +2373,29 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                 hypervisor_switch_data.restore();
             }
 
-            let cpu = get_cpu();
-            saved_arch_cpu_state.restore(cpu);
-            set_trapvector(saved_trapvector);
             if let Some(from_task) = TaskPool::get_task(from_task_id) {
+                setup_task_cpu_state(get_cpu(), from_task);
+                set_trapvector(get_kernel_trapvector_paddr());
+
                 #[cfg(feature = "user-fpu")]
                 crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
             }
         }
     }
+}
+
+/// Bind CPU-local scheduler/trampoline state to the task that is about to run.
+fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
+    let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+    } else {
+        task.get_kernel_stack_bottom_paddr()
+    };
+
+    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu.get_cpuid()));
+    cpu.set_kernel_stack(sp);
+    cpu.set_trap_handler(get_user_trap_handler());
+    cpu.set_next_address_space(task.vm_manager.get_asid());
 }
 
 /// Setup task execution by configuring hardware and user context.
@@ -2410,21 +2419,11 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
         }
     }
 
-    let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
-        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
-    } else {
-        task.get_kernel_stack_bottom_paddr()
-    };
-
-    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu.get_cpuid()));
-    cpu.set_kernel_stack(sp);
-
+    setup_task_cpu_state(cpu, task);
     let task_mode = task.vcpu.lock().get_mode();
     let trapframe = task.get_trapframe();
     task.vcpu.lock().switch(trapframe);
 
-    cpu.set_trap_handler(get_user_trap_handler());
-    cpu.set_next_address_space(task.vm_manager.get_asid());
     set_next_mode(task_mode);
     set_trapvector(get_trampoline_trap_vector());
 }
