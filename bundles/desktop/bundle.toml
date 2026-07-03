@@ -93,6 +93,12 @@ to = "/system/scarlet/bin/settings"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/std-bin"
+bin = "task_manager"
+to = "/system/scarlet/bin/task_manager"
+
+[[layers]]
+kind = "cargo"
 source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_skk"
@@ -185,4 +191,3 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_mozc"
 to = "/system/scarlet/bin/scarlet_mozc"
-
