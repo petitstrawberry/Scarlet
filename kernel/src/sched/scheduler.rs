@@ -417,6 +417,9 @@ static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
 static CPU_CAPACITIES: [AtomicU32; MAX_NUM_CPUS] =
     [const { AtomicU32::new(DEFAULT_CPU_CAPACITY) }; MAX_NUM_CPUS];
+const INVALID_CPU_TOPOLOGY_DOMAIN: u32 = u32::MAX;
+static CPU_TOPOLOGY_DOMAINS: [AtomicU32; MAX_NUM_CPUS] =
+    [const { AtomicU32::new(INVALID_CPU_TOPOLOGY_DOMAIN) }; MAX_NUM_CPUS];
 
 /// Coarse CPU core class used for heterogeneous scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +478,10 @@ pub struct CpuTopology {
     pub core_class: CpuCoreClass,
     /// Relative compute capacity in scheduler units.
     pub capacity: u32,
+    /// Optional scheduler topology domain ID.
+    pub domain_id: Option<u32>,
+    /// CPU mask for CPUs registered in the same topology domain.
+    pub domain_cpus_mask: u64,
 }
 
 /// Scheduler CPU accounting snapshot.
@@ -777,6 +784,26 @@ pub fn register_online_cpu(cpu_id: usize) {
     }
 }
 
+fn cpu_mask_bit(cpu_id: usize) -> u64 {
+    if cpu_id >= u64::BITS as usize {
+        0
+    } else {
+        1u64 << cpu_id
+    }
+}
+
+/// Return a bitmask of scheduler-online CPUs.
+///
+/// # Returns
+///
+/// A CPU mask with bit `n` set when scheduler CPU `n` is online. CPU IDs that
+/// do not fit in a 64-bit mask are omitted.
+pub fn online_cpu_mask() -> u64 {
+    let cpus = ONLINE_CPUS.lock();
+    cpus.iter()
+        .fold(0u64, |mask, &cpu_id| mask | cpu_mask_bit(cpu_id))
+}
+
 fn sanitize_cpu_capacity(core_class: CpuCoreClass, capacity: u32) -> u32 {
     let capacity = if capacity == 0 {
         core_class.default_capacity()
@@ -818,6 +845,78 @@ pub fn register_cpu_topology(
     Ok(())
 }
 
+/// Register scheduler topology domain information for a CPU.
+///
+/// Architecture code should call this when firmware exposes a stable CPU
+/// grouping, such as an Apple Silicon performance/DVFS domain. The scheduler
+/// treats missing domain information as "unknown" rather than as a stable ABI.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+/// * `domain_id` - Platform topology domain identifier.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if the CPU ID or domain ID is invalid.
+pub fn register_cpu_topology_domain(cpu_id: usize, domain_id: u32) -> Result<(), &'static str> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return Err("CPU ID out of bounds");
+    }
+    if domain_id == INVALID_CPU_TOPOLOGY_DOMAIN {
+        return Err("Invalid CPU topology domain");
+    }
+
+    CPU_TOPOLOGY_DOMAINS[cpu_id].store(domain_id, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Return the registered topology domain for a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// The registered domain ID, or `None` if the CPU ID is invalid or the
+/// platform did not provide domain information.
+pub fn cpu_topology_domain(cpu_id: usize) -> Option<u32> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+
+    let domain_id = CPU_TOPOLOGY_DOMAINS[cpu_id].load(Ordering::SeqCst);
+    (domain_id != INVALID_CPU_TOPOLOGY_DOMAIN).then_some(domain_id)
+}
+
+fn cpu_topology_domain_mask(domain_id: u32) -> u64 {
+    let mut mask = 0u64;
+    for cpu_id in 0..MAX_NUM_CPUS {
+        if cpu_topology_domain(cpu_id) == Some(domain_id) {
+            mask |= cpu_mask_bit(cpu_id);
+        }
+    }
+    mask
+}
+
+/// Return the online CPU mask for a scheduler topology domain.
+///
+/// # Arguments
+///
+/// * `domain_id` - Platform topology domain identifier.
+///
+/// # Returns
+///
+/// A CPU mask containing online CPUs in the requested domain. CPU IDs that do
+/// not fit in a 64-bit mask are omitted.
+pub fn cpu_topology_domain_online_mask(domain_id: u32) -> u64 {
+    let cpus = ONLINE_CPUS.lock();
+    cpus.iter()
+        .filter(|&&cpu_id| cpu_topology_domain(cpu_id) == Some(domain_id))
+        .fold(0u64, |mask, &cpu_id| mask | cpu_mask_bit(cpu_id))
+}
+
 /// Return scheduler topology information for a CPU.
 ///
 /// # Arguments
@@ -833,10 +932,13 @@ pub fn cpu_topology(cpu_id: usize) -> Option<CpuTopology> {
     }
 
     let core_class = CpuCoreClass::from_u8(CPU_CORE_CLASSES[cpu_id].load(Ordering::SeqCst));
+    let domain_id = cpu_topology_domain(cpu_id);
     Some(CpuTopology {
         cpu_id,
         core_class,
         capacity: sanitize_cpu_capacity(core_class, CPU_CAPACITIES[cpu_id].load(Ordering::SeqCst)),
+        domain_id,
+        domain_cpus_mask: domain_id.map(cpu_topology_domain_mask).unwrap_or(0),
     })
 }
 
@@ -1810,6 +1912,7 @@ pub fn reset() {
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
+        CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
@@ -1920,6 +2023,30 @@ mod tests {
             topology.capacity,
             CpuCoreClass::Efficiency.default_capacity()
         );
+        assert_eq!(topology.domain_id, None);
+        assert_eq!(topology.domain_cpus_mask, 0);
+    }
+
+    #[test_case]
+    fn test_register_cpu_topology_domain() {
+        reset();
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(2, CpuCoreClass::Performance, 0).unwrap();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_online_cpu(2);
+
+        register_cpu_topology_domain(0, 0xa).unwrap();
+        register_cpu_topology_domain(2, 0xa).unwrap();
+        register_cpu_topology_domain(1, 0xd).unwrap();
+
+        let topology = cpu_topology(0).unwrap();
+        assert_eq!(topology.domain_id, Some(0xa));
+        assert_eq!(topology.domain_cpus_mask, 0b101);
+        assert_eq!(cpu_topology_domain_online_mask(0xa), 0b101);
+        assert_eq!(cpu_topology_domain_online_mask(0xd), 0b010);
+        assert_eq!(online_cpu_mask(), 0b111);
     }
 
     #[test_case]

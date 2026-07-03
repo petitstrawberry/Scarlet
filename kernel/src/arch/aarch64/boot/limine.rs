@@ -153,6 +153,14 @@ fn register_cpu_topology_from_fdt() {
         }
 
         if let Some(phandle) = cpu_performance_domain_phandle(&cpu) {
+            if let Err(err) = crate::sched::scheduler::register_cpu_topology_domain(cpu_id, phandle)
+            {
+                early_println!(
+                    "[aarch64] Failed to register CPU topology domain for cpu={}: {}",
+                    cpu_id,
+                    err
+                );
+            }
             crate::device::cpufreq::register_cpu_performance_domain(cpu_id, phandle);
         }
     }
