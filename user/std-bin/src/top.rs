@@ -61,6 +61,11 @@ struct RawTaskInfo {
     name: [u8; 64],
     cpu_time_ns: u64,
     sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    _reserved2: [u8; 3],
+    sched_migration_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +78,10 @@ struct TaskInfo {
     name: String,
     cpu_time_ns: u64,
     sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    sched_migration_count: u64,
 }
 
 impl RawTaskInfo {
@@ -95,6 +104,10 @@ impl RawTaskInfo {
             name,
             cpu_time_ns: self.cpu_time_ns,
             sched_util_avg: self.sched_util_avg,
+            sched_util_min: self.sched_util_min,
+            sched_required_capacity: self.sched_required_capacity,
+            core_preference: self.core_preference,
+            sched_migration_count: self.sched_migration_count,
         }
     }
 }
@@ -273,6 +286,11 @@ fn task_info() -> Vec<TaskInfo> {
             name: [0; 64],
             cpu_time_ns: 0,
             sched_util_avg: 0,
+            sched_util_min: 0,
+            sched_required_capacity: 0,
+            core_preference: 0,
+            _reserved2: [0; 3],
+            sched_migration_count: 0,
         };
         total
     ];
@@ -353,7 +371,7 @@ fn print_table(samples: &[TaskSample]) {
     }
 
     println!(
-        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>w_time$} {:<w_cmd$} {}",
+        "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
         "PID",
         "USER",
         "PR",
@@ -361,6 +379,10 @@ fn print_table(samples: &[TaskSample]) {
         "CPU",
         "%CPU",
         "UTIL",
+        "MIN",
+        "REQ",
+        "PREF",
+        "MIG",
         "TIME+",
         "COMMAND",
         "TGID",
@@ -377,7 +399,7 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>w_time$} {:<w_cmd$} {}",
+            "{:>w_pid$} {:<4} {:<2} {:<5} {:<w_cpu$} {:>5} {:>4} {:>4} {:>4} {:<4} {:>5} {:>w_time$} {:<w_cmd$} {}",
             task.pid,
             user,
             "-",
@@ -385,6 +407,10 @@ fn print_table(samples: &[TaskSample]) {
             format!("CPU{}", task.cpu),
             format_percent_per_mille(sample.cpu_per_mille),
             task.sched_util_avg,
+            task.sched_util_min,
+            task.sched_required_capacity,
+            format_core_preference(task.core_preference),
+            task.sched_migration_count,
             format_time_ns(task.cpu_time_ns),
             task.name,
             task.tgid,
@@ -431,6 +457,14 @@ fn format_stat(state: TaskState) -> &'static str {
         TaskState::Zombie => "Z",
         TaskState::Terminated => "T",
         TaskState::NotInitialized => "?",
+    }
+}
+
+fn format_core_preference(preference: u8) -> &'static str {
+    match preference {
+        1 => "E",
+        2 => "P",
+        _ => "-",
     }
 }
 

@@ -70,6 +70,11 @@ struct RawTaskInfo {
     name: [u8; 64],
     cpu_time_ns: u64,
     sched_util_avg: u32,
+    sched_util_min: u32,
+    sched_required_capacity: u32,
+    core_preference: u8,
+    _reserved2: [u8; 3],
+    sched_migration_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +626,11 @@ fn task_info() -> Vec<TaskInfo> {
             name: [0; 64],
             cpu_time_ns: 0,
             sched_util_avg: 0,
+            sched_util_min: 0,
+            sched_required_capacity: 0,
+            core_preference: 0,
+            _reserved2: [0; 3],
+            sched_migration_count: 0,
         };
         total
     ];

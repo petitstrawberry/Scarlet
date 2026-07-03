@@ -1061,6 +1061,24 @@ fn task_min_cpu_capacity_at(task: Option<&Task>, now_ns: u64) -> u32 {
     core::cmp::max(preference_min, task_effective_util(task, now_ns))
 }
 
+/// Return the scheduler capacity required by a task at a point in time.
+///
+/// This combines measured utilization, the task's `util_min` clamp, and its
+/// core preference hint. It is intended for diagnostics and should match the
+/// placement policy's capacity floor.
+///
+/// # Arguments
+///
+/// * `task` - Task whose placement capacity should be reported.
+/// * `now_ns` - Current monotonic timestamp in nanoseconds.
+///
+/// # Returns
+///
+/// Required CPU capacity in scheduler units.
+pub fn task_required_capacity_snapshot(task: &Task, now_ns: u64) -> u32 {
+    task_min_cpu_capacity_at(Some(task), now_ns)
+}
+
 fn cpu_better_for_preference(
     candidate_cpu: usize,
     best_cpu: usize,
@@ -2536,6 +2554,7 @@ mod tests {
         assert!(!ready_queue(0).lock().contains(&task_id));
         assert_eq!(task.running_cpu.load(Ordering::SeqCst), 1);
         assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
+        assert_eq!(task.sched_migration_count(), 1);
 
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 0);
@@ -2684,6 +2703,7 @@ mod tests {
         assert_eq!(task.running_cpu.load(Ordering::SeqCst), NO_CPU);
         assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
         assert!(ready_queue(1).lock().contains(&task_id));
+        assert_eq!(task.sched_migration_count(), 1);
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 1);
         assert_eq!(stats.promotions, 1);

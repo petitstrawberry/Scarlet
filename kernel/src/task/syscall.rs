@@ -1408,7 +1408,8 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             super::TaskType::Kernel => 0,
             super::TaskType::User => 1,
         };
-        let cpu_id = target.last_cpu.load(Ordering::SeqCst) as u8; // saturates on MAX
+        let last_cpu = target.last_cpu.load(Ordering::SeqCst);
+        let cpu_id = u8::try_from(last_cpu).unwrap_or(u8::MAX);
 
         let exit_status = target.exit_status.load(Ordering::SeqCst);
 
@@ -1437,6 +1438,13 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             name,
             cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
             sched_util_avg: target.sched_util_avg_snapshot(now_ns),
+            sched_util_min: target.sched_util_min(),
+            sched_required_capacity: crate::sched::scheduler::task_required_capacity_snapshot(
+                target, now_ns,
+            ),
+            core_preference: target.core_preference().to_u8(),
+            _reserved2: [0; 3],
+            sched_migration_count: target.sched_migration_count(),
         };
 
         let info_bytes = unsafe {

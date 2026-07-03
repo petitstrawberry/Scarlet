@@ -90,7 +90,10 @@ pub struct TaskInfo {
     pub state: u8,
     /// Task type: 0 = Kernel, 1 = User.
     pub task_type: u8,
-    /// CPU the task last ran on (MAX_CPU = no CPU).
+    /// Scheduler CPU where the task is running or queued.
+    ///
+    /// For sleeping tasks, this remains the last scheduler CPU associated with
+    /// the task. `u8::MAX` means no CPU is currently known.
     pub cpu_id: u8,
     /// Reserved for future use.
     pub _reserved: u8,
@@ -104,6 +107,16 @@ pub struct TaskInfo {
     pub cpu_time_ns: u64,
     /// Measured scheduler utilization in capacity units.
     pub sched_util_avg: u32,
+    /// Minimum scheduler utilization requested by this task.
+    pub sched_util_min: u32,
+    /// Effective CPU capacity required for placement.
+    pub sched_required_capacity: u32,
+    /// Scheduler core preference hint as a `TaskCorePreference` discriminant.
+    pub core_preference: u8,
+    /// Reserved for future use.
+    pub _reserved2: [u8; 3],
+    /// Number of scheduler-directed migrations for this task.
+    pub sched_migration_count: u64,
 }
 
 impl TaskInfo {
@@ -507,6 +520,8 @@ pub struct Task {
     ///
     /// Used to rate-limit scheduler-driven cross-CPU movement.
     sched_last_migration_ns: AtomicU64,
+    /// Number of scheduler-directed migrations for this task.
+    sched_migration_count: AtomicU64,
     /// First timestamp at which this task was observed below its current CPU capacity.
     ///
     /// Used to avoid demoting a task after only one low-utilization sample.
@@ -702,6 +717,7 @@ impl Task {
             sched_util_avg: AtomicU32::new(0),
             sched_util_last_update_ns: AtomicU64::new(0),
             sched_last_migration_ns: AtomicU64::new(0),
+            sched_migration_count: AtomicU64::new(0),
             sched_low_util_since_ns: AtomicU64::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
@@ -903,6 +919,15 @@ impl Task {
         self.sched_last_migration_ns.load(Ordering::SeqCst)
     }
 
+    /// Return the number of scheduler-directed migrations for this task.
+    ///
+    /// # Returns
+    ///
+    /// Count of scheduler placement moves, including work steals.
+    pub fn sched_migration_count(&self) -> u64 {
+        self.sched_migration_count.load(Ordering::SeqCst)
+    }
+
     /// Record that the scheduler migrated this task.
     ///
     /// # Arguments
@@ -910,6 +935,7 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn mark_sched_migrated(&self, now_ns: u64) {
         self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_migration_count.fetch_add(1, Ordering::SeqCst);
         self.clear_sched_low_util();
     }
 
