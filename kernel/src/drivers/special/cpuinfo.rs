@@ -53,6 +53,25 @@ impl CpuInfoDevice {
 
     fn render() -> String {
         let mut output = String::new();
+        let migration_stats = crate::sched::scheduler::scheduler_migration_stats();
+
+        let _ = writeln!(output, "scheduler migrations\t: {}", migration_stats.total);
+        let _ = writeln!(
+            output,
+            "scheduler promotions\t: {}",
+            migration_stats.promotions
+        );
+        let _ = writeln!(
+            output,
+            "scheduler demotions\t: {}",
+            migration_stats.demotions
+        );
+        let _ = writeln!(
+            output,
+            "scheduler cooldown skips\t: {}",
+            migration_stats.cooldown_skips
+        );
+        let _ = writeln!(output);
 
         for cpu_id in 0..MAX_NUM_CPUS {
             if !is_cpu_online(cpu_id) {

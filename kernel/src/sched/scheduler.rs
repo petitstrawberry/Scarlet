@@ -412,6 +412,8 @@ const EFFICIENCY_CPU_CAPACITY: u32 = 512;
 const PERFORMANCE_CPU_CAPACITY: u32 = 1536;
 const TASK_LOAD_SCALE: u64 = 1024;
 const MAX_PRIORITY_LOAD_BONUS: u64 = 1024;
+const SCHED_MIGRATION_COOLDOWN_NS: u64 = 100_000_000;
+const SCHED_DEMOTION_MARGIN: u32 = 128;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
@@ -420,6 +422,10 @@ static CPU_CAPACITIES: [AtomicU32; MAX_NUM_CPUS] =
 const INVALID_CPU_TOPOLOGY_DOMAIN: u32 = u32::MAX;
 static CPU_TOPOLOGY_DOMAINS: [AtomicU32; MAX_NUM_CPUS] =
     [const { AtomicU32::new(INVALID_CPU_TOPOLOGY_DOMAIN) }; MAX_NUM_CPUS];
+static SCHED_MIGRATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SCHED_MIGRATION_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
+static SCHED_MIGRATION_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
+static SCHED_MIGRATION_COOLDOWN_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 /// Coarse CPU core class used for heterogeneous scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,6 +514,19 @@ pub struct CpuUtilSnapshot {
     pub capacity: u32,
     /// Number of non-idle runnable tasks seen by this CPU.
     pub runnable_tasks: usize,
+}
+
+/// Scheduler migration accounting snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct SchedulerMigrationStats {
+    /// Number of scheduler-driven CPU migrations.
+    pub total: u64,
+    /// Number of migrations to a higher-capacity CPU.
+    pub promotions: u64,
+    /// Number of migrations to a lower-capacity CPU.
+    pub demotions: u64,
+    /// Number of migration opportunities skipped by cooldown.
+    pub cooldown_skips: u64,
 }
 
 pub fn note_idle_to_user_handoff(cpu_id: usize, task_id: usize) {
@@ -600,12 +619,21 @@ fn release_deferred_prev(cpu_id: usize) {
             task.state.store(TaskState::Ready, Ordering::SeqCst);
             return;
         }
-        // Requeue the previous task on the CPU that just switched away from it.
-        // This keeps kernel-context resume paths CPU-local. New task placement
-        // and wakeups provide SMP distribution without stealing suspended
-        // kernel contexts from another CPU's ready queue.
+        // Requeue the previous task after its context has been saved. The
+        // normal path keeps it CPU-local, but sustained utilization can promote
+        // or demote it across capacity classes once it is safe to resume from
+        // another ready queue.
         if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
-            push_ready_task(cpu_id, prev_id);
+            let now_ns = get_time_ns();
+            let target_cpu = migration_target_for_task(task, cpu_id, now_ns, true)
+                .filter(|&target_cpu| is_cpu_online(target_cpu))
+                .unwrap_or(cpu_id);
+            if target_cpu != cpu_id {
+                record_scheduler_migration(task, cpu_id, target_cpu, now_ns);
+            }
+            task.last_cpu.store(target_cpu, Ordering::SeqCst);
+            push_ready_task(target_cpu, prev_id);
+            notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
         }
     }
 }
@@ -684,6 +712,20 @@ pub fn cpu_util_snapshot(cpu_id: usize) -> Option<CpuUtilSnapshot> {
         capacity: cpu_capacity(cpu_id),
         runnable_tasks: CPU_RUNNABLE_TASKS[cpu_id].load(Ordering::SeqCst),
     })
+}
+
+/// Return scheduler migration counters.
+///
+/// # Returns
+///
+/// Current scheduler migration accounting snapshot.
+pub fn scheduler_migration_stats() -> SchedulerMigrationStats {
+    SchedulerMigrationStats {
+        total: SCHED_MIGRATIONS_TOTAL.load(Ordering::SeqCst),
+        promotions: SCHED_MIGRATION_PROMOTIONS.load(Ordering::SeqCst),
+        demotions: SCHED_MIGRATION_DEMOTIONS.load(Ordering::SeqCst),
+        cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.load(Ordering::SeqCst),
+    }
 }
 
 fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usize>) {
@@ -987,13 +1029,21 @@ fn cpu_load_score(cpu_id: usize) -> u64 {
     cpu_runnable_weight(cpu_id).saturating_mul(TASK_LOAD_SCALE) / capacity
 }
 
-fn task_min_cpu_capacity(task: Option<&Task>) -> u32 {
+fn task_effective_util(task: Option<&Task>, now_ns: u64) -> u32 {
+    let Some(task) = task else {
+        return 0;
+    };
+
+    core::cmp::max(task.sched_util_avg_snapshot(now_ns), task.sched_util_min())
+        .min(SCHED_UTIL_SCALE)
+}
+
+fn task_min_cpu_capacity_at(task: Option<&Task>, now_ns: u64) -> u32 {
     let preference_min = match task.map(Task::core_preference) {
         Some(TaskCorePreference::Performance) => DEFAULT_CPU_CAPACITY,
         _ => MIN_CPU_CAPACITY,
     };
-    let util_min = task.map(Task::sched_util_min).unwrap_or(0);
-    core::cmp::max(preference_min, util_min)
+    core::cmp::max(preference_min, task_effective_util(task, now_ns))
 }
 
 fn cpu_better_for_preference(
@@ -1007,11 +1057,11 @@ fn cpu_better_for_preference(
     match preference {
         TaskCorePreference::Efficiency => candidate_capacity < best_capacity,
         TaskCorePreference::Performance => candidate_capacity > best_capacity,
-        TaskCorePreference::Any => false,
+        TaskCorePreference::Any => candidate_capacity < best_capacity,
     }
 }
 
-fn select_target_cpu(task: Option<&Task>) -> usize {
+fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
     let cpus = ONLINE_CPUS.lock();
     if cpus.is_empty() {
         return 0;
@@ -1020,7 +1070,7 @@ fn select_target_cpu(task: Option<&Task>) -> usize {
     let preference = task
         .map(Task::core_preference)
         .unwrap_or(TaskCorePreference::Any);
-    let min_capacity = task_min_cpu_capacity(task);
+    let min_capacity = task_min_cpu_capacity_at(task, now_ns);
     let start = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
     let mut fallback: Option<(usize, u64)> = None;
     let mut best: Option<(usize, u64)> = None;
@@ -1057,6 +1107,132 @@ fn select_target_cpu(task: Option<&Task>) -> usize {
     }
 
     best.or(fallback).map(|(cpu_id, _)| cpu_id).unwrap_or(0)
+}
+
+fn select_target_cpu(task: Option<&Task>) -> usize {
+    select_target_cpu_at(task, get_time_ns())
+}
+
+fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32) -> Option<usize> {
+    let cpus = ONLINE_CPUS.lock();
+    let current_capacity = cpu_capacity(current_cpu);
+    let preference = task.core_preference();
+    let mut best: Option<(usize, u64)> = None;
+
+    for &cpu_id in cpus.iter() {
+        if cpu_id == current_cpu {
+            continue;
+        }
+
+        let capacity = cpu_capacity(cpu_id);
+        if capacity >= current_capacity || capacity < min_capacity {
+            continue;
+        }
+
+        let score = cpu_load_score(cpu_id);
+        if best
+            .map(|(best_cpu, best_score)| {
+                score < best_score
+                    || (score == best_score
+                        && (cpu_better_for_preference(cpu_id, best_cpu, preference)
+                            || cpu_capacity(cpu_id) < cpu_capacity(best_cpu)))
+            })
+            .unwrap_or(true)
+        {
+            best = Some((cpu_id, score));
+        }
+    }
+
+    best.map(|(cpu_id, _)| cpu_id)
+}
+
+fn migration_cooldown_active(task: &Task, now_ns: u64, record_skip: bool) -> bool {
+    let last_migration_ns = task.sched_last_migration_ns();
+    let active = last_migration_ns != 0
+        && now_ns.saturating_sub(last_migration_ns) < SCHED_MIGRATION_COOLDOWN_NS;
+    if active && record_skip {
+        SCHED_MIGRATION_COOLDOWN_SKIPS.fetch_add(1, Ordering::SeqCst);
+    }
+    active
+}
+
+fn migration_target_for_task(
+    task: &Task,
+    current_cpu: usize,
+    now_ns: u64,
+    record_skip: bool,
+) -> Option<usize> {
+    if task.pinned_cpu.is_some() || !is_cpu_online(current_cpu) {
+        return None;
+    }
+
+    let current_capacity = cpu_capacity(current_cpu);
+    let required_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
+
+    if required_capacity > current_capacity {
+        if migration_cooldown_active(task, now_ns, record_skip) {
+            return None;
+        }
+
+        let target_cpu = select_target_cpu_at(Some(task), now_ns);
+        let target_capacity = cpu_capacity(target_cpu);
+        if target_cpu != current_cpu
+            && target_capacity > current_capacity
+            && target_capacity >= required_capacity
+        {
+            return Some(target_cpu);
+        }
+        return None;
+    }
+
+    if current_capacity > required_capacity.saturating_add(SCHED_DEMOTION_MARGIN) {
+        if migration_cooldown_active(task, now_ns, record_skip) {
+            return None;
+        }
+        return select_lower_capacity_cpu(task, current_cpu, required_capacity);
+    }
+
+    None
+}
+
+fn record_scheduler_migration(task: &Task, from_cpu: usize, to_cpu: usize, now_ns: u64) {
+    if from_cpu == to_cpu {
+        return;
+    }
+
+    let from_capacity = cpu_capacity(from_cpu);
+    let to_capacity = cpu_capacity(to_cpu);
+    SCHED_MIGRATIONS_TOTAL.fetch_add(1, Ordering::SeqCst);
+    if to_capacity > from_capacity {
+        SCHED_MIGRATION_PROMOTIONS.fetch_add(1, Ordering::SeqCst);
+    } else if to_capacity < from_capacity {
+        SCHED_MIGRATION_DEMOTIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    task.mark_sched_migrated(now_ns);
+}
+
+fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static str) {
+    if !is_cpu_online(target_cpu) || target_cpu == get_cpu().get_cpuid() {
+        return;
+    }
+
+    let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    DEBUG_REMOTE_ENQUEUE_TASK[target_cpu].store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+    DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
+    DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
+    if DEBUG_SMP_TASK_FLOW {
+        println!(
+            "[SMPDBG {}] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
+            label,
+            seq,
+            get_cpu().get_cpuid(),
+            target_cpu,
+            task_id,
+            debug_task_name(task_id),
+            ready_queue(target_cpu).lock().len(),
+        );
+    }
+    crate::arch::send_reschedule_ipi(target_cpu);
 }
 
 pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
@@ -1286,13 +1462,27 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     TaskState::Running | TaskState::Ready
                 )
             {
-                ot.state.store(TaskState::Running, Ordering::SeqCst);
-                ot.time_slice.store(
-                    ot.default_time_slice.load(Ordering::SeqCst),
-                    Ordering::SeqCst,
-                );
-                set_current_task_id(cpu_id, Some(oid));
-                return (old_id, Some(oid));
+                if migration_target_for_task(ot, cpu_id, get_time_ns(), false).is_some() {
+                    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+                    if idle_id != 0
+                        && oid != idle_id
+                        && let Some(idle_task) = TaskPool::get_task(idle_id)
+                        && try_claim_ready_task(idle_task, cpu_id)
+                    {
+                        next_id = Some(idle_id);
+                    }
+                }
+                if next_id.is_none() {
+                    ot.state.store(TaskState::Running, Ordering::SeqCst);
+                    ot.time_slice.store(
+                        ot.default_time_slice.load(Ordering::SeqCst),
+                        Ordering::SeqCst,
+                    );
+                    set_current_task_id(cpu_id, Some(oid));
+                    return (old_id, Some(oid));
+                }
+                // Fall through to the normal context-switch path. The old task
+                // will be released and migrated from release_deferred_prev().
             }
         }
     }
@@ -1380,39 +1570,53 @@ pub fn register_task(task: Task) -> usize {
 pub fn enqueue_task(task_id: usize, cpu_id: usize) {
     let _irq_guard = IrqGuard::new();
     let current_cpu = get_cpu().get_cpuid();
+    let target_cpu = TaskPool::get_task(task_id)
+        .map(|task| {
+            if let Some(pinned_cpu) = task.pinned_cpu {
+                pinned_cpu
+            } else if is_cpu_online(cpu_id)
+                && cpu_capacity(cpu_id) >= task_min_cpu_capacity_at(Some(task), get_time_ns())
+            {
+                cpu_id
+            } else {
+                select_target_cpu(Some(task))
+            }
+        })
+        .unwrap_or(cpu_id);
     let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(task) = TaskPool::get_task(task_id) {
-        task.last_cpu.store(cpu_id, Ordering::SeqCst);
+        task.last_cpu.store(target_cpu, Ordering::SeqCst);
     }
-    push_ready_task(cpu_id, task_id);
+    push_ready_task(target_cpu, task_id);
     if DEBUG_SMP_TASK_FLOW {
         println!(
             "[SMPDBG enqueue] seq={} from_cpu={} target_cpu={} task={} name={} remote={} ready_len={}",
             seq,
             current_cpu,
-            cpu_id,
+            target_cpu,
             task_id,
             debug_task_name(task_id),
-            cpu_id != current_cpu,
-            ready_queue(cpu_id).lock().len(),
+            target_cpu != current_cpu,
+            ready_queue(target_cpu).lock().len(),
         );
     }
-    if is_cpu_online(cpu_id) && cpu_id != get_cpu().get_cpuid() {
-        DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(encode_task_id(Some(task_id)), Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(current_cpu, Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(seq, Ordering::SeqCst);
+    if is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid() {
+        DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
+            .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(current_cpu, Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
         if DEBUG_SMP_TASK_FLOW {
             println!(
                 "[SMPDBG ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
                 seq,
                 current_cpu,
-                cpu_id,
+                target_cpu,
                 task_id,
                 debug_task_name(task_id),
-                ready_queue(cpu_id).lock().len(),
+                ready_queue(target_cpu).lock().len(),
             );
         }
-        crate::arch::send_reschedule_ipi(cpu_id);
+        crate::arch::send_reschedule_ipi(target_cpu);
     }
 }
 
@@ -1597,17 +1801,25 @@ pub fn wake_task(task_id: usize) -> bool {
         if let Some(pinned) = task.pinned_cpu {
             pinned
         } else {
+            let now_ns = get_time_ns();
+            let min_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
+            let selected = select_target_cpu_at(Some(task), now_ns);
+            let selected_score = cpu_load_score(selected);
             let last = task.last_cpu.load(Ordering::SeqCst);
-            if is_cpu_online(last) && cpu_capacity(last) >= task_min_cpu_capacity(Some(task)) {
+            if is_cpu_online(last)
+                && cpu_capacity(last) >= min_capacity
+                && cpu_load_score(last) <= selected_score
+            {
                 last
             } else {
                 let current = get_cpu().get_cpuid();
                 if is_cpu_online(current)
-                    && cpu_capacity(current) >= task_min_cpu_capacity(Some(task))
+                    && cpu_capacity(current) >= min_capacity
+                    && cpu_load_score(current) <= selected_score
                 {
                     current
                 } else {
-                    select_target_cpu(Some(task))
+                    selected
                 }
             }
         }
@@ -1922,6 +2134,10 @@ pub fn reset() {
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
     TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
     TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
+    SCHED_MIGRATIONS_TOTAL.store(0, Ordering::SeqCst);
+    SCHED_MIGRATION_PROMOTIONS.store(0, Ordering::SeqCst);
+    SCHED_MIGRATION_DEMOTIONS.store(0, Ordering::SeqCst);
+    SCHED_MIGRATION_COOLDOWN_SKIPS.store(0, Ordering::SeqCst);
     ONLINE_CPUS.lock().clear();
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
@@ -2075,5 +2291,65 @@ mod tests {
         task.set_core_preference(TaskCorePreference::Efficiency);
 
         assert_eq!(select_cpu_for_task(&task), 1);
+    }
+
+    #[test_case]
+    fn test_select_cpu_for_light_any_task_prefers_efficiency_on_tie() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Efficiency, 0).unwrap();
+
+        let task = Task::new("LightTask".to_string(), 1, TaskType::Kernel);
+
+        assert_eq!(select_cpu_for_task(&task), 1);
+    }
+
+    #[test_case]
+    fn test_select_cpu_for_requested_heavy_task_prefers_capacity() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+
+        let task = Task::new("HeavyTask".to_string(), 1, TaskType::Kernel);
+        task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
+
+        assert_eq!(select_cpu_for_task(&task), 1);
+    }
+
+    #[test_case]
+    fn test_migration_target_promotes_over_capacity_task() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+
+        let task = Task::new("PromoteTask".to_string(), 1, TaskType::Kernel);
+        task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
+
+        assert_eq!(
+            migration_target_for_task(&task, 0, 20_000_000, false),
+            Some(1)
+        );
+    }
+
+    #[test_case]
+    fn test_migration_target_demotes_low_util_task() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Efficiency, 0).unwrap();
+
+        let task = Task::new("DemoteTask".to_string(), 1, TaskType::Kernel);
+
+        assert_eq!(
+            migration_target_for_task(&task, 0, 10_000_000, false),
+            Some(1)
+        );
     }
 }
