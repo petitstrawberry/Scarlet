@@ -447,6 +447,10 @@ impl Trapframe {
         self.regs.reg[10] = value; // a0
     }
 
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.regs.set_tp(ptr);
+    }
+
     pub fn get_arg(&self, index: usize) -> usize {
         self.regs.reg[index + 10] // a0 - a7
     }

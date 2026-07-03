@@ -321,6 +321,10 @@ impl Trapframe {
         self.regs.reg[0] = value; // X0
     }
 
+    pub fn set_tls_pointer(&mut self, ptr: usize) {
+        self.tpidr_el0 = ptr as u64;
+    }
+
     pub fn get_arg(&self, index: usize) -> usize {
         // Arguments are passed in X0-X7 in AArch64
         if index < 8 {

@@ -341,8 +341,9 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    // Set TLS pointer using architecture-specific VCPU method
-    task.vcpu.lock().set_tls_pointer(tls_ptr);
+    // The current task's live register state is the syscall trapframe. The VCPU
+    // save area is updated from the trapframe only when the scheduler stores it.
+    trapframe.set_tls_pointer(tls_ptr);
 
     trapframe.increment_pc_next(task);
     0 // Success
