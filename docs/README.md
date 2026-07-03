@@ -16,6 +16,8 @@ describes the repository at a high level; this page is the documentation map.
   AArch64 build, test, linker, and target layout.
 - [Memory map](architecture/memory-map.md) - higher-half kernel and ioremap
   address layout.
+- [Scheduler placement and fairness](architecture/scheduler.md) - capacity-aware
+  scheduling policy, hints, fairness, and preemption integration points.
 - [Apple Silicon deployment](../projects/aarch64-apple-limine-full/DEPLOY.md) -
   experimental m1n1/U-Boot/Limine deployment flow.
 
