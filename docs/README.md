@@ -18,6 +18,8 @@ describes the repository at a high level; this page is the documentation map.
   address layout.
 - [Scheduler placement and fairness](architecture/scheduler.md) - capacity-aware
   scheduling policy, hints, fairness, and preemption integration points.
+- [Scheduler benchmark scenarios](architecture/scheduler-benchmarks.md) -
+  repeatable workloads for homogeneous and heterogeneous scheduler checks.
 - [Apple Silicon deployment](../projects/aarch64-apple-limine-full/DEPLOY.md) -
   experimental m1n1/U-Boot/Limine deployment flow.
 
