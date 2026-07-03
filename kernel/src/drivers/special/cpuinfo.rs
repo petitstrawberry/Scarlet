@@ -51,6 +51,19 @@ impl CpuInfoDevice {
             let _ = writeln!(output, "core class\t: {}", topology.core_class.as_str());
             let _ = writeln!(output, "cpu capacity\t: {}", topology.capacity);
             let _ = writeln!(output, "util scale\t: {}", SCHED_UTIL_SCALE);
+            if let Some(util) = crate::sched::scheduler::cpu_util_snapshot(cpu_id) {
+                let _ = writeln!(output, "util avg\t: {}", util.util_avg);
+                let _ = writeln!(output, "util min\t: {}", util.util_min);
+                let _ = writeln!(output, "runnable\t: {}", util.runnable_tasks);
+            }
+            if let Some(policy) = crate::device::cpufreq::cpu_frequency_policy_info(cpu_id) {
+                let _ = writeln!(output, "cpufreq gov\t: {}", policy.governor.as_str());
+                let _ = writeln!(output, "policy cpus\t: 0x{:x}", policy.cpus_mask);
+                let _ = writeln!(output, "policy min kHz\t: {}", policy.min_freq_khz);
+                let _ = writeln!(output, "policy max kHz\t: {}", policy.max_freq_khz);
+                let _ = writeln!(output, "policy target kHz\t: {}", policy.target_freq_khz);
+                let _ = writeln!(output, "policy util\t: {}", policy.last_util);
+            }
             if let Some(freq) = crate::device::cpufreq::cpu_frequency_info(cpu_id) {
                 let _ = writeln!(output, "perf domain\t: 0x{:x}", freq.performance_domain);
                 let _ = writeln!(output, "dvfs status\t: 0x{:08x}", freq.raw_status);

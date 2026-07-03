@@ -52,8 +52,8 @@ use crate::{
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
     task::{
-        Task, TaskCorePreference, TaskState, new_kernel_task, wake_parent_waiters,
-        wake_task_waiters,
+        SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
+        wake_parent_waiters, wake_task_waiters,
     },
     timer::{get_kernel_timer, get_time_ns},
 };
@@ -401,6 +401,10 @@ static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
+static CPU_UTIL_MIN: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
+static CPU_RUNNABLE_TASKS: [AtomicUsize; MAX_NUM_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 
 const DEFAULT_CPU_CAPACITY: u32 = 1024;
 const MIN_CPU_CAPACITY: u32 = 128;
@@ -482,6 +486,21 @@ pub struct CpuUsageSnapshot {
     pub busy_time_ns: u64,
     /// Cumulative idle task CPU time in nanoseconds.
     pub idle_time_ns: u64,
+}
+
+/// Scheduler utilization snapshot for one CPU.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuUtilSnapshot {
+    /// Scheduler CPU ID.
+    pub cpu_id: usize,
+    /// Exponentially weighted utilization average in [`SCHED_UTIL_SCALE`] units.
+    pub util_avg: u32,
+    /// Maximum minimum-utilization clamp from runnable tasks on this CPU.
+    pub util_min: u32,
+    /// Relative CPU capacity in scheduler units.
+    pub capacity: u32,
+    /// Number of non-idle runnable tasks seen by this CPU.
+    pub runnable_tasks: usize,
 }
 
 pub fn note_idle_to_user_handoff(cpu_id: usize, task_id: usize) {
@@ -595,6 +614,69 @@ fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
     } else {
         TOTAL_BUSY_CPU_TIME_NS.fetch_add(delta_ns, Ordering::SeqCst);
     }
+}
+
+fn task_util_min_by_id(task_id: usize) -> u32 {
+    TaskPool::get_task(task_id)
+        .map(Task::sched_util_min)
+        .unwrap_or(0)
+}
+
+fn cpu_instant_util(cpu_id: usize) -> (u32, u32, usize) {
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let mut util = 0u32;
+    let mut util_min = 0u32;
+    let mut runnable_tasks = 0usize;
+
+    if let Some(task_id) = current_task_id(cpu_id)
+        && task_id != idle_id
+    {
+        runnable_tasks = runnable_tasks.saturating_add(1);
+        util = SCHED_UTIL_SCALE;
+        util_min = util_min.max(task_util_min_by_id(task_id));
+    }
+
+    (
+        util.max(util_min).min(SCHED_UTIL_SCALE),
+        util_min,
+        runnable_tasks,
+    )
+}
+
+fn update_cpu_util_avg(cpu_id: usize) {
+    let (instant, util_min, runnable_tasks) = cpu_instant_util(cpu_id);
+    let prev = CPU_UTIL_AVG[cpu_id].load(Ordering::SeqCst);
+    let next = if instant > prev {
+        prev.saturating_add(instant).div_ceil(2)
+    } else {
+        prev.saturating_mul(7).saturating_add(instant) / 8
+    };
+    CPU_UTIL_AVG[cpu_id].store(next.min(SCHED_UTIL_SCALE), Ordering::SeqCst);
+    CPU_UTIL_MIN[cpu_id].store(util_min, Ordering::SeqCst);
+    CPU_RUNNABLE_TASKS[cpu_id].store(runnable_tasks, Ordering::SeqCst);
+}
+
+/// Return scheduler utilization for one CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// Current utilization snapshot, or `None` if the CPU ID is invalid.
+pub fn cpu_util_snapshot(cpu_id: usize) -> Option<CpuUtilSnapshot> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+
+    Some(CpuUtilSnapshot {
+        cpu_id,
+        util_avg: CPU_UTIL_AVG[cpu_id].load(Ordering::SeqCst),
+        util_min: CPU_UTIL_MIN[cpu_id].load(Ordering::SeqCst),
+        capacity: cpu_capacity(cpu_id),
+        runnable_tasks: CPU_RUNNABLE_TASKS[cpu_id].load(Ordering::SeqCst),
+    })
 }
 
 fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usize>) {
@@ -1232,6 +1314,8 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
 /// If time_slice reaches 0, triggers a reschedule.
 pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
     let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
+    update_cpu_util_avg(cpu_id);
+    crate::device::cpufreq::on_scheduler_tick(cpu_id);
 
     if let Some(task_id) = current_task_id(cpu_id) {
         if let Some(task) = TaskPool::get_task(task_id) {
