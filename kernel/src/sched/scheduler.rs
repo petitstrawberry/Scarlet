@@ -625,20 +625,29 @@ fn release_deferred_prev(cpu_id: usize) {
             task.state.store(TaskState::Ready, Ordering::SeqCst);
             return;
         }
-        // Requeue the previous task after its context has been saved. At this
-        // point `running_cpu` has been released, so another CPU may safely
-        // claim the saved kernel context from its ready queue.
-        if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
-            let now_ns = get_time_ns();
-            let target_cpu = migration_target_for_task(task, cpu_id, now_ns, true)
-                .filter(|&target_cpu| is_cpu_online(target_cpu))
-                .unwrap_or(cpu_id);
-            if target_cpu != cpu_id {
-                record_scheduler_migration(task, cpu_id, target_cpu, now_ns);
+        match task.state.load(Ordering::SeqCst) {
+            // Requeue the previous task after its context has been saved. At
+            // this point `running_cpu` has been released, so another CPU may
+            // safely claim the saved kernel context from its ready queue.
+            TaskState::Ready => {
+                let now_ns = get_time_ns();
+                let target_cpu = migration_target_for_task(task, cpu_id, now_ns, true)
+                    .filter(|&target_cpu| is_cpu_online(target_cpu))
+                    .unwrap_or(cpu_id);
+                if target_cpu != cpu_id {
+                    record_scheduler_migration(task, cpu_id, target_cpu, now_ns);
+                }
+                task.last_cpu.store(target_cpu, Ordering::SeqCst);
+                push_ready_task(target_cpu, prev_id);
+                notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
             }
-            task.last_cpu.store(target_cpu, Ordering::SeqCst);
-            push_ready_task(target_cpu, prev_id);
-            notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
+            TaskState::Zombie => {
+                finalize_zombie(prev_id, task.get_parent_id());
+            }
+            TaskState::Terminated => {
+                cleanup_zombie(prev_id);
+            }
+            TaskState::Running | TaskState::Blocked(_) | TaskState::NotInitialized => {}
         }
     }
 }
@@ -2888,5 +2897,26 @@ mod tests {
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 1);
         assert_eq!(stats.promotions, 1);
+    }
+
+    #[test_case]
+    fn test_deferred_release_cleans_terminated_task() {
+        reset();
+        register_online_cpu(0);
+
+        let task_id = register_task(Task::new(
+            "DetachedThreadTask".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Terminated, Ordering::SeqCst);
+        task.running_cpu.store(0, Ordering::SeqCst);
+        let generation = get_task_pool().task_generation(task_id).unwrap();
+        SCHEDULE_PREV_TASK[0].store(encode_prev_task(task_id, generation), Ordering::SeqCst);
+
+        release_deferred_prev(0);
+
+        assert!(TaskPool::get_task(task_id).is_none());
     }
 }

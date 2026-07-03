@@ -242,7 +242,14 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             /* Return the child task PID (namespace-local) to the parent task */
             child_ns_pid
         }
-        Err(_) => {
+        Err(err) => {
+            crate::println!(
+                "[clone] failed: parent={} name={} flags={:#x} reason={}",
+                parent_task.get_id(),
+                parent_task.name.read().as_str(),
+                clone_flags.get_raw(),
+                err
+            );
             usize::MAX /* Return -1 on error */
         }
     }
