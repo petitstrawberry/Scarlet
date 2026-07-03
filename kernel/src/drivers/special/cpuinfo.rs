@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, fmt::Write};
+use spin::Mutex;
 
 use crate::{
     device::{Device, DeviceType, char::CharDevice, manager::DeviceManager},
@@ -22,7 +23,9 @@ use crate::{
 };
 
 /// Read-only CPU topology character device.
-pub struct CpuInfoDevice;
+pub struct CpuInfoDevice {
+    snapshot: Mutex<String>,
+}
 
 impl CpuInfoDevice {
     /// Create a CPU information device.
@@ -31,7 +34,21 @@ impl CpuInfoDevice {
     ///
     /// A new CPU information character device.
     pub fn new() -> Self {
-        Self
+        Self {
+            snapshot: Mutex::new(String::new()),
+        }
+    }
+
+    fn copy_from_snapshot(snapshot: &str, position: usize, buffer: &mut [u8]) -> usize {
+        let bytes = snapshot.as_bytes();
+
+        if position >= bytes.len() || buffer.is_empty() {
+            return 0;
+        }
+
+        let bytes_to_read = core::cmp::min(buffer.len(), bytes.len() - position);
+        buffer[..bytes_to_read].copy_from_slice(&bytes[position..position + bytes_to_read]);
+        bytes_to_read
     }
 
     fn render() -> String {
@@ -51,6 +68,38 @@ impl CpuInfoDevice {
             let _ = writeln!(output, "core class\t: {}", topology.core_class.as_str());
             let _ = writeln!(output, "cpu capacity\t: {}", topology.capacity);
             let _ = writeln!(output, "util scale\t: {}", SCHED_UTIL_SCALE);
+            if let Some(util) = crate::sched::scheduler::cpu_util_snapshot(cpu_id) {
+                let _ = writeln!(output, "util avg\t: {}", util.util_avg);
+                let _ = writeln!(output, "util min\t: {}", util.util_min);
+                let _ = writeln!(output, "runnable\t: {}", util.runnable_tasks);
+            }
+            if let Some(policy) = crate::device::cpufreq::cpu_frequency_policy_info(cpu_id) {
+                let _ = writeln!(output, "cpufreq gov\t: {}", policy.governor.as_str());
+                let _ = writeln!(output, "policy cpus\t: 0x{:x}", policy.cpus_mask);
+                let _ = writeln!(output, "policy min kHz\t: {}", policy.min_freq_khz);
+                let _ = writeln!(output, "policy max kHz\t: {}", policy.max_freq_khz);
+                let _ = writeln!(output, "policy target kHz\t: {}", policy.target_freq_khz);
+                let _ = writeln!(output, "policy util\t: {}", policy.last_util);
+            }
+            if let Some(freq) = crate::device::cpufreq::cpu_frequency_info(cpu_id) {
+                let _ = writeln!(output, "perf domain\t: 0x{:x}", freq.performance_domain);
+                let _ = writeln!(output, "dvfs status\t: 0x{:08x}", freq.raw_status);
+                if let Some(pstate) = freq.current_pstate {
+                    let _ = writeln!(output, "cur pstate\t: {}", pstate);
+                }
+                if let Some(pstate) = freq.target_pstate {
+                    let _ = writeln!(output, "target pstate\t: {}", pstate);
+                }
+                if let Some(freq_khz) = freq.current_freq_khz {
+                    let _ = writeln!(output, "cur freq kHz\t: {}", freq_khz);
+                }
+                if let Some(freq_khz) = freq.target_freq_khz {
+                    let _ = writeln!(output, "target freq kHz\t: {}", freq_khz);
+                }
+                if let Some(freq_khz) = freq.max_freq_khz {
+                    let _ = writeln!(output, "max freq kHz\t: {}", freq_khz);
+                }
+            }
             let _ = writeln!(output);
         }
 
@@ -90,17 +139,32 @@ impl CharDevice for CpuInfoDevice {
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
-        let content = Self::render();
-        let bytes = content.as_bytes();
         let position = usize::try_from(position).map_err(|_| "Read position out of range")?;
 
-        if position >= bytes.len() || buffer.is_empty() {
+        if buffer.is_empty() {
             return Ok(0);
         }
 
-        let bytes_to_read = core::cmp::min(buffer.len(), bytes.len() - position);
-        buffer[..bytes_to_read].copy_from_slice(&bytes[position..position + bytes_to_read]);
-        Ok(bytes_to_read)
+        if position == 0 {
+            let content = Self::render();
+            let mut snapshot = self.snapshot.lock();
+            *snapshot = content;
+            return Ok(Self::copy_from_snapshot(&snapshot, position, buffer));
+        }
+
+        {
+            let snapshot = self.snapshot.lock();
+            if !snapshot.is_empty() {
+                return Ok(Self::copy_from_snapshot(&snapshot, position, buffer));
+            }
+        }
+
+        let content = Self::render();
+        let mut snapshot = self.snapshot.lock();
+        if snapshot.is_empty() {
+            *snapshot = content;
+        }
+        Ok(Self::copy_from_snapshot(&snapshot, position, buffer))
     }
 
     fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {

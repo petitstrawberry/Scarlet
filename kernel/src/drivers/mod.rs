@@ -4,6 +4,7 @@
 
 pub mod block;
 pub mod clk;
+pub mod cpufreq;
 pub mod display;
 pub mod gpio;
 pub mod graphics;
