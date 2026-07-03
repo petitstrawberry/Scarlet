@@ -402,7 +402,7 @@ fn terminate_current_user_exception(
         log_user_fault_memory_context(&task, trapframe, vaddr);
         log_user_code_context(&task, trapframe.elr as usize);
         task.vcpu.lock().store(trapframe);
-        task.exit(exit_status);
+        task.exit_group(exit_status);
         schedule(trapframe);
         return;
     }
