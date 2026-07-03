@@ -71,6 +71,11 @@ impl CpuInfoDevice {
             "scheduler cooldown skips\t: {}",
             migration_stats.cooldown_skips
         );
+        let _ = writeln!(
+            output,
+            "scheduler work steals\t: {}",
+            migration_stats.work_steals
+        );
         let _ = writeln!(output);
 
         for cpu_id in 0..MAX_NUM_CPUS {

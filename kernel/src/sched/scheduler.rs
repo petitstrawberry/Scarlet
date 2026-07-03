@@ -414,6 +414,7 @@ const TASK_LOAD_SCALE: u64 = 1024;
 const MAX_PRIORITY_LOAD_BONUS: u64 = 1024;
 const SCHED_MIGRATION_COOLDOWN_NS: u64 = 100_000_000;
 const SCHED_DEMOTION_MARGIN: u32 = 128;
+const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
@@ -426,6 +427,7 @@ static SCHED_MIGRATIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static SCHED_MIGRATION_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
 static SCHED_MIGRATION_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
 static SCHED_MIGRATION_COOLDOWN_SKIPS: AtomicU64 = AtomicU64::new(0);
+static SCHED_WORK_STEALS: AtomicU64 = AtomicU64::new(0);
 
 /// Coarse CPU core class used for heterogeneous scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +529,8 @@ pub struct SchedulerMigrationStats {
     pub demotions: u64,
     /// Number of migration opportunities skipped by cooldown.
     pub cooldown_skips: u64,
+    /// Number of ready tasks moved by idle-core work stealing.
+    pub work_steals: u64,
 }
 
 pub fn note_idle_to_user_handoff(cpu_id: usize, task_id: usize) {
@@ -670,6 +674,16 @@ fn cpu_instant_util(cpu_id: usize) -> (u32, u32, usize) {
         util_min = util_min.max(task_util_min_by_id(task_id));
     }
 
+    let queue = ready_queue(cpu_id).lock();
+    for &task_id in queue.iter() {
+        if task_id == idle_id {
+            continue;
+        }
+        runnable_tasks = runnable_tasks.saturating_add(1);
+        util_min = util_min.max(task_util_min_by_id(task_id));
+    }
+    drop(queue);
+
     (
         util.max(util_min).min(SCHED_UTIL_SCALE),
         util_min,
@@ -724,6 +738,7 @@ pub fn scheduler_migration_stats() -> SchedulerMigrationStats {
         promotions: SCHED_MIGRATION_PROMOTIONS.load(Ordering::SeqCst),
         demotions: SCHED_MIGRATION_DEMOTIONS.load(Ordering::SeqCst),
         cooldown_skips: SCHED_MIGRATION_COOLDOWN_SKIPS.load(Ordering::SeqCst),
+        work_steals: SCHED_WORK_STEALS.load(Ordering::SeqCst),
     }
 }
 
@@ -1117,13 +1132,134 @@ fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -
         return pinned_cpu;
     }
 
+    let selected = select_target_cpu_at(Some(task), now_ns);
+    let selected_score = cpu_load_score(selected);
     if is_cpu_online(requested_cpu)
         && cpu_capacity(requested_cpu) >= task_min_cpu_capacity_at(Some(task), now_ns)
+        && cpu_load_score(requested_cpu) <= selected_score
     {
         requested_cpu
     } else {
-        select_target_cpu_at(Some(task), now_ns)
+        selected
     }
+}
+
+fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
+    if task
+        .pinned_cpu
+        .is_some_and(|pinned_cpu| pinned_cpu != cpu_id)
+    {
+        return false;
+    }
+
+    cpu_capacity(cpu_id) >= task_min_cpu_capacity_at(Some(task), now_ns)
+}
+
+fn steal_candidate_from_cpu(
+    victim_cpu: usize,
+    target_cpu: usize,
+    now_ns: u64,
+) -> Option<(usize, u64)> {
+    let idle_id = IDLE_TASK_IDS[victim_cpu].load(Ordering::SeqCst);
+    let queue = ready_queue(victim_cpu).lock();
+    let mut weight = 0u64;
+    let mut candidate = None;
+
+    for &task_id in queue.iter() {
+        if task_id == idle_id {
+            continue;
+        }
+
+        weight = weight.saturating_add(runnable_task_weight(task_id));
+        if candidate.is_some() {
+            continue;
+        }
+
+        let Some(task) = TaskPool::get_task(task_id) else {
+            continue;
+        };
+        if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
+            continue;
+        }
+        if !matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
+            continue;
+        }
+        if !task_can_run_on_cpu(task, target_cpu, now_ns) {
+            continue;
+        }
+
+        candidate = Some(task_id);
+    }
+
+    candidate.map(|task_id| (task_id, weight))
+}
+
+fn remove_ready_task_from_cpu(cpu_id: usize, task_id: usize) -> bool {
+    let mut queue = ready_queue(cpu_id).lock();
+    let Some(index) = queue.iter().position(|&queued_id| queued_id == task_id) else {
+        return false;
+    };
+    queue.remove(index).is_some()
+}
+
+fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
+    let cpus = ONLINE_CPUS.lock();
+    if cpus.len() <= 1 || !cpus.contains(&target_cpu) {
+        return None;
+    }
+
+    let start = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
+    let mut scanned = 0usize;
+    let mut best: Option<(usize, usize, u64)> = None;
+
+    for offset in 0..cpus.len() {
+        if scanned >= SCHED_STEAL_SCAN_LIMIT {
+            break;
+        }
+
+        let victim_cpu = cpus[(start + offset) % cpus.len()];
+        if victim_cpu == target_cpu {
+            continue;
+        }
+        scanned = scanned.saturating_add(1);
+
+        let Some((task_id, weight)) = steal_candidate_from_cpu(victim_cpu, target_cpu, now_ns)
+        else {
+            continue;
+        };
+        if weight == 0 {
+            continue;
+        }
+
+        if best
+            .map(|(_, _, best_weight)| weight > best_weight)
+            .unwrap_or(true)
+        {
+            best = Some((victim_cpu, task_id, weight));
+        }
+    }
+    drop(cpus);
+
+    let (victim_cpu, task_id, _) = best?;
+    if !remove_ready_task_from_cpu(victim_cpu, task_id) {
+        return None;
+    }
+
+    let Some(task) = TaskPool::get_task(task_id) else {
+        return None;
+    };
+    if !try_claim_ready_task(task, target_cpu) {
+        if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready)
+            && task.running_cpu.load(Ordering::SeqCst) == NO_CPU
+        {
+            push_ready_task(victim_cpu, task_id);
+        }
+        return None;
+    }
+
+    record_scheduler_migration(task, victim_cpu, target_cpu, now_ns);
+    SCHED_WORK_STEALS.fetch_add(1, Ordering::SeqCst);
+    Some(task_id)
 }
 
 fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
@@ -1491,6 +1627,16 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
             None => {
                 break 'outer;
             }
+        }
+    }
+
+    if next_id.is_none() {
+        let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+        let current_is_idle = old_id
+            .map(|task_id| idle_id != 0 && task_id == idle_id)
+            .unwrap_or(true);
+        if current_is_idle {
+            next_id = steal_ready_task_for_cpu(cpu_id, get_time_ns());
         }
     }
 
@@ -2149,6 +2295,7 @@ pub fn reset() {
     SCHED_MIGRATION_PROMOTIONS.store(0, Ordering::SeqCst);
     SCHED_MIGRATION_DEMOTIONS.store(0, Ordering::SeqCst);
     SCHED_MIGRATION_COOLDOWN_SKIPS.store(0, Ordering::SeqCst);
+    SCHED_WORK_STEALS.store(0, Ordering::SeqCst);
     TOTAL_BUSY_CPU_TIME_NS.store(0, Ordering::SeqCst);
     TOTAL_IDLE_CPU_TIME_NS.store(0, Ordering::SeqCst);
     ONLINE_CPUS.lock().clear();
@@ -2331,6 +2478,46 @@ mod tests {
         task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
 
         assert_eq!(select_cpu_for_task(&task), 1);
+    }
+
+    #[test_case]
+    fn test_enqueue_prefers_idle_cpu_over_requested_busy_cpu() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Balanced, 0).unwrap();
+
+        let first_id = register_task(Task::new("FirstTask".to_string(), 1, TaskType::Kernel));
+        enqueue_task(first_id, 0);
+        assert!(ready_queue(0).lock().contains(&first_id));
+
+        let second_id = register_task(Task::new("SecondTask".to_string(), 1, TaskType::Kernel));
+        enqueue_task(second_id, 0);
+        assert!(ready_queue(1).lock().contains(&second_id));
+    }
+
+    #[test_case]
+    fn test_idle_cpu_steals_ready_task_from_busy_queue() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Balanced, 0).unwrap();
+
+        let task_id = register_task(Task::new("StealableTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task(0, task_id);
+
+        assert_eq!(steal_ready_task_for_cpu(1, 20_000_000), Some(task_id));
+        assert!(!ready_queue(0).lock().contains(&task_id));
+        assert_eq!(task.running_cpu.load(Ordering::SeqCst), 1);
+        assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
+
+        let stats = scheduler_migration_stats();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.work_steals, 1);
     }
 
     #[test_case]
