@@ -521,7 +521,7 @@ pub struct CpuUtilSnapshot {
 /// Scheduler migration accounting snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerMigrationStats {
-    /// Number of scheduler-driven CPU migrations.
+    /// Number of capacity-directed scheduler migrations.
     pub total: u64,
     /// Number of migrations to a higher-capacity CPU.
     pub promotions: u64,
@@ -1187,6 +1187,9 @@ fn steal_candidate_from_cpu(
         if !task_can_run_on_cpu(task, target_cpu, now_ns) {
             continue;
         }
+        if migration_cooldown_active(task, now_ns, false) {
+            continue;
+        }
 
         candidate = Some(task_id);
     }
@@ -1257,8 +1260,7 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
         return None;
     }
 
-    record_scheduler_migration(task, victim_cpu, target_cpu, now_ns);
-    SCHED_WORK_STEALS.fetch_add(1, Ordering::SeqCst);
+    record_work_steal(task, now_ns);
     Some(task_id)
 }
 
@@ -1346,29 +1348,34 @@ fn migration_target_for_task(
     let required_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
 
     if required_capacity > current_capacity {
-        if migration_cooldown_active(task, now_ns, record_skip) {
-            return None;
-        }
-
         let target_cpu = select_target_cpu_at(Some(task), now_ns);
         let target_capacity = cpu_capacity(target_cpu);
         if target_cpu != current_cpu
             && target_capacity > current_capacity
             && target_capacity >= required_capacity
         {
+            if migration_cooldown_active(task, now_ns, record_skip) {
+                return None;
+            }
             return Some(target_cpu);
         }
         return None;
     }
 
     if current_capacity > required_capacity.saturating_add(SCHED_DEMOTION_MARGIN) {
+        let target_cpu = select_lower_capacity_cpu(task, current_cpu, required_capacity)?;
         if migration_cooldown_active(task, now_ns, record_skip) {
             return None;
         }
-        return select_lower_capacity_cpu(task, current_cpu, required_capacity);
+        return Some(target_cpu);
     }
 
     None
+}
+
+fn record_work_steal(task: &Task, now_ns: u64) {
+    SCHED_WORK_STEALS.fetch_add(1, Ordering::SeqCst);
+    task.mark_sched_migrated(now_ns);
 }
 
 fn record_scheduler_migration(task: &Task, from_cpu: usize, to_cpu: usize, now_ns: u64) {
@@ -2516,8 +2523,31 @@ mod tests {
         assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
 
         let stats = scheduler_migration_stats();
-        assert_eq!(stats.total, 1);
+        assert_eq!(stats.total, 0);
         assert_eq!(stats.work_steals, 1);
+    }
+
+    #[test_case]
+    fn test_idle_cpu_does_not_steal_recently_migrated_task() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Balanced, 0).unwrap();
+
+        let task_id = register_task(Task::new("CoolingTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        task.mark_sched_migrated(10_000_000);
+        push_ready_task(0, task_id);
+
+        assert_eq!(steal_ready_task_for_cpu(1, 20_000_000), None);
+        assert!(ready_queue(0).lock().contains(&task_id));
+
+        let stats = scheduler_migration_stats();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.work_steals, 0);
+        assert_eq!(stats.cooldown_skips, 0);
     }
 
     #[test_case]
@@ -2538,6 +2568,22 @@ mod tests {
     }
 
     #[test_case]
+    fn test_migration_cooldown_skip_counts_when_target_exists() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Efficiency, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Performance, 0).unwrap();
+
+        let task = Task::new("CoolingPromotionTask".to_string(), 1, TaskType::Kernel);
+        task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
+        task.mark_sched_migrated(10_000_000);
+
+        assert_eq!(migration_target_for_task(&task, 0, 20_000_000, true), None);
+        assert_eq!(scheduler_migration_stats().cooldown_skips, 1);
+    }
+
+    #[test_case]
     fn test_migration_target_demotes_low_util_task() {
         reset();
         register_online_cpu(0);
@@ -2551,6 +2597,21 @@ mod tests {
             migration_target_for_task(&task, 0, 10_000_000, false),
             Some(1)
         );
+    }
+
+    #[test_case]
+    fn test_migration_cooldown_skip_requires_target_cpu() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Balanced, 0).unwrap();
+
+        let task = Task::new("NoTargetTask".to_string(), 1, TaskType::Kernel);
+        task.mark_sched_migrated(10_000_000);
+
+        assert_eq!(migration_target_for_task(&task, 0, 20_000_000, true), None);
+        assert_eq!(scheduler_migration_stats().cooldown_skips, 0);
     }
 
     #[test_case]
