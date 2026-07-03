@@ -414,6 +414,7 @@ const TASK_LOAD_SCALE: u64 = 1024;
 const MAX_PRIORITY_LOAD_BONUS: u64 = 1024;
 const SCHED_MIGRATION_COOLDOWN_NS: u64 = 100_000_000;
 const SCHED_DEMOTION_MARGIN: u32 = 128;
+const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
@@ -1334,6 +1335,11 @@ fn migration_cooldown_active(task: &Task, now_ns: u64, record_skip: bool) -> boo
     active
 }
 
+fn demotion_low_util_sustained(task: &Task, now_ns: u64) -> bool {
+    let low_util_since_ns = task.note_sched_low_util(now_ns);
+    now_ns.saturating_sub(low_util_since_ns) >= SCHED_DEMOTION_SUSTAIN_NS
+}
+
 fn migration_target_for_task(
     task: &Task,
     current_cpu: usize,
@@ -1348,6 +1354,7 @@ fn migration_target_for_task(
     let required_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
 
     if required_capacity > current_capacity {
+        task.clear_sched_low_util();
         let target_cpu = select_target_cpu_at(Some(task), now_ns);
         let target_capacity = cpu_capacity(target_cpu);
         if target_cpu != current_cpu
@@ -1363,13 +1370,21 @@ fn migration_target_for_task(
     }
 
     if current_capacity > required_capacity.saturating_add(SCHED_DEMOTION_MARGIN) {
-        let target_cpu = select_lower_capacity_cpu(task, current_cpu, required_capacity)?;
+        let Some(target_cpu) = select_lower_capacity_cpu(task, current_cpu, required_capacity)
+        else {
+            task.clear_sched_low_util();
+            return None;
+        };
+        if !demotion_low_util_sustained(task, now_ns) {
+            return None;
+        }
         if migration_cooldown_active(task, now_ns, record_skip) {
             return None;
         }
         return Some(target_cpu);
     }
 
+    task.clear_sched_low_util();
     None
 }
 
@@ -2593,9 +2608,39 @@ mod tests {
 
         let task = Task::new("LowUtilTask".to_string(), 1, TaskType::Kernel);
 
+        assert_eq!(migration_target_for_task(&task, 0, 10_000_000, false), None);
+        assert_eq!(task.sched_low_util_since_ns(), 10_000_000);
         assert_eq!(
-            migration_target_for_task(&task, 0, 10_000_000, false),
+            migration_target_for_task(&task, 0, 10_000_000 + SCHED_DEMOTION_SUSTAIN_NS - 1, false),
+            None
+        );
+        assert_eq!(
+            migration_target_for_task(&task, 0, 10_000_000 + SCHED_DEMOTION_SUSTAIN_NS, false),
             Some(1)
+        );
+    }
+
+    #[test_case]
+    fn test_migration_demotion_tracking_resets_without_lower_target() {
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        register_cpu_topology(0, CpuCoreClass::Performance, 0).unwrap();
+        register_cpu_topology(1, CpuCoreClass::Efficiency, 0).unwrap();
+
+        let task = Task::new("DemotionResetTask".to_string(), 1, TaskType::Kernel);
+
+        assert_eq!(migration_target_for_task(&task, 0, 10_000_000, false), None);
+        assert_eq!(task.sched_low_util_since_ns(), 10_000_000);
+
+        task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
+        assert_eq!(migration_target_for_task(&task, 0, 20_000_000, false), None);
+        assert_eq!(task.sched_low_util_since_ns(), 0);
+
+        task.set_sched_util_min(0).unwrap();
+        assert_eq!(
+            migration_target_for_task(&task, 0, 10_000_000 + SCHED_DEMOTION_SUSTAIN_NS, false),
+            None
         );
     }
 

@@ -507,6 +507,10 @@ pub struct Task {
     ///
     /// Used to rate-limit scheduler-driven cross-CPU movement.
     sched_last_migration_ns: AtomicU64,
+    /// First timestamp at which this task was observed below its current CPU capacity.
+    ///
+    /// Used to avoid demoting a task after only one low-utilization sample.
+    sched_low_util_since_ns: AtomicU64,
     /// Time slice for scheduling
     pub time_slice: AtomicU32,
     pub default_time_slice: AtomicU32,
@@ -698,6 +702,7 @@ impl Task {
             sched_util_avg: AtomicU32::new(0),
             sched_util_last_update_ns: AtomicU64::new(0),
             sched_last_migration_ns: AtomicU64::new(0),
+            sched_low_util_since_ns: AtomicU64::new(0),
             time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             default_time_slice: AtomicU32::new(DEFAULT_TIME_SLICE),
             cpu_time_ns: AtomicU64::new(0),
@@ -905,6 +910,44 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn mark_sched_migrated(&self, now_ns: u64) {
         self.sched_last_migration_ns.store(now_ns, Ordering::SeqCst);
+        self.clear_sched_low_util();
+    }
+
+    /// Return the timestamp at which this task first looked eligible for demotion.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic timestamp in nanoseconds, or `0` if no low-utilization window
+    /// is currently being tracked.
+    pub fn sched_low_util_since_ns(&self) -> u64 {
+        self.sched_low_util_since_ns.load(Ordering::SeqCst)
+    }
+
+    /// Record that this task is still below its current CPU capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `now_ns` - Current monotonic timestamp in nanoseconds.
+    ///
+    /// # Returns
+    ///
+    /// The first timestamp in the current low-utilization window.
+    pub fn note_sched_low_util(&self, now_ns: u64) -> u64 {
+        let observed_ns = now_ns.max(1);
+        match self.sched_low_util_since_ns.compare_exchange(
+            0,
+            observed_ns,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => observed_ns,
+            Err(since_ns) => since_ns,
+        }
+    }
+
+    /// Clear the tracked low-utilization demotion window for this task.
+    pub fn clear_sched_low_util(&self) {
+        self.sched_low_util_since_ns.store(0, Ordering::SeqCst);
     }
 
     /// Mark the task as running for CPU accounting.
