@@ -1,0 +1,27 @@
+[package]
+name = "apple-avd-fw-rs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["v3-t0"]
+v2-t0 = []
+v3-t0 = []
+v3-t1 = []
+v4-t0 = []
+v5-t0 = []
+v5-t1 = []
+
+[[bin]]
+name = "apple-avd-fw"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+opt-level = "s"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
