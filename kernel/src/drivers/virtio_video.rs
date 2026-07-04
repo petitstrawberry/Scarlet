@@ -123,7 +123,6 @@ struct PendingDecode {
     buffer: PendingDecodeBuffer,
     output_len: usize,
     output_offset: usize,
-    response_from_output: bool,
     timestamp: u64,
 }
 
@@ -758,7 +757,6 @@ impl VirtioVideoDevice {
             buffer,
             output_len,
             output_offset,
-            response_from_output: true,
             timestamp,
         });
         self.notify(QUEUE_COMMAND);
@@ -926,7 +924,7 @@ impl VirtioVideoDevice {
             }
 
             if pending.output_req_desc.is_none() && pending.input_done {
-                let response = self.copy_async_response(session, pending.response_from_output)?;
+                let response = self.copy_async_response(session)?;
                 let pending = pending_guard
                     .take()
                     .ok_or("VirtIO video pending state missing")?;
@@ -941,23 +939,17 @@ impl VirtioVideoDevice {
     fn copy_async_response(
         &self,
         session: &VideoSession,
-        from_output: bool,
     ) -> Result<alloc::vec::Vec<u8>, &'static str> {
         let async_buffers = session.async_command_buffers.lock();
         let command_buffers = async_buffers
             .as_ref()
             .ok_or("VirtIO video async command buffers are not available")?;
-        let command_buffers = if from_output {
-            &command_buffers.output
-        } else {
-            &command_buffers.input
-        };
         let mut response = alloc::vec![0u8; 24];
         // SAFETY: `resp_alloc` points to a live page and `response` is valid
         // for 24 bytes. The buffers do not overlap.
         unsafe {
             core::ptr::copy_nonoverlapping(
-                command_buffers.resp_alloc.as_ptr() as *const u8,
+                command_buffers.input.resp_alloc.as_ptr() as *const u8,
                 response.as_mut_ptr(),
                 response.len(),
             );
