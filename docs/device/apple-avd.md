@@ -6,13 +6,13 @@ This document tracks the Scarlet-side bring-up plan for Apple Video Decoder
 ## Initial Goal
 
 Decode H.264 Annex B access units with Apple AVD and return NV12 frames through
-the existing Scarlet video decode device contract at `/dev/vvideo0`.
+the Scarlet video decode device contract at `/dev/video0`.
 
 The first working path is:
 
 ```text
 video_player
-  -> /dev/vvideo0
+  -> /dev/video0
   -> Apple AVD video backend
   -> AVD low-level MMIO + DART driver
   -> Rust Cortex-M3 firmware
@@ -66,20 +66,20 @@ The branch currently provides:
   initializes the H.264 engine MMIO defaults, DART-maps input/output/workspace
   buffers, keeps decoded reference frames in the AVD workspace, generates a
   first-pass AVD H.264 instruction stream, records firmware/mailbox trace
-  events, registers a Scarlet video backend, and exposes a `/dev/vvideo0`
-  hardware frontend.
+  events, registers a Scarlet video backend, and exposes a `/dev/videoN`
+  hardware frontend through the common Scarlet video device layer.
 - `/dev/avd0`: a text debug device for the first registered AVD instance. Write
   `info`, `fw-ping`, `dart-test`, `decode-one`, `poll-decode`, `trace`, or
   `clear-trace`, then read the device to fetch the report.
-- `kernel::device::video`: shared `/dev/vvideo*` ABI definitions plus a decode
+- `kernel::device::video`: shared `/dev/video*` ABI definitions plus a decode
   backend registry used by AVD and future non-VirtIO backends.
 
-The `/dev/vvideo0` AVD frontend implements the existing mmap/ioctl entrypoints
-and submits H.264 Annex B access units through the Apple AVD backend. The first
-frontend parses SPS/slice metadata, supports progressive 8-bit 4:2:0 H.264, and
-expects one pending decode at a time. Reference pictures are retained in four
-workspace slots and copied back into the current single-buffer NV12 userspace
-layout on completion.
+The `/dev/video0` AVD frontend implements the shared mmap/ioctl entrypoints and
+submits H.264 Annex B access units through the Apple AVD backend. The backend
+parses SPS/slice metadata, supports progressive 8-bit 4:2:0 H.264, and expects
+one pending decode at a time. Reference pictures are retained in four workspace
+slots and copied back into the current single-buffer NV12 userspace layout on
+completion.
 
 Useful build checks:
 
@@ -95,7 +95,7 @@ cargo check --manifest-path drivers/video/apple-avd/Cargo.toml
 2. Bring up MMIO, PMGR, DART, SRAM load, CM3 boot, and mailbox receive.
 3. Port AVD engine initialization, instruction FIFO, and H.264 submit path.
 4. Decode one known-good H.264 frame into NV12 and verify a checksum.
-5. Expose AVD through `/dev/vvideo0` behind the current mapped session API.
+5. Expose AVD through `/dev/videoN` behind the current mapped session API.
 6. Add reference tracking, frame ordering, teardown cleanup, IRQ completion,
    cache maintenance audit, and recovery paths.
 
@@ -110,7 +110,7 @@ The `/dev/avd0` debug device currently provides the equivalent commands:
 | `info` | Print ADT/MMIO/IRQ, firmware state, current status registers, and backend capabilities. |
 | `fw-ping` | Poll the firmware mailbox and report before/after status snapshots. |
 | `dart-test` | Allocate a 16 KiB-aligned buffer, map it through the AVD DART context, clean/invalidate cache, and report the IOVA. |
-| `decode-one` | Submit the built-in 16x16 H.264 Annex B IDR access unit through the same AVD backend used by `/dev/vvideo0`. |
+| `decode-one` | Submit the built-in 16x16 H.264 Annex B IDR access unit through the same AVD backend used by `/dev/videoN`. |
 | `poll-decode` | Poll completion for a previously submitted `decode-one` request. |
 | `trace` | Dump retained MMIO/mailbox/decode trace events. |
 | `clear-trace` | Clear retained trace events. |

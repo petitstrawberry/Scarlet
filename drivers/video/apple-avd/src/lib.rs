@@ -7,7 +7,6 @@ mod debug;
 mod debug_device;
 mod firmware;
 pub mod h264;
-mod vvideo;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -36,7 +35,7 @@ use scarlet::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
             SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame, VideoBackendCapabilities,
             VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoDecodeBackend,
-            register_video_backend,
+            register_video_backend, register_video_decode_device,
         },
     },
     early_println,
@@ -1054,7 +1053,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
         let input_vaddr = vm::phys_to_virt(request.input_dma_addr as usize);
         let input_len = request.input_len as usize;
-        // SAFETY: `/dev/vvideo0` passes a PMM-backed physical address for the
+        // SAFETY: `/dev/videoN` passes a PMM-backed physical address for the
         // mapped input range and keeps the pages alive for the lifetime of the
         // device. `input_len` was checked against the mapped capacity above.
         let input_bytes =
@@ -1360,14 +1359,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
-    vvideo::register_avd_vvideo_device(Arc::clone(&backend));
+    let video_name = register_video_decode_device(Arc::clone(&backend));
     debug_device::register_avd_debug_device(id, Arc::clone(&backend));
 
     early_println!(
-        "[apple-avd] registered {} id={} backend={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",
+        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",
         device.name(),
         id,
         backend_id,
+        video_name,
         soc.name(),
         paddr,
         size,
