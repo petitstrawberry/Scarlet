@@ -132,6 +132,13 @@ def env_flag(name):
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def env_choice(name, default, choices):
+    value = os.environ.get(name, default)
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {', '.join(choices)}")
+    return value
+
+
 def shell_join(cmd):
     return shlex.join(str(part) for part in cmd)
 
@@ -258,6 +265,10 @@ def runner_command_args(args):
         hex(args.entry_point),
         "--uart-baudrate",
         str(args.uart_baudrate),
+        "--avd-dtb-patch",
+        args.avd_dtb_patch,
+        "--avd-pmgr",
+        args.avd_pmgr,
         "--no-tmux",
         "--no-uart",
     ]
@@ -269,6 +280,10 @@ def runner_command_args(args):
         cmd.append("--skip-chainload")
     if args.connect_timeout is not None:
         cmd.extend(["--connect-timeout", str(args.connect_timeout)])
+    if args.avd_info_json:
+        cmd.extend(["--avd-info-json", args.avd_info_json])
+    if args.avd_soc:
+        cmd.extend(["--avd-soc", args.avd_soc])
     return cmd
 
 
@@ -457,6 +472,48 @@ def open_proxy(args, *, timeout):
             retry_sleep(deadline)
 
 
+def warn_or_raise(mode, message, exc=None):
+    if mode == "require":
+        if exc is not None:
+            raise RuntimeError(message) from exc
+        raise RuntimeError(message)
+    print(f"warning: {message}", file=sys.stderr)
+
+
+def enable_avd_pmgr(args, p):
+    if args.avd_pmgr == "off":
+        return
+    for path in ("/arm-io/dart-avd", "/arm-io/avd"):
+        try:
+            p.pmgr_adt_clocks_enable(path)
+            print(f"Enabled PMGR clocks for {path}")
+        except Exception as exc:
+            warn_or_raise(args.avd_pmgr, f"failed to enable PMGR clocks for {path}: {exc}", exc)
+
+
+def patch_avd_guest_payload(args, hv, payload):
+    if args.avd_dtb_patch == "off":
+        return payload
+    import apple_avd_dtb
+
+    try:
+        if args.avd_info_json:
+            info = apple_avd_dtb.load_info_json(args.avd_info_json)
+        else:
+            info = apple_avd_dtb.extract_avd_info_from_adt(
+                hv.adt,
+                machine=args.machine,
+                soc=args.avd_soc,
+            )
+        patched, changed = apple_avd_dtb.patch_payload_bytes(payload, info, args.m1n1)
+        action = "Patched" if changed else "Guest DTB already has"
+        print(f"{action} Apple AVD nodes: {apple_avd_dtb.describe_info(info)}")
+        return patched
+    except Exception as exc:
+        warn_or_raise(args.avd_dtb_patch, f"Apple AVD DTB patch skipped: {exc}", exc)
+        return payload
+
+
 def start_guest(args):
     from m1n1.proxyutils import ProxyUtils
     from m1n1.hv import HV
@@ -470,6 +527,8 @@ def start_guest(args):
     hv.init()
 
     payload = args.payload.read_bytes()
+    payload = patch_avd_guest_payload(args, hv, payload)
+    enable_avd_pmgr(args, p)
     print(f"Loading guest payload {args.payload} ({len(payload)} bytes)")
     hv.load_raw(payload, args.entry_point)
 
@@ -538,12 +597,28 @@ def main():
     parser.add_argument("--image-addr", type=parse_int, default=DEFAULT_IMAGE_ADDR, help="Guest physical RAM address used by U-Boot blkmap")
     parser.add_argument("--image-map-size", type=parse_int, default=DEFAULT_IMAGE_MAP_SIZE, help="U-Boot blkmap window size")
     parser.add_argument("--entry-point", type=parse_int, default=DEFAULT_ENTRY_POINT, help="Raw guest payload entry offset")
+    parser.add_argument(
+        "--avd-dtb-patch",
+        choices=("auto", "off", "require"),
+        default=env_choice("SCARLET_AVD_DTB_PATCH", "auto", ("auto", "off", "require")),
+        help="Patch Apple AVD/DART nodes from live m1n1 ADT into the guest DTB",
+    )
+    parser.add_argument(
+        "--avd-pmgr",
+        choices=("auto", "off", "require"),
+        default=env_choice("SCARLET_AVD_PMGR", "auto", ("auto", "off", "require")),
+        help="Enable AVD and dart-avd PMGR clocks through m1n1 before booting the guest",
+    )
+    parser.add_argument("--avd-info-json", type=pathlib.Path, help="Use a saved Apple AVD DTB patch JSON instead of live ADT extraction")
+    parser.add_argument("--avd-soc", help="Override Apple SoC name for generated AVD compatibles, e.g. t8103")
     args = parser.parse_args()
 
     args.project = str(pathlib.Path(args.project).resolve())
     args.image = pathlib.Path(args.image).resolve()
     args.payload = pathlib.Path(args.payload).resolve()
     args.m1n1 = pathlib.Path(args.m1n1).resolve()
+    if args.avd_info_json:
+        args.avd_info_json = pathlib.Path(args.avd_info_json).resolve()
 
     if args.uart_console_only:
         try:
