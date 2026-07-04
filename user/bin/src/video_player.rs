@@ -86,16 +86,16 @@ const SEEK_TRACK_HEIGHT: u32 = 2;
 const SEEK_TRACK_HIT_INSET: u32 = 10;
 const SEEK_KNOB_WIDTH: u32 = 4;
 const SEEK_KNOB_HEIGHT: u32 = 8;
-const VVIDEO_DEVICE_PATH: &str = "/dev/vvideo0";
+const VIDEO_DEVICE_PATH: &str = "/dev/video0";
 const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
 const NV12_VIDEO_RANGE_PIXEL_FORMAT: u32 = 0x3432_3076;
-const VVIDEO_GET_BUFFER: u32 = 0x5600;
-const VVIDEO_SUBMIT: u32 = 0x5601;
-const VVIDEO_DEQUEUE: u32 = 0x5602;
-const VVIDEO_CREATE_SESSION: u32 = 0x5603;
-const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
-const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
-const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
+const SCARLET_VIDEO_GET_BUFFER: u32 = 0x5600;
+const SCARLET_VIDEO_SUBMIT: u32 = 0x5601;
+const SCARLET_VIDEO_DEQUEUE: u32 = 0x5602;
+const SCARLET_VIDEO_CREATE_SESSION: u32 = 0x5603;
+const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
+const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
+const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -4061,7 +4061,7 @@ impl ScarletVideoFrame {
         match &self.payload {
             ScarletVideoPayload::Owned(payload) => payload,
             ScarletVideoPayload::Mapped { ptr, len } => {
-                // SAFETY: mapped video frames point into the live /dev/vvideo0
+                // SAFETY: mapped video frames point into the live /dev/video0
                 // mmap owned by HardwareVideoDecoder. Frames are consumed before
                 // the next decode submission overwrites the output buffer.
                 unsafe { core::slice::from_raw_parts(*ptr, *len) }
@@ -4120,8 +4120,8 @@ impl HardwareVideoDecoder {
         let device = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(VVIDEO_DEVICE_PATH)
-            .map_err(|_| format!("failed to open {}", VVIDEO_DEVICE_PATH))?;
+            .open(VIDEO_DEVICE_PATH)
+            .map_err(|_| format!("failed to open {}", VIDEO_DEVICE_PATH))?;
         let mapped = Self::map_video_buffer(&device);
         if let Some(buffer) = &mapped {
             println!(
@@ -4237,7 +4237,7 @@ impl HardwareVideoDecoder {
             };
             self.device
                 .as_handle()
-                .control(VVIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
+                .control(SCARLET_VIDEO_SUBMIT_SESSION, &submit as *const _ as usize)
                 .map_err(|_| {
                     let status = self.read_decoder_status();
                     format!("hardware decoder mmap submit failed{status}")
@@ -4250,7 +4250,7 @@ impl HardwareVideoDecoder {
             };
             self.device
                 .as_handle()
-                .control(VVIDEO_SUBMIT, &submit as *const _ as usize)
+                .control(SCARLET_VIDEO_SUBMIT, &submit as *const _ as usize)
                 .map_err(|_| {
                     let status = self.read_decoder_status();
                     format!("hardware decoder mmap submit failed{status}")
@@ -4265,7 +4265,7 @@ impl HardwareVideoDecoder {
                     ..Default::default()
                 };
                 let result = self.device.as_handle().control(
-                    VVIDEO_DEQUEUE_SESSION,
+                    SCARLET_VIDEO_DEQUEUE_SESSION,
                     &mut session_frame as *mut _ as usize,
                 );
                 result.map(|value| (value, session_frame.frame))
@@ -4274,7 +4274,7 @@ impl HardwareVideoDecoder {
                 let result = self
                     .device
                     .as_handle()
-                    .control(VVIDEO_DEQUEUE, &mut frame as *mut _ as usize);
+                    .control(SCARLET_VIDEO_DEQUEUE, &mut frame as *mut _ as usize);
                 result.map(|value| (value, frame))
             };
             match dequeue_result {
@@ -4323,7 +4323,10 @@ impl HardwareVideoDecoder {
         let mut session_info = ScarletVideoSessionInfo::default();
         let (stream_id, session_commands, info) = if device
             .as_handle()
-            .control(VVIDEO_CREATE_SESSION, &mut session_info as *mut _ as usize)
+            .control(
+                SCARLET_VIDEO_CREATE_SESSION,
+                &mut session_info as *mut _ as usize,
+            )
             .is_ok()
         {
             (session_info.stream_id, true, session_info.buffer)
@@ -4331,7 +4334,7 @@ impl HardwareVideoDecoder {
             let mut info = ScarletVideoBufferInfo::default();
             device
                 .as_handle()
-                .control(VVIDEO_GET_BUFFER, &mut info as *mut _ as usize)
+                .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
                 .ok()?;
             (1, false, info)
         };
@@ -4382,7 +4385,7 @@ impl Drop for HardwareVideoDecoder {
                 let _ = self
                     .device
                     .as_handle()
-                    .control(VVIDEO_DESTROY_SESSION, &info as *const _ as usize);
+                    .control(SCARLET_VIDEO_DESTROY_SESSION, &info as *const _ as usize);
             }
         }
     }
@@ -6966,7 +6969,7 @@ pub extern "C" fn main() -> i32 {
     let window_title = video_window_title(args.title.as_deref(), &video_path);
     println!("[{}] playing {}", APP_NAME, video_path);
     if args.hardware_decode {
-        println!("[{}] hardware decoder {}", APP_NAME, VVIDEO_DEVICE_PATH);
+        println!("[{}] hardware decoder {}", APP_NAME, VIDEO_DEVICE_PATH);
     }
     let mp4_data = if is_mp4_path(&video_path) && !args.streaming {
         println!("[{}] loading MP4 {}", APP_NAME, video_path);

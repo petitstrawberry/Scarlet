@@ -46,7 +46,7 @@ describes the repository at a high level; this page is the documentation map.
   - VirtIO device notes.
 - [Display presentation](device/display-present.md) - CPU-composited display
   presentation paths.
-- [Video decode device](device/video-decode.md) - `/dev/vvideoN` ABI used by
+- [Video decode device](device/video-decode.md) - `/dev/videoN` ABI used by
   `video_player`.
 - [USB subsystem](usb/README.md) - xHCI/USB host stack status and milestones.
 - [Audio system](audio/design.md) - kernel PCM transport, SAS, and playback
