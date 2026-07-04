@@ -54,6 +54,30 @@ Firmware-to-kernel messages:
 8. Start CM3.
 9. Wait for `MSG_READY`.
 
+## Current Branch State
+
+The branch currently provides:
+
+- `firmware/apple-avd-fw-rs`: a Rust `thumbv7m-none-eabi` CM3 firmware
+  skeleton with version/tier feature flags.
+- `drivers/video/apple-avd`: an Apple platform driver that probes AVD MMIO,
+  resolves the DART-backed DMA context, records firmware/mailbox trace events,
+  registers a Scarlet video backend, and exposes a `/dev/vvideo0` stub frontend.
+- `kernel::device::video`: shared `/dev/vvideo*` ABI definitions plus a decode
+  backend registry used by AVD and future non-VirtIO backends.
+
+The `/dev/vvideo0` AVD frontend implements the existing mmap/ioctl entrypoints
+but returns `apple-avd: hardware decode submission is not wired yet` on decode
+submit until the MMIO command path is completed.
+
+Useful build checks:
+
+```bash
+cargo make build-apple-avd-firmware
+cargo make build-apple-avd-firmware-all
+cargo check --manifest-path drivers/video/apple-avd/Cargo.toml
+```
+
 ## Milestones
 
 1. Add docs, ABI constants, firmware crate skeleton, and kernel driver skeleton.
