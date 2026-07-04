@@ -5,10 +5,21 @@
 //! contract. Keep the command values, mapped-buffer structures, and frame
 //! constants here so backend implementations do not drift apart.
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{format, string::String, sync::Arc, vec::Vec};
+use core::any::Any;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::arch::Trapframe;
+use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
+use crate::environment::PAGE_SIZE;
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+use crate::mem::page::ContiguousPages;
+use crate::object::capability::{
+    ControlOps, MemoryMappingInfo, MemoryMappingOps,
+    selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
+};
 use crate::sync::Mutex;
+use crate::task::mytask;
 
 /// FourCC-like Scarlet frame stream magic.
 pub const SCARLET_VIDEO_FRAME_MAGIC: &[u8; 4] = b"SVF1";
@@ -18,19 +29,34 @@ pub const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
 pub const SCARLET_VIDEO_PIXEL_FORMAT_NV12: u32 = 0x3432_3076;
 
 /// Query the mapped buffer layout for the legacy single-session path.
-pub const VVIDEO_GET_BUFFER: u32 = 0x5600;
+pub const SCARLET_VIDEO_GET_BUFFER: u32 = 0x5600;
 /// Submit a coded access unit for the legacy single-session path.
-pub const VVIDEO_SUBMIT: u32 = 0x5601;
+pub const SCARLET_VIDEO_SUBMIT: u32 = 0x5601;
 /// Dequeue a decoded frame for the legacy single-session path.
-pub const VVIDEO_DEQUEUE: u32 = 0x5602;
+pub const SCARLET_VIDEO_DEQUEUE: u32 = 0x5602;
 /// Create or query a mapped video session.
-pub const VVIDEO_CREATE_SESSION: u32 = 0x5603;
+pub const SCARLET_VIDEO_CREATE_SESSION: u32 = 0x5603;
 /// Submit a coded access unit for a mapped video session.
-pub const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
+pub const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 /// Dequeue a decoded frame for a mapped video session.
-pub const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
+pub const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 /// Destroy a mapped video session.
-pub const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
+pub const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
+
+/// Legacy alias for [`SCARLET_VIDEO_GET_BUFFER`].
+pub const VVIDEO_GET_BUFFER: u32 = SCARLET_VIDEO_GET_BUFFER;
+/// Legacy alias for [`SCARLET_VIDEO_SUBMIT`].
+pub const VVIDEO_SUBMIT: u32 = SCARLET_VIDEO_SUBMIT;
+/// Legacy alias for [`SCARLET_VIDEO_DEQUEUE`].
+pub const VVIDEO_DEQUEUE: u32 = SCARLET_VIDEO_DEQUEUE;
+/// Legacy alias for [`SCARLET_VIDEO_CREATE_SESSION`].
+pub const VVIDEO_CREATE_SESSION: u32 = SCARLET_VIDEO_CREATE_SESSION;
+/// Legacy alias for [`SCARLET_VIDEO_SUBMIT_SESSION`].
+pub const VVIDEO_SUBMIT_SESSION: u32 = SCARLET_VIDEO_SUBMIT_SESSION;
+/// Legacy alias for [`SCARLET_VIDEO_DEQUEUE_SESSION`].
+pub const VVIDEO_DEQUEUE_SESSION: u32 = SCARLET_VIDEO_DEQUEUE_SESSION;
+/// Legacy alias for [`SCARLET_VIDEO_DESTROY_SESSION`].
+pub const VVIDEO_DESTROY_SESSION: u32 = SCARLET_VIDEO_DESTROY_SESSION;
 
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
@@ -114,7 +140,7 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Capabilities used by `/dev/vvideo*` frontends.
+    /// Capabilities used by `/dev/video*` frontends.
     fn capabilities(&self) -> VideoBackendCapabilities;
 
     /// Create or acquire a decode session.
@@ -166,6 +192,9 @@ pub trait VideoDecodeBackend: Send + Sync {
 }
 
 static VIDEO_BACKENDS: Mutex<Vec<Arc<dyn VideoDecodeBackend>>> = Mutex::new(Vec::new());
+static VIDEO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const DEFAULT_STREAM_ID: u32 = 1;
+const VIDEO_MAPPED_BUFFER_ALIGN: usize = 0x4000;
 
 /// Register a video decode backend.
 ///
@@ -181,6 +210,452 @@ pub fn register_video_backend(backend: Arc<dyn VideoDecodeBackend>) -> usize {
     let id = backends.len();
     backends.push(backend);
     id
+}
+
+/// Register a Scarlet video decode frontend for a backend.
+///
+/// # Arguments
+///
+/// * `backend` - Backend implementation served through `/dev/videoN`.
+///
+/// # Returns
+///
+/// Registered device node name.
+pub fn register_video_decode_device(backend: Arc<dyn VideoDecodeBackend>) -> String {
+    let id = VIDEO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let name = format!("video{}", id);
+    let device: Arc<dyn Device> = Arc::new(ScarletVideoDevice::new(backend));
+    DeviceManager::get_manager().register_device_with_name(name.clone(), device);
+    name
+}
+
+struct ScarletVideoDevice {
+    backend: Arc<dyn VideoDecodeBackend>,
+    mapped_buffer: Mutex<Option<ContiguousPages>>,
+    last_error: Mutex<Option<&'static str>>,
+    next_timestamp: Mutex<u64>,
+}
+
+impl ScarletVideoDevice {
+    fn new(backend: Arc<dyn VideoDecodeBackend>) -> Self {
+        Self {
+            backend,
+            mapped_buffer: Mutex::new(None),
+            last_error: Mutex::new(None),
+            next_timestamp: Mutex::new(1),
+        }
+    }
+
+    fn buffer_layout(&self) -> Result<VideoBufferLayout, &'static str> {
+        let caps = self.backend.capabilities();
+        if caps.mapped_input_len == 0 || caps.mapped_output_len == 0 {
+            return Err("scarlet-video: backend does not support mapped buffers");
+        }
+        let input_len = caps.mapped_input_len as usize;
+        let output_len = caps.mapped_output_len as usize;
+        let output_offset = align_up(input_len, VIDEO_MAPPED_BUFFER_ALIGN);
+        let mmap_len = output_offset
+            .checked_add(output_len)
+            .ok_or("scarlet-video: mapped buffer length overflow")?;
+        Ok(VideoBufferLayout {
+            input_len,
+            output_offset,
+            output_len,
+            mmap_len: align_up(mmap_len, PAGE_SIZE),
+        })
+    }
+
+    fn buffer_info(&self) -> Result<ScarletVideoBufferInfo, &'static str> {
+        let layout = self.buffer_layout()?;
+        self.ensure_mapped_buffer(layout)?;
+        Ok(ScarletVideoBufferInfo {
+            mmap_offset: 0,
+            mmap_len: layout.mmap_len as u64,
+            input_offset: 0,
+            input_len: layout.input_len as u32,
+            output_offset: layout.output_offset as u64,
+            output_len: layout.output_len as u32,
+        })
+    }
+
+    fn ensure_mapped_buffer(&self, layout: VideoBufferLayout) -> Result<(), &'static str> {
+        let mut mapped_buffer = self.mapped_buffer.lock();
+        if mapped_buffer.is_none() {
+            let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
+            *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+        }
+        if mapped_buffer.is_some() {
+            Ok(())
+        } else {
+            Err("scarlet-video: mmap buffer allocation failed")
+        }
+    }
+
+    fn next_timestamp(&self) -> u64 {
+        let mut next = self.next_timestamp.lock();
+        let timestamp = *next;
+        *next = next.wrapping_add(1);
+        timestamp
+    }
+
+    fn submit_mapped(
+        &self,
+        stream_id: u32,
+        coded_format: u32,
+        input_len: usize,
+        timestamp: u64,
+    ) -> Result<(), &'static str> {
+        let layout = self.buffer_layout()?;
+        if !self.backend.capabilities().supports_format(coded_format) {
+            return Err("scarlet-video: backend does not support coded format");
+        }
+        if input_len == 0 {
+            return Err("scarlet-video: input is empty");
+        }
+        if input_len > layout.input_len {
+            return Err("scarlet-video: input exceeds mapped buffer");
+        }
+
+        self.ensure_mapped_buffer(layout)?;
+        let (input_dma_addr, output_dma_addr) = {
+            let mapped_buffer = self.mapped_buffer.lock();
+            let buffer = mapped_buffer
+                .as_ref()
+                .ok_or("scarlet-video: mmap buffer missing")?;
+            (
+                buffer.as_paddr() as u64,
+                (buffer.as_paddr() + layout.output_offset) as u64,
+            )
+        };
+        let timestamp = if timestamp == 0 {
+            self.next_timestamp()
+        } else {
+            timestamp
+        };
+        let request = VideoBackendDecodeRequest {
+            stream_id,
+            coded_format,
+            input_dma_addr,
+            input_len: input_len as u32,
+            output_dma_addr,
+            output_len: layout.output_len as u32,
+            timestamp,
+        };
+        self.backend.submit_decode(&request)
+    }
+
+    fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let info = self.buffer_info()?;
+        write_user_value(arg, &info)?;
+        Ok(0)
+    }
+
+    fn handle_create_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        let stream_id = if info.stream_id == 0 {
+            self.backend.create_session(SCARLET_VIDEO_FORMAT_H264)?
+        } else {
+            info.stream_id
+        };
+        info.stream_id = stream_id;
+        info.padding = 0;
+        info.buffer = self.buffer_info()?;
+        write_user_value(arg, &info)?;
+        Ok(0)
+    }
+
+    fn handle_destroy_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        self.backend.destroy_session(info.stream_id)?;
+        *self.next_timestamp.lock() = 1;
+        Ok(0)
+    }
+
+    fn handle_submit(&self, arg: usize) -> Result<i32, &'static str> {
+        let submit: ScarletVideoSubmit = read_user_value(arg)?;
+        match self.submit_mapped(
+            DEFAULT_STREAM_ID,
+            submit.coded_format,
+            submit.input_len as usize,
+            submit.timestamp,
+        ) {
+            Ok(()) => {
+                *self.last_error.lock() = None;
+                Ok(0)
+            }
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                Err(e)
+            }
+        }
+    }
+
+    fn handle_submit_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let submit: ScarletVideoSessionSubmit = read_user_value(arg)?;
+        match self.submit_mapped(
+            submit.stream_id,
+            submit.coded_format,
+            submit.input_len as usize,
+            submit.timestamp,
+        ) {
+            Ok(()) => {
+                *self.last_error.lock() = None;
+                Ok(0)
+            }
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                Err(e)
+            }
+        }
+    }
+
+    fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
+        let Some(decoded) = self.backend.dequeue_frame(DEFAULT_STREAM_ID)? else {
+            return Ok(0);
+        };
+        write_user_value(arg, &decoded.frame)?;
+        Ok(1)
+    }
+
+    fn handle_dequeue_session(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut dequeued: ScarletVideoSessionDequeuedFrame = read_user_value(arg)?;
+        let stream_id = if dequeued.stream_id == 0 {
+            DEFAULT_STREAM_ID
+        } else {
+            dequeued.stream_id
+        };
+        let Some(decoded) = self.backend.dequeue_frame(stream_id)? else {
+            return Ok(0);
+        };
+        dequeued.stream_id = decoded.stream_id;
+        dequeued.padding = 0;
+        dequeued.frame = decoded.frame;
+        write_user_value(arg, &dequeued)?;
+        Ok(1)
+    }
+
+    fn status_line(&self) -> String {
+        let caps = self.backend.capabilities();
+        let last_error = self.last_error.lock().unwrap_or("none");
+        format!(
+            "scarlet-video backend={} h264={} av1={} sessions={} input={} output={} last_error={}\n",
+            self.backend.name(),
+            caps.supports_h264,
+            caps.supports_av1,
+            caps.max_sessions,
+            caps.mapped_input_len,
+            caps.mapped_output_len,
+            last_error
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VideoBufferLayout {
+    input_len: usize,
+    output_offset: usize,
+    output_len: usize,
+    mmap_len: usize,
+}
+
+impl Device for ScarletVideoDevice {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Char
+    }
+
+    fn name(&self) -> &'static str {
+        "scarlet-video"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
+        Some(self)
+    }
+}
+
+impl CharDevice for ScarletVideoDevice {
+    fn read_byte(&self) -> Option<u8> {
+        None
+    }
+
+    fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
+        Err("scarlet-video: write a complete coded access unit")
+    }
+
+    fn read(&self, buffer: &mut [u8]) -> usize {
+        let status = self.status_line();
+        let bytes = status.as_bytes();
+        let count = core::cmp::min(buffer.len(), bytes.len());
+        buffer[..count].copy_from_slice(&bytes[..count]);
+        count
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        let layout = self.buffer_layout()?;
+        if buffer.len() > layout.input_len {
+            return Err("scarlet-video: input exceeds mapped buffer");
+        }
+
+        self.ensure_mapped_buffer(layout)?;
+        {
+            let mut mapped_buffer = self.mapped_buffer.lock();
+            let buffer_pages = mapped_buffer
+                .as_mut()
+                .ok_or("scarlet-video: mmap buffer missing")?;
+            // SAFETY: `buffer_pages` owns at least `layout.input_len` bytes and
+            // `buffer.len()` was checked against that capacity. The source and
+            // destination do not overlap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buffer.as_ptr(),
+                    buffer_pages.as_ptr() as *mut u8,
+                    buffer.len(),
+                );
+            }
+        }
+
+        match self.submit_mapped(
+            DEFAULT_STREAM_ID,
+            SCARLET_VIDEO_FORMAT_H264,
+            buffer.len(),
+            self.next_timestamp(),
+        ) {
+            Ok(()) => {
+                *self.last_error.lock() = None;
+                Ok(buffer.len())
+            }
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                Err(e)
+            }
+        }
+    }
+
+    fn can_read(&self) -> bool {
+        true
+    }
+
+    fn can_write(&self) -> bool {
+        true
+    }
+
+    fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        Ok(self.read(buffer))
+    }
+}
+
+impl ControlOps for ScarletVideoDevice {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        match command {
+            SCARLET_VIDEO_GET_BUFFER => self.handle_get_buffer(arg),
+            SCARLET_VIDEO_SUBMIT => self.handle_submit(arg),
+            SCARLET_VIDEO_DEQUEUE => self.handle_dequeue(arg),
+            SCARLET_VIDEO_CREATE_SESSION => self.handle_create_session(arg),
+            SCARLET_VIDEO_SUBMIT_SESSION => self.handle_submit_session(arg),
+            SCARLET_VIDEO_DEQUEUE_SESSION => self.handle_dequeue_session(arg),
+            SCARLET_VIDEO_DESTROY_SESSION => self.handle_destroy_session(arg),
+            _ => Err("scarlet-video: unsupported control command"),
+        }
+    }
+
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        alloc::vec![
+            (SCARLET_VIDEO_GET_BUFFER, "Get mmap video buffer layout"),
+            (
+                SCARLET_VIDEO_SUBMIT,
+                "Submit mmap-written coded video access unit"
+            ),
+            (SCARLET_VIDEO_DEQUEUE, "Dequeue a decoded mmap video frame"),
+            (
+                SCARLET_VIDEO_CREATE_SESSION,
+                "Create or query mmap video stream session"
+            ),
+            (
+                SCARLET_VIDEO_SUBMIT_SESSION,
+                "Submit mmap-written coded video access unit for a stream"
+            ),
+            (
+                SCARLET_VIDEO_DEQUEUE_SESSION,
+                "Dequeue a decoded mmap video frame for a stream"
+            ),
+            (
+                SCARLET_VIDEO_DESTROY_SESSION,
+                "Destroy mmap video stream session"
+            ),
+        ]
+    }
+}
+
+impl MemoryMappingOps for ScarletVideoDevice {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        let layout = self.buffer_layout()?;
+        if offset % PAGE_SIZE != 0 || length % PAGE_SIZE != 0 {
+            return Err("scarlet-video: mmap offset and length must be page-aligned");
+        }
+        if offset >= layout.mmap_len {
+            return Err("scarlet-video: mmap offset exceeds buffer size");
+        }
+        if length > layout.mmap_len - offset {
+            return Err("scarlet-video: mmap length exceeds buffer size");
+        }
+
+        self.ensure_mapped_buffer(layout)?;
+        let mapped_buffer = self.mapped_buffer.lock();
+        let buffer = mapped_buffer
+            .as_ref()
+            .ok_or("scarlet-video: mmap buffer missing")?;
+        Ok(MemoryMappingInfo::new(
+            buffer.as_paddr() + offset,
+            0x3,
+            true,
+        ))
+    }
+
+    fn supports_mmap(&self) -> bool {
+        true
+    }
+
+    fn mmap_owner_name(&self) -> String {
+        String::from("scarlet-video")
+    }
+}
+
+impl Selectable for ScarletVideoDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read {
+            set.read = true;
+        }
+        if interest.write {
+            set.write = true;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut Trapframe,
+        _timeout_ticks: Option<u64>,
+        _min_wait_ticks: u64,
+    ) -> SelectWaitOutcome {
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
+    }
 }
 
 /// Return the first registered video decode backend.
@@ -325,6 +800,39 @@ pub fn push_svf1_header(
     bytes.extend_from_slice(&height.to_le_bytes());
     bytes.extend_from_slice(&pixel_format.to_le_bytes());
     bytes.extend_from_slice(&payload_len.to_le_bytes());
+}
+
+fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
+    if ptr == 0 {
+        return Err("scarlet-video: ioctl pointer is null");
+    }
+    let task = mytask().ok_or("scarlet-video: no current task for ioctl")?;
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: `value` is uninitialized storage for `T`; this byte slice covers
+    // exactly that storage and `copy_from_user` initializes every byte before
+    // `assume_init`.
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    };
+    copy_from_user(task, ptr, bytes).map_err(|_| "scarlet-video: failed to copy from user")?;
+    // SAFETY: The usercopy above initialized all bytes in `value`.
+    Ok(unsafe { value.assume_init() })
+}
+
+fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> {
+    if ptr == 0 {
+        return Err("scarlet-video: ioctl pointer is null");
+    }
+    let task = mytask().ok_or("scarlet-video: no current task for ioctl")?;
+    // SAFETY: `value` is valid for `size_of::<T>()` bytes and is only read.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    copy_to_user(task, ptr, bytes).map_err(|_| "scarlet-video: failed to copy to user")
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
 }
 
 /// Apple AVD firmware-to-kernel mailbox ABI.
