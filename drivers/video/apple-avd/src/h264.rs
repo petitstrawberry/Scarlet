@@ -423,6 +423,8 @@ pub enum H264SliceKind {
 /// Minimal H.264 slice metadata used by first-pass AVD instruction generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct H264SliceParameters {
+    /// NAL reference IDC bits from the slice NAL header.
+    pub nal_ref_idc: u8,
     /// Slice NAL unit type.
     pub nal_unit_type: H264NalUnitType,
     /// Slice kind derived from `slice_type`.
@@ -447,6 +449,15 @@ impl H264SliceParameters {
     /// `true` for IDR slice NALs.
     pub fn is_idr(&self) -> bool {
         matches!(self.nal_unit_type, H264NalUnitType::IdrSlice)
+    }
+
+    /// Return whether this slice should be retained as a reference picture.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `nal_ref_idc` is non-zero.
+    pub fn is_reference(&self) -> bool {
+        self.nal_ref_idc != 0
     }
 }
 
@@ -795,6 +806,7 @@ fn parse_slice_header(unit: &H264NalUnit<'_>) -> Result<H264SliceParameters, H26
         _ => return Err(H264FrontendError::MalformedSlice),
     };
     Ok(H264SliceParameters {
+        nal_ref_idc: unit.nal_ref_idc,
         nal_unit_type: unit.unit_type,
         kind,
         slice_type,
