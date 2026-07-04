@@ -350,7 +350,11 @@
             devEnv
             // {
               packages = devPackages;
-            shellHook = ''
+              # The Nix clang wrapper injects -fzero-call-used-regs=used-gpr
+              # when zerocallusedregs is enabled. That flag is not supported for
+              # riscv64-unknown-scarlet, and breaks C dependencies such as ring.
+              hardeningDisable = [ "zerocallusedregs" ];
+              shellHook = ''
               export PATH="${rustToolchain}/bin:$PATH"
               export SCARLET_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
               export SCARLET_RUST_ACTIVE_BIN="${rustToolchain}/bin"
