@@ -30,6 +30,7 @@ pub mod remoteproc;
 pub mod reset;
 pub mod spi;
 pub mod usb;
+pub mod video;
 pub mod watchdog;
 
 extern crate alloc;
