@@ -12,6 +12,13 @@ use core::any::Any;
 
 use spin::{Mutex, RwLock};
 
+use crate::device::video::{
+    SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
+    SCARLET_VIDEO_FRAME_MAGIC, ScarletVideoBufferInfo, ScarletVideoDequeuedFrame,
+    ScarletVideoSessionDequeuedFrame, ScarletVideoSessionInfo, ScarletVideoSessionSubmit,
+    ScarletVideoSubmit, VVIDEO_CREATE_SESSION, VVIDEO_DEQUEUE, VVIDEO_DEQUEUE_SESSION,
+    VVIDEO_DESTROY_SESSION, VVIDEO_GET_BUFFER, VVIDEO_SUBMIT, VVIDEO_SUBMIT_SESSION,
+};
 use crate::device::{Device, DeviceType, char::CharDevice};
 use crate::drivers::virtio::device::Register;
 use crate::drivers::virtio::features::VIRTIO_F_VERSION_1;
@@ -49,8 +56,8 @@ const VIRTIO_VIDEO_RESP_OK_RESOURCE_QUEUE: u32 = 514;
 const VIRTIO_VIDEO_QUEUE_TYPE_INPUT: u32 = 256;
 const VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT: u32 = 257;
 const VIRTIO_VIDEO_PLANES_LAYOUT_SINGLE_BUFFER: u32 = 1;
-const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
-const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
+const VIRTIO_VIDEO_FORMAT_H264: u32 = SCARLET_VIDEO_FORMAT_H264;
+const VIRTIO_VIDEO_FORMAT_AV1: u32 = SCARLET_VIDEO_FORMAT_AV1;
 const VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES: u32 = 0;
 
 const DEFAULT_STREAM_ID: u32 = 1;
@@ -58,7 +65,6 @@ const MAX_VIDEO_SESSIONS: usize = 4;
 const INPUT_RESOURCE_ID: u32 = 1;
 const OUTPUT_RESOURCE_ID: u32 = 2;
 const MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
 const MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAPPED_OUTPUT_OFFSET: usize = MAPPED_INPUT_BYTES;
 const MAPPED_OUTPUT_BYTES: usize = align_up_const(
@@ -67,13 +73,6 @@ const MAPPED_OUTPUT_BYTES: usize = align_up_const(
 );
 const MAPPED_BUFFER_BYTES: usize = MAPPED_OUTPUT_OFFSET + MAPPED_OUTPUT_BYTES;
 const MAPPED_BUFFER_PAGES: usize = MAPPED_BUFFER_BYTES / PAGE_SIZE;
-const VVIDEO_GET_BUFFER: u32 = 0x5600;
-const VVIDEO_SUBMIT: u32 = 0x5601;
-const VVIDEO_DEQUEUE: u32 = 0x5602;
-const VVIDEO_CREATE_SESSION: u32 = 0x5603;
-const VVIDEO_SUBMIT_SESSION: u32 = 0x5604;
-const VVIDEO_DEQUEUE_SESSION: u32 = 0x5605;
-const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -99,63 +98,6 @@ struct VirtioVideoStreamCreate {
     coded_format: u32,
     padding: [u8; 4],
     tag: [u8; 64],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoBufferInfo {
-    mmap_offset: u64,
-    mmap_len: u64,
-    input_offset: u64,
-    input_len: u32,
-    output_offset: u64,
-    output_len: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoSubmit {
-    input_len: u32,
-    coded_format: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoDequeuedFrame {
-    width: u32,
-    height: u32,
-    pixel_format: u32,
-    payload_offset: u64,
-    payload_len: u32,
-    flags: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoSessionInfo {
-    stream_id: u32,
-    padding: u32,
-    buffer: ScarletVideoBufferInfo,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoSessionSubmit {
-    stream_id: u32,
-    input_len: u32,
-    coded_format: u32,
-    padding: u32,
-    timestamp: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ScarletVideoSessionDequeuedFrame {
-    stream_id: u32,
-    padding: u32,
-    frame: ScarletVideoDequeuedFrame,
 }
 
 struct DecodedFrameState {
@@ -1343,7 +1285,7 @@ impl VirtioVideoDevice {
                 decoded_size,
             )
         };
-        if frame.get(0..4) != Some(b"SVF1") {
+        if frame.get(0..4) != Some(SCARLET_VIDEO_FRAME_MAGIC.as_slice()) {
             return Err("VirtIO video backend returned invalid mapped frame magic");
         }
         let width = read_le32(frame, 4)?;
@@ -1611,7 +1553,9 @@ fn read_le32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
 }
 
 fn frame_header_summary(frame: &[u8]) -> Option<String> {
-    if frame.len() < SCARLET_VIDEO_FRAME_HEADER_LEN || frame.get(0..4) != Some(b"SVF1") {
+    if frame.len() < SCARLET_VIDEO_FRAME_HEADER_LEN
+        || frame.get(0..4) != Some(SCARLET_VIDEO_FRAME_MAGIC.as_slice())
+    {
         return None;
     }
     let width = read_le32(frame, 4).ok()?;

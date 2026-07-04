@@ -5,6 +5,11 @@
 //! contract. Keep the command values, mapped-buffer structures, and frame
 //! constants here so backend implementations do not drift apart.
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::sync::Mutex;
+
 /// FourCC-like Scarlet frame stream magic.
 pub const SCARLET_VIDEO_FRAME_MAGIC: &[u8; 4] = b"SVF1";
 /// Length of the `SVF1` frame header in bytes.
@@ -31,6 +36,183 @@ pub const VVIDEO_DESTROY_SESSION: u32 = 0x5606;
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
 /// Scarlet coded format value for AV1.
 pub const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
+
+/// Capabilities advertised by a video decode backend.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VideoBackendCapabilities {
+    /// Maximum number of simultaneously owned decode sessions.
+    pub max_sessions: u32,
+    /// Maximum byte length accepted in the mapped input area.
+    pub mapped_input_len: u32,
+    /// Maximum byte length produced in the mapped output area.
+    pub mapped_output_len: u32,
+    /// Pixel format produced by decoded frames.
+    pub output_pixel_format: u32,
+    /// Whether H.264 access units are accepted.
+    pub supports_h264: bool,
+    /// Whether AV1 access units are accepted.
+    pub supports_av1: bool,
+}
+
+impl VideoBackendCapabilities {
+    /// Return whether this backend supports a Scarlet coded format.
+    ///
+    /// # Arguments
+    ///
+    /// * `coded_format` - Scarlet coded format value.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the backend accepts the format.
+    pub fn supports_format(&self, coded_format: u32) -> bool {
+        match coded_format {
+            SCARLET_VIDEO_FORMAT_H264 => self.supports_h264,
+            SCARLET_VIDEO_FORMAT_AV1 => self.supports_av1,
+            _ => false,
+        }
+    }
+}
+
+/// Backend decode request for a mapped access unit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VideoBackendDecodeRequest {
+    /// Backend stream/session identifier.
+    pub stream_id: u32,
+    /// Scarlet coded stream format.
+    pub coded_format: u32,
+    /// Device-visible address of the coded input bytes.
+    pub input_dma_addr: u64,
+    /// Byte length of the coded input.
+    pub input_len: u32,
+    /// Device-visible address of the output frame buffer.
+    pub output_dma_addr: u64,
+    /// Byte capacity of the output frame buffer.
+    pub output_len: u32,
+    /// Presentation timestamp carried through dequeue.
+    pub timestamp: u64,
+}
+
+/// Decoded frame returned by a backend.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VideoBackendDecodedFrame {
+    /// Backend stream/session identifier.
+    pub stream_id: u32,
+    /// User-visible decoded frame metadata.
+    pub frame: ScarletVideoDequeuedFrame,
+}
+
+/// Common interface for Scarlet video decode backends.
+pub trait VideoDecodeBackend: Send + Sync {
+    /// Return a short backend name for diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// Static backend name.
+    fn name(&self) -> &'static str;
+
+    /// Return backend capabilities.
+    ///
+    /// # Returns
+    ///
+    /// Capabilities used by `/dev/vvideo*` frontends.
+    fn capabilities(&self) -> VideoBackendCapabilities;
+
+    /// Create or acquire a decode session.
+    ///
+    /// # Arguments
+    ///
+    /// * `coded_format` - Scarlet coded format requested by userspace.
+    ///
+    /// # Returns
+    ///
+    /// Backend stream/session identifier.
+    fn create_session(&self, coded_format: u32) -> Result<u32, &'static str>;
+
+    /// Destroy a decode session.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_id` - Backend stream/session identifier.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the session is released.
+    fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str>;
+
+    /// Submit one coded access unit.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Mapped decode request with device-visible buffers.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the backend accepted the request.
+    fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str>;
+
+    /// Dequeue one decoded frame if available.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream_id` - Backend stream/session identifier.
+    ///
+    /// # Returns
+    ///
+    /// `Some(frame)` when a decoded frame is ready, or `None` when still pending.
+    fn dequeue_frame(
+        &self,
+        stream_id: u32,
+    ) -> Result<Option<VideoBackendDecodedFrame>, &'static str>;
+}
+
+static VIDEO_BACKENDS: Mutex<Vec<Arc<dyn VideoDecodeBackend>>> = Mutex::new(Vec::new());
+
+/// Register a video decode backend.
+///
+/// # Arguments
+///
+/// * `backend` - Backend implementation to register.
+///
+/// # Returns
+///
+/// Zero-based backend registry identifier.
+pub fn register_video_backend(backend: Arc<dyn VideoDecodeBackend>) -> usize {
+    let mut backends = VIDEO_BACKENDS.lock();
+    let id = backends.len();
+    backends.push(backend);
+    id
+}
+
+/// Return the first registered video decode backend.
+///
+/// # Returns
+///
+/// First backend when any backend has registered.
+pub fn first_video_backend() -> Option<Arc<dyn VideoDecodeBackend>> {
+    VIDEO_BACKENDS.lock().first().cloned()
+}
+
+/// Return a video decode backend by registry identifier.
+///
+/// # Arguments
+///
+/// * `id` - Backend registry identifier.
+///
+/// # Returns
+///
+/// Backend implementation when present.
+pub fn get_video_backend(id: usize) -> Option<Arc<dyn VideoDecodeBackend>> {
+    VIDEO_BACKENDS.lock().get(id).cloned()
+}
+
+/// Return the number of registered video decode backends.
+///
+/// # Returns
+///
+/// Number of currently registered backends.
+pub fn video_backend_count() -> usize {
+    VIDEO_BACKENDS.lock().len()
+}
 
 /// Information returned to userspace for a mapped video buffer.
 #[repr(C)]

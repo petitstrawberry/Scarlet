@@ -6,6 +6,7 @@ extern crate alloc;
 mod debug;
 mod firmware;
 pub mod h264;
+mod vvideo;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -25,6 +26,11 @@ use scarlet::{
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+        },
+        video::{
+            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
+            SCARLET_VIDEO_PIXEL_FORMAT_NV12, VideoBackendCapabilities, VideoBackendDecodeRequest,
+            VideoBackendDecodedFrame, VideoDecodeBackend, register_video_backend,
         },
     },
     early_println,
@@ -49,6 +55,12 @@ const CONTROL_CM3_RESET: u32 = 1 << 0;
 const CONTROL_CM3_RUN: u32 = 1 << 1;
 const CONTROL_IRQ_ENABLE: u32 = 1 << 8;
 const AVD_TRACE_CAPACITY: usize = 128;
+const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
+    AVD_MAX_DECODED_FRAME_BYTES + SCARLET_VIDEO_FRAME_HEADER_LEN,
+    4096,
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppleAvdSoc {
@@ -378,6 +390,82 @@ pub fn get_apple_avd(id: u32) -> Option<Arc<Mutex<AppleAvd>>> {
     registry.get(id as usize).cloned()
 }
 
+struct AppleAvdVideoBackend {
+    avd_id: u32,
+}
+
+impl AppleAvdVideoBackend {
+    fn new(avd_id: u32) -> Self {
+        Self { avd_id }
+    }
+
+    fn avd(&self) -> Result<Arc<Mutex<AppleAvd>>, &'static str> {
+        get_apple_avd(self.avd_id).ok_or("apple-avd: backend instance disappeared")
+    }
+}
+
+impl VideoDecodeBackend for AppleAvdVideoBackend {
+    fn name(&self) -> &'static str {
+        "apple-avd"
+    }
+
+    fn capabilities(&self) -> VideoBackendCapabilities {
+        VideoBackendCapabilities {
+            max_sessions: 1,
+            mapped_input_len: AVD_MAPPED_INPUT_BYTES as u32,
+            mapped_output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
+            output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            supports_h264: true,
+            supports_av1: false,
+        }
+    }
+
+    fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
+        if coded_format != SCARLET_VIDEO_FORMAT_H264 {
+            return Err("apple-avd: only H.264 sessions are supported");
+        }
+        Ok(1)
+    }
+
+    fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
+        if stream_id != 1 {
+            return Err("apple-avd: invalid stream id");
+        }
+        Ok(())
+    }
+
+    fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
+        if request.stream_id != 1 {
+            return Err("apple-avd: invalid stream id");
+        }
+        if request.coded_format != SCARLET_VIDEO_FORMAT_H264 {
+            return Err("apple-avd: unsupported coded format");
+        }
+        if request.input_len == 0 {
+            return Err("apple-avd: empty input access unit");
+        }
+
+        let avd = self.avd()?;
+        let mut avd = avd.lock();
+        avd.trace.push(
+            AvdTraceKind::DecodeSubmit,
+            request.input_dma_addr,
+            request.input_len as u64,
+        );
+        Err("apple-avd: hardware decode submission is not wired yet")
+    }
+
+    fn dequeue_frame(
+        &self,
+        stream_id: u32,
+    ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
+        if stream_id != 1 {
+            return Err("apple-avd: invalid stream id");
+        }
+        Ok(None)
+    }
+}
+
 fn first_mem_resource(device: &PlatformDeviceInfo) -> Option<(usize, usize)> {
     device
         .get_resources()
@@ -432,11 +520,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     avd.trace
         .push(AvdTraceKind::Probe, paddr as u64, size as u64);
     let id = register_avd(avd);
+    let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
+    let backend_id = register_video_backend(Arc::clone(&backend));
+    vvideo::register_avd_vvideo_device(backend);
 
     early_println!(
-        "[apple-avd] registered {} id={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",
+        "[apple-avd] registered {} id={} backend={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",
         device.name(),
         id,
+        backend_id,
         soc.name(),
         paddr,
         size,
@@ -476,3 +568,7 @@ static SCARLET_DRIVER_APPLE_AVD_ANCHOR: fn() = force_link;
 
 /// Keep the Apple AVD driver crate linked into Scarlet module bundles.
 pub fn force_link() {}
+
+const fn align_up_const(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
