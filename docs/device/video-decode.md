@@ -24,8 +24,6 @@ reference.
 
 Video decode devices are exposed as `videoN`, starting at `video0`. Userspace
 talks to the device through normal file operations, `mmap()`, and `control()`.
-Legacy VirtIO debug nodes may still appear as `vvideoN`, but new userspace
-should open `/dev/videoN`.
 
 The PCI VirtIO video backend negotiates `VIRTIO_F_VERSION_1` and the VirtIO
 video `RESOURCE_GUEST_PAGES` feature. The host backend added with this work is
@@ -78,25 +76,17 @@ Each video session owns one shared mapping:
 
 | Region | Offset | Size |
 | --- | ---: | ---: |
-| input bitstream | `0` | `8 * 1024 * 1024` |
-| output frame | `8 * 1024 * 1024` | aligned `16 * 1024 * 1024 + 20` |
+| input bitstream | `input_offset` | `input_len` |
+| output frame | `output_offset` | `output_len` |
 
 The output payload starts at `output_offset + 20` after a successful dequeue.
-The mapping offset for stream `stream_id` is:
-
-```text
-(stream_id - 1) * mapped_buffer_len
-```
-
-Both `mmap` offset and length must be page-aligned. The driver currently
-supports at most four sessions.
+Both `mmap` offset and length must be page-aligned. The reported lengths come
+from the selected backend capabilities.
 
 ## Control Commands
 
 All commands use raw `#[repr(C)]` structures copied between Scarlet userspace
-and the kernel. The primary names use the `SCARLET_VIDEO_` prefix. The older
-`VVIDEO_` names remain kernel aliases for source compatibility with early
-VirtIO-only callers. All current Scarlet targets are little-endian; do not treat
+and the kernel. All current Scarlet targets are little-endian; do not treat
 these layouts as a portable cross-OS ABI.
 
 | Command | Value | Argument | Return |

@@ -28,11 +28,11 @@ pub const SCARLET_VIDEO_FRAME_HEADER_LEN: usize = 20;
 /// NV12 video-range pixel format value expected by `video_player`.
 pub const SCARLET_VIDEO_PIXEL_FORMAT_NV12: u32 = 0x3432_3076;
 
-/// Query the mapped buffer layout for the legacy single-session path.
+/// Query the mapped buffer layout for the single-session path.
 pub const SCARLET_VIDEO_GET_BUFFER: u32 = 0x5600;
-/// Submit a coded access unit for the legacy single-session path.
+/// Submit a coded access unit for the single-session path.
 pub const SCARLET_VIDEO_SUBMIT: u32 = 0x5601;
-/// Dequeue a decoded frame for the legacy single-session path.
+/// Dequeue a decoded frame for the single-session path.
 pub const SCARLET_VIDEO_DEQUEUE: u32 = 0x5602;
 /// Create or query a mapped video session.
 pub const SCARLET_VIDEO_CREATE_SESSION: u32 = 0x5603;
@@ -42,21 +42,6 @@ pub const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 pub const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 /// Destroy a mapped video session.
 pub const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
-
-/// Legacy alias for [`SCARLET_VIDEO_GET_BUFFER`].
-pub const VVIDEO_GET_BUFFER: u32 = SCARLET_VIDEO_GET_BUFFER;
-/// Legacy alias for [`SCARLET_VIDEO_SUBMIT`].
-pub const VVIDEO_SUBMIT: u32 = SCARLET_VIDEO_SUBMIT;
-/// Legacy alias for [`SCARLET_VIDEO_DEQUEUE`].
-pub const VVIDEO_DEQUEUE: u32 = SCARLET_VIDEO_DEQUEUE;
-/// Legacy alias for [`SCARLET_VIDEO_CREATE_SESSION`].
-pub const VVIDEO_CREATE_SESSION: u32 = SCARLET_VIDEO_CREATE_SESSION;
-/// Legacy alias for [`SCARLET_VIDEO_SUBMIT_SESSION`].
-pub const VVIDEO_SUBMIT_SESSION: u32 = SCARLET_VIDEO_SUBMIT_SESSION;
-/// Legacy alias for [`SCARLET_VIDEO_DEQUEUE_SESSION`].
-pub const VVIDEO_DEQUEUE_SESSION: u32 = SCARLET_VIDEO_DEQUEUE_SESSION;
-/// Legacy alias for [`SCARLET_VIDEO_DESTROY_SESSION`].
-pub const VVIDEO_DESTROY_SESSION: u32 = SCARLET_VIDEO_DESTROY_SESSION;
 
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
@@ -112,6 +97,8 @@ pub struct VideoBackendDecodeRequest {
     pub input_len: u32,
     /// Device-visible address of the output frame buffer.
     pub output_dma_addr: u64,
+    /// Offset of the output frame buffer inside the frontend mmap.
+    pub output_offset: u64,
     /// Byte capacity of the output frame buffer.
     pub output_len: u32,
     /// Presentation timestamp carried through dequeue.
@@ -338,6 +325,7 @@ impl ScarletVideoDevice {
             input_dma_addr,
             input_len: input_len as u32,
             output_dma_addr,
+            output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
             timestamp,
         };
@@ -410,10 +398,19 @@ impl ScarletVideoDevice {
     }
 
     fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
-        let Some(decoded) = self.backend.dequeue_frame(DEFAULT_STREAM_ID)? else {
+        let decoded = match self.backend.dequeue_frame(DEFAULT_STREAM_ID) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                return Err(e);
+            }
+        };
+        let Some(decoded) = decoded else {
+            *self.last_error.lock() = None;
             return Ok(0);
         };
         write_user_value(arg, &decoded.frame)?;
+        *self.last_error.lock() = None;
         Ok(1)
     }
 
@@ -424,13 +421,22 @@ impl ScarletVideoDevice {
         } else {
             dequeued.stream_id
         };
-        let Some(decoded) = self.backend.dequeue_frame(stream_id)? else {
+        let decoded = match self.backend.dequeue_frame(stream_id) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                return Err(e);
+            }
+        };
+        let Some(decoded) = decoded else {
+            *self.last_error.lock() = None;
             return Ok(0);
         };
         dequeued.stream_id = decoded.stream_id;
         dequeued.padding = 0;
         dequeued.frame = decoded.frame;
         write_user_value(arg, &dequeued)?;
+        *self.last_error.lock() = None;
         Ok(1)
     }
 

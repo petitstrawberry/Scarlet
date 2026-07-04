@@ -62,7 +62,6 @@ const VIRTIO_PCI_MODERN_SOUND_DEVICE_ID: u16 = 0x1059;
 const VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID: u16 = 0x105f;
 
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static VIDEO_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Mapped register blocks for a VirtIO PCI function.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioPciTransport {
@@ -446,8 +445,6 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             Ok(())
         }
         VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID => {
-            let id = VIDEO_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let legacy_name = format!("vvideo{}", id);
             let dev = Arc::new(VirtioVideoDevice::new_pci(transport));
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
@@ -460,11 +457,9 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
             let backend: Arc<dyn VideoDecodeBackend> = dev.clone();
             let backend_id = register_video_backend(Arc::clone(&backend));
             let video_name = register_video_decode_device(backend);
-            let registered: Arc<dyn Device> = dev;
-            DeviceManager::get_manager().register_device_with_name(legacy_name.clone(), registered);
             println!(
-                "[virtio-pci] Registered video decoder device {} legacy={} backend={}",
-                video_name, legacy_name, backend_id
+                "[virtio-pci] Registered video decoder device {} backend={}",
+                video_name, backend_id
             );
             Ok(())
         }

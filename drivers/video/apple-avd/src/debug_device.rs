@@ -241,6 +241,7 @@ impl AppleAvdDebugDevice {
             input_dma_addr,
             input_len: SAMPLE_H264_AU.len() as u32,
             output_dma_addr,
+            output_offset: AVD_MAPPED_INPUT_BYTES as u64,
             output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
             timestamp: SAMPLE_H264_TIMESTAMP,
         };
