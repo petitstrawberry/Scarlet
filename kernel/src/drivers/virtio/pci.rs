@@ -19,6 +19,9 @@ use crate::device::pci::config::{self, PciConfig, capability, command, status, v
 use crate::device::pci::device::PciDeviceInfo;
 use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
 use crate::device::pci::intx::PciIntxInterruptSource;
+use crate::device::video::{
+    VideoDecodeBackend, register_video_backend, register_video_decode_device,
+};
 use crate::driver_initcall;
 use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
@@ -444,7 +447,7 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         }
         VIRTIO_PCI_MODERN_VIDEO_DECODER_DEVICE_ID => {
             let id = VIDEO_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("vvideo{}", id);
+            let legacy_name = format!("vvideo{}", id);
             let dev = Arc::new(VirtioVideoDevice::new_pci(transport));
             if let Some(interrupt_id) = register_legacy_intx(device, dev.clone()) {
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
@@ -454,9 +457,15 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
                 early_println!("[virtio-pci] No usable INTx routing for video decoder device");
             }
 
+            let backend: Arc<dyn VideoDecodeBackend> = dev.clone();
+            let backend_id = register_video_backend(Arc::clone(&backend));
+            let video_name = register_video_decode_device(backend);
             let registered: Arc<dyn Device> = dev;
-            DeviceManager::get_manager().register_device_with_name(name.clone(), registered);
-            println!("[virtio-pci] Registered video decoder device {}", name);
+            DeviceManager::get_manager().register_device_with_name(legacy_name.clone(), registered);
+            println!(
+                "[virtio-pci] Registered video decoder device {} legacy={} backend={}",
+                video_name, legacy_name, backend_id
+            );
             Ok(())
         }
         _ => Err("Unsupported VirtIO PCI device"),
