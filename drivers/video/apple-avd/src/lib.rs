@@ -3,10 +3,20 @@
 
 extern crate alloc;
 
+mod debug;
+mod firmware;
+pub mod h264;
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+pub use debug::{AvdTraceEvent, AvdTraceKind};
+pub use firmware::AvdFirmwareMessage;
+
+use debug::AvdTraceLog;
+use firmware::AvdFirmwareMailbox;
+use h264::H264DecodeRequest;
 use scarlet::{
     arch::mmio,
     device::{
@@ -38,6 +48,7 @@ const REG_MAILBOX_CM3_TO_AP: usize = 0x0204;
 const CONTROL_CM3_RESET: u32 = 1 << 0;
 const CONTROL_CM3_RUN: u32 = 1 << 1;
 const CONTROL_IRQ_ENABLE: u32 = 1 << 8;
+const AVD_TRACE_CAPACITY: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppleAvdSoc {
@@ -160,6 +171,8 @@ pub struct AppleAvd {
     irq: Option<u32>,
     registers: AvdRegisters,
     dma: DmaContext,
+    mailbox: AvdFirmwareMailbox,
+    trace: AvdTraceLog,
     firmware_state: AvdFirmwareState,
 }
 
@@ -181,6 +194,8 @@ impl AppleAvd {
             irq,
             registers,
             dma,
+            mailbox: AvdFirmwareMailbox::new(),
+            trace: AvdTraceLog::new(AVD_TRACE_CAPACITY),
             firmware_state: AvdFirmwareState::Missing,
         }
     }
@@ -230,6 +245,83 @@ impl AppleAvd {
         &self.dma
     }
 
+    /// Return retained debug trace events.
+    ///
+    /// # Returns
+    ///
+    /// Trace event slice ordered from oldest to newest.
+    pub fn trace_entries(&self) -> &[AvdTraceEvent] {
+        self.trace.entries()
+    }
+
+    /// Clear retained debug trace events.
+    pub fn clear_trace(&mut self) {
+        self.trace.clear();
+    }
+
+    /// Submit a H.264 request to the firmware mailbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - H.264 decode request lowered by the frontend.
+    ///
+    /// # Returns
+    ///
+    /// Driver-local firmware command tag on success.
+    pub fn submit_h264_request(
+        &mut self,
+        request: &H264DecodeRequest,
+    ) -> Result<u32, &'static str> {
+        if self.firmware_state != AvdFirmwareState::Running {
+            return Err("apple-avd: firmware is not running");
+        }
+
+        let command = self.mailbox.encode_h264_decode(request);
+        self.registers.send_mailbox(command.raw);
+        self.trace.push(
+            AvdTraceKind::DecodeSubmit,
+            request.session_id,
+            request.frame_number as u64,
+        );
+        self.trace.push(
+            AvdTraceKind::MailboxTx,
+            command.raw as u64,
+            command.tag as u64,
+        );
+        Ok(command.tag)
+    }
+
+    /// Poll one firmware mailbox message.
+    ///
+    /// # Returns
+    ///
+    /// Classified firmware message when the mailbox contains a non-zero word.
+    pub fn poll_firmware_message(&mut self) -> Option<AvdFirmwareMessage> {
+        let raw = self.registers.recv_mailbox();
+        if raw == 0 {
+            return None;
+        }
+
+        let message = AvdFirmwareMessage::decode(raw);
+        self.trace.push(AvdTraceKind::MailboxRx, raw as u64, 0);
+        match message {
+            AvdFirmwareMessage::Ready => {
+                self.firmware_state = AvdFirmwareState::Running;
+                self.trace.push(AvdTraceKind::Firmware, raw as u64, 0);
+            }
+            AvdFirmwareMessage::VideoProcessorDone | AvdFirmwareMessage::PostProcessorDone => {
+                self.trace.push(AvdTraceKind::DecodeComplete, raw as u64, 0);
+            }
+            message if message.is_fault() => {
+                self.mark_firmware_faulted();
+                self.trace.push(AvdTraceKind::Fault, raw as u64, 0);
+            }
+            _ => {}
+        }
+
+        Some(message)
+    }
+
     fn snapshot(&self) -> AvdStatusSnapshot {
         AvdStatusSnapshot {
             status: self.registers.status(),
@@ -244,12 +336,18 @@ impl AppleAvd {
         self.registers
             .stage_firmware_window(firmware_dma_addr, firmware_size);
         self.firmware_state = AvdFirmwareState::Staged;
+        self.trace.push(
+            AvdTraceKind::Firmware,
+            firmware_dma_addr,
+            firmware_size as u64,
+        );
     }
 
     fn start_firmware(&mut self) {
         self.registers.enable_irqs();
         self.registers.run_cm3();
         self.firmware_state = AvdFirmwareState::Running;
+        self.trace.push(AvdTraceKind::Firmware, 1, 0);
     }
 
     fn mark_firmware_faulted(&mut self) {
@@ -321,7 +419,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let soc = AppleAvdSoc::from_device(device);
     let irq = first_irq(device);
-    let avd = AppleAvd::new(
+    let mut avd = AppleAvd::new(
         device.name(),
         soc,
         paddr,
@@ -331,6 +429,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         dma,
     );
     let snapshot = avd.snapshot();
+    avd.trace
+        .push(AvdTraceKind::Probe, paddr as u64, size as u64);
     let id = register_avd(avd);
 
     early_println!(
