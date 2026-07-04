@@ -58,17 +58,22 @@ Firmware-to-kernel messages:
 
 The branch currently provides:
 
-- `firmware/apple-avd-fw-rs`: a Rust `thumbv7m-none-eabi` CM3 firmware
-  skeleton with version/tier feature flags.
+- `firmware/apple-avd-fw-rs`: a Rust `thumbv7m-none-eabi` CM3 firmware image
+  with version/tier feature flags, tunable MMIO replay, mailbox command polling,
+  IRQ forwarding, and panic reporting.
 - `drivers/video/apple-avd`: an Apple platform driver that probes AVD MMIO,
-  resolves the DART-backed DMA context, records firmware/mailbox trace events,
-  registers a Scarlet video backend, and exposes a `/dev/vvideo0` stub frontend.
+  resolves the DART-backed DMA context, embeds and starts the Rust CM3 firmware,
+  initializes the H.264 engine MMIO defaults, DART-maps input/output/workspace
+  buffers, generates a first-pass AVD H.264 instruction stream, records
+  firmware/mailbox trace events, registers a Scarlet video backend, and exposes
+  a `/dev/vvideo0` hardware frontend.
 - `kernel::device::video`: shared `/dev/vvideo*` ABI definitions plus a decode
   backend registry used by AVD and future non-VirtIO backends.
 
 The `/dev/vvideo0` AVD frontend implements the existing mmap/ioctl entrypoints
-but returns `apple-avd: hardware decode submission is not wired yet` on decode
-submit until the MMIO command path is completed.
+and submits H.264 Annex B access units through the Apple AVD backend. The first
+frontend parses SPS/slice metadata, supports progressive 8-bit 4:2:0 H.264, and
+expects one pending decode at a time while reference tracking is brought up.
 
 Useful build checks:
 
@@ -80,13 +85,12 @@ cargo check --manifest-path drivers/video/apple-avd/Cargo.toml
 
 ## Milestones
 
-1. Add docs, ABI constants, firmware crate skeleton, and kernel driver skeleton.
-2. Build Rust CM3 firmware binaries for known AVD version/tier combinations.
-3. Bring up MMIO, PMGR, DART, SRAM load, CM3 boot, and mailbox receive.
-4. Port AVD engine initialization, instruction FIFO, and H.264 submit path.
-5. Decode one known-good H.264 frame into NV12 and verify a checksum.
-6. Expose AVD through `/dev/vvideo0` behind the current mapped session API.
-7. Add reference tracking, frame ordering, teardown cleanup, IRQ completion,
+1. Build Rust CM3 firmware binaries for known AVD version/tier combinations.
+2. Bring up MMIO, PMGR, DART, SRAM load, CM3 boot, and mailbox receive.
+3. Port AVD engine initialization, instruction FIFO, and H.264 submit path.
+4. Decode one known-good H.264 frame into NV12 and verify a checksum.
+5. Expose AVD through `/dev/vvideo0` behind the current mapped session API.
+6. Add reference tracking, frame ordering, teardown cleanup, IRQ completion,
    cache maintenance audit, and recovery paths.
 
 ## Debug Hooks

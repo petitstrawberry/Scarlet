@@ -9,6 +9,7 @@ pub mod h264;
 mod vvideo;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -17,29 +18,36 @@ pub use firmware::AvdFirmwareMessage;
 
 use debug::AvdTraceLog;
 use firmware::AvdFirmwareMailbox;
-use h264::H264DecodeRequest;
+use h264::{
+    AnnexBAccessUnit, AvdDmaRange, AvdH264InstructionStream, AvdH264Workspace, H264DecodeRequest,
+    H264FrontendError, H264StreamParameters,
+};
 use scarlet::{
-    arch::mmio,
+    arch::{self, mmio},
     device::{
         DeviceInfo,
-        iommu::{DmaContext, IommuDomainConfig, IommuDomainType},
+        iommu::{DmaContext, DmaMapping, IommuDomainConfig, IommuDomainType, IommuMapFlags},
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
         video::{
-            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
-            SCARLET_VIDEO_PIXEL_FORMAT_NV12, VideoBackendCapabilities, VideoBackendDecodeRequest,
-            VideoBackendDecodedFrame, VideoDecodeBackend, register_video_backend,
+            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
+            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame, VideoBackendCapabilities,
+            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoDecodeBackend,
+            register_video_backend,
         },
     },
     early_println,
+    environment::PAGE_SIZE,
+    mem::page::ContiguousPages,
     sync::Mutex,
     vm,
 };
 
 const AVD_DEFAULT_IOVA_BASE: u64 = 0x4000_0000;
 const AVD_DEFAULT_IOVA_SIZE: u64 = 0x4000_0000;
+const DEFAULT_AVD_FIRMWARE: &[u8] = include_bytes!(env!("SCARLET_APPLE_AVD_FW_BIN"));
 
 const REG_STATUS: usize = 0x0000;
 const REG_CONTROL: usize = 0x0004;
@@ -50,17 +58,75 @@ const REG_FW_BASE_HI: usize = 0x0104;
 const REG_FW_SIZE: usize = 0x0108;
 const REG_MAILBOX_AP_TO_CM3: usize = 0x0200;
 const REG_MAILBOX_CM3_TO_AP: usize = 0x0204;
+const REG_H264_INSTRUCTION: usize = 0x1104000;
+const REG_H264_SUBMIT: usize = 0x1104014;
+const REG_H264_COUNTER0: usize = 0x1104018;
+const REG_H264_COUNTER1: usize = 0x110401c;
+const REG_H264_COUNTER2: usize = 0x1104020;
+const REG_H264_COUNTER3: usize = 0x1104024;
+const REG_H264_COUNTER4: usize = 0x1104028;
+const REG_H264_CONTROL0: usize = 0x1104034;
+const REG_H264_CONTROL1: usize = 0x110403c;
+const REG_H264_TIMEOUT: usize = 0x110405c;
+const REG_H264_STATUS: usize = 0x1104060;
+const REG_H264_STATUS_MASK: usize = 0x1104064;
+const REG_AVD_DMA_CONFIG_BASE: usize = 0x108ee90;
 
 const CONTROL_CM3_RESET: u32 = 1 << 0;
 const CONTROL_CM3_RUN: u32 = 1 << 1;
 const CONTROL_IRQ_ENABLE: u32 = 1 << 8;
+const H264_SUBMIT_START: u32 = 1;
+const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
+const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
 const AVD_TRACE_CAPACITY: usize = 128;
+const AVD_DMA_GRANULE: usize = 0x4000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
     AVD_MAX_DECODED_FRAME_BYTES + SCARLET_VIDEO_FRAME_HEADER_LEN,
-    4096,
+    AVD_DMA_GRANULE,
 );
+const AVD_MAX_SESSIONS: usize = 4;
+const AVD_WORKSPACE_BYTES: usize = 16 * 1024 * 1024;
+const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
+const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
+const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
+const AVD_WORKSPACE_PPS_TILE_OFFSET: usize = 0x140000;
+const AVD_WORKSPACE_SPS_TILE_OFFSET: usize = 0x200000;
+const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
+
+const AVD_H264_DMA_CONFIG: [u32; 30] = [
+    0x0402_0002,
+    0x0002_0002,
+    0x0402_0002,
+    0x0402_0002,
+    0x0402_0002,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0402_0002,
+    0x0002_0002,
+    0x0402_0002,
+    0x0402_0002,
+    0x0402_0002,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0402_0002,
+    0x0202_0202,
+    0x0402_0002,
+    0x0402_0002,
+    0x0402_0202,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+    0x0007_0007,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppleAvdSoc {
@@ -165,6 +231,40 @@ impl AvdRegisters {
     fn recv_mailbox(&self) -> u32 {
         self.read32(REG_MAILBOX_CM3_TO_AP)
     }
+
+    fn clear_recv_mailbox(&self) {
+        self.write32(REG_MAILBOX_CM3_TO_AP, 0);
+    }
+
+    fn init_h264_engine(&self) {
+        self.write32(REG_H264_COUNTER0, 0x78);
+        self.write32(REG_H264_COUNTER1, 0x78);
+        self.write32(REG_H264_COUNTER2, 0x78);
+        self.write32(REG_H264_COUNTER3, 0x78);
+        self.write32(REG_H264_COUNTER4, 0x20);
+        self.write32(REG_H264_CONTROL0, 0);
+        self.write32(REG_H264_CONTROL1, 0);
+        self.write32(REG_H264_TIMEOUT, 0x0050_0000);
+        self.write32(REG_H264_STATUS_MASK, 0x3);
+
+        for (index, value) in AVD_H264_DMA_CONFIG.iter().copied().enumerate() {
+            self.write32(REG_AVD_DMA_CONFIG_BASE + index * 4, value);
+        }
+    }
+
+    fn h264_status(&self) -> u32 {
+        self.read32(REG_H264_STATUS)
+    }
+
+    fn write_h264_instructions(&self, words: &[u32]) {
+        for word in words {
+            self.write32(REG_H264_INSTRUCTION, *word);
+        }
+    }
+
+    fn submit_h264(&self) {
+        self.write32(REG_H264_SUBMIT, H264_SUBMIT_START);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +272,12 @@ struct AvdStatusSnapshot {
     status: u32,
     irq_status: u32,
     mailbox: u32,
+}
+
+struct AvdFirmwareAllocation {
+    pages: ContiguousPages,
+    mapping: DmaMapping,
+    size: usize,
 }
 
 /// Apple AVD hardware instance discovered from ADT/FDT.
@@ -186,6 +292,7 @@ pub struct AppleAvd {
     mailbox: AvdFirmwareMailbox,
     trace: AvdTraceLog,
     firmware_state: AvdFirmwareState,
+    firmware_allocation: Option<AvdFirmwareAllocation>,
 }
 
 impl AppleAvd {
@@ -209,6 +316,7 @@ impl AppleAvd {
             mailbox: AvdFirmwareMailbox::new(),
             trace: AvdTraceLog::new(AVD_TRACE_CAPACITY),
             firmware_state: AvdFirmwareState::Missing,
+            firmware_allocation: None,
         }
     }
 
@@ -271,6 +379,69 @@ impl AppleAvd {
         self.trace.clear();
     }
 
+    /// Initialize the H.264 engine registers with the v3-class defaults.
+    pub fn init_h264_engine(&mut self) {
+        self.registers.init_h264_engine();
+        self.trace.push(AvdTraceKind::Firmware, 0x1104_0000, 0);
+    }
+
+    /// Stage and start the bundled CM3 firmware image.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Raw Cortex-M3 firmware image bytes.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the image is copied, mapped, and CM3 run has been
+    /// requested.
+    pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
+        if image.is_empty() {
+            return Err("apple-avd: empty firmware image");
+        }
+        let granule = self.dma.mapping_granule().max(PAGE_SIZE);
+        let byte_len = align_up(image.len(), granule);
+        let page_count = byte_len.div_ceil(PAGE_SIZE);
+        let pages = ContiguousPages::new_aligned(page_count, granule)
+            .ok_or("apple-avd: firmware allocation failed")?;
+
+        // SAFETY: `pages` owns at least `byte_len` bytes and `image.len()` was
+        // used to size-check the copy. The source firmware image is immutable
+        // static data and cannot overlap with PMM pages.
+        unsafe {
+            core::ptr::copy_nonoverlapping(image.as_ptr(), pages.as_ptr() as *mut u8, image.len());
+        }
+        arch::clean_dcache_to_poc_range(pages.as_vaddr(), byte_len);
+
+        let mapping = self
+            .dma
+            .map_phys_owned(
+                pages.as_paddr(),
+                byte_len,
+                IommuMapFlags::READ | IommuMapFlags::EXECUTE | IommuMapFlags::COHERENT,
+            )
+            .map_err(|_| "apple-avd: firmware DMA map failed")?;
+        let dma_addr = mapping.dma_addr();
+        self.prepare_for_firmware(dma_addr, image.len());
+        self.start_firmware();
+        self.firmware_allocation = Some(AvdFirmwareAllocation {
+            pages,
+            mapping,
+            size: image.len(),
+        });
+
+        for _ in 0..1024 {
+            if matches!(
+                self.poll_firmware_message(),
+                Some(AvdFirmwareMessage::Ready)
+            ) {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
     /// Submit a H.264 request to the firmware mailbox.
     ///
     /// # Arguments
@@ -303,6 +474,44 @@ impl AppleAvd {
         Ok(command.tag)
     }
 
+    /// Submit a generated H.264 instruction stream to the MMIO command path.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - H.264 decode request metadata.
+    /// * `instructions` - AVD H.264 instruction stream.
+    ///
+    /// # Returns
+    ///
+    /// Status register value observed immediately before submit.
+    pub fn submit_h264_mmio(
+        &mut self,
+        request: &H264DecodeRequest,
+        instructions: &AvdH264InstructionStream,
+    ) -> Result<u32, &'static str> {
+        if instructions.words().is_empty() {
+            return Err("apple-avd: empty H.264 instruction stream");
+        }
+        self.registers.write_h264_instructions(instructions.words());
+        let status_before = self.registers.h264_status();
+        self.registers.submit_h264();
+        self.trace.push(
+            AvdTraceKind::DecodeSubmit,
+            request.input.dma_addr,
+            instructions.words().len() as u64,
+        );
+        Ok(status_before)
+    }
+
+    /// Return the current H.264 status register.
+    ///
+    /// # Returns
+    ///
+    /// Raw H.264 engine status.
+    pub fn h264_status(&self) -> u32 {
+        self.registers.h264_status()
+    }
+
     /// Poll one firmware mailbox message.
     ///
     /// # Returns
@@ -315,6 +524,7 @@ impl AppleAvd {
         }
 
         let message = AvdFirmwareMessage::decode(raw);
+        self.registers.clear_recv_mailbox();
         self.trace.push(AvdTraceKind::MailboxRx, raw as u64, 0);
         match message {
             AvdFirmwareMessage::Ready => {
@@ -390,17 +600,237 @@ pub fn get_apple_avd(id: u32) -> Option<Arc<Mutex<AppleAvd>>> {
     registry.get(id as usize).cloned()
 }
 
+struct AvdSessionWorkspace {
+    pages: ContiguousPages,
+    mapping: DmaMapping,
+    byte_len: usize,
+}
+
+impl AvdSessionWorkspace {
+    fn new(avd: &AppleAvd) -> Result<Self, &'static str> {
+        let granule = avd.dma_context().mapping_granule().max(AVD_WORKSPACE_ALIGN);
+        let byte_len = align_up(AVD_WORKSPACE_BYTES, granule);
+        let page_count = byte_len.div_ceil(PAGE_SIZE);
+        let pages = ContiguousPages::new_aligned(page_count, granule)
+            .ok_or("apple-avd: workspace allocation failed")?;
+        let mapping = avd
+            .dma_context()
+            .map_phys_owned(
+                pages.as_paddr(),
+                byte_len,
+                IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+            )
+            .map_err(|_| "apple-avd: workspace DMA map failed")?;
+        Ok(Self {
+            pages,
+            mapping,
+            byte_len,
+        })
+    }
+
+    fn addresses(&self) -> AvdH264Workspace {
+        let base = self.mapping.dma_addr();
+        AvdH264Workspace {
+            instruction_fifo_dma_addr: base + AVD_WORKSPACE_INST_FIFO_OFFSET as u64,
+            pps_tile_dma_addr: base + AVD_WORKSPACE_PPS_TILE_OFFSET as u64,
+            sps_tile_dma_addr: base + AVD_WORKSPACE_SPS_TILE_OFFSET as u64,
+            reference_dma_addr: base + AVD_WORKSPACE_REFERENCE_OFFSET as u64,
+        }
+    }
+
+    fn instruction_fifo_vaddr(&self) -> usize {
+        self.pages.as_vaddr() + AVD_WORKSPACE_INST_FIFO_OFFSET
+    }
+
+    fn instruction_fifo_mut(&mut self) -> &mut [u8] {
+        let ptr = (self.pages.as_vaddr() + AVD_WORKSPACE_INST_FIFO_OFFSET) as *mut u8;
+        // SAFETY: `pages` owns `byte_len` bytes, and the instruction FIFO
+        // window is inside the workspace constants checked at compile time.
+        unsafe { core::slice::from_raw_parts_mut(ptr, AVD_WORKSPACE_INST_FIFO_BYTES) }
+    }
+}
+
+struct AvdBackendSession {
+    stream_id: u32,
+    active: bool,
+    coded_format: u32,
+    next_frame: u32,
+    stream_parameters: Option<H264StreamParameters>,
+    workspace: Option<AvdSessionWorkspace>,
+}
+
+impl AvdBackendSession {
+    fn new(index: usize) -> Self {
+        Self {
+            stream_id: (index + 1) as u32,
+            active: false,
+            coded_format: 0,
+            next_frame: 0,
+            stream_parameters: None,
+            workspace: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.active = false;
+        self.coded_format = 0;
+        self.next_frame = 0;
+        self.stream_parameters = None;
+        self.workspace = None;
+    }
+
+    fn ensure_workspace(
+        &mut self,
+        avd: &AppleAvd,
+    ) -> Result<&mut AvdSessionWorkspace, &'static str> {
+        if self.workspace.is_none() {
+            self.workspace = Some(AvdSessionWorkspace::new(avd)?);
+        }
+        self.workspace
+            .as_mut()
+            .ok_or("apple-avd: workspace unavailable")
+    }
+}
+
+struct AvdPendingDecode {
+    stream_id: u32,
+    frame_number: u32,
+    timestamp: u64,
+    layout: h264::AvdFrameLayout,
+    payload_len: usize,
+    output_base_paddr: usize,
+    status_before: u32,
+    command_tag: u32,
+    input_mapping: DmaMapping,
+    output_mapping: DmaMapping,
+}
+
+struct AvdBackendState {
+    sessions: Vec<AvdBackendSession>,
+    pending: VecDeque<AvdPendingDecode>,
+    completed: VecDeque<VideoBackendDecodedFrame>,
+}
+
+impl AvdBackendState {
+    fn new() -> Self {
+        let mut sessions = Vec::new();
+        for index in 0..AVD_MAX_SESSIONS {
+            sessions.push(AvdBackendSession::new(index));
+        }
+        Self {
+            sessions,
+            pending: VecDeque::new(),
+            completed: VecDeque::new(),
+        }
+    }
+
+    fn allocate_session(&mut self, coded_format: u32) -> Result<u32, &'static str> {
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| !session.active)
+            .ok_or("apple-avd: no free video sessions")?;
+        session.active = true;
+        session.coded_format = coded_format;
+        session.next_frame = 0;
+        session.stream_parameters = None;
+        Ok(session.stream_id)
+    }
+
+    fn session_mut(&mut self, stream_id: u32) -> Result<&mut AvdBackendSession, &'static str> {
+        self.sessions
+            .iter_mut()
+            .find(|session| session.stream_id == stream_id)
+            .ok_or("apple-avd: invalid stream id")
+    }
+
+    fn active_session_mut(
+        &mut self,
+        stream_id: u32,
+    ) -> Result<&mut AvdBackendSession, &'static str> {
+        let session = self.session_mut(stream_id)?;
+        if !session.active {
+            return Err("apple-avd: inactive stream id");
+        }
+        Ok(session)
+    }
+
+    fn session_for_submit(
+        &mut self,
+        stream_id: u32,
+        coded_format: u32,
+    ) -> Result<&mut AvdBackendSession, &'static str> {
+        let session = self.session_mut(stream_id)?;
+        if !session.active {
+            session.active = true;
+            session.coded_format = coded_format;
+        }
+        if session.coded_format != coded_format {
+            return Err("apple-avd: stream format mismatch");
+        }
+        Ok(session)
+    }
+
+    fn destroy_session(&mut self, stream_id: u32) -> Result<(), &'static str> {
+        let session = self.active_session_mut(stream_id)?;
+        session.reset();
+        self.pending
+            .retain(|pending| pending.stream_id != stream_id);
+        self.completed.retain(|frame| frame.stream_id != stream_id);
+        Ok(())
+    }
+}
+
 struct AppleAvdVideoBackend {
     avd_id: u32,
+    state: Mutex<AvdBackendState>,
 }
 
 impl AppleAvdVideoBackend {
     fn new(avd_id: u32) -> Self {
-        Self { avd_id }
+        Self {
+            avd_id,
+            state: Mutex::new(AvdBackendState::new()),
+        }
     }
 
     fn avd(&self) -> Result<Arc<Mutex<AppleAvd>>, &'static str> {
         get_apple_avd(self.avd_id).ok_or("apple-avd: backend instance disappeared")
+    }
+
+    fn service_completions(&self) -> Result<(), &'static str> {
+        let avd = self.avd()?;
+        let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        let message = avd.poll_firmware_message();
+        let status = avd.h264_status();
+        let Some(front) = state.pending.front() else {
+            return Ok(());
+        };
+
+        if status != front.status_before && (status & H264_STATUS_ERROR_MASK) != 0 {
+            let _ = state.pending.pop_front();
+            avd.trace.push(AvdTraceKind::Fault, status as u64, 0);
+            return Err("apple-avd: H.264 engine reported an error");
+        }
+
+        let completed_by_mailbox = matches!(
+            message,
+            Some(AvdFirmwareMessage::VideoProcessorDone)
+                | Some(AvdFirmwareMessage::PostProcessorDone)
+        );
+        let completed_by_status =
+            status != front.status_before && (status & H264_STATUS_DONE_MASK) != 0;
+        if completed_by_mailbox || completed_by_status {
+            let pending = state
+                .pending
+                .pop_front()
+                .ok_or("apple-avd: pending queue changed under completion")?;
+            finish_pending_decode(&mut state, pending)?;
+            avd.trace
+                .push(AvdTraceKind::DecodeComplete, status as u64, 0);
+        }
+        Ok(())
     }
 }
 
@@ -411,7 +841,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
     fn capabilities(&self) -> VideoBackendCapabilities {
         VideoBackendCapabilities {
-            max_sessions: 1,
+            max_sessions: AVD_MAX_SESSIONS as u32,
             mapped_input_len: AVD_MAPPED_INPUT_BYTES as u32,
             mapped_output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
             output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
@@ -424,45 +854,243 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         if coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: only H.264 sessions are supported");
         }
-        Ok(1)
+        self.state.lock().allocate_session(coded_format)
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
-        if stream_id != 1 {
-            return Err("apple-avd: invalid stream id");
-        }
-        Ok(())
+        self.state.lock().destroy_session(stream_id)
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
-        if request.stream_id != 1 {
-            return Err("apple-avd: invalid stream id");
-        }
         if request.coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: unsupported coded format");
         }
         if request.input_len == 0 {
             return Err("apple-avd: empty input access unit");
         }
+        if request.output_len as usize <= SCARLET_VIDEO_FRAME_HEADER_LEN {
+            return Err("apple-avd: output buffer is too small");
+        }
+        if request.input_len as usize > AVD_MAPPED_INPUT_BYTES {
+            return Err("apple-avd: input exceeds mapped input buffer");
+        }
 
+        self.service_completions()?;
         let avd = self.avd()?;
         let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        if !state.pending.is_empty() {
+            return Err("apple-avd: decode already pending");
+        }
+
+        let input_vaddr = vm::phys_to_virt(request.input_dma_addr as usize);
+        let input_len = request.input_len as usize;
+        // SAFETY: `/dev/vvideo0` passes a PMM-backed physical address for the
+        // mapped input range and keeps the pages alive for the lifetime of the
+        // device. `input_len` was checked against the mapped capacity above.
+        let input_bytes =
+            unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
+        let access_unit = AnnexBAccessUnit::new(input_bytes);
+        let parsed_stream_parameters =
+            access_unit.stream_parameters().map_err(h264_error_to_str)?;
+
+        let session = state.session_for_submit(request.stream_id, request.coded_format)?;
+        let stream_parameters = if let Some(parameters) = parsed_stream_parameters {
+            session.stream_parameters = Some(parameters);
+            parameters
+        } else {
+            session
+                .stream_parameters
+                .ok_or("apple-avd: missing H.264 SPS before first slice")?
+        };
+        let layout = stream_parameters.nv12_layout();
+        let payload_len = layout.output_len();
+        let total_output_len = payload_len
+            .checked_add(SCARLET_VIDEO_FRAME_HEADER_LEN)
+            .ok_or("apple-avd: output length overflow")?;
+        if total_output_len > request.output_len as usize {
+            return Err("apple-avd: decoded frame exceeds mapped output buffer");
+        }
+
+        let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
+        let input_map_len = align_up(input_len, granule);
+        let output_map_len = align_up(request.output_len as usize, granule);
+        let input_mapping = avd
+            .dma_context()
+            .map_phys_owned(
+                request.input_dma_addr as usize,
+                input_map_len,
+                IommuMapFlags::READ | IommuMapFlags::COHERENT,
+            )
+            .map_err(|_| "apple-avd: input DMA map failed")?;
+        let output_mapping = avd
+            .dma_context()
+            .map_phys_owned(
+                request.output_dma_addr as usize,
+                output_map_len,
+                IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+            )
+            .map_err(|_| "apple-avd: output DMA map failed")?;
+
+        let frame_number = session.next_frame;
+        session.next_frame = session.next_frame.wrapping_add(1);
+        let decode_request = H264DecodeRequest::from_access_unit(
+            session.stream_id as u64,
+            frame_number,
+            &access_unit,
+            AvdDmaRange {
+                dma_addr: input_mapping.dma_addr(),
+                len: input_len,
+            },
+            AvdDmaRange {
+                dma_addr: output_mapping.dma_addr() + SCARLET_VIDEO_FRAME_HEADER_LEN as u64,
+                len: request.output_len as usize - SCARLET_VIDEO_FRAME_HEADER_LEN,
+            },
+            layout,
+        )
+        .map_err(h264_error_to_str)?;
+
+        let (instructions, inst_len) = {
+            let workspace = session.ensure_workspace(&avd)?;
+            let workspace_addresses = workspace.addresses();
+            let instructions = AvdH264InstructionStream::build(
+                &decode_request,
+                &stream_parameters,
+                &decode_request.slice,
+                &workspace_addresses,
+            );
+            let inst_len = instructions
+                .write_le_bytes(workspace.instruction_fifo_mut())
+                .map_err(h264_error_to_str)?;
+            arch::clean_dcache_to_poc_range(workspace.instruction_fifo_vaddr(), inst_len);
+            arch::clean_dcache_to_poc_range(workspace.pages.as_vaddr(), workspace.byte_len);
+            (instructions, inst_len)
+        };
+
+        arch::clean_dcache_to_poc_range(input_vaddr, input_map_len);
+        arch::clean_invalidate_dcache_to_poc_range(
+            vm::phys_to_virt(request.output_dma_addr as usize),
+            output_map_len,
+        );
+
+        let status_before = avd.submit_h264_mmio(&decode_request, &instructions)?;
+        let command_tag = avd.submit_h264_request(&decode_request)?;
         avd.trace.push(
             AvdTraceKind::DecodeSubmit,
             request.input_dma_addr,
-            request.input_len as u64,
+            inst_len as u64,
         );
-        Err("apple-avd: hardware decode submission is not wired yet")
+        state.pending.push_back(AvdPendingDecode {
+            stream_id: request.stream_id,
+            frame_number,
+            timestamp: request.timestamp,
+            layout,
+            payload_len,
+            output_base_paddr: request.output_dma_addr as usize,
+            status_before,
+            command_tag,
+            input_mapping,
+            output_mapping,
+        });
+        Ok(())
     }
 
     fn dequeue_frame(
         &self,
         stream_id: u32,
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
-        if stream_id != 1 {
-            return Err("apple-avd: invalid stream id");
+        self.service_completions()?;
+        let mut state = self.state.lock();
+        let Some(index) = state
+            .completed
+            .iter()
+            .position(|frame| frame.stream_id == stream_id)
+        else {
+            return Ok(None);
+        };
+        Ok(state.completed.remove(index))
+    }
+}
+
+fn finish_pending_decode(
+    state: &mut AvdBackendState,
+    pending: AvdPendingDecode,
+) -> Result<(), &'static str> {
+    let output_vaddr = vm::phys_to_virt(pending.output_base_paddr);
+    let total_output_len = pending
+        .payload_len
+        .checked_add(SCARLET_VIDEO_FRAME_HEADER_LEN)
+        .ok_or("apple-avd: completed frame length overflow")?;
+
+    arch::invalidate_dcache_to_poc_range(
+        output_vaddr + SCARLET_VIDEO_FRAME_HEADER_LEN,
+        pending.payload_len,
+    );
+    write_frame_header(
+        output_vaddr,
+        pending.layout.width,
+        pending.layout.height,
+        pending.layout.pixel_format,
+        pending.payload_len as u32,
+    )?;
+    arch::clean_dcache_to_poc_range(output_vaddr, SCARLET_VIDEO_FRAME_HEADER_LEN);
+
+    state.completed.push_back(VideoBackendDecodedFrame {
+        stream_id: pending.stream_id,
+        frame: ScarletVideoDequeuedFrame {
+            width: pending.layout.width,
+            height: pending.layout.height,
+            pixel_format: pending.layout.pixel_format,
+            payload_offset: (AVD_MAPPED_INPUT_BYTES + SCARLET_VIDEO_FRAME_HEADER_LEN) as u64,
+            payload_len: pending.payload_len as u32,
+            flags: pending.command_tag,
+            timestamp: pending.timestamp,
+        },
+    });
+    let _ = pending.input_mapping.dma_addr();
+    let _ = pending.output_mapping.dma_addr();
+    let _ = pending.frame_number;
+    let _ = total_output_len;
+    Ok(())
+}
+
+fn write_frame_header(
+    output_vaddr: usize,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    payload_len: u32,
+) -> Result<(), &'static str> {
+    let header = output_vaddr as *mut u8;
+    // SAFETY: `output_vaddr` points at the beginning of the mapped output
+    // buffer. The caller verified the buffer has at least
+    // `SCARLET_VIDEO_FRAME_HEADER_LEN` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            SCARLET_VIDEO_FRAME_MAGIC.as_ptr(),
+            header,
+            SCARLET_VIDEO_FRAME_MAGIC.len(),
+        );
+        core::ptr::copy_nonoverlapping(width.to_le_bytes().as_ptr(), header.add(4), 4);
+        core::ptr::copy_nonoverlapping(height.to_le_bytes().as_ptr(), header.add(8), 4);
+        core::ptr::copy_nonoverlapping(pixel_format.to_le_bytes().as_ptr(), header.add(12), 4);
+        core::ptr::copy_nonoverlapping(payload_len.to_le_bytes().as_ptr(), header.add(16), 4);
+    }
+    Ok(())
+}
+
+fn h264_error_to_str(error: H264FrontendError) -> &'static str {
+    match error {
+        H264FrontendError::MissingStartCode => "apple-avd: H.264 access unit missing start code",
+        H264FrontendError::EmptyNalUnit => "apple-avd: H.264 access unit contains an empty NAL",
+        H264FrontendError::MissingParameterSet => "apple-avd: H.264 parameter set is missing",
+        H264FrontendError::InvalidDimensions => "apple-avd: H.264 dimensions are invalid",
+        H264FrontendError::MalformedSps => "apple-avd: H.264 SPS is malformed",
+        H264FrontendError::UnsupportedSps => "apple-avd: H.264 SPS uses unsupported features",
+        H264FrontendError::MalformedSlice => "apple-avd: H.264 slice header is malformed",
+        H264FrontendError::InstructionStreamTooLarge => {
+            "apple-avd: generated H.264 instruction stream is too large"
         }
-        Ok(None)
     }
 }
 
@@ -519,6 +1147,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let snapshot = avd.snapshot();
     avd.trace
         .push(AvdTraceKind::Probe, paddr as u64, size as u64);
+    avd.init_h264_engine();
+    avd.boot_firmware(DEFAULT_AVD_FIRMWARE)?;
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
@@ -570,5 +1200,9 @@ static SCARLET_DRIVER_APPLE_AVD_ANCHOR: fn() = force_link;
 pub fn force_link() {}
 
 const fn align_up_const(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }

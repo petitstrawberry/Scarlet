@@ -26,7 +26,7 @@ use scarlet::{
     task::mytask,
 };
 
-use crate::{AVD_MAPPED_INPUT_BYTES, AVD_MAPPED_OUTPUT_BYTES};
+use crate::{AVD_DMA_GRANULE, AVD_MAPPED_INPUT_BYTES, AVD_MAPPED_OUTPUT_BYTES};
 
 const DEFAULT_STREAM_ID: u32 = 1;
 const MAPPED_OUTPUT_OFFSET: usize = AVD_MAPPED_INPUT_BYTES;
@@ -45,7 +45,7 @@ pub(crate) fn register_avd_vvideo_device(backend: Arc<dyn VideoDecodeBackend>) {
     let device = Arc::new(AppleAvdVvideoDevice::new(backend));
     DeviceManager::get_manager().register_device_with_name(String::from("vvideo0"), device);
     *registered = true;
-    scarlet::early_println!("[apple-avd] registered /dev/vvideo0 stub frontend");
+    scarlet::early_println!("[apple-avd] registered /dev/vvideo0 hardware frontend");
 }
 
 struct AppleAvdVvideoDevice {
@@ -80,7 +80,7 @@ impl AppleAvdVvideoDevice {
     fn ensure_mapped_buffer(&self) -> Result<(), &'static str> {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
-            *mapped_buffer = ContiguousPages::new(MAPPED_BUFFER_PAGES);
+            *mapped_buffer = ContiguousPages::new_aligned(MAPPED_BUFFER_PAGES, AVD_DMA_GRANULE);
         }
         if mapped_buffer.is_some() {
             Ok(())
