@@ -1,9 +1,9 @@
 # Apple AVD Cortex-M3 Firmware
 
-This crate is a Scarlet-owned Rust `no_std` firmware skeleton for the Apple AVD
-Cortex-M3. It is intentionally small: tunables, IRQ forwarding, panic reporting,
-and mailbox status messages live here; H.264 parsing and command submission stay
-in the kernel driver.
+This crate is a Scarlet-owned Rust `no_std` firmware for the Apple AVD
+Cortex-M3. It applies AVD revision/tier tunables, enables decode IRQ delivery,
+forwards DONE/ERROR interrupts to the kernel, and reports panic/debug state.
+H.264 parsing and instruction stream generation stay in the kernel driver.
 
 Build a variant with:
 
