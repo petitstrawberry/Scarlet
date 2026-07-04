@@ -254,6 +254,10 @@ impl AvdRegisters {
         }
     }
 
+    fn clear_h264_status(&self, mask: u32) {
+        self.write32(REG_H264_STATUS, mask);
+    }
+
     fn h264_status(&self) -> u32 {
         self.read32(REG_H264_STATUS)
     }
@@ -570,6 +574,20 @@ impl AppleAvd {
     /// Raw H.264 engine status.
     pub fn h264_status(&self) -> u32 {
         self.registers.h264_status()
+    }
+
+    /// Clear H.264 status and replay engine initialization after an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `reason` - Driver-local reason or status value recorded in the trace.
+    pub fn recover_h264_engine(&mut self, reason: u64) {
+        self.trace.push(AvdTraceKind::Fault, reason, 0);
+        self.registers
+            .clear_h264_status(H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK);
+        self.registers.init_h264_engine();
+        self.registers.clear_recv_mailbox();
+        self.trace.push(AvdTraceKind::Firmware, 0x1104_0000, 1);
     }
 
     /// Poll one firmware mailbox message.
@@ -915,6 +933,12 @@ impl AvdBackendState {
         self.completed.retain(|frame| frame.stream_id != stream_id);
         Ok(())
     }
+
+    fn has_pending_for_stream(&self, stream_id: u32) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.stream_id == stream_id)
+    }
 }
 
 struct AppleAvdVideoBackend {
@@ -946,7 +970,7 @@ impl AppleAvdVideoBackend {
 
         if status != front.status_before && (status & H264_STATUS_ERROR_MASK) != 0 {
             let _ = state.pending.pop_front();
-            avd.trace.push(AvdTraceKind::Fault, status as u64, 0);
+            avd.recover_h264_engine(status as u64);
             return Err("apple-avd: H.264 engine reported an error");
         }
 
@@ -994,7 +1018,16 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
-        self.state.lock().destroy_session(stream_id)
+        let had_pending = {
+            let mut state = self.state.lock();
+            let had_pending = state.has_pending_for_stream(stream_id);
+            state.destroy_session(stream_id)?;
+            had_pending
+        };
+        if had_pending {
+            self.avd()?.lock().recover_h264_engine(stream_id as u64);
+        }
+        Ok(())
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
