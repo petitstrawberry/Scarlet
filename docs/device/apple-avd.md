@@ -64,9 +64,10 @@ The branch currently provides:
 - `drivers/video/apple-avd`: an Apple platform driver that probes AVD MMIO,
   resolves the DART-backed DMA context, embeds and starts the Rust CM3 firmware,
   initializes the H.264 engine MMIO defaults, DART-maps input/output/workspace
-  buffers, generates a first-pass AVD H.264 instruction stream, records
-  firmware/mailbox trace events, registers a Scarlet video backend, and exposes
-  a `/dev/vvideo0` hardware frontend.
+  buffers, keeps decoded reference frames in the AVD workspace, generates a
+  first-pass AVD H.264 instruction stream, records firmware/mailbox trace
+  events, registers a Scarlet video backend, and exposes a `/dev/vvideo0`
+  hardware frontend.
 - `/dev/avd0`: a text debug device for the first registered AVD instance. Write
   `info`, `fw-ping`, `dart-test`, `decode-one`, `poll-decode`, `trace`, or
   `clear-trace`, then read the device to fetch the report.
@@ -76,7 +77,9 @@ The branch currently provides:
 The `/dev/vvideo0` AVD frontend implements the existing mmap/ioctl entrypoints
 and submits H.264 Annex B access units through the Apple AVD backend. The first
 frontend parses SPS/slice metadata, supports progressive 8-bit 4:2:0 H.264, and
-expects one pending decode at a time while reference tracking is brought up.
+expects one pending decode at a time. Reference pictures are retained in four
+workspace slots and copied back into the current single-buffer NV12 userspace
+layout on completion.
 
 Useful build checks:
 
