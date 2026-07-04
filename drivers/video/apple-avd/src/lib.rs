@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod debug;
+mod debug_device;
 mod firmware;
 pub mod h264;
 mod vvideo;
@@ -267,11 +268,15 @@ impl AvdRegisters {
     }
 }
 
+/// Snapshot of Apple AVD debug status registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AvdStatusSnapshot {
-    status: u32,
-    irq_status: u32,
-    mailbox: u32,
+pub struct AvdStatusSnapshot {
+    /// Top-level AVD status register.
+    pub status: u32,
+    /// Top-level AVD IRQ status register.
+    pub irq_status: u32,
+    /// Raw CM3-to-AP mailbox value.
+    pub mailbox: u32,
 }
 
 struct AvdFirmwareAllocation {
@@ -347,6 +352,15 @@ impl AppleAvd {
         self.size
     }
 
+    /// Return the detected Apple Silicon SoC name.
+    ///
+    /// # Returns
+    ///
+    /// Static SoC identifier used by driver diagnostics.
+    pub fn soc_name(&self) -> &'static str {
+        self.soc.name()
+    }
+
     /// Return the interrupt line discovered for the device.
     ///
     /// # Returns
@@ -377,6 +391,51 @@ impl AppleAvd {
     /// Clear retained debug trace events.
     pub fn clear_trace(&mut self) {
         self.trace.clear();
+    }
+
+    /// Return the current firmware lifecycle state.
+    ///
+    /// # Returns
+    ///
+    /// Static state name for debug output.
+    pub fn firmware_state_name(&self) -> &'static str {
+        match self.firmware_state {
+            AvdFirmwareState::Missing => "missing",
+            AvdFirmwareState::Staged => "staged",
+            AvdFirmwareState::Running => "running",
+            AvdFirmwareState::Faulted => "faulted",
+        }
+    }
+
+    /// Return the device-visible address of the staged firmware image.
+    ///
+    /// # Returns
+    ///
+    /// Firmware DMA address when an image is currently mapped.
+    pub fn firmware_dma_addr(&self) -> Option<u64> {
+        self.firmware_allocation
+            .as_ref()
+            .map(|allocation| allocation.mapping.dma_addr())
+    }
+
+    /// Return the staged firmware image size.
+    ///
+    /// # Returns
+    ///
+    /// Firmware image byte length when an image is currently mapped.
+    pub fn firmware_image_size(&self) -> Option<usize> {
+        self.firmware_allocation
+            .as_ref()
+            .map(|allocation| allocation.size)
+    }
+
+    /// Return a snapshot of the top-level debug registers.
+    ///
+    /// # Returns
+    ///
+    /// Status, IRQ status, and firmware mailbox values captured together.
+    pub fn debug_snapshot(&self) -> AvdStatusSnapshot {
+        self.snapshot()
     }
 
     /// Initialize the H.264 engine registers with the v3-class defaults.
@@ -1152,7 +1211,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
-    vvideo::register_avd_vvideo_device(backend);
+    vvideo::register_avd_vvideo_device(Arc::clone(&backend));
+    debug_device::register_avd_debug_device(id, Arc::clone(&backend));
 
     early_println!(
         "[apple-avd] registered {} id={} backend={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",

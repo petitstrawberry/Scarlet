@@ -67,6 +67,9 @@ The branch currently provides:
   buffers, generates a first-pass AVD H.264 instruction stream, records
   firmware/mailbox trace events, registers a Scarlet video backend, and exposes
   a `/dev/vvideo0` hardware frontend.
+- `/dev/avd0`: a text debug device for the first registered AVD instance. Write
+  `info`, `fw-ping`, `dart-test`, `decode-one`, `poll-decode`, `trace`, or
+  `clear-trace`, then read the device to fetch the report.
 - `kernel::device::video`: shared `/dev/vvideo*` ABI definitions plus a decode
   backend registry used by AVD and future non-VirtIO backends.
 
@@ -97,13 +100,17 @@ cargo check --manifest-path drivers/video/apple-avd/Cargo.toml
 
 The driver should grow these commands or equivalent kernel debug hooks:
 
-```text
-avd-info
-avd-fw-ping
-avd-dart-test
-avd-decode-one
-avd-trace
-```
+The `/dev/avd0` debug device currently provides the equivalent commands:
+
+| Write command | Purpose |
+| --- | --- |
+| `info` | Print ADT/MMIO/IRQ, firmware state, current status registers, and backend capabilities. |
+| `fw-ping` | Poll the firmware mailbox and report before/after status snapshots. |
+| `dart-test` | Allocate a 16 KiB-aligned buffer, map it through the AVD DART context, clean/invalidate cache, and report the IOVA. |
+| `decode-one` | Submit the built-in 16x16 H.264 Annex B IDR access unit through the same AVD backend used by `/dev/vvideo0`. |
+| `poll-decode` | Poll completion for a previously submitted `decode-one` request. |
+| `trace` | Dump retained MMIO/mailbox/decode trace events. |
+| `clear-trace` | Clear retained trace events. |
 
 The first smoke media target is `/root/media/bad_apple.h264`, after a smaller
 one-frame test asset passes.
