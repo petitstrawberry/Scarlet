@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod debug;
+#[cfg(feature = "debug-device")]
 mod debug_device;
 mod firmware;
 pub mod h264;
@@ -1362,6 +1363,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
     let video_name = register_video_decode_device(Arc::clone(&backend));
+    #[cfg(feature = "debug-device")]
     debug_device::register_avd_debug_device(id, Arc::clone(&backend));
 
     early_println!(
