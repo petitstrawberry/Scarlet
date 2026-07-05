@@ -450,6 +450,24 @@ impl AppleAvd {
         self.trace.push(AvdTraceKind::Firmware, 0x1104_0000, 0);
     }
 
+    /// Ensure the bundled firmware is running before a hardware decode submit.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the firmware is already running or was started
+    /// successfully.
+    pub fn ensure_firmware_running(&mut self) -> Result<(), &'static str> {
+        if self.firmware_state == AvdFirmwareState::Running {
+            return Ok(());
+        }
+        if self.firmware_state == AvdFirmwareState::Faulted {
+            return Err("apple-avd: firmware is faulted");
+        }
+
+        self.init_h264_engine();
+        self.boot_firmware(DEFAULT_AVD_FIRMWARE)
+    }
+
     /// Stage and start the bundled CM3 firmware image.
     ///
     /// # Arguments
@@ -645,7 +663,6 @@ impl AppleAvd {
     }
 
     fn start_firmware(&mut self) {
-        self.registers.enable_irqs();
         self.registers.run_cm3();
         self.firmware_state = AvdFirmwareState::Running;
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
@@ -1100,6 +1117,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         if !state.pending.is_empty() {
             return Err("apple-avd: decode already pending");
         }
+        avd.ensure_firmware_running()?;
 
         let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
         let input_vaddr = request.input_vaddr;
@@ -1361,8 +1379,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let snapshot = avd.snapshot();
     avd.trace
         .push(AvdTraceKind::Probe, paddr as u64, size as u64);
-    avd.init_h264_engine();
-    avd.boot_firmware(DEFAULT_AVD_FIRMWARE)?;
+    avd.registers.mask_irqs();
+    avd.registers.hold_cm3_in_reset();
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
