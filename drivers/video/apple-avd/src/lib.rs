@@ -24,10 +24,11 @@ use scarlet::{
     arch::{self, mmio},
     device::{
         iommu::{DmaContext, DmaMapping, IommuDomainConfig, IommuDomainType, IommuMapFlags},
-        manager::{DeviceManager, DriverPriority},
+        manager::{is_probe_defer, probe_defer, DeviceManager, DriverPriority},
         platform::{
             resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
+        reset::ResetHandle,
         video::{
             register_video_backend, register_video_decode_device, ScarletVideoDequeuedFrame,
             VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
@@ -48,10 +49,14 @@ const AVD_DEFAULT_IOVA_SIZE: u64 = 0x4000_0000;
 const DEFAULT_AVD_FIRMWARE: &[u8] = include_bytes!(env!("SCARLET_APPLE_AVD_FW_BIN"));
 
 const REG_TOP_GATE: usize = 0x1000000;
+const REG_DART_TUNING0: usize = 0x1010060;
+const REG_DART_TUNING1: usize = 0x1010068;
+const REG_DART_TUNING2: usize = 0x101006c;
 const REG_PIODMA_CONFIG: usize = 0x1070000;
 const REG_PIODMA_BASE: usize = 0x1070024;
 const REG_MCPU_CODE: usize = 0x1080000;
 const REG_MCPU_SRAM: usize = 0x108c000;
+const REG_DECODER_CONTROL_BASE: usize = 0x1100000;
 const REG_MCPU_CONTROL: usize = 0x1098008;
 const REG_MCPU_IRQ_ENABLE0: usize = 0x1098010;
 const REG_MCPU_IRQ_ENABLE1: usize = 0x1098048;
@@ -111,8 +116,8 @@ const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
 const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DMA_GRANULE: usize = 0x4000;
-const AVD_MCPU_CODE_BYTES: usize = 0xc000;
-const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
+const AVD_MCPU_CODE_BYTES: usize = 0x10000;
+const AVD_MCPU_SRAM_BYTES: usize = 0x10000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
@@ -212,6 +217,181 @@ const AVD_DMA_STAGE0: &[(usize, u32)] = &[
     (0x110cbc4, 0x0400_0040),
     (0x110cc04, 0x03c0_0040),
     (0x110cc44, 0x0440_00c0),
+];
+
+const AVD_PMGR_BOOT_WRITES: &[(usize, u32)] = &[
+    (0x000, 0x11),
+    (0x00c, 0x0d),
+    (0x010, 0x0c),
+    (0x014, 0x01),
+    (0x018, 0x01),
+    (0x01c, 0x03),
+    (0x020, 0x03),
+    (0x024, 0x03),
+    (0x028, 0x03),
+    (0x02c, 0x03),
+    (0x108, 0x11),
+    (0x10c, 0x0d),
+    (0x110, 0x0c),
+    (0x114, 0x01),
+    (0x118, 0x01),
+    (0x11c, 0x03),
+    (0x120, 0x03),
+    (0x124, 0x03),
+    (0x128, 0x03),
+    (0x12c, 0x03),
+    (0x400, 0xc0f1_0010),
+    (0xa00, 0x01ff_ffff),
+];
+
+const AVD_CTRL_BOOT_TUNABLES: &[(usize, u32)] = &[
+    (0x0008, 0x8000_0000),
+    (0x1000, 0x8000_0000),
+    (0x1100, 0x8000_0000),
+    (0x1200, 0x8000_0000),
+    (0x1300, 0x8000_0000),
+    (0x1400, 0x8000_0000),
+    (0x1500, 0x8000_0000),
+    (0x1600, 0x8000_0000),
+    (0x1700, 0x8000_0000),
+    (0x1800, 0x8000_0000),
+    (0x4000, 0x8000_0000),
+    (0x4100, 0x8000_0000),
+    (0x4200, 0x8000_0000),
+    (0x4300, 0x8000_0000),
+    (0x4400, 0x8000_0000),
+    (0x4500, 0x8000_0000),
+    (0x4600, 0x8000_0000),
+    (0xc000, 0x0000_0001),
+    (0xc080, 0x8001_07ff),
+    (0xc084, 0x0000_0028),
+    (0xc0c0, 0x8001_07ff),
+    (0xc0c4, 0x0028_0028),
+    (0xc100, 0x8001_07ff),
+    (0xc104, 0x0050_0028),
+    (0xc140, 0x8001_07ff),
+    (0xc144, 0x0078_0028),
+    (0xc180, 0x8001_07ff),
+    (0xc184, 0x0052_0028),
+    (0xc1c0, 0x8001_07ff),
+    (0xc1c4, 0x007a_0028),
+    (0xc200, 0x8001_07ff),
+    (0xc204, 0x00a2_0028),
+    (0xc240, 0x8001_07ff),
+    (0xc244, 0x00ca_0028),
+    (0xc280, 0x8001_07ff),
+    (0xc284, 0x00a0_0020),
+    (0xc2c0, 0x8001_07ff),
+    (0xc2c4, 0x00c0_0020),
+    (0xc300, 0x8001_07ff),
+    (0xc304, 0x00e0_0020),
+    (0xc340, 0x8001_07ff),
+    (0xc344, 0x0100_0020),
+    (0xc380, 0x8001_07ff),
+    (0xc384, 0x0000_000a),
+    (0xc3c0, 0x8001_07ff),
+    (0xc3c4, 0x000a_000a),
+    (0xc400, 0x8001_07ff),
+    (0xc404, 0x0014_000a),
+    (0xc440, 0x8001_07ff),
+    (0xc444, 0x001e_000a),
+    (0xc480, 0x8001_07ff),
+    (0xc484, 0x0120_000c),
+    (0xc4c0, 0x8001_07ff),
+    (0xc4c4, 0x012c_000c),
+    (0xc500, 0x8001_07ff),
+    (0xc504, 0x0138_000c),
+    (0xc540, 0x8001_07ff),
+    (0xc544, 0x0144_000c),
+    (0xc580, 0x8001_07ff),
+    (0xc584, 0x00f2_0020),
+    (0xc5c0, 0x8001_07ff),
+    (0xc5c4, 0x0112_0020),
+    (0xc600, 0x8001_07ff),
+    (0xc604, 0x0132_0020),
+    (0xc640, 0x8001_07ff),
+    (0xc644, 0x0152_0020),
+    (0xc680, 0x8001_07ff),
+    (0xc684, 0x0150_0018),
+    (0xc6c0, 0x8001_07ff),
+    (0xc6c4, 0x0028_000a),
+    (0xc700, 0x8001_07ff),
+    (0xc704, 0x0168_000e),
+    (0xc740, 0x8001_07ff),
+    (0xc744, 0x0032_000a),
+    (0xc780, 0x8001_07ff),
+    (0xc784, 0x0176_000a),
+    (0xc7c0, 0x8001_07ff),
+    (0xc7c4, 0x003c_000c),
+    (0xc800, 0x8001_07ff),
+    (0xc804, 0x0180_0012),
+    (0xc840, 0x8001_07ff),
+    (0xc844, 0x0048_000a),
+    (0xc880, 0x8001_07ff),
+    (0xc884, 0x0192_000a),
+    (0xc8c0, 0x8001_07ff),
+    (0xc8c4, 0x0172_0018),
+    (0xc900, 0x8001_13ff),
+    (0xc904, 0x019c_011c),
+    (0xc940, 0x8001_13ff),
+    (0xc944, 0x02b8_011c),
+    (0xc980, 0x8001_13ff),
+    (0xc984, 0x03d4_011c),
+    (0xc9c0, 0x8001_13ff),
+    (0xc9c4, 0x04f0_011c),
+    (0xe000, 0x0000_0001),
+    (0xe080, 0x8002_07ff),
+    (0xe084, 0x0000_001c),
+    (0xe0c0, 0x8002_07ff),
+    (0xe0c4, 0x0000_002e),
+    (0xe100, 0x8002_07ff),
+    (0xe104, 0x001c_0054),
+    (0xe140, 0x8002_07ff),
+    (0xe144, 0x002e_009e),
+    (0xe180, 0x8002_07ff),
+    (0xe184, 0x0070_0016),
+    (0xe1c0, 0x8002_07ff),
+    (0xe1c4, 0x00cc_0022),
+    (0xe200, 0x8002_07ff),
+    (0xe204, 0x0086_0020),
+    (0xe240, 0x8002_07ff),
+    (0xe244, 0x00ee_0020),
+    (0xe280, 0x8002_07ff),
+    (0xe284, 0x00a6_000c),
+    (0xe2c0, 0x8002_07ff),
+    (0xe2c4, 0x010e_000c),
+    (0xe300, 0x8002_3fff),
+    (0xe304, 0x00c0_00cc),
+    (0xe340, 0x8002_07ff),
+    (0xe344, 0x00b6_000a),
+    (0xe380, 0x8002_07ff),
+    (0xe384, 0x011a_000a),
+    (0xe3c0, 0x8002_07ff),
+    (0xe3c4, 0x018c_0012),
+    (0xe400, 0x8002_07ff),
+    (0xe404, 0x0124_0020),
+    (0xe440, 0x8002_07ff),
+    (0xe444, 0x019e_0068),
+    (0xe480, 0x8002_07ff),
+    (0xe484, 0x0144_0060),
+    (0xe4c0, 0x8003_4072),
+    (0xe4c8, 0x021e_009e),
+    (0xe4cc, 0x0206_000c),
+    (0xe500, 0x8005_6072),
+    (0xe508, 0x02bc_009e),
+    (0xe50c, 0x0212_000c),
+    (0xe540, 0x8002_07ff),
+    (0xe544, 0x00b2_0004),
+    (0xe800, 0x0000_0001),
+    (0xe880, 0x8002_07ff),
+    (0xe884, 0x0000_0016),
+    (0xe8c0, 0x8002_07ff),
+    (0xe8c4, 0x0000_0022),
+    (0xe900, 0x8002_07ff),
+    (0xe904, 0x0016_0022),
+    (0xe940, 0x8002_07ff),
+    (0xe944, 0x0022_003a),
+    (0xe980, 0x8077_0003),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,9 +496,12 @@ impl AvdRegisters {
     }
 
     fn init_hardware(&self) {
+        self.init_power_regs();
         self.write32(REG_TOP_GATE, 0xfff);
+        self.init_dart_tuning();
         self.clear_window(REG_MCPU_CODE, AVD_MCPU_CODE_BYTES);
         self.clear_window(REG_MCPU_SRAM, AVD_MCPU_SRAM_BYTES);
+        self.init_ctrl_tunables();
         self.init_wrapper();
         self.init_dma_stage0();
     }
@@ -405,7 +588,18 @@ impl AvdRegisters {
 
     fn init_wrapper(&self) {
         self.write32(REG_WRAP_IDLE, 1);
-        self.write32(REG_WRAP_INIT, 1);
+        self.write32(REG_WRAP_INIT, 0);
+        self.write32(REG_DECODER_CONTROL_BASE + 0x14c, 0x14);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe4d0, 0);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe4d4, 0);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe510, 0);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe514, 0);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe308, u32::MAX);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xe300, 0x8002_3fff);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xc900, 0x8001_13ff);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xc940, 0x8001_13ff);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xc980, 0x8001_13ff);
+        self.write32(REG_DECODER_CONTROL_BASE + 0xc9c0, 0x8001_13ff);
         self.write32(REG_PIODMA_CONFIG, 0);
         self.write32(REG_H264_STATUS_MASK, 0x3);
         self.write32(REG_AVD_DMA_IRQ_CLEAR0, u32::MAX);
@@ -415,6 +609,24 @@ impl AvdRegisters {
         self.write32(REG_AVD_DMA_IRQ_CLEAR4, u32::MAX);
         self.write32(REG_PIODMA_BASE, 0x26907000);
         self.write32(REG_WRAP_IDLE, 0);
+    }
+
+    fn init_power_regs(&self) {
+        for (offset, value) in AVD_PMGR_BOOT_WRITES.iter().copied() {
+            self.write32(offset, value);
+        }
+    }
+
+    fn init_dart_tuning(&self) {
+        self.write32(REG_DART_TUNING0, 0x8001_6100);
+        self.write32(REG_DART_TUNING1, 0x000f_0f0f);
+        self.write32(REG_DART_TUNING2, 0x0008_0808);
+    }
+
+    fn init_ctrl_tunables(&self) {
+        for (offset, value) in AVD_CTRL_BOOT_TUNABLES.iter().copied() {
+            self.write32(REG_DECODER_CONTROL_BASE + offset, value);
+        }
     }
 
     fn init_dma_stage0(&self) {
@@ -474,6 +686,7 @@ pub struct AppleAvd {
     irq: Option<u32>,
     registers: AvdRegisters,
     dma: DmaContext,
+    reset: Option<ResetHandle>,
     mailbox: AvdFirmwareMailbox,
     trace: AvdTraceLog,
     firmware_state: AvdFirmwareState,
@@ -489,6 +702,7 @@ impl AppleAvd {
         irq: Option<u32>,
         registers: AvdRegisters,
         dma: DmaContext,
+        reset: Option<ResetHandle>,
     ) -> Self {
         Self {
             name,
@@ -498,6 +712,7 @@ impl AppleAvd {
             irq,
             registers,
             dma,
+            reset,
             mailbox: AvdFirmwareMailbox::new(),
             trace: AvdTraceLog::new(AVD_TRACE_CAPACITY),
             firmware_state: AvdFirmwareState::Missing,
@@ -794,6 +1009,7 @@ impl AppleAvd {
     }
 
     fn prepare_for_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
+        self.reset_hardware()?;
         self.registers.init_hardware();
         self.registers.hold_cm3_in_reset();
         self.registers.stage_firmware_image(image)?;
@@ -811,6 +1027,17 @@ impl AppleAvd {
         self.registers.enable_irqs();
         self.registers.run_cm3();
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
+    }
+
+    fn reset_hardware(&mut self) -> Result<(), &'static str> {
+        let Some(reset) = &self.reset else {
+            return Ok(());
+        };
+        reset.reset()?;
+        time::udelay(10);
+        self.firmware_state = AvdFirmwareState::Missing;
+        self.trace.push(AvdTraceKind::Firmware, 0, 0);
+        Ok(())
     }
 
     fn mark_firmware_faulted(&mut self) {
@@ -1524,6 +1751,18 @@ fn first_irq(device: &PlatformDeviceInfo) -> Option<u32> {
         .map(|resource| resource.start as u32)
 }
 
+fn resolve_avd_reset(device: &PlatformDeviceInfo) -> Result<Option<ResetHandle>, &'static str> {
+    match DeviceManager::get_manager().resolve_reset_by_index(device, 0) {
+        Ok(reset) => Ok(Some(reset)),
+        Err(e) if is_probe_defer(e) => probe_defer(),
+        Err(e @ ("reset: resets missing" | "reset: index out of range")) => {
+            early_println!("[apple-avd] reset unavailable: {}", e);
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (paddr, size) = first_mem_resource(device).ok_or("apple-avd: missing MMIO resource")?;
     if size == 0 {
@@ -1542,6 +1781,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let soc = AppleAvdSoc::from_device(device);
     let irq = first_irq(device);
+    let reset = resolve_avd_reset(device)?;
     let mut avd = AppleAvd::new(
         device.name(),
         soc,
@@ -1550,6 +1790,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         irq,
         AvdRegisters::new(vaddr),
         dma,
+        reset,
     );
     let snapshot = avd.snapshot();
     avd.trace
