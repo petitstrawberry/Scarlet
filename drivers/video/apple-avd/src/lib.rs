@@ -37,9 +37,9 @@ use scarlet::{
         },
         DeviceInfo,
     },
-    early_println,
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
+    println,
     sync::Mutex,
     time, vm,
 };
@@ -530,7 +530,7 @@ impl AvdRegisters {
     }
 
     fn log_boot_state(&self, label: &str) {
-        early_println!(
+        println!(
             "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
             label,
             self.read32(REG_MCPU_CONTROL),
@@ -556,7 +556,7 @@ impl AvdRegisters {
     fn log_code_window(&self, label: &str, image: &[u8]) {
         let image_sp = read_image_word(image, 0);
         let image_reset = read_image_word(image, 4);
-        early_println!(
+        println!(
             "[apple-avd] boot {} image_len={} image_vec=[{:#x},{:#x}] code_vec=[{:#x},{:#x},{:#x},{:#x}] sram0={:#x}",
             label,
             image.len(),
@@ -906,7 +906,7 @@ impl AppleAvd {
     /// requested.
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         validate_firmware_image(image)?;
-        early_println!(
+        println!(
             "[apple-avd] boot begin firmware_len={} reset_available={}",
             image.len(),
             self.reset.is_some()
@@ -1811,7 +1811,7 @@ fn resolve_avd_reset(device: &PlatformDeviceInfo) -> Result<Option<ResetHandle>,
         Ok(reset) => Ok(Some(reset)),
         Err(e) if is_probe_defer(e) => probe_defer(),
         Err(e @ ("reset: resets missing" | "reset: index out of range")) => {
-            early_println!("[apple-avd] reset unavailable: {}", e);
+            println!("[apple-avd] reset unavailable: {}", e);
             Ok(None)
         }
         Err(e) => Err(e),
@@ -1853,6 +1853,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .push(AvdTraceKind::Probe, paddr as u64, size as u64);
     avd.registers.mask_irqs();
     avd.registers.hold_cm3_in_reset();
+    match avd.boot_firmware(DEFAULT_AVD_FIRMWARE) {
+        Ok(()) => println!("[apple-avd] probe firmware boot succeeded"),
+        Err(e) => println!("[apple-avd] probe firmware boot failed: {}", e),
+    }
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
     let backend_id = register_video_backend(Arc::clone(&backend));
@@ -1860,7 +1864,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     #[cfg(feature = "debug-device")]
     debug_device::register_avd_debug_device(id, Arc::clone(&backend));
 
-    early_println!(
+    println!(
         "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} reset={} status={:#x} irq_status={:#x}",
         device.name(),
         id,
