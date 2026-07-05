@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const PT_LOAD: u32 = 1;
+const MAX_RAW_FIRMWARE_SIZE: usize = 256 * 1024;
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
@@ -45,14 +48,19 @@ fn main() {
 
 fn build_firmware(firmware_dir: &Path, firmware_feature: &str) {
     let mut command = Command::new("cargo");
-    command.current_dir(firmware_dir).args([
-        "build",
-        "-Zbuild-std=core",
-        "--release",
-        "--no-default-features",
-        "--features",
-        firmware_feature,
-    ]);
+    command
+        .current_dir(firmware_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env("RUSTFLAGS", "-C link-arg=-Tmemory.x -C link-arg=--nmagic")
+        .args([
+            "build",
+            "-Zbuild-std=core",
+            "--release",
+            "--no-default-features",
+            "--features",
+            firmware_feature,
+        ]);
     let status = command
         .status()
         .expect("failed to spawn cargo for apple-avd firmware");
@@ -73,44 +81,83 @@ fn elf_to_raw(elf_path: &Path, raw_path: &Path) {
     let phoff = read_u32(&elf, 28) as usize;
     let phentsize = read_u16(&elf, 42) as usize;
     let phnum = read_u16(&elf, 44) as usize;
-    let mut min_vaddr = u32::MAX;
-    let mut max_vaddr = 0u32;
+    let mut min_paddr = u32::MAX;
+    let mut max_paddr = 0u32;
 
     for index in 0..phnum {
         let off = phoff + index * phentsize;
-        if read_u32(&elf, off) != 1 {
+        if read_u32(&elf, off) != PT_LOAD {
             continue;
         }
-        let vaddr = read_u32(&elf, off + 8);
-        let memsz = read_u32(&elf, off + 20);
-        if memsz == 0 {
+        let paddr = read_u32(&elf, off + 12);
+        let filesz = read_u32(&elf, off + 16);
+        if filesz == 0 {
             continue;
         }
-        min_vaddr = min_vaddr.min(vaddr);
-        max_vaddr = max_vaddr.max(vaddr.checked_add(memsz).expect("firmware memsz overflow"));
+        min_paddr = min_paddr.min(paddr);
+        max_paddr = max_paddr.max(
+            paddr
+                .checked_add(filesz)
+                .expect("firmware load segment overflow"),
+        );
     }
 
-    if min_vaddr == u32::MAX || max_vaddr <= min_vaddr {
+    if min_paddr == u32::MAX || max_paddr <= min_paddr {
         panic!("apple-avd firmware ELF has no loadable segments");
     }
 
-    let mut raw = vec![0u8; (max_vaddr - min_vaddr) as usize];
+    let raw_len = (max_paddr - min_paddr) as usize;
+    if raw_len > MAX_RAW_FIRMWARE_SIZE {
+        panic!("apple-avd raw firmware image is too large: {raw_len} bytes");
+    }
+
+    let mut raw = vec![0u8; raw_len];
     for index in 0..phnum {
         let off = phoff + index * phentsize;
-        if read_u32(&elf, off) != 1 {
+        if read_u32(&elf, off) != PT_LOAD {
             continue;
         }
         let file_off = read_u32(&elf, off + 4) as usize;
-        let vaddr = read_u32(&elf, off + 8);
+        let paddr = read_u32(&elf, off + 12);
         let filesz = read_u32(&elf, off + 16) as usize;
         if filesz == 0 {
             continue;
         }
-        let dst_off = (vaddr - min_vaddr) as usize;
-        raw[dst_off..dst_off + filesz].copy_from_slice(&elf[file_off..file_off + filesz]);
+        let file_end = file_off
+            .checked_add(filesz)
+            .expect("firmware file segment overflow");
+        if file_end > elf.len() {
+            panic!("apple-avd firmware segment extends past ELF file");
+        }
+        let dst_off = (paddr - min_paddr) as usize;
+        raw[dst_off..dst_off + filesz].copy_from_slice(&elf[file_off..file_end]);
     }
 
+    validate_raw_firmware(&raw);
     fs::write(raw_path, raw).expect("failed to write apple-avd raw firmware image");
+}
+
+fn validate_raw_firmware(raw: &[u8]) {
+    if raw.len() < 8 {
+        panic!(
+            "apple-avd raw firmware image is too small: {} bytes",
+            raw.len()
+        );
+    }
+    if raw.get(0..4) == Some(b"\x7fELF") {
+        panic!("apple-avd firmware conversion produced an ELF header");
+    }
+
+    let stack_pointer = read_u32(raw, 0);
+    if (stack_pointer & 0xff00_0000) != 0x2000_0000 {
+        panic!("apple-avd firmware has invalid initial stack pointer: 0x{stack_pointer:08x}");
+    }
+
+    let reset_vector = read_u32(raw, 4);
+    let reset_addr = reset_vector & !1;
+    if (reset_vector & 1) == 0 || reset_addr as usize >= raw.len() {
+        panic!("apple-avd firmware has invalid reset vector: 0x{reset_vector:08x}");
+    }
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
