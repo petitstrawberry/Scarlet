@@ -529,6 +529,47 @@ impl AvdRegisters {
         self.write32(REG_MCPU_CM3_ACK, 1);
     }
 
+    fn log_boot_state(&self, label: &str) {
+        early_println!(
+            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
+            label,
+            self.read32(REG_MCPU_CONTROL),
+            self.read32(REG_MCPU_STATUS),
+            self.read32(REG_MCPU_IRQ_ENABLE0),
+            self.read32(REG_MCPU_IRQ_ENABLE1),
+            self.read32(REG_MCPU_AP_ACK),
+            self.read32(REG_MCPU_CM3_ACK),
+            self.read32(REG_MCPU_AP_IRQ_CLEAR),
+            self.read32(REG_MCPU_CM3_IRQ_CLEAR),
+            self.read32(REG_MAILBOX_AP_TO_CM3),
+            self.read32(REG_MAILBOX_CM3_TO_AP),
+            self.read32(REG_WRAP_CONTROL),
+            self.read32(REG_WRAP_IDLE),
+            self.read32(REG_WRAP_INIT),
+            self.read32(REG_TOP_GATE),
+            self.read32(REG_DART_TUNING0),
+            self.read32(REG_DART_TUNING1),
+            self.read32(REG_DART_TUNING2)
+        );
+    }
+
+    fn log_code_window(&self, label: &str, image: &[u8]) {
+        let image_sp = read_image_word(image, 0);
+        let image_reset = read_image_word(image, 4);
+        early_println!(
+            "[apple-avd] boot {} image_len={} image_vec=[{:#x},{:#x}] code_vec=[{:#x},{:#x},{:#x},{:#x}] sram0={:#x}",
+            label,
+            image.len(),
+            image_sp,
+            image_reset,
+            self.read32(REG_MCPU_CODE),
+            self.read32(REG_MCPU_CODE + 4),
+            self.read32(REG_MCPU_CODE + 8),
+            self.read32(REG_MCPU_CODE + 12),
+            self.read32(REG_MCPU_SRAM)
+        );
+    }
+
     fn init_h264_engine(&self) {
         self.write32(REG_H264_COUNTER0, 0x78);
         self.write32(REG_H264_COUNTER1, 0x78);
@@ -865,6 +906,11 @@ impl AppleAvd {
     /// requested.
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         validate_firmware_image(image)?;
+        early_println!(
+            "[apple-avd] boot begin firmware_len={} reset_available={}",
+            image.len(),
+            self.reset.is_some()
+        );
         self.prepare_for_firmware(image)?;
         self.start_firmware();
         self.firmware_image = Some(AvdFirmwareImage { size: image.len() });
@@ -879,6 +925,8 @@ impl AppleAvd {
             }
         }
 
+        self.registers.log_boot_state("ready-timeout");
+        self.registers.log_code_window("ready-timeout", image);
         Err("apple-avd: firmware did not become ready")
     }
 
@@ -1010,10 +1058,15 @@ impl AppleAvd {
 
     fn prepare_for_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         self.reset_hardware()?;
+        self.registers.log_boot_state("before-init");
         self.registers.init_hardware();
+        self.registers.log_boot_state("after-init");
         self.registers.hold_cm3_in_reset();
+        self.registers.log_boot_state("after-hold-reset");
         self.registers.stage_firmware_image(image)?;
+        self.registers.log_code_window("after-stage", image);
         self.registers.clear_recv_mailbox();
+        self.registers.log_boot_state("after-clear-mailbox");
         self.firmware_state = AvdFirmwareState::Staged;
         self.trace.push(
             AvdTraceKind::Firmware,
@@ -1025,7 +1078,9 @@ impl AppleAvd {
 
     fn start_firmware(&mut self) {
         self.registers.enable_irqs();
+        self.registers.log_boot_state("after-enable-irqs");
         self.registers.run_cm3();
+        self.registers.log_boot_state("after-run");
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
     }
 
@@ -1782,6 +1837,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let soc = AppleAvdSoc::from_device(device);
     let irq = first_irq(device);
     let reset = resolve_avd_reset(device)?;
+    let has_reset = reset.is_some();
     let mut avd = AppleAvd::new(
         device.name(),
         soc,
@@ -1805,7 +1861,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     debug_device::register_avd_debug_device(id, Arc::clone(&backend));
 
     early_println!(
-        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} status={:#x} irq_status={:#x}",
+        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} reset={} status={:#x} irq_status={:#x}",
         device.name(),
         id,
         backend_id,
@@ -1814,6 +1870,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         paddr,
         size,
         irq,
+        has_reset,
         snapshot.status,
         snapshot.irq_status
     );
@@ -1856,6 +1913,13 @@ const fn align_up_const(value: usize, align: usize) -> usize {
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn read_image_word(image: &[u8], offset: usize) -> u32 {
+    let Some(bytes) = image.get(offset..offset + 4) else {
+        return 0;
+    };
+    u32::from_le_bytes(bytes.try_into().expect("firmware word bytes"))
 }
 
 fn validate_firmware_image(image: &[u8]) -> Result<(), &'static str> {
