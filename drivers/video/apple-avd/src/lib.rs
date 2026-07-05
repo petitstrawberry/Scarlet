@@ -23,18 +23,18 @@ use h264::{
 use scarlet::{
     arch::{self, mmio},
     device::{
-        DeviceInfo,
         iommu::{DmaContext, DmaMapping, IommuDomainConfig, IommuDomainType, IommuMapFlags},
         manager::{DeviceManager, DriverPriority},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
         },
         video::{
-            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame, VideoBackendCapabilities,
-            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoDecodeBackend,
-            register_video_backend, register_video_decode_device,
+            register_video_backend, register_video_decode_device, ScarletVideoDequeuedFrame,
+            VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
+            VideoDecodeBackend, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
+            SCARLET_VIDEO_FRAME_MAGIC, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
         },
+        DeviceInfo,
     },
     early_println,
     environment::PAGE_SIZE,
@@ -47,16 +47,27 @@ const AVD_DEFAULT_IOVA_BASE: u64 = 0x4000_0000;
 const AVD_DEFAULT_IOVA_SIZE: u64 = 0x4000_0000;
 const DEFAULT_AVD_FIRMWARE: &[u8] = include_bytes!(env!("SCARLET_APPLE_AVD_FW_BIN"));
 
-const REG_STATUS: usize = 0x0000;
-const REG_CONTROL: usize = 0x0004;
-const REG_IRQ_STATUS: usize = 0x0010;
-const REG_IRQ_MASK: usize = 0x0014;
-const REG_FW_BASE_LO: usize = 0x0100;
-const REG_FW_BASE_HI: usize = 0x0104;
-const REG_FW_SIZE: usize = 0x0108;
-const REG_MAILBOX_AP_TO_CM3: usize = 0x0200;
-const REG_MAILBOX_CM3_TO_AP: usize = 0x0204;
+const REG_TOP_GATE: usize = 0x1000000;
+const REG_PIODMA_CONFIG: usize = 0x1070000;
+const REG_PIODMA_BASE: usize = 0x1070024;
+const REG_MCPU_CODE: usize = 0x1080000;
+const REG_MCPU_SRAM: usize = 0x108c000;
+const REG_MCPU_CONTROL: usize = 0x1098008;
+const REG_MCPU_IRQ_ENABLE0: usize = 0x1098010;
+const REG_MCPU_IRQ_ENABLE1: usize = 0x1098048;
+const REG_MCPU_AP_ACK: usize = 0x1098050;
+const REG_MAILBOX_AP_TO_CM3: usize = 0x1098054;
+const REG_MCPU_AP_IRQ_CLEAR: usize = 0x109805c;
+const REG_MAILBOX_CM3_TO_AP: usize = 0x1098064;
+const REG_MCPU_CM3_ACK: usize = 0x1098068;
+const REG_MCPU_CM3_IRQ_CLEAR: usize = 0x1098074;
+const REG_MCPU_IRQ_ARM: usize = 0x109807c;
+const REG_MCPU_IRQ_MASK: usize = 0x1098080;
+const REG_MCPU_STATUS: usize = 0x1098090;
 const REG_H264_INSTRUCTION: usize = 0x1104000;
+const REG_H265_INSTRUCTION: usize = 0x1104004;
+const REG_H264_MODE: usize = 0x110400c;
+const REG_VP9_MODE: usize = 0x1104010;
 const REG_H264_SUBMIT: usize = 0x1104014;
 const REG_H264_COUNTER0: usize = 0x1104018;
 const REG_H264_COUNTER1: usize = 0x110401c;
@@ -65,19 +76,43 @@ const REG_H264_COUNTER3: usize = 0x1104024;
 const REG_H264_COUNTER4: usize = 0x1104028;
 const REG_H264_CONTROL0: usize = 0x1104034;
 const REG_H264_CONTROL1: usize = 0x110403c;
+const REG_H265_CONTROL: usize = 0x1104040;
+const REG_H264_DMA_TRIGGER: usize = 0x1104048;
+const REG_VP9_CONTROL: usize = 0x110404c;
 const REG_H264_TIMEOUT: usize = 0x110405c;
 const REG_H264_STATUS: usize = 0x1104060;
 const REG_H264_STATUS_MASK: usize = 0x1104064;
+const REG_H264_INST_FIFO_BASE: usize = 0x1104068;
+const REG_H264_INST_FIFO_SIZE: usize = 0x1104084;
+const REG_H264_INST_FIFO_READ: usize = 0x11040a0;
+const REG_H264_INST_FIFO_WRITE: usize = 0x11040bc;
+const REG_H264_PIPE_SELECT: usize = 0x11040f4;
+const REG_H264_PIPE_CONTROL: usize = 0x1104110;
 const REG_AVD_DMA_CONFIG_BASE: usize = 0x108ee90;
+const REG_AVD_DMA_BASE: usize = 0x110c000;
+const REG_AVD_DMA_CTRL0: usize = 0x110c010;
+const REG_AVD_DMA_CTRL1: usize = 0x110c018;
+const REG_AVD_DMA_IRQ_CLEAR0: usize = 0x110cc90;
+const REG_AVD_DMA_IRQ_CLEAR1: usize = 0x110cc94;
+const REG_AVD_DMA_IRQ_CLEAR2: usize = 0x110ccd0;
+const REG_AVD_DMA_IRQ_CLEAR3: usize = 0x110ccd4;
+const REG_AVD_DMA_IRQ_CLEAR4: usize = 0x110cac8;
+const REG_WRAP_CONTROL: usize = 0x1400000;
+const REG_WRAP_IDLE: usize = 0x1400014;
+const REG_WRAP_INIT: usize = 0x1400018;
 
-const CONTROL_CM3_RESET: u32 = 1 << 0;
-const CONTROL_CM3_RUN: u32 = 1 << 1;
-const CONTROL_IRQ_ENABLE: u32 = 1 << 8;
+const MCPU_CONTROL_RESET: u32 = 0xe;
+const MCPU_CONTROL_RUN: u32 = 0x1;
 const H264_SUBMIT_START: u32 = 1;
+const H264_SUBMIT_FRAME: u32 = 0x2b000107;
 const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
+const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
+const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DMA_GRANULE: usize = 0x4000;
+const AVD_MCPU_CODE_BYTES: usize = 0xc000;
+const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
@@ -129,6 +164,54 @@ const AVD_H264_DMA_CONFIG: [u32; 30] = [
     0x0007_0007,
     0x0007_0007,
     0x0007_0007,
+];
+
+const AVD_DMA_STAGE0: &[(usize, u32)] = &[
+    (0x110c044, 0x0000_0040),
+    (0x110c084, 0x0040_0040),
+    (0x110c244, 0x0080_0034),
+    (0x110c284, 0x0000_0018),
+    (0x110c2c4, 0x00b4_0020),
+    (0x110c3c4, 0x00d4_0030),
+    (0x110c404, 0x0018_0014),
+    (0x110c444, 0x0104_001c),
+    (0x110c484, 0x002c_0014),
+    (0x110c4c4, 0x0120_0014),
+    (0x110c504, 0x0040_0018),
+    (0x110c544, 0x0134_0024),
+    (0x110c584, 0x0058_0014),
+    (0x110c5c4, 0x0158_0014),
+    (0x110c1c4, 0x006c_0048),
+    (0x110c204, 0x00b4_0048),
+    (0x110c384, 0x00fc_0038),
+    (0x110c604, 0x0134_0030),
+    (0x110c644, 0x016c_00b0),
+    (0x110c684, 0x021c_00b0),
+    (0x110c844, 0x0164_001c),
+    (0x110c884, 0x02cc_0028),
+    (0x110c744, 0x0180_0018),
+    (0x110c784, 0x02f4_0020),
+    (0x110c7c4, 0x0198_0018),
+    (0x110c804, 0x0314_001c),
+    (0x110c8c4, 0x01b0_0024),
+    (0x110c904, 0x0330_0040),
+    (0x110c944, 0x01d4_001c),
+    (0x110c984, 0x0370_002c),
+    (0x110c9c4, 0x01f0_0030),
+    (0x110ca04, 0x039c_003c),
+    (0x110ca44, 0x0220_0014),
+    (0x110ca84, 0x03d8_0014),
+    (0x110cb04, 0x0234_0014),
+    (0x110cb44, 0x03ec_0014),
+    (0x110cac4, 0x0248_0080),
+    (0x110cc8c, 0x02c8_0014),
+    (0x110cccc, 0x02dc_0014),
+    (0x110cc88, 0x02f0_0060),
+    (0x110ccc8, 0x0350_0054),
+    (0x110cb84, 0x03a4_001c),
+    (0x110cbc4, 0x0400_0040),
+    (0x110cc04, 0x03c0_0040),
+    (0x110cc44, 0x0440_00c0),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,33 +281,56 @@ impl AvdRegisters {
     }
 
     fn status(&self) -> u32 {
-        self.read32(REG_STATUS)
+        self.read32(REG_MCPU_STATUS)
     }
 
     fn irq_status(&self) -> u32 {
-        self.read32(REG_IRQ_STATUS)
+        self.read32(REG_MCPU_IRQ_ENABLE1)
     }
 
     fn mask_irqs(&self) {
-        self.write32(REG_IRQ_MASK, 0);
+        self.write32(REG_MCPU_IRQ_ENABLE0, 0);
+        self.write32(REG_MCPU_IRQ_ENABLE1, 0);
     }
 
     fn enable_irqs(&self) {
-        self.write32(REG_IRQ_MASK, u32::MAX);
+        self.write32(REG_MCPU_IRQ_ENABLE0, 0x2);
+        self.write32(REG_MCPU_IRQ_ENABLE1, 0x8);
     }
 
     fn hold_cm3_in_reset(&self) {
-        self.write32(REG_CONTROL, CONTROL_CM3_RESET);
+        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RESET);
+        self.mask_irqs();
     }
 
     fn run_cm3(&self) {
-        self.write32(REG_CONTROL, CONTROL_CM3_RUN | CONTROL_IRQ_ENABLE);
+        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RESET);
+        self.mask_irqs();
+        self.write32(REG_MCPU_AP_ACK, 1);
+        self.write32(REG_MCPU_CM3_ACK, 1);
+        self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
+        self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
+        self.enable_irqs();
+        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RUN);
+        self.write32(REG_WRAP_IDLE, 0);
     }
 
-    fn stage_firmware_window(&self, dma_addr: u64, size: usize) {
-        self.write32(REG_FW_BASE_LO, dma_addr as u32);
-        self.write32(REG_FW_BASE_HI, (dma_addr >> 32) as u32);
-        self.write32(REG_FW_SIZE, size as u32);
+    fn init_hardware(&self) {
+        self.write32(REG_TOP_GATE, 0xfff);
+        self.clear_window(REG_MCPU_CODE, AVD_MCPU_CODE_BYTES);
+        self.clear_window(REG_MCPU_SRAM, AVD_MCPU_SRAM_BYTES);
+        self.init_wrapper();
+        self.init_dma_stage0();
+    }
+
+    fn stage_firmware_image(&self, image: &[u8]) -> Result<(), &'static str> {
+        if image.len() > AVD_MCPU_CODE_BYTES {
+            return Err("apple-avd: firmware image exceeds CM3 code window");
+        }
+        self.clear_window(REG_MCPU_CODE, AVD_MCPU_CODE_BYTES);
+        self.clear_window(REG_MCPU_SRAM, AVD_MCPU_SRAM_BYTES);
+        self.write_buffer(REG_MCPU_CODE, image);
+        Ok(())
     }
 
     fn send_mailbox(&self, value: u32) {
@@ -237,6 +343,7 @@ impl AvdRegisters {
 
     fn clear_recv_mailbox(&self) {
         self.write32(REG_MAILBOX_CM3_TO_AP, 0);
+        self.write32(REG_MCPU_CM3_ACK, 1);
     }
 
     fn init_h264_engine(&self) {
@@ -247,7 +354,13 @@ impl AvdRegisters {
         self.write32(REG_H264_COUNTER4, 0x20);
         self.write32(REG_H264_CONTROL0, 0);
         self.write32(REG_H264_CONTROL1, 0);
-        self.write32(REG_H264_TIMEOUT, 0x0050_0000);
+        self.write32(REG_H265_CONTROL, 0);
+        self.write32(REG_H264_DMA_TRIGGER, 0);
+        self.write32(REG_VP9_CONTROL, 0);
+        self.write32(
+            REG_H264_TIMEOUT,
+            self.read32(REG_H264_TIMEOUT) | 0x0050_0000,
+        );
         self.write32(REG_H264_STATUS_MASK, 0x3);
 
         for (index, value) in AVD_H264_DMA_CONFIG.iter().copied().enumerate() {
@@ -265,12 +378,75 @@ impl AvdRegisters {
 
     fn write_h264_instructions(&self, words: &[u32]) {
         for word in words {
-            self.write32(REG_H264_INSTRUCTION, *word);
+            self.write32(REG_H264_MODE, *word);
         }
     }
 
     fn submit_h264(&self) {
-        self.write32(REG_H264_SUBMIT, H264_SUBMIT_START);
+        self.write32(REG_H264_SUBMIT, H264_SUBMIT_FRAME);
+    }
+
+    fn clear_window(&self, offset: usize, len: usize) {
+        for word_offset in (0..len).step_by(4) {
+            self.write32(offset + word_offset, 0);
+        }
+    }
+
+    fn write_buffer(&self, offset: usize, bytes: &[u8]) {
+        let mut index = 0;
+        while index < bytes.len() {
+            let mut word = [0u8; 4];
+            let end = (index + 4).min(bytes.len());
+            word[..end - index].copy_from_slice(&bytes[index..end]);
+            self.write32(offset + index, u32::from_le_bytes(word));
+            index += 4;
+        }
+    }
+
+    fn init_wrapper(&self) {
+        self.write32(REG_WRAP_IDLE, 1);
+        self.write32(REG_WRAP_INIT, 1);
+        self.write32(REG_PIODMA_CONFIG, 0);
+        self.write32(REG_H264_STATUS_MASK, 0x3);
+        self.write32(REG_AVD_DMA_IRQ_CLEAR0, u32::MAX);
+        self.write32(REG_AVD_DMA_IRQ_CLEAR1, u32::MAX);
+        self.write32(REG_AVD_DMA_IRQ_CLEAR2, u32::MAX);
+        self.write32(REG_AVD_DMA_IRQ_CLEAR3, u32::MAX);
+        self.write32(REG_AVD_DMA_IRQ_CLEAR4, u32::MAX);
+        self.write32(REG_PIODMA_BASE, 0x26907000);
+        self.write32(REG_WRAP_IDLE, 0);
+    }
+
+    fn init_dma_stage0(&self) {
+        self.write32(REG_PIODMA_BASE, 0x26907000);
+        self.write32(REG_WRAP_CONTROL, 0x3);
+        self.write32(REG_H264_INSTRUCTION, 0);
+        self.write32(REG_H264_TIMEOUT, 0);
+        self.write32(REG_H264_PIPE_CONTROL, 0);
+        self.write32(REG_H264_PIPE_SELECT, 0x1555);
+
+        for offset in (0x1100000..=0x110b000).step_by(0x1000) {
+            self.write32(offset, 0xc000_0000);
+        }
+        self.write32(REG_AVD_DMA_CTRL0, 1);
+        self.write32(REG_AVD_DMA_CTRL1, 1);
+        for offset in (0x40..=0xc80).step_by(0x40) {
+            let reg = REG_AVD_DMA_BASE + offset;
+            self.write32(reg, self.read32(reg) | 0xc000_0000);
+        }
+        let last_dma_reg = REG_AVD_DMA_BASE + 0xd00;
+        self.write32(last_dma_reg, self.read32(last_dma_reg) | 0xc000_0003);
+
+        for (offset, value) in AVD_DMA_STAGE0.iter().copied() {
+            self.write32(offset, value);
+        }
+
+        self.write32(
+            REG_H264_TIMEOUT,
+            self.read32(REG_H264_TIMEOUT) | 0x0050_0000,
+        );
+        self.write32(REG_MCPU_IRQ_ARM, 1);
+        self.write32(REG_MCPU_IRQ_MASK, u32::MAX);
     }
 }
 
@@ -285,9 +461,7 @@ pub struct AvdStatusSnapshot {
     pub mailbox: u32,
 }
 
-struct AvdFirmwareAllocation {
-    pages: ContiguousPages,
-    mapping: DmaMapping,
+struct AvdFirmwareImage {
     size: usize,
 }
 
@@ -303,7 +477,7 @@ pub struct AppleAvd {
     mailbox: AvdFirmwareMailbox,
     trace: AvdTraceLog,
     firmware_state: AvdFirmwareState,
-    firmware_allocation: Option<AvdFirmwareAllocation>,
+    firmware_image: Option<AvdFirmwareImage>,
 }
 
 impl AppleAvd {
@@ -327,7 +501,7 @@ impl AppleAvd {
             mailbox: AvdFirmwareMailbox::new(),
             trace: AvdTraceLog::new(AVD_TRACE_CAPACITY),
             firmware_state: AvdFirmwareState::Missing,
-            firmware_allocation: None,
+            firmware_image: None,
         }
     }
 
@@ -419,9 +593,7 @@ impl AppleAvd {
     ///
     /// Firmware DMA address when an image is currently mapped.
     pub fn firmware_dma_addr(&self) -> Option<u64> {
-        self.firmware_allocation
-            .as_ref()
-            .map(|allocation| allocation.mapping.dma_addr())
+        None
     }
 
     /// Return the staged firmware image size.
@@ -430,9 +602,7 @@ impl AppleAvd {
     ///
     /// Firmware image byte length when an image is currently mapped.
     pub fn firmware_image_size(&self) -> Option<usize> {
-        self.firmware_allocation
-            .as_ref()
-            .map(|allocation| allocation.size)
+        self.firmware_image.as_ref().map(|image| image.size)
     }
 
     /// Return a snapshot of the top-level debug registers.
@@ -479,42 +649,10 @@ impl AppleAvd {
     /// `Ok(())` once the image is copied, mapped, and CM3 run has been
     /// requested.
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
-        if image.is_empty() {
-            return Err("apple-avd: empty firmware image");
-        }
-        let granule = self.dma.mapping_granule().max(PAGE_SIZE);
-        let byte_len = align_up(image.len(), granule);
-        let page_count = byte_len.div_ceil(PAGE_SIZE);
-        let pages = ContiguousPages::new_aligned(page_count, granule)
-            .ok_or("apple-avd: firmware allocation failed")?;
-
-        // SAFETY: `pages` owns at least `byte_len` bytes and `image.len()` was
-        // used to size-check the copy. The source firmware image is immutable
-        // static data and cannot overlap with PMM pages.
-        unsafe {
-            core::ptr::copy_nonoverlapping(image.as_ptr(), pages.as_ptr() as *mut u8, image.len());
-        }
-        arch::clean_dcache_to_poc_range(pages.as_vaddr(), byte_len);
-
-        let mapping = self
-            .dma
-            .map_phys_owned(
-                pages.as_paddr(),
-                byte_len,
-                IommuMapFlags::READ
-                    | IommuMapFlags::WRITE
-                    | IommuMapFlags::EXECUTE
-                    | IommuMapFlags::COHERENT,
-            )
-            .map_err(|_| "apple-avd: firmware DMA map failed")?;
-        let dma_addr = mapping.dma_addr();
-        self.prepare_for_firmware(dma_addr, image.len());
+        validate_firmware_image(image)?;
+        self.prepare_for_firmware(image)?;
         self.start_firmware();
-        self.firmware_allocation = Some(AvdFirmwareAllocation {
-            pages,
-            mapping,
-            size: image.len(),
-        });
+        self.firmware_image = Some(AvdFirmwareImage { size: image.len() });
 
         for _ in 0..AVD_FIRMWARE_READY_POLLS {
             match self.poll_firmware_message() {
@@ -655,17 +793,18 @@ impl AppleAvd {
         }
     }
 
-    fn prepare_for_firmware(&mut self, firmware_dma_addr: u64, firmware_size: usize) {
-        self.registers.mask_irqs();
+    fn prepare_for_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
+        self.registers.init_hardware();
         self.registers.hold_cm3_in_reset();
-        self.registers
-            .stage_firmware_window(firmware_dma_addr, firmware_size);
+        self.registers.stage_firmware_image(image)?;
+        self.registers.clear_recv_mailbox();
         self.firmware_state = AvdFirmwareState::Staged;
         self.trace.push(
             AvdTraceKind::Firmware,
-            firmware_dma_addr,
-            firmware_size as u64,
+            REG_MCPU_CODE as u64,
+            image.len() as u64,
         );
+        Ok(())
     }
 
     fn start_firmware(&mut self) {
@@ -1476,4 +1615,29 @@ const fn align_up_const(value: usize, align: usize) -> usize {
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn validate_firmware_image(image: &[u8]) -> Result<(), &'static str> {
+    if image.len() < 8 {
+        return Err("apple-avd: firmware image is too small");
+    }
+    if image.get(0..4) == Some(b"\x7fELF") {
+        return Err("apple-avd: firmware image is still an ELF file");
+    }
+    if image.len() > AVD_MCPU_CODE_BYTES {
+        return Err("apple-avd: firmware image exceeds CM3 code window");
+    }
+
+    let stack_pointer = u32::from_le_bytes(image[0..4].try_into().expect("stack pointer bytes"));
+    if (stack_pointer & 0xff00_0000) != 0x2000_0000 {
+        return Err("apple-avd: firmware image has invalid stack pointer");
+    }
+
+    let reset_vector = u32::from_le_bytes(image[4..8].try_into().expect("reset vector bytes"));
+    let reset_addr = (reset_vector & !1) as usize;
+    if (reset_vector & 1) == 0 || reset_addr >= image.len() {
+        return Err("apple-avd: firmware image has invalid reset vector");
+    }
+
+    Ok(())
 }
