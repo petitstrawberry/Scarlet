@@ -43,7 +43,7 @@ use scarlet::{
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
     sync::Mutex,
-    vm,
+    time, vm,
 };
 
 const AVD_DEFAULT_IOVA_BASE: u64 = 0x4000_0000;
@@ -97,6 +97,8 @@ const AVD_WORKSPACE_SPS_TILE_OFFSET: usize = 0x200000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
 const AVD_REFERENCE_SLOT_COUNT: usize = 4;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
+const AVD_FIRMWARE_READY_POLLS: usize = 500;
+const AVD_FIRMWARE_READY_POLL_US: u64 = 100;
 
 const AVD_H264_DMA_CONFIG: [u32; 30] = [
     0x0402_0002,
@@ -501,7 +503,10 @@ impl AppleAvd {
             .map_phys_owned(
                 pages.as_paddr(),
                 byte_len,
-                IommuMapFlags::READ | IommuMapFlags::EXECUTE | IommuMapFlags::COHERENT,
+                IommuMapFlags::READ
+                    | IommuMapFlags::WRITE
+                    | IommuMapFlags::EXECUTE
+                    | IommuMapFlags::COHERENT,
             )
             .map_err(|_| "apple-avd: firmware DMA map failed")?;
         let dma_addr = mapping.dma_addr();
@@ -513,16 +518,17 @@ impl AppleAvd {
             size: image.len(),
         });
 
-        for _ in 0..1024 {
-            if matches!(
-                self.poll_firmware_message(),
-                Some(AvdFirmwareMessage::Ready)
-            ) {
-                break;
+        for _ in 0..AVD_FIRMWARE_READY_POLLS {
+            match self.poll_firmware_message() {
+                Some(AvdFirmwareMessage::Ready) => return Ok(()),
+                Some(message) if message.is_fault() => return Err("apple-avd: firmware faulted"),
+                _ => {
+                    time::udelay(AVD_FIRMWARE_READY_POLL_US);
+                }
             }
-            core::hint::spin_loop();
         }
-        Ok(())
+
+        Err("apple-avd: firmware did not become ready")
     }
 
     /// Submit a H.264 request to the firmware mailbox.
@@ -663,8 +669,8 @@ impl AppleAvd {
     }
 
     fn start_firmware(&mut self) {
+        self.registers.enable_irqs();
         self.registers.run_cm3();
-        self.firmware_state = AvdFirmwareState::Running;
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
     }
 
