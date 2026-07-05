@@ -847,7 +847,7 @@ struct AvdPendingDecode {
     timestamp: u64,
     layout: h264::AvdFrameLayout,
     payload_len: usize,
-    output_base_paddr: usize,
+    output_base_vaddr: usize,
     output_offset: usize,
     hardware_output_vaddr: usize,
     hardware_output_len: usize,
@@ -857,7 +857,6 @@ struct AvdPendingDecode {
     status_before: u32,
     command_tag: u32,
     input_mapping: DmaMapping,
-    output_mapping: DmaMapping,
 }
 
 struct AvdBackendState {
@@ -1053,9 +1052,9 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             return Err("apple-avd: decode already pending");
         }
 
-        let input_vaddr = vm::phys_to_virt(request.input_dma_addr as usize);
+        let input_vaddr = request.input_vaddr;
         let input_len = request.input_len as usize;
-        // SAFETY: `/dev/videoN` passes a PMM-backed physical address for the
+        // SAFETY: `/dev/videoN` passes a PMM-backed kernel mapping for the
         // mapped input range and keeps the pages alive for the lifetime of the
         // device. `input_len` was checked against the mapped capacity above.
         let input_bytes =
@@ -1084,23 +1083,14 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
         let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
         let input_map_len = align_up(input_len, granule);
-        let output_map_len = align_up(request.output_len as usize, granule);
         let input_mapping = avd
             .dma_context()
             .map_phys_owned(
-                request.input_dma_addr as usize,
+                request.input_paddr,
                 input_map_len,
                 IommuMapFlags::READ | IommuMapFlags::COHERENT,
             )
             .map_err(|_| "apple-avd: input DMA map failed")?;
-        let output_mapping = avd
-            .dma_context()
-            .map_phys_owned(
-                request.output_dma_addr as usize,
-                output_map_len,
-                IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
-            )
-            .map_err(|_| "apple-avd: output DMA map failed")?;
 
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
@@ -1140,16 +1130,12 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         };
 
         arch::clean_dcache_to_poc_range(input_vaddr, input_map_len);
-        arch::clean_invalidate_dcache_to_poc_range(
-            vm::phys_to_virt(request.output_dma_addr as usize),
-            output_map_len,
-        );
 
         let status_before = avd.submit_h264_mmio(&decode_request, &instructions)?;
         let command_tag = avd.submit_h264_request(&decode_request)?;
         avd.trace.push(
             AvdTraceKind::DecodeSubmit,
-            request.input_dma_addr,
+            input_mapping.dma_addr(),
             inst_len as u64,
         );
         state.pending.push_back(AvdPendingDecode {
@@ -1158,7 +1144,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             timestamp: request.timestamp,
             layout,
             payload_len,
-            output_base_paddr: request.output_dma_addr as usize,
+            output_base_vaddr: request.output_vaddr,
             output_offset: request.output_offset as usize,
             hardware_output_vaddr: reference_output.vaddr,
             hardware_output_len: reference_output.len,
@@ -1168,7 +1154,6 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             status_before,
             command_tag,
             input_mapping,
-            output_mapping,
         });
         Ok(())
     }
@@ -1194,7 +1179,7 @@ fn finish_pending_decode(
     state: &mut AvdBackendState,
     pending: AvdPendingDecode,
 ) -> Result<(), &'static str> {
-    let output_vaddr = vm::phys_to_virt(pending.output_base_paddr);
+    let output_vaddr = pending.output_base_vaddr;
     let total_output_len = pending
         .payload_len
         .checked_add(SCARLET_VIDEO_FRAME_HEADER_LEN)
@@ -1259,7 +1244,6 @@ fn finish_pending_decode(
         },
     });
     let _ = pending.input_mapping.dma_addr();
-    let _ = pending.output_mapping.dma_addr();
     let _ = total_output_len;
     Ok(())
 }

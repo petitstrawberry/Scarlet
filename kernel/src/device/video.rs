@@ -91,12 +91,16 @@ pub struct VideoBackendDecodeRequest {
     pub stream_id: u32,
     /// Scarlet coded stream format.
     pub coded_format: u32,
-    /// Device-visible address of the coded input bytes.
-    pub input_dma_addr: u64,
+    /// Physical address backing the coded input bytes.
+    pub input_paddr: usize,
+    /// Kernel virtual address of the coded input bytes.
+    pub input_vaddr: usize,
     /// Byte length of the coded input.
     pub input_len: u32,
-    /// Device-visible address of the output frame buffer.
-    pub output_dma_addr: u64,
+    /// Physical address backing the output frame buffer.
+    pub output_paddr: usize,
+    /// Kernel virtual address of the output frame buffer.
+    pub output_vaddr: usize,
     /// Offset of the output frame buffer inside the frontend mmap.
     pub output_offset: u64,
     /// Byte capacity of the output frame buffer.
@@ -304,14 +308,16 @@ impl ScarletVideoDevice {
         }
 
         self.ensure_mapped_buffer(layout)?;
-        let (input_dma_addr, output_dma_addr) = {
+        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let mapped_buffer = self.mapped_buffer.lock();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("scarlet-video: mmap buffer missing")?;
             (
-                buffer.as_paddr() as u64,
-                (buffer.as_paddr() + layout.output_offset) as u64,
+                buffer.as_paddr(),
+                buffer.as_vaddr(),
+                buffer.as_paddr() + layout.output_offset,
+                buffer.as_vaddr() + layout.output_offset,
             )
         };
         let timestamp = if timestamp == 0 {
@@ -322,9 +328,11 @@ impl ScarletVideoDevice {
         let request = VideoBackendDecodeRequest {
             stream_id,
             coded_format,
-            input_dma_addr,
+            input_paddr,
+            input_vaddr,
             input_len: input_len as u32,
-            output_dma_addr,
+            output_paddr,
+            output_vaddr,
             output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
             timestamp,

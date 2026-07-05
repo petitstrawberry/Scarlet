@@ -551,7 +551,7 @@ impl VirtioVideoDevice {
             timestamp,
             request.input_len,
             PendingDecodeBuffer::ExternalMapped {
-                output_paddr: request.output_dma_addr as usize,
+                output_paddr: request.output_paddr,
             },
             request.output_len as usize,
             request.output_offset as usize,
@@ -571,9 +571,9 @@ impl VirtioVideoDevice {
         request: &VideoBackendDecodeRequest,
     ) -> Result<(), &'static str> {
         let desired = MappedResourceSet {
-            input_paddr: request.input_dma_addr,
+            input_paddr: request.input_paddr as u64,
             input_len: MAPPED_INPUT_BYTES as u32,
-            output_paddr: request.output_dma_addr,
+            output_paddr: request.output_paddr as u64,
             output_len: request.output_len,
         };
         {

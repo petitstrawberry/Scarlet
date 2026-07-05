@@ -225,22 +225,26 @@ impl AppleAvdDebugDevice {
             arch::clean_dcache_to_poc_range(pages.as_vaddr(), SAMPLE_H264_AU.len());
         }
 
-        let (input_dma_addr, output_dma_addr) = {
+        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let buffer_guard = self.decode_buffer.lock();
             let pages = buffer_guard
                 .as_ref()
                 .ok_or("apple-avd-debug: decode buffer missing")?;
             (
-                pages.as_paddr() as u64,
-                (pages.as_paddr() + AVD_MAPPED_INPUT_BYTES) as u64,
+                pages.as_paddr(),
+                pages.as_vaddr(),
+                pages.as_paddr() + AVD_MAPPED_INPUT_BYTES,
+                pages.as_vaddr() + AVD_MAPPED_INPUT_BYTES,
             )
         };
         let request = VideoBackendDecodeRequest {
             stream_id,
             coded_format: SCARLET_VIDEO_FORMAT_H264,
-            input_dma_addr,
+            input_paddr,
+            input_vaddr,
             input_len: SAMPLE_H264_AU.len() as u32,
-            output_dma_addr,
+            output_paddr,
+            output_vaddr,
             output_offset: AVD_MAPPED_INPUT_BYTES as u64,
             output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
             timestamp: SAMPLE_H264_TIMESTAMP,
