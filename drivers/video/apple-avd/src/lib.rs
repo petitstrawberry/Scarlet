@@ -926,10 +926,10 @@ impl AppleAvd {
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         validate_firmware_image(image)?;
         println!(
-            "[apple-avd] boot begin firmware_len={} power_on={} reset_available={}",
+            "[apple-avd] boot begin firmware_len={} power_on={} reset_source={}",
             image.len(),
             self.power.as_ref().map(|power| power.is_on()).unwrap_or(true),
-            self.reset.is_some()
+            self.reset_source()
         );
         self.prepare_for_firmware(image)?;
         self.start_firmware()?;
@@ -1119,14 +1119,37 @@ impl AppleAvd {
             }
         }
 
-        let Some(reset) = &self.reset else {
+        if let Some(reset) = &self.reset {
+            reset.reset()?;
+        } else if let Some(power) = &self.power {
+            println!(
+                "[apple-avd] reset via PMGR domain '{}'",
+                power.label()
+            );
+            power.reset_assert();
+            time::udelay(10);
+            power.reset_deassert();
+            if !power.is_on() {
+                power.enable()?;
+            }
+        } else {
             return Ok(());
-        };
-        reset.reset()?;
+        }
+
         time::udelay(10);
         self.firmware_state = AvdFirmwareState::Missing;
         self.trace.push(AvdTraceKind::Firmware, 0, 0);
         Ok(())
+    }
+
+    fn reset_source(&self) -> &'static str {
+        if self.reset.is_some() {
+            "fdt"
+        } else if self.power.is_some() {
+            "pmgr"
+        } else {
+            "none"
+        }
     }
 
     fn mark_firmware_faulted(&mut self) {
