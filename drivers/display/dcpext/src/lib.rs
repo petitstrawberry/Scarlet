@@ -80,10 +80,10 @@ impl DisplayOutput for DcpextOutput {
         {
             let mut pt_guard = self.page_table.lock();
             if pt_guard.is_none() {
-                let pt = DartPageTable::new()?;
                 let dart = get_dart_by_phandle(self.dart_phandle)
                     .ok_or("apple-dcpext-output: DART not found")?;
-                dart.enable_translation(0, pt.root_paddr(), 2);
+                let pt = DartPageTable::new_for_page_shift(dart.page_shift())?;
+                dart.enable_translation(0, pt.root_paddr(), pt.translation_levels());
                 *pt_guard = Some(pt);
             }
 
