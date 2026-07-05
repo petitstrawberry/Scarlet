@@ -116,8 +116,10 @@ const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
 const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DMA_GRANULE: usize = 0x4000;
-const AVD_MCPU_CODE_BYTES: usize = 0x10000;
-const AVD_MCPU_SRAM_BYTES: usize = 0x10000;
+// m1n1 clears 0xc000 bytes here. Extending the SRAM clear reaches the MCPU
+// mailbox/control block at 0x1098000 and clears the run latch back to zero.
+const AVD_MCPU_CODE_BYTES: usize = 0xc000;
+const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
@@ -1855,7 +1857,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     avd.registers.hold_cm3_in_reset();
     match avd.boot_firmware(DEFAULT_AVD_FIRMWARE) {
         Ok(()) => println!("[apple-avd] probe firmware boot succeeded"),
-        Err(e) => println!("[apple-avd] probe firmware boot failed: {}", e),
+        Err(e) => {
+            println!("[apple-avd] probe firmware boot failed: {}", e);
+            return Err(e);
+        }
     }
     let id = register_avd(avd);
     let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
