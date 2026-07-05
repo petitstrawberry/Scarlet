@@ -177,11 +177,72 @@ def _dtb_to_dts(dtb: pathlib.Path, dts: pathlib.Path) -> str:
     return dts.read_text() + result.stderr
 
 
+def _extract_braced_block(text: str, open_brace: int) -> str | None:
+    if open_brace < 0 or open_brace >= len(text) or text[open_brace] != "{":
+        return None
+    depth = 0
+    for index in range(open_brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace + 1 : index]
+    return None
+
+
+def _node_blocks(text: str, node_name_pattern: str) -> list[str]:
+    blocks = []
+    pattern = re.compile(rf"(?m)^\s*(?:[A-Za-z0-9_]+:\s*)?{node_name_pattern}\s*\{{")
+    for match in pattern.finditer(text):
+        open_brace = text.find("{", match.start(), match.end())
+        block = _extract_braced_block(text, open_brace)
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def _first_iommus_phandle(block: str) -> int | None:
+    match = re.search(r"\biommus\s*=\s*<\s*([^>\s]+)", block)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1), 0)
+    except ValueError:
+        return None
+
+
+def _first_phandle(block: str) -> int | None:
+    match = re.search(r"\b(?:linux,)?phandle\s*=\s*<\s*([^>\s]+)", block)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1), 0)
+    except ValueError:
+        return None
+
+
+def _dts_has_working_avd(text: str) -> bool:
+    avd_iommus = []
+    dart_phandles = set()
+    for block in _node_blocks(text, r"avd@[0-9a-fA-F]+"):
+        if re.search(r"apple,t[0-9]{4}-avd|apple,avd", block):
+            phandle = _first_iommus_phandle(block)
+            if phandle is not None:
+                avd_iommus.append(phandle)
+    for block in _node_blocks(text, r"iommu@[0-9a-fA-F]+"):
+        if re.search(r"apple,t[0-9]{4}-dart|apple,dart", block):
+            phandle = _first_phandle(block)
+            if phandle is not None:
+                dart_phandles.add(phandle)
+    return any(phandle in dart_phandles for phandle in avd_iommus)
+
+
 def dtb_has_avd(dtb: pathlib.Path) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         dts = pathlib.Path(tmp) / "base.dts"
         text = _dtb_to_dts(dtb, dts)
-    return "apple,avd" in text or re.search(r"apple,t[0-9]{4}-avd", text) is not None
+    return _dts_has_working_avd(text)
 
 
 def _next_phandle(dtb: pathlib.Path) -> int:
@@ -222,7 +283,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             #address-cells = <2>;
             #size-cells = <2>;
 
-            iommu@{dart["base"]:x} {{
+            dart_avd: iommu@{dart["base"]:x} {{
                 compatible = "apple,{soc}-dart", "apple,dart";
                 reg = {_reg_cells(dart["base"], dart["size"])};
                 #iommu-cells = <1>;
@@ -233,7 +294,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             avd@{avd["base"]:x} {{
                 compatible = "apple,{soc}-avd", "apple,avd";
                 reg = {_reg_cells(avd["base"], avd["size"])};
-                iommus = <0x{dart_phandle:x} 0x{sid:x}>;
+                iommus = <&dart_avd 0x{sid:x}>;
                 status = "okay";
             }};
         }};
