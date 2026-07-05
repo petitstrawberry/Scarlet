@@ -354,7 +354,7 @@ pub struct PmgrDomain {
 impl PmgrDomain {
     /// Enable (power on) this domain.
     pub fn enable(&self) -> Result<(), &'static str> {
-        self.inner.enable_domain_local(&self.domain)
+        PmgrInstance::enable_domain(&self.domain)
     }
 
     /// Disable (power off) this domain.
@@ -409,6 +409,40 @@ pub fn pmgr_get_domain(pmgr_phandle: u32, domain_index: u32) -> Result<PmgrDomai
     let instance = registry
         .instances
         .get(&pmgr_phandle)
+        .ok_or("pmgr: instance not found")?;
+
+    Ok(PmgrDomain {
+        inner: Arc::clone(instance),
+        domain: Arc::clone(domain),
+    })
+}
+
+/// Look up a power domain by its firmware label.
+///
+/// This is useful for Apple devices whose pwrstate node exists in the PMGR
+/// tree but is not referenced directly by the consumer node's `power-domains`
+/// property.
+///
+/// # Arguments
+///
+/// * `label` - Firmware `label` property from a PMGR pwrstate node.
+///
+/// # Returns
+///
+/// A `PmgrDomain` handle, or an error if no matching domain is registered.
+pub fn pmgr_get_domain_by_label(label: &str) -> Result<PmgrDomain, &'static str> {
+    let guard = get_registry().ok_or("pmgr: registry not initialized")?;
+    let registry = guard.as_ref().unwrap();
+
+    let domain = registry
+        .domain_map
+        .values()
+        .find(|domain| domain.label.as_str() == label)
+        .ok_or("pmgr: domain label not found")?;
+
+    let instance = registry
+        .instances
+        .get(&domain.pmgr_phandle)
         .ok_or("pmgr: instance not found")?;
 
     Ok(PmgrDomain {

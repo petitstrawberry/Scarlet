@@ -20,6 +20,7 @@ use h264::{
     AnnexBAccessUnit, AvdDmaRange, AvdH264InstructionStream, AvdH264Workspace, H264DecodeRequest,
     H264FrontendError, H264StreamParameters,
 };
+use scarlet_driver_apple_pmgr::{pmgr_get_domain_by_label, PmgrDomain};
 use scarlet::{
     arch::{self, mmio},
     device::{
@@ -729,6 +730,7 @@ pub struct AppleAvd {
     irq: Option<u32>,
     registers: AvdRegisters,
     dma: DmaContext,
+    power: Option<PmgrDomain>,
     reset: Option<ResetHandle>,
     mailbox: AvdFirmwareMailbox,
     trace: AvdTraceLog,
@@ -745,6 +747,7 @@ impl AppleAvd {
         irq: Option<u32>,
         registers: AvdRegisters,
         dma: DmaContext,
+        power: Option<PmgrDomain>,
         reset: Option<ResetHandle>,
     ) -> Self {
         Self {
@@ -755,6 +758,7 @@ impl AppleAvd {
             irq,
             registers,
             dma,
+            power,
             reset,
             mailbox: AvdFirmwareMailbox::new(),
             trace: AvdTraceLog::new(AVD_TRACE_CAPACITY),
@@ -909,8 +913,9 @@ impl AppleAvd {
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         validate_firmware_image(image)?;
         println!(
-            "[apple-avd] boot begin firmware_len={} reset_available={}",
+            "[apple-avd] boot begin firmware_len={} power_on={} reset_available={}",
             image.len(),
+            self.power.as_ref().map(|power| power.is_on()).unwrap_or(true),
             self.reset.is_some()
         );
         self.prepare_for_firmware(image)?;
@@ -1087,6 +1092,13 @@ impl AppleAvd {
     }
 
     fn reset_hardware(&mut self) -> Result<(), &'static str> {
+        if let Some(power) = &self.power {
+            if !power.is_on() {
+                power.enable()?;
+                time::udelay(10);
+            }
+        }
+
         let Some(reset) = &self.reset else {
             return Ok(());
         };
@@ -1820,6 +1832,31 @@ fn resolve_avd_reset(device: &PlatformDeviceInfo) -> Result<Option<ResetHandle>,
     }
 }
 
+fn resolve_avd_power_domain() -> Result<Option<PmgrDomain>, &'static str> {
+    match pmgr_get_domain_by_label("avd_sys") {
+        Ok(power) => {
+            let was_on = power.is_on();
+            power.enable()?;
+            println!(
+                "[apple-avd] power domain '{}' enabled before={} after={}",
+                power.label(),
+                was_on,
+                power.is_on()
+            );
+            Ok(Some(power))
+        }
+        Err(e @ "pmgr: registry not initialized") => {
+            println!("[apple-avd] PMGR not ready for avd_sys: {}", e);
+            probe_defer()
+        }
+        Err(e @ "pmgr: domain label not found") => {
+            println!("[apple-avd] power domain avd_sys unavailable: {}", e);
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (paddr, size) = first_mem_resource(device).ok_or("apple-avd: missing MMIO resource")?;
     if size == 0 {
@@ -1838,6 +1875,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let soc = AppleAvdSoc::from_device(device);
     let irq = first_irq(device);
+    let power = resolve_avd_power_domain()?;
     let reset = resolve_avd_reset(device)?;
     let has_reset = reset.is_some();
     let mut avd = AppleAvd::new(
@@ -1848,6 +1886,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         irq,
         AvdRegisters::new(vaddr),
         dma,
+        power,
         reset,
     );
     let snapshot = avd.snapshot();

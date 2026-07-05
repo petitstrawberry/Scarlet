@@ -12,3 +12,4 @@ debug-device = []
 
 [dependencies]
 scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-pmgr = { path = "../../soc/apple-pmgr" }
