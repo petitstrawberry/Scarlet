@@ -1,7 +1,7 @@
 //! AP/CM3 mailbox transport for AVD firmware.
 
-const MAILBOX_AP_TO_CM3: usize = 0x0109_8054;
-const MAILBOX_CM3_TO_AP: usize = 0x0109_8064;
+const MAILBOX_AP_TO_CM3: usize = 0x000a_8054;
+const MAILBOX_CM3_TO_AP: usize = 0x000a_8064;
 
 /// Send one compact firmware status message to the AP.
 ///
