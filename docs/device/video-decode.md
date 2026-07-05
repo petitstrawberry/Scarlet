@@ -77,11 +77,13 @@ Each video session owns one shared mapping:
 | Region | Offset | Size |
 | --- | ---: | ---: |
 | input bitstream | `input_offset` | `input_len` |
-| output frame | `output_offset` | `output_len` |
+| output frames | `output_offset` | `output_len` |
 
-The output payload starts at `output_offset + 20` after a successful dequeue.
-Both `mmap` offset and length must be page-aligned. The reported lengths come
-from the selected backend capabilities.
+After a successful dequeue, `ScarletVideoDequeuedFrame.payload_offset` and
+`payload_len` identify the decoded payload inside the full mapping. Backends may
+use `output_len` as a pool of frame slots, so callers must not assume the payload
+always starts at `output_offset + 20`. Both `mmap` offset and length must be
+page-aligned. The reported lengths come from the selected backend capabilities.
 
 ## Control Commands
 

@@ -743,7 +743,7 @@ pub struct ScarletVideoDequeuedFrame {
     pub height: u32,
     /// Decoded pixel format.
     pub pixel_format: u32,
-    /// Offset of frame payload inside the mapped output area.
+    /// Offset of frame payload inside the full mapped video buffer.
     pub payload_offset: u64,
     /// Byte length of the decoded payload.
     pub payload_len: u32,
