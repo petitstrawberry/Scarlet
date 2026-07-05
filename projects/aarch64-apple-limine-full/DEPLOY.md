@@ -51,7 +51,8 @@ python3 projects/aarch64-apple-limine-full/tools/deploy_m1n1_usb.py \
 デフォルトでは `deploy_m1n1_usb.py` が m1n1 の live ADT から
 `/arm-io/avd` と `/arm-io/dart-avd` を読み、guest payload 内 DTB に
 Apple AVD/DART node をメモリ上で注入する。あわせて m1n1 proxy 経由で
-`/arm-io/dart-avd` と `/arm-io/avd` の PMGR clocks を enable する。
+`/arm-io/dart-avd` と `/arm-io/avd` の PMGR power を enable する
+（古いローカル m1n1 では PMGR clocks enable にフォールバックする）。
 
 AVD DTB patch を必須にして失敗時に止める場合：
 
@@ -78,7 +79,7 @@ deploy_m1n1_usb.py
   ├─ ProxyUtils(heap_size=128MB)
   ├─ hv.init()                    (HV 初期化, vUART マップ)
   ├─ AVD DTB patch                (live ADT → guest payload DTB)
-  ├─ PMGR enable                  (/arm-io/dart-avd, /arm-io/avd)
+  ├─ PMGR power enable            (/arm-io/dart-avd, /arm-io/avd)
   ├─ hv.load_raw(boot-j293.bin)   (m1n1+DTB+U-Boot を HV ゲストとしてロード)
   ├─ writemem(0x900000000, image) (Limine FAT イメージを RAM に push)
   └─ hv.start()                   (ゲスト起動)

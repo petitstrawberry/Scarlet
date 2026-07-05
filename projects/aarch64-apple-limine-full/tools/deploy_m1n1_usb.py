@@ -485,10 +485,15 @@ def enable_avd_pmgr(args, p):
         return
     for path in ("/arm-io/dart-avd", "/arm-io/avd"):
         try:
-            p.pmgr_adt_clocks_enable(path)
-            print(f"Enabled PMGR clocks for {path}")
+            enable = getattr(p, "pmgr_adt_power_enable", None)
+            kind = "power"
+            if enable is None:
+                enable = p.pmgr_adt_clocks_enable
+                kind = "clocks"
+            enable(path)
+            print(f"Enabled PMGR {kind} for {path}")
         except Exception as exc:
-            warn_or_raise(args.avd_pmgr, f"failed to enable PMGR clocks for {path}: {exc}", exc)
+            warn_or_raise(args.avd_pmgr, f"failed to enable PMGR for {path}: {exc}", exc)
 
 
 def patch_avd_guest_payload(args, hv, payload):
@@ -607,7 +612,7 @@ def main():
         "--avd-pmgr",
         choices=("auto", "off", "require"),
         default=env_choice("SCARLET_AVD_PMGR", "auto", ("auto", "off", "require")),
-        help="Enable AVD and dart-avd PMGR clocks through m1n1 before booting the guest",
+        help="Enable AVD and dart-avd PMGR power through m1n1 before booting the guest",
     )
     parser.add_argument("--avd-info-json", type=pathlib.Path, help="Use a saved Apple AVD DTB patch JSON instead of live ADT extraction")
     parser.add_argument("--avd-soc", help="Override Apple SoC name for generated AVD compatibles, e.g. t8103")
