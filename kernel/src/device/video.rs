@@ -127,6 +127,16 @@ pub trait VideoDecodeBackend: Send + Sync {
     /// Static backend name.
     fn name(&self) -> &'static str;
 
+    /// Return backend-specific debug status for `/dev/videoN` reads.
+    ///
+    /// # Returns
+    ///
+    /// A short status fragment without a trailing newline when the backend has
+    /// useful diagnostics, or `None` when the generic status is sufficient.
+    fn debug_status(&self) -> Option<String> {
+        None
+    }
+
     /// Return backend capabilities.
     ///
     /// # Returns
@@ -451,15 +461,17 @@ impl ScarletVideoDevice {
     fn status_line(&self) -> String {
         let caps = self.backend.capabilities();
         let last_error = self.last_error.lock().unwrap_or("none");
+        let backend_status = self.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} h264={} av1={} sessions={} input={} output={} last_error={}\n",
+            "scarlet-video backend={} h264={} av1={} sessions={} input={} output={} last_error={}{}\n",
             self.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
             caps.max_sessions,
             caps.mapped_input_len,
             caps.mapped_output_len,
-            last_error
+            last_error,
+            backend_status
         )
     }
 }

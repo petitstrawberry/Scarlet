@@ -9,10 +9,7 @@ mod debug_device;
 mod firmware;
 pub mod h264;
 
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 
 pub use debug::{AvdTraceEvent, AvdTraceKind};
 pub use firmware::AvdFirmwareMessage;
@@ -99,6 +96,7 @@ const AVD_REFERENCE_SLOT_COUNT: usize = 4;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_FIRMWARE_READY_POLLS: usize = 500;
 const AVD_FIRMWARE_READY_POLL_US: u64 = 100;
+const AVD_DECODE_POLL_LIMIT: usize = 10_000;
 
 const AVD_H264_DMA_CONFIG: [u32; 30] = [
     0x0402_0002,
@@ -582,6 +580,8 @@ impl AppleAvd {
             return Err("apple-avd: empty H.264 instruction stream");
         }
         self.registers.write_h264_instructions(instructions.words());
+        self.registers
+            .clear_h264_status(H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK);
         let status_before = self.registers.h264_status();
         self.registers.submit_h264();
         self.trace.push(
@@ -929,6 +929,7 @@ struct AvdPendingDecode {
     status_before: u32,
     command_tag: u32,
     input_mapping: DmaMapping,
+    poll_count: usize,
 }
 
 struct AvdBackendState {
@@ -1036,7 +1037,7 @@ impl AppleAvdVideoBackend {
         let mut state = self.state.lock();
         let message = avd.poll_firmware_message();
         let status = avd.h264_status();
-        let Some(front) = state.pending.front() else {
+        let Some(front) = state.pending.front_mut() else {
             return Ok(());
         };
 
@@ -1061,6 +1062,13 @@ impl AppleAvdVideoBackend {
             finish_pending_decode(&mut state, pending)?;
             avd.trace
                 .push(AvdTraceKind::DecodeComplete, status as u64, 0);
+        } else {
+            front.poll_count = front.poll_count.saturating_add(1);
+            if front.poll_count > AVD_DECODE_POLL_LIMIT {
+                let _ = state.pending.pop_front();
+                avd.recover_h264_engine(status as u64);
+                return Err("apple-avd: decode timed out");
+            }
         }
         Ok(())
     }
@@ -1069,6 +1077,27 @@ impl AppleAvdVideoBackend {
 impl VideoDecodeBackend for AppleAvdVideoBackend {
     fn name(&self) -> &'static str {
         "apple-avd"
+    }
+
+    fn debug_status(&self) -> Option<String> {
+        let avd = self.avd().ok()?;
+        let avd = avd.lock();
+        let snapshot = avd.debug_snapshot();
+        let h264_status = avd.h264_status();
+        let firmware = avd.firmware_state_name();
+        drop(avd);
+
+        let state = self.state.lock();
+        Some(format!(
+            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
+            firmware,
+            state.pending.len(),
+            state.completed.len(),
+            h264_status,
+            snapshot.status,
+            snapshot.irq_status,
+            snapshot.mailbox
+        ))
     }
 
     fn capabilities(&self) -> VideoBackendCapabilities {
@@ -1222,6 +1251,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             status_before,
             command_tag,
             input_mapping,
+            poll_count: 0,
         });
         Ok(())
     }
