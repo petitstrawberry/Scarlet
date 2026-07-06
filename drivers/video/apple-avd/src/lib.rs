@@ -1635,6 +1635,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
             supports_h264: true,
             supports_av1: false,
+            supports_stateless_h264: false,
         }
     }
 

@@ -96,6 +96,11 @@ const SCARLET_VIDEO_CREATE_SESSION: u32 = 0x5603;
 const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
+const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
+const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
+const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
+const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
+const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -157,6 +162,24 @@ struct ScarletVideoSessionDequeuedFrame {
     stream_id: u32,
     padding: u32,
     frame: ScarletVideoDequeuedFrame,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoCapabilities {
+    version: u32,
+    flags: u32,
+    max_sessions: u32,
+    output_pixel_format: u32,
+    mapped_input_len: u32,
+    mapped_output_len: u32,
+    reserved: [u32; 8],
+}
+
+impl ScarletVideoCapabilities {
+    fn has_flag(self, flag: u32) -> bool {
+        self.flags & flag != 0
+    }
 }
 
 struct VideoFrameStore {
@@ -2347,6 +2370,13 @@ impl VideoCodec {
             VideoCodec::Av1 => VIRTIO_VIDEO_FORMAT_AV1,
         }
     }
+
+    fn name(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "H.264",
+            VideoCodec::Av1 => "AV1",
+        }
+    }
 }
 
 impl VideoSource {
@@ -4113,6 +4143,7 @@ impl MappedVideoBuffer {
 struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
+    caps: Option<ScarletVideoCapabilities>,
 }
 
 impl HardwareVideoDecoder {
@@ -4122,6 +4153,17 @@ impl HardwareVideoDecoder {
             .write(true)
             .open(VIDEO_DEVICE_PATH)
             .map_err(|_| format!("failed to open {}", VIDEO_DEVICE_PATH))?;
+        let caps = Self::query_capabilities(&device);
+        if let Some(caps) = caps {
+            println!(
+                "[{}] hardware decoder caps flags=0x{:x} stateful_h264={} stateful_av1={} stateless_h264={}",
+                APP_NAME,
+                caps.flags,
+                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
+                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
+                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264)
+            );
+        }
         let mapped = Self::map_video_buffer(&device);
         if let Some(buffer) = &mapped {
             println!(
@@ -4129,7 +4171,11 @@ impl HardwareVideoDecoder {
                 APP_NAME, buffer.input_len, buffer.output_len
             );
         }
-        Ok(Self { device, mapped })
+        Ok(Self {
+            device,
+            mapped,
+            caps,
+        })
     }
 
     fn decode_access_unit(
@@ -4139,6 +4185,12 @@ impl HardwareVideoDecoder {
     ) -> Result<Option<ScarletVideoFrame>, String> {
         if access_unit.is_empty() {
             return Ok(None);
+        }
+        if !self.supports_stateful_codec(codec) {
+            return Err(format!(
+                "hardware decoder does not support stateful {}",
+                codec.name()
+            ));
         }
         if let Some(buffer) = &self.mapped {
             if access_unit.len() <= buffer.input_len {
@@ -4151,6 +4203,16 @@ impl HardwareVideoDecoder {
             ));
         }
         self.decode_access_unit_stream(access_unit)
+    }
+
+    fn supports_stateful_codec(&self, codec: VideoCodec) -> bool {
+        let Some(caps) = self.caps else {
+            return true;
+        };
+        match codec {
+            VideoCodec::H264 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
+            VideoCodec::Av1 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
+        }
     }
 
     fn decode_access_unit_stream(
@@ -4358,6 +4420,19 @@ impl HardwareVideoDecoder {
             output_offset: info.output_offset as usize,
             output_len: info.output_len as usize,
         })
+    }
+
+    fn query_capabilities(device: &File) -> Option<ScarletVideoCapabilities> {
+        let mut caps = ScarletVideoCapabilities::default();
+        device
+            .as_handle()
+            .control(SCARLET_VIDEO_GET_CAPS, &mut caps as *mut _ as usize)
+            .ok()?;
+        if caps.version == SCARLET_VIDEO_CAPS_VERSION {
+            Some(caps)
+        } else {
+            None
+        }
     }
 
     fn read_decoder_status(&mut self) -> String {

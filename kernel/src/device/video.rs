@@ -5,7 +5,7 @@
 //! contract. Keep the command values, mapped-buffer structures, and frame
 //! constants here so backend implementations do not drift apart.
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -42,6 +42,23 @@ pub const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 pub const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 /// Destroy a mapped video session.
 pub const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
+/// Query backend capabilities with explicit stateful/stateless mode flags.
+pub const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
+/// Submit a stateless H.264 decode request for a mapped video session.
+pub const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
+
+/// Version of `ScarletVideoCapabilities`.
+pub const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
+/// Backend accepts stateful H.264 access units through legacy submit ioctls.
+pub const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
+/// Backend accepts stateful AV1 access units through legacy submit ioctls.
+pub const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
+/// Backend accepts stateless H.264 requests.
+pub const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
+/// Backend supports the common mmap input/output buffer.
+pub const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
+/// Backend supports multiple mapped stream sessions.
+pub const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
 
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
@@ -59,10 +76,12 @@ pub struct VideoBackendCapabilities {
     pub mapped_output_len: u32,
     /// Pixel format produced by decoded frames.
     pub output_pixel_format: u32,
-    /// Whether H.264 access units are accepted.
+    /// Whether stateful H.264 access units are accepted.
     pub supports_h264: bool,
-    /// Whether AV1 access units are accepted.
+    /// Whether stateful AV1 access units are accepted.
     pub supports_av1: bool,
+    /// Whether stateless H.264 requests are accepted.
+    pub supports_stateless_h264: bool,
 }
 
 impl VideoBackendCapabilities {
@@ -81,6 +100,31 @@ impl VideoBackendCapabilities {
             SCARLET_VIDEO_FORMAT_AV1 => self.supports_av1,
             _ => false,
         }
+    }
+
+    /// Convert backend capabilities to user-visible bit flags.
+    ///
+    /// # Returns
+    ///
+    /// `SCARLET_VIDEO_CAP_*` bitset.
+    pub fn user_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.supports_h264 {
+            flags |= SCARLET_VIDEO_CAP_STATEFUL_H264;
+        }
+        if self.supports_av1 {
+            flags |= SCARLET_VIDEO_CAP_STATEFUL_AV1;
+        }
+        if self.supports_stateless_h264 {
+            flags |= SCARLET_VIDEO_CAP_STATELESS_H264;
+        }
+        if self.mapped_input_len != 0 && self.mapped_output_len != 0 {
+            flags |= SCARLET_VIDEO_CAP_MAPPED_BUFFERS;
+        }
+        if self.max_sessions > 1 {
+            flags |= SCARLET_VIDEO_CAP_SESSIONS;
+        }
+        flags
     }
 }
 
@@ -107,6 +151,14 @@ pub struct VideoBackendDecodeRequest {
     pub output_len: u32,
     /// Presentation timestamp carried through dequeue.
     pub timestamp: u64,
+}
+
+/// Backend request for stateless H.264 decode.
+pub struct VideoBackendH264StatelessRequest {
+    /// Common mapped decode buffers.
+    pub decode: VideoBackendDecodeRequest,
+    /// Copied stateless H.264 parameters supplied by userspace.
+    pub h264: Box<ScarletVideoH264StatelessParams>,
 }
 
 /// Decoded frame returned by a backend.
@@ -176,6 +228,23 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// `Ok(())` when the backend accepted the request.
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str>;
+
+    /// Submit one stateless H.264 decode request.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Mapped buffers and H.264 syntax parameters for one decode
+    ///   request.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the backend accepted the request.
+    fn submit_h264_stateless(
+        &self,
+        _request: &VideoBackendH264StatelessRequest,
+    ) -> Result<(), &'static str> {
+        Err("scarlet-video: backend does not support stateless H.264")
+    }
 
     /// Dequeue one decoded frame if available.
     ///
@@ -279,6 +348,19 @@ impl ScarletVideoDevice {
         })
     }
 
+    fn capabilities_info(&self) -> ScarletVideoCapabilities {
+        let caps = self.backend.capabilities();
+        ScarletVideoCapabilities {
+            version: SCARLET_VIDEO_CAPS_VERSION,
+            flags: caps.user_flags(),
+            max_sessions: caps.max_sessions,
+            output_pixel_format: caps.output_pixel_format,
+            mapped_input_len: caps.mapped_input_len,
+            mapped_output_len: caps.mapped_output_len,
+            reserved: [0; 8],
+        }
+    }
+
     fn ensure_mapped_buffer(&self, layout: VideoBufferLayout) -> Result<(), &'static str> {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
@@ -299,17 +381,14 @@ impl ScarletVideoDevice {
         timestamp
     }
 
-    fn submit_mapped(
+    fn mapped_decode_request(
         &self,
         stream_id: u32,
         coded_format: u32,
         input_len: usize,
         timestamp: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<VideoBackendDecodeRequest, &'static str> {
         let layout = self.buffer_layout()?;
-        if !self.backend.capabilities().supports_format(coded_format) {
-            return Err("scarlet-video: backend does not support coded format");
-        }
         if input_len == 0 {
             return Err("scarlet-video: input is empty");
         }
@@ -335,7 +414,7 @@ impl ScarletVideoDevice {
         } else {
             timestamp
         };
-        let request = VideoBackendDecodeRequest {
+        Ok(VideoBackendDecodeRequest {
             stream_id,
             coded_format,
             input_paddr,
@@ -346,13 +425,56 @@ impl ScarletVideoDevice {
             output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
             timestamp,
-        };
+        })
+    }
+
+    fn submit_mapped(
+        &self,
+        stream_id: u32,
+        coded_format: u32,
+        input_len: usize,
+        timestamp: u64,
+    ) -> Result<(), &'static str> {
+        if !self.backend.capabilities().supports_format(coded_format) {
+            return Err("scarlet-video: backend does not support coded format");
+        }
+        let request = self.mapped_decode_request(stream_id, coded_format, input_len, timestamp)?;
         self.backend.submit_decode(&request)
+    }
+
+    fn h264_stateless_params(
+        &self,
+        ptrs: ScarletVideoH264ParamPtrs,
+    ) -> Result<Box<ScarletVideoH264StatelessParams>, &'static str> {
+        if ptrs.sps == 0
+            || ptrs.pps == 0
+            || ptrs.scaling_matrix == 0
+            || ptrs.pred_weights == 0
+            || ptrs.slice_params == 0
+            || ptrs.decode_params == 0
+        {
+            return Err("scarlet-video: stateless H.264 parameter pointer is null");
+        }
+
+        Ok(Box::new(ScarletVideoH264StatelessParams {
+            sps: read_user_value(ptrs.sps as usize)?,
+            pps: read_user_value(ptrs.pps as usize)?,
+            scaling_matrix: read_user_value(ptrs.scaling_matrix as usize)?,
+            pred_weights: read_user_value(ptrs.pred_weights as usize)?,
+            slice_params: read_user_value(ptrs.slice_params as usize)?,
+            decode_params: read_user_value(ptrs.decode_params as usize)?,
+        }))
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
         let info = self.buffer_info()?;
         write_user_value(arg, &info)?;
+        Ok(0)
+    }
+
+    fn handle_get_caps(&self, arg: usize) -> Result<i32, &'static str> {
+        let caps = self.capabilities_info();
+        write_user_value(arg, &caps)?;
         Ok(0)
     }
 
@@ -415,6 +537,43 @@ impl ScarletVideoDevice {
         }
     }
 
+    fn handle_submit_h264_stateless(&self, arg: usize) -> Result<i32, &'static str> {
+        let submit: ScarletVideoH264StatelessSubmit = read_user_value(arg)?;
+        let result = (|| {
+            if submit.flags != 0 {
+                return Err("scarlet-video: stateless H.264 submit flags must be zero");
+            }
+            if !self.backend.capabilities().supports_stateless_h264 {
+                return Err("scarlet-video: backend does not support stateless H.264");
+            }
+            let stream_id = if submit.stream_id == 0 {
+                DEFAULT_STREAM_ID
+            } else {
+                submit.stream_id
+            };
+            let decode = self.mapped_decode_request(
+                stream_id,
+                SCARLET_VIDEO_FORMAT_H264,
+                submit.input_len as usize,
+                submit.timestamp,
+            )?;
+            let h264 = self.h264_stateless_params(submit.params)?;
+            let request = VideoBackendH264StatelessRequest { decode, h264 };
+            self.backend.submit_h264_stateless(&request)
+        })();
+
+        match result {
+            Ok(()) => {
+                *self.last_error.lock() = None;
+                Ok(0)
+            }
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                Err(e)
+            }
+        }
+    }
+
     fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
         let decoded = match self.backend.dequeue_frame(DEFAULT_STREAM_ID) {
             Ok(decoded) => decoded,
@@ -463,10 +622,11 @@ impl ScarletVideoDevice {
         let last_error = self.last_error.lock().unwrap_or("none");
         let backend_status = self.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} h264={} av1={} sessions={} input={} output={} last_error={}{}\n",
+            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} input={} output={} last_error={}{}\n",
             self.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
+            caps.supports_stateless_h264,
             caps.max_sessions,
             caps.mapped_input_len,
             caps.mapped_output_len,
@@ -587,6 +747,8 @@ impl ControlOps for ScarletVideoDevice {
             SCARLET_VIDEO_SUBMIT_SESSION => self.handle_submit_session(arg),
             SCARLET_VIDEO_DEQUEUE_SESSION => self.handle_dequeue_session(arg),
             SCARLET_VIDEO_DESTROY_SESSION => self.handle_destroy_session(arg),
+            SCARLET_VIDEO_GET_CAPS => self.handle_get_caps(arg),
+            SCARLET_VIDEO_SUBMIT_H264_STATELESS => self.handle_submit_h264_stateless(arg),
             _ => Err("scarlet-video: unsupported control command"),
         }
     }
@@ -614,6 +776,11 @@ impl ControlOps for ScarletVideoDevice {
             (
                 SCARLET_VIDEO_DESTROY_SESSION,
                 "Destroy mmap video stream session"
+            ),
+            (SCARLET_VIDEO_GET_CAPS, "Get video backend capabilities"),
+            (
+                SCARLET_VIDEO_SUBMIT_H264_STATELESS,
+                "Submit stateless H.264 decode request for a stream"
             ),
         ]
     }
@@ -803,6 +970,351 @@ pub struct ScarletVideoSessionDequeuedFrame {
     pub padding: u32,
     /// Decoded frame metadata.
     pub frame: ScarletVideoDequeuedFrame,
+}
+
+/// H.264 sequence parameter set for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScarletVideoH264Sps {
+    /// H.264 `profile_idc`.
+    pub profile_idc: u8,
+    /// H.264 constraint set flags.
+    pub constraint_set_flags: u8,
+    /// H.264 `level_idc`.
+    pub level_idc: u8,
+    /// H.264 sequence parameter set id.
+    pub seq_parameter_set_id: u8,
+    /// H.264 chroma format idc.
+    pub chroma_format_idc: u8,
+    /// H.264 luma bit depth minus eight.
+    pub bit_depth_luma_minus8: u8,
+    /// H.264 chroma bit depth minus eight.
+    pub bit_depth_chroma_minus8: u8,
+    /// H.264 log2 max frame number minus four.
+    pub log2_max_frame_num_minus4: u8,
+    /// H.264 picture order count type.
+    pub pic_order_cnt_type: u8,
+    /// H.264 log2 max picture order count LSB minus four.
+    pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    /// H.264 maximum reference frame count.
+    pub max_num_ref_frames: u8,
+    /// H.264 POC type 1 offset cycle length.
+    pub num_ref_frames_in_pic_order_cnt_cycle: u8,
+    /// H.264 POC type 1 reference offsets.
+    pub offset_for_ref_frame: [i32; 255],
+    /// H.264 POC type 1 non-reference offset.
+    pub offset_for_non_ref_pic: i32,
+    /// H.264 POC type 1 top-to-bottom offset.
+    pub offset_for_top_to_bottom_field: i32,
+    /// H.264 coded width in macroblocks minus one.
+    pub pic_width_in_mbs_minus1: u16,
+    /// H.264 coded height in map units minus one.
+    pub pic_height_in_map_units_minus1: u16,
+    /// `SCARLET_VIDEO_H264_SPS_FLAG_*` bitset.
+    pub flags: u32,
+}
+
+impl Default for ScarletVideoH264Sps {
+    fn default() -> Self {
+        Self {
+            profile_idc: 0,
+            constraint_set_flags: 0,
+            level_idc: 0,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 0,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            max_num_ref_frames: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: [0; 255],
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            pic_width_in_mbs_minus1: 0,
+            pic_height_in_map_units_minus1: 0,
+            flags: 0,
+        }
+    }
+}
+
+/// H.264 picture parameter set for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264Pps {
+    /// H.264 picture parameter set id.
+    pub pic_parameter_set_id: u8,
+    /// Referenced sequence parameter set id.
+    pub seq_parameter_set_id: u8,
+    /// H.264 slice group count minus one.
+    pub num_slice_groups_minus1: u8,
+    /// Default active L0 reference count minus one.
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    /// Default active L1 reference count minus one.
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    /// H.264 weighted bipred idc.
+    pub weighted_bipred_idc: u8,
+    /// H.264 initial picture QP minus 26.
+    pub pic_init_qp_minus26: i8,
+    /// H.264 initial picture QS minus 26.
+    pub pic_init_qs_minus26: i8,
+    /// H.264 chroma QP index offset.
+    pub chroma_qp_index_offset: i8,
+    /// H.264 second chroma QP index offset.
+    pub second_chroma_qp_index_offset: i8,
+    /// `SCARLET_VIDEO_H264_PPS_FLAG_*` bitset.
+    pub flags: u16,
+}
+
+/// H.264 scaling matrices for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScarletVideoH264ScalingMatrix {
+    /// H.264 4x4 scaling lists in raster order.
+    pub scaling_list_4x4: [[u8; 16]; 6],
+    /// H.264 8x8 scaling lists in raster order.
+    pub scaling_list_8x8: [[u8; 64]; 6],
+}
+
+impl Default for ScarletVideoH264ScalingMatrix {
+    fn default() -> Self {
+        Self {
+            scaling_list_4x4: [[0; 16]; 6],
+            scaling_list_8x8: [[0; 64]; 6],
+        }
+    }
+}
+
+/// One H.264 reference picture list entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264Reference {
+    /// Reference field selector.
+    pub fields: u8,
+    /// Index into `ScarletVideoH264DecodeParams::dpb`.
+    pub index: u8,
+}
+
+/// H.264 prediction weight factors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264WeightFactors {
+    /// Luma weights.
+    pub luma_weight: [i16; 32],
+    /// Luma offsets.
+    pub luma_offset: [i16; 32],
+    /// Chroma weights.
+    pub chroma_weight: [[i16; 2]; 32],
+    /// Chroma offsets.
+    pub chroma_offset: [[i16; 2]; 32],
+}
+
+/// H.264 prediction weights for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264PredWeights {
+    /// H.264 luma log2 weight denominator.
+    pub luma_log2_weight_denom: u16,
+    /// H.264 chroma log2 weight denominator.
+    pub chroma_log2_weight_denom: u16,
+    /// List 0 and list 1 weight factors.
+    pub weight_factors: [ScarletVideoH264WeightFactors; 2],
+}
+
+/// H.264 per-slice parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScarletVideoH264SliceParams {
+    /// Offset in bits from the slice NAL payload start to `slice_data()`.
+    pub header_bit_size: u32,
+    /// H.264 first macroblock in slice.
+    pub first_mb_in_slice: u32,
+    /// H.264 slice type.
+    pub slice_type: u8,
+    /// H.264 colour plane id.
+    pub colour_plane_id: u8,
+    /// H.264 redundant picture count.
+    pub redundant_pic_cnt: u8,
+    /// H.264 CABAC init idc.
+    pub cabac_init_idc: u8,
+    /// H.264 slice QP delta.
+    pub slice_qp_delta: i8,
+    /// H.264 slice QS delta.
+    pub slice_qs_delta: i8,
+    /// H.264 deblocking filter idc.
+    pub disable_deblocking_filter_idc: u8,
+    /// H.264 alpha C0 deblocking offset divided by two.
+    pub slice_alpha_c0_offset_div2: i8,
+    /// H.264 beta deblocking offset divided by two.
+    pub slice_beta_offset_div2: i8,
+    /// Active L0 reference count minus one.
+    pub num_ref_idx_l0_active_minus1: u8,
+    /// Active L1 reference count minus one.
+    pub num_ref_idx_l1_active_minus1: u8,
+    /// Reserved padding.
+    pub reserved: u8,
+    /// Reference picture list 0.
+    pub ref_pic_list0: [ScarletVideoH264Reference; 32],
+    /// Reference picture list 1.
+    pub ref_pic_list1: [ScarletVideoH264Reference; 32],
+    /// `SCARLET_VIDEO_H264_SLICE_FLAG_*` bitset.
+    pub flags: u32,
+}
+
+impl Default for ScarletVideoH264SliceParams {
+    fn default() -> Self {
+        Self {
+            header_bit_size: 0,
+            first_mb_in_slice: 0,
+            slice_type: 0,
+            colour_plane_id: 0,
+            redundant_pic_cnt: 0,
+            cabac_init_idc: 0,
+            slice_qp_delta: 0,
+            slice_qs_delta: 0,
+            disable_deblocking_filter_idc: 0,
+            slice_alpha_c0_offset_div2: 0,
+            slice_beta_offset_div2: 0,
+            num_ref_idx_l0_active_minus1: 0,
+            num_ref_idx_l1_active_minus1: 0,
+            reserved: 0,
+            ref_pic_list0: [ScarletVideoH264Reference::default(); 32],
+            ref_pic_list1: [ScarletVideoH264Reference::default(); 32],
+            flags: 0,
+        }
+    }
+}
+
+/// H.264 decoded picture buffer entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264DpbEntry {
+    /// Timestamp identifying the decoded reference frame.
+    pub reference_ts: u64,
+    /// H.264 PicNum.
+    pub pic_num: u32,
+    /// H.264 frame_num.
+    pub frame_num: u16,
+    /// Reference field selector.
+    pub fields: u8,
+    /// Reserved padding.
+    pub reserved: [u8; 5],
+    /// H.264 top field order count.
+    pub top_field_order_cnt: i32,
+    /// H.264 bottom field order count.
+    pub bottom_field_order_cnt: i32,
+    /// `SCARLET_VIDEO_H264_DPB_FLAG_*` bitset.
+    pub flags: u32,
+}
+
+/// H.264 per-frame decode parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264DecodeParams {
+    /// Decoded picture buffer entries.
+    pub dpb: [ScarletVideoH264DpbEntry; 16],
+    /// H.264 NAL reference idc.
+    pub nal_ref_idc: u16,
+    /// H.264 frame number.
+    pub frame_num: u16,
+    /// H.264 top field order count.
+    pub top_field_order_cnt: i32,
+    /// H.264 bottom field order count.
+    pub bottom_field_order_cnt: i32,
+    /// H.264 IDR picture id.
+    pub idr_pic_id: u16,
+    /// H.264 picture order count LSB.
+    pub pic_order_cnt_lsb: u16,
+    /// H.264 bottom POC delta.
+    pub delta_pic_order_cnt_bottom: i32,
+    /// H.264 POC delta 0.
+    pub delta_pic_order_cnt0: i32,
+    /// H.264 POC delta 1.
+    pub delta_pic_order_cnt1: i32,
+    /// Bit size of `dec_ref_pic_marking()`.
+    pub dec_ref_pic_marking_bit_size: u32,
+    /// Bit size of POC syntax in the slice header.
+    pub pic_order_cnt_bit_size: u32,
+    /// H.264 slice group change cycle.
+    pub slice_group_change_cycle: u32,
+    /// Reserved padding.
+    pub reserved: u32,
+    /// `SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_*` bitset.
+    pub flags: u32,
+}
+
+/// Copied stateless H.264 parameters for a backend submit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264StatelessParams {
+    /// H.264 sequence parameter set.
+    pub sps: ScarletVideoH264Sps,
+    /// H.264 picture parameter set.
+    pub pps: ScarletVideoH264Pps,
+    /// H.264 scaling matrices.
+    pub scaling_matrix: ScarletVideoH264ScalingMatrix,
+    /// H.264 prediction weights.
+    pub pred_weights: ScarletVideoH264PredWeights,
+    /// H.264 slice parameters.
+    pub slice_params: ScarletVideoH264SliceParams,
+    /// H.264 decode parameters.
+    pub decode_params: ScarletVideoH264DecodeParams,
+}
+
+/// Userspace pointers to stateless H.264 parameter structures.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264ParamPtrs {
+    /// Pointer to `ScarletVideoH264Sps`.
+    pub sps: u64,
+    /// Pointer to `ScarletVideoH264Pps`.
+    pub pps: u64,
+    /// Pointer to `ScarletVideoH264ScalingMatrix`.
+    pub scaling_matrix: u64,
+    /// Pointer to `ScarletVideoH264PredWeights`.
+    pub pred_weights: u64,
+    /// Pointer to `ScarletVideoH264SliceParams`.
+    pub slice_params: u64,
+    /// Pointer to `ScarletVideoH264DecodeParams`.
+    pub decode_params: u64,
+}
+
+/// Stateless H.264 mapped-buffer submit request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoH264StatelessSubmit {
+    /// Backend stream/session identifier, or zero for the default stream.
+    pub stream_id: u32,
+    /// Number of bytes written to the mapped input area.
+    pub input_len: u32,
+    /// Presentation timestamp carried through dequeue.
+    pub timestamp: u64,
+    /// Pointers to userspace parameter structures.
+    pub params: ScarletVideoH264ParamPtrs,
+    /// Reserved for future per-submit flags.
+    pub flags: u32,
+    /// Reserved padding.
+    pub padding: u32,
+}
+
+/// User-visible video backend capabilities.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoCapabilities {
+    /// Structure version.
+    pub version: u32,
+    /// `SCARLET_VIDEO_CAP_*` bitset.
+    pub flags: u32,
+    /// Maximum backend sessions.
+    pub max_sessions: u32,
+    /// Decoded output pixel format.
+    pub output_pixel_format: u32,
+    /// Mapped input byte capacity.
+    pub mapped_input_len: u32,
+    /// Mapped output byte capacity.
+    pub mapped_output_len: u32,
+    /// Reserved for future ABI fields.
+    pub reserved: [u32; 8],
 }
 
 /// Write an `SVF1` header into `bytes`.
