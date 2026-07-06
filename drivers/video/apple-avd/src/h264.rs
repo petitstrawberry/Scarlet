@@ -446,6 +446,10 @@ pub struct H264StreamParameters {
     pub width: u32,
     /// Decoded display height in pixels after cropping.
     pub height: u32,
+    /// Left crop offset in pixels.
+    pub crop_left: u32,
+    /// Top crop offset in pixels.
+    pub crop_top: u32,
     /// Coded width rounded to macroblock units.
     pub coded_width: u32,
     /// Coded height rounded to macroblock units.
@@ -494,8 +498,10 @@ impl H264StreamParameters {
             };
         let crop_unit_x = 2;
         let crop_unit_y = 2;
-        let crop_x = (crop_left + crop_right) * crop_unit_x;
-        let crop_y = (crop_top + crop_bottom) * crop_unit_y;
+        let crop_left_px = crop_left * crop_unit_x;
+        let crop_top_px = crop_top * crop_unit_y;
+        let crop_x = crop_left_px + crop_right * crop_unit_x;
+        let crop_y = crop_top_px + crop_bottom * crop_unit_y;
         if crop_x >= coded_width || crop_y >= coded_height {
             return Err(H264FrontendError::InvalidDimensions);
         }
@@ -516,6 +522,8 @@ impl H264StreamParameters {
                 != 0,
             width,
             height,
+            crop_left: crop_left_px,
+            crop_top: crop_top_px,
             coded_width,
             coded_height,
             log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4 as u32,
@@ -1898,8 +1906,10 @@ fn parse_sps(nal_payload: &[u8]) -> Result<H264StreamParameters, H264FrontendErr
     let coded_height = (pic_height_in_map_units_minus1 + 1) * 16;
     let crop_unit_x = 2;
     let crop_unit_y = 2;
-    let crop_x = (crop_left + crop_right) * crop_unit_x;
-    let crop_y = (crop_top + crop_bottom) * crop_unit_y;
+    let crop_left_px = crop_left * crop_unit_x;
+    let crop_top_px = crop_top * crop_unit_y;
+    let crop_x = crop_left_px + crop_right * crop_unit_x;
+    let crop_y = crop_top_px + crop_bottom * crop_unit_y;
     if crop_x >= coded_width || crop_y >= coded_height {
         return Err(H264FrontendError::InvalidDimensions);
     }
@@ -1919,6 +1929,8 @@ fn parse_sps(nal_payload: &[u8]) -> Result<H264StreamParameters, H264FrontendErr
         direct_8x8_inference_flag,
         width,
         height,
+        crop_left: crop_left_px,
+        crop_top: crop_top_px,
         coded_width,
         coded_height,
         log2_max_frame_num_minus4,

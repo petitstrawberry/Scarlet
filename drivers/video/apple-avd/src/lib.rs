@@ -1825,6 +1825,10 @@ struct AvdPendingDecode {
     frame_number: u32,
     timestamp: u64,
     layout: h264::AvdFrameLayout,
+    display_x: u32,
+    display_y: u32,
+    display_width: u32,
+    display_height: u32,
     payload_len: usize,
     output_header_vaddr: usize,
     output_payload_vaddr: usize,
@@ -2337,7 +2341,9 @@ impl AppleAvdVideoBackend {
             return Err("apple-avd: stream format mismatch");
         }
         let layout = stream_parameters.nv12_layout();
-        let payload_len = layout.output_len();
+        let hardware_payload_len = layout.output_len();
+        let display_payload_len =
+            nv12_tight_payload_len(stream_parameters.width, stream_parameters.height)?;
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
         let log_decode = should_log_decode_progress(frame_number);
@@ -2374,7 +2380,7 @@ impl AppleAvdVideoBackend {
         )?;
         let output = AvdDmaRange {
             dma_addr: reference_output.dma_addr,
-            len: payload_len,
+            len: hardware_payload_len,
         };
         let decode_request = match source {
             AvdH264SubmitSource::AccessUnit(access_unit) => H264DecodeRequest::from_access_unit(
@@ -2462,7 +2468,11 @@ impl AppleAvdVideoBackend {
             frame_number,
             timestamp: request.timestamp,
             layout,
-            payload_len,
+            display_x: stream_parameters.crop_left,
+            display_y: stream_parameters.crop_top,
+            display_width: stream_parameters.width,
+            display_height: stream_parameters.height,
+            payload_len: display_payload_len,
             output_header_vaddr: reference_output.header_vaddr,
             output_payload_vaddr: reference_output.vaddr,
             output_payload_dma: reference_output.dma_addr,
@@ -2684,10 +2694,12 @@ fn finish_pending_decode(
             sample.uv_non_neutral
         );
     }
+    compact_nv12_output_payload(&pending)?;
+    arch::clean_dcache_to_poc_range(pending.output_payload_vaddr, pending.payload_len);
     write_frame_header(
         pending.output_header_vaddr,
-        pending.layout.width,
-        pending.layout.height,
+        pending.display_width,
+        pending.display_height,
         pending.layout.pixel_format,
         pending.payload_len as u32,
     )?;
@@ -2716,8 +2728,8 @@ fn finish_pending_decode(
     state.completed.push_back(VideoBackendDecodedFrame {
         stream_id: pending.stream_id,
         frame: ScarletVideoDequeuedFrame {
-            width: pending.layout.width,
-            height: pending.layout.height,
+            width: pending.display_width,
+            height: pending.display_height,
             pixel_format: pending.layout.pixel_format,
             payload_offset: pending.output_payload_offset as u64,
             payload_len: pending.payload_len as u32,
@@ -2726,6 +2738,130 @@ fn finish_pending_decode(
         },
     })?;
     Ok(())
+}
+
+fn compact_nv12_output_payload(pending: &AvdPendingDecode) -> Result<(), &'static str> {
+    if pending.layout.pixel_format != SCARLET_VIDEO_PIXEL_FORMAT_NV12 {
+        return Err("apple-avd: unsupported decoded pixel format");
+    }
+    if pending.display_width == 0 || pending.display_height == 0 {
+        return Err("apple-avd: invalid display dimensions");
+    }
+    if pending.display_x > pending.layout.width
+        || pending.display_y > pending.layout.height
+        || pending.display_width > pending.layout.width - pending.display_x
+        || pending.display_height > pending.layout.height - pending.display_y
+    {
+        return Err("apple-avd: display crop exceeds coded frame");
+    }
+    if pending.display_width > pending.layout.y_stride
+        || pending.display_width > pending.layout.uv_stride
+    {
+        return Err("apple-avd: display width exceeds decoded stride");
+    }
+    if (pending.display_x & 1) != 0 || (pending.display_y & 1) != 0 {
+        return Err("apple-avd: invalid NV12 crop alignment");
+    }
+
+    let expected_len = nv12_tight_payload_len(pending.display_width, pending.display_height)?;
+    if expected_len != pending.payload_len || expected_len > pending.output_payload_len {
+        return Err("apple-avd: invalid display payload length");
+    }
+
+    let y_stride = pending.layout.y_stride as usize;
+    let uv_stride = pending.layout.uv_stride as usize;
+    let coded_height = pending.layout.height as usize;
+    let display_x = pending.display_x as usize;
+    let display_y = pending.display_y as usize;
+    let display_width = pending.display_width as usize;
+    let display_height = pending.display_height as usize;
+    let uv_height = display_height / 2;
+    let source_y_end = plane_copy_end(
+        display_y,
+        display_height,
+        y_stride,
+        display_x,
+        display_width,
+    )
+    .ok_or("apple-avd: display y source overflow")?;
+    let source_uv_base = y_stride
+        .checked_mul(coded_height)
+        .ok_or("apple-avd: decoded UV offset overflow")?;
+    let source_uv_end = source_uv_base
+        .checked_add(
+            plane_copy_end(
+                display_y / 2,
+                uv_height,
+                uv_stride,
+                display_x,
+                display_width,
+            )
+            .ok_or("apple-avd: display UV source overflow")?,
+        )
+        .ok_or("apple-avd: display UV source overflow")?;
+    if source_y_end > pending.output_payload_len || source_uv_end > pending.output_payload_len {
+        return Err("apple-avd: display crop exceeds output payload");
+    }
+
+    if pending.display_x == 0
+        && pending.display_y == 0
+        && pending.display_width == pending.layout.width
+        && pending.display_height == pending.layout.height
+        && pending.layout.y_stride == pending.display_width
+        && pending.layout.uv_stride == pending.display_width
+    {
+        return Ok(());
+    }
+
+    let base = pending.output_payload_vaddr;
+    for row in 0..display_height {
+        let src = base + (display_y + row) * y_stride + display_x;
+        let dst = base + row * display_width;
+        // SAFETY: Source and destination are validated to lie in the same
+        // output payload. `copy` is used because in-place compaction can overlap.
+        unsafe {
+            core::ptr::copy(src as *const u8, dst as *mut u8, display_width);
+        }
+    }
+
+    let dst_uv_base = base + display_width * display_height;
+    for row in 0..uv_height {
+        let src = base + source_uv_base + (display_y / 2 + row) * uv_stride + display_x;
+        let dst = dst_uv_base + row * display_width;
+        // SAFETY: Source and destination are validated to lie in the same
+        // output payload. `copy` is used because in-place compaction can overlap.
+        unsafe {
+            core::ptr::copy(src as *const u8, dst as *mut u8, display_width);
+        }
+    }
+    Ok(())
+}
+
+fn plane_copy_end(
+    start_row: usize,
+    rows: usize,
+    stride: usize,
+    x: usize,
+    width: usize,
+) -> Option<usize> {
+    if rows == 0 {
+        return x.checked_add(width);
+    }
+    start_row
+        .checked_add(rows - 1)?
+        .checked_mul(stride)?
+        .checked_add(x)?
+        .checked_add(width)
+}
+
+fn nv12_tight_payload_len(width: u32, height: u32) -> Result<usize, &'static str> {
+    if width == 0 || height == 0 || (width & 1) != 0 || (height & 1) != 0 {
+        return Err("apple-avd: invalid NV12 dimensions");
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|y_len| y_len.checked_add(y_len / 2))
+        .ok_or("apple-avd: NV12 payload length overflow")
 }
 
 fn should_log_decode_completion(pending: &AvdPendingDecode, completion: AvdCompletionInfo) -> bool {
