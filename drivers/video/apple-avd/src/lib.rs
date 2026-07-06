@@ -32,11 +32,13 @@ use scarlet::{
         reset::ResetHandle,
         video::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
+            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM,
+            SCARLET_VIDEO_H264_DPB_FLAG_VALID,
             SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
-            ScarletVideoDequeuedFrame, ScarletVideoH264StatelessParams, VideoBackendCapabilities,
-            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoBackendH264StatelessRequest,
-            VideoDecodeBackend, register_video_backend, register_video_decode_device,
+            ScarletVideoDequeuedFrame, ScarletVideoH264DpbEntry, ScarletVideoH264StatelessParams,
+            VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
+            VideoBackendH264StatelessRequest, VideoDecodeBackend, register_video_backend,
+            register_video_decode_device,
         },
     },
     environment::PAGE_SIZE,
@@ -1388,6 +1390,19 @@ impl AvdBackendSession {
             .ok_or("apple-avd: workspace unavailable")
     }
 
+    fn prune_reference_frames_for_dpb(&mut self, dpb: &[ScarletVideoH264DpbEntry; 16]) {
+        let has_valid_entry = dpb
+            .iter()
+            .any(|entry| entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID != 0);
+        if !has_valid_entry {
+            return;
+        }
+        self.reference_frames.retain(|frame| {
+            dpb.iter()
+                .any(|entry| dpb_entry_matches_reference(entry, frame))
+        });
+    }
+
     fn prepare_mapped_output(
         &mut self,
         avd: &AppleAvd,
@@ -1523,6 +1538,26 @@ impl AvdBackendSession {
     }
 }
 
+fn dpb_entry_matches_reference(
+    entry: &ScarletVideoH264DpbEntry,
+    frame: &AvdReferenceFrame,
+) -> bool {
+    if entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID == 0 {
+        return false;
+    }
+    let entry_long_term = entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM != 0;
+    if frame.timestamp != 0 && entry.reference_ts == frame.timestamp {
+        return true;
+    }
+    if frame.frame_num == entry.frame_num
+        && frame.top_field_order_cnt == entry.top_field_order_cnt
+        && frame.long_term == entry_long_term
+    {
+        return true;
+    }
+    frame.top_field_order_cnt == entry.top_field_order_cnt && frame.pic_num == entry.pic_num
+}
+
 #[derive(Clone, Copy)]
 struct AvdReferenceFrame {
     slot: usize,
@@ -1534,6 +1569,7 @@ struct AvdReferenceFrame {
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
+    long_term: bool,
 }
 
 struct AvdMappedOutputPool {
@@ -1574,6 +1610,7 @@ struct AvdPendingDecode {
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
+    long_term: bool,
     store_reference: bool,
     is_idr: bool,
     status_before: u32,
@@ -1948,6 +1985,9 @@ impl AppleAvdVideoBackend {
         let input_bytes =
             unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
         let (is_idr, store_reference) = source.reference_flags().map_err(h264_error_to_str)?;
+        if let AvdH264SubmitSource::Stateless(params) = &source {
+            session.prune_reference_frames_for_dpb(&params.decode_params.dpb);
+        }
         let reference_output = session.prepare_mapped_output(
             avd,
             request,
@@ -1991,7 +2031,7 @@ impl AppleAvdVideoBackend {
                 frame_num: frame.frame_num,
                 pic_num: frame.pic_num,
                 top_field_order_cnt: frame.top_field_order_cnt,
-                long_term: false,
+                long_term: frame.long_term,
             })
             .collect();
 
@@ -2100,6 +2140,7 @@ impl AppleAvdVideoBackend {
             frame_num: decode_request.frame_num,
             pic_num: i32::from(decode_request.frame_num),
             top_field_order_cnt: decode_request.current_poc,
+            long_term: false,
             store_reference: decode_request.slice.is_reference(),
             is_idr: decode_request.slice.is_idr(),
             status_before,
@@ -2328,8 +2369,9 @@ fn finish_pending_decode(
             frame_num: pending.frame_num,
             pic_num: pending.pic_num,
             top_field_order_cnt: pending.top_field_order_cnt,
+            long_term: pending.long_term,
         });
-        while session.reference_frames.len() > pending.dpb_capacity {
+        while session.reference_frames.len() > pending.reference_slot_count {
             session.reference_frames.remove(0);
         }
     }
@@ -2353,7 +2395,6 @@ fn finish_pending_decode(
 fn should_log_decode_completion(pending: &AvdPendingDecode, completion: AvdCompletionInfo) -> bool {
     pending.frame_number < AVD_DECODE_TRACE_FRAMES
         || (completion.status & H264_STATUS_ERROR_MASK) != 0
-        || (completion.by_status && !completion.by_mailbox)
 }
 
 fn sample_output_payload(
