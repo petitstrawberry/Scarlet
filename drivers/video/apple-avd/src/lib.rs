@@ -32,8 +32,9 @@ use scarlet::{
         reset::ResetHandle,
         video::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame, VideoBackendCapabilities,
-            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoDecodeBackend,
+            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame,
+            ScarletVideoH264StatelessParams, VideoBackendCapabilities, VideoBackendDecodeRequest,
+            VideoBackendDecodedFrame, VideoBackendH264StatelessRequest, VideoDecodeBackend,
             register_video_backend, register_video_decode_device,
         },
     },
@@ -1518,6 +1519,11 @@ struct AppleAvdVideoBackend {
     state: Mutex<AvdBackendState>,
 }
 
+enum AvdH264SubmitSource<'a> {
+    AccessUnit(&'a AnnexBAccessUnit<'a>),
+    Stateless(&'a ScarletVideoH264StatelessParams),
+}
+
 impl AppleAvdVideoBackend {
     fn new(avd_id: u32) -> Self {
         Self {
@@ -1599,67 +1605,11 @@ impl AppleAvdVideoBackend {
         }
         Ok(())
     }
-}
 
-impl VideoDecodeBackend for AppleAvdVideoBackend {
-    fn name(&self) -> &'static str {
-        "apple-avd"
-    }
-
-    fn debug_status(&self) -> Option<String> {
-        let avd = self.avd().ok()?;
-        let avd = avd.lock();
-        let snapshot = avd.debug_snapshot();
-        let h264_status = avd.h264_status();
-        let firmware = avd.firmware_state_name();
-        drop(avd);
-
-        let state = self.state.lock();
-        Some(format!(
-            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
-            firmware,
-            state.pending.len(),
-            state.completed.len(),
-            h264_status,
-            snapshot.status,
-            snapshot.irq_status,
-            snapshot.mailbox
-        ))
-    }
-
-    fn capabilities(&self) -> VideoBackendCapabilities {
-        VideoBackendCapabilities {
-            max_sessions: AVD_MAX_SESSIONS as u32,
-            mapped_input_len: AVD_MAPPED_INPUT_BYTES as u32,
-            mapped_output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
-            output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
-            supports_h264: true,
-            supports_av1: false,
-            supports_stateless_h264: false,
-        }
-    }
-
-    fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
-        if coded_format != SCARLET_VIDEO_FORMAT_H264 {
-            return Err("apple-avd: only H.264 sessions are supported");
-        }
-        self.state.lock().allocate_session(coded_format)
-    }
-
-    fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
-        let had_pending = {
-            let mut state = self.state.lock();
-            let had_pending = state.has_pending_for_stream(stream_id);
-            state.destroy_session(stream_id)?;
-            had_pending
-        };
-        if had_pending {
-            self.avd()?.lock().recover_h264_engine(stream_id as u64);
-        }
-        Ok(())
-    }
-
-    fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
+    fn validate_h264_request(
+        &self,
+        request: &VideoBackendDecodeRequest,
+    ) -> Result<(), &'static str> {
         if request.coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: unsupported coded format");
         }
@@ -1672,42 +1622,23 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         if request.input_len as usize > AVD_MAPPED_INPUT_BYTES {
             return Err("apple-avd: input exceeds mapped input buffer");
         }
+        Ok(())
+    }
 
-        self.service_completions()?;
-        let avd = self.avd()?;
-        let mut avd = avd.lock();
-        let mut state = self.state.lock();
-        if !state.pending.is_empty() {
-            return Err("apple-avd: decode already pending");
-        }
-        avd.ensure_firmware_running()?;
-
+    fn submit_h264_prepared_locked(
+        &self,
+        avd: &mut AppleAvd,
+        state: &mut AvdBackendState,
+        request: &VideoBackendDecodeRequest,
+        stream_parameters: H264StreamParameters,
+        source: AvdH264SubmitSource<'_>,
+    ) -> Result<(), &'static str> {
         let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
         let input_vaddr = request.input_vaddr;
         let input_len = request.input_len as usize;
         let input_map_len = align_up(input_len, granule);
         arch::clean_invalidate_dcache_to_poc_range(input_vaddr, input_map_len);
 
-        // SAFETY: `/dev/videoN` passes a PMM-backed kernel mapping for the
-        // mapped input range and keeps the pages alive for the lifetime of the
-        // device. `input_len` was checked against the mapped capacity above.
-        let input_bytes =
-            unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
-        let access_unit = AnnexBAccessUnit::new(input_bytes);
-        let parsed_stream_parameters =
-            access_unit.stream_parameters().map_err(h264_error_to_str)?;
-
-        let session = state.session_for_submit(request.stream_id, request.coded_format)?;
-        let stream_parameters = if let Some(parameters) = parsed_stream_parameters {
-            session.stream_parameters = Some(parameters);
-            parameters
-        } else {
-            session
-                .stream_parameters
-                .ok_or("apple-avd: missing H.264 SPS before first slice")?
-        };
-        let layout = stream_parameters.nv12_layout();
-        let payload_len = layout.output_len();
         let input_mapping = avd
             .dma_context()
             .map_phys_owned(
@@ -1717,27 +1648,42 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             )
             .map_err(|_| "apple-avd: input DMA map failed")?;
 
+        let session = state.session_for_submit(request.stream_id, request.coded_format)?;
+        let layout = stream_parameters.nv12_layout();
+        let payload_len = layout.output_len();
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
-        let reference_output = session.prepare_mapped_output(&avd, request, layout)?;
-        let decode_request = H264DecodeRequest::from_access_unit(
-            session.stream_id as u64,
-            frame_number,
-            &access_unit,
-            AvdDmaRange {
-                dma_addr: input_mapping.dma_addr(),
-                len: input_len,
-            },
-            AvdDmaRange {
-                dma_addr: reference_output.dma_addr,
-                len: payload_len,
-            },
-            layout,
-        )
+        let reference_output = session.prepare_mapped_output(avd, request, layout)?;
+        let input = AvdDmaRange {
+            dma_addr: input_mapping.dma_addr(),
+            len: input_len,
+        };
+        let output = AvdDmaRange {
+            dma_addr: reference_output.dma_addr,
+            len: payload_len,
+        };
+        let decode_request = match source {
+            AvdH264SubmitSource::AccessUnit(access_unit) => H264DecodeRequest::from_access_unit(
+                session.stream_id as u64,
+                frame_number,
+                access_unit,
+                input,
+                output,
+                layout,
+            ),
+            AvdH264SubmitSource::Stateless(params) => H264DecodeRequest::from_stateless(
+                session.stream_id as u64,
+                frame_number,
+                params,
+                input,
+                output,
+                layout,
+            ),
+        }
         .map_err(h264_error_to_str)?;
 
         let (instructions, inst_len) = {
-            let workspace = session.ensure_workspace(&avd)?;
+            let workspace = session.ensure_workspace(avd)?;
             let mut workspace_addresses = workspace.addresses();
             workspace_addresses.reference_dma_addr = reference_output.dma_addr;
             let instructions = AvdH264InstructionStream::build(
@@ -1808,6 +1754,137 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             poll_count: 0,
         });
         Ok(())
+    }
+}
+
+impl VideoDecodeBackend for AppleAvdVideoBackend {
+    fn name(&self) -> &'static str {
+        "apple-avd"
+    }
+
+    fn debug_status(&self) -> Option<String> {
+        let avd = self.avd().ok()?;
+        let avd = avd.lock();
+        let snapshot = avd.debug_snapshot();
+        let h264_status = avd.h264_status();
+        let firmware = avd.firmware_state_name();
+        drop(avd);
+
+        let state = self.state.lock();
+        Some(format!(
+            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
+            firmware,
+            state.pending.len(),
+            state.completed.len(),
+            h264_status,
+            snapshot.status,
+            snapshot.irq_status,
+            snapshot.mailbox
+        ))
+    }
+
+    fn capabilities(&self) -> VideoBackendCapabilities {
+        VideoBackendCapabilities {
+            max_sessions: AVD_MAX_SESSIONS as u32,
+            mapped_input_len: AVD_MAPPED_INPUT_BYTES as u32,
+            mapped_output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
+            output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            supports_h264: true,
+            supports_av1: false,
+            supports_stateless_h264: true,
+        }
+    }
+
+    fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
+        if coded_format != SCARLET_VIDEO_FORMAT_H264 {
+            return Err("apple-avd: only H.264 sessions are supported");
+        }
+        self.state.lock().allocate_session(coded_format)
+    }
+
+    fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
+        let had_pending = {
+            let mut state = self.state.lock();
+            let had_pending = state.has_pending_for_stream(stream_id);
+            state.destroy_session(stream_id)?;
+            had_pending
+        };
+        if had_pending {
+            self.avd()?.lock().recover_h264_engine(stream_id as u64);
+        }
+        Ok(())
+    }
+
+    fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
+        self.validate_h264_request(request)?;
+
+        let input_vaddr = request.input_vaddr;
+        let input_len = request.input_len as usize;
+        // SAFETY: `/dev/videoN` passes a PMM-backed kernel mapping for the
+        // mapped input range and keeps the pages alive for the lifetime of the
+        // device. `input_len` was checked against the mapped capacity above.
+        let input_bytes =
+            unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
+        let access_unit = AnnexBAccessUnit::new(input_bytes);
+        let parsed_stream_parameters =
+            access_unit.stream_parameters().map_err(h264_error_to_str)?;
+
+        self.service_completions()?;
+        let avd = self.avd()?;
+        let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        if !state.pending.is_empty() {
+            return Err("apple-avd: decode already pending");
+        }
+        avd.ensure_firmware_running()?;
+        let stream_parameters = {
+            let session = state.session_for_submit(request.stream_id, request.coded_format)?;
+            if let Some(parameters) = parsed_stream_parameters {
+                session.stream_parameters = Some(parameters);
+                parameters
+            } else {
+                session
+                    .stream_parameters
+                    .ok_or("apple-avd: missing H.264 SPS before first slice")?
+            }
+        };
+        self.submit_h264_prepared_locked(
+            &mut avd,
+            &mut state,
+            request,
+            stream_parameters,
+            AvdH264SubmitSource::AccessUnit(&access_unit),
+        )
+    }
+
+    fn submit_h264_stateless(
+        &self,
+        request: &VideoBackendH264StatelessRequest,
+    ) -> Result<(), &'static str> {
+        self.validate_h264_request(&request.decode)?;
+        let stream_parameters = H264StreamParameters::from_stateless_sps(&request.h264.sps)
+            .map_err(h264_error_to_str)?;
+
+        self.service_completions()?;
+        let avd = self.avd()?;
+        let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        if !state.pending.is_empty() {
+            return Err("apple-avd: decode already pending");
+        }
+        avd.ensure_firmware_running()?;
+        {
+            let session =
+                state.session_for_submit(request.decode.stream_id, request.decode.coded_format)?;
+            session.stream_parameters = Some(stream_parameters);
+        }
+        self.submit_h264_prepared_locked(
+            &mut avd,
+            &mut state,
+            &request.decode,
+            stream_parameters,
+            AvdH264SubmitSource::Stateless(request.h264.as_ref()),
+        )
     }
 
     fn dequeue_frame(

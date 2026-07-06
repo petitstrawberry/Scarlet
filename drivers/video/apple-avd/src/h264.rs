@@ -1,6 +1,11 @@
 use alloc::vec::Vec;
 
-use scarlet::device::video::SCARLET_VIDEO_PIXEL_FORMAT_NV12;
+use scarlet::device::video::{
+    SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE,
+    SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY,
+    SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoH264DecodeParams, ScarletVideoH264SliceParams,
+    ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
+};
 
 const H264_PROFILE_HIGH: u8 = 100;
 const H264_PROFILE_HIGH_10: u8 = 110;
@@ -398,6 +403,71 @@ pub struct H264StreamParameters {
 }
 
 impl H264StreamParameters {
+    /// Build stream parameters from a Scarlet stateless H.264 SPS.
+    ///
+    /// # Arguments
+    ///
+    /// * `sps` - Userspace-provided stateless H.264 SPS.
+    ///
+    /// # Returns
+    ///
+    /// SPS-derived stream parameters accepted by the AVD frontend.
+    pub fn from_stateless_sps(sps: &ScarletVideoH264Sps) -> Result<Self, H264FrontendError> {
+        let chroma_format_idc = sps.chroma_format_idc as u32;
+        let bit_depth_luma_minus8 = sps.bit_depth_luma_minus8 as u32;
+        let bit_depth_chroma_minus8 = sps.bit_depth_chroma_minus8 as u32;
+        if chroma_format_idc != 1 || bit_depth_luma_minus8 != 0 || bit_depth_chroma_minus8 != 0 {
+            return Err(H264FrontendError::UnsupportedSps);
+        }
+        if sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY == 0 {
+            return Err(H264FrontendError::UnsupportedSps);
+        }
+
+        let coded_width = (sps.pic_width_in_mbs_minus1 as u32 + 1) * 16;
+        let coded_height = (sps.pic_height_in_map_units_minus1 as u32 + 1) * 16;
+        let (crop_left, crop_right, crop_top, crop_bottom) =
+            if sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING != 0 {
+                (
+                    sps.frame_crop_left_offset,
+                    sps.frame_crop_right_offset,
+                    sps.frame_crop_top_offset,
+                    sps.frame_crop_bottom_offset,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+        let crop_unit_x = 2;
+        let crop_unit_y = 2;
+        let crop_x = (crop_left + crop_right) * crop_unit_x;
+        let crop_y = (crop_top + crop_bottom) * crop_unit_y;
+        if crop_x >= coded_width || crop_y >= coded_height {
+            return Err(H264FrontendError::InvalidDimensions);
+        }
+        let width = coded_width - crop_x;
+        let height = coded_height - crop_y;
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(H264FrontendError::InvalidDimensions);
+        }
+
+        Ok(Self {
+            sps_id: sps.seq_parameter_set_id as u32,
+            profile_idc: sps.profile_idc,
+            level_idc: sps.level_idc,
+            chroma_format_idc,
+            bit_depth_luma_minus8,
+            bit_depth_chroma_minus8,
+            direct_8x8_inference_flag: sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE
+                != 0,
+            width,
+            height,
+            coded_width,
+            coded_height,
+            log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4 as u32,
+            pic_order_cnt_type: sps.pic_order_cnt_type as u32,
+            max_num_ref_frames: sps.max_num_ref_frames as u32,
+        })
+    }
+
     /// Build the NV12 output layout used by the Scarlet video ABI.
     ///
     /// # Returns
@@ -442,6 +512,46 @@ pub struct H264SliceParameters {
 }
 
 impl H264SliceParameters {
+    /// Build slice parameters from Scarlet stateless H.264 controls.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - Per-slice stateless parameters.
+    /// * `decode` - Per-frame stateless decode parameters.
+    ///
+    /// # Returns
+    ///
+    /// Slice metadata accepted by the AVD instruction builder.
+    pub fn from_stateless(
+        slice: &ScarletVideoH264SliceParams,
+        decode: &ScarletVideoH264DecodeParams,
+    ) -> Result<Self, H264FrontendError> {
+        if decode.nal_ref_idc > 3 || slice.nal_len == 0 {
+            return Err(H264FrontendError::MalformedSlice);
+        }
+        let kind = match (slice.slice_type as u32) % 5 {
+            0 | 3 => H264SliceKind::P,
+            1 => H264SliceKind::B,
+            2 | 4 => H264SliceKind::I,
+            _ => return Err(H264FrontendError::MalformedSlice),
+        };
+        let nal_unit_type = if decode.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0 {
+            H264NalUnitType::IdrSlice
+        } else {
+            H264NalUnitType::Slice
+        };
+        Ok(Self {
+            nal_ref_idc: decode.nal_ref_idc as u8,
+            nal_unit_type,
+            kind,
+            slice_type: slice.slice_type as u32,
+            pic_parameter_set_id: slice.pic_parameter_set_id as u32,
+            nal_offset: slice.nal_offset as usize,
+            nal_len: slice.nal_len as usize,
+            parsed_header_bits: slice.header_bit_size as usize,
+        })
+    }
+
     /// Return whether this slice belongs to an IDR picture.
     ///
     /// # Returns
@@ -753,6 +863,51 @@ impl H264DecodeRequest {
             )
         }) {
             flags.insert(H264DecodeFlags::END_OF_STREAM);
+        }
+
+        Ok(Self {
+            session_id,
+            frame_number,
+            input,
+            output,
+            layout,
+            flags,
+            slice,
+        })
+    }
+
+    /// Build a decode request from stateless H.264 controls and DMA buffers.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - Video session identifier.
+    /// * `frame_number` - Driver-local frame number.
+    /// * `params` - Userspace-provided stateless H.264 parameters.
+    /// * `input` - Device-visible input range.
+    /// * `output` - Device-visible output range.
+    /// * `layout` - Expected decoded frame layout.
+    ///
+    /// # Returns
+    ///
+    /// H.264 decode request ready for firmware command lowering.
+    pub fn from_stateless(
+        session_id: u64,
+        frame_number: u32,
+        params: &ScarletVideoH264StatelessParams,
+        input: AvdDmaRange,
+        output: AvdDmaRange,
+        layout: AvdFrameLayout,
+    ) -> Result<Self, H264FrontendError> {
+        if layout.width == 0 || layout.height == 0 {
+            return Err(H264FrontendError::InvalidDimensions);
+        }
+
+        let slice =
+            H264SliceParameters::from_stateless(&params.slice_params, &params.decode_params)?;
+        let mut flags = H264DecodeFlags::empty();
+        flags.insert(H264DecodeFlags::PARAMETER_SETS);
+        if params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0 {
+            flags.insert(H264DecodeFlags::IDR);
         }
 
         Ok(Self {

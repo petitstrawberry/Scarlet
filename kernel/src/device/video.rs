@@ -60,6 +60,25 @@ pub const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
 /// Backend supports multiple mapped stream sessions.
 pub const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
 
+/// H.264 SPS has `separate_colour_plane_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE: u32 = 1 << 0;
+/// H.264 SPS has `qpprime_y_zero_transform_bypass_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_QPPRIME_Y_ZERO_TRANSFORM_BYPASS: u32 = 1 << 1;
+/// H.264 SPS has `delta_pic_order_always_zero_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO: u32 = 1 << 2;
+/// H.264 SPS has `gaps_in_frame_num_value_allowed_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_GAPS_IN_FRAME_NUM_VALUE_ALLOWED: u32 = 1 << 3;
+/// H.264 SPS has `frame_mbs_only_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY: u32 = 1 << 4;
+/// H.264 SPS has `mb_adaptive_frame_field_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD: u32 = 1 << 5;
+/// H.264 SPS has `direct_8x8_inference_flag` set.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE: u32 = 1 << 6;
+/// H.264 SPS has frame cropping offsets.
+pub const SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING: u32 = 1 << 7;
+/// H.264 decode request is an IDR picture.
+pub const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
+
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
 /// Scarlet coded format value for AV1.
@@ -1010,6 +1029,14 @@ pub struct ScarletVideoH264Sps {
     pub pic_width_in_mbs_minus1: u16,
     /// H.264 coded height in map units minus one.
     pub pic_height_in_map_units_minus1: u16,
+    /// H.264 left frame crop offset.
+    pub frame_crop_left_offset: u32,
+    /// H.264 right frame crop offset.
+    pub frame_crop_right_offset: u32,
+    /// H.264 top frame crop offset.
+    pub frame_crop_top_offset: u32,
+    /// H.264 bottom frame crop offset.
+    pub frame_crop_bottom_offset: u32,
     /// `SCARLET_VIDEO_H264_SPS_FLAG_*` bitset.
     pub flags: u32,
 }
@@ -1034,6 +1061,10 @@ impl Default for ScarletVideoH264Sps {
             offset_for_top_to_bottom_field: 0,
             pic_width_in_mbs_minus1: 0,
             pic_height_in_map_units_minus1: 0,
+            frame_crop_left_offset: 0,
+            frame_crop_right_offset: 0,
+            frame_crop_top_offset: 0,
+            frame_crop_bottom_offset: 0,
             flags: 0,
         }
     }
@@ -1128,10 +1159,16 @@ pub struct ScarletVideoH264PredWeights {
 pub struct ScarletVideoH264SliceParams {
     /// Offset in bits from the slice NAL payload start to `slice_data()`.
     pub header_bit_size: u32,
+    /// Byte offset of the slice NAL header in the mapped coded input.
+    pub nal_offset: u32,
+    /// Byte length of the slice NAL payload including the NAL header.
+    pub nal_len: u32,
     /// H.264 first macroblock in slice.
     pub first_mb_in_slice: u32,
     /// H.264 slice type.
     pub slice_type: u8,
+    /// H.264 picture parameter set id referenced by this slice.
+    pub pic_parameter_set_id: u8,
     /// H.264 colour plane id.
     pub colour_plane_id: u8,
     /// H.264 redundant picture count.
@@ -1166,8 +1203,11 @@ impl Default for ScarletVideoH264SliceParams {
     fn default() -> Self {
         Self {
             header_bit_size: 0,
+            nal_offset: 0,
+            nal_len: 0,
             first_mb_in_slice: 0,
             slice_type: 0,
+            pic_parameter_set_id: 0,
             colour_plane_id: 0,
             redundant_pic_cnt: 0,
             cabac_init_idc: 0,
