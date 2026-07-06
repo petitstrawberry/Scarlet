@@ -32,10 +32,10 @@ use scarlet::{
         reset::ResetHandle,
         video::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame,
-            ScarletVideoH264StatelessParams, VideoBackendCapabilities, VideoBackendDecodeRequest,
-            VideoBackendDecodedFrame, VideoBackendH264StatelessRequest, VideoDecodeBackend,
-            register_video_backend, register_video_decode_device,
+            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            ScarletVideoDequeuedFrame, ScarletVideoH264StatelessParams, VideoBackendCapabilities,
+            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoBackendH264StatelessRequest,
+            VideoDecodeBackend, register_video_backend, register_video_decode_device,
         },
     },
     environment::PAGE_SIZE,
@@ -143,20 +143,16 @@ const AVD_DMA_GRANULE: usize = 0x4000;
 const AVD_MCPU_CODE_BYTES: usize = 0xc000;
 const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
-const AVD_MAX_DECODED_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
-    AVD_MAX_DECODED_FRAME_BYTES + SCARLET_VIDEO_FRAME_HEADER_LEN,
-    AVD_DMA_GRANULE,
-);
+const AVD_MAPPED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 const AVD_MAX_SESSIONS: usize = 4;
-const AVD_WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
 const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
 const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
 const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
 const AVD_WORKSPACE_PPS_TILE_OFFSET: usize = 0x140000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
-const AVD_WORKSPACE_REFERENCE_SLOT_BYTES: usize = 0x500000;
-const AVD_REFERENCE_SLOT_COUNT: usize = 4;
+const AVD_H264_MAX_DPB_FRAMES: usize = 16;
+const AVD_H264_EXTRA_DECODE_SLOTS: usize = 1;
+const AVD_H264_MAX_OUTPUT_SLOTS: usize = AVD_H264_MAX_DPB_FRAMES + AVD_H264_EXTRA_DECODE_SLOTS;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
@@ -1244,12 +1240,29 @@ struct AvdSessionWorkspace {
     pages: ContiguousPages,
     mapping: DmaMapping,
     byte_len: usize,
+    reference_slot_span: usize,
+    slot_count: usize,
 }
 
 impl AvdSessionWorkspace {
-    fn new(avd: &AppleAvd) -> Result<Self, &'static str> {
+    fn new(
+        avd: &AppleAvd,
+        layout: h264::AvdFrameLayout,
+        slot_count: usize,
+    ) -> Result<Self, &'static str> {
+        if slot_count == 0 || slot_count > AVD_H264_MAX_OUTPUT_SLOTS {
+            return Err("apple-avd: invalid workspace slot count");
+        }
+        let reference_slot_span = Self::reference_slot_span(layout)?;
+        let required = AVD_WORKSPACE_REFERENCE_OFFSET
+            .checked_add(
+                reference_slot_span
+                    .checked_mul(slot_count)
+                    .ok_or("apple-avd: workspace size overflow")?,
+            )
+            .ok_or("apple-avd: workspace size overflow")?;
         let granule = avd.dma_context().mapping_granule().max(AVD_WORKSPACE_ALIGN);
-        let byte_len = align_up(AVD_WORKSPACE_BYTES, granule);
+        let byte_len = align_up(required, granule);
         let page_count = byte_len.div_ceil(PAGE_SIZE);
         let pages = ContiguousPages::new_aligned(page_count, granule)
             .ok_or("apple-avd: workspace allocation failed")?;
@@ -1265,7 +1278,24 @@ impl AvdSessionWorkspace {
             pages,
             mapping,
             byte_len,
+            reference_slot_span,
+            slot_count,
         })
+    }
+
+    fn reference_slot_span(layout: h264::AvdFrameLayout) -> Result<usize, &'static str> {
+        let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
+        let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
+        rvra_len
+            .checked_add(sps_len)
+            .map(|len| align_up(len, AVD_DMA_GRANULE))
+            .ok_or("apple-avd: reference workspace slot size overflow")
+    }
+
+    fn is_compatible(&self, layout: h264::AvdFrameLayout, slot_count: usize) -> bool {
+        slot_count <= self.slot_count
+            && Self::reference_slot_span(layout)
+                .is_ok_and(|slot_span| slot_span == self.reference_slot_span)
     }
 
     fn addresses_for_slot(
@@ -1273,20 +1303,15 @@ impl AvdSessionWorkspace {
         slot: usize,
         layout: h264::AvdFrameLayout,
     ) -> Result<AvdH264Workspace, &'static str> {
-        if slot >= AVD_REFERENCE_SLOT_COUNT {
+        if slot >= self.slot_count {
             return Err("apple-avd: invalid reference slot");
         }
         let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
-        let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
-        if rvra_len
-            .checked_add(sps_len)
-            .is_none_or(|len| len > AVD_WORKSPACE_REFERENCE_SLOT_BYTES)
-        {
-            return Err("apple-avd: reference workspace slot is too small");
-        }
         let base = self.mapping.dma_addr();
-        let reference_offset =
-            AVD_WORKSPACE_REFERENCE_OFFSET + slot * AVD_WORKSPACE_REFERENCE_SLOT_BYTES;
+        let reference_offset = AVD_WORKSPACE_REFERENCE_OFFSET
+            + slot
+                .checked_mul(self.reference_slot_span)
+                .ok_or("apple-avd: reference workspace offset overflow")?;
         let reference_dma_addr = base + reference_offset as u64;
         Ok(AvdH264Workspace {
             instruction_fifo_dma_addr: base + AVD_WORKSPACE_INST_FIFO_OFFSET as u64,
@@ -1320,6 +1345,8 @@ struct AvdBackendSession {
     reference_frames: Vec<AvdReferenceFrame>,
     next_reference_slot: usize,
     reference_slot_len: usize,
+    active_slot_count: usize,
+    dpb_capacity: usize,
 }
 
 impl AvdBackendSession {
@@ -1335,6 +1362,8 @@ impl AvdBackendSession {
             reference_frames: Vec::new(),
             next_reference_slot: 0,
             reference_slot_len: 0,
+            active_slot_count: 0,
+            dpb_capacity: 0,
         }
     }
 
@@ -1348,15 +1377,11 @@ impl AvdBackendSession {
         self.reference_frames.clear();
         self.next_reference_slot = 0;
         self.reference_slot_len = 0;
+        self.active_slot_count = 0;
+        self.dpb_capacity = 0;
     }
 
-    fn ensure_workspace(
-        &mut self,
-        avd: &AppleAvd,
-    ) -> Result<&mut AvdSessionWorkspace, &'static str> {
-        if self.workspace.is_none() {
-            self.workspace = Some(AvdSessionWorkspace::new(avd)?);
-        }
+    fn ensure_workspace(&mut self) -> Result<&mut AvdSessionWorkspace, &'static str> {
         self.workspace
             .as_mut()
             .ok_or("apple-avd: workspace unavailable")
@@ -1367,17 +1392,34 @@ impl AvdBackendSession {
         avd: &AppleAvd,
         request: &VideoBackendDecodeRequest,
         layout: h264::AvdFrameLayout,
+        stream_parameters: H264StreamParameters,
+        store_reference: bool,
+        is_idr: bool,
     ) -> Result<AvdReferenceOutput, &'static str> {
         let payload_len = layout.output_len();
         let slot_span = AVD_OUTPUT_SLOT_PAYLOAD_OFFSET
             .checked_add(payload_len)
             .map(|len| align_up(len, AVD_DMA_GRANULE))
             .ok_or("apple-avd: output slot size overflow")?;
+        let mut dpb_capacity =
+            (stream_parameters.max_num_ref_frames as usize).min(AVD_H264_MAX_DPB_FRAMES);
+        if store_reference && dpb_capacity == 0 {
+            dpb_capacity = 1;
+        }
+        let slot_count = dpb_capacity
+            .checked_add(AVD_H264_EXTRA_DECODE_SLOTS)
+            .ok_or("apple-avd: output slot count overflow")?
+            .max(1)
+            .min(AVD_H264_MAX_OUTPUT_SLOTS);
         let required = slot_span
-            .checked_mul(AVD_REFERENCE_SLOT_COUNT)
+            .checked_mul(slot_count)
             .ok_or("apple-avd: reference slot size overflow")?;
         if payload_len == 0 || required > request.output_len as usize {
             return Err("apple-avd: decoded frame exceeds mapped output slot pool");
+        }
+        if is_idr {
+            self.reference_frames.clear();
+            self.next_reference_slot = 0;
         }
 
         let granule = avd.dma_context().mapping_granule().max(AVD_DMA_GRANULE);
@@ -1405,16 +1447,34 @@ impl AvdBackendSession {
             self.reference_frames.clear();
             self.next_reference_slot = 0;
             self.reference_slot_len = 0;
+            self.active_slot_count = 0;
+            self.dpb_capacity = 0;
         }
 
-        if self.reference_slot_len != slot_span {
+        let remap_workspace = self
+            .workspace
+            .as_ref()
+            .is_none_or(|workspace| !workspace.is_compatible(layout, slot_count));
+        if remap_workspace {
+            self.workspace = Some(AvdSessionWorkspace::new(avd, layout, slot_count)?);
+            self.reference_frames.clear();
+            self.next_reference_slot = 0;
+        }
+
+        if self.reference_slot_len != slot_span
+            || self.active_slot_count != slot_count
+            || self.dpb_capacity != dpb_capacity
+        {
             self.reference_frames.clear();
             self.next_reference_slot = 0;
             self.reference_slot_len = slot_span;
+            self.active_slot_count = slot_count;
+            self.dpb_capacity = dpb_capacity;
         }
 
-        let slot = self.next_reference_slot % AVD_REFERENCE_SLOT_COUNT;
-        self.next_reference_slot = (slot + 1) % AVD_REFERENCE_SLOT_COUNT;
+        let slot = self
+            .select_free_output_slot(slot_count)
+            .ok_or("apple-avd: no free output reference slot")?;
         let slot_offset = slot
             .checked_mul(slot_span)
             .ok_or("apple-avd: output slot offset overflow")?;
@@ -1436,12 +1496,29 @@ impl AvdBackendSession {
             .ok_or("apple-avd: mapped output pool unavailable")?;
         Ok(AvdReferenceOutput {
             slot,
+            slot_count,
+            dpb_capacity,
             dma_addr: output_pool.mapping.dma_addr() + payload_offset_in_output as u64,
             vaddr: output_pool.vaddr + payload_offset_in_output,
             header_vaddr: output_pool.vaddr + header_offset_in_output,
             payload_offset: request.output_offset as usize + payload_offset_in_output,
             len: payload_len,
         })
+    }
+
+    fn select_free_output_slot(&mut self, slot_count: usize) -> Option<usize> {
+        for offset in 0..slot_count {
+            let candidate = (self.next_reference_slot + offset) % slot_count;
+            if self
+                .reference_frames
+                .iter()
+                .all(|frame| frame.slot != candidate)
+            {
+                self.next_reference_slot = (candidate + 1) % slot_count;
+                return Some(candidate);
+            }
+        }
+        None
     }
 }
 
@@ -1465,6 +1542,8 @@ struct AvdMappedOutputPool {
 #[derive(Clone, Copy)]
 struct AvdReferenceOutput {
     slot: usize,
+    slot_count: usize,
+    dpb_capacity: usize,
     dma_addr: u64,
     vaddr: usize,
     header_vaddr: usize,
@@ -1484,6 +1563,8 @@ struct AvdPendingDecode {
     output_payload_offset: usize,
     output_payload_len: usize,
     reference_slot: usize,
+    reference_slot_count: usize,
+    dpb_capacity: usize,
     reference_dma_addr: u64,
     top_field_order_cnt: i32,
     store_reference: bool,
@@ -1613,6 +1694,23 @@ struct AppleAvdVideoBackend {
 enum AvdH264SubmitSource<'a> {
     AccessUnit(&'a AnnexBAccessUnit<'a>),
     Stateless(&'a ScarletVideoH264StatelessParams),
+}
+
+impl AvdH264SubmitSource<'_> {
+    fn reference_flags(&self) -> Result<(bool, bool), H264FrontendError> {
+        match self {
+            Self::AccessUnit(access_unit) => {
+                let slice = access_unit
+                    .first_slice()?
+                    .ok_or(H264FrontendError::MalformedSlice)?;
+                Ok((slice.is_idr(), slice.is_reference()))
+            }
+            Self::Stateless(params) => Ok((
+                params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0,
+                params.decode_params.nal_ref_idc != 0,
+            )),
+        }
+    }
 }
 
 impl AppleAvdVideoBackend {
@@ -1833,20 +1931,28 @@ impl AppleAvdVideoBackend {
         let payload_len = layout.output_len();
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
-        let reference_output = session.prepare_mapped_output(avd, request, layout)?;
         let input = AvdDmaRange {
             dma_addr: input_mapping.dma_addr(),
             len: input_len,
-        };
-        let output = AvdDmaRange {
-            dma_addr: reference_output.dma_addr,
-            len: payload_len,
         };
         // SAFETY: `input_vaddr` points at the mapped video input area for
         // `input_len` bytes during this submit, and userspace data has already
         // been copied there before the backend ioctl is invoked.
         let input_bytes =
             unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
+        let (is_idr, store_reference) = source.reference_flags().map_err(h264_error_to_str)?;
+        let reference_output = session.prepare_mapped_output(
+            avd,
+            request,
+            layout,
+            stream_parameters,
+            store_reference,
+            is_idr,
+        )?;
+        let output = AvdDmaRange {
+            dma_addr: reference_output.dma_addr,
+            len: payload_len,
+        };
         let decode_request = match source {
             AvdH264SubmitSource::AccessUnit(access_unit) => H264DecodeRequest::from_access_unit(
                 session.stream_id as u64,
@@ -1871,7 +1977,7 @@ impl AppleAvdVideoBackend {
             .reference_frames
             .iter()
             .rev()
-            .take(AVD_REFERENCE_SLOT_COUNT)
+            .take(AVD_H264_MAX_DPB_FRAMES)
             .map(|frame| AvdH264ReferencePicture {
                 reference_dma_addr: frame.reference_dma_addr,
                 top_field_order_cnt: frame.top_field_order_cnt,
@@ -1880,7 +1986,7 @@ impl AppleAvdVideoBackend {
             .collect();
 
         let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr) = {
-            let workspace = session.ensure_workspace(avd)?;
+            let workspace = session.ensure_workspace()?;
             let workspace_addresses =
                 workspace.addresses_for_slot(reference_output.slot, layout)?;
             let reference_dma_addr = workspace_addresses.reference_dma_addr;
@@ -1912,7 +2018,7 @@ impl AppleAvdVideoBackend {
         if frame_number < AVD_DECODE_TRACE_FRAMES {
             let words = instructions.words();
             println!(
-                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} refs={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
                 request.stream_id,
                 frame_number,
                 decode_request.slice.is_idr(),
@@ -1920,6 +2026,9 @@ impl AppleAvdVideoBackend {
                 decode_request.slice.kind,
                 decode_request.current_poc,
                 reference_pictures.len(),
+                reference_output.slot,
+                reference_output.slot_count,
+                reference_output.dpb_capacity,
                 input_mapping.dma_addr(),
                 input_len,
                 reference_output.dma_addr,
@@ -1953,6 +2062,8 @@ impl AppleAvdVideoBackend {
             output_payload_offset: reference_output.payload_offset,
             output_payload_len: reference_output.len,
             reference_slot: reference_output.slot,
+            reference_slot_count: reference_output.slot_count,
+            dpb_capacity: reference_output.dpb_capacity,
             reference_dma_addr,
             top_field_order_cnt: decode_request.current_poc,
             store_reference: decode_request.slice.is_reference(),
@@ -2127,12 +2238,13 @@ fn finish_pending_decode(
             pending.layout,
         );
         println!(
-            "[apple-avd] decode complete stream={} frame={} idr={} ref={} slot={} by_mailbox={} by_status={} status_before={:#x} status={:#x} msg={:#x} out={:#x}+{} sample y0={} u0={} v0={} y_words=[{:#x},{:#x},{:#x},{:#x}] y_hash={:#x} y_nonzero={} uv_words=[{:#x},{:#x}] uv_hash={:#x} uv_non_neutral={}",
+            "[apple-avd] decode complete stream={} frame={} idr={} ref={} slot={}/{} by_mailbox={} by_status={} status_before={:#x} status={:#x} msg={:#x} out={:#x}+{} sample y0={} u0={} v0={} y_words=[{:#x},{:#x},{:#x},{:#x}] y_hash={:#x} y_nonzero={} uv_words=[{:#x},{:#x}] uv_hash={:#x} uv_non_neutral={}",
             pending.stream_id,
             pending.frame_number,
             pending.is_idr,
             pending.store_reference,
             pending.reference_slot,
+            pending.reference_slot_count,
             completion.by_mailbox,
             completion.by_status,
             completion.status_before,
@@ -2180,7 +2292,7 @@ fn finish_pending_decode(
             reference_dma_addr: pending.reference_dma_addr,
             top_field_order_cnt: pending.top_field_order_cnt,
         });
-        while session.reference_frames.len() > AVD_REFERENCE_SLOT_COUNT {
+        while session.reference_frames.len() > pending.dpb_capacity {
             session.reference_frames.remove(0);
         }
     }
@@ -2538,10 +2650,6 @@ static SCARLET_DRIVER_APPLE_AVD_ANCHOR: fn() = force_link;
 
 /// Keep the Apple AVD driver crate linked into Scarlet module bundles.
 pub fn force_link() {}
-
-const fn align_up_const(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
-}
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)

@@ -7,8 +7,9 @@ use scarlet::device::video::{
     SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED,
     SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING,
     SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
-    ScarletVideoH264DecodeParams, ScarletVideoH264Pps, ScarletVideoH264Reference,
-    ScarletVideoH264SliceParams, ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
+    ScarletVideoH264DecodeParams, ScarletVideoH264Pps, ScarletVideoH264PredWeights,
+    ScarletVideoH264Reference, ScarletVideoH264SliceParams, ScarletVideoH264Sps,
+    ScarletVideoH264StatelessParams,
 };
 
 const H264_PROFILE_HIGH: u8 = 100;
@@ -935,21 +936,7 @@ impl AvdH264InstructionStream {
                     );
                 }
             }
-            let pred_weight = (request.pps.weighted_pred && matches!(slice.kind, H264SliceKind::P))
-                || (request.pps.weighted_bipred_idc == 1 && matches!(slice.kind, H264SliceKind::B));
-            let default_weight_denom = if request.pps.weighted_bipred_idc == 2 {
-                0x5 | (0x5 << 3)
-            } else {
-                0
-            };
-            push(
-                &mut words,
-                0x2dd0_0000
-                    | (((request.pps.weighted_bipred_idc == 2) as u32) << 7)
-                    | ((pred_weight as u32) << 6)
-                    | default_weight_denom,
-                "slc_76c_cmd_weights_denom",
-            );
+            stream_weights(&mut words, request, slice);
         }
         if slice.first_mb_in_slice == 0 {
             push(&mut words, 0x2a00_0000, "cm3_cmd_set_mb_dims");
@@ -1041,7 +1028,7 @@ pub struct AvdH264ReferencePicture {
 }
 
 /// H.264 decode request lowered for the Apple AVD command path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct H264DecodeRequest {
     /// Video session identifier.
     pub session_id: u64,
@@ -1059,6 +1046,8 @@ pub struct H264DecodeRequest {
     pub flags: H264DecodeFlags,
     /// PPS-derived picture parameters.
     pub pps: H264PictureParameters,
+    /// Explicit H.264 prediction weights.
+    pub pred_weights: ScarletVideoH264PredWeights,
     /// First slice metadata used for AVD instruction generation.
     pub slice: H264SliceParameters,
 }
@@ -1130,6 +1119,7 @@ impl H264DecodeRequest {
             current_poc: 0,
             flags,
             pps: H264PictureParameters::baseline_defaults(),
+            pred_weights: ScarletVideoH264PredWeights::default(),
             slice,
         })
     }
@@ -1183,6 +1173,7 @@ impl H264DecodeRequest {
             current_poc: params.decode_params.top_field_order_cnt,
             flags,
             pps,
+            pred_weights: params.pred_weights,
             slice,
         })
     }
@@ -1326,6 +1317,105 @@ fn stream_refs(
             workspace.reference_offsets,
             "hdr_c0_ref_addr_lsb7",
         );
+    }
+}
+
+fn stream_weights(words: &mut Vec<u32>, request: &H264DecodeRequest, slice: &H264SliceParameters) {
+    let pred_weight = (request.pps.weighted_pred && matches!(slice.kind, H264SliceKind::P))
+        || (request.pps.weighted_bipred_idc == 1 && matches!(slice.kind, H264SliceKind::B));
+    let mut denom = 0;
+    if request.pps.weighted_bipred_idc == 2 {
+        denom |= 0x5 | (0x5 << 3);
+    } else {
+        denom |= (u32::from(request.pred_weights.luma_log2_weight_denom) & 0x7) << 3;
+        denom |= u32::from(request.pred_weights.chroma_log2_weight_denom) & 0x7;
+    }
+    push(
+        words,
+        0x2dd0_0000
+            | (((request.pps.weighted_bipred_idc == 2) as u32) << 7)
+            | ((pred_weight as u32) << 6)
+            | denom,
+        "slc_76c_cmd_weights_denom",
+    );
+    if !pred_weight {
+        return;
+    }
+
+    let default_luma_weight = 1i16
+        .checked_shl(u32::from(request.pred_weights.luma_log2_weight_denom))
+        .unwrap_or(0);
+    let default_chroma_weight = 1i16
+        .checked_shl(u32::from(request.pred_weights.chroma_log2_weight_denom))
+        .unwrap_or(0);
+    let list_count = if matches!(slice.kind, H264SliceKind::B) {
+        2
+    } else {
+        1
+    };
+    for list_index in 0..list_count {
+        let active = if list_index == 0 {
+            slice.num_ref_idx_l0_active_minus1
+        } else {
+            slice.num_ref_idx_l1_active_minus1
+        };
+        let factors = &request.pred_weights.weight_factors[list_index];
+        for index in 0..=usize::from(active) {
+            let list_bit = (list_index as u32) << 13;
+            let ref_bits = (index as u32) << 9;
+            if factors.luma_weight[index] != default_luma_weight || factors.luma_offset[index] != 0
+            {
+                push(
+                    words,
+                    0x2de0_0000
+                        | (1 << 14)
+                        | list_bit
+                        | ref_bits
+                        | (u32::from(factors.luma_weight[index] as u16) & 0x1ff),
+                    "slc_luma_weights",
+                );
+                push(
+                    words,
+                    0x2df0_0000 | swrap_i32(i32::from(factors.luma_offset[index]), 0x10000),
+                    "slc_luma_offsets",
+                );
+            }
+
+            if factors.chroma_weight[index][0] != default_chroma_weight
+                || factors.chroma_offset[index][0] != 0
+                || factors.chroma_weight[index][1] != default_chroma_weight
+                || factors.chroma_offset[index][1] != 0
+            {
+                push(
+                    words,
+                    0x2de0_0000
+                        | (2 << 14)
+                        | list_bit
+                        | ref_bits
+                        | (u32::from(factors.chroma_weight[index][0] as u16) & 0x1ff),
+                    "slc_chroma_weights_0",
+                );
+                push(
+                    words,
+                    0x2df0_0000 | swrap_i32(i32::from(factors.chroma_offset[index][0]), 0x10000),
+                    "slc_chroma_offsets_0",
+                );
+                push(
+                    words,
+                    0x2de0_0000
+                        | (3 << 14)
+                        | list_bit
+                        | ref_bits
+                        | (u32::from(factors.chroma_weight[index][1] as u16) & 0x1ff),
+                    "slc_chroma_weights_1",
+                );
+                push(
+                    words,
+                    0x2df0_0000 | swrap_i32(i32::from(factors.chroma_offset[index][1]), 0x10000),
+                    "slc_chroma_offsets_1",
+                );
+            }
+        }
     }
 }
 
