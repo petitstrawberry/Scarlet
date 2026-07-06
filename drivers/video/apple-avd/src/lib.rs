@@ -1912,12 +1912,14 @@ impl AppleAvdVideoBackend {
         if frame_number < AVD_DECODE_TRACE_FRAMES {
             let words = instructions.words();
             println!(
-                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} refs={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
                 request.stream_id,
                 frame_number,
                 decode_request.slice.is_idr(),
                 decode_request.slice.is_reference(),
                 decode_request.slice.kind,
+                decode_request.current_poc,
+                reference_pictures.len(),
                 input_mapping.dma_addr(),
                 input_len,
                 reference_output.dma_addr,

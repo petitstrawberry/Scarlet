@@ -5666,10 +5666,15 @@ fn parse_h264_slice(
         let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
         decode_params.pic_order_cnt_lsb =
             read_u16_bits(&mut reader, poc_bits, "H.264 pic_order_cnt_lsb")?;
+        decode_params.top_field_order_cnt = i32::from(decode_params.pic_order_cnt_lsb);
+        decode_params.bottom_field_order_cnt = decode_params.top_field_order_cnt;
         if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT != 0 {
             decode_params.delta_pic_order_cnt_bottom = reader
                 .read_se()
                 .ok_or_else(|| String::from("H.264 delta_pic_order_cnt_bottom missing"))?;
+            decode_params.bottom_field_order_cnt = decode_params
+                .top_field_order_cnt
+                .saturating_add(decode_params.delta_pic_order_cnt_bottom);
         }
     } else if sps.pic_order_cnt_type == 1
         && sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO == 0
@@ -5682,6 +5687,10 @@ fn parse_h264_slice(
                 .read_se()
                 .ok_or_else(|| String::from("H.264 delta_pic_order_cnt1 missing"))?;
         }
+        decode_params.top_field_order_cnt = decode_params.delta_pic_order_cnt0;
+        decode_params.bottom_field_order_cnt = decode_params
+            .top_field_order_cnt
+            .saturating_add(decode_params.delta_pic_order_cnt1);
     }
     let mut redundant_pic_cnt = 0;
     if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT != 0 {

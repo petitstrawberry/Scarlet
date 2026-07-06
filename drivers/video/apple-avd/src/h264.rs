@@ -759,6 +759,7 @@ impl AvdH264InstructionStream {
         references: &[AvdH264ReferencePicture],
     ) -> Self {
         let mut words = Vec::new();
+        let reference_plan = ReferencePlan::build(slice, request.current_poc, references);
         let coded_width = stream.coded_width.max(request.layout.width);
         let coded_height = stream.coded_height.max(request.layout.height);
         let y_addr = request.output.dma_addr;
@@ -867,7 +868,7 @@ impl AvdH264InstructionStream {
             "hdr_54_height_width",
         );
         if !is_idr {
-            stream_refs(&mut words, request, workspace, references);
+            stream_refs(&mut words, request, workspace, &reference_plan.table);
         }
         push(&mut words, 0, "cm3_mark_end_section_scl");
 
@@ -913,27 +914,23 @@ impl AvdH264InstructionStream {
         }
         push(&mut words, deblock, "slc_a74_cmd_deblocking_filter");
         if matches!(slice.kind, H264SliceKind::P | H264SliceKind::B) {
-            let l0_count = (usize::from(slice.num_ref_idx_l0_active_minus1) + 1)
-                .min(references.len())
-                .min(16);
-            for index in 0..l0_count {
+            for (index, reference_index) in reference_plan.list0.iter().copied().enumerate() {
                 push(
                     &mut words,
-                    0x2dc0_0000 | (((index as u32) & 0xf) << 4) | ((index as u32) & 0xf),
+                    0x2dc0_0000
+                        | (((index as u32) & 0xf) << 4)
+                        | (u32::from(reference_index) & 0xf),
                     "slc_6e8_cmd_ref_list_0",
                 );
             }
             if matches!(slice.kind, H264SliceKind::B) {
-                let l1_count = (usize::from(slice.num_ref_idx_l1_active_minus1) + 1)
-                    .min(references.len())
-                    .min(16);
-                for index in 0..l1_count {
+                for (index, reference_index) in reference_plan.list1.iter().copied().enumerate() {
                     push(
                         &mut words,
                         0x2dc0_0000
                             | (1 << 8)
                             | (((index as u32) & 0xf) << 4)
-                            | ((index as u32) & 0xf),
+                            | (u32::from(reference_index) & 0xf),
                         "slc_6e8_cmd_ref_list_1",
                     );
                 }
@@ -1189,6 +1186,100 @@ impl H264DecodeRequest {
             slice,
         })
     }
+}
+
+struct ReferencePlan {
+    table: Vec<AvdH264ReferencePicture>,
+    list0: Vec<u8>,
+    list1: Vec<u8>,
+}
+
+impl ReferencePlan {
+    fn build(
+        slice: &H264SliceParameters,
+        current_poc: i32,
+        references: &[AvdH264ReferencePicture],
+    ) -> Self {
+        let mut list0_original = Vec::new();
+        let mut list1_original = Vec::new();
+
+        match slice.kind {
+            H264SliceKind::I => {}
+            H264SliceKind::P => {
+                let needed = (usize::from(slice.num_ref_idx_l0_active_minus1) + 1).min(16);
+                list0_original.extend(0..references.len().min(needed));
+            }
+            H264SliceKind::B => {
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                for (index, reference) in references.iter().enumerate() {
+                    if reference.top_field_order_cnt < current_poc {
+                        before.push(index);
+                    } else {
+                        after.push(index);
+                    }
+                }
+                before.sort_by(|left, right| {
+                    references[*right]
+                        .top_field_order_cnt
+                        .cmp(&references[*left].top_field_order_cnt)
+                });
+                after.sort_by(|left, right| {
+                    references[*left]
+                        .top_field_order_cnt
+                        .cmp(&references[*right].top_field_order_cnt)
+                });
+
+                list0_original.extend(before.iter().copied());
+                list0_original.extend(after.iter().copied());
+                list1_original.extend(after.iter().copied());
+                list1_original.extend(before.iter().copied());
+                if list0_original == list1_original && list1_original.len() > 1 {
+                    list1_original.swap(0, 1);
+                }
+
+                let l0_needed = (usize::from(slice.num_ref_idx_l0_active_minus1) + 1).min(16);
+                let l1_needed = (usize::from(slice.num_ref_idx_l1_active_minus1) + 1).min(16);
+                list0_original.truncate(l0_needed);
+                list1_original.truncate(l1_needed);
+            }
+        }
+
+        let mut table_indices = Vec::new();
+        for index in list0_original.iter().chain(list1_original.iter()).copied() {
+            if !table_indices.contains(&index) && table_indices.len() < 16 {
+                table_indices.push(index);
+            }
+        }
+
+        let mut table = Vec::new();
+        for index in table_indices.iter().copied() {
+            if let Some(reference) = references.get(index) {
+                table.push(*reference);
+            }
+        }
+
+        let list0 = remap_reference_list(&list0_original, &table_indices);
+        let list1 = remap_reference_list(&list1_original, &table_indices);
+        Self {
+            table,
+            list0,
+            list1,
+        }
+    }
+}
+
+fn remap_reference_list(original: &[usize], table_indices: &[usize]) -> Vec<u8> {
+    let mut remapped = Vec::new();
+    for index in original {
+        if let Some(table_index) = table_indices
+            .iter()
+            .position(|candidate| candidate == index)
+        {
+            remapped.push(table_index as u8);
+        }
+    }
+    remapped
 }
 
 fn stream_refs(
