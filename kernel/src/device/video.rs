@@ -88,6 +88,12 @@ pub const SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT: u16 = 1
 pub const SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED: u16 = 1 << 4;
 /// H.264 PPS has `redundant_pic_cnt_present_flag` set.
 pub const SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT: u16 = 1 << 5;
+/// H.264 PPS has `transform_8x8_mode_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE: u16 = 1 << 6;
+/// H.264 PPS has `pic_scaling_matrix_present_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_SCALING_MATRIX_PRESENT: u16 = 1 << 7;
+/// H.264 B-slice uses direct spatial motion vector prediction.
+pub const SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED: u32 = 1 << 0;
 /// H.264 decode request is an IDR picture.
 pub const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
 
@@ -1131,7 +1137,7 @@ impl Default for ScarletVideoH264ScalingMatrix {
 
 /// One H.264 reference picture list entry.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScarletVideoH264Reference {
     /// Reference field selector.
     pub fields: u8,

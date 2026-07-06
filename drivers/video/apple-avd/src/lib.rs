@@ -1819,6 +1819,11 @@ impl AppleAvdVideoBackend {
             dma_addr: reference_output.dma_addr,
             len: payload_len,
         };
+        // SAFETY: `input_vaddr` points at the mapped video input area for
+        // `input_len` bytes during this submit, and userspace data has already
+        // been copied there before the backend ioctl is invoked.
+        let input_bytes =
+            unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
         let decode_request = match source {
             AvdH264SubmitSource::AccessUnit(access_unit) => H264DecodeRequest::from_access_unit(
                 session.stream_id as u64,
@@ -1833,6 +1838,7 @@ impl AppleAvdVideoBackend {
                 frame_number,
                 params,
                 input,
+                input_bytes,
                 output,
                 layout,
             ),
@@ -1841,8 +1847,7 @@ impl AppleAvdVideoBackend {
 
         let (instructions, inst_len, instruction_fifo_dma) = {
             let workspace = session.ensure_workspace(avd)?;
-            let mut workspace_addresses = workspace.addresses();
-            workspace_addresses.reference_dma_addr = reference_output.dma_addr;
+            let workspace_addresses = workspace.addresses();
             let instructions = AvdH264InstructionStream::build(
                 &decode_request,
                 &stream_parameters,
@@ -2253,6 +2258,7 @@ fn h264_error_to_str(error: H264FrontendError) -> &'static str {
         H264FrontendError::MalformedSps => "apple-avd: H.264 SPS is malformed",
         H264FrontendError::UnsupportedSps => "apple-avd: H.264 SPS uses unsupported features",
         H264FrontendError::MalformedSlice => "apple-avd: H.264 slice header is malformed",
+        H264FrontendError::InvalidSliceRange => "apple-avd: H.264 slice range is invalid",
         H264FrontendError::InstructionStreamTooLarge => {
             "apple-avd: generated H.264 instruction stream is too large"
         }

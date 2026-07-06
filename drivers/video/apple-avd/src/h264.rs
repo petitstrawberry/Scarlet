@@ -1,10 +1,14 @@
 use alloc::vec::Vec;
 
 use scarlet::device::video::{
-    SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE,
-    SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY,
-    SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoH264DecodeParams, ScarletVideoH264SliceParams,
-    ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
+    SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED,
+    SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE,
+    SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE,
+    SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED,
+    SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING,
+    SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+    ScarletVideoH264DecodeParams, ScarletVideoH264Pps, ScarletVideoH264Reference,
+    ScarletVideoH264SliceParams, ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
 };
 
 const H264_PROFILE_HIGH: u8 = 100;
@@ -38,6 +42,8 @@ pub enum H264FrontendError {
     UnsupportedSps,
     /// Slice header metadata could not be parsed.
     MalformedSlice,
+    /// Slice payload range does not fit inside the submitted input buffer.
+    InvalidSliceRange,
     /// Generated AVD instruction stream exceeded its destination buffer.
     InstructionStreamTooLarge,
 }
@@ -474,8 +480,68 @@ impl H264StreamParameters {
     ///
     /// NV12 frame layout with AVD-friendly aligned strides.
     pub fn nv12_layout(&self) -> AvdFrameLayout {
-        let y_stride = align_up_u32(self.width, 64);
-        AvdFrameLayout::nv12(self.width, self.height, y_stride, y_stride)
+        let y_stride = align_up_u32(self.coded_width, 64);
+        AvdFrameLayout::nv12(self.coded_width, self.coded_height, y_stride, y_stride)
+    }
+}
+
+/// H.264 PPS-derived picture parameters needed by the AVD command stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H264PictureParameters {
+    /// CABAC entropy coding mode.
+    pub entropy_coding_mode: bool,
+    /// 8x8 transform mode.
+    pub transform_8x8_mode: bool,
+    /// Constrained intra prediction.
+    pub constrained_intra_pred: bool,
+    /// Weighted bipred IDC.
+    pub weighted_bipred_idc: u8,
+    /// Initial picture QP minus 26.
+    pub pic_init_qp_minus26: i8,
+    /// First chroma QP offset.
+    pub chroma_qp_index_offset: i8,
+    /// Second chroma QP offset.
+    pub second_chroma_qp_index_offset: i8,
+}
+
+impl H264PictureParameters {
+    /// Build picture parameters from a Scarlet stateless H.264 PPS.
+    ///
+    /// # Arguments
+    ///
+    /// * `pps` - Userspace-provided stateless H.264 PPS.
+    ///
+    /// # Returns
+    ///
+    /// PPS-derived command stream parameters.
+    pub fn from_stateless_pps(pps: &ScarletVideoH264Pps) -> Self {
+        Self {
+            entropy_coding_mode: pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE != 0,
+            transform_8x8_mode: pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE != 0,
+            constrained_intra_pred: pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED
+                != 0,
+            weighted_bipred_idc: pps.weighted_bipred_idc,
+            pic_init_qp_minus26: pps.pic_init_qp_minus26,
+            chroma_qp_index_offset: pps.chroma_qp_index_offset,
+            second_chroma_qp_index_offset: pps.second_chroma_qp_index_offset,
+        }
+    }
+
+    /// Return conservative defaults used for the old access-unit path.
+    ///
+    /// # Returns
+    ///
+    /// Baseline PPS defaults.
+    pub const fn baseline_defaults() -> Self {
+        Self {
+            entropy_coding_mode: false,
+            transform_8x8_mode: false,
+            constrained_intra_pred: false,
+            weighted_bipred_idc: 0,
+            pic_init_qp_minus26: 0,
+            chroma_qp_index_offset: 0,
+            second_chroma_qp_index_offset: 0,
+        }
     }
 }
 
@@ -507,8 +573,34 @@ pub struct H264SliceParameters {
     pub nal_offset: usize,
     /// Byte length of the NAL payload including the NAL header.
     pub nal_len: usize,
+    /// Byte offset of `slice_data()` in the submitted input buffer.
+    pub slice_data_offset: usize,
+    /// Byte length from `slice_data()` to the end of the slice NAL.
+    pub slice_data_len: usize,
     /// Approximate number of bits consumed from the slice RBSP by fields parsed here.
     pub parsed_header_bits: usize,
+    /// First macroblock in this slice.
+    pub first_mb_in_slice: u32,
+    /// CABAC init IDC.
+    pub cabac_init_idc: u8,
+    /// Slice QP delta.
+    pub slice_qp_delta: i8,
+    /// Deblocking filter IDC.
+    pub disable_deblocking_filter_idc: u8,
+    /// Alpha C0 deblocking offset divided by two.
+    pub slice_alpha_c0_offset_div2: i8,
+    /// Beta deblocking offset divided by two.
+    pub slice_beta_offset_div2: i8,
+    /// Active L0 reference count minus one.
+    pub num_ref_idx_l0_active_minus1: u8,
+    /// Active L1 reference count minus one.
+    pub num_ref_idx_l1_active_minus1: u8,
+    /// Reference picture list 0.
+    pub ref_pic_list0: [ScarletVideoH264Reference; 32],
+    /// Reference picture list 1.
+    pub ref_pic_list1: [ScarletVideoH264Reference; 32],
+    /// `SCARLET_VIDEO_H264_SLICE_FLAG_*` bitset.
+    pub flags: u32,
 }
 
 impl H264SliceParameters {
@@ -525,6 +617,8 @@ impl H264SliceParameters {
     pub fn from_stateless(
         slice: &ScarletVideoH264SliceParams,
         decode: &ScarletVideoH264DecodeParams,
+        pps: &ScarletVideoH264Pps,
+        input: &[u8],
     ) -> Result<Self, H264FrontendError> {
         if decode.nal_ref_idc > 3 || slice.nal_len == 0 {
             return Err(H264FrontendError::MalformedSlice);
@@ -540,6 +634,9 @@ impl H264SliceParameters {
         } else {
             H264NalUnitType::Slice
         };
+        let entropy_coding_mode = pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE != 0;
+        let (slice_data_offset, slice_data_len) =
+            locate_slice_data(input, slice, entropy_coding_mode)?;
         Ok(Self {
             nal_ref_idc: decode.nal_ref_idc as u8,
             nal_unit_type,
@@ -548,7 +645,20 @@ impl H264SliceParameters {
             pic_parameter_set_id: slice.pic_parameter_set_id as u32,
             nal_offset: slice.nal_offset as usize,
             nal_len: slice.nal_len as usize,
+            slice_data_offset,
+            slice_data_len,
             parsed_header_bits: slice.header_bit_size as usize,
+            first_mb_in_slice: slice.first_mb_in_slice,
+            cabac_init_idc: slice.cabac_init_idc,
+            slice_qp_delta: slice.slice_qp_delta,
+            disable_deblocking_filter_idc: slice.disable_deblocking_filter_idc,
+            slice_alpha_c0_offset_div2: slice.slice_alpha_c0_offset_div2,
+            slice_beta_offset_div2: slice.slice_beta_offset_div2,
+            num_ref_idx_l0_active_minus1: slice.num_ref_idx_l0_active_minus1,
+            num_ref_idx_l1_active_minus1: slice.num_ref_idx_l1_active_minus1,
+            ref_pic_list0: slice.ref_pic_list0,
+            ref_pic_list1: slice.ref_pic_list1,
+            flags: slice.flags,
         })
     }
 
@@ -633,14 +743,28 @@ impl AvdH264InstructionStream {
         if stream.direct_8x8_inference_flag {
             sps_param |= 1;
         }
+        if request.pps.transform_8x8_mode {
+            sps_param |= 1 << 7;
+        }
         push(&mut words, sps_param, "hdr_2c_sps_param");
 
         let mut flags = 0;
+        if request.pps.entropy_coding_mode {
+            flags |= 1 << 20;
+        }
         if !is_idr {
             flags |= 1 << 21;
         }
+        if request.pps.constrained_intra_pred {
+            flags |= 1 << 19;
+        }
         push(&mut words, flags, "hdr_44_flags");
-        push(&mut words, 0, "hdr_48_chroma_qp_index_offset");
+        push(
+            &mut words,
+            (swrap_i8(request.pps.chroma_qp_index_offset, 32) << 5)
+                | swrap_i8(request.pps.second_chroma_qp_index_offset, 32),
+            "hdr_48_chroma_qp_index_offset",
+        );
         push(&mut words, 0x0030_000a, "hdr_58_const_3a");
         push(&mut words, 0, "cm3_dma_config_1");
         push(&mut words, 0, "cm3_dma_config_2");
@@ -709,35 +833,73 @@ impl AvdH264InstructionStream {
         );
         push(&mut words, 0, "cm3_mark_end_section_scl");
 
-        push(&mut words, 0x2d80_0000, "slc_a7c_cmd_set_coded_slice");
+        let header_remainder = if request.pps.entropy_coding_mode {
+            0
+        } else {
+            (slice.parsed_header_bits as u32 % 8) << 15
+        };
+        let slice_addr = request.input.dma_addr + slice.slice_data_offset as u64;
         push(
             &mut words,
-            (request.input.dma_addr as usize + slice.nal_offset) as u32,
-            "slc_a84_slice_addr_low",
+            0x2d80_0000 | header_remainder | ((slice_addr >> 32) as u32),
+            "slc_a7c_cmd_set_coded_slice",
         );
+        push(&mut words, slice_addr as u32, "slc_a84_slice_addr_low");
         push(
             &mut words,
-            slice.nal_len as u32,
+            slice.slice_data_len as u32,
             "slc_a88_slice_payload_size",
         );
-        push(&mut words, 0x2c00_0000, "cm3_cmd_exec_mb_vp");
+        let mb_width = ((coded_width - 1) >> 4) + 1;
         push(
             &mut words,
-            0x2d90_0000 | (26 * 0x400),
+            0x2c00_0000
+                | ((slice.first_mb_in_slice / mb_width) << 12)
+                | (slice.first_mb_in_slice % mb_width),
+            "cm3_cmd_exec_mb_vp",
+        );
+        let qp = 26 + request.pps.pic_init_qp_minus26 as i32 + slice.slice_qp_delta as i32;
+        push(
+            &mut words,
+            0x2d90_0000 | (((qp * 0x400) as u32) & 0x1fc00),
             "slc_a70_cmd_quant_param",
         );
-        push(&mut words, 0x2da0_0000, "slc_a74_cmd_deblocking_filter");
-        push(&mut words, 0x2a00_0000, "cm3_cmd_set_mb_dims");
-        push(
-            &mut words,
-            (((coded_height - 1) >> 4) << 12) | ((coded_width - 1) >> 4),
-            "cm3_set_mb_dims",
-        );
+        let mut deblock = 0x2da0_0000;
+        if slice.disable_deblocking_filter_idc == 0 {
+            deblock |= 1 << 17;
+        }
+        if slice.disable_deblocking_filter_idc != 1 {
+            deblock |= 1 << 16;
+            deblock |= swrap_i8(slice.slice_beta_offset_div2, 16) << 12;
+            deblock |= swrap_i8(slice.slice_alpha_c0_offset_div2, 16) << 8;
+        }
+        push(&mut words, deblock, "slc_a74_cmd_deblocking_filter");
+        if slice.first_mb_in_slice == 0 {
+            push(&mut words, 0x2a00_0000, "cm3_cmd_set_mb_dims");
+            push(
+                &mut words,
+                (((coded_height - 1) >> 4) << 12) | ((coded_width - 1) >> 4),
+                "cm3_set_mb_dims",
+            );
+        }
         let ref_type = match slice.kind {
             H264SliceKind::I => 0x20000,
             H264SliceKind::P => 0x10000,
             H264SliceKind::B => 0x40000,
         };
+        let mut ref_type = ref_type;
+        if matches!(slice.kind, H264SliceKind::P | H264SliceKind::B) {
+            if request.pps.entropy_coding_mode {
+                ref_type |= (slice.cabac_init_idc as u32) << 5;
+            }
+            if matches!(slice.kind, H264SliceKind::B) {
+                ref_type |= (slice.num_ref_idx_l1_active_minus1 as u32) << 7;
+                if slice.flags & SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED == 0 {
+                    ref_type |= 1 << 15;
+                }
+            }
+            ref_type |= (slice.num_ref_idx_l0_active_minus1 as u32) << 11;
+        }
         push(&mut words, 0x2d00_0000 | ref_type, "slc_6e4_cmd_ref_type");
         push(&mut words, 0x2b00_0000 | 0x400, "cm3_cmd_inst_fifo_end");
 
@@ -803,6 +965,8 @@ pub struct H264DecodeRequest {
     pub layout: AvdFrameLayout,
     /// Request flags derived from the access unit.
     pub flags: H264DecodeFlags,
+    /// PPS-derived picture parameters.
+    pub pps: H264PictureParameters,
     /// First slice metadata used for AVD instruction generation.
     pub slice: H264SliceParameters,
 }
@@ -872,6 +1036,7 @@ impl H264DecodeRequest {
             output,
             layout,
             flags,
+            pps: H264PictureParameters::baseline_defaults(),
             slice,
         })
     }
@@ -895,6 +1060,7 @@ impl H264DecodeRequest {
         frame_number: u32,
         params: &ScarletVideoH264StatelessParams,
         input: AvdDmaRange,
+        input_bytes: &[u8],
         output: AvdDmaRange,
         layout: AvdFrameLayout,
     ) -> Result<Self, H264FrontendError> {
@@ -902,8 +1068,13 @@ impl H264DecodeRequest {
             return Err(H264FrontendError::InvalidDimensions);
         }
 
-        let slice =
-            H264SliceParameters::from_stateless(&params.slice_params, &params.decode_params)?;
+        let pps = H264PictureParameters::from_stateless_pps(&params.pps);
+        let slice = H264SliceParameters::from_stateless(
+            &params.slice_params,
+            &params.decode_params,
+            &params.pps,
+            input_bytes,
+        )?;
         let mut flags = H264DecodeFlags::empty();
         flags.insert(H264DecodeFlags::PARAMETER_SETS);
         if params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0 {
@@ -917,6 +1088,7 @@ impl H264DecodeRequest {
             output,
             layout,
             flags,
+            pps,
             slice,
         })
     }
@@ -968,8 +1140,71 @@ fn parse_slice_header(unit: &H264NalUnit<'_>) -> Result<H264SliceParameters, H26
         pic_parameter_set_id,
         nal_offset: unit.offset,
         nal_len: unit.payload.len(),
+        slice_data_offset: unit.offset + 1,
+        slice_data_len: unit.payload.len().saturating_sub(1),
         parsed_header_bits: reader.position_bits(),
+        first_mb_in_slice: 0,
+        cabac_init_idc: 0,
+        slice_qp_delta: 0,
+        disable_deblocking_filter_idc: 0,
+        slice_alpha_c0_offset_div2: 0,
+        slice_beta_offset_div2: 0,
+        num_ref_idx_l0_active_minus1: 0,
+        num_ref_idx_l1_active_minus1: 0,
+        ref_pic_list0: [ScarletVideoH264Reference::default(); 32],
+        ref_pic_list1: [ScarletVideoH264Reference::default(); 32],
+        flags: 0,
     })
+}
+
+fn locate_slice_data(
+    input: &[u8],
+    slice: &ScarletVideoH264SliceParams,
+    entropy_coding_mode: bool,
+) -> Result<(usize, usize), H264FrontendError> {
+    let nal_start = slice.nal_offset as usize;
+    let nal_len = slice.nal_len as usize;
+    let nal_end = nal_start
+        .checked_add(nal_len)
+        .ok_or(H264FrontendError::InvalidSliceRange)?;
+    if nal_len == 0 || nal_end > input.len() {
+        return Err(H264FrontendError::InvalidSliceRange);
+    }
+
+    let mut offset = nal_start + 1;
+    let rbsp_header_bytes = if entropy_coding_mode {
+        (slice.header_bit_size as usize + 7) / 8
+    } else {
+        slice.header_bit_size as usize / 8
+    };
+    let mut rbsp_read = 0usize;
+    let mut zero_count = 0u8;
+
+    while rbsp_read < rbsp_header_bytes {
+        let byte = *input
+            .get(offset)
+            .ok_or(H264FrontendError::InvalidSliceRange)?;
+        offset += 1;
+        if zero_count >= 2 && byte == 0x03 {
+            zero_count = 0;
+            continue;
+        }
+        rbsp_read += 1;
+        if byte == 0 {
+            zero_count = zero_count.saturating_add(1);
+        } else {
+            zero_count = 0;
+        }
+    }
+
+    if offset > nal_end {
+        return Err(H264FrontendError::InvalidSliceRange);
+    }
+    Ok((offset, nal_end - offset))
+}
+
+fn swrap_i8(value: i8, width: u32) -> u32 {
+    (value as i32 as u32) & (width - 1)
 }
 
 fn parse_sps(nal_payload: &[u8]) -> Result<H264StreamParameters, H264FrontendError> {

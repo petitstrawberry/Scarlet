@@ -116,6 +116,8 @@ const SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED: u16 = 1 << 2;
 const SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT: u16 = 1 << 3;
 const SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED: u16 = 1 << 4;
 const SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT: u16 = 1 << 5;
+const SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE: u16 = 1 << 6;
+const SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED: u32 = 1 << 0;
 const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
@@ -5241,6 +5243,7 @@ fn first_mb_in_slice(nal: &[u8]) -> Option<u32> {
     reader.read_ue()
 }
 
+#[derive(Clone)]
 struct EbspBitReader<'a> {
     bytes: &'a [u8],
     byte_index: usize,
@@ -5354,7 +5357,8 @@ impl H264StatelessState {
                     let pps = self
                         .pps
                         .ok_or_else(|| String::from("H.264 stateless submit missing PPS"))?;
-                    let (slice_params, decode_params) = parse_h264_slice(nal, &sps, &pps)?;
+                    let (slice_params, decode_params) =
+                        parse_h264_slice(nal, &sps, &pps, &mut self.pred_weights)?;
                     slice = Some(slice_params);
                     decode = Some(decode_params);
                 }
@@ -5581,6 +5585,31 @@ fn parse_h264_pps(nal: &[u8]) -> Result<ScarletVideoH264Pps, String> {
     if read_bool(&mut reader, "H.264 redundant_pic_cnt_present_flag")? {
         flags |= SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT;
     }
+    if h264_more_rbsp_data(&reader) {
+        if read_bool(&mut reader, "H.264 transform_8x8_mode_flag")? {
+            flags |= SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE;
+        }
+        if read_bool(&mut reader, "H.264 pic_scaling_matrix_present_flag")? {
+            return Err(String::from("H.264 PPS scaling matrices are unsupported"));
+        }
+        if h264_more_rbsp_data(&reader) {
+            let second_chroma_qp_index_offset =
+                read_i8_se(&mut reader, "H.264 second_chroma_qp_index_offset")?;
+            return Ok(ScarletVideoH264Pps {
+                pic_parameter_set_id,
+                seq_parameter_set_id,
+                num_slice_groups_minus1,
+                num_ref_idx_l0_default_active_minus1,
+                num_ref_idx_l1_default_active_minus1,
+                weighted_bipred_idc,
+                pic_init_qp_minus26,
+                pic_init_qs_minus26,
+                chroma_qp_index_offset,
+                second_chroma_qp_index_offset,
+                flags,
+            });
+        }
+    }
 
     Ok(ScarletVideoH264Pps {
         pic_parameter_set_id,
@@ -5601,6 +5630,7 @@ fn parse_h264_slice(
     nal: &RawNalUnit<'_>,
     sps: &ScarletVideoH264Sps,
     pps: &ScarletVideoH264Pps,
+    pred_weights: &mut ScarletVideoH264PredWeights,
 ) -> Result<(ScarletVideoH264SliceParams, ScarletVideoH264DecodeParams), String> {
     if nal.bytes.len() < 2 {
         return Err(String::from("H.264 slice is truncated"));
@@ -5661,9 +5691,11 @@ fn parse_h264_slice(
     let slice_class = slice_type % 5;
     let mut num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
     let mut num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
+    let mut slice_flags = 0u32;
     if slice_class == 1 {
-        let _direct_spatial_mv_pred_flag =
-            read_bool(&mut reader, "H.264 direct_spatial_mv_pred_flag")?;
+        if read_bool(&mut reader, "H.264 direct_spatial_mv_pred_flag")? {
+            slice_flags |= SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
+        }
     }
     if slice_class == 0 || slice_class == 1 || slice_class == 3 {
         let override_refs = read_bool(&mut reader, "H.264 num_ref_idx_active_override_flag")?;
@@ -5676,6 +5708,52 @@ fn parse_h264_slice(
             }
         }
     }
+    skip_h264_ref_pic_list_modification(&mut reader, slice_class)?;
+    parse_h264_pred_weight_table(
+        &mut reader,
+        sps,
+        pps,
+        slice_class,
+        num_ref_idx_l0_active_minus1,
+        num_ref_idx_l1_active_minus1,
+        pred_weights,
+    )?;
+
+    let dec_ref_start_bits = reader.position_bits();
+    if nal.nal_ref_idc != 0 {
+        parse_h264_dec_ref_pic_marking(&mut reader, nal.nal_type)?;
+    }
+    decode_params.dec_ref_pic_marking_bit_size =
+        reader.position_bits().saturating_sub(dec_ref_start_bits) as u32;
+
+    let mut cabac_init_idc = 0;
+    if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE != 0
+        && slice_class != 2
+        && slice_class != 4
+    {
+        cabac_init_idc = read_u8_ue(&mut reader, "H.264 cabac_init_idc")?;
+    }
+    let slice_qp_delta = read_i8_se(&mut reader, "H.264 slice_qp_delta")?;
+    let mut slice_qs_delta = 0;
+    if slice_class == 3 || slice_class == 4 {
+        if slice_class == 3 {
+            let _sp_for_switch_flag = read_bool(&mut reader, "H.264 sp_for_switch_flag")?;
+        }
+        slice_qs_delta = read_i8_se(&mut reader, "H.264 slice_qs_delta")?;
+    }
+
+    let mut disable_deblocking_filter_idc = 0;
+    let mut slice_alpha_c0_offset_div2 = 0;
+    let mut slice_beta_offset_div2 = 0;
+    if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT != 0 {
+        disable_deblocking_filter_idc =
+            read_u8_ue(&mut reader, "H.264 disable_deblocking_filter_idc")?;
+        if disable_deblocking_filter_idc != 1 {
+            slice_alpha_c0_offset_div2 =
+                read_i8_se(&mut reader, "H.264 slice_alpha_c0_offset_div2")?;
+            slice_beta_offset_div2 = read_i8_se(&mut reader, "H.264 slice_beta_offset_div2")?;
+        }
+    }
 
     let slice_params = ScarletVideoH264SliceParams {
         header_bit_size: reader.position_bits() as u32,
@@ -5686,11 +5764,184 @@ fn parse_h264_slice(
         pic_parameter_set_id,
         colour_plane_id,
         redundant_pic_cnt,
+        cabac_init_idc,
+        slice_qp_delta,
+        slice_qs_delta,
+        disable_deblocking_filter_idc,
+        slice_alpha_c0_offset_div2,
+        slice_beta_offset_div2,
         num_ref_idx_l0_active_minus1,
         num_ref_idx_l1_active_minus1,
+        flags: slice_flags,
         ..Default::default()
     };
     Ok((slice_params, decode_params))
+}
+
+fn skip_h264_ref_pic_list_modification(
+    reader: &mut EbspBitReader<'_>,
+    slice_class: u8,
+) -> Result<(), String> {
+    if slice_class == 2 || slice_class == 4 {
+        return Ok(());
+    }
+
+    if read_bool(reader, "H.264 ref_pic_list_modification_flag_l0")? {
+        loop {
+            let idc = read_u32_ue(reader, "H.264 modification_of_pic_nums_idc_l0")?;
+            match idc {
+                0 | 1 => {
+                    let _abs_diff_pic_num_minus1 =
+                        read_u32_ue(reader, "H.264 abs_diff_pic_num_minus1_l0")?;
+                }
+                2 => {
+                    let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l0")?;
+                }
+                3 => break,
+                _ => return Err(String::from("H.264 invalid ref list modification idc")),
+            }
+        }
+    }
+
+    if slice_class == 1 && read_bool(reader, "H.264 ref_pic_list_modification_flag_l1")? {
+        loop {
+            let idc = read_u32_ue(reader, "H.264 modification_of_pic_nums_idc_l1")?;
+            match idc {
+                0 | 1 => {
+                    let _abs_diff_pic_num_minus1 =
+                        read_u32_ue(reader, "H.264 abs_diff_pic_num_minus1_l1")?;
+                }
+                2 => {
+                    let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l1")?;
+                }
+                3 => break,
+                _ => return Err(String::from("H.264 invalid ref list modification idc")),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_h264_pred_weight_table(
+    reader: &mut EbspBitReader<'_>,
+    sps: &ScarletVideoH264Sps,
+    pps: &ScarletVideoH264Pps,
+    slice_class: u8,
+    num_ref_idx_l0_active_minus1: u8,
+    num_ref_idx_l1_active_minus1: u8,
+    pred_weights: &mut ScarletVideoH264PredWeights,
+) -> Result<(), String> {
+    let weighted_p = pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED != 0
+        && (slice_class == 0 || slice_class == 3);
+    let weighted_b = pps.weighted_bipred_idc == 1 && slice_class == 1;
+    *pred_weights = ScarletVideoH264PredWeights::default();
+    if !weighted_p && !weighted_b {
+        return Ok(());
+    }
+
+    let luma_denom = read_u16_ue(reader, "H.264 luma_log2_weight_denom")?;
+    let chroma_denom = if sps.chroma_format_idc != 0 {
+        read_u16_ue(reader, "H.264 chroma_log2_weight_denom")?
+    } else {
+        0
+    };
+    pred_weights.luma_log2_weight_denom = luma_denom;
+    pred_weights.chroma_log2_weight_denom = chroma_denom;
+
+    let list_count = if slice_class == 1 { 2 } else { 1 };
+    for list in 0..list_count {
+        let active = if list == 0 {
+            num_ref_idx_l0_active_minus1
+        } else {
+            num_ref_idx_l1_active_minus1
+        };
+        for index in 0..=usize::from(active) {
+            pred_weights.weight_factors[list].luma_weight[index] =
+                1i16.checked_shl(u32::from(luma_denom)).unwrap_or(0);
+            if read_bool(reader, "H.264 luma_weight_lX_flag")? {
+                pred_weights.weight_factors[list].luma_weight[index] =
+                    read_i16_se(reader, "H.264 luma_weight_lX")?;
+                pred_weights.weight_factors[list].luma_offset[index] =
+                    read_i16_se(reader, "H.264 luma_offset_lX")?;
+            }
+
+            if sps.chroma_format_idc != 0 {
+                for component in 0..2 {
+                    pred_weights.weight_factors[list].chroma_weight[index][component] =
+                        1i16.checked_shl(u32::from(chroma_denom)).unwrap_or(0);
+                }
+                if read_bool(reader, "H.264 chroma_weight_lX_flag")? {
+                    for component in 0..2 {
+                        pred_weights.weight_factors[list].chroma_weight[index][component] =
+                            read_i16_se(reader, "H.264 chroma_weight_lX")?;
+                        pred_weights.weight_factors[list].chroma_offset[index][component] =
+                            read_i16_se(reader, "H.264 chroma_offset_lX")?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_h264_dec_ref_pic_marking(
+    reader: &mut EbspBitReader<'_>,
+    nal_type: u8,
+) -> Result<(), String> {
+    if nal_type == 5 {
+        let _no_output_of_prior_pics_flag =
+            read_bool(reader, "H.264 no_output_of_prior_pics_flag")?;
+        let _long_term_reference_flag = read_bool(reader, "H.264 long_term_reference_flag")?;
+        return Ok(());
+    }
+
+    if !read_bool(reader, "H.264 adaptive_ref_pic_marking_mode_flag")? {
+        return Ok(());
+    }
+    loop {
+        let op = read_u32_ue(reader, "H.264 memory_management_control_operation")?;
+        match op {
+            0 => break,
+            1 | 3 => {
+                let _difference_of_pic_nums_minus1 =
+                    read_u32_ue(reader, "H.264 difference_of_pic_nums_minus1")?;
+                if op == 3 {
+                    let _long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
+                }
+            }
+            2 => {
+                let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num")?;
+            }
+            4 => {
+                let _max_long_term_frame_idx_plus1 =
+                    read_u32_ue(reader, "H.264 max_long_term_frame_idx_plus1")?;
+            }
+            5 => {}
+            6 => {
+                let _long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
+            }
+            _ => return Err(String::from("H.264 invalid MMCO")),
+        }
+    }
+    Ok(())
+}
+
+fn h264_more_rbsp_data(reader: &EbspBitReader<'_>) -> bool {
+    let mut clone = reader.clone();
+    let Some(first) = clone.read_bit() else {
+        return false;
+    };
+    if first == 0 {
+        return true;
+    }
+    while let Some(bit) = clone.read_bit() {
+        if bit != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_bool(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<bool, String> {
@@ -5739,6 +5990,11 @@ fn read_u32_ue(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<u32
 fn read_i8_se(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<i8, String> {
     let value = reader.read_se().ok_or_else(|| format!("{name} missing"))?;
     i8::try_from(value).map_err(|_| format!("{name} overflows i8"))
+}
+
+fn read_i16_se(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<i16, String> {
+    let value = reader.read_se().ok_or_else(|| format!("{name} missing"))?;
+    i16::try_from(value).map_err(|_| format!("{name} overflows i16"))
 }
 
 fn skip_h264_scaling_list(reader: &mut EbspBitReader<'_>, count: usize) -> Result<(), String> {
