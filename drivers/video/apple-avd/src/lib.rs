@@ -65,9 +65,10 @@ const REG_MCPU_CONTROL: usize = 0x1098008;
 const REG_MCPU_IRQ_ENABLE0: usize = 0x1098010;
 const REG_MCPU_IRQ_ENABLE1: usize = 0x1098048;
 const REG_MCPU_AP_ACK: usize = 0x1098050;
-const REG_MAILBOX_AP_TO_CM3: usize = 0x1098054;
+const REG_MCPU_DECODE_DMA_CONFIG: usize = 0x1098054;
+const REG_MAILBOX_AP_TO_CM3: usize = 0x1098058;
 const REG_MCPU_AP_IRQ_CLEAR: usize = 0x109805c;
-const REG_MAILBOX_CM3_TO_AP: usize = 0x1098064;
+const REG_MAILBOX_CM3_TO_AP: usize = 0x1098060;
 const REG_MCPU_CM3_ACK: usize = 0x1098068;
 const REG_MCPU_CM3_IRQ_CLEAR: usize = 0x1098074;
 const REG_MCPU_IRQ_ARM: usize = 0x109807c;
@@ -113,6 +114,7 @@ const REG_WRAP_INIT: usize = 0x1400018;
 
 const MCPU_CONTROL_RESET: u32 = 0xe;
 const MCPU_CONTROL_RUN: u32 = 0x1;
+const MCPU_DECODE_DMA_CONFIG: u32 = 0x108e_b30;
 const H264_SUBMIT_START: u32 = 1;
 const H264_SUBMIT_FRAME: u32 = 0x2b000107;
 const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
@@ -547,6 +549,7 @@ impl AvdRegisters {
 
     fn send_mailbox(&self, value: u32) {
         self.write32(REG_MAILBOX_AP_TO_CM3, value);
+        arch::io_wmb();
     }
 
     fn recv_mailbox(&self) -> u32 {
@@ -730,6 +733,7 @@ impl AvdRegisters {
         for (offset, value) in AVD_DMA_STAGE0.iter().copied() {
             self.write32(offset, value);
         }
+        self.write32(REG_MCPU_DECODE_DMA_CONFIG, MCPU_DECODE_DMA_CONFIG);
 
         self.write32(
             REG_H264_TIMEOUT,
