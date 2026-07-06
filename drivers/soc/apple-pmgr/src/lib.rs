@@ -98,6 +98,8 @@ impl ApplePmDomain {
 
 /// A single PMGR controller instance (there can be multiple PMGR blocks in SoC).
 struct PmgrInstance {
+    /// Physical base address of this PMGR MMIO region
+    paddr: usize,
     /// Base virtual address of this PMGR MMIO region
     base_addr: usize,
     /// Size of the MMIO region
@@ -108,8 +110,9 @@ struct PmgrInstance {
 
 impl PmgrInstance {
     /// Create a new PMGR instance.
-    fn new(base_addr: usize, size: usize) -> Self {
+    fn new(paddr: usize, base_addr: usize, size: usize) -> Self {
         Self {
+            paddr,
             base_addr,
             size,
             domains: BTreeMap::new(),
@@ -475,6 +478,43 @@ pub fn pmgr_get_domain_by_phandle(pwrstate_phandle: u32) -> Result<PmgrDomain, &
     pmgr_get_domain(pmgr_phandle, domain_index)
 }
 
+/// Look up a power domain by its PMGR register physical address.
+///
+/// m1n1's ADT `clock-gates` entries resolve to concrete PMGR power-state
+/// registers through `/arm-io/pmgr/devices` and `/arm-io/pmgr/ps-regs`. Guest
+/// DT overlays can carry those physical register addresses even when the
+/// consumer node has no direct FDT `power-domains` reference. This helper maps
+/// that address back to a registered FDT pwrstate domain.
+///
+/// # Arguments
+///
+/// * `register_paddr` - Physical address of the PMGR power-state register.
+///
+/// # Returns
+///
+/// A `PmgrDomain` handle, or an error if no registered domain owns that
+/// register.
+pub fn pmgr_get_domain_by_register_paddr(
+    register_paddr: usize,
+) -> Result<PmgrDomain, &'static str> {
+    let guard = get_registry().ok_or("pmgr: registry not initialized")?;
+    let registry = guard.as_ref().unwrap();
+
+    for domain in registry.domain_map.values() {
+        let Some(instance) = registry.instances.get(&domain.pmgr_phandle) else {
+            continue;
+        };
+        if instance.paddr + domain.offset == register_paddr {
+            return Ok(PmgrDomain {
+                inner: Arc::clone(instance),
+                domain: Arc::clone(domain),
+            });
+        }
+    }
+
+    Err("pmgr: register paddr not found")
+}
+
 // =============================================================================
 // Platform Driver Implementation
 // =============================================================================
@@ -508,7 +548,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let registry = registry_guard.as_mut().unwrap();
 
-    let instance = Arc::new(PmgrInstance::new(base_addr, size));
+    let instance = Arc::new(PmgrInstance::new(paddr, base_addr, size));
 
     let phandle = device
         .property("phandle")

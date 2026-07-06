@@ -20,29 +20,31 @@ use h264::{
     AnnexBAccessUnit, AvdDmaRange, AvdH264InstructionStream, AvdH264Workspace, H264DecodeRequest,
     H264FrontendError, H264StreamParameters,
 };
-use scarlet_driver_apple_pmgr::{pmgr_get_domain_by_label, PmgrDomain};
 use scarlet::{
     arch::{self, mmio},
     device::{
+        DeviceInfo,
         iommu::{DmaContext, DmaMapping, IommuDomainConfig, IommuDomainType, IommuMapFlags},
-        manager::{is_probe_defer, probe_defer, DeviceManager, DriverPriority},
+        manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo,
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
         reset::ResetHandle,
         video::{
-            register_video_backend, register_video_decode_device, ScarletVideoDequeuedFrame,
-            VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
-            VideoDecodeBackend, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
-            SCARLET_VIDEO_FRAME_MAGIC, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
+            SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame, VideoBackendCapabilities,
+            VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoDecodeBackend,
+            register_video_backend, register_video_decode_device,
         },
-        DeviceInfo,
     },
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
     println,
     sync::Mutex,
     time, vm,
+};
+use scarlet_driver_apple_pmgr::{
+    PmgrDomain, pmgr_get_domain_by_label, pmgr_get_domain_by_register_paddr,
 };
 
 const AVD_DEFAULT_IOVA_BASE: u64 = 0x4000_0000;
@@ -143,6 +145,7 @@ const AVD_FIRMWARE_READY_POLL_US: u64 = 100;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
 const AVD_DECODE_POLL_LIMIT: usize = 10_000;
+const AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY: &str = "apple,pmgr-clock-gate-paddrs";
 
 const AVD_H264_DMA_CONFIG: [u32; 30] = [
     0x0402_0002,
@@ -936,7 +939,10 @@ impl AppleAvd {
         println!(
             "[apple-avd] boot begin firmware_len={} power_on={} reset_source={}",
             image.len(),
-            self.power.as_ref().map(|power| power.is_on()).unwrap_or(true),
+            self.power
+                .as_ref()
+                .map(|power| power.is_on())
+                .unwrap_or(true),
             self.reset_source()
         );
         self.prepare_for_firmware(image)?;
@@ -1140,11 +1146,7 @@ impl AppleAvd {
     }
 
     fn reset_source(&self) -> &'static str {
-        if self.reset.is_some() {
-            "fdt"
-        } else {
-            "none"
-        }
+        if self.reset.is_some() { "fdt" } else { "none" }
     }
 
     fn mark_firmware_faulted(&mut self) {
@@ -1895,6 +1897,67 @@ fn resolve_avd_power_domain() -> Result<Option<PmgrDomain>, &'static str> {
     }
 }
 
+fn read_be_u64_cells(bytes: &[u8]) -> Result<Vec<usize>, &'static str> {
+    if bytes.len() % 8 != 0 {
+        return Err("apple-avd: malformed PMGR clock gate paddr property");
+    }
+
+    let mut out = Vec::new();
+    for chunk in bytes.chunks_exact(8) {
+        let word: [u8; 8] = chunk
+            .try_into()
+            .map_err(|_| "apple-avd: malformed PMGR clock gate paddr property")?;
+        let raw = u64::from_be_bytes(word);
+        out.push(
+            usize::try_from(raw).map_err(|_| "apple-avd: PMGR clock gate paddr out of range")?,
+        );
+    }
+    Ok(out)
+}
+
+fn enable_adt_pmgr_clock_gates(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    let Some(property) = device.property(AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY) else {
+        return Ok(());
+    };
+    let paddrs = read_be_u64_cells(property.value())?;
+    if paddrs.is_empty() {
+        return Ok(());
+    }
+
+    for paddr in paddrs {
+        match pmgr_get_domain_by_register_paddr(paddr) {
+            Ok(domain) => {
+                let was_on = domain.is_on();
+                domain.enable()?;
+                println!(
+                    "[apple-avd] PMGR ADT clock gate '{}' paddr={:#x} enabled before={} after={}",
+                    domain.label(),
+                    paddr,
+                    was_on,
+                    domain.is_on()
+                );
+            }
+            Err(e @ "pmgr: registry not initialized") => {
+                println!(
+                    "[apple-avd] PMGR not ready for ADT clock gate {:#x}: {}",
+                    paddr, e
+                );
+                return probe_defer();
+            }
+            Err(e @ "pmgr: register paddr not found") => {
+                println!(
+                    "[apple-avd] PMGR ADT clock gate paddr={:#x} unavailable: {}",
+                    paddr, e
+                );
+                return Err("apple-avd: PMGR ADT clock gate missing");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}
+
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (paddr, size) = first_mem_resource(device).ok_or("apple-avd: missing MMIO resource")?;
     if size == 0 {
@@ -1913,6 +1976,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let soc = AppleAvdSoc::from_device(device);
     let irq = first_irq(device);
+    enable_adt_pmgr_clock_gates(device)?;
     let power = resolve_avd_power_domain()?;
     let reset = resolve_avd_reset(device)?;
     let has_reset = reset.is_some();

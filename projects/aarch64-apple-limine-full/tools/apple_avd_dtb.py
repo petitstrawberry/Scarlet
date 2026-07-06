@@ -25,7 +25,12 @@ from typing import Any
 FDT_MAGIC = b"\xd0\r\xfe\xed"
 AVD_ADT_PATH = "/arm-io/avd"
 DART_AVD_ADT_PATH = "/arm-io/dart-avd"
+PMGR_ADT_PATH = "/arm-io/pmgr"
 GUEST_SOC_PATH = "/soc"
+PMGR_DEVICE_ID_MASK = 0xffff
+PMGR_DIE_ID_SHIFT = 28
+PMGR_DIE_ID_MASK = 0xf
+PMGR_DIE_OFFSET = 0x2000000000
 
 
 class AvdDtbError(RuntimeError):
@@ -99,6 +104,127 @@ def _node_u32_list(node: Any, prop: str, path: str) -> list[int]:
     return _u32_list(value, f"{path}.{prop}")
 
 
+def _field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value[name]
+    return getattr(value, name)
+
+
+def _maybe_field(value: Any, name: str, default: Any = None) -> Any:
+    try:
+        return _field(value, name)
+    except (AttributeError, KeyError):
+        return default
+
+
+def _pmgr_uses_u8_ids(devices: list[Any]) -> bool:
+    if len(devices) < 2:
+        return False
+    return int(_field(devices[0], "id1")) != int(_field(devices[1], "id1"))
+
+
+def _pmgr_device_id(device: Any, use_u8_ids: bool) -> int:
+    return int(_field(device, "id1" if use_u8_ids else "id2"))
+
+
+def _pmgr_device_parents(device: Any, use_u8_ids: bool) -> list[int]:
+    parents_un = _field(device, "parents_un")
+    field = "u8id" if use_u8_ids else "u16id"
+    parents = _field(_field(parents_un, field), "parents")
+    return [int(parent) for parent in parents if int(parent) != 0]
+
+
+def _pmgr_device_is_virtual(device: Any) -> bool:
+    flags = _field(device, "flags")
+    if isinstance(flags, int):
+        return bool(flags & 0x10)
+    # m1n1's Python ADT parser names the PMGR_FLAG_VIRTUAL bit `no_ps`.
+    return bool(_maybe_field(flags, "no_ps", False))
+
+
+def _find_pmgr_device(devices: list[Any], use_u8_ids: bool, device_id: int) -> Any | None:
+    for device in devices:
+        if _pmgr_device_id(device, use_u8_ids) == device_id:
+            return device
+    return None
+
+
+def _pmgr_device_paddr(pmgr: Any, ps_regs: list[Any], device: Any, die: int) -> int:
+    psreg_index = int(_field(device, "psreg"))
+    psreg = ps_regs[psreg_index]
+    reg_index = int(_field(psreg, "reg"))
+    reg_offset = int(_field(psreg, "offset"))
+    base, _size = pmgr.get_reg(reg_index)
+    addr_offset = int(_field(device, "psidx")) << 3
+    return int(base) + reg_offset + (PMGR_DIE_OFFSET * die) + addr_offset
+
+
+def _pmgr_clock_gate_devices(adt: Any, gates: list[int]) -> list[dict[str, Any]]:
+    try:
+        pmgr = _node_by_path(adt, PMGR_ADT_PATH)
+        devices = list(pmgr.getprop("devices", []))
+        ps_regs = list(pmgr.getprop("ps-regs", []))
+    except Exception:
+        return []
+    if not devices or not ps_regs:
+        return []
+
+    use_u8_ids = _pmgr_uses_u8_ids(devices)
+    out = []
+    for gate in gates:
+        device_id = gate & PMGR_DEVICE_ID_MASK
+        die = (gate >> PMGR_DIE_ID_SHIFT) & PMGR_DIE_ID_MASK
+        device = _find_pmgr_device(devices, use_u8_ids, device_id)
+        if device is None:
+            continue
+        try:
+            paddr = _pmgr_device_paddr(pmgr, ps_regs, device, die)
+        except Exception:
+            paddr = None
+        out.append(
+            {
+                "gate": gate,
+                "die": die,
+                "device_id": device_id,
+                "name": str(_field(device, "name")),
+                "parents": _pmgr_device_parents(device, use_u8_ids),
+                "virtual": _pmgr_device_is_virtual(device),
+                "paddr": paddr,
+            }
+        )
+    return out
+
+
+def _clock_gate_devices(value: Any, label: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    out = []
+    try:
+        iterable = list(value)
+    except TypeError as exc:
+        raise AvdDtbError(f"{label} is not a list") from exc
+    for index, item in enumerate(iterable):
+        if not isinstance(item, dict):
+            raise AvdDtbError(f"{label}[{index}] is not an object")
+        paddr = item.get("paddr")
+        if paddr is not None:
+            paddr = int(paddr)
+            if paddr < 0:
+                raise AvdDtbError(f"{label}[{index}].paddr is negative")
+        out.append(
+            {
+                "gate": int(item["gate"]),
+                "die": int(item["die"]),
+                "device_id": int(item["device_id"]),
+                "name": str(item.get("name", "")),
+                "parents": _u32_list(item.get("parents"), f"{label}[{index}].parents"),
+                "virtual": bool(item.get("virtual", False)),
+                "paddr": paddr,
+            }
+        )
+    return out
+
+
 def _infer_soc(machine: str | None, compatibles: list[str]) -> str:
     for compatible in compatibles:
         match = re.search(r"\b(t[0-9]{4})\b", compatible)
@@ -146,6 +272,8 @@ def extract_avd_info_from_adt(
     dart_base, dart_size = _reg0(dart, DART_AVD_ADT_PATH)
     compatibles = _node_compatibles(avd) + _node_compatibles(dart)
     soc = soc or _infer_soc(machine, compatibles)
+    avd_clock_gates = _node_u32_list(avd, "clock-gates", AVD_ADT_PATH)
+    dart_clock_gates = _node_u32_list(dart, "clock-gates", DART_AVD_ADT_PATH)
     return {
         "machine": machine,
         "soc": soc,
@@ -155,14 +283,16 @@ def extract_avd_info_from_adt(
             "base": avd_base,
             "size": avd_size,
             "compatible": _node_compatibles(avd),
-            "clock_gates": _node_u32_list(avd, "clock-gates", AVD_ADT_PATH),
+            "clock_gates": avd_clock_gates,
+            "clock_gate_devices": _pmgr_clock_gate_devices(adt, avd_clock_gates),
         },
         "dart": {
             "adt_path": DART_AVD_ADT_PATH,
             "base": dart_base,
             "size": dart_size,
             "compatible": _node_compatibles(dart),
-            "clock_gates": _node_u32_list(dart, "clock-gates", DART_AVD_ADT_PATH),
+            "clock_gates": dart_clock_gates,
+            "clock_gate_devices": _pmgr_clock_gate_devices(adt, dart_clock_gates),
         },
     }
 
@@ -198,6 +328,9 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
             "base": avd_base,
             "size": avd_size,
             "clock_gates": _u32_list(avd.get("clock_gates"), "avd.clock_gates"),
+            "clock_gate_devices": _clock_gate_devices(
+                avd.get("clock_gate_devices"), "avd.clock_gate_devices"
+            ),
         },
         "dart": {
             **dart,
@@ -205,6 +338,9 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
             "base": dart_base,
             "size": dart_size,
             "clock_gates": _u32_list(dart.get("clock_gates"), "dart.clock_gates"),
+            "clock_gate_devices": _clock_gate_devices(
+                dart.get("clock_gate_devices"), "dart.clock_gate_devices"
+            ),
         },
     }
 
@@ -313,10 +449,47 @@ def _u32_cells(values: list[int]) -> str:
     return " ".join(f"0x{value:x}" for value in values)
 
 
+def _u64_cells(values: list[int]) -> str:
+    return " ".join(_cells64(value) for value in values)
+
+
 def _optional_u32_property(indent: str, name: str, values: list[int]) -> str:
     if not values:
         return ""
     return f"{indent}{name} = <{_u32_cells(values)}>;\n"
+
+
+def _optional_u64_property(indent: str, name: str, values: list[int]) -> str:
+    if not values:
+        return ""
+    return f"{indent}{name} = <{_u64_cells(values)}>;\n"
+
+
+def _dts_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _optional_string_list_property(indent: str, name: str, values: list[str]) -> str:
+    if not values:
+        return ""
+    strings = ", ".join(f'"{_dts_string(value)}"' for value in values)
+    return f"{indent}{name} = {strings};\n"
+
+
+def _clock_gate_paddrs(info_node: dict[str, Any]) -> list[int]:
+    return [
+        int(device["paddr"])
+        for device in info_node["clock_gate_devices"]
+        if device.get("paddr") is not None and not device.get("virtual", False)
+    ]
+
+
+def _clock_gate_names(info_node: dict[str, Any]) -> list[str]:
+    return [
+        str(device["name"])
+        for device in info_node["clock_gate_devices"]
+        if device.get("name") and not device.get("virtual", False)
+    ]
 
 
 def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
@@ -330,6 +503,20 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
     )
     dart_clock_gates = _optional_u32_property(
         "                ", "apple,adt-clock-gates", dart["clock_gates"]
+    )
+    avd_dependency_paddrs = _clock_gate_paddrs(dart) + _clock_gate_paddrs(avd)
+    avd_dependency_names = _clock_gate_names(dart) + _clock_gate_names(avd)
+    avd_paddrs = _optional_u64_property(
+        "                ", "apple,pmgr-clock-gate-paddrs", avd_dependency_paddrs
+    )
+    dart_paddrs = _optional_u64_property(
+        "                ", "apple,pmgr-clock-gate-paddrs", _clock_gate_paddrs(dart)
+    )
+    avd_names = _optional_string_list_property(
+        "                ", "apple,pmgr-clock-gate-names", avd_dependency_names
+    )
+    dart_names = _optional_string_list_property(
+        "                ", "apple,pmgr-clock-gate-names", _clock_gate_names(dart)
     )
     return f"""/dts-v1/;
 /plugin/;
@@ -345,7 +532,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
                 compatible = "apple,{soc}-dart", "apple,dart";
                 reg = {_reg_cells(dart["base"], dart["size"])};
 {dart_clock_gates}                apple,adt-path = "{dart["adt_path"]}";
-                #iommu-cells = <1>;
+{dart_paddrs}{dart_names}                #iommu-cells = <1>;
                 status = "okay";
                 phandle = <0x{dart_phandle:x}>;
             }};
@@ -354,7 +541,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
                 compatible = "apple,{soc}-avd", "apple,avd";
                 reg = {_reg_cells(avd["base"], avd["size"])};
 {avd_clock_gates}                apple,adt-path = "{avd["adt_path"]}";
-                iommus = <&dart_avd 0x{sid:x}>;
+{avd_paddrs}{avd_names}                iommus = <&dart_avd 0x{sid:x}>;
                 status = "okay";
             }};
         }};
@@ -436,16 +623,34 @@ def patch_payload_file(
     return changed
 
 
+def _describe_clock_gate_devices(info_node: dict[str, Any]) -> str:
+    parts = []
+    for device in info_node["clock_gate_devices"]:
+        name = device["name"] or f"id{device['device_id']:#x}"
+        if device.get("virtual", False):
+            suffix = "virtual"
+        elif device.get("paddr") is None:
+            suffix = "unmapped"
+        else:
+            suffix = f"{int(device['paddr']):#x}"
+        parts.append(f"{name}@{suffix}")
+    return " ".join(parts)
+
+
 def describe_info(info: dict[str, Any]) -> str:
     info = validate_info(info)
     clock_gates = (
         f" clock-gates: avd=[{_u32_cells(info['avd']['clock_gates'])}] "
         f"dart=[{_u32_cells(info['dart']['clock_gates'])}]"
     )
+    pmgr_devices = (
+        f" pmgr: avd=[{_describe_clock_gate_devices(info['avd'])}] "
+        f"dart=[{_describe_clock_gate_devices(info['dart'])}]"
+    )
     return (
         f"soc={info['soc']} avd={info['avd']['base']:#x}+{info['avd']['size']:#x} "
         f"dart={info['dart']['base']:#x}+{info['dart']['size']:#x} sid={info['sid']:#x}"
-        f"{clock_gates}"
+        f"{clock_gates}{pmgr_devices}"
     )
 
 
