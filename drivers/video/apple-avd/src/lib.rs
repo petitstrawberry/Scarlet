@@ -2089,7 +2089,7 @@ fn validate_firmware_image(image: &[u8]) -> Result<(), &'static str> {
     }
 
     let stack_pointer = u32::from_le_bytes(image[0..4].try_into().expect("stack pointer bytes"));
-    if (stack_pointer & 0xff00_0000) != 0x2000_0000 {
+    if (stack_pointer & 0xff00_0000) != 0x1000_0000 {
         return Err("apple-avd: firmware image has invalid stack pointer");
     }
 

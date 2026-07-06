@@ -75,6 +75,14 @@ name = "scarlet-driver-apple-avd"
 version = "0.1.0"
 dependencies = [
  "scarlet",
+ "scarlet-driver-apple-pmgr",
+]
+
+[[package]]
+name = "scarlet-driver-apple-pmgr"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
 ]
 
 [[package]]

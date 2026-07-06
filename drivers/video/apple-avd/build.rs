@@ -16,7 +16,7 @@ fn main() {
     let firmware_dir = repo_root.join("firmware/apple-avd-fw-rs");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let firmware_feature =
-        env::var("SCARLET_APPLE_AVD_FW_FEATURE").unwrap_or_else(|_| String::from("v3-t0"));
+        env::var("SCARLET_APPLE_AVD_FW_FEATURE").unwrap_or_else(|_| String::from("v2-t0"));
     let raw_path = out_dir.join(format!("apple-avd-fw-{firmware_feature}.bin"));
 
     println!("cargo:rerun-if-env-changed=SCARLET_APPLE_AVD_FW_FEATURE");
@@ -149,7 +149,7 @@ fn validate_raw_firmware(raw: &[u8]) {
     }
 
     let stack_pointer = read_u32(raw, 0);
-    if (stack_pointer & 0xff00_0000) != 0x2000_0000 {
+    if (stack_pointer & 0xff00_0000) != 0x1000_0000 {
         panic!("apple-avd firmware has invalid initial stack pointer: 0x{stack_pointer:08x}");
     }
 

@@ -10,7 +10,7 @@ mod vector;
 use core::arch::asm;
 
 use abi::{CMD_H264_DECODE, MSG_PANIC, MSG_READY, MSG_UNKNOWN_IRQ, command_kind, command_tag};
-use mailbox::{receive_command, send_message};
+use mailbox::{receive_command, send_message, signal_booted};
 
 /// Firmware reset entry point.
 #[unsafe(no_mangle)]
@@ -18,6 +18,7 @@ pub extern "C" fn reset_handler() -> ! {
     tunables::apply_selected_tunables();
     irq::enable_all_nvic_irqs();
     enable_interrupts();
+    signal_booted();
     send_message(MSG_READY);
 
     loop {
