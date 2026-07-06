@@ -1121,22 +1121,11 @@ impl AppleAvd {
 
         if let Some(reset) = &self.reset {
             reset.reset()?;
-        } else if let Some(power) = &self.power {
-            println!(
-                "[apple-avd] reset via PMGR domain '{}'",
-                power.label()
-            );
-            power.reset_assert();
             time::udelay(10);
-            power.reset_deassert();
-            if !power.is_on() {
-                power.enable()?;
-            }
         } else {
-            return Ok(());
+            println!("[apple-avd] reset unavailable; skipping PMGR reset fallback");
         }
 
-        time::udelay(10);
         self.firmware_state = AvdFirmwareState::Missing;
         self.trace.push(AvdTraceKind::Firmware, 0, 0);
         Ok(())
@@ -1145,8 +1134,6 @@ impl AppleAvd {
     fn reset_source(&self) -> &'static str {
         if self.reset.is_some() {
             "fdt"
-        } else if self.power.is_some() {
-            "pmgr"
         } else {
             "none"
         }
