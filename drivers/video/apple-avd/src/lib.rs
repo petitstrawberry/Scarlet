@@ -1350,6 +1350,9 @@ impl AvdSessionWorkspace {
         let page_count = byte_len.div_ceil(PAGE_SIZE);
         let pages = ContiguousPages::new_aligned(page_count, granule)
             .ok_or("apple-avd: workspace allocation failed")?;
+        // The large reference workspace is device-owned after setup. Drop any
+        // stale CPU cache lines once, then only clean CPU-written subranges.
+        arch::clean_invalidate_dcache_to_poc_range(pages.as_vaddr(), byte_len);
         let mapping = avd
             .dma_context()
             .map_phys_owned(
@@ -2426,7 +2429,6 @@ impl AppleAvdVideoBackend {
                 .write_le_bytes(workspace.instruction_fifo_mut())
                 .map_err(h264_error_to_str)?;
             arch::clean_dcache_to_poc_range(workspace.instruction_fifo_vaddr(), inst_len);
-            arch::clean_dcache_to_poc_range(workspace.pages.as_vaddr(), workspace.byte_len);
             (
                 instructions,
                 inst_len,
