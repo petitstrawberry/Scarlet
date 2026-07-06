@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use scarlet::device::video::{
     SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED,
     SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE,
-    SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE,
+    SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE, SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED,
     SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED,
     SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING,
     SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
@@ -373,6 +373,50 @@ impl AvdFrameLayout {
         self.y_stride as usize * self.height as usize
             + self.uv_stride as usize * (self.height as usize / 2)
     }
+
+    /// Return the AVD RVRA scratch offsets for this frame layout.
+    ///
+    /// # Returns
+    ///
+    /// Four RVRA section offsets in bytes.
+    pub fn rvra_offsets(&self) -> [u32; 4] {
+        let height = align_up_u32(self.height, 32);
+        let size0 = self.width * height + (self.width * height) / 4;
+        let size1 =
+            (self.width.next_power_of_two() * self.height.next_power_of_two() / 32).max(0x100);
+        let size2 = size0 / 2;
+        [size0, 0, size0 + size1 + size2, size0 + size1]
+    }
+
+    /// Return the AVD RVRA scratch size for this frame layout.
+    ///
+    /// # Returns
+    ///
+    /// Required RVRA scratch bytes.
+    pub fn rvra_len(&self) -> usize {
+        let offsets = self.rvra_offsets();
+        let size = offsets[2] as usize;
+        let aligned = align_up_usize(size, 0x4000);
+        aligned
+            + if self.width < 1000 {
+                0
+            } else if self.width < 1800 {
+                2 * 0x4000
+            } else if self.width < 3800 {
+                3 * 0x4000
+            } else {
+                9 * 0x4000
+            }
+    }
+
+    /// Return the AVD SPS scratch size for this frame layout.
+    ///
+    /// # Returns
+    ///
+    /// Required SPS scratch bytes.
+    pub fn sps_scratch_len(&self) -> usize {
+        ((((self.width - 1) as usize * (self.height - 1) as usize) / 0x10000) + 2) * 0x4000
+    }
 }
 
 /// SPS-derived H.264 stream parameters needed by the AVD frontend.
@@ -496,6 +540,8 @@ pub struct H264PictureParameters {
     pub constrained_intra_pred: bool,
     /// Weighted bipred IDC.
     pub weighted_bipred_idc: u8,
+    /// Weighted prediction for P/SP slices.
+    pub weighted_pred: bool,
     /// Initial picture QP minus 26.
     pub pic_init_qp_minus26: i8,
     /// First chroma QP offset.
@@ -521,6 +567,7 @@ impl H264PictureParameters {
             constrained_intra_pred: pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED
                 != 0,
             weighted_bipred_idc: pps.weighted_bipred_idc,
+            weighted_pred: pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED != 0,
             pic_init_qp_minus26: pps.pic_init_qp_minus26,
             chroma_qp_index_offset: pps.chroma_qp_index_offset,
             second_chroma_qp_index_offset: pps.second_chroma_qp_index_offset,
@@ -538,6 +585,7 @@ impl H264PictureParameters {
             transform_8x8_mode: false,
             constrained_intra_pred: false,
             weighted_bipred_idc: 0,
+            weighted_pred: false,
             pic_init_qp_minus26: 0,
             chroma_qp_index_offset: 0,
             second_chroma_qp_index_offset: 0,
@@ -708,6 +756,7 @@ impl AvdH264InstructionStream {
         stream: &H264StreamParameters,
         slice: &H264SliceParameters,
         workspace: &AvdH264Workspace,
+        references: &[AvdH264ReferencePicture],
     ) -> Self {
         let mut words = Vec::new();
         let coded_width = stream.coded_width.max(request.layout.width);
@@ -793,24 +842,10 @@ impl AvdH264InstructionStream {
             "hdr_9c_pps_tile_addr_lsb8",
         );
         push(&mut words, 0, "cm3_dma_config_5");
-        push(
+        push_rvra(
             &mut words,
-            (workspace.reference_dma_addr >> 7) as u32,
-            "hdr_c0_curr_ref_addr_lsb7",
-        );
-        push(
-            &mut words,
-            ((workspace.reference_dma_addr + 0x4000) >> 7) as u32,
-            "hdr_c0_curr_ref_addr_lsb7",
-        );
-        push(
-            &mut words,
-            ((workspace.reference_dma_addr + 0x8000) >> 7) as u32,
-            "hdr_c0_curr_ref_addr_lsb7",
-        );
-        push(
-            &mut words,
-            ((workspace.reference_dma_addr + 0xc000) >> 7) as u32,
+            workspace.reference_dma_addr,
+            workspace.reference_offsets,
             "hdr_c0_curr_ref_addr_lsb7",
         );
         push(&mut words, (y_addr >> 8) as u32, "hdr_210_y_addr_lsb8");
@@ -831,6 +866,9 @@ impl AvdH264InstructionStream {
             (((coded_height - 1) & 0xffff) << 16) | ((coded_width - 1) & 0xffff),
             "hdr_54_height_width",
         );
+        if !is_idr {
+            stream_refs(&mut words, request, workspace, references);
+        }
         push(&mut words, 0, "cm3_mark_end_section_scl");
 
         let header_remainder = if request.pps.entropy_coding_mode {
@@ -874,6 +912,48 @@ impl AvdH264InstructionStream {
             deblock |= swrap_i8(slice.slice_alpha_c0_offset_div2, 16) << 8;
         }
         push(&mut words, deblock, "slc_a74_cmd_deblocking_filter");
+        if matches!(slice.kind, H264SliceKind::P | H264SliceKind::B) {
+            let l0_count = (usize::from(slice.num_ref_idx_l0_active_minus1) + 1)
+                .min(references.len())
+                .min(16);
+            for index in 0..l0_count {
+                push(
+                    &mut words,
+                    0x2dc0_0000 | (((index as u32) & 0xf) << 4) | ((index as u32) & 0xf),
+                    "slc_6e8_cmd_ref_list_0",
+                );
+            }
+            if matches!(slice.kind, H264SliceKind::B) {
+                let l1_count = (usize::from(slice.num_ref_idx_l1_active_minus1) + 1)
+                    .min(references.len())
+                    .min(16);
+                for index in 0..l1_count {
+                    push(
+                        &mut words,
+                        0x2dc0_0000
+                            | (1 << 8)
+                            | (((index as u32) & 0xf) << 4)
+                            | ((index as u32) & 0xf),
+                        "slc_6e8_cmd_ref_list_1",
+                    );
+                }
+            }
+            let pred_weight = (request.pps.weighted_pred && matches!(slice.kind, H264SliceKind::P))
+                || (request.pps.weighted_bipred_idc == 1 && matches!(slice.kind, H264SliceKind::B));
+            let default_weight_denom = if request.pps.weighted_bipred_idc == 2 {
+                0x5 | (0x5 << 3)
+            } else {
+                0
+            };
+            push(
+                &mut words,
+                0x2dd0_0000
+                    | (((request.pps.weighted_bipred_idc == 2) as u32) << 7)
+                    | ((pred_weight as u32) << 6)
+                    | default_weight_denom,
+                "slc_76c_cmd_weights_denom",
+            );
+        }
         if slice.first_mb_in_slice == 0 {
             push(&mut words, 0x2a00_0000, "cm3_cmd_set_mb_dims");
             push(
@@ -948,6 +1028,19 @@ pub struct AvdH264Workspace {
     pub sps_tile_dma_addr: u64,
     /// Reference scratch memory.
     pub reference_dma_addr: u64,
+    /// RVRA section offsets relative to `reference_dma_addr`.
+    pub reference_offsets: [u32; 4],
+}
+
+/// Previously decoded reference picture visible to the AVD command stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AvdH264ReferencePicture {
+    /// RVRA scratch base for the reference picture.
+    pub reference_dma_addr: u64,
+    /// Top field order count.
+    pub top_field_order_cnt: i32,
+    /// Whether this is a long-term reference.
+    pub long_term: bool,
 }
 
 /// H.264 decode request lowered for the Apple AVD command path.
@@ -963,6 +1056,8 @@ pub struct H264DecodeRequest {
     pub output: AvdDmaRange,
     /// Decoded frame layout.
     pub layout: AvdFrameLayout,
+    /// Current picture order count.
+    pub current_poc: i32,
     /// Request flags derived from the access unit.
     pub flags: H264DecodeFlags,
     /// PPS-derived picture parameters.
@@ -1035,6 +1130,7 @@ impl H264DecodeRequest {
             input,
             output,
             layout,
+            current_poc: 0,
             flags,
             pps: H264PictureParameters::baseline_defaults(),
             slice,
@@ -1087,10 +1183,64 @@ impl H264DecodeRequest {
             input,
             output,
             layout,
+            current_poc: params.decode_params.top_field_order_cnt,
             flags,
             pps,
             slice,
         })
+    }
+}
+
+fn stream_refs(
+    words: &mut Vec<u32>,
+    request: &H264DecodeRequest,
+    workspace: &AvdH264Workspace,
+    references: &[AvdH264ReferencePicture],
+) {
+    push(words, 0, "cm3_dma_config_6");
+    push(
+        words,
+        ((workspace.pps_tile_dma_addr + 0x20000) >> 8) as u32,
+        "hdr_9c_pps_tile_addr_lsb8",
+    );
+    push(
+        words,
+        (workspace.sps_tile_dma_addr >> 8) as u32,
+        "hdr_bc_sps_tile_addr_lsb8",
+    );
+    push(words, 0, "cm3_dma_config_7");
+    push(words, 0, "cm3_dma_config_8");
+    push(words, 0, "cm3_dma_config_9");
+    push(words, 0, "cm3_dma_config_a");
+
+    let count = references.len().min(16);
+    if count == 0 {
+        return;
+    }
+    for reference in references.iter().take(count) {
+        let poc_delta = request
+            .current_poc
+            .wrapping_sub(reference.top_field_order_cnt);
+        push(
+            words,
+            (((count as u32 - 1) & 0xf) << 28)
+                | 0x0100_0000
+                | ((reference.long_term as u32) << 17)
+                | swrap_i32(poc_delta, 1 << 17),
+            "hdr_d0_ref_hdr",
+        );
+        push_rvra(
+            words,
+            reference.reference_dma_addr,
+            workspace.reference_offsets,
+            "hdr_c0_ref_addr_lsb7",
+        );
+    }
+}
+
+fn push_rvra(words: &mut Vec<u32>, base: u64, offsets: [u32; 4], _name: &'static str) {
+    for offset in offsets {
+        push(words, ((base + offset as u64) >> 7) as u32, _name);
     }
 }
 
@@ -1205,6 +1355,10 @@ fn locate_slice_data(
 
 fn swrap_i8(value: i8, width: u32) -> u32 {
     (value as i32 as u32) & (width - 1)
+}
+
+fn swrap_i32(value: i32, width: u32) -> u32 {
+    (value as u32) & (width - 1)
 }
 
 fn parse_sps(nal_payload: &[u8]) -> Result<H264StreamParameters, H264FrontendError> {
@@ -1499,5 +1653,9 @@ impl<'a> BitReader<'a> {
 }
 
 const fn align_up_u32(value: u32, align: u32) -> u32 {
+    (value + align - 1) & !(align - 1)
+}
+
+const fn align_up_usize(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }

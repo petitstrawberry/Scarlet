@@ -17,8 +17,8 @@ pub use firmware::AvdFirmwareMessage;
 use debug::AvdTraceLog;
 use firmware::AvdFirmwareMailbox;
 use h264::{
-    AnnexBAccessUnit, AvdDmaRange, AvdH264InstructionStream, AvdH264Workspace, H264DecodeRequest,
-    H264FrontendError, H264StreamParameters,
+    AnnexBAccessUnit, AvdDmaRange, AvdH264InstructionStream, AvdH264ReferencePicture,
+    AvdH264Workspace, H264DecodeRequest, H264FrontendError, H264StreamParameters,
 };
 use scarlet::{
     arch::{self, mmio},
@@ -149,13 +149,13 @@ const AVD_MAPPED_OUTPUT_BYTES: usize = align_up_const(
     AVD_DMA_GRANULE,
 );
 const AVD_MAX_SESSIONS: usize = 4;
-const AVD_WORKSPACE_BYTES: usize = 16 * 1024 * 1024;
+const AVD_WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
 const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
 const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
 const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
 const AVD_WORKSPACE_PPS_TILE_OFFSET: usize = 0x140000;
-const AVD_WORKSPACE_SPS_TILE_OFFSET: usize = 0x200000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
+const AVD_WORKSPACE_REFERENCE_SLOT_BYTES: usize = 0x500000;
 const AVD_REFERENCE_SLOT_COUNT: usize = 4;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
@@ -1268,14 +1268,33 @@ impl AvdSessionWorkspace {
         })
     }
 
-    fn addresses(&self) -> AvdH264Workspace {
+    fn addresses_for_slot(
+        &self,
+        slot: usize,
+        layout: h264::AvdFrameLayout,
+    ) -> Result<AvdH264Workspace, &'static str> {
+        if slot >= AVD_REFERENCE_SLOT_COUNT {
+            return Err("apple-avd: invalid reference slot");
+        }
+        let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
+        let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
+        if rvra_len
+            .checked_add(sps_len)
+            .is_none_or(|len| len > AVD_WORKSPACE_REFERENCE_SLOT_BYTES)
+        {
+            return Err("apple-avd: reference workspace slot is too small");
+        }
         let base = self.mapping.dma_addr();
-        AvdH264Workspace {
+        let reference_offset =
+            AVD_WORKSPACE_REFERENCE_OFFSET + slot * AVD_WORKSPACE_REFERENCE_SLOT_BYTES;
+        let reference_dma_addr = base + reference_offset as u64;
+        Ok(AvdH264Workspace {
             instruction_fifo_dma_addr: base + AVD_WORKSPACE_INST_FIFO_OFFSET as u64,
             pps_tile_dma_addr: base + AVD_WORKSPACE_PPS_TILE_OFFSET as u64,
-            sps_tile_dma_addr: base + AVD_WORKSPACE_SPS_TILE_OFFSET as u64,
-            reference_dma_addr: base + AVD_WORKSPACE_REFERENCE_OFFSET as u64,
-        }
+            sps_tile_dma_addr: reference_dma_addr + rvra_len as u64,
+            reference_dma_addr,
+            reference_offsets: layout.rvra_offsets(),
+        })
     }
 
     fn instruction_fifo_vaddr(&self) -> usize {
@@ -1432,6 +1451,8 @@ struct AvdReferenceFrame {
     frame_number: u32,
     timestamp: u64,
     layout: h264::AvdFrameLayout,
+    reference_dma_addr: u64,
+    top_field_order_cnt: i32,
 }
 
 struct AvdMappedOutputPool {
@@ -1463,6 +1484,8 @@ struct AvdPendingDecode {
     output_payload_offset: usize,
     output_payload_len: usize,
     reference_slot: usize,
+    reference_dma_addr: u64,
+    top_field_order_cnt: i32,
     store_reference: bool,
     is_idr: bool,
     status_before: u32,
@@ -1844,15 +1867,29 @@ impl AppleAvdVideoBackend {
             ),
         }
         .map_err(h264_error_to_str)?;
+        let reference_pictures: Vec<AvdH264ReferencePicture> = session
+            .reference_frames
+            .iter()
+            .rev()
+            .take(AVD_REFERENCE_SLOT_COUNT)
+            .map(|frame| AvdH264ReferencePicture {
+                reference_dma_addr: frame.reference_dma_addr,
+                top_field_order_cnt: frame.top_field_order_cnt,
+                long_term: false,
+            })
+            .collect();
 
-        let (instructions, inst_len, instruction_fifo_dma) = {
+        let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr) = {
             let workspace = session.ensure_workspace(avd)?;
-            let workspace_addresses = workspace.addresses();
+            let workspace_addresses =
+                workspace.addresses_for_slot(reference_output.slot, layout)?;
+            let reference_dma_addr = workspace_addresses.reference_dma_addr;
             let instructions = AvdH264InstructionStream::build(
                 &decode_request,
                 &stream_parameters,
                 &decode_request.slice,
                 &workspace_addresses,
+                &reference_pictures,
             );
             let inst_len = instructions
                 .write_le_bytes(workspace.instruction_fifo_mut())
@@ -1863,6 +1900,7 @@ impl AppleAvdVideoBackend {
                 instructions,
                 inst_len,
                 workspace_addresses.instruction_fifo_dma_addr,
+                reference_dma_addr,
             )
         };
 
@@ -1913,6 +1951,8 @@ impl AppleAvdVideoBackend {
             output_payload_offset: reference_output.payload_offset,
             output_payload_len: reference_output.len,
             reference_slot: reference_output.slot,
+            reference_dma_addr,
+            top_field_order_cnt: decode_request.current_poc,
             store_reference: decode_request.slice.is_reference(),
             is_idr: decode_request.slice.is_idr(),
             status_before,
@@ -2135,6 +2175,8 @@ fn finish_pending_decode(
             frame_number: pending.frame_number,
             timestamp: pending.timestamp,
             layout: pending.layout,
+            reference_dma_addr: pending.reference_dma_addr,
+            top_field_order_cnt: pending.top_field_order_cnt,
         });
         while session.reference_frames.len() > AVD_REFERENCE_SLOT_COUNT {
             session.reference_frames.remove(0);
