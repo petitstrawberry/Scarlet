@@ -1580,7 +1580,7 @@ impl AppleAvdVideoBackend {
             return Err("apple-avd: H.264 engine reported an error");
         }
 
-        let completed_by_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
+        let postprocess_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
         let mut completed_by_status = false;
         if completion_phase == AvdH264CompletionPhase::WaitingVideo
             && (status & H264_STATUS_VIDEO_PHASE_MASK) == H264_STATUS_VIDEO_PHASE_DONE
@@ -1631,7 +1631,7 @@ impl AppleAvdVideoBackend {
             );
         }
 
-        if completed_by_mailbox || completed_by_status {
+        if completed_by_status {
             let pending = state
                 .pending
                 .pop_front()
@@ -1640,7 +1640,7 @@ impl AppleAvdVideoBackend {
                 status_before,
                 status,
                 message_raw,
-                by_mailbox: completed_by_mailbox,
+                by_mailbox: postprocess_mailbox,
                 by_status: completed_by_status,
             };
             finish_pending_decode(&mut state, pending, completion)?;
