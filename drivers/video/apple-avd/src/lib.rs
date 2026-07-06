@@ -119,7 +119,10 @@ const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
 const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
 const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
-const H264_STATUS_COMPLETION_MASK: u32 = H264_STATUS_VIDEO_DONE | H264_STATUS_POSTPROCESS_DONE;
+const H264_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
+const H264_STATUS_VIDEO_PHASE_DONE: u32 = 0x00c0_0000;
+const H264_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
+const H264_STATUS_POSTPROCESS_PHASE_DONE: u32 = 0x0000_2000;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DECODE_TRACE_FRAMES: u32 = 12;
 const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
@@ -1037,6 +1040,16 @@ impl AppleAvd {
         self.registers.h264_status()
     }
 
+    /// Clear selected H.264 status bits.
+    ///
+    /// # Arguments
+    ///
+    /// * `mask` - Status bits to acknowledge by writing them back to the
+    ///   hardware status register.
+    pub fn clear_h264_status(&mut self, mask: u32) {
+        self.registers.clear_h264_status(mask);
+    }
+
     /// Clear H.264 status and replay engine initialization after an error.
     ///
     /// # Arguments
@@ -1408,6 +1421,13 @@ struct AvdPendingDecode {
     command_tag: u32,
     input_mapping: DmaMapping,
     poll_count: usize,
+    completion_phase: AvdH264CompletionPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AvdH264CompletionPhase {
+    WaitingVideo,
+    WaitingPostprocess,
 }
 
 #[derive(Clone, Copy)]
@@ -1549,30 +1569,68 @@ impl AppleAvdVideoBackend {
         let status_before = front.status_before;
         let frame_number = front.frame_number;
         let stream_id = front.stream_id;
+        let poll_count = front.poll_count;
+        let completion_phase = front.completion_phase;
 
-        if status != status_before && (status & H264_STATUS_ERROR_MASK) != 0 {
+        if (status != status_before && (status & H264_STATUS_ERROR_MASK) != 0)
+            || matches!(message, Some(message) if message.is_fault())
+        {
             let _ = state.pending.pop_front();
             avd.recover_h264_engine(status as u64);
             return Err("apple-avd: H.264 engine reported an error");
         }
 
-        let completed_by_mailbox = matches!(
-            message,
-            Some(AvdFirmwareMessage::VideoProcessorDone)
-                | Some(AvdFirmwareMessage::PostProcessorDone)
-        );
-        let completed_by_status =
-            status != status_before && (status & H264_STATUS_COMPLETION_MASK) != 0;
+        let completed_by_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
+        let mut completed_by_status = false;
+        if completion_phase == AvdH264CompletionPhase::WaitingVideo
+            && (status & H264_STATUS_VIDEO_PHASE_MASK) == H264_STATUS_VIDEO_PHASE_DONE
+        {
+            avd.clear_h264_status(H264_STATUS_POSTPROCESS_DONE);
+            let front = state
+                .pending
+                .front_mut()
+                .ok_or("apple-avd: pending queue changed during video completion")?;
+            front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
+            front.poll_count = front.poll_count.saturating_add(1);
+            if frame_number < AVD_DECODE_TRACE_FRAMES {
+                println!(
+                    "[apple-avd] decode video phase stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x}",
+                    stream_id,
+                    frame_number,
+                    poll_count,
+                    status_before,
+                    status,
+                    message_raw,
+                    H264_STATUS_POSTPROCESS_DONE
+                );
+            }
+            return Ok(());
+        }
+        if completion_phase == AvdH264CompletionPhase::WaitingPostprocess
+            && (status & H264_STATUS_POSTPROCESS_PHASE_MASK) == H264_STATUS_POSTPROCESS_PHASE_DONE
+        {
+            avd.clear_h264_status(H264_STATUS_VIDEO_DONE);
+            completed_by_status = true;
+        }
+
         if frame_number < AVD_DECODE_TRACE_FRAMES
-            && status != status_before
-            && (status & H264_STATUS_DONE_MASK) != 0
-            && !completed_by_status
+            && (message_raw != 0
+                || status != status_before
+                || poll_count == 0
+                || poll_count % 1000 == 0)
         {
             println!(
-                "[apple-avd] decode status activity stream={} frame={} status_before={:#x} status={:#x} msg={:#x}",
-                stream_id, frame_number, status_before, status, message_raw
+                "[apple-avd] decode poll stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:#x}",
+                stream_id,
+                frame_number,
+                completion_phase,
+                poll_count,
+                status_before,
+                status,
+                message_raw
             );
         }
+
         if completed_by_mailbox || completed_by_status {
             let pending = state
                 .pending
@@ -1592,12 +1650,25 @@ impl AppleAvdVideoBackend {
                 message_raw as u64,
             );
         } else {
-            let front = state
-                .pending
-                .front_mut()
-                .ok_or("apple-avd: pending queue changed under poll")?;
-            front.poll_count = front.poll_count.saturating_add(1);
-            if front.poll_count > AVD_DECODE_POLL_LIMIT {
+            let updated_poll_count = {
+                let front = state
+                    .pending
+                    .front_mut()
+                    .ok_or("apple-avd: pending queue changed under poll")?;
+                front.poll_count = front.poll_count.saturating_add(1);
+                front.poll_count
+            };
+            if updated_poll_count > AVD_DECODE_POLL_LIMIT {
+                println!(
+                    "[apple-avd] decode timeout stream={} frame={} phase={:?} polls={} status_before={:#x} status={:#x} msg={:#x}",
+                    stream_id,
+                    frame_number,
+                    completion_phase,
+                    updated_poll_count,
+                    status_before,
+                    status,
+                    message_raw
+                );
                 let _ = state.pending.pop_front();
                 avd.recover_h264_engine(status as u64);
                 return Err("apple-avd: decode timed out");
@@ -1752,6 +1823,7 @@ impl AppleAvdVideoBackend {
             command_tag,
             input_mapping,
             poll_count: 0,
+            completion_phase: AvdH264CompletionPhase::WaitingVideo,
         });
         Ok(())
     }
