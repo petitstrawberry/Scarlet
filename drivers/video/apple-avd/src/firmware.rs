@@ -39,7 +39,7 @@ impl AvdFirmwareMessage {
         match raw {
             avd_fw::MSG_READY => Self::Ready,
             avd_fw::MSG_PANIC => Self::Panic,
-            avd_fw::MSG_PP_DONE => Self::PostProcessorDone,
+            value if value & 0xff00 == avd_fw::MSG_PP_DONE => Self::PostProcessorDone,
             avd_fw::MSG_UNKNOWN_IRQ => Self::UnknownIrq,
             value if value & 0xff00 == avd_fw::MSG_VP_DONE => Self::VideoProcessorDone,
             value if value & 0xff00 == avd_fw::MSG_VP_ERROR => Self::VideoProcessorError,

@@ -1422,17 +1422,21 @@ impl AvdBackendSession {
         if store_reference && dpb_capacity == 0 {
             dpb_capacity = 1;
         }
-        let slot_count = dpb_capacity
+        let minimum_slot_count = dpb_capacity
             .checked_add(AVD_H264_EXTRA_DECODE_SLOTS)
             .ok_or("apple-avd: output slot count overflow")?
             .max(1)
             .min(AVD_H264_MAX_OUTPUT_SLOTS);
-        let required = slot_span
-            .checked_mul(slot_count)
-            .ok_or("apple-avd: reference slot size overflow")?;
-        if payload_len == 0 || required > request.output_len as usize {
+        if payload_len == 0 {
             return Err("apple-avd: decoded frame exceeds mapped output slot pool");
         }
+        let max_slot_count_by_output = (request.output_len as usize / slot_span)
+            .max(1)
+            .min(AVD_H264_MAX_OUTPUT_SLOTS);
+        if max_slot_count_by_output < minimum_slot_count {
+            return Err("apple-avd: decoded frame exceeds mapped output slot pool");
+        }
+        let slot_count = max_slot_count_by_output;
         if is_idr {
             self.reference_frames.clear();
             self.next_reference_slot = 0;
@@ -1680,6 +1684,23 @@ impl AvdBackendState {
         Ok(session.stream_id)
     }
 
+    fn reset_all_sessions(&mut self) {
+        for session in &mut self.sessions {
+            session.reset();
+        }
+        self.pending.clear();
+        self.completed.clear();
+    }
+
+    fn clear_pending_decode(&mut self) -> Option<u64> {
+        let reason = self.pending.front().map(|pending| {
+            (u64::from(pending.frame_number) << 32) | u64::from(pending.command_tag)
+        });
+        self.pending.clear();
+        self.completed.clear();
+        reason
+    }
+
     fn session_mut(&mut self, stream_id: u32) -> Result<&mut AvdBackendSession, &'static str> {
         self.sessions
             .iter_mut()
@@ -1767,6 +1788,18 @@ impl AppleAvdVideoBackend {
 
     fn avd(&self) -> Result<Arc<Mutex<AppleAvd>>, &'static str> {
         get_apple_avd(self.avd_id).ok_or("apple-avd: backend instance disappeared")
+    }
+
+    fn recover_pending_state(&self, avd: &mut AppleAvd, state: &mut AvdBackendState) -> bool {
+        let Some(reason) = state.clear_pending_decode() else {
+            return false;
+        };
+        println!(
+            "[apple-avd] recovering stale pending decode before new submit reason={:#x}",
+            reason
+        );
+        avd.recover_h264_engine(reason);
+        true
     }
 
     fn service_completions(&self) -> Result<(), &'static str> {
@@ -1869,6 +1902,7 @@ impl AppleAvdVideoBackend {
                 || status != status_before
                 || poll_count == 0
                 || poll_count % 1000 == 0)
+            && (poll_count < 4 || status != status_before || poll_count % 1000 == 0)
         {
             println!(
                 "[apple-avd] decode poll stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:#x}",
@@ -2195,7 +2229,21 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         if coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: only H.264 sessions are supported");
         }
-        self.state.lock().allocate_session(coded_format)
+        let avd = self.avd()?;
+        let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        if self.recover_pending_state(&mut avd, &mut state) {
+            state.reset_all_sessions();
+        }
+        match state.allocate_session(coded_format) {
+            Ok(stream_id) => Ok(stream_id),
+            Err(_) => {
+                println!("[apple-avd] resetting stale video sessions before create");
+                state.reset_all_sessions();
+                avd.recover_h264_engine(0x51_4553_45);
+                state.allocate_session(coded_format)
+            }
+        }
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
@@ -2230,7 +2278,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if !state.pending.is_empty() {
-            return Err("apple-avd: decode already pending");
+            self.recover_pending_state(&mut avd, &mut state);
         }
         avd.ensure_firmware_running()?;
         let stream_parameters = {
@@ -2266,7 +2314,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if !state.pending.is_empty() {
-            return Err("apple-avd: decode already pending");
+            self.recover_pending_state(&mut avd, &mut state);
         }
         avd.ensure_firmware_running()?;
         {
