@@ -159,6 +159,83 @@ def _pmgr_device_paddr(pmgr: Any, ps_regs: list[Any], device: Any, die: int) -> 
     return int(base) + reg_offset + (PMGR_DIE_OFFSET * die) + addr_offset
 
 
+def _pmgr_clock_gate_record(
+    pmgr: Any,
+    ps_regs: list[Any],
+    device: Any,
+    use_u8_ids: bool,
+    gate: int,
+    die: int,
+) -> dict[str, Any]:
+    is_virtual = _pmgr_device_is_virtual(device)
+    paddr = None
+    if not is_virtual:
+        try:
+            paddr = _pmgr_device_paddr(pmgr, ps_regs, device, die)
+        except Exception:
+            paddr = None
+    return {
+        "gate": gate,
+        "die": die,
+        "device_id": _pmgr_device_id(device, use_u8_ids),
+        "name": str(_field(device, "name")),
+        "parents": _pmgr_device_parents(device, use_u8_ids),
+        "virtual": is_virtual,
+        "paddr": paddr,
+    }
+
+
+def _collect_pmgr_clock_gate_device(
+    pmgr: Any,
+    devices: list[Any],
+    ps_regs: list[Any],
+    use_u8_ids: bool,
+    gate: int,
+    die: int,
+    device_id: int,
+    out: list[dict[str, Any]],
+    seen: set[tuple[int, int]],
+    stack: set[tuple[int, int]],
+) -> None:
+    if device_id == 0:
+        return
+    key = (die, device_id)
+    if key in stack:
+        return
+    device = _find_pmgr_device(devices, use_u8_ids, device_id)
+    if device is None:
+        return
+
+    stack.add(key)
+    is_virtual = _pmgr_device_is_virtual(device)
+    if is_virtual and key not in seen:
+        out.append(
+            _pmgr_clock_gate_record(pmgr, ps_regs, device, use_u8_ids, gate, die)
+        )
+        seen.add(key)
+
+    for parent_id in _pmgr_device_parents(device, use_u8_ids):
+        _collect_pmgr_clock_gate_device(
+            pmgr,
+            devices,
+            ps_regs,
+            use_u8_ids,
+            gate,
+            die,
+            parent_id,
+            out,
+            seen,
+            stack,
+        )
+
+    if not is_virtual and key not in seen:
+        out.append(
+            _pmgr_clock_gate_record(pmgr, ps_regs, device, use_u8_ids, gate, die)
+        )
+        seen.add(key)
+    stack.remove(key)
+
+
 def _pmgr_clock_gate_devices(adt: Any, gates: list[int]) -> list[dict[str, Any]]:
     try:
         pmgr = _node_by_path(adt, PMGR_ADT_PATH)
@@ -170,27 +247,22 @@ def _pmgr_clock_gate_devices(adt: Any, gates: list[int]) -> list[dict[str, Any]]
         return []
 
     use_u8_ids = _pmgr_uses_u8_ids(devices)
-    out = []
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
     for gate in gates:
         device_id = gate & PMGR_DEVICE_ID_MASK
         die = (gate >> PMGR_DIE_ID_SHIFT) & PMGR_DIE_ID_MASK
-        device = _find_pmgr_device(devices, use_u8_ids, device_id)
-        if device is None:
-            continue
-        try:
-            paddr = _pmgr_device_paddr(pmgr, ps_regs, device, die)
-        except Exception:
-            paddr = None
-        out.append(
-            {
-                "gate": gate,
-                "die": die,
-                "device_id": device_id,
-                "name": str(_field(device, "name")),
-                "parents": _pmgr_device_parents(device, use_u8_ids),
-                "virtual": _pmgr_device_is_virtual(device),
-                "paddr": paddr,
-            }
+        _collect_pmgr_clock_gate_device(
+            pmgr,
+            devices,
+            ps_regs,
+            use_u8_ids,
+            gate,
+            die,
+            device_id,
+            out,
+            seen,
+            set(),
         )
     return out
 
@@ -479,19 +551,29 @@ def _optional_string_list_property(indent: str, name: str, values: list[str]) ->
 
 
 def _clock_gate_paddrs(info_node: dict[str, Any]) -> list[int]:
-    return [
-        int(device["paddr"])
-        for device in info_node["clock_gate_devices"]
-        if device.get("paddr") is not None and not device.get("virtual", False)
-    ]
+    out = []
+    seen = set()
+    for device in info_node["clock_gate_devices"]:
+        if device.get("paddr") is None or device.get("virtual", False):
+            continue
+        paddr = int(device["paddr"])
+        if paddr not in seen:
+            out.append(paddr)
+            seen.add(paddr)
+    return out
 
 
 def _clock_gate_names(info_node: dict[str, Any]) -> list[str]:
-    return [
-        str(device["name"])
-        for device in info_node["clock_gate_devices"]
-        if device.get("name") and not device.get("virtual", False)
-    ]
+    out = []
+    seen = set()
+    for device in info_node["clock_gate_devices"]:
+        if not device.get("name") or device.get("virtual", False):
+            continue
+        name = str(device["name"])
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
 
 
 def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
