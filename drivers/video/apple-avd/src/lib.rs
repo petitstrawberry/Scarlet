@@ -1926,7 +1926,12 @@ fn enable_adt_pmgr_clock_gates(device: &PlatformDeviceInfo) -> Result<(), &'stat
         return Ok(());
     }
 
+    let mut enabled_paddrs = Vec::new();
     for paddr in paddrs {
+        if enabled_paddrs.iter().any(|seen| *seen == paddr) {
+            continue;
+        }
+        enabled_paddrs.push(paddr);
         match pmgr_get_domain_by_register_paddr(paddr) {
             Ok(domain) => {
                 let was_on = domain.is_on();
