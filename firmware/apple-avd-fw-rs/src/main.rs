@@ -9,7 +9,7 @@ mod vector;
 
 use core::arch::asm;
 
-use abi::{CMD_H264_DECODE, MSG_PANIC, MSG_READY, MSG_UNKNOWN_IRQ, command_kind, command_tag};
+use abi::{MSG_PANIC, MSG_READY};
 use mailbox::{receive_command, send_message, signal_booted};
 
 /// Firmware reset entry point.
@@ -55,12 +55,5 @@ fn wait_for_interrupt() {
 }
 
 fn dispatch_command(command: u32) {
-    match command_kind(command) {
-        CMD_H264_DECODE => irq::arm_decode_irqs(),
-        _ => {
-            let kind = command_kind(command) & 0xff;
-            let tag = command_tag(command) & 0xff;
-            send_message(MSG_UNKNOWN_IRQ | (kind << 8) | tag);
-        }
-    }
+    irq::dispatch_mailbox_command(command);
 }

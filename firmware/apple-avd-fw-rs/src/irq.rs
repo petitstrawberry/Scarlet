@@ -1,7 +1,10 @@
 //! Cortex-M3 interrupt handling for the Apple AVD firmware.
 
-use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR};
-use crate::mailbox::send_message;
+use crate::abi::{
+    CMD_H264_DECODE, MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR, command_kind,
+    command_tag,
+};
+use crate::mailbox::{receive_command, send_message};
 
 /// Number of external NVIC lines enabled by the AVD firmware.
 pub const NVIC_EXTERNAL_IRQS: usize = 224;
@@ -49,6 +52,31 @@ pub fn arm_decode_irqs() {
         // SAFETY: NVIC ISER registers are memory-mapped Cortex-M system control registers.
         unsafe {
             core::ptr::write_volatile(reg, u32::MAX);
+        }
+    }
+}
+
+/// Handle an AP-to-CM3 mailbox IRQ.
+pub fn mailbox_command() {
+    let Some(command) = receive_command() else {
+        return;
+    };
+
+    dispatch_mailbox_command(command);
+}
+
+/// Dispatch one AP-to-CM3 mailbox command.
+///
+/// # Arguments
+///
+/// * `command` - Raw AP-to-CM3 command word.
+pub fn dispatch_mailbox_command(command: u32) {
+    match command_kind(command) {
+        CMD_H264_DECODE => arm_decode_irqs(),
+        _ => {
+            let kind = command_kind(command) & 0xff;
+            let tag = command_tag(command) & 0xff;
+            send_message(MSG_UNKNOWN_IRQ | (kind << 8) | tag);
         }
     }
 }

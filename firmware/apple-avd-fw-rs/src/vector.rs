@@ -222,6 +222,15 @@ macro_rules! post_process_irq_handler {
     };
 }
 
+macro_rules! mailbox_irq_handler {
+    ($name:ident) => {
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name() {
+            irq::mailbox_command();
+        }
+    };
+}
+
 /// Non-maskable interrupt handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn nmi_handler() -> ! {
@@ -259,6 +268,8 @@ pipe_irq_handlers!(irq33_handler, irq34_handler, irq35_handler, 3);
 submit_unknown_irq_handler!(irq38_handler);
 post_process_irq_handler!(irq40_handler);
 
+mailbox_irq_handler!(irq1_handler);
+
 submit_unknown_irq_handler!(irq62_handler);
 post_process_irq_handler!(irq64_handler);
 pipe_irq_handlers!(irq78_handler, irq79_handler, irq80_handler, 0);
@@ -275,7 +286,6 @@ pipe_irq_handlers!(irq128_handler, irq129_handler, irq130_handler, 10);
 pipe_irq_handlers!(irq133_handler, irq134_handler, irq135_handler, 11);
 
 default_irq_handler!(irq0_handler, 0);
-default_irq_handler!(irq1_handler, 1);
 default_irq_handler!(irq2_handler, 2);
 default_irq_handler!(irq3_handler, 3);
 default_irq_handler!(irq4_handler, 4);
