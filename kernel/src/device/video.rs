@@ -259,7 +259,8 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the session is released.
+    /// `Ok(())` when the session is released. After a successful return, the
+    /// backend must not access buffers that were submitted by that session.
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str>;
 
     /// Submit one coded access unit.
@@ -405,11 +406,56 @@ impl ScarletVideoDevice {
         }
     }
 
+    fn log_backend_state(&self, event: &str, stream_id: u32, error: Option<&'static str>) {
+        let caps = self.backend.capabilities();
+        let backend_status = self.backend.debug_status().unwrap_or_default();
+        if let Some(error) = error {
+            crate::println!(
+                "[scarlet-video] {} error={} stream={} backend={} caps=0x{:x} sessions={} input={} output={}{}",
+                event,
+                error,
+                stream_id,
+                self.backend.name(),
+                caps.user_flags(),
+                caps.max_sessions,
+                caps.mapped_input_len,
+                caps.mapped_output_len,
+                backend_status
+            );
+        } else {
+            crate::println!(
+                "[scarlet-video] {} stream={} backend={} caps=0x{:x} sessions={} input={} output={}{}",
+                event,
+                stream_id,
+                self.backend.name(),
+                caps.user_flags(),
+                caps.max_sessions,
+                caps.mapped_input_len,
+                caps.mapped_output_len,
+                backend_status
+            );
+        }
+    }
+
     fn ensure_mapped_buffer(&self, layout: VideoBufferLayout) -> Result<(), &'static str> {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
             *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            if let Some(buffer) = mapped_buffer.as_ref() {
+                crate::println!(
+                    "[scarlet-video] legacy mmap alloc pages={} len={} paddr={:#x}",
+                    pages,
+                    layout.mmap_len,
+                    buffer.as_paddr()
+                );
+            } else {
+                crate::println!(
+                    "[scarlet-video] legacy mmap alloc failed pages={} len={}",
+                    pages,
+                    layout.mmap_len
+                );
+            }
         }
         if mapped_buffer.is_some() {
             Ok(())
@@ -691,7 +737,16 @@ struct ScarletVideoOpen {
 impl ScarletVideoOpen {
     fn new(device: Arc<ScarletVideoDevice>) -> Result<Self, &'static str> {
         let backend = device.backend.clone();
-        let stream_id = backend.create_session(SCARLET_VIDEO_FORMAT_H264)?;
+        let stream_id = match backend.create_session(SCARLET_VIDEO_FORMAT_H264) {
+            Ok(stream_id) => {
+                device.log_backend_state("open create_session ok", stream_id, None);
+                stream_id
+            }
+            Err(e) => {
+                device.log_backend_state("open create_session failed", 0, Some(e));
+                return Err(e);
+            }
+        };
         Ok(Self {
             device,
             mapped_buffer: Mutex::new(None),
@@ -709,14 +764,35 @@ impl ScarletVideoOpen {
         let mut stream_id = self.stream_id.lock();
         match *stream_id {
             Some(current) if requested_stream_id == 0 || requested_stream_id == current => {
+                crate::println!(
+                    "[scarlet-video] create_session query open={:#x} requested={} stream={}",
+                    self as *const _ as usize,
+                    requested_stream_id,
+                    current
+                );
                 Ok(current)
             }
             Some(_) => Err("scarlet-video: stream id belongs to another open"),
             None if requested_stream_id == 0 => {
-                let new_stream_id = self
+                let new_stream_id = match self
                     .device
                     .backend
-                    .create_session(SCARLET_VIDEO_FORMAT_H264)?;
+                    .create_session(SCARLET_VIDEO_FORMAT_H264)
+                {
+                    Ok(new_stream_id) => {
+                        self.device.log_backend_state(
+                            "create_session reopen ok",
+                            new_stream_id,
+                            None,
+                        );
+                        new_stream_id
+                    }
+                    Err(e) => {
+                        self.device
+                            .log_backend_state("create_session reopen failed", 0, Some(e));
+                        return Err(e);
+                    }
+                };
                 *stream_id = Some(new_stream_id);
                 Ok(new_stream_id)
             }
@@ -735,7 +811,19 @@ impl ScarletVideoOpen {
 
     fn destroy_current_session(&self, requested_stream_id: u32) -> Result<(), &'static str> {
         let current = self.checked_stream_id(requested_stream_id)?;
-        self.device.backend.destroy_session(current)?;
+        crate::println!(
+            "[scarlet-video] destroy_session begin open={:#x} requested={} stream={}",
+            self as *const _ as usize,
+            requested_stream_id,
+            current
+        );
+        if let Err(e) = self.device.backend.destroy_session(current) {
+            self.device
+                .log_backend_state("destroy_session failed", current, Some(e));
+            return Err(e);
+        }
+        self.device
+            .log_backend_state("destroy_session ok", current, None);
         *self.stream_id.lock() = None;
         *self.next_timestamp.lock() = 1;
         Ok(())
@@ -755,10 +843,29 @@ impl ScarletVideoOpen {
     }
 
     fn ensure_mapped_buffer(&self, layout: VideoBufferLayout) -> Result<(), &'static str> {
+        let stream_id = (*self.stream_id.lock()).unwrap_or(0);
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
             *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            if let Some(buffer) = mapped_buffer.as_ref() {
+                crate::println!(
+                    "[scarlet-video] mmap alloc open={:#x} stream={} pages={} len={} paddr={:#x}",
+                    self as *const _ as usize,
+                    stream_id,
+                    pages,
+                    layout.mmap_len,
+                    buffer.as_paddr()
+                );
+            } else {
+                crate::println!(
+                    "[scarlet-video] mmap alloc failed open={:#x} stream={} pages={} len={}",
+                    self as *const _ as usize,
+                    stream_id,
+                    pages,
+                    layout.mmap_len
+                );
+            }
         }
         if mapped_buffer.is_some() {
             Ok(())
@@ -885,12 +992,30 @@ impl ScarletVideoOpen {
 
 impl Drop for ScarletVideoOpen {
     fn drop(&mut self) {
-        let stream_id = {
-            let mut stream_id = self.stream_id.lock();
-            stream_id.take()
-        };
+        let stream_id = *self.stream_id.lock();
         if let Some(stream_id) = stream_id {
-            let _ = self.device.backend.destroy_session(stream_id);
+            crate::println!(
+                "[scarlet-video] drop begin open={:#x} stream={}",
+                self as *const _ as usize,
+                stream_id
+            );
+            match self.device.backend.destroy_session(stream_id) {
+                Ok(()) => {
+                    self.device
+                        .log_backend_state("drop destroy ok", stream_id, None);
+                    *self.stream_id.lock() = None;
+                }
+                Err(e) => {
+                    self.device
+                        .log_backend_state("drop destroy failed", stream_id, Some(e));
+                    *self.last_error.lock() = Some(e);
+                }
+            }
+        } else {
+            crate::println!(
+                "[scarlet-video] drop without session open={:#x}",
+                self as *const _ as usize
+            );
         }
     }
 }
@@ -1145,6 +1270,15 @@ impl MemoryMappingOps for ScarletVideoOpen {
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("scarlet-video: mmap buffer missing")?;
+        let stream_id = (*self.stream_id.lock()).unwrap_or(0);
+        crate::println!(
+            "[scarlet-video] mmap map open={:#x} stream={} offset={} length={} paddr={:#x}",
+            self as *const _ as usize,
+            stream_id,
+            offset,
+            length,
+            buffer.as_paddr() + offset
+        );
         Ok(MemoryMappingInfo::new(
             buffer.as_paddr() + offset,
             0x3,
@@ -1358,6 +1492,12 @@ impl MemoryMappingOps for ScarletVideoDevice {
         let buffer = mapped_buffer
             .as_ref()
             .ok_or("scarlet-video: mmap buffer missing")?;
+        crate::println!(
+            "[scarlet-video] legacy mmap map offset={} length={} paddr={:#x}",
+            offset,
+            length,
+            buffer.as_paddr() + offset
+        );
         Ok(MemoryMappingInfo::new(
             buffer.as_paddr() + offset,
             0x3,

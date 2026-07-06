@@ -1592,6 +1592,7 @@ fn decode_loop_hardware(
     let mut loop_index = 0u64;
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut decoder = HardwareVideoDecoder::open()?;
 
     loop {
         let seek_plan = video_seek_plan(&source, seek_target_us);
@@ -1604,6 +1605,7 @@ fn decode_loop_hardware(
                 &source,
                 mp4_data,
                 &seek_plan,
+                &mut decoder,
                 frame_store,
                 paint_signal,
                 controls,
@@ -1618,7 +1620,6 @@ fn decode_loop_hardware(
             }
         }
 
-        let mut decoder = HardwareVideoDecoder::open()?;
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
                 queue.clear();
@@ -1811,11 +1812,9 @@ fn decode_loop_hardware_streaming_mp4(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 continue;
             }
-            drop(decoder);
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
-            decoder = HardwareVideoDecoder::open()?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -1828,8 +1827,6 @@ fn decode_loop_hardware_streaming_mp4(
         }
         if !controls.is_scrubbing() && active_preview_published {
             let seek_plan = video_seek_plan(&source, seek_target_us);
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open()?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -2120,11 +2117,9 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 thread::sleep(Duration::from_millis(STREAM_POLL_INTERVAL_MS));
                 continue;
             }
-            drop(decoder);
             if let Some(clock) = clock {
                 clock.reset_for_replay();
             }
-            decoder = HardwareVideoDecoder::open()?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -2137,8 +2132,6 @@ fn decode_loop_hardware_streaming_mp4_socket(
         }
         if !controls.is_scrubbing() && active_preview_published {
             let seek_plan = video_seek_plan(&source, seek_target_us);
-            drop(decoder);
-            decoder = HardwareVideoDecoder::open()?;
             reorder = FrameReorderBuffer::new_from(
                 stream_total_frames(&source, seek_plan.decode_start_index, complete),
                 seek_plan.publish_start_rank,
@@ -2337,6 +2330,7 @@ fn replay_hardware_source_loops(
     let mut access_unit_scratch = Vec::new();
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut decoder = HardwareVideoDecoder::open()?;
 
     loop {
         let seek_plan = video_seek_plan(source, seek_target_us);
@@ -2349,6 +2343,7 @@ fn replay_hardware_source_loops(
                 source,
                 Some(mp4_data),
                 &seek_plan,
+                &mut decoder,
                 frame_store,
                 paint_signal,
                 controls,
@@ -2363,7 +2358,6 @@ fn replay_hardware_source_loops(
             }
         }
 
-        let mut decoder = HardwareVideoDecoder::open()?;
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
                 queue.clear();
@@ -5124,6 +5118,7 @@ fn publish_hardware_seek_preview(
     source: &VideoSource,
     mp4_data: Option<&[u8]>,
     seek_plan: &VideoSeekPlan,
+    decoder: &mut HardwareVideoDecoder,
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
     controls: &ControlsOverlay,
@@ -5142,9 +5137,6 @@ fn publish_hardware_seek_preview(
         return Ok(true);
     }
     let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
-    let Ok(mut decoder) = HardwareVideoDecoder::open() else {
-        return Ok(true);
-    };
     let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
         return Ok(true);
     };

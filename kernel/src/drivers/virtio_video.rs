@@ -350,6 +350,26 @@ impl VirtioVideoDevice {
         Ok(())
     }
 
+    fn drain_session_pending_decode(&self, session: &VideoSession) -> Result<(), &'static str> {
+        let mut spins = 0;
+        loop {
+            if session.pending_decode.lock().is_none() {
+                return Ok(());
+            }
+            let made_progress = self.try_complete_pending_decode()?;
+            if session.pending_decode.lock().is_none() {
+                return Ok(());
+            }
+            if spins >= CONTROL_SPIN_LIMIT {
+                return Err("VirtIO video pending decode timed out during destroy");
+            }
+            if !made_progress {
+                spins += 1;
+                core::hint::spin_loop();
+            }
+        }
+    }
+
     fn create_stream(&self, stream_id: u32, coded_format: u32) -> Result<(), &'static str> {
         let mut tag = [0u8; 64];
         let name = match coded_format {
@@ -1012,7 +1032,7 @@ impl VideoDecodeBackend for VirtioVideoDevice {
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
         let session = self.session_by_stream_id(stream_id)?;
-        if let Err(e) = self.try_complete_pending_decode() {
+        if let Err(e) = self.drain_session_pending_decode(session) {
             self.decoded_frame.lock().last_error = Some(e);
             return Err(e);
         }
