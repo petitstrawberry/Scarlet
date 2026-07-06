@@ -34,12 +34,13 @@ pub mod video;
 pub mod watchdog;
 
 extern crate alloc;
+use alloc::{sync::Arc, vec::Vec};
 use core::any::Any;
 
 use crate::device::events::EventCapableDevice;
+use crate::object::capability::memory_mapping::{ResolveFaultError, ResolveFaultResult};
 use crate::object::capability::selectable::Selectable;
-use crate::object::capability::{ControlOps, MemoryMappingOps};
-use alloc::vec::Vec;
+use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps};
 
 /// Device capability flags for neutral feature discovery across ABIs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,9 +103,14 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the open may proceed.
-    fn open(&self) -> Result<(), &'static str> {
-        Ok(())
+    /// Per-open device endpoint. The default endpoint delegates operations to
+    /// the registered device and calls [`Device::close`] when the endpoint is
+    /// dropped.
+    fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str>
+    where
+        Self: 'static,
+    {
+        Ok(Arc::new(DefaultDeviceOpen::new(self)))
     }
 
     /// Called when a device file object is closed.
@@ -193,6 +199,197 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
         self: alloc::sync::Arc<Self>,
     ) -> Option<alloc::sync::Arc<dyn network::NetworkDevice>> {
         None
+    }
+}
+
+/// Default per-open endpoint for devices that do not need private open state.
+///
+/// The endpoint owns a reference to the registered device and delegates all
+/// device operations to it. Dropping the endpoint invokes [`Device::close`] on
+/// the registered device, preserving the old open/close lifecycle for existing
+/// device implementations.
+pub(crate) struct DefaultDeviceOpen<T: Device + ?Sized> {
+    device: Arc<T>,
+}
+
+impl<T: Device + ?Sized> DefaultDeviceOpen<T> {
+    /// Create a default per-open endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Registered device backing this open endpoint.
+    ///
+    /// # Returns
+    ///
+    /// A delegating per-open endpoint.
+    pub(crate) fn new(device: Arc<T>) -> Self {
+        Self { device }
+    }
+}
+
+impl<T: Device + ?Sized> Drop for DefaultDeviceOpen<T> {
+    fn drop(&mut self) {
+        self.device.close();
+    }
+}
+
+impl<T: Device + ?Sized> ControlOps for DefaultDeviceOpen<T> {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        self.device.control(command, arg)
+    }
+
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        self.device.supported_control_commands()
+    }
+}
+
+impl<T: Device + ?Sized> MemoryMappingOps for DefaultDeviceOpen<T> {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        self.device.get_mapping_info(offset, length)
+    }
+
+    fn get_mapping_info_with(
+        &self,
+        offset: usize,
+        length: usize,
+        is_shared: bool,
+    ) -> Result<MemoryMappingInfo, &'static str> {
+        self.device.get_mapping_info_with(offset, length, is_shared)
+    }
+
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        self.device.on_mapped(vaddr, paddr, length, offset);
+    }
+
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        self.device.on_unmapped(vaddr, length);
+    }
+
+    fn supports_mmap(&self) -> bool {
+        self.device.supports_mmap()
+    }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        self.device.mmap_owner_name()
+    }
+
+    fn can_extend_vma_on_fault(&self) -> bool {
+        self.device.can_extend_vma_on_fault()
+    }
+
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        page_idx: usize,
+        vm_start: usize,
+    ) -> core::result::Result<ResolveFaultResult, ResolveFaultError> {
+        self.device.resolve_fault(access, page_idx, vm_start)
+    }
+
+    fn fault_page_permissions(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        default_permissions: usize,
+    ) -> usize {
+        self.device
+            .fault_page_permissions(access, default_permissions)
+    }
+
+    fn private_fault_requires_copy(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+    ) -> bool {
+        self.device.private_fault_requires_copy(access)
+    }
+
+    fn release_pages(&self, start_page_idx: usize, page_count: usize) {
+        self.device.release_pages(start_page_idx, page_count);
+    }
+
+    fn fork_clone(&self) -> Option<Arc<dyn MemoryMappingOps>> {
+        self.device.fork_clone()
+    }
+}
+
+impl<T: Device + ?Sized> Selectable for DefaultDeviceOpen<T> {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        self.device.current_ready(interest)
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        self.device
+            .wait_until_ready(interest, trapframe, timeout_ticks, min_wait_ticks)
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.device.set_nonblocking(enabled);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.device.is_nonblocking()
+    }
+}
+
+impl<T: Device + ?Sized + 'static> Device for DefaultDeviceOpen<T> {
+    fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
+        Ok(self)
+    }
+
+    fn device_type(&self) -> DeviceType {
+        self.device.device_type()
+    }
+
+    fn name(&self) -> &'static str {
+        self.device.name()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn capabilities(&self) -> &'static [DeviceCapability] {
+        self.device.capabilities()
+    }
+
+    fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
+        self.device.as_event_capable()
+    }
+
+    fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
+        self.device.as_char_device()
+    }
+
+    fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
+        self.device.as_block_device()
+    }
+
+    fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
+        self.device.as_graphics_device()
+    }
+
+    fn as_gpu_device(&self) -> Option<&dyn gpu::GpuDevice> {
+        self.device.as_gpu_device()
+    }
+
+    fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
+        self.device.as_network_device()
     }
 }
 

@@ -2012,12 +2012,6 @@ impl AvdBackendState {
         if self.pending.is_some() {
             return Err("apple-avd: decode already pending");
         }
-        if let Some(session) = self.sessions.iter_mut().find(|session| session.active) {
-            if session.coded_format != coded_format {
-                return Err("apple-avd: stream format mismatch");
-            }
-            return Ok(session.stream_id);
-        }
         let index = self
             .sessions
             .iter()

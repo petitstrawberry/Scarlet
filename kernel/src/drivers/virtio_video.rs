@@ -327,7 +327,7 @@ impl VirtioVideoDevice {
         for offset in 0..MAX_VIDEO_SESSIONS {
             let index = (*next + offset) % MAX_VIDEO_SESSIONS;
             let session = &self.sessions[index];
-            if session.pending_decode.lock().is_none() {
+            if !*session.stream_created.read() && session.pending_decode.lock().is_none() {
                 *next = index.wrapping_add(1);
                 return Ok(session);
             }

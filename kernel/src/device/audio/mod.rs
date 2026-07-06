@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::device::char::CharDevice;
-use crate::device::{Device, DeviceCapability, DeviceType};
+use crate::device::{DefaultDeviceOpen, Device, DeviceCapability, DeviceType};
 use crate::environment::PAGE_SIZE;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::mem::page::ContiguousPages;
@@ -961,13 +961,14 @@ pub fn register_playback_device_with_info(
 }
 
 impl Device for AudioCharDevice {
-    fn open(&self) -> Result<(), &'static str> {
+    fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
         let mut opened = self.opened.lock();
         if *opened {
             return Err("PCM device is busy");
         }
         *opened = true;
-        Ok(())
+        drop(opened);
+        Ok(Arc::new(DefaultDeviceOpen::new(self)))
     }
 
     fn close(&self) {

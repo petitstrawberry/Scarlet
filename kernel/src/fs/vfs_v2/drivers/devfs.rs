@@ -530,8 +530,8 @@ pub struct DevFileObject {
     /// Device type
     #[allow(dead_code)]
     device_type: DeviceType,
-    /// Optional device guard for device files
-    device_guard: Option<Arc<dyn Device>>,
+    /// Per-open device endpoint for device files
+    device_open: Option<Arc<dyn Device>>,
 }
 
 impl DevFileObject {
@@ -553,7 +553,7 @@ impl DevFileObject {
         // Try to get the device from DeviceManager by ID
         match device_manager.get_device(device_id) {
             Some(device_guard) => {
-                device_guard.open().map_err(|e| {
+                let device_open = device_guard.open().map_err(|e| {
                     FileSystemError::new(
                         FileSystemErrorKind::DeviceError,
                         format!("Device open failed: {}", e),
@@ -564,7 +564,7 @@ impl DevFileObject {
                     position: RwLock::new(0),
                     device_id,
                     device_type,
-                    device_guard: Some(device_guard),
+                    device_open: Some(device_open),
                 })
             }
             None => Err(FileSystemError::new(
@@ -586,13 +586,13 @@ impl DevFileObject {
 
     /// Read from the underlying device at current position
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_open_ref = device_open.as_ref();
             let position = *self.position.read();
 
-            match device_guard_ref.device_type() {
+            match device_open_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                    if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use read_at for position-based read
                         match char_device.read_at(position, buffer) {
                             Ok(bytes_read) => {
@@ -613,7 +613,7 @@ impl DevFileObject {
                     }
                 }
                 DeviceType::Block => {
-                    if let Some(block_device) = device_guard_ref.as_block_device() {
+                    if let Some(block_device) = device_open_ref.as_block_device() {
                         let disk_size = block_device.get_disk_size();
                         let position = if position > usize::MAX as u64 {
                             return Ok(0);
@@ -691,13 +691,13 @@ impl DevFileObject {
 
     /// Write to the underlying device at current position
     fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_open_ref = device_open.as_ref();
             let position = *self.position.read();
 
-            match device_guard_ref.device_type() {
+            match device_open_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                    if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use write_at for position-based write
                         match char_device.write_at(position, buffer) {
                             Ok(bytes_written) => {
@@ -718,7 +718,7 @@ impl DevFileObject {
                     }
                 }
                 DeviceType::Block => {
-                    if let Some(block_device) = device_guard_ref.as_block_device() {
+                    if let Some(block_device) = device_open_ref.as_block_device() {
                         let disk_size = block_device.get_disk_size();
                         let position = if position > usize::MAX as u64 {
                             return Ok(0);
@@ -834,8 +834,8 @@ impl StreamOps for DevFileObject {
 impl ControlOps for DevFileObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         // For device files, delegate control operations to the underlying device
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             // Device trait now inherits from ControlOps, so we can delegate directly
             device_guard_ref.control(command, arg)
         } else {
@@ -845,8 +845,8 @@ impl ControlOps for DevFileObject {
 
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         // For device files, delegate to the underlying device
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.supported_control_commands()
         } else {
             alloc::vec![]
@@ -861,8 +861,8 @@ impl MemoryMappingOps for DevFileObject {
         length: usize,
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         // For device files, delegate to the underlying device if it supports memory mapping
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.get_mapping_info(offset, length)
         } else {
             Err("No device associated with this DevFileObject")
@@ -870,22 +870,22 @@ impl MemoryMappingOps for DevFileObject {
     }
 
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.on_mapped(vaddr, paddr, length, offset);
         }
     }
 
     fn on_unmapped(&self, vaddr: usize, length: usize) {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.on_unmapped(vaddr, length);
         }
     }
 
     fn supports_mmap(&self) -> bool {
-        if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.as_ref();
+        if let Some(ref device_open) = self.device_open {
+            let device_guard_ref = device_open.as_ref();
             device_guard_ref.supports_mmap()
         } else {
             false
@@ -944,8 +944,8 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
         interest: crate::object::capability::selectable::ReadyInterest,
     ) -> crate::object::capability::selectable::ReadySet {
         // Delegate to underlying Device's Selectable; fallback to default
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard.as_ref().current_ready(interest);
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().current_ready(interest);
         }
         crate::object::capability::selectable::Selectable::current_ready(self, interest)
     }
@@ -957,8 +957,8 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard.as_ref().wait_until_ready(
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().wait_until_ready(
                 interest,
                 trapframe,
                 timeout_ticks,
@@ -970,24 +970,16 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
-        if let Some(ref device_guard) = self.device_guard {
-            device_guard.as_ref().set_nonblocking(enabled);
+        if let Some(ref device_open) = self.device_open {
+            device_open.as_ref().set_nonblocking(enabled);
         }
     }
 
     fn is_nonblocking(&self) -> bool {
-        if let Some(ref device_guard) = self.device_guard {
-            return device_guard.as_ref().is_nonblocking();
+        if let Some(ref device_open) = self.device_open {
+            return device_open.as_ref().is_nonblocking();
         }
         crate::object::capability::selectable::Selectable::is_nonblocking(self)
-    }
-}
-
-impl Drop for DevFileObject {
-    fn drop(&mut self) {
-        if let Some(device_guard) = self.device_guard.as_ref() {
-            device_guard.close();
-        }
     }
 }
 
