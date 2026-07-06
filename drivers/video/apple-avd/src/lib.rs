@@ -140,8 +140,6 @@ const AVD_WORKSPACE_SPS_TILE_OFFSET: usize = 0x200000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
 const AVD_REFERENCE_SLOT_COUNT: usize = 4;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
-const AVD_FIRMWARE_READY_POLLS: usize = 500;
-const AVD_FIRMWARE_READY_POLL_US: u64 = 100;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
 const AVD_DECODE_POLL_LIMIT: usize = 10_000;
@@ -547,6 +545,10 @@ impl AvdRegisters {
         self.read32(REG_MAILBOX_CM3_TO_AP)
     }
 
+    fn recv_mailbox_status(&self) -> u32 {
+        self.read32(REG_MCPU_AP_IRQ_CLEAR)
+    }
+
     fn clear_recv_mailbox(&self) {
         self.write32(REG_MAILBOX_CM3_TO_AP, 0);
         self.write32(REG_MCPU_CM3_ACK, 1);
@@ -555,7 +557,7 @@ impl AvdRegisters {
 
     fn log_boot_state(&self, label: &str) {
         println!(
-            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} irq_arm={:#x} irq_mask={:#x} mcpu98={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
+            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} irq_arm={:#x} irq_mask={:#x} mcpu98={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap_status={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
             label,
             self.read32(REG_MCPU_CONTROL),
             self.read32(REG_MCPU_STATUS),
@@ -569,7 +571,7 @@ impl AvdRegisters {
             self.read32(REG_MCPU_AP_IRQ_CLEAR),
             self.read32(REG_MCPU_CM3_IRQ_CLEAR),
             self.read32(REG_MAILBOX_AP_TO_CM3),
-            self.read32(REG_MAILBOX_CM3_TO_AP),
+            self.recv_mailbox_status(),
             self.read32(REG_WRAP_CONTROL),
             self.read32(REG_WRAP_IDLE),
             self.read32(REG_WRAP_INIT),
@@ -737,7 +739,7 @@ pub struct AvdStatusSnapshot {
     pub status: u32,
     /// Top-level AVD IRQ status register.
     pub irq_status: u32,
-    /// Raw CM3-to-AP mailbox value.
+    /// CM3-to-AP mailbox status bits.
     pub mailbox: u32,
 }
 
@@ -949,19 +951,13 @@ impl AppleAvd {
         self.start_firmware()?;
         self.firmware_image = Some(AvdFirmwareImage { size: image.len() });
 
-        for _ in 0..AVD_FIRMWARE_READY_POLLS {
-            match self.poll_firmware_message() {
-                Some(AvdFirmwareMessage::Ready) => return Ok(()),
-                Some(message) if message.is_fault() => return Err("apple-avd: firmware faulted"),
-                _ => {
-                    time::udelay(AVD_FIRMWARE_READY_POLL_US);
-                }
+        if let Some(message) = self.poll_firmware_message() {
+            if message.is_fault() {
+                return Err("apple-avd: firmware faulted");
             }
         }
 
-        self.registers.log_boot_state("ready-timeout");
-        self.registers.log_code_window("ready-timeout", image);
-        Err("apple-avd: firmware did not become ready")
+        Ok(())
     }
 
     /// Submit a H.264 request to the firmware mailbox.
@@ -1086,7 +1082,7 @@ impl AppleAvd {
         AvdStatusSnapshot {
             status: self.registers.status(),
             irq_status: self.registers.irq_status(),
-            mailbox: self.registers.recv_mailbox(),
+            mailbox: self.registers.recv_mailbox_status(),
         }
     }
 
@@ -1121,6 +1117,7 @@ impl AppleAvd {
             return Err(e);
         }
         self.registers.log_boot_state("after-run");
+        self.firmware_state = AvdFirmwareState::Running;
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
         Ok(())
     }
