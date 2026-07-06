@@ -15,6 +15,7 @@ const DECODE_STATUS_ERR: u32 = 1 << 1;
 const DECODE_STATUS_DONE: u32 = 1 << 2;
 const H264_STATUS_OFFSET: usize = 0x4060;
 const H264_STATUS_IRQ1: u32 = 0x800;
+const DECODE_STATUS_CLEAR_POLLS: usize = 100_000;
 
 #[cfg(feature = "v2-t0")]
 const DECODE_CTRL_BASE: usize = 0x4010_0000;
@@ -94,7 +95,10 @@ pub fn video_pipe_unknown(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_done(pipe: u32) {
-    clear_decode_status(pipe, DECODE_STATUS_DONE);
+    if !clear_decode_status(pipe, DECODE_STATUS_DONE) {
+        send_message(MSG_VP_ERROR | (pipe & 0xff));
+        return;
+    }
     send_message(MSG_VP_DONE | (pipe & 0xff));
 }
 
@@ -104,7 +108,7 @@ pub fn video_pipe_done(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_error(pipe: u32) {
-    clear_decode_status(pipe, DECODE_STATUS_ERR);
+    let _ = clear_decode_status(pipe, DECODE_STATUS_ERR);
     send_message(MSG_VP_ERROR | (pipe & 0xff));
 }
 
@@ -115,7 +119,10 @@ pub fn submit_unknown() {
 
 /// Handle a post-process DONE IRQ.
 pub fn post_process_done() {
-    clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE);
+    if !clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE) {
+        send_message(MSG_VP_ERROR | (IRQ_SUBMIT_SLOT & 0xff));
+        return;
+    }
     send_message(MSG_PP_DONE);
 }
 
@@ -128,17 +135,21 @@ pub fn unknown_irq(irq: u32) {
     send_message(MSG_UNKNOWN_IRQ | (irq & 0xff));
 }
 
-fn clear_decode_status(slot: u32, status: u32) {
+fn clear_decode_status(slot: u32, status: u32) -> bool {
     let ptr = decode_status_ptr(slot);
     let mask = decode_status_mask(slot, status);
     // SAFETY: These are AVD decode status registers in the CM3-visible MMIO
     // window; writing the observed bits acknowledges the corresponding IRQ.
     unsafe {
         core::ptr::write_volatile(ptr, mask);
-        while core::ptr::read_volatile(ptr) & mask != 0 {
+        for _ in 0..DECODE_STATUS_CLEAR_POLLS {
+            if core::ptr::read_volatile(ptr) & mask == 0 {
+                return true;
+            }
             core::hint::spin_loop();
         }
     }
+    false
 }
 
 fn clear_h264_status(status: u32) {

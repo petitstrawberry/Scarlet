@@ -123,13 +123,9 @@ const H264_SUBMIT_START: u32 = 1;
 const H264_SUBMIT_FRAME: u32 = 0x2b000107;
 const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
-const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
-const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
 const H264_STATUS_ACCEPTED: u32 = 0x0000_0800;
 const H264_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
-const H264_STATUS_VIDEO_PHASE_DONE: u32 = 0x00c0_0000;
 const H264_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
-const H264_STATUS_POSTPROCESS_PHASE_DONE: u32 = 0x0000_2000;
 const H264_STATUS_RECOVERY_CLEAR_MASK: u32 = H264_STATUS_DONE_MASK
     | H264_STATUS_ERROR_MASK
     | H264_STATUS_ACCEPTED
@@ -579,7 +575,6 @@ impl AvdRegisters {
 
     fn clear_recv_mailbox(&self) {
         self.write32(REG_MCPU_IRQ_CLEAR, MCPU_MAILBOX1_NOT_EMPTY);
-        self.write32(REG_MCPU_CM3_ACK, 1);
         arch::io_wmb();
     }
 
@@ -1057,22 +1052,6 @@ impl AppleAvd {
         Ok(())
     }
 
-    /// Restart firmware after a decode path became unrecoverable.
-    ///
-    /// # Arguments
-    ///
-    /// * `reason` - Driver-local reason or status value recorded in the trace.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` when CM3 firmware is running again.
-    pub fn restart_firmware(&mut self, reason: u64) -> Result<(), &'static str> {
-        println!("[apple-avd] restarting firmware reason={:#x}", reason);
-        self.trace.push(AvdTraceKind::Fault, reason, 1);
-        self.firmware_state = AvdFirmwareState::Missing;
-        self.boot_firmware(DEFAULT_AVD_FIRMWARE)
-    }
-
     /// Submit a H.264 request to the firmware mailbox.
     ///
     /// # Arguments
@@ -1208,8 +1187,11 @@ impl AppleAvd {
             AvdFirmwareMessage::VideoProcessorDone | AvdFirmwareMessage::PostProcessorDone => {
                 self.trace.push(AvdTraceKind::DecodeComplete, raw as u64, 0);
             }
-            message if message.is_fault() => {
+            AvdFirmwareMessage::Panic => {
                 self.mark_firmware_faulted();
+                self.trace.push(AvdTraceKind::Fault, raw as u64, 0);
+            }
+            AvdFirmwareMessage::VideoProcessorError => {
                 self.trace.push(AvdTraceKind::Fault, raw as u64, 0);
             }
             _ => {}
@@ -2085,11 +2067,23 @@ impl AvdBackendState {
         Ok(session)
     }
 
-    fn destroy_session(&mut self, stream_id: u32) -> Result<bool, &'static str> {
+    fn has_pending_for_stream(&self, stream_id: u32) -> Result<bool, &'static str> {
         let index = self.session_index(stream_id)?;
         let session = &self.sessions[index];
         if !session.active {
             return Ok(false);
+        }
+        Ok(self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.stream_id == stream_id))
+    }
+
+    fn destroy_session(&mut self, stream_id: u32) -> Result<(), &'static str> {
+        let index = self.session_index(stream_id)?;
+        let session = &self.sessions[index];
+        if !session.active {
+            return Ok(());
         }
         let had_pending = self
             .pending
@@ -2099,7 +2093,7 @@ impl AvdBackendState {
             let _ = self.pending.take();
         }
         self.reset_session_state(index);
-        Ok(had_pending)
+        Ok(())
     }
 
     fn pending_len(&self) -> usize {
@@ -2162,13 +2156,44 @@ impl AppleAvdVideoBackend {
         let poll_count = front.poll_count;
         let completion_phase = front.completion_phase;
 
-        if (status != status_before && (status & H264_STATUS_ERROR_MASK) != 0)
-            || matches!(message, Some(message) if message.is_fault())
-        {
+        let status_error = status != status_before && (status & H264_STATUS_ERROR_MASK) != 0;
+        let firmware_panic = matches!(message, Some(AvdFirmwareMessage::Panic));
+        if firmware_panic {
+            println!(
+                "[apple-avd] firmware panic stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:?}/{:#x}",
+                stream_id,
+                frame_number,
+                completion_phase,
+                poll_count,
+                status_before,
+                status,
+                message,
+                message_raw
+            );
             let _ = state.pending.take();
+            avd.recover_h264_engine(status as u64);
             state.reset_all_sessions();
-            avd.restart_firmware(status as u64)?;
-            return Err("apple-avd: H.264 engine reported an error");
+            return Err("apple-avd: firmware panic during decode");
+        }
+
+        let processor_error = matches!(
+            message,
+            Some(AvdFirmwareMessage::VideoProcessorError | AvdFirmwareMessage::UnknownIrq)
+        );
+        if (status_error || processor_error)
+            && (poll_count < 4 || poll_count % 1000 == 0 || message_raw != 0)
+        {
+            println!(
+                "[apple-avd] decode error pending watchdog stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:?}/{:#x}",
+                stream_id,
+                frame_number,
+                completion_phase,
+                poll_count,
+                status_before,
+                status,
+                message,
+                message_raw
+            );
         }
 
         if completion_phase == AvdH264CompletionPhase::WaitingVideo
@@ -2209,42 +2234,10 @@ impl AppleAvdVideoBackend {
         }
 
         let completed_by_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
-        let mut completed_by_status = false;
-        if completion_phase == AvdH264CompletionPhase::WaitingVideo
-            && (status & H264_STATUS_VIDEO_PHASE_MASK) == H264_STATUS_VIDEO_PHASE_DONE
-        {
-            avd.clear_h264_status(H264_STATUS_POSTPROCESS_DONE);
-            avd.submit_h264_postprocess();
-            let front = state
-                .pending
-                .as_mut()
-                .ok_or("apple-avd: pending queue changed during video completion")?;
-            front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
-            front.poll_count = front.poll_count.saturating_add(1);
-            if should_log_decode_progress(frame_number) {
-                println!(
-                    "[apple-avd] decode video phase stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x}",
-                    stream_id,
-                    frame_number,
-                    poll_count,
-                    status_before,
-                    status,
-                    message_raw,
-                    H264_STATUS_POSTPROCESS_DONE
-                );
-            }
-            return Ok(());
-        }
-        if completion_phase == AvdH264CompletionPhase::WaitingPostprocess
-            && (status & H264_STATUS_POSTPROCESS_PHASE_MASK) == H264_STATUS_POSTPROCESS_PHASE_DONE
-        {
-            avd.clear_h264_status(H264_STATUS_VIDEO_DONE);
-            completed_by_status = true;
-        }
-
+        let completed_by_status = false;
         if should_log_decode_progress(frame_number)
             && (message_raw != 0 || status != status_before || poll_count == 0)
-            && (poll_count < 4 || status != status_before || poll_count % 1000 == 0)
+            && (poll_count < 4 || message_raw != 0 || poll_count % 1000 == 0)
         {
             println!(
                 "[apple-avd] decode poll stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:#x}",
@@ -2297,8 +2290,8 @@ impl AppleAvdVideoBackend {
                     message_raw
                 );
                 let _ = state.pending.take();
+                avd.recover_h264_engine(status as u64);
                 state.reset_all_sessions();
-                avd.restart_firmware(status as u64)?;
                 return Err("apple-avd: decode timed out");
             }
         }
@@ -2546,12 +2539,15 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let avd = self.avd()?;
         let mut avd = avd.lock();
         let mut state = self.state.lock();
-        let status = avd.h264_status();
-        let restart_firmware = state.destroy_session(stream_id)?;
-        if restart_firmware {
-            avd.restart_firmware(status as u64)?;
+        if state.has_pending_for_stream(stream_id)? {
+            let status = avd.h264_status();
+            println!(
+                "[apple-avd] destroying stream {} with pending decode; recovering H.264 engine without firmware restart status={:#x}",
+                stream_id, status
+            );
+            avd.recover_h264_engine(status as u64);
         }
-        Ok(())
+        state.destroy_session(stream_id)
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
@@ -2622,7 +2618,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             &mut state,
             &request.decode,
             stream_parameters,
-            AvdH264SubmitSource::Stateless(request.h264.as_ref()),
+            AvdH264SubmitSource::Stateless(&request.h264),
         )
     }
 

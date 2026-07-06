@@ -51,7 +51,7 @@ impl AvdTraceLog {
     /// Empty trace log retaining at most `capacity` events.
     pub fn new(capacity: usize) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: Vec::with_capacity(capacity),
             next_sequence: 0,
             capacity,
         }

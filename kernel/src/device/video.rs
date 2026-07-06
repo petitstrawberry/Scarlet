@@ -5,7 +5,7 @@
 //! contract. Keep the command values, mapped-buffer structures, and frame
 //! constants here so backend implementations do not drift apart.
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -201,7 +201,7 @@ pub struct VideoBackendH264StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
     /// Copied stateless H.264 parameters supplied by userspace.
-    pub h264: Box<ScarletVideoH264StatelessParams>,
+    pub h264: ScarletVideoH264StatelessParams,
 }
 
 /// Decoded frame returned by a backend.
@@ -535,7 +535,7 @@ impl ScarletVideoDevice {
     fn h264_stateless_params(
         &self,
         ptrs: ScarletVideoH264ParamPtrs,
-    ) -> Result<Box<ScarletVideoH264StatelessParams>, &'static str> {
+    ) -> Result<ScarletVideoH264StatelessParams, &'static str> {
         if ptrs.sps == 0
             || ptrs.pps == 0
             || ptrs.scaling_matrix == 0
@@ -546,14 +546,14 @@ impl ScarletVideoDevice {
             return Err("scarlet-video: stateless H.264 parameter pointer is null");
         }
 
-        Ok(Box::new(ScarletVideoH264StatelessParams {
+        Ok(ScarletVideoH264StatelessParams {
             sps: read_user_value(ptrs.sps as usize)?,
             pps: read_user_value(ptrs.pps as usize)?,
             scaling_matrix: read_user_value(ptrs.scaling_matrix as usize)?,
             pred_weights: read_user_value(ptrs.pred_weights as usize)?,
             slice_params: read_user_value(ptrs.slice_params as usize)?,
             decode_params: read_user_value(ptrs.decode_params as usize)?,
-        }))
+        })
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
