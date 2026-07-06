@@ -76,6 +76,18 @@ pub const SCARLET_VIDEO_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD: u32 = 1 << 5;
 pub const SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE: u32 = 1 << 6;
 /// H.264 SPS has frame cropping offsets.
 pub const SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING: u32 = 1 << 7;
+/// H.264 PPS has `entropy_coding_mode_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE: u16 = 1 << 0;
+/// H.264 PPS has `bottom_field_pic_order_in_frame_present_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT: u16 = 1 << 1;
+/// H.264 PPS has `weighted_pred_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED: u16 = 1 << 2;
+/// H.264 PPS has `deblocking_filter_control_present_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT: u16 = 1 << 3;
+/// H.264 PPS has `constrained_intra_pred_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED: u16 = 1 << 4;
+/// H.264 PPS has `redundant_pic_cnt_present_flag` set.
+pub const SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT: u16 = 1 << 5;
 /// H.264 decode request is an IDR picture.
 pub const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
 

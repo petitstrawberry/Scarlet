@@ -97,10 +97,26 @@ const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
 const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
+const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
 const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
 const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
+const SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE: u32 = 1 << 0;
+const SCARLET_VIDEO_H264_SPS_FLAG_QPPRIME_Y_ZERO_TRANSFORM_BYPASS: u32 = 1 << 1;
+const SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO: u32 = 1 << 2;
+const SCARLET_VIDEO_H264_SPS_FLAG_GAPS_IN_FRAME_NUM_VALUE_ALLOWED: u32 = 1 << 3;
+const SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY: u32 = 1 << 4;
+const SCARLET_VIDEO_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD: u32 = 1 << 5;
+const SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE: u32 = 1 << 6;
+const SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING: u32 = 1 << 7;
+const SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE: u16 = 1 << 0;
+const SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT: u16 = 1 << 1;
+const SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED: u16 = 1 << 2;
+const SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT: u16 = 1 << 3;
+const SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED: u16 = 1 << 4;
+const SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT: u16 = 1 << 5;
+const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -180,6 +196,235 @@ impl ScarletVideoCapabilities {
     fn has_flag(self, flag: u32) -> bool {
         self.flags & flag != 0
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoH264Sps {
+    profile_idc: u8,
+    constraint_set_flags: u8,
+    level_idc: u8,
+    seq_parameter_set_id: u8,
+    chroma_format_idc: u8,
+    bit_depth_luma_minus8: u8,
+    bit_depth_chroma_minus8: u8,
+    log2_max_frame_num_minus4: u8,
+    pic_order_cnt_type: u8,
+    log2_max_pic_order_cnt_lsb_minus4: u8,
+    max_num_ref_frames: u8,
+    num_ref_frames_in_pic_order_cnt_cycle: u8,
+    offset_for_ref_frame: [i32; 255],
+    offset_for_non_ref_pic: i32,
+    offset_for_top_to_bottom_field: i32,
+    pic_width_in_mbs_minus1: u16,
+    pic_height_in_map_units_minus1: u16,
+    frame_crop_left_offset: u32,
+    frame_crop_right_offset: u32,
+    frame_crop_top_offset: u32,
+    frame_crop_bottom_offset: u32,
+    flags: u32,
+}
+
+impl Default for ScarletVideoH264Sps {
+    fn default() -> Self {
+        Self {
+            profile_idc: 0,
+            constraint_set_flags: 0,
+            level_idc: 0,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 0,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 0,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            max_num_ref_frames: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            offset_for_ref_frame: [0; 255],
+            offset_for_non_ref_pic: 0,
+            offset_for_top_to_bottom_field: 0,
+            pic_width_in_mbs_minus1: 0,
+            pic_height_in_map_units_minus1: 0,
+            frame_crop_left_offset: 0,
+            frame_crop_right_offset: 0,
+            frame_crop_top_offset: 0,
+            frame_crop_bottom_offset: 0,
+            flags: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264Pps {
+    pic_parameter_set_id: u8,
+    seq_parameter_set_id: u8,
+    num_slice_groups_minus1: u8,
+    num_ref_idx_l0_default_active_minus1: u8,
+    num_ref_idx_l1_default_active_minus1: u8,
+    weighted_bipred_idc: u8,
+    pic_init_qp_minus26: i8,
+    pic_init_qs_minus26: i8,
+    chroma_qp_index_offset: i8,
+    second_chroma_qp_index_offset: i8,
+    flags: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoH264ScalingMatrix {
+    scaling_list_4x4: [[u8; 16]; 6],
+    scaling_list_8x8: [[u8; 64]; 6],
+}
+
+impl Default for ScarletVideoH264ScalingMatrix {
+    fn default() -> Self {
+        Self {
+            scaling_list_4x4: [[0; 16]; 6],
+            scaling_list_8x8: [[0; 64]; 6],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264Reference {
+    fields: u8,
+    index: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264WeightFactors {
+    luma_weight: [i16; 32],
+    luma_offset: [i16; 32],
+    chroma_weight: [[i16; 2]; 32],
+    chroma_offset: [[i16; 2]; 32],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264PredWeights {
+    luma_log2_weight_denom: u16,
+    chroma_log2_weight_denom: u16,
+    weight_factors: [ScarletVideoH264WeightFactors; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScarletVideoH264SliceParams {
+    header_bit_size: u32,
+    nal_offset: u32,
+    nal_len: u32,
+    first_mb_in_slice: u32,
+    slice_type: u8,
+    pic_parameter_set_id: u8,
+    colour_plane_id: u8,
+    redundant_pic_cnt: u8,
+    cabac_init_idc: u8,
+    slice_qp_delta: i8,
+    slice_qs_delta: i8,
+    disable_deblocking_filter_idc: u8,
+    slice_alpha_c0_offset_div2: i8,
+    slice_beta_offset_div2: i8,
+    num_ref_idx_l0_active_minus1: u8,
+    num_ref_idx_l1_active_minus1: u8,
+    reserved: u8,
+    ref_pic_list0: [ScarletVideoH264Reference; 32],
+    ref_pic_list1: [ScarletVideoH264Reference; 32],
+    flags: u32,
+}
+
+impl Default for ScarletVideoH264SliceParams {
+    fn default() -> Self {
+        Self {
+            header_bit_size: 0,
+            nal_offset: 0,
+            nal_len: 0,
+            first_mb_in_slice: 0,
+            slice_type: 0,
+            pic_parameter_set_id: 0,
+            colour_plane_id: 0,
+            redundant_pic_cnt: 0,
+            cabac_init_idc: 0,
+            slice_qp_delta: 0,
+            slice_qs_delta: 0,
+            disable_deblocking_filter_idc: 0,
+            slice_alpha_c0_offset_div2: 0,
+            slice_beta_offset_div2: 0,
+            num_ref_idx_l0_active_minus1: 0,
+            num_ref_idx_l1_active_minus1: 0,
+            reserved: 0,
+            ref_pic_list0: [ScarletVideoH264Reference::default(); 32],
+            ref_pic_list1: [ScarletVideoH264Reference::default(); 32],
+            flags: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264DpbEntry {
+    reference_ts: u64,
+    pic_num: u32,
+    frame_num: u16,
+    fields: u8,
+    reserved: [u8; 5],
+    top_field_order_cnt: i32,
+    bottom_field_order_cnt: i32,
+    flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264DecodeParams {
+    dpb: [ScarletVideoH264DpbEntry; 16],
+    nal_ref_idc: u16,
+    frame_num: u16,
+    top_field_order_cnt: i32,
+    bottom_field_order_cnt: i32,
+    idr_pic_id: u16,
+    pic_order_cnt_lsb: u16,
+    delta_pic_order_cnt_bottom: i32,
+    delta_pic_order_cnt0: i32,
+    delta_pic_order_cnt1: i32,
+    dec_ref_pic_marking_bit_size: u32,
+    pic_order_cnt_bit_size: u32,
+    slice_group_change_cycle: u32,
+    reserved: u32,
+    flags: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264StatelessParams {
+    sps: ScarletVideoH264Sps,
+    pps: ScarletVideoH264Pps,
+    scaling_matrix: ScarletVideoH264ScalingMatrix,
+    pred_weights: ScarletVideoH264PredWeights,
+    slice_params: ScarletVideoH264SliceParams,
+    decode_params: ScarletVideoH264DecodeParams,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264ParamPtrs {
+    sps: u64,
+    pps: u64,
+    scaling_matrix: u64,
+    pred_weights: u64,
+    slice_params: u64,
+    decode_params: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoH264StatelessSubmit {
+    stream_id: u32,
+    input_len: u32,
+    timestamp: u64,
+    params: ScarletVideoH264ParamPtrs,
+    flags: u32,
+    padding: u32,
 }
 
 struct VideoFrameStore {
@@ -4052,6 +4297,8 @@ fn read_nal_length(sample: &[u8], offset: usize, nal_length_size: usize) -> Resu
 
 struct RawNalUnit<'a> {
     nal_type: u8,
+    nal_ref_idc: u8,
+    offset: usize,
     bytes: &'a [u8],
 }
 
@@ -4144,6 +4391,7 @@ struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
+    h264_state: H264StatelessState,
 }
 
 impl HardwareVideoDecoder {
@@ -4175,6 +4423,7 @@ impl HardwareVideoDecoder {
             device,
             mapped,
             caps,
+            h264_state: H264StatelessState::default(),
         })
     }
 
@@ -4186,9 +4435,9 @@ impl HardwareVideoDecoder {
         if access_unit.is_empty() {
             return Ok(None);
         }
-        if !self.supports_stateful_codec(codec) {
+        if !self.supports_decode_codec(codec) {
             return Err(format!(
-                "hardware decoder does not support stateful {}",
+                "hardware decoder does not support {}",
                 codec.name()
             ));
         }
@@ -4197,12 +4446,23 @@ impl HardwareVideoDecoder {
                 return self.decode_access_unit_mapped(codec, access_unit);
             }
         }
+        if !self.supports_stateful_codec(codec) {
+            return Err(format!(
+                "hardware decoder stateless {} requires mmap input",
+                codec.name()
+            ));
+        }
         if codec != VideoCodec::H264 {
             return Err(String::from(
                 "hardware decoder mmap input overflow for non-H.264 access unit",
             ));
         }
         self.decode_access_unit_stream(access_unit)
+    }
+
+    fn supports_decode_codec(&self, codec: VideoCodec) -> bool {
+        self.supports_stateful_codec(codec)
+            || (codec == VideoCodec::H264 && self.supports_stateless_h264())
     }
 
     fn supports_stateful_codec(&self, codec: VideoCodec) -> bool {
@@ -4213,6 +4473,12 @@ impl HardwareVideoDecoder {
             VideoCodec::H264 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
             VideoCodec::Av1 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
         }
+    }
+
+    fn supports_stateless_h264(&self) -> bool {
+        self.caps
+            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264))
+            .unwrap_or(false)
     }
 
     fn decode_access_unit_stream(
@@ -4289,7 +4555,34 @@ impl HardwareVideoDecoder {
             );
         }
 
-        if buffer.session_commands {
+        if codec == VideoCodec::H264 && self.supports_stateless_h264() {
+            let params = self.h264_state.params_for_access_unit(access_unit)?;
+            let submit = ScarletVideoH264StatelessSubmit {
+                stream_id: buffer.stream_id,
+                input_len: access_unit.len() as u32,
+                timestamp: 0,
+                params: ScarletVideoH264ParamPtrs {
+                    sps: &params.sps as *const _ as usize as u64,
+                    pps: &params.pps as *const _ as usize as u64,
+                    scaling_matrix: &params.scaling_matrix as *const _ as usize as u64,
+                    pred_weights: &params.pred_weights as *const _ as usize as u64,
+                    slice_params: &params.slice_params as *const _ as usize as u64,
+                    decode_params: &params.decode_params as *const _ as usize as u64,
+                },
+                flags: 0,
+                padding: 0,
+            };
+            self.device
+                .as_handle()
+                .control(
+                    SCARLET_VIDEO_SUBMIT_H264_STATELESS,
+                    &submit as *const _ as usize,
+                )
+                .map_err(|_| {
+                    let status = self.read_decoder_status();
+                    format!("hardware decoder stateless H.264 submit failed{status}")
+                })?;
+        } else if buffer.session_commands {
             let submit = ScarletVideoSessionSubmit {
                 stream_id: buffer.stream_id,
                 input_len: access_unit.len() as u32,
@@ -4896,6 +5189,8 @@ fn parse_raw_annex_b(data: &[u8]) -> Vec<RawNalUnit<'_>> {
             if header & 0x80 == 0 {
                 nals.push(RawNalUnit {
                     nal_type: header & 0x1f,
+                    nal_ref_idc: (header >> 5) & 0x3,
+                    offset: nal_start,
                     bytes: &data[nal_start..nal_end],
                 });
             }
@@ -5003,6 +5298,473 @@ impl<'a> EbspBitReader<'a> {
         }
         Some(value - 1)
     }
+
+    fn read_bits(&mut self, bits: u8) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..bits {
+            value = (value << 1) | u32::from(self.read_bit()?);
+        }
+        Some(value)
+    }
+
+    fn read_se(&mut self) -> Option<i32> {
+        let code_num = self.read_ue()?;
+        let magnitude = code_num.div_ceil(2) as i32;
+        if code_num & 1 == 0 {
+            Some(-magnitude)
+        } else {
+            Some(magnitude)
+        }
+    }
+
+    fn position_bits(&self) -> usize {
+        self.byte_index * 8 + usize::from(self.bit_index)
+    }
+}
+
+#[derive(Default)]
+struct H264StatelessState {
+    sps: Option<ScarletVideoH264Sps>,
+    pps: Option<ScarletVideoH264Pps>,
+    scaling_matrix: ScarletVideoH264ScalingMatrix,
+    pred_weights: ScarletVideoH264PredWeights,
+}
+
+impl H264StatelessState {
+    fn params_for_access_unit(
+        &mut self,
+        access_unit: &[u8],
+    ) -> Result<ScarletVideoH264StatelessParams, String> {
+        let nals = parse_raw_annex_b(access_unit);
+        let mut slice = None;
+        let mut decode = None;
+
+        for nal in &nals {
+            match nal.nal_type {
+                7 => {
+                    self.sps = Some(parse_h264_sps(nal.bytes)?);
+                }
+                8 => {
+                    self.pps = Some(parse_h264_pps(nal.bytes)?);
+                }
+                1 | 5 if slice.is_none() => {
+                    let sps = self
+                        .sps
+                        .ok_or_else(|| String::from("H.264 stateless submit missing SPS"))?;
+                    let pps = self
+                        .pps
+                        .ok_or_else(|| String::from("H.264 stateless submit missing PPS"))?;
+                    let (slice_params, decode_params) = parse_h264_slice(nal, &sps, &pps)?;
+                    slice = Some(slice_params);
+                    decode = Some(decode_params);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ScarletVideoH264StatelessParams {
+            sps: self
+                .sps
+                .ok_or_else(|| String::from("H.264 stateless submit missing SPS"))?,
+            pps: self
+                .pps
+                .ok_or_else(|| String::from("H.264 stateless submit missing PPS"))?,
+            scaling_matrix: self.scaling_matrix,
+            pred_weights: self.pred_weights,
+            slice_params: slice
+                .ok_or_else(|| String::from("H.264 stateless submit has no slice"))?,
+            decode_params: decode
+                .ok_or_else(|| String::from("H.264 stateless submit has no decode params"))?,
+        })
+    }
+}
+
+fn parse_h264_sps(nal: &[u8]) -> Result<ScarletVideoH264Sps, String> {
+    if nal.len() < 2 {
+        return Err(String::from("H.264 SPS is truncated"));
+    }
+    let mut reader = EbspBitReader::new(&nal[1..]);
+    let profile_idc = read_u8_bits(&mut reader, 8, "H.264 SPS profile_idc")?;
+    let constraint_set_flags = read_u8_bits(&mut reader, 8, "H.264 SPS constraint flags")?;
+    let level_idc = read_u8_bits(&mut reader, 8, "H.264 SPS level_idc")?;
+    let seq_parameter_set_id = read_u8_ue(&mut reader, "H.264 SPS id")?;
+
+    let mut chroma_format_idc = 1u8;
+    let mut bit_depth_luma_minus8 = 0u8;
+    let mut bit_depth_chroma_minus8 = 0u8;
+    let mut flags = 0u32;
+    if is_h264_high_profile(profile_idc) {
+        chroma_format_idc = read_u8_ue(&mut reader, "H.264 chroma_format_idc")?;
+        if chroma_format_idc == 3 {
+            if reader
+                .read_bit()
+                .ok_or_else(|| String::from("H.264 SPS separate_colour_plane_flag missing"))?
+                != 0
+            {
+                flags |= SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE;
+            }
+        }
+        bit_depth_luma_minus8 = read_u8_ue(&mut reader, "H.264 bit_depth_luma_minus8")?;
+        bit_depth_chroma_minus8 = read_u8_ue(&mut reader, "H.264 bit_depth_chroma_minus8")?;
+        if reader
+            .read_bit()
+            .ok_or_else(|| String::from("H.264 SPS transform bypass flag missing"))?
+            != 0
+        {
+            flags |= SCARLET_VIDEO_H264_SPS_FLAG_QPPRIME_Y_ZERO_TRANSFORM_BYPASS;
+        }
+        let scaling_matrix_present = reader
+            .read_bit()
+            .ok_or_else(|| String::from("H.264 SPS scaling matrix flag missing"))?
+            != 0;
+        if scaling_matrix_present {
+            let count = if chroma_format_idc != 3 { 8 } else { 12 };
+            for index in 0..count {
+                let present = reader
+                    .read_bit()
+                    .ok_or_else(|| String::from("H.264 SPS scaling list flag missing"))?
+                    != 0;
+                if present {
+                    skip_h264_scaling_list(&mut reader, if index < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+
+    let log2_max_frame_num_minus4 = read_u8_ue(&mut reader, "H.264 log2_max_frame_num_minus4")?;
+    let pic_order_cnt_type = read_u8_ue(&mut reader, "H.264 pic_order_cnt_type")?;
+    let mut log2_max_pic_order_cnt_lsb_minus4 = 0u8;
+    let mut offset_for_ref_frame = [0i32; 255];
+    let mut offset_for_non_ref_pic = 0i32;
+    let mut offset_for_top_to_bottom_field = 0i32;
+    let mut num_ref_frames_in_pic_order_cnt_cycle = 0u8;
+    match pic_order_cnt_type {
+        0 => {
+            log2_max_pic_order_cnt_lsb_minus4 =
+                read_u8_ue(&mut reader, "H.264 log2_max_pic_order_cnt_lsb_minus4")?;
+        }
+        1 => {
+            if reader
+                .read_bit()
+                .ok_or_else(|| String::from("H.264 delta_pic_order_always_zero_flag missing"))?
+                != 0
+            {
+                flags |= SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO;
+            }
+            offset_for_non_ref_pic = reader
+                .read_se()
+                .ok_or_else(|| String::from("H.264 offset_for_non_ref_pic missing"))?;
+            offset_for_top_to_bottom_field = reader
+                .read_se()
+                .ok_or_else(|| String::from("H.264 offset_for_top_to_bottom_field missing"))?;
+            let count = read_u8_ue(&mut reader, "H.264 num_ref_frames_in_pic_order_cnt_cycle")?;
+            num_ref_frames_in_pic_order_cnt_cycle = count;
+            for index in 0..usize::from(count) {
+                offset_for_ref_frame[index] = reader
+                    .read_se()
+                    .ok_or_else(|| String::from("H.264 offset_for_ref_frame missing"))?;
+            }
+        }
+        _ => return Err(String::from("H.264 pic_order_cnt_type is unsupported")),
+    }
+    let max_num_ref_frames = read_u8_ue(&mut reader, "H.264 max_num_ref_frames")?;
+    if reader
+        .read_bit()
+        .ok_or_else(|| String::from("H.264 gaps_in_frame_num_value_allowed_flag missing"))?
+        != 0
+    {
+        flags |= SCARLET_VIDEO_H264_SPS_FLAG_GAPS_IN_FRAME_NUM_VALUE_ALLOWED;
+    }
+    let pic_width_in_mbs_minus1 = read_u16_ue(&mut reader, "H.264 pic_width_in_mbs_minus1")?;
+    let pic_height_in_map_units_minus1 =
+        read_u16_ue(&mut reader, "H.264 pic_height_in_map_units_minus1")?;
+    if reader
+        .read_bit()
+        .ok_or_else(|| String::from("H.264 frame_mbs_only_flag missing"))?
+        != 0
+    {
+        flags |= SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY;
+    } else if reader
+        .read_bit()
+        .ok_or_else(|| String::from("H.264 mb_adaptive_frame_field_flag missing"))?
+        != 0
+    {
+        flags |= SCARLET_VIDEO_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD;
+    }
+    if reader
+        .read_bit()
+        .ok_or_else(|| String::from("H.264 direct_8x8_inference_flag missing"))?
+        != 0
+    {
+        flags |= SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE;
+    }
+    let mut frame_crop_left_offset = 0;
+    let mut frame_crop_right_offset = 0;
+    let mut frame_crop_top_offset = 0;
+    let mut frame_crop_bottom_offset = 0;
+    if reader
+        .read_bit()
+        .ok_or_else(|| String::from("H.264 frame_cropping_flag missing"))?
+        != 0
+    {
+        flags |= SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING;
+        frame_crop_left_offset = read_u32_ue(&mut reader, "H.264 frame_crop_left_offset")?;
+        frame_crop_right_offset = read_u32_ue(&mut reader, "H.264 frame_crop_right_offset")?;
+        frame_crop_top_offset = read_u32_ue(&mut reader, "H.264 frame_crop_top_offset")?;
+        frame_crop_bottom_offset = read_u32_ue(&mut reader, "H.264 frame_crop_bottom_offset")?;
+    }
+
+    Ok(ScarletVideoH264Sps {
+        profile_idc,
+        constraint_set_flags,
+        level_idc,
+        seq_parameter_set_id,
+        chroma_format_idc,
+        bit_depth_luma_minus8,
+        bit_depth_chroma_minus8,
+        log2_max_frame_num_minus4,
+        pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4,
+        max_num_ref_frames,
+        num_ref_frames_in_pic_order_cnt_cycle,
+        offset_for_ref_frame,
+        offset_for_non_ref_pic,
+        offset_for_top_to_bottom_field,
+        pic_width_in_mbs_minus1,
+        pic_height_in_map_units_minus1,
+        frame_crop_left_offset,
+        frame_crop_right_offset,
+        frame_crop_top_offset,
+        frame_crop_bottom_offset,
+        flags,
+    })
+}
+
+fn parse_h264_pps(nal: &[u8]) -> Result<ScarletVideoH264Pps, String> {
+    if nal.len() < 2 {
+        return Err(String::from("H.264 PPS is truncated"));
+    }
+    let mut reader = EbspBitReader::new(&nal[1..]);
+    let pic_parameter_set_id = read_u8_ue(&mut reader, "H.264 PPS id")?;
+    let seq_parameter_set_id = read_u8_ue(&mut reader, "H.264 PPS SPS id")?;
+    let mut flags = 0u16;
+    if read_bool(&mut reader, "H.264 entropy_coding_mode_flag")? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE;
+    }
+    if read_bool(
+        &mut reader,
+        "H.264 bottom_field_pic_order_in_frame_present_flag",
+    )? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT;
+    }
+    let num_slice_groups_minus1 = read_u8_ue(&mut reader, "H.264 num_slice_groups_minus1")?;
+    if num_slice_groups_minus1 != 0 {
+        return Err(String::from("H.264 slice groups are unsupported"));
+    }
+    let num_ref_idx_l0_default_active_minus1 =
+        read_u8_ue(&mut reader, "H.264 num_ref_idx_l0_default_active_minus1")?;
+    let num_ref_idx_l1_default_active_minus1 =
+        read_u8_ue(&mut reader, "H.264 num_ref_idx_l1_default_active_minus1")?;
+    if read_bool(&mut reader, "H.264 weighted_pred_flag")? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED;
+    }
+    let weighted_bipred_idc = read_u8_bits(&mut reader, 2, "H.264 weighted_bipred_idc")?;
+    let pic_init_qp_minus26 = read_i8_se(&mut reader, "H.264 pic_init_qp_minus26")?;
+    let pic_init_qs_minus26 = read_i8_se(&mut reader, "H.264 pic_init_qs_minus26")?;
+    let chroma_qp_index_offset = read_i8_se(&mut reader, "H.264 chroma_qp_index_offset")?;
+    if read_bool(&mut reader, "H.264 deblocking_filter_control_present_flag")? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT;
+    }
+    if read_bool(&mut reader, "H.264 constrained_intra_pred_flag")? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED;
+    }
+    if read_bool(&mut reader, "H.264 redundant_pic_cnt_present_flag")? {
+        flags |= SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT;
+    }
+
+    Ok(ScarletVideoH264Pps {
+        pic_parameter_set_id,
+        seq_parameter_set_id,
+        num_slice_groups_minus1,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        weighted_bipred_idc,
+        pic_init_qp_minus26,
+        pic_init_qs_minus26,
+        chroma_qp_index_offset,
+        second_chroma_qp_index_offset: chroma_qp_index_offset,
+        flags,
+    })
+}
+
+fn parse_h264_slice(
+    nal: &RawNalUnit<'_>,
+    sps: &ScarletVideoH264Sps,
+    pps: &ScarletVideoH264Pps,
+) -> Result<(ScarletVideoH264SliceParams, ScarletVideoH264DecodeParams), String> {
+    if nal.bytes.len() < 2 {
+        return Err(String::from("H.264 slice is truncated"));
+    }
+    let mut reader = EbspBitReader::new(&nal.bytes[1..]);
+    let first_mb_in_slice = read_u32_ue(&mut reader, "H.264 first_mb_in_slice")?;
+    let slice_type = read_u8_ue(&mut reader, "H.264 slice_type")?;
+    let pic_parameter_set_id = read_u8_ue(&mut reader, "H.264 slice PPS id")?;
+    if pic_parameter_set_id != pps.pic_parameter_set_id {
+        return Err(String::from("H.264 slice references unknown PPS"));
+    }
+
+    let mut colour_plane_id = 0;
+    if sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE != 0 {
+        colour_plane_id = read_u8_bits(&mut reader, 2, "H.264 colour_plane_id")?;
+    }
+    let frame_num_bits = sps.log2_max_frame_num_minus4.saturating_add(4);
+    let frame_num = read_u16_bits(&mut reader, frame_num_bits, "H.264 frame_num")?;
+    if sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY == 0 {
+        return Err(String::from("H.264 field pictures are unsupported"));
+    }
+
+    let mut decode_params = ScarletVideoH264DecodeParams {
+        nal_ref_idc: u16::from(nal.nal_ref_idc),
+        frame_num,
+        ..Default::default()
+    };
+    if nal.nal_type == 5 {
+        decode_params.flags |= SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR;
+        decode_params.idr_pic_id = read_u16_ue(&mut reader, "H.264 idr_pic_id")?;
+    }
+    if sps.pic_order_cnt_type == 0 {
+        let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
+        decode_params.pic_order_cnt_lsb =
+            read_u16_bits(&mut reader, poc_bits, "H.264 pic_order_cnt_lsb")?;
+        if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT != 0 {
+            decode_params.delta_pic_order_cnt_bottom = reader
+                .read_se()
+                .ok_or_else(|| String::from("H.264 delta_pic_order_cnt_bottom missing"))?;
+        }
+    } else if sps.pic_order_cnt_type == 1
+        && sps.flags & SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO == 0
+    {
+        decode_params.delta_pic_order_cnt0 = reader
+            .read_se()
+            .ok_or_else(|| String::from("H.264 delta_pic_order_cnt0 missing"))?;
+        if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT != 0 {
+            decode_params.delta_pic_order_cnt1 = reader
+                .read_se()
+                .ok_or_else(|| String::from("H.264 delta_pic_order_cnt1 missing"))?;
+        }
+    }
+    let mut redundant_pic_cnt = 0;
+    if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT != 0 {
+        redundant_pic_cnt = read_u8_ue(&mut reader, "H.264 redundant_pic_cnt")?;
+    }
+
+    let slice_class = slice_type % 5;
+    let mut num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
+    let mut num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
+    if slice_class == 1 {
+        let _direct_spatial_mv_pred_flag =
+            read_bool(&mut reader, "H.264 direct_spatial_mv_pred_flag")?;
+    }
+    if slice_class == 0 || slice_class == 1 || slice_class == 3 {
+        let override_refs = read_bool(&mut reader, "H.264 num_ref_idx_active_override_flag")?;
+        if override_refs {
+            num_ref_idx_l0_active_minus1 =
+                read_u8_ue(&mut reader, "H.264 num_ref_idx_l0_active_minus1")?;
+            if slice_class == 1 {
+                num_ref_idx_l1_active_minus1 =
+                    read_u8_ue(&mut reader, "H.264 num_ref_idx_l1_active_minus1")?;
+            }
+        }
+    }
+
+    let slice_params = ScarletVideoH264SliceParams {
+        header_bit_size: reader.position_bits() as u32,
+        nal_offset: nal.offset as u32,
+        nal_len: nal.bytes.len() as u32,
+        first_mb_in_slice,
+        slice_type,
+        pic_parameter_set_id,
+        colour_plane_id,
+        redundant_pic_cnt,
+        num_ref_idx_l0_active_minus1,
+        num_ref_idx_l1_active_minus1,
+        ..Default::default()
+    };
+    Ok((slice_params, decode_params))
+}
+
+fn read_bool(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<bool, String> {
+    reader
+        .read_bit()
+        .map(|bit| bit != 0)
+        .ok_or_else(|| format!("{name} missing"))
+}
+
+fn read_u8_bits(
+    reader: &mut EbspBitReader<'_>,
+    bits: u8,
+    name: &'static str,
+) -> Result<u8, String> {
+    let value = reader
+        .read_bits(bits)
+        .ok_or_else(|| format!("{name} missing"))?;
+    u8::try_from(value).map_err(|_| format!("{name} overflows u8"))
+}
+
+fn read_u16_bits(
+    reader: &mut EbspBitReader<'_>,
+    bits: u8,
+    name: &'static str,
+) -> Result<u16, String> {
+    let value = reader
+        .read_bits(bits)
+        .ok_or_else(|| format!("{name} missing"))?;
+    u16::try_from(value).map_err(|_| format!("{name} overflows u16"))
+}
+
+fn read_u8_ue(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<u8, String> {
+    let value = read_u32_ue(reader, name)?;
+    u8::try_from(value).map_err(|_| format!("{name} overflows u8"))
+}
+
+fn read_u16_ue(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<u16, String> {
+    let value = read_u32_ue(reader, name)?;
+    u16::try_from(value).map_err(|_| format!("{name} overflows u16"))
+}
+
+fn read_u32_ue(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<u32, String> {
+    reader.read_ue().ok_or_else(|| format!("{name} missing"))
+}
+
+fn read_i8_se(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<i8, String> {
+    let value = reader.read_se().ok_or_else(|| format!("{name} missing"))?;
+    i8::try_from(value).map_err(|_| format!("{name} overflows i8"))
+}
+
+fn skip_h264_scaling_list(reader: &mut EbspBitReader<'_>, count: usize) -> Result<(), String> {
+    let mut last_scale = 8i32;
+    let mut next_scale = 8i32;
+    for _ in 0..count {
+        if next_scale != 0 {
+            let delta_scale = reader
+                .read_se()
+                .ok_or_else(|| String::from("H.264 scaling list is truncated"))?;
+            next_scale = (last_scale + delta_scale + 256) % 256;
+        }
+        last_scale = if next_scale == 0 {
+            last_scale
+        } else {
+            next_scale
+        };
+    }
+    Ok(())
+}
+
+fn is_h264_high_profile(profile_idc: u8) -> bool {
+    matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    )
 }
 
 fn start_audio_thread(
