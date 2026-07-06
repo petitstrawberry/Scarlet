@@ -118,7 +118,10 @@ const SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED: u16 = 1 << 4;
 const SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT: u16 = 1 << 5;
 const SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE: u16 = 1 << 6;
 const SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED: u32 = 1 << 0;
+const SCARLET_VIDEO_H264_SLICE_FLAG_REF_LISTS_PRESENT: u32 = 1 << 1;
 const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
+const SCARLET_VIDEO_H264_DPB_FLAG_VALID: u32 = 1 << 0;
+const SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM: u32 = 1 << 1;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
@@ -368,7 +371,7 @@ impl Default for ScarletVideoH264SliceParams {
 #[derive(Clone, Copy, Default)]
 struct ScarletVideoH264DpbEntry {
     reference_ts: u64,
-    pic_num: u32,
+    pic_num: i32,
     frame_num: u16,
     fields: u8,
     reserved: [u8; 5],
@@ -5331,6 +5334,53 @@ struct H264StatelessState {
     pps: Option<ScarletVideoH264Pps>,
     scaling_matrix: ScarletVideoH264ScalingMatrix,
     pred_weights: ScarletVideoH264PredWeights,
+    dpb: Vec<H264DpbFrame>,
+    next_reference_ts: u64,
+}
+
+#[derive(Clone, Copy)]
+struct H264DpbFrame {
+    reference_ts: u64,
+    pic_num: i32,
+    frame_num: u16,
+    top_field_order_cnt: i32,
+    bottom_field_order_cnt: i32,
+    long_term: bool,
+}
+
+#[derive(Clone, Copy)]
+enum H264RefListModification {
+    ShortTermSubtract(u32),
+    ShortTermAdd(u32),
+    LongTerm(u32),
+}
+
+#[derive(Default)]
+struct H264RefPicMarking {
+    idr_long_term: bool,
+    adaptive: bool,
+    operations: Vec<H264MemoryManagementControl>,
+}
+
+#[derive(Clone, Copy)]
+enum H264MemoryManagementControl {
+    ShortTermUnused {
+        difference_of_pic_nums_minus1: u32,
+    },
+    LongTermUnused {
+        long_term_pic_num: u32,
+    },
+    ShortTermToLongTerm {
+        difference_of_pic_nums_minus1: u32,
+        long_term_frame_idx: u32,
+    },
+    MaxLongTermFrameIdx {
+        max_long_term_frame_idx_plus1: u32,
+    },
+    Reset,
+    CurrentToLongTerm {
+        long_term_frame_idx: u32,
+    },
 }
 
 impl H264StatelessState {
@@ -5341,6 +5391,7 @@ impl H264StatelessState {
         let nals = parse_raw_annex_b(access_unit);
         let mut slice = None;
         let mut decode = None;
+        let mut ref_pic_marking = None;
 
         for nal in &nals {
             match nal.nal_type {
@@ -5357,16 +5408,17 @@ impl H264StatelessState {
                     let pps = self
                         .pps
                         .ok_or_else(|| String::from("H.264 stateless submit missing PPS"))?;
-                    let (slice_params, decode_params) =
-                        parse_h264_slice(nal, &sps, &pps, &mut self.pred_weights)?;
+                    let (slice_params, decode_params, marking) =
+                        parse_h264_slice(nal, &sps, &pps, &self.dpb, &mut self.pred_weights)?;
                     slice = Some(slice_params);
                     decode = Some(decode_params);
+                    ref_pic_marking = Some(marking);
                 }
                 _ => {}
             }
         }
 
-        Ok(ScarletVideoH264StatelessParams {
+        let params = ScarletVideoH264StatelessParams {
             sps: self
                 .sps
                 .ok_or_else(|| String::from("H.264 stateless submit missing SPS"))?,
@@ -5379,7 +5431,143 @@ impl H264StatelessState {
                 .ok_or_else(|| String::from("H.264 stateless submit has no slice"))?,
             decode_params: decode
                 .ok_or_else(|| String::from("H.264 stateless submit has no decode params"))?,
-        })
+        };
+        self.update_dpb_after_submit(
+            &params,
+            &ref_pic_marking.unwrap_or_else(H264RefPicMarking::default),
+        );
+        Ok(params)
+    }
+
+    fn update_dpb_after_submit(
+        &mut self,
+        params: &ScarletVideoH264StatelessParams,
+        marking: &H264RefPicMarking,
+    ) {
+        let is_idr = params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0;
+        let max_frame_num = h264_max_frame_num(&params.sps);
+        let current_frame_num = params.decode_params.frame_num;
+        let current_long_term_idx = if is_idr {
+            self.dpb.clear();
+            marking.idr_long_term.then_some(0)
+        } else {
+            self.apply_ref_pic_marking(marking, current_frame_num, max_frame_num)
+        };
+
+        if params.decode_params.nal_ref_idc == 0 {
+            return;
+        }
+        if self.next_reference_ts == 0 {
+            self.next_reference_ts = 1;
+        }
+        self.dpb.push(H264DpbFrame {
+            reference_ts: self.next_reference_ts,
+            pic_num: current_long_term_idx
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or_else(|| i32::from(params.decode_params.frame_num)),
+            frame_num: params.decode_params.frame_num,
+            top_field_order_cnt: params.decode_params.top_field_order_cnt,
+            bottom_field_order_cnt: params.decode_params.bottom_field_order_cnt,
+            long_term: current_long_term_idx.is_some(),
+        });
+        self.next_reference_ts = self.next_reference_ts.wrapping_add(1);
+        let max_refs = usize::from(params.sps.max_num_ref_frames).max(1);
+        if !is_idr && marking.adaptive {
+            self.cap_dpb(max_refs);
+            return;
+        }
+        self.cap_dpb(max_refs);
+    }
+
+    fn apply_ref_pic_marking(
+        &mut self,
+        marking: &H264RefPicMarking,
+        current_frame_num: u16,
+        max_frame_num: u32,
+    ) -> Option<u32> {
+        if !marking.adaptive {
+            return None;
+        }
+
+        let mut current_long_term_idx = None;
+        for operation in &marking.operations {
+            match *operation {
+                H264MemoryManagementControl::ShortTermUnused {
+                    difference_of_pic_nums_minus1,
+                } => {
+                    let target = h264_mmco_short_pic_num(
+                        current_frame_num,
+                        max_frame_num,
+                        difference_of_pic_nums_minus1,
+                    );
+                    self.dpb.retain(|frame| {
+                        frame.long_term
+                            || h264_short_pic_num(frame, current_frame_num, max_frame_num) != target
+                    });
+                }
+                H264MemoryManagementControl::LongTermUnused { long_term_pic_num } => {
+                    self.dpb.retain(|frame| {
+                        !frame.long_term
+                            || frame.pic_num != i32::try_from(long_term_pic_num).unwrap_or(-1)
+                    });
+                }
+                H264MemoryManagementControl::ShortTermToLongTerm {
+                    difference_of_pic_nums_minus1,
+                    long_term_frame_idx,
+                } => {
+                    let target = h264_mmco_short_pic_num(
+                        current_frame_num,
+                        max_frame_num,
+                        difference_of_pic_nums_minus1,
+                    );
+                    self.dpb.retain(|frame| {
+                        !frame.long_term
+                            || frame.pic_num != i32::try_from(long_term_frame_idx).unwrap_or(-1)
+                    });
+                    for frame in &mut self.dpb {
+                        if !frame.long_term
+                            && h264_short_pic_num(frame, current_frame_num, max_frame_num) == target
+                        {
+                            frame.long_term = true;
+                            frame.pic_num = i32::try_from(long_term_frame_idx).unwrap_or(-1);
+                            break;
+                        }
+                    }
+                }
+                H264MemoryManagementControl::MaxLongTermFrameIdx {
+                    max_long_term_frame_idx_plus1,
+                } => {
+                    if max_long_term_frame_idx_plus1 == 0 {
+                        self.dpb.retain(|frame| !frame.long_term);
+                    } else {
+                        let max_idx =
+                            i32::try_from(max_long_term_frame_idx_plus1 - 1).unwrap_or(i32::MAX);
+                        self.dpb
+                            .retain(|frame| !frame.long_term || frame.pic_num <= max_idx);
+                    }
+                }
+                H264MemoryManagementControl::Reset => {
+                    self.dpb.clear();
+                    current_long_term_idx = None;
+                }
+                H264MemoryManagementControl::CurrentToLongTerm {
+                    long_term_frame_idx,
+                } => {
+                    self.dpb.retain(|frame| {
+                        !frame.long_term
+                            || frame.pic_num != i32::try_from(long_term_frame_idx).unwrap_or(-1)
+                    });
+                    current_long_term_idx = Some(long_term_frame_idx);
+                }
+            }
+        }
+        current_long_term_idx
+    }
+
+    fn cap_dpb(&mut self, max_refs: usize) {
+        while self.dpb.len() > max_refs {
+            self.dpb.remove(0);
+        }
     }
 }
 
@@ -5630,8 +5818,16 @@ fn parse_h264_slice(
     nal: &RawNalUnit<'_>,
     sps: &ScarletVideoH264Sps,
     pps: &ScarletVideoH264Pps,
+    dpb: &[H264DpbFrame],
     pred_weights: &mut ScarletVideoH264PredWeights,
-) -> Result<(ScarletVideoH264SliceParams, ScarletVideoH264DecodeParams), String> {
+) -> Result<
+    (
+        ScarletVideoH264SliceParams,
+        ScarletVideoH264DecodeParams,
+        H264RefPicMarking,
+    ),
+    String,
+> {
     if nal.bytes.len() < 2 {
         return Err(String::from("H.264 slice is truncated"));
     }
@@ -5658,6 +5854,8 @@ fn parse_h264_slice(
         frame_num,
         ..Default::default()
     };
+    let max_frame_num = h264_max_frame_num(sps);
+    fill_h264_decode_dpb(&mut decode_params, dpb, frame_num, max_frame_num);
     if nal.nal_type == 5 {
         decode_params.flags |= SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR;
         decode_params.idr_pic_id = read_u16_ue(&mut reader, "H.264 idr_pic_id")?;
@@ -5717,7 +5915,21 @@ fn parse_h264_slice(
             }
         }
     }
-    skip_h264_ref_pic_list_modification(&mut reader, slice_class)?;
+    let (list0_modifications, list1_modifications) =
+        parse_h264_ref_pic_list_modification(&mut reader, slice_class)?;
+    let (ref_pic_list0, ref_pic_list1) = build_h264_ref_pic_lists(
+        dpb,
+        &decode_params,
+        sps,
+        slice_class,
+        num_ref_idx_l0_active_minus1,
+        num_ref_idx_l1_active_minus1,
+        &list0_modifications,
+        &list1_modifications,
+    );
+    if slice_class == 0 || slice_class == 1 || slice_class == 3 {
+        slice_flags |= SCARLET_VIDEO_H264_SLICE_FLAG_REF_LISTS_PRESENT;
+    }
     parse_h264_pred_weight_table(
         &mut reader,
         sps,
@@ -5729,9 +5941,11 @@ fn parse_h264_slice(
     )?;
 
     let dec_ref_start_bits = reader.position_bits();
-    if nal.nal_ref_idc != 0 {
-        parse_h264_dec_ref_pic_marking(&mut reader, nal.nal_type)?;
-    }
+    let ref_pic_marking = if nal.nal_ref_idc != 0 {
+        parse_h264_dec_ref_pic_marking(&mut reader, nal.nal_type)?
+    } else {
+        H264RefPicMarking::default()
+    };
     decode_params.dec_ref_pic_marking_bit_size =
         reader.position_bits().saturating_sub(dec_ref_start_bits) as u32;
 
@@ -5764,7 +5978,7 @@ fn parse_h264_slice(
         }
     }
 
-    let slice_params = ScarletVideoH264SliceParams {
+    let mut slice_params = ScarletVideoH264SliceParams {
         header_bit_size: reader.position_bits() as u32,
         nal_offset: nal.offset as u32,
         nal_len: nal.bytes.len() as u32,
@@ -5784,27 +5998,65 @@ fn parse_h264_slice(
         flags: slice_flags,
         ..Default::default()
     };
-    Ok((slice_params, decode_params))
+    slice_params.ref_pic_list0 = ref_pic_list0;
+    slice_params.ref_pic_list1 = ref_pic_list1;
+    Ok((slice_params, decode_params, ref_pic_marking))
 }
 
-fn skip_h264_ref_pic_list_modification(
+fn fill_h264_decode_dpb(
+    decode: &mut ScarletVideoH264DecodeParams,
+    dpb: &[H264DpbFrame],
+    current_frame_num: u16,
+    max_frame_num: u32,
+) {
+    for (index, frame) in dpb.iter().take(16).enumerate() {
+        decode.dpb[index] = ScarletVideoH264DpbEntry {
+            reference_ts: frame.reference_ts,
+            pic_num: if frame.long_term {
+                frame.pic_num
+            } else {
+                h264_short_pic_num(frame, current_frame_num, max_frame_num)
+            },
+            frame_num: frame.frame_num,
+            fields: 3,
+            reserved: [0; 5],
+            top_field_order_cnt: frame.top_field_order_cnt,
+            bottom_field_order_cnt: frame.bottom_field_order_cnt,
+            flags: SCARLET_VIDEO_H264_DPB_FLAG_VALID
+                | if frame.long_term {
+                    SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM
+                } else {
+                    0
+                },
+        };
+    }
+}
+
+fn parse_h264_ref_pic_list_modification(
     reader: &mut EbspBitReader<'_>,
     slice_class: u8,
-) -> Result<(), String> {
+) -> Result<(Vec<H264RefListModification>, Vec<H264RefListModification>), String> {
     if slice_class == 2 || slice_class == 4 {
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
     }
 
+    let mut list0 = Vec::new();
     if read_bool(reader, "H.264 ref_pic_list_modification_flag_l0")? {
         loop {
             let idc = read_u32_ue(reader, "H.264 modification_of_pic_nums_idc_l0")?;
             match idc {
                 0 | 1 => {
-                    let _abs_diff_pic_num_minus1 =
+                    let abs_diff_pic_num_minus1 =
                         read_u32_ue(reader, "H.264 abs_diff_pic_num_minus1_l0")?;
+                    list0.push(if idc == 0 {
+                        H264RefListModification::ShortTermSubtract(abs_diff_pic_num_minus1)
+                    } else {
+                        H264RefListModification::ShortTermAdd(abs_diff_pic_num_minus1)
+                    });
                 }
                 2 => {
-                    let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l0")?;
+                    let long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l0")?;
+                    list0.push(H264RefListModification::LongTerm(long_term_pic_num));
                 }
                 3 => break,
                 _ => return Err(String::from("H.264 invalid ref list modification idc")),
@@ -5812,16 +6064,23 @@ fn skip_h264_ref_pic_list_modification(
         }
     }
 
+    let mut list1 = Vec::new();
     if slice_class == 1 && read_bool(reader, "H.264 ref_pic_list_modification_flag_l1")? {
         loop {
             let idc = read_u32_ue(reader, "H.264 modification_of_pic_nums_idc_l1")?;
             match idc {
                 0 | 1 => {
-                    let _abs_diff_pic_num_minus1 =
+                    let abs_diff_pic_num_minus1 =
                         read_u32_ue(reader, "H.264 abs_diff_pic_num_minus1_l1")?;
+                    list1.push(if idc == 0 {
+                        H264RefListModification::ShortTermSubtract(abs_diff_pic_num_minus1)
+                    } else {
+                        H264RefListModification::ShortTermAdd(abs_diff_pic_num_minus1)
+                    });
                 }
                 2 => {
-                    let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l1")?;
+                    let long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num_l1")?;
+                    list1.push(H264RefListModification::LongTerm(long_term_pic_num));
                 }
                 3 => break,
                 _ => return Err(String::from("H.264 invalid ref list modification idc")),
@@ -5829,7 +6088,265 @@ fn skip_h264_ref_pic_list_modification(
         }
     }
 
-    Ok(())
+    Ok((list0, list1))
+}
+
+fn build_h264_ref_pic_lists(
+    dpb: &[H264DpbFrame],
+    decode: &ScarletVideoH264DecodeParams,
+    sps: &ScarletVideoH264Sps,
+    slice_class: u8,
+    num_ref_idx_l0_active_minus1: u8,
+    num_ref_idx_l1_active_minus1: u8,
+    list0_modifications: &[H264RefListModification],
+    list1_modifications: &[H264RefListModification],
+) -> (
+    [ScarletVideoH264Reference; 32],
+    [ScarletVideoH264Reference; 32],
+) {
+    let mut list0 = Vec::new();
+    let mut list1 = Vec::new();
+    let l0_active = h264_active_count(num_ref_idx_l0_active_minus1);
+    let l1_active = h264_active_count(num_ref_idx_l1_active_minus1);
+    let max_frame_num = h264_max_frame_num(sps);
+
+    match slice_class {
+        0 | 3 => {
+            list0 = h264_default_p_ref_list(dpb, decode.frame_num, max_frame_num);
+        }
+        1 => {
+            let (default_l0, default_l1) =
+                h264_default_b_ref_lists(dpb, decode.top_field_order_cnt);
+            list0 = default_l0;
+            list1 = default_l1;
+        }
+        _ => {}
+    }
+
+    apply_h264_ref_list_modifications(
+        &mut list0,
+        list0_modifications,
+        dpb,
+        decode.frame_num,
+        max_frame_num,
+        l0_active,
+    );
+    if slice_class == 1 {
+        apply_h264_ref_list_modifications(
+            &mut list1,
+            list1_modifications,
+            dpb,
+            decode.frame_num,
+            max_frame_num,
+            l1_active,
+        );
+    }
+
+    (
+        write_h264_ref_list(&list0, l0_active),
+        write_h264_ref_list(&list1, l1_active),
+    )
+}
+
+fn h264_default_p_ref_list(
+    dpb: &[H264DpbFrame],
+    current_frame_num: u16,
+    max_frame_num: u32,
+) -> Vec<usize> {
+    let mut refs = Vec::new();
+    for (index, frame) in dpb.iter().enumerate().rev() {
+        if !frame.long_term {
+            refs.push(index);
+        }
+    }
+    refs.sort_by(|left, right| {
+        h264_short_pic_num(&dpb[*right], current_frame_num, max_frame_num).cmp(&h264_short_pic_num(
+            &dpb[*left],
+            current_frame_num,
+            max_frame_num,
+        ))
+    });
+    for (index, frame) in dpb.iter().enumerate().rev() {
+        if frame.long_term {
+            refs.push(index);
+        }
+    }
+    refs
+}
+
+fn h264_default_b_ref_lists(dpb: &[H264DpbFrame], current_poc: i32) -> (Vec<usize>, Vec<usize>) {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut long_term = Vec::new();
+    for (index, frame) in dpb.iter().enumerate() {
+        if frame.long_term {
+            long_term.push(index);
+        } else if frame.top_field_order_cnt < current_poc {
+            before.push(index);
+        } else {
+            after.push(index);
+        }
+    }
+
+    before.sort_by(|left, right| {
+        dpb[*right]
+            .top_field_order_cnt
+            .cmp(&dpb[*left].top_field_order_cnt)
+    });
+    after.sort_by(|left, right| {
+        dpb[*left]
+            .top_field_order_cnt
+            .cmp(&dpb[*right].top_field_order_cnt)
+    });
+    long_term.sort_by(|left, right| dpb[*left].pic_num.cmp(&dpb[*right].pic_num));
+
+    let mut list0 = Vec::new();
+    list0.extend(before.iter().copied());
+    list0.extend(after.iter().copied());
+    list0.extend(long_term.iter().copied());
+
+    let mut list1 = Vec::new();
+    list1.extend(after.iter().copied());
+    list1.extend(before.iter().copied());
+    list1.extend(long_term.iter().copied());
+    if list0 == list1 && list1.len() > 1 {
+        list1.swap(0, 1);
+    }
+
+    (list0, list1)
+}
+
+fn apply_h264_ref_list_modifications(
+    list: &mut Vec<usize>,
+    modifications: &[H264RefListModification],
+    dpb: &[H264DpbFrame],
+    current_frame_num: u16,
+    max_frame_num: u32,
+    active_count: usize,
+) {
+    if active_count == 0 {
+        list.clear();
+        return;
+    }
+
+    let max_frame_num_u32 = max_frame_num.max(1);
+    let mut pic_num_pred = i64::from(current_frame_num);
+    let max_frame_num = i64::from(max_frame_num_u32);
+    let mut ref_idx = 0usize;
+    for modification in modifications {
+        let dpb_index = match *modification {
+            H264RefListModification::ShortTermSubtract(abs_diff_pic_num_minus1) => {
+                let diff = i64::from(abs_diff_pic_num_minus1) + 1;
+                let mut pic_num_no_wrap = pic_num_pred - diff;
+                if pic_num_no_wrap < 0 {
+                    pic_num_no_wrap += max_frame_num;
+                }
+                pic_num_pred = pic_num_no_wrap;
+                let pic_num = if pic_num_no_wrap > i64::from(current_frame_num) {
+                    pic_num_no_wrap - max_frame_num
+                } else {
+                    pic_num_no_wrap
+                };
+                find_h264_short_ref_by_pic_num(dpb, current_frame_num, max_frame_num_u32, pic_num)
+            }
+            H264RefListModification::ShortTermAdd(abs_diff_pic_num_minus1) => {
+                let diff = i64::from(abs_diff_pic_num_minus1) + 1;
+                let mut pic_num_no_wrap = pic_num_pred + diff;
+                if pic_num_no_wrap >= max_frame_num {
+                    pic_num_no_wrap -= max_frame_num;
+                }
+                pic_num_pred = pic_num_no_wrap;
+                let pic_num = if pic_num_no_wrap > i64::from(current_frame_num) {
+                    pic_num_no_wrap - max_frame_num
+                } else {
+                    pic_num_no_wrap
+                };
+                find_h264_short_ref_by_pic_num(dpb, current_frame_num, max_frame_num_u32, pic_num)
+            }
+            H264RefListModification::LongTerm(long_term_pic_num) => dpb.iter().position(|frame| {
+                frame.long_term && frame.pic_num == i32::try_from(long_term_pic_num).unwrap_or(-1)
+            }),
+        };
+
+        let Some(dpb_index) = dpb_index else {
+            continue;
+        };
+        if ref_idx > list.len() {
+            list.push(dpb_index);
+        } else {
+            list.insert(ref_idx, dpb_index);
+        }
+        let mut scan = ref_idx + 1;
+        while scan < list.len() {
+            if list[scan] == dpb_index {
+                list.remove(scan);
+            } else {
+                scan += 1;
+            }
+        }
+        ref_idx = ref_idx.saturating_add(1).min(active_count);
+    }
+
+    if list.is_empty() {
+        return;
+    }
+    while list.len() < active_count {
+        let last = *list.last().unwrap_or(&0);
+        list.push(last);
+    }
+    list.truncate(active_count);
+}
+
+fn find_h264_short_ref_by_pic_num(
+    dpb: &[H264DpbFrame],
+    current_frame_num: u16,
+    max_frame_num: u32,
+    pic_num: i64,
+) -> Option<usize> {
+    dpb.iter().position(|frame| {
+        !frame.long_term
+            && i64::from(h264_short_pic_num(frame, current_frame_num, max_frame_num)) == pic_num
+    })
+}
+
+fn write_h264_ref_list(list: &[usize], active_count: usize) -> [ScarletVideoH264Reference; 32] {
+    let mut refs = [ScarletVideoH264Reference::default(); 32];
+    for (output_index, dpb_index) in list.iter().copied().take(active_count.min(32)).enumerate() {
+        refs[output_index] = ScarletVideoH264Reference {
+            fields: 3,
+            index: dpb_index as u8,
+        };
+    }
+    refs
+}
+
+fn h264_active_count(active_minus1: u8) -> usize {
+    usize::from(active_minus1).saturating_add(1).min(32)
+}
+
+fn h264_max_frame_num(sps: &ScarletVideoH264Sps) -> u32 {
+    1u32.checked_shl(u32::from(sps.log2_max_frame_num_minus4.saturating_add(4)))
+        .unwrap_or(u32::MAX)
+}
+
+fn h264_short_pic_num(frame: &H264DpbFrame, current_frame_num: u16, max_frame_num: u32) -> i32 {
+    let max_frame_num = i32::try_from(max_frame_num).unwrap_or(i32::MAX);
+    let frame_num = i32::from(frame.frame_num);
+    if frame.frame_num > current_frame_num {
+        frame_num.saturating_sub(max_frame_num)
+    } else {
+        frame_num
+    }
+}
+
+fn h264_mmco_short_pic_num(
+    current_frame_num: u16,
+    _max_frame_num: u32,
+    difference_of_pic_nums_minus1: u32,
+) -> i32 {
+    i32::from(current_frame_num)
+        .saturating_sub(i32::try_from(difference_of_pic_nums_minus1).unwrap_or(i32::MAX))
+        .saturating_sub(1)
 }
 
 fn parse_h264_pred_weight_table(
@@ -5898,43 +6415,80 @@ fn parse_h264_pred_weight_table(
 fn parse_h264_dec_ref_pic_marking(
     reader: &mut EbspBitReader<'_>,
     nal_type: u8,
-) -> Result<(), String> {
+) -> Result<H264RefPicMarking, String> {
     if nal_type == 5 {
         let _no_output_of_prior_pics_flag =
             read_bool(reader, "H.264 no_output_of_prior_pics_flag")?;
-        let _long_term_reference_flag = read_bool(reader, "H.264 long_term_reference_flag")?;
-        return Ok(());
+        let long_term_reference_flag = read_bool(reader, "H.264 long_term_reference_flag")?;
+        return Ok(H264RefPicMarking {
+            idr_long_term: long_term_reference_flag,
+            adaptive: false,
+            operations: Vec::new(),
+        });
     }
 
     if !read_bool(reader, "H.264 adaptive_ref_pic_marking_mode_flag")? {
-        return Ok(());
+        return Ok(H264RefPicMarking::default());
     }
+    let mut marking = H264RefPicMarking {
+        idr_long_term: false,
+        adaptive: true,
+        operations: Vec::new(),
+    };
     loop {
         let op = read_u32_ue(reader, "H.264 memory_management_control_operation")?;
         match op {
             0 => break,
-            1 | 3 => {
-                let _difference_of_pic_nums_minus1 =
+            1 => {
+                let difference_of_pic_nums_minus1 =
                     read_u32_ue(reader, "H.264 difference_of_pic_nums_minus1")?;
-                if op == 3 {
-                    let _long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
-                }
+                marking
+                    .operations
+                    .push(H264MemoryManagementControl::ShortTermUnused {
+                        difference_of_pic_nums_minus1,
+                    });
             }
             2 => {
-                let _long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num")?;
+                let long_term_pic_num = read_u32_ue(reader, "H.264 long_term_pic_num")?;
+                marking
+                    .operations
+                    .push(H264MemoryManagementControl::LongTermUnused { long_term_pic_num });
+            }
+            3 => {
+                let difference_of_pic_nums_minus1 =
+                    read_u32_ue(reader, "H.264 difference_of_pic_nums_minus1")?;
+                let long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
+                marking
+                    .operations
+                    .push(H264MemoryManagementControl::ShortTermToLongTerm {
+                        difference_of_pic_nums_minus1,
+                        long_term_frame_idx,
+                    });
             }
             4 => {
-                let _max_long_term_frame_idx_plus1 =
+                let max_long_term_frame_idx_plus1 =
                     read_u32_ue(reader, "H.264 max_long_term_frame_idx_plus1")?;
+                marking
+                    .operations
+                    .push(H264MemoryManagementControl::MaxLongTermFrameIdx {
+                        max_long_term_frame_idx_plus1,
+                    });
             }
-            5 => {}
+            5 => {
+                marking.operations.push(H264MemoryManagementControl::Reset);
+            }
             6 => {
-                let _long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
+                let long_term_frame_idx = read_u32_ue(reader, "H.264 long_term_frame_idx")?;
+                marking
+                    .operations
+                    .push(H264MemoryManagementControl::CurrentToLongTerm {
+                        long_term_frame_idx,
+                    });
             }
             _ => return Err(String::from("H.264 invalid MMCO")),
         }
     }
-    Ok(())
+    Ok(marking)
 }
 
 fn h264_more_rbsp_data(reader: &EbspBitReader<'_>) -> bool {

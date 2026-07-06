@@ -94,8 +94,14 @@ pub const SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE: u16 = 1 << 6;
 pub const SCARLET_VIDEO_H264_PPS_FLAG_SCALING_MATRIX_PRESENT: u16 = 1 << 7;
 /// H.264 B-slice uses direct spatial motion vector prediction.
 pub const SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED: u32 = 1 << 0;
+/// H.264 stateless submit includes resolved reference picture lists.
+pub const SCARLET_VIDEO_H264_SLICE_FLAG_REF_LISTS_PRESENT: u32 = 1 << 1;
 /// H.264 decode request is an IDR picture.
 pub const SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR: u32 = 1 << 0;
+/// H.264 DPB entry contains a valid reference picture.
+pub const SCARLET_VIDEO_H264_DPB_FLAG_VALID: u32 = 1 << 0;
+/// H.264 DPB entry is a long-term reference picture.
+pub const SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM: u32 = 1 << 1;
 
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
@@ -1251,7 +1257,7 @@ pub struct ScarletVideoH264DpbEntry {
     /// Timestamp identifying the decoded reference frame.
     pub reference_ts: u64,
     /// H.264 PicNum.
-    pub pic_num: u32,
+    pub pic_num: i32,
     /// H.264 frame_num.
     pub frame_num: u16,
     /// Reference field selector.

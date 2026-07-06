@@ -1,15 +1,17 @@
 use alloc::vec::Vec;
 
 use scarlet::device::video::{
-    SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED,
+    SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM,
+    SCARLET_VIDEO_H264_DPB_FLAG_VALID, SCARLET_VIDEO_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED,
     SCARLET_VIDEO_H264_PPS_FLAG_ENTROPY_CODING_MODE,
     SCARLET_VIDEO_H264_PPS_FLAG_TRANSFORM_8X8_MODE, SCARLET_VIDEO_H264_PPS_FLAG_WEIGHTED_PRED,
     SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED,
+    SCARLET_VIDEO_H264_SLICE_FLAG_REF_LISTS_PRESENT,
     SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE, SCARLET_VIDEO_H264_SPS_FLAG_FRAME_CROPPING,
     SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
-    ScarletVideoH264DecodeParams, ScarletVideoH264Pps, ScarletVideoH264PredWeights,
-    ScarletVideoH264Reference, ScarletVideoH264SliceParams, ScarletVideoH264Sps,
-    ScarletVideoH264StatelessParams,
+    ScarletVideoH264DecodeParams, ScarletVideoH264DpbEntry, ScarletVideoH264Pps,
+    ScarletVideoH264PredWeights, ScarletVideoH264Reference, ScarletVideoH264SliceParams,
+    ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
 };
 
 const H264_PROFILE_HIGH: u8 = 100;
@@ -760,7 +762,7 @@ impl AvdH264InstructionStream {
         references: &[AvdH264ReferencePicture],
     ) -> Self {
         let mut words = Vec::new();
-        let reference_plan = ReferencePlan::build(slice, request.current_poc, references);
+        let reference_plan = ReferencePlan::build(request, slice, references);
         let coded_width = stream.coded_width.max(request.layout.width);
         let coded_height = stream.coded_height.max(request.layout.height);
         let y_addr = request.output.dma_addr;
@@ -1021,6 +1023,10 @@ pub struct AvdH264Workspace {
 pub struct AvdH264ReferencePicture {
     /// RVRA scratch base for the reference picture.
     pub reference_dma_addr: u64,
+    /// H.264 frame number.
+    pub frame_num: u16,
+    /// H.264 short-term picture number.
+    pub pic_num: i32,
     /// Top field order count.
     pub top_field_order_cnt: i32,
     /// Whether this is a long-term reference.
@@ -1042,10 +1048,14 @@ pub struct H264DecodeRequest {
     pub layout: AvdFrameLayout,
     /// Current picture order count.
     pub current_poc: i32,
+    /// Current H.264 frame number.
+    pub frame_num: u16,
     /// Request flags derived from the access unit.
     pub flags: H264DecodeFlags,
     /// PPS-derived picture parameters.
     pub pps: H264PictureParameters,
+    /// Userspace-provided decoded picture buffer.
+    pub dpb: [ScarletVideoH264DpbEntry; 16],
     /// Explicit H.264 prediction weights.
     pub pred_weights: ScarletVideoH264PredWeights,
     /// First slice metadata used for AVD instruction generation.
@@ -1117,8 +1127,10 @@ impl H264DecodeRequest {
             output,
             layout,
             current_poc: 0,
+            frame_num: 0,
             flags,
             pps: H264PictureParameters::baseline_defaults(),
+            dpb: [ScarletVideoH264DpbEntry::default(); 16],
             pred_weights: ScarletVideoH264PredWeights::default(),
             slice,
         })
@@ -1171,8 +1183,10 @@ impl H264DecodeRequest {
             output,
             layout,
             current_poc: params.decode_params.top_field_order_cnt,
+            frame_num: params.decode_params.frame_num,
             flags,
             pps,
+            dpb: params.decode_params.dpb,
             pred_weights: params.pred_weights,
             slice,
         })
@@ -1187,10 +1201,30 @@ struct ReferencePlan {
 
 impl ReferencePlan {
     fn build(
+        request: &H264DecodeRequest,
         slice: &H264SliceParameters,
-        current_poc: i32,
         references: &[AvdH264ReferencePicture],
     ) -> Self {
+        if slice.flags & SCARLET_VIDEO_H264_SLICE_FLAG_REF_LISTS_PRESENT != 0 {
+            let list0_original = resolve_explicit_reference_list(
+                &slice.ref_pic_list0,
+                usize::from(slice.num_ref_idx_l0_active_minus1) + 1,
+                &request.dpb,
+                references,
+            );
+            let list1_original = if matches!(slice.kind, H264SliceKind::B) {
+                resolve_explicit_reference_list(
+                    &slice.ref_pic_list1,
+                    usize::from(slice.num_ref_idx_l1_active_minus1) + 1,
+                    &request.dpb,
+                    references,
+                )
+            } else {
+                Vec::new()
+            };
+            return Self::from_original_lists(list0_original, list1_original, references);
+        }
+
         let mut list0_original = Vec::new();
         let mut list1_original = Vec::new();
 
@@ -1204,7 +1238,7 @@ impl ReferencePlan {
                 let mut before = Vec::new();
                 let mut after = Vec::new();
                 for (index, reference) in references.iter().enumerate() {
-                    if reference.top_field_order_cnt < current_poc {
+                    if reference.top_field_order_cnt < request.current_poc {
                         before.push(index);
                     } else {
                         after.push(index);
@@ -1236,6 +1270,14 @@ impl ReferencePlan {
             }
         }
 
+        Self::from_original_lists(list0_original, list1_original, references)
+    }
+
+    fn from_original_lists(
+        list0_original: Vec<usize>,
+        list1_original: Vec<usize>,
+        references: &[AvdH264ReferencePicture],
+    ) -> Self {
         let mut table_indices = Vec::new();
         for index in list0_original.iter().chain(list1_original.iter()).copied() {
             if !table_indices.contains(&index) && table_indices.len() < 16 {
@@ -1258,6 +1300,38 @@ impl ReferencePlan {
             list1,
         }
     }
+}
+
+fn resolve_explicit_reference_list(
+    list: &[ScarletVideoH264Reference; 32],
+    count: usize,
+    dpb: &[ScarletVideoH264DpbEntry; 16],
+    references: &[AvdH264ReferencePicture],
+) -> Vec<usize> {
+    let mut resolved = Vec::new();
+    for entry in list.iter().take(count.min(32)) {
+        let dpb_index = usize::from(entry.index);
+        let Some(dpb_entry) = dpb.get(dpb_index) else {
+            continue;
+        };
+        if dpb_entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID == 0 {
+            continue;
+        }
+        if let Some(reference_index) = references.iter().position(|reference| {
+            reference.frame_num == dpb_entry.frame_num
+                && reference.top_field_order_cnt == dpb_entry.top_field_order_cnt
+                && reference.long_term
+                    == (dpb_entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM != 0)
+        }) {
+            resolved.push(reference_index);
+        } else if let Some(reference_index) = references.iter().position(|reference| {
+            reference.top_field_order_cnt == dpb_entry.top_field_order_cnt
+                && reference.pic_num == dpb_entry.pic_num
+        }) {
+            resolved.push(reference_index);
+        }
+    }
+    resolved
 }
 
 fn remap_reference_list(original: &[usize], table_indices: &[usize]) -> Vec<u8> {

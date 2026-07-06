@@ -1529,6 +1529,8 @@ struct AvdReferenceFrame {
     timestamp: u64,
     layout: h264::AvdFrameLayout,
     reference_dma_addr: u64,
+    frame_num: u16,
+    pic_num: i32,
     top_field_order_cnt: i32,
 }
 
@@ -1566,6 +1568,8 @@ struct AvdPendingDecode {
     reference_slot_count: usize,
     dpb_capacity: usize,
     reference_dma_addr: u64,
+    frame_num: u16,
+    pic_num: i32,
     top_field_order_cnt: i32,
     store_reference: bool,
     is_idr: bool,
@@ -1980,6 +1984,8 @@ impl AppleAvdVideoBackend {
             .take(AVD_H264_MAX_DPB_FRAMES)
             .map(|frame| AvdH264ReferencePicture {
                 reference_dma_addr: frame.reference_dma_addr,
+                frame_num: frame.frame_num,
+                pic_num: frame.pic_num,
                 top_field_order_cnt: frame.top_field_order_cnt,
                 long_term: false,
             })
@@ -2065,6 +2071,8 @@ impl AppleAvdVideoBackend {
             reference_slot_count: reference_output.slot_count,
             dpb_capacity: reference_output.dpb_capacity,
             reference_dma_addr,
+            frame_num: decode_request.frame_num,
+            pic_num: i32::from(decode_request.frame_num),
             top_field_order_cnt: decode_request.current_poc,
             store_reference: decode_request.slice.is_reference(),
             is_idr: decode_request.slice.is_idr(),
@@ -2290,6 +2298,8 @@ fn finish_pending_decode(
             timestamp: pending.timestamp,
             layout: pending.layout,
             reference_dma_addr: pending.reference_dma_addr,
+            frame_num: pending.frame_num,
+            pic_num: pending.pic_num,
             top_field_order_cnt: pending.top_field_order_cnt,
         });
         while session.reference_frames.len() > pending.dpb_capacity {
