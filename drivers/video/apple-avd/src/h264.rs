@@ -642,16 +642,16 @@ impl AvdH264InstructionStream {
         push(&mut words, flags, "hdr_44_flags");
         push(&mut words, 0, "hdr_48_chroma_qp_index_offset");
         push(&mut words, 0x0030_000a, "hdr_58_const_3a");
-        push(&mut words, 0x0402_0002, "cm3_dma_config_1");
-        push(&mut words, 0x0002_0002, "cm3_dma_config_2");
+        push(&mut words, 0, "cm3_dma_config_1");
+        push(&mut words, 0, "cm3_dma_config_2");
         push(&mut words, 0, "cm3_mark_end_section");
         push(
             &mut words,
             (workspace.pps_tile_dma_addr >> 8) as u32,
             "hdr_9c_pps_tile_addr_lsb8",
         );
-        push(&mut words, 0x0402_0002, "cm3_dma_config_3");
-        push(&mut words, 0x0402_0002, "cm3_dma_config_4");
+        push(&mut words, 0, "cm3_dma_config_3");
+        push(&mut words, 0, "cm3_dma_config_4");
         push(&mut words, 0, "cm3_mark_end_section");
         push(
             &mut words,
@@ -668,7 +668,7 @@ impl AvdH264InstructionStream {
             ((workspace.pps_tile_dma_addr + 0x18000) >> 8) as u32,
             "hdr_9c_pps_tile_addr_lsb8",
         );
-        push(&mut words, 0x0007_0007, "cm3_dma_config_5");
+        push(&mut words, 0, "cm3_dma_config_5");
         push(
             &mut words,
             (workspace.reference_dma_addr >> 7) as u32,

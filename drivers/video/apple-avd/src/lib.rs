@@ -64,11 +64,12 @@ const REG_DECODER_CONTROL_BASE: usize = 0x1100000;
 const REG_MCPU_CONTROL: usize = 0x1098008;
 const REG_MCPU_IRQ_ENABLE0: usize = 0x1098010;
 const REG_MCPU_IRQ_ENABLE1: usize = 0x1098048;
+const REG_MCPU_IRQ_CLEAR: usize = 0x109804c;
 const REG_MCPU_AP_ACK: usize = 0x1098050;
 const REG_MCPU_DECODE_DMA_CONFIG: usize = 0x1098054;
 const REG_MAILBOX_AP_TO_CM3: usize = 0x1098058;
 const REG_MCPU_AP_IRQ_CLEAR: usize = 0x109805c;
-const REG_MAILBOX_CM3_TO_AP: usize = 0x1098060;
+const REG_MAILBOX_CM3_TO_AP: usize = 0x1098064;
 const REG_MCPU_CM3_ACK: usize = 0x1098068;
 const REG_MCPU_CM3_IRQ_CLEAR: usize = 0x1098074;
 const REG_MCPU_IRQ_ARM: usize = 0x109807c;
@@ -115,16 +116,23 @@ const REG_WRAP_INIT: usize = 0x1400018;
 const MCPU_CONTROL_RESET: u32 = 0xe;
 const MCPU_CONTROL_RUN: u32 = 0x1;
 const MCPU_DECODE_DMA_CONFIG: u32 = 0x108e_b30;
+const MCPU_MAILBOX1_NOT_EMPTY: u32 = 0x8;
 const H264_SUBMIT_START: u32 = 1;
 const H264_SUBMIT_FRAME: u32 = 0x2b000107;
 const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
 const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
 const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
+const H264_STATUS_ACCEPTED: u32 = 0x0000_0800;
 const H264_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
 const H264_STATUS_VIDEO_PHASE_DONE: u32 = 0x00c0_0000;
 const H264_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
 const H264_STATUS_POSTPROCESS_PHASE_DONE: u32 = 0x0000_2000;
+const H264_VP_CM3_MASK: u32 = 0x7;
+const H264_PP_CM3_MASK: u32 = 0x5;
+const H264_T8103_VP_SLOT: u32 = 2;
+const H264_T8103_FIFO_SLOT: u32 = 0;
+const H264_T8103_FIFO_COUNT: u32 = 7;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DECODE_TRACE_FRAMES: u32 = 12;
 const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
@@ -561,7 +569,7 @@ impl AvdRegisters {
     }
 
     fn clear_recv_mailbox(&self) {
-        self.write32(REG_MAILBOX_CM3_TO_AP, 0);
+        self.write32(REG_MCPU_IRQ_CLEAR, MCPU_MAILBOX1_NOT_EMPTY);
         self.write32(REG_MCPU_CM3_ACK, 1);
         arch::io_wmb();
     }
@@ -646,8 +654,37 @@ impl AvdRegisters {
         }
     }
 
+    fn configure_h264_stream(&self, instruction_fifo_dma: u64) {
+        let fifo_offset = H264_T8103_FIFO_SLOT as usize * 4;
+        let vp_offset = H264_T8103_VP_SLOT as usize * 4;
+        self.write32(
+            REG_H264_INST_FIFO_BASE + fifo_offset,
+            (instruction_fifo_dma >> 8) as u32,
+        );
+        self.write32(
+            REG_H264_INST_FIFO_SIZE + fifo_offset,
+            AVD_WORKSPACE_INST_FIFO_BYTES as u32,
+        );
+        self.write32(REG_H264_INST_FIFO_READ + fifo_offset, 0);
+        self.write32(REG_H264_INST_FIFO_WRITE + fifo_offset, 0);
+        self.write32(REG_H265_CONTROL + vp_offset, 0);
+        self.write32(
+            REG_H264_TIMEOUT,
+            self.read32(REG_H264_TIMEOUT)
+                | (H264_VP_CM3_MASK << (H264_T8103_VP_SLOT * 5))
+                | (H264_PP_CM3_MASK << 20),
+        );
+    }
+
     fn submit_h264(&self) {
         self.write32(REG_H264_SUBMIT, H264_SUBMIT_FRAME);
+    }
+
+    fn submit_h264_postprocess(&self) {
+        self.write32(
+            REG_H264_SUBMIT,
+            0x2b00_0000 | 0x100 | (H264_T8103_FIFO_SLOT << 4) | H264_T8103_FIFO_COUNT,
+        );
     }
 
     fn clear_window(&self, offset: usize, len: usize) {
@@ -1018,21 +1055,28 @@ impl AppleAvd {
         &mut self,
         request: &H264DecodeRequest,
         instructions: &AvdH264InstructionStream,
+        instruction_fifo_dma: u64,
     ) -> Result<u32, &'static str> {
         if instructions.words().is_empty() {
             return Err("apple-avd: empty H.264 instruction stream");
         }
+        self.registers.configure_h264_stream(instruction_fifo_dma);
         self.registers.write_h264_instructions(instructions.words());
-        self.registers
-            .clear_h264_status(H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK);
+        self.registers.clear_h264_status(
+            H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK | H264_STATUS_ACCEPTED,
+        );
         let status_before = self.registers.h264_status();
-        self.registers.submit_h264();
         self.trace.push(
             AvdTraceKind::DecodeSubmit,
             request.input.dma_addr,
             instructions.words().len() as u64,
         );
         Ok(status_before)
+    }
+
+    /// Submit the post-process stage after the video pipe reports completion.
+    pub fn submit_h264_postprocess(&mut self) {
+        self.registers.submit_h264_postprocess();
     }
 
     /// Return the current H.264 status register.
@@ -1584,12 +1628,50 @@ impl AppleAvdVideoBackend {
             return Err("apple-avd: H.264 engine reported an error");
         }
 
-        let postprocess_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
+        if completion_phase == AvdH264CompletionPhase::WaitingVideo
+            && (status & H264_STATUS_ACCEPTED) != 0
+        {
+            avd.clear_h264_status(H264_STATUS_ACCEPTED);
+            if frame_number < AVD_DECODE_TRACE_FRAMES {
+                println!(
+                    "[apple-avd] decode accepted stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x}",
+                    stream_id,
+                    frame_number,
+                    poll_count,
+                    status_before,
+                    status,
+                    message_raw,
+                    H264_STATUS_ACCEPTED
+                );
+            }
+        }
+
+        if completion_phase == AvdH264CompletionPhase::WaitingVideo
+            && matches!(message, Some(AvdFirmwareMessage::VideoProcessorDone))
+        {
+            avd.submit_h264_postprocess();
+            let front = state
+                .pending
+                .front_mut()
+                .ok_or("apple-avd: pending queue changed during video mailbox completion")?;
+            front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
+            front.poll_count = front.poll_count.saturating_add(1);
+            if frame_number < AVD_DECODE_TRACE_FRAMES {
+                println!(
+                    "[apple-avd] decode video mailbox stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} submit_pp=true",
+                    stream_id, frame_number, poll_count, status_before, status, message_raw
+                );
+            }
+            return Ok(());
+        }
+
+        let completed_by_mailbox = matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
         let mut completed_by_status = false;
         if completion_phase == AvdH264CompletionPhase::WaitingVideo
             && (status & H264_STATUS_VIDEO_PHASE_MASK) == H264_STATUS_VIDEO_PHASE_DONE
         {
             avd.clear_h264_status(H264_STATUS_POSTPROCESS_DONE);
+            avd.submit_h264_postprocess();
             let front = state
                 .pending
                 .front_mut()
@@ -1635,7 +1717,7 @@ impl AppleAvdVideoBackend {
             );
         }
 
-        if completed_by_status {
+        if completed_by_mailbox || completed_by_status {
             let pending = state
                 .pending
                 .pop_front()
@@ -1644,7 +1726,7 @@ impl AppleAvdVideoBackend {
                 status_before,
                 status,
                 message_raw,
-                by_mailbox: postprocess_mailbox,
+                by_mailbox: completed_by_mailbox,
                 by_status: completed_by_status,
             };
             finish_pending_decode(&mut state, pending, completion)?;
@@ -1757,7 +1839,7 @@ impl AppleAvdVideoBackend {
         }
         .map_err(h264_error_to_str)?;
 
-        let (instructions, inst_len) = {
+        let (instructions, inst_len, instruction_fifo_dma) = {
             let workspace = session.ensure_workspace(avd)?;
             let mut workspace_addresses = workspace.addresses();
             workspace_addresses.reference_dma_addr = reference_output.dma_addr;
@@ -1772,12 +1854,17 @@ impl AppleAvdVideoBackend {
                 .map_err(h264_error_to_str)?;
             arch::clean_dcache_to_poc_range(workspace.instruction_fifo_vaddr(), inst_len);
             arch::clean_dcache_to_poc_range(workspace.pages.as_vaddr(), workspace.byte_len);
-            (instructions, inst_len)
+            (
+                instructions,
+                inst_len,
+                workspace_addresses.instruction_fifo_dma_addr,
+            )
         };
 
         arch::clean_invalidate_dcache_to_poc_range(reference_output.vaddr, reference_output.len);
 
-        let status_before = avd.submit_h264_mmio(&decode_request, &instructions)?;
+        let status_before =
+            avd.submit_h264_mmio(&decode_request, &instructions, instruction_fifo_dma)?;
         let command_tag = avd.submit_h264_request(&decode_request)?;
         if frame_number < AVD_DECODE_TRACE_FRAMES {
             let words = instructions.words();
