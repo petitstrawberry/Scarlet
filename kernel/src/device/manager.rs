@@ -1928,11 +1928,11 @@ impl DeviceManager {
         } else {
             Some(attachments.remove(0))
         };
-        Ok(DmaContext {
-            iommu: primary,
-            additional_iommus: attachments,
-            direct_dma_offset: 0,
-        })
+        Ok(DmaContext::from_iommu_attachments(
+            primary,
+            attachments,
+            config,
+        ))
     }
 
     /// Resolve a platform device MSI controller from its `msi-parent` property.

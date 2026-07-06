@@ -20,4 +20,12 @@ gzip -kf "$PAYLOADS/u-boot-nodtb.bin"
 for machine in "$@"; do
   echo "Generating boot-${machine}.bin..."
   python3 "$M1N1/make-boot.py" "$machine"
+  if [ -n "${SCARLET_AVD_INFO_JSON:-}" ]; then
+    echo "Patching boot-${machine}.bin with Apple AVD nodes..."
+    python3 "$BASE/tools/apple_avd_dtb.py" patch-payload \
+      --info-json "$SCARLET_AVD_INFO_JSON" \
+      --input "$PAYLOADS/boot-${machine}.bin" \
+      --output "$PAYLOADS/boot-${machine}.bin" \
+      --m1n1-bin "$PAYLOADS/m1n1.bin"
+  fi
 done

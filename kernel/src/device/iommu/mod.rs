@@ -9,6 +9,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{BitOr, BitOrAssign};
 
+use crate::sync::Mutex;
+
 /// Physical address type used by DMA mappings.
 pub type PhysAddr = usize;
 
@@ -266,6 +268,7 @@ pub struct DmaContext {
     pub additional_iommus: Vec<IommuAttachment>,
     /// Offset applied to physical addresses for direct DMA.
     pub direct_dma_offset: isize,
+    iova_allocator: Option<Arc<Mutex<DmaIovaAllocator>>>,
 }
 
 /// Owned DMA mapping that is unmapped when dropped.
@@ -340,6 +343,102 @@ impl Drop for DmaMapping {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DmaIovaRange {
+    start: Iova,
+    len: u64,
+}
+
+struct DmaIovaAllocator {
+    free: Vec<DmaIovaRange>,
+}
+
+impl DmaIovaAllocator {
+    fn new(base: Iova, size: u64) -> Self {
+        Self {
+            free: alloc::vec![DmaIovaRange {
+                start: base,
+                len: size,
+            }],
+        }
+    }
+
+    fn alloc(&mut self, len: u64, align: u64) -> Result<Iova, IommuError> {
+        if len == 0 || align == 0 {
+            return Err(IommuError::OutOfIova);
+        }
+
+        for index in 0..self.free.len() {
+            let range = self.free[index];
+            let Some(start) = align_up_u64(range.start, align) else {
+                continue;
+            };
+            let padding = start - range.start;
+            if padding > range.len {
+                continue;
+            }
+            let available = range.len - padding;
+            if available < len {
+                continue;
+            }
+
+            let before = padding;
+            let after_start = start.checked_add(len).ok_or(IommuError::OutOfIova)?;
+            let after_len = available - len;
+            match (before, after_len) {
+                (0, 0) => {
+                    self.free.remove(index);
+                }
+                (0, _) => {
+                    self.free[index] = DmaIovaRange {
+                        start: after_start,
+                        len: after_len,
+                    };
+                }
+                (_, 0) => {
+                    self.free[index].len = before;
+                }
+                (_, _) => {
+                    self.free[index].len = before;
+                    self.free.insert(
+                        index + 1,
+                        DmaIovaRange {
+                            start: after_start,
+                            len: after_len,
+                        },
+                    );
+                }
+            }
+            return Ok(start);
+        }
+
+        Err(IommuError::OutOfIova)
+    }
+
+    fn free(&mut self, start: Iova, len: u64) {
+        if len == 0 {
+            return;
+        }
+
+        self.free.push(DmaIovaRange { start, len });
+        self.free.sort_by_key(|range| range.start);
+
+        let mut merged: Vec<DmaIovaRange> = Vec::new();
+        for range in self.free.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                let last_end = last.start.saturating_add(last.len);
+                if range.start <= last_end {
+                    let range_end = range.start.saturating_add(range.len);
+                    last.len = range_end.max(last_end).saturating_sub(last.start);
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+        self.free = merged;
+    }
+}
+
 impl DmaContext {
     /// Create a direct-DMA context without an IOMMU attachment.
     ///
@@ -351,6 +450,40 @@ impl DmaContext {
             iommu: None,
             additional_iommus: Vec::new(),
             direct_dma_offset: 0,
+            iova_allocator: None,
+        }
+    }
+
+    /// Create a DMA context from resolved IOMMU attachments.
+    ///
+    /// # Arguments
+    ///
+    /// * `iommu` - Primary IOMMU attachment, if any.
+    /// * `additional_iommus` - Additional IOMMU attachments reached by the device.
+    /// * `config` - Domain configuration used to allocate translated IOVA space.
+    ///
+    /// # Returns
+    ///
+    /// A DMA context that returns allocated IOVA addresses when `config.iova_base`
+    /// is non-zero, or preserves physical-address IOVA behavior otherwise.
+    pub fn from_iommu_attachments(
+        iommu: Option<IommuAttachment>,
+        additional_iommus: Vec<IommuAttachment>,
+        config: IommuDomainConfig,
+    ) -> Self {
+        let iova_allocator = if iommu.is_some() && config.iova_base != 0 && config.iova_size != 0 {
+            Some(Arc::new(Mutex::new(DmaIovaAllocator::new(
+                config.iova_base,
+                config.iova_size,
+            ))))
+        } else {
+            None
+        };
+        Self {
+            iommu,
+            additional_iommus,
+            direct_dma_offset: 0,
+            iova_allocator,
         }
     }
 
@@ -371,15 +504,38 @@ impl DmaContext {
         len: usize,
         flags: IommuMapFlags,
     ) -> Result<DmaAddr, IommuError> {
+        self.map_phys_internal(paddr, len, flags)
+            .map(|(dma_addr, _mapped_len)| dma_addr)
+    }
+
+    fn map_phys_internal(
+        &self,
+        paddr: PhysAddr,
+        len: usize,
+        flags: IommuMapFlags,
+    ) -> Result<(DmaAddr, usize), IommuError> {
         if let Some(attachment) = &self.iommu {
-            let iova = paddr as Iova;
-            attachment.domain.map(iova, paddr, len, flags)?;
-            for attachment in &self.additional_iommus {
-                attachment.domain.map(iova, paddr, len, flags)?;
+            let mapped_len = self.mapped_len(len)?;
+            let iova = self.alloc_iova(paddr, mapped_len)?;
+            if let Err(error) = attachment.domain.map(iova, paddr, mapped_len, flags) {
+                self.free_iova(iova, mapped_len);
+                return Err(error);
             }
-            Ok(iova)
+            let mut mapped_additionals = 0;
+            for additional in &self.additional_iommus {
+                if let Err(error) = additional.domain.map(iova, paddr, mapped_len, flags) {
+                    for mapped in self.additional_iommus.iter().take(mapped_additionals).rev() {
+                        let _ = mapped.domain.unmap(iova, mapped_len);
+                    }
+                    let _ = attachment.domain.unmap(iova, mapped_len);
+                    self.free_iova(iova, mapped_len);
+                    return Err(error);
+                }
+                mapped_additionals += 1;
+            }
+            Ok((iova, mapped_len))
         } else {
-            Ok((paddr as isize + self.direct_dma_offset) as DmaAddr)
+            Ok(((paddr as isize + self.direct_dma_offset) as DmaAddr, len))
         }
     }
 
@@ -421,8 +577,8 @@ impl DmaContext {
         len: usize,
         flags: IommuMapFlags,
     ) -> Result<DmaMapping, IommuError> {
-        let dma_addr = self.map_phys(paddr, len, flags)?;
-        Ok(DmaMapping::new(self.clone(), dma_addr, len))
+        let (dma_addr, mapped_len) = self.map_phys_internal(paddr, len, flags)?;
+        Ok(DmaMapping::new(self.clone(), dma_addr, mapped_len))
     }
 
     /// Unmap a DMA address previously returned by [`Self::map_phys`].
@@ -437,14 +593,64 @@ impl DmaContext {
     /// `Ok(())` when the mapping is removed or direct DMA needs no action.
     pub fn unmap(&self, dma_addr: DmaAddr, len: usize) -> Result<(), IommuError> {
         if let Some(attachment) = &self.iommu {
-            attachment.domain.unmap(dma_addr as Iova, len)?;
-            for attachment in &self.additional_iommus {
-                attachment.domain.unmap(dma_addr as Iova, len)?;
+            let mapped_len = self.mapped_len(len)?;
+            attachment.domain.unmap(dma_addr as Iova, mapped_len)?;
+            for additional in &self.additional_iommus {
+                additional.domain.unmap(dma_addr as Iova, mapped_len)?;
             }
+            self.free_iova(dma_addr as Iova, mapped_len);
             Ok(())
         } else {
             Ok(())
         }
+    }
+
+    fn mapped_len(&self, len: usize) -> Result<usize, IommuError> {
+        if self.iova_allocator.is_some() {
+            align_up_usize(len, self.mapping_granule()).ok_or(IommuError::OutOfIova)
+        } else {
+            Ok(len)
+        }
+    }
+
+    fn alloc_iova(&self, paddr: PhysAddr, len: usize) -> Result<Iova, IommuError> {
+        if let Some(allocator) = &self.iova_allocator {
+            allocator
+                .lock()
+                .alloc(len as u64, self.mapping_granule() as u64)
+        } else {
+            Ok(paddr as Iova)
+        }
+    }
+
+    fn free_iova(&self, iova: Iova, len: usize) {
+        if let Some(allocator) = &self.iova_allocator {
+            allocator.lock().free(iova, len as u64);
+        }
+    }
+}
+
+fn align_up_usize(value: usize, align: usize) -> Option<usize> {
+    if align == 0 {
+        return None;
+    }
+    let rem = value % align;
+    if rem == 0 {
+        Some(value)
+    } else {
+        value.checked_add(align - rem)
+    }
+}
+
+fn align_up_u64(value: u64, align: u64) -> Option<u64> {
+    if align == 0 {
+        return None;
+    }
+    let rem = value % align;
+    if rem == 0 {
+        Some(value)
+    } else {
+        value.checked_add(align - rem)
     }
 }
 
@@ -565,6 +771,22 @@ mod tests {
         }
     }
 
+    fn identity_iova_config() -> IommuDomainConfig {
+        IommuDomainConfig {
+            domain_type: IommuDomainType::Dma,
+            iova_base: 0,
+            iova_size: 0,
+        }
+    }
+
+    fn allocated_iova_config() -> IommuDomainConfig {
+        IommuDomainConfig {
+            domain_type: IommuDomainType::Dma,
+            iova_base: 0x4000_0000,
+            iova_size: 0x1_0000,
+        }
+    }
+
     #[test_case]
     fn test_iommu_map_flags_contains_and_bitor() {
         let mut flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
@@ -606,15 +828,15 @@ mod tests {
         let controller = Arc::new(TestController {
             domain: domain.clone(),
         });
-        let context = DmaContext {
-            iommu: Some(IommuAttachment {
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
                 controller,
                 domain: domain.clone(),
                 streams: Vec::new(),
             }),
-            additional_iommus: Vec::new(),
-            direct_dma_offset: 0,
-        };
+            Vec::new(),
+            identity_iova_config(),
+        );
 
         let dma_addr = context
             .map_phys(0x2000, 0x200, IommuMapFlags::READ | IommuMapFlags::WRITE)
@@ -641,19 +863,19 @@ mod tests {
         let secondary_controller = Arc::new(TestController {
             domain: secondary_domain.clone(),
         });
-        let context = DmaContext {
-            iommu: Some(IommuAttachment {
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
                 controller: primary_controller,
                 domain: primary_domain.clone(),
                 streams: Vec::new(),
             }),
-            additional_iommus: alloc::vec![IommuAttachment {
+            alloc::vec![IommuAttachment {
                 controller: secondary_controller,
                 domain: secondary_domain.clone(),
                 streams: Vec::new(),
             }],
-            direct_dma_offset: 0,
-        };
+            identity_iova_config(),
+        );
 
         let flags = IommuMapFlags::READ | IommuMapFlags::WRITE;
         let dma_addr = context.map_phys(0x3000, 0x400, flags).unwrap();
@@ -678,19 +900,19 @@ mod tests {
         let secondary_controller = Arc::new(TestController {
             domain: secondary_domain.clone(),
         });
-        let context = DmaContext {
-            iommu: Some(IommuAttachment {
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
                 controller: primary_controller,
                 domain: primary_domain,
                 streams: Vec::new(),
             }),
-            additional_iommus: alloc::vec![IommuAttachment {
+            alloc::vec![IommuAttachment {
                 controller: secondary_controller,
                 domain: secondary_domain,
                 streams: Vec::new(),
             }],
-            direct_dma_offset: 0,
-        };
+            identity_iova_config(),
+        );
 
         assert_eq!(context.mapping_granule(), 0x4000);
     }
@@ -707,15 +929,15 @@ mod tests {
         let controller = Arc::new(TestController {
             domain: domain.clone(),
         });
-        let context = DmaContext {
-            iommu: Some(IommuAttachment {
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
                 controller,
                 domain: domain.clone(),
                 streams: Vec::new(),
             }),
-            additional_iommus: Vec::new(),
-            direct_dma_offset: 0,
-        };
+            Vec::new(),
+            identity_iova_config(),
+        );
 
         {
             let mapping = context
@@ -735,15 +957,15 @@ mod tests {
         let controller = Arc::new(TestController {
             domain: domain.clone(),
         });
-        let context = DmaContext {
-            iommu: Some(IommuAttachment {
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
                 controller,
                 domain: domain.clone(),
                 streams: Vec::new(),
             }),
-            additional_iommus: Vec::new(),
-            direct_dma_offset: 0,
-        };
+            Vec::new(),
+            identity_iova_config(),
+        );
 
         let mapping = context
             .map_phys_owned(0x5000, 0x1000, IommuMapFlags::WRITE)
@@ -752,5 +974,44 @@ mod tests {
 
         assert_eq!(domain.last_unmap(), Some((0x5000, 0x1000)));
         assert_eq!(domain.unmap_count(), 1);
+    }
+
+    #[test_case]
+    fn test_dma_context_allocates_configured_iova_space() {
+        let domain = Arc::new(TestDomain::with_page_size(0x4000));
+        let controller = Arc::new(TestController {
+            domain: domain.clone(),
+        });
+        let context = DmaContext::from_iommu_attachments(
+            Some(IommuAttachment {
+                controller,
+                domain: domain.clone(),
+                streams: Vec::new(),
+            }),
+            Vec::new(),
+            allocated_iova_config(),
+        );
+
+        let dma_addr = context
+            .map_phys(0x8_0000_0000, 0x2000, IommuMapFlags::READ)
+            .unwrap();
+        assert_eq!(dma_addr, 0x4000_0000);
+        assert_eq!(
+            domain.last_map(),
+            Some(RecordedMap {
+                iova: 0x4000_0000,
+                paddr: 0x8_0000_0000,
+                len: 0x4000,
+                flags: IommuMapFlags::READ,
+            })
+        );
+
+        context.unmap(dma_addr, 0x2000).unwrap();
+        assert_eq!(domain.last_unmap(), Some((0x4000_0000, 0x4000)));
+
+        let dma_addr = context
+            .map_phys(0x8_0004_0000, 0x1000, IommuMapFlags::WRITE)
+            .unwrap();
+        assert_eq!(dma_addr, 0x4000_0000);
     }
 }

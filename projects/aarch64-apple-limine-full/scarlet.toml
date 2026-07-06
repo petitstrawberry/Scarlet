@@ -35,6 +35,7 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-afk" = { path = "../../drivers/soc/apple-afk", enabled = true }
 "scarlet-driver-apple-epic" = { path = "../../drivers/soc/apple-epic", enabled = true }
 "scarlet-driver-apple-dart" = { path = "../../drivers/iommu/apple-dart", enabled = true }
+"scarlet-driver-apple-avd" = { path = "../../drivers/video/apple-avd", enabled = true }
 "scarlet-driver-apple-dwc3" = { path = "../../drivers/usb/dwc3/apple-dwc3", enabled = true }
 "scarlet-driver-apple-pcie" = { path = "../../drivers/pcie/apple-pcie", enabled = true }
 "scarlet-driver-apple-spi" = { path = "../../drivers/spi/apple-spi", enabled = true }

@@ -48,6 +48,28 @@ python3 projects/aarch64-apple-limine-full/tools/deploy_m1n1_usb.py \
 
 `--no-build` を外せばイメージビルドから自動実行。
 
+デフォルトでは `deploy_m1n1_usb.py` が m1n1 の live ADT から
+`/arm-io/avd` と `/arm-io/dart-avd` を読み、guest payload 内 DTB に
+Apple AVD/DART node をメモリ上で注入する。あわせて m1n1 proxy 経由で
+`/arm-io/dart-avd` と `/arm-io/avd` の PMGR power を enable する
+（古いローカル m1n1 では PMGR clocks enable にフォールバックする）。
+
+AVD DTB patch を必須にして失敗時に止める場合：
+
+```bash
+python3 projects/aarch64-apple-limine-full/tools/deploy_m1n1_usb.py \
+  --no-build \
+  --avd-dtb-patch require \
+  --avd-pmgr require \
+  --proxy-device /dev/cu.usbmodemC02DN1XV0KPF1 \
+  --secondary-device /dev/cu.usbmodemC02DN1XV0KPF3
+```
+
+AVD patch を無効にする場合は `--avd-dtb-patch off --avd-pmgr off` を付ける。
+offline で `boot-*.bin` を直接パッチする場合は、ADT から保存した情報と同じ
+形式の JSON を `SCARLET_AVD_INFO_JSON=/path/to/avd.json ./build-uboot.sh j293`
+で渡す。
+
 ## フロー
 
 ```
@@ -56,6 +78,8 @@ deploy_m1n1_usb.py
   ├─ UartInterface() 新規接続      (run_guest.py と同じ)
   ├─ ProxyUtils(heap_size=128MB)
   ├─ hv.init()                    (HV 初期化, vUART マップ)
+  ├─ AVD DTB patch                (live ADT → guest payload DTB)
+  ├─ PMGR power enable            (/arm-io/dart-avd, /arm-io/avd)
   ├─ hv.load_raw(boot-j293.bin)   (m1n1+DTB+U-Boot を HV ゲストとしてロード)
   ├─ writemem(0x900000000, image) (Limine FAT イメージを RAM に push)
   └─ hv.start()                   (ゲスト起動)

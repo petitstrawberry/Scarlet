@@ -3,10 +3,9 @@
 ## Overview
 
 Scarlet exposes video decode hardware as a character device such as
-`/dev/vvideo0`. The API described here is the Scarlet video decode device
-contract used by userspace. It is not inherently tied to VirtIO, although the
-current implementation is backed by the VirtIO video driver and a
-vhost-user-video host process.
+`/dev/video0`. The API described here is the Scarlet video decode device
+contract used by userspace. It is not tied to a particular transport: VirtIO
+video and Apple AVD backends both plug into the same frontend.
 
 The current API is intentionally small:
 
@@ -23,16 +22,14 @@ reference.
 
 ## Device Model
 
-Video decode devices are exposed as `vvideoN`, starting at `vvideo0`. Userspace
+Video decode devices are exposed as `videoN`, starting at `video0`. Userspace
 talks to the device through normal file operations, `mmap()`, and `control()`.
-A future non-VirtIO implementation should be able to expose the same device
-contract.
 
-The current backend is a PCI VirtIO video device. That driver negotiates
-`VIRTIO_F_VERSION_1` and the VirtIO video `RESOURCE_GUEST_PAGES` feature. The
-host backend added with this work is `tools/vhost-video-videotoolbox`,
-which decodes through Apple's VideoToolbox when the QEMU vhost-user-video path
-is enabled.
+The PCI VirtIO video backend negotiates `VIRTIO_F_VERSION_1` and the VirtIO
+video `RESOURCE_GUEST_PAGES` feature. The host backend added with this work is
+`tools/vhost-video-videotoolbox`, which decodes through Apple's VideoToolbox
+when the QEMU vhost-user-video path is enabled. Apple AVD uses the same Scarlet
+frontend with an Apple platform-device backend.
 
 The kernel side accepts these coded stream formats:
 
@@ -64,7 +61,7 @@ reported as `0x3432_3076` (`v024`).
 
 The stream path is useful as a simple smoke test:
 
-1. Open `/dev/vvideo0`.
+1. Open `/dev/video0`.
 2. Write one H.264 Annex B access unit.
 3. Read 20 bytes of `SVF1` header.
 4. Read `payload_len` bytes of NV12 payload.
@@ -79,41 +76,35 @@ Each video session owns one shared mapping:
 
 | Region | Offset | Size |
 | --- | ---: | ---: |
-| input bitstream | `0` | `8 * 1024 * 1024` |
-| output frame | `8 * 1024 * 1024` | aligned `16 * 1024 * 1024 + 20` |
+| input bitstream | `input_offset` | `input_len` |
+| output frames | `output_offset` | `output_len` |
 
-The output payload starts at `output_offset + 20` after a successful dequeue.
-The mapping offset for stream `stream_id` is:
-
-```text
-(stream_id - 1) * mapped_buffer_len
-```
-
-Both `mmap` offset and length must be page-aligned. The driver currently
-supports at most four sessions.
+After a successful dequeue, `ScarletVideoDequeuedFrame.payload_offset` and
+`payload_len` identify the decoded payload inside the full mapping. Backends may
+use `output_len` as a pool of frame slots, so callers must not assume the payload
+always starts at `output_offset + 20`. Both `mmap` offset and length must be
+page-aligned. The reported lengths come from the selected backend capabilities.
 
 ## Control Commands
 
 All commands use raw `#[repr(C)]` structures copied between Scarlet userspace
-and the kernel. The command names currently use the `VVIDEO_` prefix because
-they were introduced with the `vvideoN` device. They should be read as video
-decode device commands, not as a VirtIO-only userspace ABI. All current Scarlet
-targets are little-endian; do not treat these layouts as a portable cross-OS
-ABI.
+and the kernel. All current Scarlet targets are little-endian; do not treat
+these layouts as a portable cross-OS ABI.
 
 | Command | Value | Argument | Return |
 | --- | ---: | --- | --- |
-| `VVIDEO_GET_BUFFER` | `0x5600` | `*mut ScarletVideoBufferInfo` | `0` |
-| `VVIDEO_SUBMIT` | `0x5601` | `*const ScarletVideoSubmit` | `0` |
-| `VVIDEO_DEQUEUE` | `0x5602` | `*mut ScarletVideoDequeuedFrame` | `1` if ready, `0` if empty |
-| `VVIDEO_CREATE_SESSION` | `0x5603` | `*mut ScarletVideoSessionInfo` | `0` |
-| `VVIDEO_SUBMIT_SESSION` | `0x5604` | `*const ScarletVideoSessionSubmit` | `0` |
-| `VVIDEO_DEQUEUE_SESSION` | `0x5605` | `*mut ScarletVideoSessionDequeuedFrame` | `1` if ready, `0` if empty |
-| `VVIDEO_DESTROY_SESSION` | `0x5606` | `*const ScarletVideoSessionInfo` | `0` |
+| `SCARLET_VIDEO_GET_BUFFER` | `0x5600` | `*mut ScarletVideoBufferInfo` | `0` |
+| `SCARLET_VIDEO_SUBMIT` | `0x5601` | `*const ScarletVideoSubmit` | `0` |
+| `SCARLET_VIDEO_DEQUEUE` | `0x5602` | `*mut ScarletVideoDequeuedFrame` | `1` if ready, `0` if empty |
+| `SCARLET_VIDEO_CREATE_SESSION` | `0x5603` | `*mut ScarletVideoSessionInfo` | `0` |
+| `SCARLET_VIDEO_SUBMIT_SESSION` | `0x5604` | `*const ScarletVideoSessionSubmit` | `0` |
+| `SCARLET_VIDEO_DEQUEUE_SESSION` | `0x5605` | `*mut ScarletVideoSessionDequeuedFrame` | `1` if ready, `0` if empty |
+| `SCARLET_VIDEO_DESTROY_SESSION` | `0x5606` | `*const ScarletVideoSessionInfo` | `0` |
 
-`VVIDEO_GET_BUFFER` uses the default stream, stream id `1`. New code should use
-`VVIDEO_CREATE_SESSION` first; passing `stream_id = 0` allocates an available
-session, while passing a nonzero `stream_id` claims or queries that session.
+`SCARLET_VIDEO_GET_BUFFER` uses the default stream, stream id `1`. New code
+should use `SCARLET_VIDEO_CREATE_SESSION` first; passing `stream_id = 0`
+allocates an available session, while passing a nonzero `stream_id` claims or
+queries that session.
 
 ## ABI Structures
 
@@ -175,18 +166,18 @@ per-session timestamp. `flags` is currently always zero.
 
 ## Typical Mapped Decode Sequence
 
-1. Open `/dev/vvideo0`.
-2. Call `VVIDEO_CREATE_SESSION` with `stream_id = 0`.
+1. Open `/dev/video0`.
+2. Call `SCARLET_VIDEO_CREATE_SESSION` with `stream_id = 0`.
 3. Map `buffer.mmap_len` bytes at `buffer.mmap_offset` with read/write shared
    permissions.
 4. Copy one coded access unit into `input_offset`.
-5. Call `VVIDEO_SUBMIT_SESSION` with the returned stream id, input length, coded
+5. Call `SCARLET_VIDEO_SUBMIT_SESSION` with the returned stream id, input length, coded
    format, and optional timestamp.
-6. Poll `VVIDEO_DEQUEUE_SESSION` until it returns `1`.
+6. Poll `SCARLET_VIDEO_DEQUEUE_SESSION` until it returns `1`.
 7. Read metadata from `ScarletVideoDequeuedFrame`.
 8. Use `payload_offset` and `payload_len` to read the decoded NV12 payload from
    the mapping.
-9. On teardown, unmap the buffer and call `VVIDEO_DESTROY_SESSION`.
+9. On teardown, unmap the buffer and call `SCARLET_VIDEO_DESTROY_SESSION`.
 
 The default-session commands follow the same model but omit the explicit
 `stream_id` fields.
@@ -211,6 +202,6 @@ as "not ready yet" and retry with their own timeout.
 - The output path currently assumes a single-buffer NV12 frame.
 - Error reporting is mostly string-based through kernel `Result<&'static str>`
   and status reads.
-- The only implementation today is the VirtIO/vhost-user-video backend, so
-  backend support depends on the host vhost-user-video process and VideoToolbox
-  capabilities.
+- Backend support depends on the registered kernel backend. VirtIO depends on
+  the host vhost-user-video process and VideoToolbox capabilities; Apple AVD
+  depends on the platform DTB exposing AVD and DART resources.

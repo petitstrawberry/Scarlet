@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-driver-apple-avd"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+debug-device = []
+
+[dependencies]
+scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-pmgr = { path = "../../soc/apple-pmgr" }

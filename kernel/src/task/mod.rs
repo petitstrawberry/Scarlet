@@ -33,7 +33,12 @@ use crate::{
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
     mem::page::ContiguousPages,
-    object::{capability::memory_mapping::anon_owner::ForkCowPageOwner, handle::HandleTable},
+    object::{
+        capability::memory_mapping::{
+            anon_owner::ForkCowPageOwner, syscall::reclaim_private_removed_mapping,
+        },
+        handle::HandleTable,
+    },
     sched::scheduler::{
         cleanup_zombie, current_task, finalize_zombie, get_all_task_ids, get_task_by_id,
         remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
@@ -2258,6 +2263,16 @@ impl Task {
         self.exit_with_cleanup(status, |_| {});
     }
 
+    fn release_all_memory_maps_for_exit(&self) {
+        let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
+        }
+    }
+
     pub(crate) fn exit_with_cleanup<F>(&self, status: i32, cleanup: F)
     where
         F: FnOnce(&Task),
@@ -2273,6 +2288,9 @@ impl Task {
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        if self.vm_manager.is_sole_owner() {
+            self.release_all_memory_maps_for_exit();
+        }
         cleanup(self);
         self.reparent_children();
 
@@ -2385,7 +2403,7 @@ impl Task {
         }
 
         if my_id == leader_id {
-            self.exit(status);
+            self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
             return;
         }
 
@@ -2404,6 +2422,7 @@ impl Task {
 
         self.clear_process_control_stopped();
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        self.release_all_memory_maps_for_exit();
         self.reparent_children();
         self.set_exit_status(status);
         self.state.store(TaskState::Terminated, Ordering::SeqCst);

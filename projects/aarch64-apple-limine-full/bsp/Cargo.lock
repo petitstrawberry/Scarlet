@@ -114,6 +114,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-driver-apple-avd"
+version = "0.1.0"
+dependencies = [
+ "scarlet",
+ "scarlet-driver-apple-pmgr",
+]
+
+[[package]]
 name = "scarlet-driver-apple-cd321x"
 version = "0.1.0"
 dependencies = [
@@ -306,6 +314,7 @@ dependencies = [
  "scarlet-driver-apple-aic",
  "scarlet-driver-apple-asc",
  "scarlet-driver-apple-atcphy",
+ "scarlet-driver-apple-avd",
  "scarlet-driver-apple-cd321x",
  "scarlet-driver-apple-dart",
  "scarlet-driver-apple-dwc3",

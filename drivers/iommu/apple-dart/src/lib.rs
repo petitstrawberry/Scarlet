@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
 use scarlet::{
@@ -22,7 +23,7 @@ use scarlet::{
     },
     early_println,
     environment::PAGE_SIZE,
-    mem::pmm,
+    mem::page::ContiguousPages,
 };
 
 const DART_PARAMS1: usize = 0x00;
@@ -46,8 +47,10 @@ const DART_PARAMS1_MASK: u32 = 0xf << DART_PARAMS1_SHIFT;
 const DART_STREAM_COMMAND_BUSY: u32 = 1 << 2;
 
 const DART_PAGE_SHIFT: usize = 14;
-const DART_PTE_COUNT: usize = 512;
-const DART_TABLE_SIZE: usize = DART_PTE_COUNT * 8;
+const DART_IOVA_BITS: usize = 36;
+const DART_PADDR_BITS: usize = 36;
+const DART_PADDR_FIELD_SHIFT: usize = 12;
+const DART_PTE_SIZE_SHIFT: usize = 3;
 
 const DART_PTE_SUBPAGE_END_MASK: u64 = 0xfff << 40;
 const DART_PTE_SUBPAGE_ALLOW_ALL: u64 = DART_PTE_SUBPAGE_END_MASK;
@@ -57,7 +60,8 @@ const DART_PTE_SP_DIS: u64 = 1 << 1;
 const DART_PTE_NO_WRITE: u64 = 1 << 7;
 const DART_PTE_NO_READ: u64 = 1 << 8;
 
-const DART_PADDR_MASK: u64 = ((1u64 << 36) - 1) & !((1u64 << DART_PAGE_SHIFT) - 1);
+const DART_PADDR_MASK: u64 =
+    ((1u64 << DART_PADDR_BITS) - 1) & !((1u64 << DART_PADDR_FIELD_SHIFT) - 1);
 
 const DART_STREAM_COMMAND_INV_ALL: u32 = 0;
 
@@ -331,7 +335,8 @@ impl DartDomain {
     ///
     /// A domain with a fresh root page table.
     pub fn new(dart: Arc<DartInstance>) -> Result<Self, IommuError> {
-        let page_table = DartPageTable::new().map_err(|_| IommuError::DomainAllocationFailed)?;
+        let page_table = DartPageTable::new_for_page_shift(dart.page_shift())
+            .map_err(|_| IommuError::DomainAllocationFailed)?;
 
         Ok(Self {
             dart,
@@ -356,9 +361,11 @@ impl DartDomain {
 impl IommuDomain for DartDomain {
     fn attach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
         let sid = self.validate_stream(stream)?;
-        let root_paddr = self.page_table.lock().root_paddr();
+        let page_table = self.page_table.lock();
+        let root_paddr = page_table.root_paddr();
+        let levels = page_table.translation_levels();
 
-        self.dart.enable_translation(sid, root_paddr, 3);
+        self.dart.enable_translation(sid, root_paddr, levels);
 
         let mut attached_streams = self.attached_streams.lock();
         if !attached_streams.contains(&(sid as u32)) {
@@ -393,7 +400,7 @@ impl IommuDomain for DartDomain {
     }
 
     fn unmap(&self, iova: Iova, len: usize) -> Result<(), IommuError> {
-        let page_size = 1usize << DART_PAGE_SHIFT;
+        let page_size = self.page_size();
         let pages = len.div_ceil(page_size);
         let mut page_table = self.page_table.lock();
 
@@ -410,7 +417,7 @@ impl IommuDomain for DartDomain {
     }
 
     fn page_size(&self) -> usize {
-        1usize << DART_PAGE_SHIFT
+        self.page_table.lock().page_size()
     }
 
     fn flush(&self) -> Result<(), IommuError> {
@@ -432,8 +439,13 @@ fn dart_pte_flags(flags: IommuMapFlags) -> u64 {
 
 /// Apple DART three-level page table.
 pub struct DartPageTable {
-    root_paddr: usize,
-    root_vaddr: usize,
+    root: ContiguousPages,
+    tables: Vec<ContiguousPages>,
+    page_shift: usize,
+    bits_per_level: usize,
+    table_levels: usize,
+    pte_count: usize,
+    table_size: usize,
 }
 
 impl DartPageTable {
@@ -443,15 +455,51 @@ impl DartPageTable {
     ///
     /// A new page table, or an error if physical page allocation fails.
     pub fn new() -> Result<Self, &'static str> {
-        let root_paddr = pmm::alloc_frame().ok_or("dart: failed to allocate root page table")?;
-        let root_vaddr = scarlet::vm::phys_to_virt(root_paddr);
-        unsafe {
-            core::ptr::write_bytes(root_vaddr as *mut u8, 0, DART_TABLE_SIZE);
+        Self::new_for_page_shift(DART_PAGE_SHIFT as u32)
+    }
+
+    /// Allocate and zero a new root page table for a DART page size.
+    ///
+    /// # Arguments
+    ///
+    /// * `page_shift` - Hardware DART page shift reported by PARAMS1.
+    ///
+    /// # Returns
+    ///
+    /// A new page table, or an error if physical page allocation fails.
+    pub fn new_for_page_shift(page_shift: u32) -> Result<Self, &'static str> {
+        let page_shift = page_shift as usize;
+        if page_shift < DART_PTE_SIZE_SHIFT || page_shift < PAGE_SIZE.trailing_zeros() as usize {
+            return Err("dart: invalid page shift");
         }
+
+        let bits_per_level = page_shift - DART_PTE_SIZE_SHIFT;
+        if bits_per_level == 0 || DART_IOVA_BITS <= page_shift {
+            return Err("dart: invalid page table geometry");
+        }
+
+        let table_size = 1usize
+            .checked_shl(page_shift as u32)
+            .ok_or("dart: page table size overflow")?;
+        let pte_count = table_size / core::mem::size_of::<u64>();
+        let iova_index_bits = DART_IOVA_BITS - page_shift;
+        let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
+        let root = Self::allocate_table(table_size)?;
+
         Ok(Self {
-            root_paddr,
-            root_vaddr,
+            root,
+            tables: Vec::new(),
+            page_shift,
+            bits_per_level,
+            table_levels,
+            pte_count,
+            table_size,
         })
+    }
+
+    fn allocate_table(table_size: usize) -> Result<ContiguousPages, &'static str> {
+        let pages = table_size.div_ceil(PAGE_SIZE);
+        ContiguousPages::new_aligned(pages, table_size).ok_or("dart: failed to allocate page table")
     }
 
     fn read_pte(table_vaddr: usize, index: usize) -> u64 {
@@ -462,6 +510,22 @@ impl DartPageTable {
         unsafe {
             core::ptr::write_volatile((table_vaddr + index * 8) as *mut u64, pte);
         }
+    }
+
+    fn paddr_to_pte(paddr: usize) -> u64 {
+        paddr as u64 & DART_PADDR_MASK
+    }
+
+    fn pte_to_paddr(pte: u64) -> usize {
+        (pte & DART_PADDR_MASK) as usize
+    }
+
+    fn table_index(&self, iova: usize, level: usize) -> usize {
+        (iova >> (self.page_shift + level * self.bits_per_level)) & (self.pte_count - 1)
+    }
+
+    fn leaf_index(&self, iova: usize) -> usize {
+        (iova >> self.page_shift) & (self.pte_count - 1)
     }
 
     /// Map one DART page.
@@ -476,40 +540,27 @@ impl DartPageTable {
     ///
     /// `Ok(())` when the mapping is installed.
     pub fn map_page(&mut self, iova: usize, paddr: usize, flags: u64) -> Result<(), &'static str> {
-        let mut table_vaddr = self.root_vaddr;
-
-        for level in 0..2 {
-            let shift = DART_PAGE_SHIFT + (2 - level) * 9;
-            let index = (iova >> shift) & (DART_PTE_COUNT - 1);
-
+        let mut table_vaddr = self.root.as_vaddr();
+        for level in (1..self.table_levels).rev() {
+            let index = self.table_index(iova, level);
             let pte = Self::read_pte(table_vaddr, index);
 
-            if level < 2 {
-                if pte & DART_PTE_VALID == 0 {
-                    let mid_paddr =
-                        pmm::alloc_frame().ok_or("dart: failed to allocate page table")?;
-                    let mid_vaddr = scarlet::vm::phys_to_virt(mid_paddr);
-                    unsafe {
-                        core::ptr::write_bytes(mid_vaddr as *mut u8, 0, DART_TABLE_SIZE);
-                    }
-                    // Format must match the read side below and the leaf PTE write:
-                    // paddr bits live in DART_PADDR_MASK (bits 12..35), not as a
-                    // frame number in the low bits. Using `>> DART_PAGE_SHIFT` here
-                    // caused phys_to_virt() to receive a garbage address on the
-                    // next map_page() that hit the same root entry (issue #480).
-                    let mid_pte = (mid_paddr as u64 & DART_PADDR_MASK) | DART_PTE_VALID;
-                    Self::write_pte(table_vaddr, index, mid_pte);
-                    table_vaddr = mid_vaddr;
-                } else {
-                    let next_table_paddr =
-                        (((pte & DART_PADDR_MASK) >> DART_PAGE_SHIFT) as usize) << DART_PAGE_SHIFT;
-                    table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
-                }
+            if pte & DART_PTE_VALID == 0 {
+                let table = Self::allocate_table(self.table_size)?;
+                let next_vaddr = table.as_vaddr();
+                let next_paddr = table.as_paddr();
+                let table_pte = Self::paddr_to_pte(next_paddr) | DART_PTE_VALID;
+                self.tables.push(table);
+                Self::write_pte(table_vaddr, index, table_pte);
+                table_vaddr = next_vaddr;
+            } else {
+                let next_table_paddr = Self::pte_to_paddr(pte);
+                table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
             }
         }
 
-        let leaf_index = (iova >> DART_PAGE_SHIFT) & (DART_PTE_COUNT - 1);
-        let leaf_pte = (paddr as u64 & DART_PADDR_MASK) | DART_PTE_SUBPAGE_ALLOW_ALL | flags;
+        let leaf_index = self.leaf_index(iova);
+        let leaf_pte = Self::paddr_to_pte(paddr) | DART_PTE_SUBPAGE_ALLOW_ALL | flags;
         Self::write_pte(table_vaddr, leaf_index, leaf_pte);
         Ok(())
     }
@@ -520,21 +571,17 @@ impl DartPageTable {
     ///
     /// * `iova` - I/O virtual address to unmap.
     pub fn unmap_page(&mut self, iova: usize) {
-        let mut table_vaddr = self.root_vaddr;
-        for level in 0..2 {
-            let shift = DART_PAGE_SHIFT + (2 - level) * 9;
-            let index = (iova >> shift) & (DART_PTE_COUNT - 1);
+        let mut table_vaddr = self.root.as_vaddr();
+        for level in (1..self.table_levels).rev() {
+            let index = self.table_index(iova, level);
             let pte = Self::read_pte(table_vaddr, index);
             if pte & DART_PTE_VALID == 0 {
                 return;
             }
-            if level < 2 {
-                let next_table_paddr =
-                    (((pte & DART_PADDR_MASK) >> DART_PAGE_SHIFT) as usize) << DART_PAGE_SHIFT;
-                table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
-            }
+            let next_table_paddr = Self::pte_to_paddr(pte);
+            table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
         }
-        let leaf_index = (iova >> DART_PAGE_SHIFT) & (DART_PTE_COUNT - 1);
+        let leaf_index = self.leaf_index(iova);
         Self::write_pte(table_vaddr, leaf_index, 0);
     }
 
@@ -544,7 +591,25 @@ impl DartPageTable {
     ///
     /// Root page table physical address.
     pub fn root_paddr(&self) -> usize {
-        self.root_paddr
+        self.root.as_paddr()
+    }
+
+    /// Return the page size used by this DART page table.
+    ///
+    /// # Returns
+    ///
+    /// DART mapping granule in bytes.
+    pub fn page_size(&self) -> usize {
+        1usize << self.page_shift
+    }
+
+    /// Return the number of translation levels expected by the DART TCR.
+    ///
+    /// # Returns
+    ///
+    /// Table depth including the top TTBR-selected level.
+    pub fn translation_levels(&self) -> u32 {
+        (self.table_levels + 1) as u32
     }
 
     /// Map a contiguous IOVA range to contiguous physical pages.
@@ -566,7 +631,7 @@ impl DartPageTable {
         size: usize,
         flags: u64,
     ) -> Result<(), &'static str> {
-        let page_size = 1usize << DART_PAGE_SHIFT;
+        let page_size = self.page_size();
         let pages = size.div_ceil(page_size);
         for i in 0..pages {
             self.map_page(iova + i * page_size, paddr + i * page_size, flags)?;
@@ -777,5 +842,13 @@ mod tests {
             dart_pte_flags(IommuMapFlags::WRITE),
             DART_PTE_VALID | DART_PTE_SP_DIS | DART_PTE_NO_READ
         );
+    }
+
+    #[test_case]
+    fn test_dart_pte_preserves_4k_aligned_physical_address() {
+        let paddr = 0x800b_1000usize;
+        let pte = DartPageTable::paddr_to_pte(paddr) | DART_PTE_VALID;
+
+        assert_eq!(DartPageTable::pte_to_paddr(pte), paddr);
     }
 }

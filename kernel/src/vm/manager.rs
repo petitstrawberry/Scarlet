@@ -103,6 +103,15 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Check whether this manager is the only owner of its address space.
+    ///
+    /// # Returns
+    ///
+    /// `true` when no other `VirtualMemoryManager` shares the same inner state.
+    pub fn is_sole_owner(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     /// Set the owner task ID if this manager does not already have one.
     ///
     /// # Arguments
