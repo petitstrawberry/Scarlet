@@ -819,16 +819,16 @@ impl AvdH264InstructionStream {
             "hdr_48_chroma_qp_index_offset",
         );
         push(&mut words, 0x0030_000a, "hdr_58_const_3a");
-        push(&mut words, 0, "cm3_dma_config_1");
-        push(&mut words, 0, "cm3_dma_config_2");
+        push(&mut words, 0x0402_0002, "cm3_dma_config_1");
+        push(&mut words, 0x0002_0002, "cm3_dma_config_2");
         push(&mut words, 0, "cm3_mark_end_section");
         push(
             &mut words,
             (workspace.pps_tile_dma_addr >> 8) as u32,
             "hdr_9c_pps_tile_addr_lsb8",
         );
-        push(&mut words, 0, "cm3_dma_config_3");
-        push(&mut words, 0, "cm3_dma_config_4");
+        push(&mut words, 0x0402_0002, "cm3_dma_config_3");
+        push(&mut words, 0x0402_0002, "cm3_dma_config_4");
         push(&mut words, 0, "cm3_mark_end_section");
         push(
             &mut words,
@@ -845,7 +845,7 @@ impl AvdH264InstructionStream {
             ((workspace.pps_tile_dma_addr + 0x18000) >> 8) as u32,
             "hdr_9c_pps_tile_addr_lsb8",
         );
-        push(&mut words, 0, "cm3_dma_config_5");
+        push(&mut words, 0x0007_0007, "cm3_dma_config_5");
         push_rvra(
             &mut words,
             workspace.reference_dma_addr,
@@ -967,6 +967,19 @@ impl AvdH264InstructionStream {
             ref_type |= (slice.num_ref_idx_l0_active_minus1 as u32) << 11;
         }
         push(&mut words, 0x2d00_0000 | ref_type, "slc_6e4_cmd_ref_type");
+        if matches!(slice.kind, H264SliceKind::B) {
+            let colocated_sps_tile = reference_plan
+                .list1
+                .first()
+                .and_then(|index| reference_plan.table.get(usize::from(*index)))
+                .map(|reference| reference.sps_tile_dma_addr)
+                .unwrap_or(workspace.sps_tile_dma_addr);
+            push(
+                &mut words,
+                (colocated_sps_tile >> 8) as u32,
+                "slc_a78_sps_tile_addr2_lsb8",
+            );
+        }
         push(&mut words, 0x2b00_0000 | 0x400, "cm3_cmd_inst_fifo_end");
 
         Self { words }
@@ -1023,6 +1036,8 @@ pub struct AvdH264Workspace {
 pub struct AvdH264ReferencePicture {
     /// RVRA scratch base for the reference picture.
     pub reference_dma_addr: u64,
+    /// SPS scratch tile base associated with this reference picture.
+    pub sps_tile_dma_addr: u64,
     /// H.264 frame number.
     pub frame_num: u16,
     /// H.264 short-term picture number.
@@ -1353,7 +1368,7 @@ fn stream_refs(
     workspace: &AvdH264Workspace,
     references: &[AvdH264ReferencePicture],
 ) {
-    push(words, 0, "cm3_dma_config_6");
+    push(words, 0x0402_0002, "cm3_dma_config_6");
     push(
         words,
         ((workspace.pps_tile_dma_addr + 0x20000) >> 8) as u32,
@@ -1364,10 +1379,10 @@ fn stream_refs(
         (workspace.sps_tile_dma_addr >> 8) as u32,
         "hdr_bc_sps_tile_addr_lsb8",
     );
-    push(words, 0, "cm3_dma_config_7");
-    push(words, 0, "cm3_dma_config_8");
-    push(words, 0, "cm3_dma_config_9");
-    push(words, 0, "cm3_dma_config_a");
+    push(words, 0x0007_0007, "cm3_dma_config_7");
+    push(words, 0x0007_0007, "cm3_dma_config_8");
+    push(words, 0x0007_0007, "cm3_dma_config_9");
+    push(words, 0x0007_0007, "cm3_dma_config_a");
 
     let count = references.len().min(16);
     if count == 0 {

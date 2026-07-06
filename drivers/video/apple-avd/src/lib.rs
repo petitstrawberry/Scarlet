@@ -32,7 +32,8 @@ use scarlet::{
         reset::ResetHandle,
         video::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
+            SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
             ScarletVideoDequeuedFrame, ScarletVideoH264StatelessParams, VideoBackendCapabilities,
             VideoBackendDecodeRequest, VideoBackendDecodedFrame, VideoBackendH264StatelessRequest,
             VideoDecodeBackend, register_video_backend, register_video_decode_device,
@@ -1529,6 +1530,7 @@ struct AvdReferenceFrame {
     timestamp: u64,
     layout: h264::AvdFrameLayout,
     reference_dma_addr: u64,
+    sps_tile_dma_addr: u64,
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
@@ -1568,6 +1570,7 @@ struct AvdPendingDecode {
     reference_slot_count: usize,
     dpb_capacity: usize,
     reference_dma_addr: u64,
+    sps_tile_dma_addr: u64,
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
@@ -1984,6 +1987,7 @@ impl AppleAvdVideoBackend {
             .take(AVD_H264_MAX_DPB_FRAMES)
             .map(|frame| AvdH264ReferencePicture {
                 reference_dma_addr: frame.reference_dma_addr,
+                sps_tile_dma_addr: frame.sps_tile_dma_addr,
                 frame_num: frame.frame_num,
                 pic_num: frame.pic_num,
                 top_field_order_cnt: frame.top_field_order_cnt,
@@ -1991,11 +1995,12 @@ impl AppleAvdVideoBackend {
             })
             .collect();
 
-        let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr) = {
+        let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr, sps_tile_dma_addr) = {
             let workspace = session.ensure_workspace()?;
             let workspace_addresses =
                 workspace.addresses_for_slot(reference_output.slot, layout)?;
             let reference_dma_addr = workspace_addresses.reference_dma_addr;
+            let sps_tile_dma_addr = workspace_addresses.sps_tile_dma_addr;
             let instructions = AvdH264InstructionStream::build(
                 &decode_request,
                 &stream_parameters,
@@ -2013,6 +2018,7 @@ impl AppleAvdVideoBackend {
                 inst_len,
                 workspace_addresses.instruction_fifo_dma_addr,
                 reference_dma_addr,
+                sps_tile_dma_addr,
             )
         };
 
@@ -2023,14 +2029,30 @@ impl AppleAvdVideoBackend {
         let command_tag = avd.submit_h264_request(&decode_request)?;
         if frame_number < AVD_DECODE_TRACE_FRAMES {
             let words = instructions.words();
+            let tail0 = words
+                .get(words.len().saturating_sub(3))
+                .copied()
+                .unwrap_or(0);
+            let tail1 = words
+                .get(words.len().saturating_sub(2))
+                .copied()
+                .unwrap_or(0);
+            let tail2 = words
+                .get(words.len().saturating_sub(1))
+                .copied()
+                .unwrap_or(0);
             println!(
-                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} l0={} l1={} direct={} refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] tail=[{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
                 request.stream_id,
                 frame_number,
                 decode_request.slice.is_idr(),
                 decode_request.slice.is_reference(),
                 decode_request.slice.kind,
                 decode_request.current_poc,
+                decode_request.slice.num_ref_idx_l0_active_minus1 as u32 + 1,
+                decode_request.slice.num_ref_idx_l1_active_minus1 as u32 + 1,
+                decode_request.slice.flags & SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED
+                    != 0,
                 reference_pictures.len(),
                 reference_output.slot,
                 reference_output.slot_count,
@@ -2047,6 +2069,9 @@ impl AppleAvdVideoBackend {
                 words.get(1).copied().unwrap_or(0),
                 words.get(2).copied().unwrap_or(0),
                 words.get(3).copied().unwrap_or(0),
+                tail0,
+                tail1,
+                tail2,
                 status_before,
                 command_tag
             );
@@ -2071,6 +2096,7 @@ impl AppleAvdVideoBackend {
             reference_slot_count: reference_output.slot_count,
             dpb_capacity: reference_output.dpb_capacity,
             reference_dma_addr,
+            sps_tile_dma_addr,
             frame_num: decode_request.frame_num,
             pic_num: i32::from(decode_request.frame_num),
             top_field_order_cnt: decode_request.current_poc,
@@ -2298,6 +2324,7 @@ fn finish_pending_decode(
             timestamp: pending.timestamp,
             layout: pending.layout,
             reference_dma_addr: pending.reference_dma_addr,
+            sps_tile_dma_addr: pending.sps_tile_dma_addr,
             frame_num: pending.frame_num,
             pic_num: pending.pic_num,
             top_field_order_cnt: pending.top_field_order_cnt,
