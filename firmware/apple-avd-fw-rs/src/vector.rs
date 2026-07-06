@@ -222,11 +222,11 @@ macro_rules! post_process_irq_handler {
     };
 }
 
-macro_rules! mailbox_irq_handler {
+macro_rules! h264_status_irq_handler {
     ($name:ident) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn $name() {
-            irq::mailbox_command();
+            irq::h264_status_irq1();
         }
     };
 }
@@ -268,7 +268,7 @@ pipe_irq_handlers!(irq33_handler, irq34_handler, irq35_handler, 3);
 submit_unknown_irq_handler!(irq38_handler);
 post_process_irq_handler!(irq40_handler);
 
-mailbox_irq_handler!(irq1_handler);
+h264_status_irq_handler!(irq1_handler);
 
 submit_unknown_irq_handler!(irq62_handler);
 post_process_irq_handler!(irq64_handler);

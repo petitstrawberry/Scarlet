@@ -4,7 +4,7 @@ use crate::abi::{
     CMD_H264_DECODE, MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR, command_kind,
     command_tag,
 };
-use crate::mailbox::{receive_command, send_message};
+use crate::mailbox::send_message;
 
 /// Number of external NVIC lines enabled by the AVD firmware.
 pub const NVIC_EXTERNAL_IRQS: usize = 224;
@@ -13,6 +13,8 @@ const NVIC_ISER_BASE: usize = 0xe000_e100;
 const DECODE_STATUS_UNK: u32 = 1 << 0;
 const DECODE_STATUS_ERR: u32 = 1 << 1;
 const DECODE_STATUS_DONE: u32 = 1 << 2;
+const H264_STATUS_OFFSET: usize = 0x4060;
+const H264_STATUS_IRQ1: u32 = 0x800;
 
 #[cfg(feature = "v2-t0")]
 const DECODE_CTRL_BASE: usize = 0x4010_0000;
@@ -56,15 +58,6 @@ pub fn arm_decode_irqs() {
     }
 }
 
-/// Handle an AP-to-CM3 mailbox IRQ.
-pub fn mailbox_command() {
-    let Some(command) = receive_command() else {
-        return;
-    };
-
-    dispatch_mailbox_command(command);
-}
-
 /// Dispatch one AP-to-CM3 mailbox command.
 ///
 /// # Arguments
@@ -79,6 +72,11 @@ pub fn dispatch_mailbox_command(command: u32) {
             send_message(MSG_UNKNOWN_IRQ | (kind << 8) | tag);
         }
     }
+}
+
+/// Handle the early H.264 status IRQ observed when a frame is accepted.
+pub fn h264_status_irq1() {
+    clear_h264_status(H264_STATUS_IRQ1);
 }
 
 /// Handle a video-pipe unknown-status IRQ.
@@ -140,6 +138,15 @@ fn clear_decode_status(slot: u32, status: u32) {
         while core::ptr::read_volatile(ptr) & mask != 0 {
             core::hint::spin_loop();
         }
+    }
+}
+
+fn clear_h264_status(status: u32) {
+    let ptr = (DECODE_CTRL_BASE + H264_STATUS_OFFSET) as *mut u32;
+    // SAFETY: This is the CM3-visible alias of the H.264 status register.
+    // Writing the observed bit acknowledges the corresponding IRQ.
+    unsafe {
+        core::ptr::write_volatile(ptr, status);
     }
 }
 
