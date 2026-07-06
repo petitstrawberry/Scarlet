@@ -4488,6 +4488,15 @@ impl HardwareVideoDecoder {
             .unwrap_or(false)
     }
 
+    fn supports_seek_preview(&self, codec: VideoCodec) -> bool {
+        let Some(caps) = self.caps else {
+            return false;
+        };
+        codec == VideoCodec::H264
+            && caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264)
+            && caps.max_sessions > 1
+    }
+
     fn decode_access_unit_stream(
         &mut self,
         access_unit: &[u8],
@@ -5145,6 +5154,9 @@ fn publish_hardware_seek_preview(
     let Ok(mut decoder) = HardwareVideoDecoder::open() else {
         return Ok(true);
     };
+    if !decoder.supports_seek_preview(access_unit.codec) {
+        return Ok(true);
+    }
     let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
         return Ok(true);
     };
