@@ -70,6 +70,7 @@ const REG_MCPU_CM3_IRQ_CLEAR: usize = 0x1098074;
 const REG_MCPU_IRQ_ARM: usize = 0x109807c;
 const REG_MCPU_IRQ_MASK: usize = 0x1098080;
 const REG_MCPU_STATUS: usize = 0x1098090;
+const REG_MCPU_CONTROL_98: usize = 0x1098098;
 const REG_H264_INSTRUCTION: usize = 0x1104000;
 const REG_H265_INSTRUCTION: usize = 0x1104004;
 const REG_H264_MODE: usize = 0x110400c;
@@ -497,7 +498,9 @@ impl AvdRegisters {
         self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
         self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
         self.enable_irqs();
+        arch::io_wmb();
         self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RUN);
+        arch::io_mb();
 
         for _ in 0..AVD_MCPU_RUN_POLLS {
             if self.status() == 1 {
@@ -529,6 +532,7 @@ impl AvdRegisters {
         self.clear_window(REG_MCPU_CODE, AVD_MCPU_CODE_BYTES);
         self.clear_window(REG_MCPU_SRAM, AVD_MCPU_SRAM_BYTES);
         self.write_buffer(REG_MCPU_CODE, image);
+        arch::io_wmb();
         Ok(())
     }
 
@@ -543,16 +547,20 @@ impl AvdRegisters {
     fn clear_recv_mailbox(&self) {
         self.write32(REG_MAILBOX_CM3_TO_AP, 0);
         self.write32(REG_MCPU_CM3_ACK, 1);
+        arch::io_wmb();
     }
 
     fn log_boot_state(&self, label: &str) {
         println!(
-            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
+            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} irq_arm={:#x} irq_mask={:#x} mcpu98={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
             label,
             self.read32(REG_MCPU_CONTROL),
             self.read32(REG_MCPU_STATUS),
             self.read32(REG_MCPU_IRQ_ENABLE0),
             self.read32(REG_MCPU_IRQ_ENABLE1),
+            self.read32(REG_MCPU_IRQ_ARM),
+            self.read32(REG_MCPU_IRQ_MASK),
+            self.read32(REG_MCPU_CONTROL_98),
             self.read32(REG_MCPU_AP_ACK),
             self.read32(REG_MCPU_CM3_ACK),
             self.read32(REG_MCPU_AP_IRQ_CLEAR),
