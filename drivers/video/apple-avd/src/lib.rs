@@ -118,7 +118,11 @@ const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
 const H264_STATUS_VIDEO_DONE: u32 = 0x0040_0000;
 const H264_STATUS_POSTPROCESS_DONE: u32 = 0x0000_1000;
+const H264_STATUS_COMPLETION_MASK: u32 = H264_STATUS_VIDEO_DONE | H264_STATUS_POSTPROCESS_DONE;
 const AVD_TRACE_CAPACITY: usize = 128;
+const AVD_DECODE_TRACE_FRAMES: u32 = 12;
+const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
+const AVD_OUTPUT_UV_SAMPLE_BYTES: usize = 256;
 const AVD_DMA_GRANULE: usize = 0x4000;
 // m1n1 clears 0xc000 bytes here. Extending the SRAM clear reaches the MCPU
 // mailbox/control block at 0x1098000 and clears the run latch back to zero.
@@ -1393,6 +1397,7 @@ struct AvdPendingDecode {
     payload_len: usize,
     output_header_vaddr: usize,
     output_payload_vaddr: usize,
+    output_payload_dma: u64,
     output_payload_offset: usize,
     output_payload_len: usize,
     reference_slot: usize,
@@ -1402,6 +1407,28 @@ struct AvdPendingDecode {
     command_tag: u32,
     input_mapping: DmaMapping,
     poll_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AvdCompletionInfo {
+    status_before: u32,
+    status: u32,
+    message_raw: u32,
+    by_mailbox: bool,
+    by_status: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AvdOutputSample {
+    y_first: [u32; 4],
+    y_checksum: u32,
+    y_nonzero: usize,
+    uv_first: [u32; 2],
+    uv_checksum: u32,
+    uv_non_neutral: usize,
+    y0: u8,
+    u0: u8,
+    v0: u8,
 }
 
 struct AvdBackendState {
@@ -1508,12 +1535,16 @@ impl AppleAvdVideoBackend {
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         let message = avd.poll_firmware_message();
+        let message_raw = message.map(|message| message.raw()).unwrap_or(0);
         let status = avd.h264_status();
-        let Some(front) = state.pending.front_mut() else {
+        let Some(front) = state.pending.front() else {
             return Ok(());
         };
+        let status_before = front.status_before;
+        let frame_number = front.frame_number;
+        let stream_id = front.stream_id;
 
-        if status != front.status_before && (status & H264_STATUS_ERROR_MASK) != 0 {
+        if status != status_before && (status & H264_STATUS_ERROR_MASK) != 0 {
             let _ = state.pending.pop_front();
             avd.recover_h264_engine(status as u64);
             return Err("apple-avd: H.264 engine reported an error");
@@ -1525,16 +1556,40 @@ impl AppleAvdVideoBackend {
                 | Some(AvdFirmwareMessage::PostProcessorDone)
         );
         let completed_by_status =
-            status != front.status_before && (status & H264_STATUS_DONE_MASK) != 0;
+            status != status_before && (status & H264_STATUS_COMPLETION_MASK) != 0;
+        if frame_number < AVD_DECODE_TRACE_FRAMES
+            && status != status_before
+            && (status & H264_STATUS_DONE_MASK) != 0
+            && !completed_by_status
+        {
+            println!(
+                "[apple-avd] decode status activity stream={} frame={} status_before={:#x} status={:#x} msg={:#x}",
+                stream_id, frame_number, status_before, status, message_raw
+            );
+        }
         if completed_by_mailbox || completed_by_status {
             let pending = state
                 .pending
                 .pop_front()
                 .ok_or("apple-avd: pending queue changed under completion")?;
-            finish_pending_decode(&mut state, pending)?;
-            avd.trace
-                .push(AvdTraceKind::DecodeComplete, status as u64, 0);
+            let completion = AvdCompletionInfo {
+                status_before,
+                status,
+                message_raw,
+                by_mailbox: completed_by_mailbox,
+                by_status: completed_by_status,
+            };
+            finish_pending_decode(&mut state, pending, completion)?;
+            avd.trace.push(
+                AvdTraceKind::DecodeComplete,
+                status as u64,
+                message_raw as u64,
+            );
         } else {
+            let front = state
+                .pending
+                .front_mut()
+                .ok_or("apple-avd: pending queue changed under poll")?;
             front.poll_count = front.poll_count.saturating_add(1);
             if front.poll_count > AVD_DECODE_POLL_LIMIT {
                 let _ = state.pending.pop_front();
@@ -1702,6 +1757,31 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
         let status_before = avd.submit_h264_mmio(&decode_request, &instructions)?;
         let command_tag = avd.submit_h264_request(&decode_request)?;
+        if frame_number < AVD_DECODE_TRACE_FRAMES {
+            let words = instructions.words();
+            println!(
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                request.stream_id,
+                frame_number,
+                decode_request.slice.is_idr(),
+                decode_request.slice.is_reference(),
+                decode_request.slice.kind,
+                input_mapping.dma_addr(),
+                input_len,
+                reference_output.dma_addr,
+                payload_len,
+                layout.width,
+                layout.height,
+                layout.y_stride,
+                words.len(),
+                words.first().copied().unwrap_or(0),
+                words.get(1).copied().unwrap_or(0),
+                words.get(2).copied().unwrap_or(0),
+                words.get(3).copied().unwrap_or(0),
+                status_before,
+                command_tag
+            );
+        }
         avd.trace.push(
             AvdTraceKind::DecodeSubmit,
             input_mapping.dma_addr(),
@@ -1715,6 +1795,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             payload_len,
             output_header_vaddr: reference_output.header_vaddr,
             output_payload_vaddr: reference_output.vaddr,
+            output_payload_dma: reference_output.dma_addr,
             output_payload_offset: reference_output.payload_offset,
             output_payload_len: reference_output.len,
             reference_slot: reference_output.slot,
@@ -1748,8 +1829,44 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 fn finish_pending_decode(
     state: &mut AvdBackendState,
     pending: AvdPendingDecode,
+    completion: AvdCompletionInfo,
 ) -> Result<(), &'static str> {
     arch::invalidate_dcache_to_poc_range(pending.output_payload_vaddr, pending.output_payload_len);
+    if should_log_decode_completion(&pending, completion) {
+        let sample = sample_output_payload(
+            pending.output_payload_vaddr,
+            pending.output_payload_len,
+            pending.layout,
+        );
+        println!(
+            "[apple-avd] decode complete stream={} frame={} idr={} ref={} slot={} by_mailbox={} by_status={} status_before={:#x} status={:#x} msg={:#x} out={:#x}+{} sample y0={} u0={} v0={} y_words=[{:#x},{:#x},{:#x},{:#x}] y_hash={:#x} y_nonzero={} uv_words=[{:#x},{:#x}] uv_hash={:#x} uv_non_neutral={}",
+            pending.stream_id,
+            pending.frame_number,
+            pending.is_idr,
+            pending.store_reference,
+            pending.reference_slot,
+            completion.by_mailbox,
+            completion.by_status,
+            completion.status_before,
+            completion.status,
+            completion.message_raw,
+            pending.output_payload_dma,
+            pending.output_payload_len,
+            sample.y0,
+            sample.u0,
+            sample.v0,
+            sample.y_first[0],
+            sample.y_first[1],
+            sample.y_first[2],
+            sample.y_first[3],
+            sample.y_checksum,
+            sample.y_nonzero,
+            sample.uv_first[0],
+            sample.uv_first[1],
+            sample.uv_checksum,
+            sample.uv_non_neutral
+        );
+    }
     write_frame_header(
         pending.output_header_vaddr,
         pending.layout.width,
@@ -1792,6 +1909,73 @@ fn finish_pending_decode(
     });
     let _ = pending.input_mapping.dma_addr();
     Ok(())
+}
+
+fn should_log_decode_completion(pending: &AvdPendingDecode, completion: AvdCompletionInfo) -> bool {
+    pending.frame_number < AVD_DECODE_TRACE_FRAMES
+        || (completion.status & H264_STATUS_ERROR_MASK) != 0
+        || (completion.by_status && !completion.by_mailbox)
+}
+
+fn sample_output_payload(
+    output_vaddr: usize,
+    output_len: usize,
+    layout: h264::AvdFrameLayout,
+) -> AvdOutputSample {
+    let y_sample_len = output_len.min(AVD_OUTPUT_SAMPLE_BYTES);
+    let y_bytes = if y_sample_len == 0 {
+        &[]
+    } else {
+        // SAFETY: `output_vaddr..output_vaddr + output_len` is a mapped
+        // output buffer retained by the pending decode until completion.
+        unsafe { core::slice::from_raw_parts(output_vaddr as *const u8, y_sample_len) }
+    };
+
+    let uv_offset = layout.y_stride as usize * layout.height as usize;
+    let uv_sample_len = output_len
+        .saturating_sub(uv_offset)
+        .min(AVD_OUTPUT_UV_SAMPLE_BYTES);
+    let uv_bytes = if uv_sample_len == 0 {
+        &[]
+    } else {
+        // SAFETY: `uv_offset` was clamped against `output_len` above.
+        unsafe {
+            core::slice::from_raw_parts((output_vaddr + uv_offset) as *const u8, uv_sample_len)
+        }
+    };
+
+    AvdOutputSample {
+        y_first: [
+            read_sample_word(y_bytes, 0),
+            read_sample_word(y_bytes, 4),
+            read_sample_word(y_bytes, 8),
+            read_sample_word(y_bytes, 12),
+        ],
+        y_checksum: fnv1a32(y_bytes),
+        y_nonzero: y_bytes.iter().filter(|byte| **byte != 0).count(),
+        uv_first: [read_sample_word(uv_bytes, 0), read_sample_word(uv_bytes, 4)],
+        uv_checksum: fnv1a32(uv_bytes),
+        uv_non_neutral: uv_bytes.iter().filter(|byte| **byte != 0x80).count(),
+        y0: y_bytes.first().copied().unwrap_or(0),
+        u0: uv_bytes.first().copied().unwrap_or(0),
+        v0: uv_bytes.get(1).copied().unwrap_or(0),
+    }
+}
+
+fn read_sample_word(bytes: &[u8], offset: usize) -> u32 {
+    let Some(word) = bytes.get(offset..offset + 4) else {
+        return 0;
+    };
+    u32::from_le_bytes(word.try_into().expect("sample word bytes"))
+}
+
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    for byte in bytes {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 fn write_frame_header(
