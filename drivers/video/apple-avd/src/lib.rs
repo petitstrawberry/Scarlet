@@ -131,6 +131,12 @@ const H264_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
 const H264_STATUS_VIDEO_PHASE_DONE: u32 = 0x00c0_0000;
 const H264_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
 const H264_STATUS_POSTPROCESS_PHASE_DONE: u32 = 0x0000_2000;
+const H264_STATUS_RECOVERY_CLEAR_MASK: u32 = H264_STATUS_DONE_MASK
+    | H264_STATUS_ERROR_MASK
+    | H264_STATUS_ACCEPTED
+    | H264_STATUS_VIDEO_PHASE_MASK
+    | H264_STATUS_POSTPROCESS_PHASE_MASK
+    | 0x0200_0000;
 const H264_VP_CM3_MASK: u32 = 0x7;
 const H264_PP_CM3_MASK: u32 = 0x5;
 const H264_T8103_VP_SLOT: u32 = 2;
@@ -160,6 +166,9 @@ const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
 const AVD_DECODE_POLL_LIMIT: usize = 10_000;
+const AVD_MAILBOX_DRAIN_POLLS: usize = 64;
+const AVD_MAILBOX_DRAIN_IDLE_POLLS: usize = 4;
+const AVD_MAILBOX_DRAIN_POLL_US: u64 = 10;
 const AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY: &str = "apple,pmgr-clock-gate-paddrs";
 
 const AVD_H264_DMA_CONFIG: [u32; 30] = [
@@ -573,6 +582,29 @@ impl AvdRegisters {
         arch::io_wmb();
     }
 
+    fn drain_recv_mailbox(&self) -> usize {
+        let mut drained = 0usize;
+        let mut idle_polls = 0usize;
+        for _ in 0..AVD_MAILBOX_DRAIN_POLLS {
+            let raw = self.recv_mailbox();
+            if raw == 0 {
+                idle_polls += 1;
+                if idle_polls >= AVD_MAILBOX_DRAIN_IDLE_POLLS {
+                    break;
+                }
+                time::udelay(AVD_MAILBOX_DRAIN_POLL_US);
+                continue;
+            }
+
+            idle_polls = 0;
+            drained += 1;
+            self.clear_recv_mailbox();
+            arch::io_mb();
+            time::udelay(AVD_MAILBOX_DRAIN_POLL_US);
+        }
+        drained
+    }
+
     fn log_boot_state(&self, label: &str) {
         println!(
             "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} irq_arm={:#x} irq_mask={:#x} mcpu98={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap_status={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
@@ -645,6 +677,21 @@ impl AvdRegisters {
 
     fn h264_status(&self) -> u32 {
         self.read32(REG_H264_STATUS)
+    }
+
+    fn clear_h264_latched_status(&self) -> u32 {
+        let mut last = 0;
+        for _ in 0..8 {
+            let status = self.h264_status();
+            if status == 0 {
+                break;
+            }
+            last = status;
+            let clear = status | H264_STATUS_RECOVERY_CLEAR_MASK;
+            self.clear_h264_status(clear);
+            arch::io_mb();
+        }
+        last
     }
 
     fn write_h264_instructions(&self, words: &[u32]) {
@@ -1059,6 +1106,8 @@ impl AppleAvd {
         if instructions.words().is_empty() {
             return Err("apple-avd: empty H.264 instruction stream");
         }
+        self.registers.drain_recv_mailbox();
+        self.registers.clear_h264_latched_status();
         self.registers.configure_h264_stream(instruction_fifo_dma);
         self.registers.write_h264_instructions(instructions.words());
         self.registers.clear_h264_status(
@@ -1104,10 +1153,18 @@ impl AppleAvd {
     /// * `reason` - Driver-local reason or status value recorded in the trace.
     pub fn recover_h264_engine(&mut self, reason: u64) {
         self.trace.push(AvdTraceKind::Fault, reason, 0);
-        self.registers
-            .clear_h264_status(H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK);
+        let drained_before = self.registers.drain_recv_mailbox();
+        let status_before = self.registers.clear_h264_latched_status();
         self.registers.init_h264_engine();
-        self.registers.clear_recv_mailbox();
+        let status_after_init = self.registers.clear_h264_latched_status();
+        let drained_after = self.registers.drain_recv_mailbox();
+        if status_before != 0 || status_after_init != 0 || drained_before != 0 || drained_after != 0
+        {
+            println!(
+                "[apple-avd] recovered H.264 engine reason={:#x} status_before={:#x} status_after_init={:#x} drained_before={} drained_after={}",
+                reason, status_before, status_after_init, drained_before, drained_after
+            );
+        }
         self.trace.push(AvdTraceKind::Firmware, 0x1104_0000, 1);
     }
 
@@ -1390,17 +1447,30 @@ impl AvdBackendSession {
             .ok_or("apple-avd: workspace unavailable")
     }
 
-    fn prune_reference_frames_for_dpb(&mut self, dpb: &[ScarletVideoH264DpbEntry; 16]) {
-        let has_valid_entry = dpb
+    fn prune_reference_frames_for_dpb(
+        &mut self,
+        dpb: &[ScarletVideoH264DpbEntry; 16],
+        max_references: usize,
+    ) -> usize {
+        let valid_entries = dpb
             .iter()
-            .any(|entry| entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID != 0);
-        if !has_valid_entry {
-            return;
+            .filter(|entry| entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID != 0)
+            .count();
+        let target_references = valid_entries
+            .min(max_references)
+            .min(AVD_H264_MAX_DPB_FRAMES);
+        if target_references == 0 {
+            self.reference_frames.clear();
+            return valid_entries;
         }
         self.reference_frames.retain(|frame| {
             dpb.iter()
                 .any(|entry| dpb_entry_matches_reference(entry, frame))
         });
+        while self.reference_frames.len() > target_references {
+            self.reference_frames.remove(0);
+        }
+        valid_entries
     }
 
     fn prepare_mapped_output(
@@ -2019,9 +2089,13 @@ impl AppleAvdVideoBackend {
         let input_bytes =
             unsafe { core::slice::from_raw_parts(input_vaddr as *const u8, input_len) };
         let (is_idr, store_reference) = source.reference_flags().map_err(h264_error_to_str)?;
-        if let AvdH264SubmitSource::Stateless(params) = &source {
-            session.prune_reference_frames_for_dpb(&params.decode_params.dpb);
-        }
+        let max_references =
+            (stream_parameters.max_num_ref_frames as usize).min(AVD_H264_MAX_DPB_FRAMES);
+        let valid_dpb_entries = if let AvdH264SubmitSource::Stateless(params) = &source {
+            session.prune_reference_frames_for_dpb(&params.decode_params.dpb, max_references)
+        } else {
+            0
+        };
         let reference_output = session.prepare_mapped_output(
             avd,
             request,
@@ -2116,7 +2190,7 @@ impl AppleAvdVideoBackend {
                 .copied()
                 .unwrap_or(0);
             println!(
-                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} l0={} l1={} direct={} refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] tail=[{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} l0={} l1={} direct={} refs={} valid_dpb={} max_refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] tail=[{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
                 request.stream_id,
                 frame_number,
                 decode_request.slice.is_idr(),
@@ -2128,6 +2202,8 @@ impl AppleAvdVideoBackend {
                 decode_request.slice.flags & SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED
                     != 0,
                 reference_pictures.len(),
+                valid_dpb_entries,
+                max_references,
                 reference_output.slot,
                 reference_output.slot_count,
                 reference_output.dpb_capacity,
@@ -2419,7 +2495,7 @@ fn finish_pending_decode(
             top_field_order_cnt: pending.top_field_order_cnt,
             long_term: pending.long_term,
         });
-        while session.reference_frames.len() > pending.reference_slot_count {
+        while session.reference_frames.len() > pending.dpb_capacity.max(1) {
             session.reference_frames.remove(0);
         }
     }
