@@ -71,6 +71,34 @@ def _node_compatibles(node: Any) -> list[str]:
         return [str(value)]
 
 
+def _u32_list(value: Any, label: str) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, int):
+        values = [value]
+    elif isinstance(value, bytes):
+        if len(value) % 4 != 0:
+            raise AvdDtbError(f"{label} byte length is not a multiple of 4")
+        values = [
+            int.from_bytes(value[index : index + 4], "little")
+            for index in range(0, len(value), 4)
+        ]
+    else:
+        try:
+            values = [int(item) for item in value]
+        except TypeError as exc:
+            raise AvdDtbError(f"{label} is not a u32 list") from exc
+    for item in values:
+        if item < 0 or item > 0xffffffff:
+            raise AvdDtbError(f"{label} contains out-of-range u32 value {item:#x}")
+    return values
+
+
+def _node_u32_list(node: Any, prop: str, path: str) -> list[int]:
+    value = node.getprop(prop, None) if hasattr(node, "getprop") else None
+    return _u32_list(value, f"{path}.{prop}")
+
+
 def _infer_soc(machine: str | None, compatibles: list[str]) -> str:
     for compatible in compatibles:
         match = re.search(r"\b(t[0-9]{4})\b", compatible)
@@ -127,12 +155,14 @@ def extract_avd_info_from_adt(
             "base": avd_base,
             "size": avd_size,
             "compatible": _node_compatibles(avd),
+            "clock_gates": _node_u32_list(avd, "clock-gates", AVD_ADT_PATH),
         },
         "dart": {
             "adt_path": DART_AVD_ADT_PATH,
             "base": dart_base,
             "size": dart_size,
             "compatible": _node_compatibles(dart),
+            "clock_gates": _node_u32_list(dart, "clock-gates", DART_AVD_ADT_PATH),
         },
     }
 
@@ -162,8 +192,20 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
         **info,
         "soc": soc,
         "sid": sid,
-        "avd": {**avd, "base": avd_base, "size": avd_size},
-        "dart": {**dart, "base": dart_base, "size": dart_size},
+        "avd": {
+            **avd,
+            "adt_path": str(avd.get("adt_path", AVD_ADT_PATH)),
+            "base": avd_base,
+            "size": avd_size,
+            "clock_gates": _u32_list(avd.get("clock_gates"), "avd.clock_gates"),
+        },
+        "dart": {
+            **dart,
+            "adt_path": str(dart.get("adt_path", DART_AVD_ADT_PATH)),
+            "base": dart_base,
+            "size": dart_size,
+            "clock_gates": _u32_list(dart.get("clock_gates"), "dart.clock_gates"),
+        },
     }
 
 
@@ -267,12 +309,28 @@ def _reg_cells(base: int, size: int) -> str:
     return f"<{_cells64(base)} {_cells64(size)}>"
 
 
+def _u32_cells(values: list[int]) -> str:
+    return " ".join(f"0x{value:x}" for value in values)
+
+
+def _optional_u32_property(indent: str, name: str, values: list[int]) -> str:
+    if not values:
+        return ""
+    return f"{indent}{name} = <{_u32_cells(values)}>;\n"
+
+
 def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
     info = validate_info(info)
     soc = info["soc"]
     avd = info["avd"]
     dart = info["dart"]
     sid = int(info.get("sid", 0))
+    avd_clock_gates = _optional_u32_property(
+        "                ", "apple,adt-clock-gates", avd["clock_gates"]
+    )
+    dart_clock_gates = _optional_u32_property(
+        "                ", "apple,adt-clock-gates", dart["clock_gates"]
+    )
     return f"""/dts-v1/;
 /plugin/;
 
@@ -286,6 +344,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             dart_avd: iommu@{dart["base"]:x} {{
                 compatible = "apple,{soc}-dart", "apple,dart";
                 reg = {_reg_cells(dart["base"], dart["size"])};
+{dart_clock_gates}                apple,adt-path = "{dart["adt_path"]}";
                 #iommu-cells = <1>;
                 status = "okay";
                 phandle = <0x{dart_phandle:x}>;
@@ -294,6 +353,7 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             avd@{avd["base"]:x} {{
                 compatible = "apple,{soc}-avd", "apple,avd";
                 reg = {_reg_cells(avd["base"], avd["size"])};
+{avd_clock_gates}                apple,adt-path = "{avd["adt_path"]}";
                 iommus = <&dart_avd 0x{sid:x}>;
                 status = "okay";
             }};
@@ -378,9 +438,14 @@ def patch_payload_file(
 
 def describe_info(info: dict[str, Any]) -> str:
     info = validate_info(info)
+    clock_gates = (
+        f" clock-gates: avd=[{_u32_cells(info['avd']['clock_gates'])}] "
+        f"dart=[{_u32_cells(info['dart']['clock_gates'])}]"
+    )
     return (
         f"soc={info['soc']} avd={info['avd']['base']:#x}+{info['avd']['size']:#x} "
         f"dart={info['dart']['base']:#x}+{info['dart']['size']:#x} sid={info['sid']:#x}"
+        f"{clock_gates}"
     )
 
 
