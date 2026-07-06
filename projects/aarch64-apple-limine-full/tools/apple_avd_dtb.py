@@ -643,6 +643,18 @@ def _describe_clock_gate_devices(info_node: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def clock_gate_warnings(info: dict[str, Any]) -> list[str]:
+    info = validate_info(info)
+    warnings = []
+    for label in ("dart", "avd"):
+        node = info[label]
+        if node["clock_gates"] and not _clock_gate_paddrs(node):
+            warnings.append(
+                f"{label} has ADT clock-gates but no PMGR paddr mapping"
+            )
+    return warnings
+
+
 def describe_info(info: dict[str, Any]) -> str:
     info = validate_info(info)
     clock_gates = (

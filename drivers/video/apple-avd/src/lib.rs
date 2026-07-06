@@ -1917,10 +1917,15 @@ fn read_be_u64_cells(bytes: &[u8]) -> Result<Vec<usize>, &'static str> {
 
 fn enable_adt_pmgr_clock_gates(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let Some(property) = device.property(AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY) else {
+        println!(
+            "[apple-avd] PMGR ADT clock gate property '{}' missing",
+            AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY
+        );
         return Ok(());
     };
     let paddrs = read_be_u64_cells(property.value())?;
     if paddrs.is_empty() {
+        println!("[apple-avd] PMGR ADT clock gate property is empty");
         return Ok(());
     }
 

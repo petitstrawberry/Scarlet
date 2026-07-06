@@ -513,6 +513,8 @@ def patch_avd_guest_payload(args, hv, payload):
         patched, changed = apple_avd_dtb.patch_payload_bytes(payload, info, args.m1n1)
         action = "Patched" if changed else "Guest DTB already has"
         print(f"{action} Apple AVD nodes: {apple_avd_dtb.describe_info(info)}")
+        for warning in apple_avd_dtb.clock_gate_warnings(info):
+            print(f"warning: Apple AVD DTB patch: {warning}", file=sys.stderr)
         return patched
     except Exception as exc:
         warn_or_raise(args.avd_dtb_patch, f"Apple AVD DTB patch skipped: {exc}", exc)
