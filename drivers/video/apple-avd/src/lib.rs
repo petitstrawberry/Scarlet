@@ -9,7 +9,7 @@ mod debug_device;
 mod firmware;
 pub mod h264;
 
-use alloc::{boxed::Box, collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
 pub use debug::{AvdTraceEvent, AvdTraceKind};
 pub use firmware::AvdFirmwareMessage;
@@ -33,8 +33,7 @@ use scarlet::{
         video::{
             SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
             SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM,
-            SCARLET_VIDEO_H264_DPB_FLAG_VALID,
-            SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+            SCARLET_VIDEO_H264_DPB_FLAG_VALID, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
             ScarletVideoDequeuedFrame, ScarletVideoH264DpbEntry, ScarletVideoH264StatelessParams,
             VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
             VideoBackendH264StatelessRequest, VideoDecodeBackend, register_video_backend,
@@ -143,8 +142,8 @@ const H264_T8103_VP_SLOT: u32 = 2;
 const H264_T8103_FIFO_SLOT: u32 = 0;
 const H264_T8103_FIFO_COUNT: u32 = 7;
 const AVD_TRACE_CAPACITY: usize = 128;
-const AVD_DECODE_TRACE_FRAMES: u32 = 12;
-const AVD_DECODE_PROGRESS_INTERVAL: u32 = 30;
+const AVD_DECODE_TRACE_FRAMES: u32 = 0;
+const AVD_DECODE_PROGRESS_INTERVAL: u32 = 0;
 const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
 const AVD_OUTPUT_UV_SAMPLE_BYTES: usize = 256;
 const AVD_DMA_GRANULE: usize = 0x4000;
@@ -154,7 +153,7 @@ const AVD_MCPU_CODE_BYTES: usize = 0xc000;
 const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
-const AVD_MAX_SESSIONS: usize = 4;
+const AVD_MAX_SESSIONS: usize = 1;
 const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
 const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
 const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
@@ -163,6 +162,7 @@ const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
 const AVD_H264_MAX_DPB_FRAMES: usize = 16;
 const AVD_H264_EXTRA_DECODE_SLOTS: usize = 1;
 const AVD_H264_MAX_OUTPUT_SLOTS: usize = AVD_H264_MAX_DPB_FRAMES + AVD_H264_EXTRA_DECODE_SLOTS;
+const AVD_COMPLETED_FRAME_QUEUE_LEN: usize = AVD_MAX_SESSIONS * AVD_H264_MAX_OUTPUT_SLOTS;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
@@ -1425,8 +1425,10 @@ struct AvdBackendSession {
     next_frame: u32,
     stream_parameters: Option<H264StreamParameters>,
     workspace: Option<AvdSessionWorkspace>,
+    input_pool: Option<AvdMappedInputPool>,
     output_pool: Option<AvdMappedOutputPool>,
-    reference_frames: Vec<AvdReferenceFrame>,
+    reference_frames: [Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+    reference_frame_count: usize,
     next_reference_slot: usize,
     reference_slot_len: usize,
     active_slot_count: usize,
@@ -1442,8 +1444,10 @@ impl AvdBackendSession {
             next_frame: 0,
             stream_parameters: None,
             workspace: None,
+            input_pool: None,
             output_pool: None,
-            reference_frames: Vec::new(),
+            reference_frames: [None; AVD_H264_MAX_DPB_FRAMES],
+            reference_frame_count: 0,
             next_reference_slot: 0,
             reference_slot_len: 0,
             active_slot_count: 0,
@@ -1457,18 +1461,125 @@ impl AvdBackendSession {
         self.next_frame = 0;
         self.stream_parameters = None;
         self.workspace = None;
+        self.input_pool = None;
         self.output_pool = None;
-        self.reference_frames.clear();
+        self.clear_reference_frames();
         self.next_reference_slot = 0;
         self.reference_slot_len = 0;
         self.active_slot_count = 0;
         self.dpb_capacity = 0;
     }
 
+    fn clear_reference_frames(&mut self) {
+        for frame in &mut self.reference_frames {
+            *frame = None;
+        }
+        self.reference_frame_count = 0;
+    }
+
+    fn reference_frames(&self) -> impl Iterator<Item = &AvdReferenceFrame> {
+        self.reference_frames.iter().filter_map(Option::as_ref)
+    }
+
+    fn retain_reference_frames<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&AvdReferenceFrame) -> bool,
+    {
+        for entry in &mut self.reference_frames {
+            let remove = entry.as_ref().is_some_and(|frame| !keep(frame));
+            if remove {
+                *entry = None;
+                self.reference_frame_count = self.reference_frame_count.saturating_sub(1);
+            }
+        }
+    }
+
+    fn remove_reference_slot(&mut self, slot: usize) {
+        for entry in &mut self.reference_frames {
+            let remove = entry.as_ref().is_some_and(|frame| frame.slot == slot);
+            if remove {
+                *entry = None;
+                self.reference_frame_count = self.reference_frame_count.saturating_sub(1);
+            }
+        }
+    }
+
+    fn remove_oldest_reference_frame(&mut self) {
+        let mut oldest_index = None;
+        let mut oldest_frame_number = u32::MAX;
+        for (index, entry) in self.reference_frames.iter().enumerate() {
+            let Some(frame) = entry else {
+                continue;
+            };
+            if oldest_index.is_none() || frame.frame_number < oldest_frame_number {
+                oldest_index = Some(index);
+                oldest_frame_number = frame.frame_number;
+            }
+        }
+        if let Some(index) = oldest_index {
+            self.reference_frames[index] = None;
+            self.reference_frame_count = self.reference_frame_count.saturating_sub(1);
+        }
+    }
+
+    fn trim_reference_frames(&mut self, target_count: usize) {
+        while self.reference_frame_count > target_count {
+            self.remove_oldest_reference_frame();
+        }
+    }
+
+    fn insert_reference_frame(&mut self, frame: AvdReferenceFrame) -> Result<(), &'static str> {
+        self.remove_reference_slot(frame.slot);
+        if self.reference_frame_count >= AVD_H264_MAX_DPB_FRAMES {
+            self.remove_oldest_reference_frame();
+        }
+        let Some(entry) = self
+            .reference_frames
+            .iter_mut()
+            .find(|entry| entry.is_none())
+        else {
+            return Err("apple-avd: reference frame table is full");
+        };
+        *entry = Some(frame);
+        self.reference_frame_count += 1;
+        Ok(())
+    }
+
     fn ensure_workspace(&mut self) -> Result<&mut AvdSessionWorkspace, &'static str> {
         self.workspace
             .as_mut()
             .ok_or("apple-avd: workspace unavailable")
+    }
+
+    fn ensure_mapped_input(
+        &mut self,
+        avd: &AppleAvd,
+        paddr: usize,
+        vaddr: usize,
+        len: usize,
+    ) -> Result<u64, &'static str> {
+        let remap_input = self
+            .input_pool
+            .as_ref()
+            .is_none_or(|pool| pool.paddr != paddr || pool.vaddr != vaddr || pool.len != len);
+        if remap_input {
+            let mapping = avd
+                .dma_context()
+                .map_phys_owned(paddr, len, IommuMapFlags::READ | IommuMapFlags::COHERENT)
+                .map_err(|_| "apple-avd: input DMA map failed")?;
+            self.input_pool = Some(AvdMappedInputPool {
+                paddr,
+                vaddr,
+                len,
+                mapping,
+            });
+        }
+        Ok(self
+            .input_pool
+            .as_ref()
+            .ok_or("apple-avd: mapped input pool unavailable")?
+            .mapping
+            .dma_addr())
     }
 
     fn prune_reference_frames_for_dpb(
@@ -1484,16 +1595,14 @@ impl AvdBackendSession {
             .min(max_references)
             .min(AVD_H264_MAX_DPB_FRAMES);
         if target_references == 0 {
-            self.reference_frames.clear();
+            self.clear_reference_frames();
             return valid_entries;
         }
-        self.reference_frames.retain(|frame| {
+        self.retain_reference_frames(|frame| {
             dpb.iter()
                 .any(|entry| dpb_entry_matches_reference(entry, frame))
         });
-        while self.reference_frames.len() > target_references {
-            self.reference_frames.remove(0);
-        }
+        self.trim_reference_frames(target_references);
         valid_entries
     }
 
@@ -1532,7 +1641,7 @@ impl AvdBackendSession {
         }
         let slot_count = max_slot_count_by_output;
         if is_idr {
-            self.reference_frames.clear();
+            self.clear_reference_frames();
             self.next_reference_slot = 0;
         }
 
@@ -1558,7 +1667,7 @@ impl AvdBackendSession {
                 len: output_map_len,
                 mapping,
             });
-            self.reference_frames.clear();
+            self.clear_reference_frames();
             self.next_reference_slot = 0;
             self.reference_slot_len = 0;
             self.active_slot_count = 0;
@@ -1571,7 +1680,7 @@ impl AvdBackendSession {
             .is_none_or(|workspace| !workspace.is_compatible(layout, slot_count));
         if remap_workspace {
             self.workspace = Some(AvdSessionWorkspace::new(avd, layout, slot_count)?);
-            self.reference_frames.clear();
+            self.clear_reference_frames();
             self.next_reference_slot = 0;
         }
 
@@ -1579,7 +1688,7 @@ impl AvdBackendSession {
             || self.active_slot_count != slot_count
             || self.dpb_capacity != dpb_capacity
         {
-            self.reference_frames.clear();
+            self.clear_reference_frames();
             self.next_reference_slot = 0;
             self.reference_slot_len = slot_span;
             self.active_slot_count = slot_count;
@@ -1623,11 +1732,7 @@ impl AvdBackendSession {
     fn select_free_output_slot(&mut self, slot_count: usize) -> Option<usize> {
         for offset in 0..slot_count {
             let candidate = (self.next_reference_slot + offset) % slot_count;
-            if self
-                .reference_frames
-                .iter()
-                .all(|frame| frame.slot != candidate)
-            {
+            if self.reference_frames().all(|frame| frame.slot != candidate) {
                 self.next_reference_slot = (candidate + 1) % slot_count;
                 return Some(candidate);
             }
@@ -1656,6 +1761,40 @@ fn dpb_entry_matches_reference(
     frame.top_field_order_cnt == entry.top_field_order_cnt && frame.pic_num == entry.pic_num
 }
 
+fn h264_reference_pictures_from_dpb(
+    dpb: &[ScarletVideoH264DpbEntry; 16],
+    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+    out: &mut [AvdH264ReferencePicture; AVD_H264_MAX_DPB_FRAMES],
+) -> usize {
+    let mut count = 0usize;
+    for entry in dpb
+        .iter()
+        .filter(|entry| entry.flags & SCARLET_VIDEO_H264_DPB_FLAG_VALID != 0)
+    {
+        if count >= out.len() {
+            break;
+        }
+        let Some(frame) = frames
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|frame| dpb_entry_matches_reference(entry, frame))
+        else {
+            continue;
+        };
+        out[count] = AvdH264ReferencePicture {
+            timestamp: frame.timestamp,
+            reference_dma_addr: frame.reference_dma_addr,
+            sps_tile_dma_addr: frame.sps_tile_dma_addr,
+            frame_num: frame.frame_num,
+            pic_num: frame.pic_num,
+            top_field_order_cnt: frame.top_field_order_cnt,
+            long_term: frame.long_term,
+        };
+        count += 1;
+    }
+    count
+}
+
 #[derive(Clone, Copy)]
 struct AvdReferenceFrame {
     slot: usize,
@@ -1668,6 +1807,13 @@ struct AvdReferenceFrame {
     pic_num: i32,
     top_field_order_cnt: i32,
     long_term: bool,
+}
+
+struct AvdMappedInputPool {
+    paddr: usize,
+    vaddr: usize,
+    len: usize,
+    mapping: DmaMapping,
 }
 
 struct AvdMappedOutputPool {
@@ -1713,7 +1859,6 @@ struct AvdPendingDecode {
     is_idr: bool,
     status_before: u32,
     command_tag: u32,
-    input_mapping: DmaMapping,
     poll_count: usize,
     completion_phase: AvdH264CompletionPhase,
 }
@@ -1746,31 +1891,140 @@ struct AvdOutputSample {
     v0: u8,
 }
 
+struct AvdCompletedQueue {
+    frames: [Option<VideoBackendDecodedFrame>; AVD_COMPLETED_FRAME_QUEUE_LEN],
+    head: usize,
+    len: usize,
+}
+
+impl AvdCompletedQueue {
+    fn new() -> Self {
+        Self {
+            frames: [None; AVD_COMPLETED_FRAME_QUEUE_LEN],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn clear(&mut self) {
+        for offset in 0..self.len {
+            let index = self.index(offset);
+            self.frames[index] = None;
+        }
+        self.head = 0;
+        self.len = 0;
+    }
+
+    fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&VideoBackendDecodedFrame) -> bool,
+    {
+        let old_len = self.len;
+        let mut write = 0;
+        for read in 0..old_len {
+            let read_index = self.index(read);
+            let Some(frame) = self.frames[read_index].take() else {
+                continue;
+            };
+            if keep(&frame) {
+                self.frames[write] = Some(frame);
+                write += 1;
+            }
+        }
+        for index in write..old_len {
+            self.frames[index] = None;
+        }
+        self.head = 0;
+        self.len = write;
+    }
+
+    fn push_back(&mut self, frame: VideoBackendDecodedFrame) -> Result<(), &'static str> {
+        if self.len >= AVD_COMPLETED_FRAME_QUEUE_LEN {
+            return Err("apple-avd: decoded frame queue is full");
+        }
+        let index = self.index(self.len);
+        self.frames[index] = Some(frame);
+        self.len += 1;
+        Ok(())
+    }
+
+    fn position<F>(&self, mut predicate: F) -> Option<usize>
+    where
+        F: FnMut(&VideoBackendDecodedFrame) -> bool,
+    {
+        for offset in 0..self.len {
+            let index = self.index(offset);
+            let Some(frame) = self.frames[index].as_ref() else {
+                continue;
+            };
+            if predicate(frame) {
+                return Some(offset);
+            }
+        }
+        None
+    }
+
+    fn remove(&mut self, offset: usize) -> Option<VideoBackendDecodedFrame> {
+        if offset >= self.len {
+            return None;
+        }
+        let removed_index = self.index(offset);
+        let removed = self.frames[removed_index].take();
+        for read in (offset + 1)..self.len {
+            let read_index = self.index(read);
+            let write_index = self.index(read - 1);
+            self.frames[write_index] = self.frames[read_index].take();
+        }
+        let tail_index = self.index(self.len - 1);
+        self.frames[tail_index] = None;
+        self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
+        }
+        removed
+    }
+
+    fn index(&self, offset: usize) -> usize {
+        (self.head + offset) % AVD_COMPLETED_FRAME_QUEUE_LEN
+    }
+}
+
 struct AvdBackendState {
-    sessions: Vec<AvdBackendSession>,
-    pending: VecDeque<AvdPendingDecode>,
-    completed: VecDeque<VideoBackendDecodedFrame>,
+    sessions: [AvdBackendSession; AVD_MAX_SESSIONS],
+    pending: Option<AvdPendingDecode>,
+    completed: AvdCompletedQueue,
 }
 
 impl AvdBackendState {
     fn new() -> Self {
-        let mut sessions = Vec::new();
-        for index in 0..AVD_MAX_SESSIONS {
-            sessions.push(AvdBackendSession::new(index));
-        }
         Self {
-            sessions,
-            pending: VecDeque::new(),
-            completed: VecDeque::new(),
+            sessions: core::array::from_fn(AvdBackendSession::new),
+            pending: None,
+            completed: AvdCompletedQueue::new(),
         }
     }
 
     fn allocate_session(&mut self, coded_format: u32) -> Result<u32, &'static str> {
-        let session = self
+        if self.pending.is_some() {
+            return Err("apple-avd: decode already pending");
+        }
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.active) {
+            if session.coded_format != coded_format {
+                return Err("apple-avd: stream format mismatch");
+            }
+            return Ok(session.stream_id);
+        }
+        let index = self
             .sessions
-            .iter_mut()
-            .find(|session| !session.active)
+            .iter()
+            .position(|session| !session.active)
             .ok_or("apple-avd: no free video sessions")?;
+        self.reset_session_state(index);
+        let session = &mut self.sessions[index];
         session.active = true;
         session.coded_format = coded_format;
         session.next_frame = 0;
@@ -1782,17 +2036,21 @@ impl AvdBackendState {
         for session in &mut self.sessions {
             session.reset();
         }
-        self.pending.clear();
+        self.pending = None;
         self.completed.clear();
     }
 
-    fn clear_pending_decode(&mut self) -> Option<u64> {
-        let reason = self.pending.front().map(|pending| {
-            (u64::from(pending.frame_number) << 32) | u64::from(pending.command_tag)
-        });
-        self.pending.clear();
-        self.completed.clear();
-        reason
+    fn session_index(&self, stream_id: u32) -> Result<usize, &'static str> {
+        self.sessions
+            .iter()
+            .position(|session| session.stream_id == stream_id)
+            .ok_or("apple-avd: invalid stream id")
+    }
+
+    fn reset_session_state(&mut self, index: usize) {
+        let stream_id = self.sessions[index].stream_id;
+        self.sessions[index].reset();
+        self.completed.retain(|frame| frame.stream_id != stream_id);
     }
 
     fn session_mut(&mut self, stream_id: u32) -> Result<&mut AvdBackendSession, &'static str> {
@@ -1818,7 +2076,8 @@ impl AvdBackendState {
         stream_id: u32,
         coded_format: u32,
     ) -> Result<&mut AvdBackendSession, &'static str> {
-        let session = self.session_mut(stream_id)?;
+        let index = self.session_index(stream_id)?;
+        let session = &mut self.sessions[index];
         if !session.active {
             session.active = true;
             session.coded_format = coded_format;
@@ -1829,19 +2088,25 @@ impl AvdBackendState {
         Ok(session)
     }
 
-    fn destroy_session(&mut self, stream_id: u32) -> Result<(), &'static str> {
-        let session = self.active_session_mut(stream_id)?;
-        session.reset();
-        self.pending
-            .retain(|pending| pending.stream_id != stream_id);
-        self.completed.retain(|frame| frame.stream_id != stream_id);
-        Ok(())
+    fn destroy_session(&mut self, stream_id: u32) -> Result<bool, &'static str> {
+        let index = self.session_index(stream_id)?;
+        let session = &self.sessions[index];
+        if !session.active {
+            return Ok(false);
+        }
+        let had_pending = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.stream_id == stream_id);
+        if had_pending {
+            let _ = self.pending.take();
+        }
+        self.reset_session_state(index);
+        Ok(had_pending)
     }
 
-    fn has_pending_for_stream(&self, stream_id: u32) -> bool {
-        self.pending
-            .iter()
-            .any(|pending| pending.stream_id == stream_id)
+    fn pending_len(&self) -> usize {
+        usize::from(self.pending.is_some())
     }
 }
 
@@ -1884,23 +2149,6 @@ impl AppleAvdVideoBackend {
         get_apple_avd(self.avd_id).ok_or("apple-avd: backend instance disappeared")
     }
 
-    fn recover_pending_state(
-        &self,
-        avd: &mut AppleAvd,
-        state: &mut AvdBackendState,
-    ) -> Result<bool, &'static str> {
-        let Some(reason) = state.clear_pending_decode() else {
-            return Ok(false);
-        };
-        println!(
-            "[apple-avd] recovering stale pending decode before new submit reason={:#x}",
-            reason
-        );
-        state.reset_all_sessions();
-        avd.restart_firmware(reason)?;
-        Ok(true)
-    }
-
     fn service_completions(&self) -> Result<(), &'static str> {
         let avd = self.avd()?;
         let mut avd = avd.lock();
@@ -1908,7 +2156,7 @@ impl AppleAvdVideoBackend {
         let message = avd.poll_firmware_message();
         let message_raw = message.map(|message| message.raw()).unwrap_or(0);
         let status = avd.h264_status();
-        let Some(front) = state.pending.front() else {
+        let Some(front) = state.pending.as_ref() else {
             return Ok(());
         };
         let status_before = front.status_before;
@@ -1920,7 +2168,7 @@ impl AppleAvdVideoBackend {
         if (status != status_before && (status & H264_STATUS_ERROR_MASK) != 0)
             || matches!(message, Some(message) if message.is_fault())
         {
-            let _ = state.pending.pop_front();
+            let _ = state.pending.take();
             state.reset_all_sessions();
             avd.restart_firmware(status as u64)?;
             return Err("apple-avd: H.264 engine reported an error");
@@ -1950,7 +2198,7 @@ impl AppleAvdVideoBackend {
             avd.submit_h264_postprocess();
             let front = state
                 .pending
-                .front_mut()
+                .as_mut()
                 .ok_or("apple-avd: pending queue changed during video mailbox completion")?;
             front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
             front.poll_count = front.poll_count.saturating_add(1);
@@ -1972,7 +2220,7 @@ impl AppleAvdVideoBackend {
             avd.submit_h264_postprocess();
             let front = state
                 .pending
-                .front_mut()
+                .as_mut()
                 .ok_or("apple-avd: pending queue changed during video completion")?;
             front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
             front.poll_count = front.poll_count.saturating_add(1);
@@ -1997,7 +2245,7 @@ impl AppleAvdVideoBackend {
             completed_by_status = true;
         }
 
-        if (should_log_decode_progress(frame_number) || poll_count == 0 || poll_count % 1000 == 0)
+        if should_log_decode_progress(frame_number)
             && (message_raw != 0 || status != status_before || poll_count == 0)
             && (poll_count < 4 || status != status_before || poll_count % 1000 == 0)
         {
@@ -2016,7 +2264,7 @@ impl AppleAvdVideoBackend {
         if completed_by_mailbox || completed_by_status {
             let pending = state
                 .pending
-                .pop_front()
+                .take()
                 .ok_or("apple-avd: pending queue changed under completion")?;
             let completion = AvdCompletionInfo {
                 status_before,
@@ -2035,7 +2283,7 @@ impl AppleAvdVideoBackend {
             let updated_poll_count = {
                 let front = state
                     .pending
-                    .front_mut()
+                    .as_mut()
                     .ok_or("apple-avd: pending queue changed under poll")?;
                 front.poll_count = front.poll_count.saturating_add(1);
                 front.poll_count
@@ -2051,7 +2299,7 @@ impl AppleAvdVideoBackend {
                     status,
                     message_raw
                 );
-                let _ = state.pending.pop_front();
+                let _ = state.pending.take();
                 state.reset_all_sessions();
                 avd.restart_firmware(status as u64)?;
                 return Err("apple-avd: decode timed out");
@@ -2090,25 +2338,27 @@ impl AppleAvdVideoBackend {
         let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
         let input_vaddr = request.input_vaddr;
         let input_len = request.input_len as usize;
-        let input_map_len = align_up(input_len, granule);
-        arch::clean_invalidate_dcache_to_poc_range(input_vaddr, input_map_len);
+        let input_clean_len = align_up(input_len, granule);
+        let input_map_len = align_up(AVD_MAPPED_INPUT_BYTES, granule);
+        arch::clean_invalidate_dcache_to_poc_range(input_vaddr, input_clean_len);
 
-        let input_mapping = avd
-            .dma_context()
-            .map_phys_owned(
-                request.input_paddr,
-                input_map_len,
-                IommuMapFlags::READ | IommuMapFlags::COHERENT,
-            )
-            .map_err(|_| "apple-avd: input DMA map failed")?;
-
-        let session = state.session_for_submit(request.stream_id, request.coded_format)?;
+        let session = state.active_session_mut(request.stream_id)?;
+        if session.coded_format != request.coded_format {
+            return Err("apple-avd: stream format mismatch");
+        }
         let layout = stream_parameters.nv12_layout();
         let payload_len = layout.output_len();
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
+        let log_decode = should_log_decode_progress(frame_number);
+        let input_dma_addr = session.ensure_mapped_input(
+            avd,
+            request.input_paddr,
+            request.input_vaddr,
+            input_map_len,
+        )?;
         let input = AvdDmaRange {
-            dma_addr: input_mapping.dma_addr(),
+            dma_addr: input_dma_addr,
             len: input_len,
         };
         // SAFETY: `input_vaddr` points at the mapped video input area for
@@ -2156,20 +2406,14 @@ impl AppleAvdVideoBackend {
             ),
         }
         .map_err(h264_error_to_str)?;
-        let reference_pictures: Vec<AvdH264ReferencePicture> = session
-            .reference_frames
-            .iter()
-            .rev()
-            .take(AVD_H264_MAX_DPB_FRAMES)
-            .map(|frame| AvdH264ReferencePicture {
-                reference_dma_addr: frame.reference_dma_addr,
-                sps_tile_dma_addr: frame.sps_tile_dma_addr,
-                frame_num: frame.frame_num,
-                pic_num: frame.pic_num,
-                top_field_order_cnt: frame.top_field_order_cnt,
-                long_term: frame.long_term,
-            })
-            .collect();
+        let mut reference_picture_storage =
+            [AvdH264ReferencePicture::default(); AVD_H264_MAX_DPB_FRAMES];
+        let reference_picture_count = h264_reference_pictures_from_dpb(
+            &decode_request.dpb,
+            &session.reference_frames,
+            &mut reference_picture_storage,
+        );
+        let reference_pictures = &reference_picture_storage[..reference_picture_count];
 
         let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr, sps_tile_dma_addr) = {
             let workspace = session.ensure_workspace()?;
@@ -2182,7 +2426,7 @@ impl AppleAvdVideoBackend {
                 &stream_parameters,
                 &decode_request.slice,
                 &workspace_addresses,
-                &reference_pictures,
+                reference_pictures,
             );
             let inst_len = instructions
                 .write_le_bytes(workspace.instruction_fifo_mut())
@@ -2203,63 +2447,28 @@ impl AppleAvdVideoBackend {
         let status_before =
             avd.submit_h264_mmio(&decode_request, &instructions, instruction_fifo_dma)?;
         let command_tag = avd.submit_h264_request(&decode_request)?;
-        if should_log_decode_progress(frame_number) {
+        if log_decode {
             let words = instructions.words();
-            let tail0 = words
-                .get(words.len().saturating_sub(3))
-                .copied()
-                .unwrap_or(0);
-            let tail1 = words
-                .get(words.len().saturating_sub(2))
-                .copied()
-                .unwrap_or(0);
-            let tail2 = words
-                .get(words.len().saturating_sub(1))
-                .copied()
-                .unwrap_or(0);
             println!(
-                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} l0={} l1={} direct={} refs={} valid_dpb={} max_refs={} slot={}/{} dpb={} in={:#x}+{} out={:#x}+{} layout={}x{} y_stride={} inst_words={} inst0=[{:#x},{:#x},{:#x},{:#x}] tail=[{:#x},{:#x},{:#x}] status_before={:#x} tag={:#x}",
+                "[apple-avd] decode submit stream={} frame={} idr={} ref={} slice={:?} poc={} refs={} valid_dpb={} slot={}/{} inst_words={} status_before={:#x} tag={:#x}",
                 request.stream_id,
                 frame_number,
                 decode_request.slice.is_idr(),
                 decode_request.slice.is_reference(),
                 decode_request.slice.kind,
                 decode_request.current_poc,
-                decode_request.slice.num_ref_idx_l0_active_minus1 as u32 + 1,
-                decode_request.slice.num_ref_idx_l1_active_minus1 as u32 + 1,
-                decode_request.slice.flags & SCARLET_VIDEO_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED
-                    != 0,
                 reference_pictures.len(),
                 valid_dpb_entries,
-                max_references,
                 reference_output.slot,
                 reference_output.slot_count,
-                reference_output.dpb_capacity,
-                input_mapping.dma_addr(),
-                input_len,
-                reference_output.dma_addr,
-                payload_len,
-                layout.width,
-                layout.height,
-                layout.y_stride,
                 words.len(),
-                words.first().copied().unwrap_or(0),
-                words.get(1).copied().unwrap_or(0),
-                words.get(2).copied().unwrap_or(0),
-                words.get(3).copied().unwrap_or(0),
-                tail0,
-                tail1,
-                tail2,
                 status_before,
                 command_tag
             );
         }
-        avd.trace.push(
-            AvdTraceKind::DecodeSubmit,
-            input_mapping.dma_addr(),
-            inst_len as u64,
-        );
-        state.pending.push_back(AvdPendingDecode {
+        avd.trace
+            .push(AvdTraceKind::DecodeSubmit, input_dma_addr, inst_len as u64);
+        state.pending = Some(AvdPendingDecode {
             stream_id: request.stream_id,
             frame_number,
             timestamp: request.timestamp,
@@ -2283,7 +2492,6 @@ impl AppleAvdVideoBackend {
             is_idr: decode_request.slice.is_idr(),
             status_before,
             command_tag,
-            input_mapping,
             poll_count: 0,
             completion_phase: AvdH264CompletionPhase::WaitingVideo,
         });
@@ -2308,7 +2516,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         Some(format!(
             " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
             firmware,
-            state.pending.len(),
+            state.pending_len(),
             state.completed.len(),
             h264_status,
             snapshot.status,
@@ -2333,34 +2541,19 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         if coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: only H.264 sessions are supported");
         }
-        let avd = self.avd()?;
-        let mut avd = avd.lock();
+        self.service_completions()?;
         let mut state = self.state.lock();
-        self.recover_pending_state(&mut avd, &mut state)?;
-        match state.allocate_session(coded_format) {
-            Ok(stream_id) => Ok(stream_id),
-            Err(_) => {
-                println!("[apple-avd] resetting stale video sessions before create");
-                state.reset_all_sessions();
-                avd.restart_firmware(0x51_4553_45)?;
-                state.allocate_session(coded_format)
-            }
-        }
+        state.allocate_session(coded_format)
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
         let avd = self.avd()?;
         let mut avd = avd.lock();
         let mut state = self.state.lock();
-        let had_pending = state.has_pending_for_stream(stream_id);
-        state.destroy_session(stream_id)?;
-        if had_pending {
-            println!(
-                "[apple-avd] destroying stream {} with pending decode; restarting firmware",
-                stream_id
-            );
-            state.reset_all_sessions();
-            avd.restart_firmware(stream_id as u64)?;
+        let status = avd.h264_status();
+        let restart_firmware = state.destroy_session(stream_id)?;
+        if restart_firmware {
+            avd.restart_firmware(status as u64)?;
         }
         Ok(())
     }
@@ -2383,8 +2576,8 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let avd = self.avd()?;
         let mut avd = avd.lock();
         let mut state = self.state.lock();
-        if !state.pending.is_empty() {
-            self.recover_pending_state(&mut avd, &mut state)?;
+        if state.pending.is_some() {
+            return Err("apple-avd: decode already pending");
         }
         avd.ensure_firmware_running()?;
         let stream_parameters = {
@@ -2419,8 +2612,8 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let avd = self.avd()?;
         let mut avd = avd.lock();
         let mut state = self.state.lock();
-        if !state.pending.is_empty() {
-            self.recover_pending_state(&mut avd, &mut state)?;
+        if state.pending.is_some() {
+            return Err("apple-avd: decode already pending");
         }
         avd.ensure_firmware_running()?;
         {
@@ -2443,9 +2636,12 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
         self.service_completions()?;
         let mut state = self.state.lock();
+        let session_index = state.session_index(stream_id)?;
+        if !state.sessions[session_index].active {
+            return Err("apple-avd: inactive stream id");
+        }
         let Some(index) = state
             .completed
-            .iter()
             .position(|frame| frame.stream_id == stream_id)
         else {
             return Ok(None);
@@ -2507,13 +2703,10 @@ fn finish_pending_decode(
 
     let session = state.session_mut(pending.stream_id)?;
     if pending.is_idr {
-        session.reference_frames.clear();
+        session.clear_reference_frames();
     }
     if pending.store_reference {
-        session
-            .reference_frames
-            .retain(|frame| frame.slot != pending.reference_slot);
-        session.reference_frames.push(AvdReferenceFrame {
+        session.insert_reference_frame(AvdReferenceFrame {
             slot: pending.reference_slot,
             frame_number: pending.frame_number,
             timestamp: pending.timestamp,
@@ -2524,10 +2717,8 @@ fn finish_pending_decode(
             pic_num: pending.pic_num,
             top_field_order_cnt: pending.top_field_order_cnt,
             long_term: pending.long_term,
-        });
-        while session.reference_frames.len() > pending.dpb_capacity.max(1) {
-            session.reference_frames.remove(0);
-        }
+        })?;
+        session.trim_reference_frames(pending.dpb_capacity.max(1));
     }
 
     state.completed.push_back(VideoBackendDecodedFrame {
@@ -2541,8 +2732,7 @@ fn finish_pending_decode(
             flags: pending.command_tag,
             timestamp: pending.timestamp,
         },
-    });
-    let _ = pending.input_mapping.dma_addr();
+    })?;
     Ok(())
 }
 
@@ -2551,8 +2741,9 @@ fn should_log_decode_completion(pending: &AvdPendingDecode, completion: AvdCompl
         || (completion.status & H264_STATUS_ERROR_MASK) != 0
 }
 
-fn should_log_decode_progress(frame_number: u32) -> bool {
-    frame_number < AVD_DECODE_TRACE_FRAMES || frame_number % AVD_DECODE_PROGRESS_INTERVAL == 0
+fn should_log_decode_progress(_frame_number: u32) -> bool {
+    _frame_number < AVD_DECODE_TRACE_FRAMES
+        || (AVD_DECODE_PROGRESS_INTERVAL != 0 && _frame_number % AVD_DECODE_PROGRESS_INTERVAL == 0)
 }
 
 fn sample_output_payload(

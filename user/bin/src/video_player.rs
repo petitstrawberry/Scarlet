@@ -102,6 +102,8 @@ const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
 const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
+const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
+const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
 const SCARLET_VIDEO_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE: u32 = 1 << 0;
 const SCARLET_VIDEO_H264_SPS_FLAG_QPPRIME_Y_ZERO_TRANSFORM_BYPASS: u32 = 1 << 1;
 const SCARLET_VIDEO_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO: u32 = 1 << 2;
@@ -4396,7 +4398,7 @@ struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
-    h264_state: H264StatelessState,
+    h264_context: H264RequestContext,
 }
 
 impl HardwareVideoDecoder {
@@ -4417,7 +4419,7 @@ impl HardwareVideoDecoder {
                 caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264)
             );
         }
-        let mapped = Self::map_video_buffer(&device);
+        let mapped = Self::map_video_buffer(&device, caps);
         if let Some(buffer) = &mapped {
             println!(
                 "[{}] hardware decoder mmap input={} output={}",
@@ -4428,7 +4430,7 @@ impl HardwareVideoDecoder {
             device,
             mapped,
             caps,
-            h264_state: H264StatelessState::default(),
+            h264_context: H264RequestContext::default(),
         })
     }
 
@@ -4561,11 +4563,12 @@ impl HardwareVideoDecoder {
         }
 
         if codec == VideoCodec::H264 && self.supports_stateless_h264() {
-            let params = self.h264_state.params_for_access_unit(access_unit)?;
+            let h264 = self.h264_context.params_for_access_unit(access_unit)?;
+            let params = &h264.params;
             let submit = ScarletVideoH264StatelessSubmit {
                 stream_id: buffer.stream_id,
                 input_len: access_unit.len() as u32,
-                timestamp: 0,
+                timestamp: h264.timestamp,
                 params: ScarletVideoH264ParamPtrs {
                     sps: &params.sps as *const _ as usize as u64,
                     pps: &params.pps as *const _ as usize as u64,
@@ -4679,17 +4682,38 @@ impl HardwareVideoDecoder {
         }
     }
 
-    fn map_video_buffer(device: &File) -> Option<MappedVideoBuffer> {
-        let mut session_info = ScarletVideoSessionInfo::default();
-        let (stream_id, session_commands, info) = if device
-            .as_handle()
-            .control(
-                SCARLET_VIDEO_CREATE_SESSION,
-                &mut session_info as *mut _ as usize,
-            )
-            .is_ok()
+    fn map_video_buffer(
+        device: &File,
+        caps: Option<ScarletVideoCapabilities>,
+    ) -> Option<MappedVideoBuffer> {
+        if caps
+            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_MAPPED_BUFFERS))
+            .is_some_and(|has_mapped_buffers| !has_mapped_buffers)
         {
-            (session_info.stream_id, true, session_info.buffer)
+            return None;
+        }
+        let use_session_commands = caps
+            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_SESSIONS))
+            .unwrap_or(true);
+        let (stream_id, session_commands, info) = if use_session_commands {
+            let mut session_info = ScarletVideoSessionInfo::default();
+            if device
+                .as_handle()
+                .control(
+                    SCARLET_VIDEO_CREATE_SESSION,
+                    &mut session_info as *mut _ as usize,
+                )
+                .is_ok()
+            {
+                (session_info.stream_id, true, session_info.buffer)
+            } else {
+                let mut info = ScarletVideoBufferInfo::default();
+                device
+                    .as_handle()
+                    .control(SCARLET_VIDEO_GET_BUFFER, &mut info as *mut _ as usize)
+                    .ok()?;
+                (1, false, info)
+            }
         } else {
             let mut info = ScarletVideoBufferInfo::default();
             device
@@ -4748,7 +4772,6 @@ impl HardwareVideoDecoder {
 impl Drop for HardwareVideoDecoder {
     fn drop(&mut self) {
         if let Some(buffer) = self.mapped.take() {
-            let _ = munmap(buffer.ptr as usize, buffer.mmap_len);
             if buffer.session_commands {
                 let info = ScarletVideoSessionInfo {
                     stream_id: buffer.stream_id,
@@ -4760,6 +4783,7 @@ impl Drop for HardwareVideoDecoder {
                     .as_handle()
                     .control(SCARLET_VIDEO_DESTROY_SESSION, &info as *const _ as usize);
             }
+            let _ = munmap(buffer.ptr as usize, buffer.mmap_len);
         }
     }
 }
@@ -5329,13 +5353,21 @@ impl<'a> EbspBitReader<'a> {
 }
 
 #[derive(Default)]
-struct H264StatelessState {
+struct H264RequestContext {
+    // The kernel ABI is stateless per request; userspace still keeps the
+    // stream context needed to build those requests.
     sps: Option<ScarletVideoH264Sps>,
     pps: Option<ScarletVideoH264Pps>,
     scaling_matrix: ScarletVideoH264ScalingMatrix,
     pred_weights: ScarletVideoH264PredWeights,
     dpb: Vec<H264DpbFrame>,
-    next_reference_ts: u64,
+    poc: H264PocState,
+    next_timestamp: u64,
+}
+
+struct H264PreparedAccessUnit {
+    params: ScarletVideoH264StatelessParams,
+    timestamp: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -5346,6 +5378,12 @@ struct H264DpbFrame {
     top_field_order_cnt: i32,
     bottom_field_order_cnt: i32,
     long_term: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct H264PocState {
+    prev_pic_order_cnt_msb: i32,
+    prev_pic_order_cnt_lsb: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -5360,6 +5398,14 @@ struct H264RefPicMarking {
     idr_long_term: bool,
     adaptive: bool,
     operations: Vec<H264MemoryManagementControl>,
+}
+
+impl H264RefPicMarking {
+    fn resets_poc(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| matches!(operation, H264MemoryManagementControl::Reset))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5383,11 +5429,11 @@ enum H264MemoryManagementControl {
     },
 }
 
-impl H264StatelessState {
+impl H264RequestContext {
     fn params_for_access_unit(
         &mut self,
         access_unit: &[u8],
-    ) -> Result<ScarletVideoH264StatelessParams, String> {
+    ) -> Result<H264PreparedAccessUnit, String> {
         let nals = parse_raw_annex_b(access_unit);
         let mut slice = None;
         let mut decode = None;
@@ -5408,8 +5454,14 @@ impl H264StatelessState {
                     let pps = self
                         .pps
                         .ok_or_else(|| String::from("H.264 stateless submit missing PPS"))?;
-                    let (slice_params, decode_params, marking) =
-                        parse_h264_slice(nal, &sps, &pps, &self.dpb, &mut self.pred_weights)?;
+                    let (slice_params, decode_params, marking) = parse_h264_slice(
+                        nal,
+                        &sps,
+                        &pps,
+                        &self.dpb,
+                        &mut self.pred_weights,
+                        &mut self.poc,
+                    )?;
                     slice = Some(slice_params);
                     decode = Some(decode_params);
                     ref_pic_marking = Some(marking);
@@ -5432,17 +5484,20 @@ impl H264StatelessState {
             decode_params: decode
                 .ok_or_else(|| String::from("H.264 stateless submit has no decode params"))?,
         };
+        let timestamp = self.next_submit_timestamp();
         self.update_dpb_after_submit(
             &params,
             &ref_pic_marking.unwrap_or_else(H264RefPicMarking::default),
+            timestamp,
         );
-        Ok(params)
+        Ok(H264PreparedAccessUnit { params, timestamp })
     }
 
     fn update_dpb_after_submit(
         &mut self,
         params: &ScarletVideoH264StatelessParams,
         marking: &H264RefPicMarking,
+        timestamp: u64,
     ) {
         let is_idr = params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0;
         let max_frame_num = h264_max_frame_num(&params.sps);
@@ -5457,11 +5512,8 @@ impl H264StatelessState {
         if params.decode_params.nal_ref_idc == 0 {
             return;
         }
-        if self.next_reference_ts == 0 {
-            self.next_reference_ts = 1;
-        }
         self.dpb.push(H264DpbFrame {
-            reference_ts: self.next_reference_ts,
+            reference_ts: timestamp,
             pic_num: current_long_term_idx
                 .and_then(|index| i32::try_from(index).ok())
                 .unwrap_or_else(|| i32::from(params.decode_params.frame_num)),
@@ -5470,7 +5522,6 @@ impl H264StatelessState {
             bottom_field_order_cnt: params.decode_params.bottom_field_order_cnt,
             long_term: current_long_term_idx.is_some(),
         });
-        self.next_reference_ts = self.next_reference_ts.wrapping_add(1);
         let max_refs = usize::from(params.sps.max_num_ref_frames).max(1);
         if !is_idr && marking.adaptive {
             self.cap_dpb(max_refs);
@@ -5568,6 +5619,18 @@ impl H264StatelessState {
         while self.dpb.len() > max_refs {
             self.dpb.remove(0);
         }
+    }
+
+    fn next_submit_timestamp(&mut self) -> u64 {
+        if self.next_timestamp == 0 {
+            self.next_timestamp = 1;
+        }
+        let timestamp = self.next_timestamp;
+        self.next_timestamp = self.next_timestamp.wrapping_add(1);
+        if self.next_timestamp == 0 {
+            self.next_timestamp = 1;
+        }
+        timestamp
     }
 }
 
@@ -5820,6 +5883,7 @@ fn parse_h264_slice(
     pps: &ScarletVideoH264Pps,
     dpb: &[H264DpbFrame],
     pred_weights: &mut ScarletVideoH264PredWeights,
+    poc_state: &mut H264PocState,
 ) -> Result<
     (
         ScarletVideoH264SliceParams,
@@ -5864,7 +5928,10 @@ fn parse_h264_slice(
         let poc_bits = sps.log2_max_pic_order_cnt_lsb_minus4.saturating_add(4);
         decode_params.pic_order_cnt_lsb =
             read_u16_bits(&mut reader, poc_bits, "H.264 pic_order_cnt_lsb")?;
-        decode_params.top_field_order_cnt = i32::from(decode_params.pic_order_cnt_lsb);
+        let pic_order_cnt_msb =
+            h264_pic_order_cnt_msb(sps, nal, decode_params.pic_order_cnt_lsb, poc_state);
+        decode_params.top_field_order_cnt =
+            pic_order_cnt_msb.saturating_add(i32::from(decode_params.pic_order_cnt_lsb));
         decode_params.bottom_field_order_cnt = decode_params.top_field_order_cnt;
         if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT != 0 {
             decode_params.delta_pic_order_cnt_bottom = reader
@@ -5978,6 +6045,18 @@ fn parse_h264_slice(
         }
     }
 
+    if sps.pic_order_cnt_type == 0 && nal.nal_ref_idc != 0 {
+        if ref_pic_marking.resets_poc() {
+            poc_state.prev_pic_order_cnt_msb = 0;
+            poc_state.prev_pic_order_cnt_lsb = 0;
+        } else {
+            poc_state.prev_pic_order_cnt_msb = decode_params
+                .top_field_order_cnt
+                .saturating_sub(i32::from(decode_params.pic_order_cnt_lsb));
+            poc_state.prev_pic_order_cnt_lsb = decode_params.pic_order_cnt_lsb;
+        }
+    }
+
     let mut slice_params = ScarletVideoH264SliceParams {
         header_bit_size: reader.position_bits() as u32,
         nal_offset: nal.offset as u32,
@@ -6001,6 +6080,36 @@ fn parse_h264_slice(
     slice_params.ref_pic_list0 = ref_pic_list0;
     slice_params.ref_pic_list1 = ref_pic_list1;
     Ok((slice_params, decode_params, ref_pic_marking))
+}
+
+fn h264_pic_order_cnt_msb(
+    sps: &ScarletVideoH264Sps,
+    nal: &RawNalUnit<'_>,
+    pic_order_cnt_lsb: u16,
+    poc_state: &H264PocState,
+) -> i32 {
+    let poc_bits = u32::from(sps.log2_max_pic_order_cnt_lsb_minus4.saturating_add(4));
+    let max_pic_order_cnt_lsb = 1i32.checked_shl(poc_bits).unwrap_or(i32::MAX);
+    if nal.nal_type == 5 || max_pic_order_cnt_lsb <= 0 {
+        return 0;
+    }
+
+    let pic_order_cnt_lsb = i32::from(pic_order_cnt_lsb);
+    let prev_pic_order_cnt_lsb = i32::from(poc_state.prev_pic_order_cnt_lsb);
+    let prev_pic_order_cnt_msb = poc_state.prev_pic_order_cnt_msb;
+    let half_range = max_pic_order_cnt_lsb / 2;
+
+    if pic_order_cnt_lsb < prev_pic_order_cnt_lsb
+        && prev_pic_order_cnt_lsb - pic_order_cnt_lsb >= half_range
+    {
+        prev_pic_order_cnt_msb.saturating_add(max_pic_order_cnt_lsb)
+    } else if pic_order_cnt_lsb > prev_pic_order_cnt_lsb
+        && pic_order_cnt_lsb - prev_pic_order_cnt_lsb > half_range
+    {
+        prev_pic_order_cnt_msb.saturating_sub(max_pic_order_cnt_lsb)
+    } else {
+        prev_pic_order_cnt_msb
+    }
 }
 
 fn fill_h264_decode_dpb(
@@ -6914,10 +7023,16 @@ impl SasPcmWriter {
             }
 
             let data_offset = pos_frame * self.frame_bytes;
+            if controls.current_seek_epoch() != seek_epoch {
+                return Ok(true);
+            }
             let written = self
                 .stream
                 .write(&data[data_offset..data_offset + frames * self.frame_bytes]);
             pos_frame += written;
+            if controls.current_seek_epoch() != seek_epoch {
+                return Ok(true);
+            }
         }
         Ok(false)
     }
