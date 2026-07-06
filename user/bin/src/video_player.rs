@@ -1592,6 +1592,7 @@ fn decode_loop_hardware(
     let mut loop_index = 0u64;
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut seek_decoder = None;
 
     loop {
         let seek_plan = video_seek_plan(&source, seek_target_us);
@@ -1601,6 +1602,7 @@ fn decode_loop_hardware(
 
         if seek_epoch != 0 || seek_target_us != 0 {
             if !publish_hardware_seek_preview(
+                &mut seek_decoder,
                 &source,
                 mp4_data,
                 &seek_plan,
@@ -2337,6 +2339,7 @@ fn replay_hardware_source_loops(
     let mut access_unit_scratch = Vec::new();
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut seek_decoder = None;
 
     loop {
         let seek_plan = video_seek_plan(source, seek_target_us);
@@ -2346,6 +2349,7 @@ fn replay_hardware_source_loops(
 
         if seek_epoch != 0 || seek_target_us != 0 {
             if !publish_hardware_seek_preview(
+                &mut seek_decoder,
                 source,
                 Some(mp4_data),
                 &seek_plan,
@@ -5121,6 +5125,7 @@ impl FrameReorderBuffer {
 }
 
 fn publish_hardware_seek_preview(
+    decoder: &mut Option<HardwareVideoDecoder>,
     source: &VideoSource,
     mp4_data: Option<&[u8]>,
     seek_plan: &VideoSeekPlan,
@@ -5142,7 +5147,12 @@ fn publish_hardware_seek_preview(
         return Ok(true);
     }
     let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
-    let mut decoder = HardwareVideoDecoder::open()?;
+    if decoder.is_none() {
+        *decoder = Some(HardwareVideoDecoder::open()?);
+    }
+    let decoder = decoder
+        .as_mut()
+        .ok_or_else(|| String::from("hardware seek decoder is unavailable"))?;
     let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
         return Ok(true);
     };
