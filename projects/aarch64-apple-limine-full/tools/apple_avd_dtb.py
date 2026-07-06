@@ -400,11 +400,13 @@ def _first_phandle(block: str) -> int | None:
         return None
 
 
-def _dts_has_working_avd(text: str) -> bool:
+def _dts_has_working_avd(text: str, require_pmgr_clock_gates: bool = False) -> bool:
     avd_iommus = []
     dart_phandles = set()
     for block in _node_blocks(text, r"avd@[0-9a-fA-F]+"):
         if re.search(r"apple,t[0-9]{4}-avd|apple,avd", block):
+            if require_pmgr_clock_gates and "apple,pmgr-clock-gate-paddrs" not in block:
+                continue
             phandle = _first_iommus_phandle(block)
             if phandle is not None:
                 avd_iommus.append(phandle)
@@ -416,11 +418,11 @@ def _dts_has_working_avd(text: str) -> bool:
     return any(phandle in dart_phandles for phandle in avd_iommus)
 
 
-def dtb_has_avd(dtb: pathlib.Path) -> bool:
+def dtb_has_avd(dtb: pathlib.Path, require_pmgr_clock_gates: bool = False) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         dts = pathlib.Path(tmp) / "base.dts"
         text = _dtb_to_dts(dtb, dts)
-    return _dts_has_working_avd(text)
+    return _dts_has_working_avd(text, require_pmgr_clock_gates)
 
 
 def _next_phandle(dtb: pathlib.Path) -> int:
@@ -552,7 +554,11 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
 
 def patch_dtb_file(input_dtb: pathlib.Path, output_dtb: pathlib.Path, info: dict[str, Any]) -> bool:
     """Patch a DTB file. Return True when a patch was applied."""
-    if dtb_has_avd(input_dtb):
+    info = validate_info(info)
+    require_pmgr_clock_gates = bool(
+        _clock_gate_paddrs(info["avd"]) or _clock_gate_paddrs(info["dart"])
+    )
+    if dtb_has_avd(input_dtb, require_pmgr_clock_gates):
         if input_dtb.resolve() != output_dtb.resolve():
             output_dtb.write_bytes(input_dtb.read_bytes())
         return False
