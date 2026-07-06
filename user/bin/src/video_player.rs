@@ -1592,6 +1592,8 @@ fn decode_loop_hardware(
     let mut loop_index = 0u64;
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut hardware_caps = None;
+    let mut seek_decoder = None;
 
     loop {
         let seek_plan = video_seek_plan(&source, seek_target_us);
@@ -1601,6 +1603,8 @@ fn decode_loop_hardware(
 
         if seek_epoch != 0 || seek_target_us != 0 {
             if !publish_hardware_seek_preview(
+                &mut seek_decoder,
+                hardware_caps,
                 &source,
                 mp4_data,
                 &seek_plan,
@@ -1619,6 +1623,7 @@ fn decode_loop_hardware(
         }
 
         let mut decoder = HardwareVideoDecoder::open()?;
+        hardware_caps = decoder.caps;
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
                 queue.clear();
@@ -2337,6 +2342,8 @@ fn replay_hardware_source_loops(
     let mut access_unit_scratch = Vec::new();
     let mut seek_epoch = controls.current_seek_epoch();
     let mut seek_target_us = 0u64;
+    let mut hardware_caps = None;
+    let mut seek_decoder = None;
 
     loop {
         let seek_plan = video_seek_plan(source, seek_target_us);
@@ -2346,6 +2353,8 @@ fn replay_hardware_source_loops(
 
         if seek_epoch != 0 || seek_target_us != 0 {
             if !publish_hardware_seek_preview(
+                &mut seek_decoder,
+                hardware_caps,
                 source,
                 Some(mp4_data),
                 &seek_plan,
@@ -2364,6 +2373,7 @@ fn replay_hardware_source_loops(
         }
 
         let mut decoder = HardwareVideoDecoder::open()?;
+        hardware_caps = decoder.caps;
         for access_unit in &source.access_units[seek_plan.decode_start_index..] {
             if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
                 queue.clear();
@@ -5121,6 +5131,8 @@ impl FrameReorderBuffer {
 }
 
 fn publish_hardware_seek_preview(
+    decoder: &mut Option<HardwareVideoDecoder>,
+    caps: Option<ScarletVideoCapabilities>,
     source: &VideoSource,
     mp4_data: Option<&[u8]>,
     seek_plan: &VideoSeekPlan,
@@ -5142,9 +5154,18 @@ fn publish_hardware_seek_preview(
         return Ok(true);
     }
     let access_unit_bytes = access_unit.bytes(mp4_data, access_unit_scratch)?;
-    let Ok(mut decoder) = HardwareVideoDecoder::open() else {
+    if !hardware_seek_preview_supported(caps) {
         return Ok(true);
-    };
+    }
+    if decoder.is_none() {
+        let Ok(new_decoder) = HardwareVideoDecoder::open() else {
+            return Ok(true);
+        };
+        *decoder = Some(new_decoder);
+    }
+    let decoder = decoder
+        .as_mut()
+        .ok_or_else(|| String::from("hardware seek decoder is unavailable"))?;
     let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
         return Ok(true);
     };
@@ -5158,6 +5179,10 @@ fn publish_hardware_seek_preview(
         access_unit.presentation_time_us,
         seek_epoch,
     )
+}
+
+fn hardware_seek_preview_supported(caps: Option<ScarletVideoCapabilities>) -> bool {
+    caps.is_some_and(|caps| caps.max_sessions > 1)
 }
 
 fn stream_total_frames(source: &VideoSource, decoded: usize, complete: bool) -> u32 {
