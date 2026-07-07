@@ -1,8 +1,8 @@
 //! Cortex-M3 interrupt handling for the Apple AVD firmware.
 
 use crate::abi::{
-    CMD_H264_DECODE, MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR, command_kind,
-    command_tag,
+    CMD_H264_DECODE, CMD_VP9_DECODE, MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR,
+    command_kind, command_tag,
 };
 use crate::mailbox::send_message;
 
@@ -67,6 +67,7 @@ pub fn arm_decode_irqs() {
 pub fn dispatch_mailbox_command(command: u32) {
     match command_kind(command) {
         CMD_H264_DECODE => arm_decode_irqs(),
+        CMD_VP9_DECODE => arm_decode_irqs(),
         _ => {
             let kind = command_kind(command) & 0xff;
             let tag = command_tag(command) & 0xff;

@@ -8,6 +8,7 @@ mod debug;
 mod debug_device;
 mod firmware;
 pub mod h264;
+pub mod vp9;
 
 use alloc::{
     boxed::Box,
@@ -37,12 +38,15 @@ use scarlet::{
         },
         reset::ResetHandle,
         video::{
-            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC,
-            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR, SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM,
-            SCARLET_VIDEO_H264_DPB_FLAG_VALID, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
-            ScarletVideoDequeuedFrame, ScarletVideoH264DpbEntry, ScarletVideoH264StatelessParams,
-            VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
-            VideoBackendH264StatelessRequest, VideoCompletionNotifier, VideoDecodeBackend,
+            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FORMAT_VP9, SCARLET_VIDEO_FRAME_HEADER_LEN,
+            SCARLET_VIDEO_FRAME_MAGIC, SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
+            SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM, SCARLET_VIDEO_H264_DPB_FLAG_VALID,
+            SCARLET_VIDEO_PIXEL_FORMAT_NV12, SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME,
+            SCARLET_VIDEO_VP9_PROBABILITY_BYTES, ScarletVideoDequeuedFrame,
+            ScarletVideoH264DpbEntry, ScarletVideoH264StatelessParams,
+            ScarletVideoVp9StatelessParams, VideoBackendCapabilities, VideoBackendDecodeRequest,
+            VideoBackendDecodedFrame, VideoBackendH264StatelessRequest,
+            VideoBackendVp9StatelessRequest, VideoCompletionNotifier, VideoDecodeBackend,
             register_video_backend, register_video_decode_device,
         },
     },
@@ -58,6 +62,10 @@ use scarlet::{
 };
 use scarlet_driver_apple_pmgr::{
     PmgrDomain, pmgr_get_domain_by_label, pmgr_get_domain_by_register_paddr,
+};
+use vp9::{
+    AvdVp9InstructionStream, AvdVp9ReferencePicture, AvdVp9Workspace, Vp9DecodeRequest,
+    Vp9FrontendError, Vp9StreamParameters,
 };
 
 const AVD_DEFAULT_IOVA_BASE: u64 = 0x4000_0000;
@@ -92,26 +100,26 @@ const REG_H264_INSTRUCTION: usize = 0x1104000;
 const REG_H265_INSTRUCTION: usize = 0x1104004;
 const REG_H264_MODE: usize = 0x110400c;
 const REG_VP9_MODE: usize = 0x1104010;
-const REG_H264_SUBMIT: usize = 0x1104014;
-const REG_H264_COUNTER0: usize = 0x1104018;
-const REG_H264_COUNTER1: usize = 0x110401c;
-const REG_H264_COUNTER2: usize = 0x1104020;
-const REG_H264_COUNTER3: usize = 0x1104024;
-const REG_H264_COUNTER4: usize = 0x1104028;
-const REG_H264_CONTROL0: usize = 0x1104034;
-const REG_H264_CONTROL1: usize = 0x110403c;
+const REG_DECODE_SUBMIT: usize = 0x1104014;
+const REG_DECODE_COUNTER0: usize = 0x1104018;
+const REG_DECODE_COUNTER1: usize = 0x110401c;
+const REG_DECODE_COUNTER2: usize = 0x1104020;
+const REG_DECODE_COUNTER3: usize = 0x1104024;
+const REG_DECODE_COUNTER4: usize = 0x1104028;
+const REG_DECODE_CONTROL0: usize = 0x1104034;
+const REG_DECODE_CONTROL1: usize = 0x110403c;
 const REG_H265_CONTROL: usize = 0x1104040;
-const REG_H264_DMA_TRIGGER: usize = 0x1104048;
+const REG_DECODE_DMA_TRIGGER: usize = 0x1104048;
 const REG_VP9_CONTROL: usize = 0x110404c;
-const REG_H264_TIMEOUT: usize = 0x110405c;
-const REG_H264_STATUS: usize = 0x1104060;
-const REG_H264_STATUS_MASK: usize = 0x1104064;
-const REG_H264_INST_FIFO_BASE: usize = 0x1104068;
-const REG_H264_INST_FIFO_SIZE: usize = 0x1104084;
-const REG_H264_INST_FIFO_READ: usize = 0x11040a0;
-const REG_H264_INST_FIFO_WRITE: usize = 0x11040bc;
-const REG_H264_PIPE_SELECT: usize = 0x11040f4;
-const REG_H264_PIPE_CONTROL: usize = 0x1104110;
+const REG_DECODE_TIMEOUT: usize = 0x110405c;
+const REG_DECODE_STATUS: usize = 0x1104060;
+const REG_DECODE_STATUS_MASK: usize = 0x1104064;
+const REG_DECODE_INST_FIFO_BASE: usize = 0x1104068;
+const REG_DECODE_INST_FIFO_SIZE: usize = 0x1104084;
+const REG_DECODE_INST_FIFO_READ: usize = 0x11040a0;
+const REG_DECODE_INST_FIFO_WRITE: usize = 0x11040bc;
+const REG_DECODE_PIPE_SELECT: usize = 0x11040f4;
+const REG_DECODE_PIPE_CONTROL: usize = 0x1104110;
 const REG_AVD_DMA_CONFIG_BASE: usize = 0x108ee90;
 const REG_AVD_DMA_BASE: usize = 0x110c000;
 const REG_AVD_DMA_CTRL0: usize = 0x110c010;
@@ -132,22 +140,22 @@ const MCPU_IRQ_ENABLE1_PENDING: u32 = 0x1;
 const MCPU_MAILBOX1_NOT_EMPTY: u32 = 0x8;
 const H264_SUBMIT_START: u32 = 1;
 const H264_SUBMIT_FRAME: u32 = 0x2b000107;
-const H264_STATUS_DONE_MASK: u32 = 0x0084_2108;
-const H264_STATUS_ERROR_MASK: u32 = 0x0000_0003;
-const H264_STATUS_ACCEPTED: u32 = 0x0000_0800;
-const H264_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
-const H264_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
-const H264_STATUS_RECOVERY_CLEAR_MASK: u32 = H264_STATUS_DONE_MASK
-    | H264_STATUS_ERROR_MASK
-    | H264_STATUS_ACCEPTED
-    | H264_STATUS_VIDEO_PHASE_MASK
-    | H264_STATUS_POSTPROCESS_PHASE_MASK
+const DECODE_STATUS_DONE_MASK: u32 = 0x0084_2108;
+const DECODE_STATUS_ERROR_MASK: u32 = 0x0000_0003;
+const DECODE_STATUS_ACCEPTED: u32 = 0x0000_0800;
+const DECODE_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
+const DECODE_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
+const DECODE_STATUS_RECOVERY_CLEAR_MASK: u32 = DECODE_STATUS_DONE_MASK
+    | DECODE_STATUS_ERROR_MASK
+    | DECODE_STATUS_ACCEPTED
+    | DECODE_STATUS_VIDEO_PHASE_MASK
+    | DECODE_STATUS_POSTPROCESS_PHASE_MASK
     | 0x0200_0000;
-const H264_VP_CM3_MASK: u32 = 0x7;
-const H264_PP_CM3_MASK: u32 = 0x5;
-const H264_T8103_VP_SLOT: u32 = 2;
-const H264_T8103_FIFO_SLOT: u32 = 0;
-const H264_T8103_FIFO_COUNT: u32 = 7;
+const DECODE_VP_CM3_MASK: u32 = 0x7;
+const DECODE_PP_CM3_MASK: u32 = 0x5;
+const DECODE_T8103_VP_SLOT: u32 = 2;
+const DECODE_T8103_FIFO_SLOT: u32 = 0;
+const DECODE_T8103_FIFO_COUNT: u32 = 7;
 const AVD_TRACE_CAPACITY: usize = 128;
 const AVD_DECODE_TRACE_FRAMES: u32 = 0;
 const AVD_DECODE_PROGRESS_INTERVAL: u32 = 0;
@@ -165,10 +173,16 @@ const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
 const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
 const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
 const AVD_WORKSPACE_PPS_TILE_OFFSET: usize = 0x140000;
+const AVD_WORKSPACE_VP9_PROBS_OFFSET: usize = 0x180000;
+const AVD_WORKSPACE_VP9_PPS0_OFFSET: usize = 0x190000;
+const AVD_WORKSPACE_VP9_PPS1_OFFSET: usize = 0x198000;
+const AVD_WORKSPACE_VP9_PPS2_OFFSET: usize = 0x1d8000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
 const AVD_H264_MAX_DPB_FRAMES: usize = 16;
 const AVD_H264_EXTRA_DECODE_SLOTS: usize = 1;
 const AVD_H264_MAX_OUTPUT_SLOTS: usize = AVD_H264_MAX_DPB_FRAMES + AVD_H264_EXTRA_DECODE_SLOTS;
+const AVD_VP9_MAX_REFERENCE_FRAMES: usize = 8;
+const AVD_VP9_REFERENCE_SLOTS: usize = 4;
 const AVD_COMPLETED_FRAME_QUEUE_LEN: usize = AVD_MAX_SESSIONS * AVD_H264_MAX_OUTPUT_SLOTS;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
@@ -179,7 +193,7 @@ const AVD_MAILBOX_DRAIN_IDLE_POLLS: usize = 4;
 const AVD_MAILBOX_DRAIN_POLL_US: u64 = 10;
 const AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY: &str = "apple,pmgr-clock-gate-paddrs";
 
-const AVD_H264_DMA_CONFIG: [u32; 30] = [
+const AVD_DECODE_DMA_CONFIG: [u32; 30] = [
     0x0402_0002,
     0x0002_0002,
     0x0402_0002,
@@ -510,13 +524,17 @@ impl AvdRegisters {
     }
 
     fn mask_irqs(&self) {
+        self.write32(REG_MCPU_IRQ_ARM, 0);
         self.write32(REG_MCPU_IRQ_ENABLE0, 0);
         self.write32(REG_MCPU_IRQ_ENABLE1, 0);
+        arch::io_wmb();
     }
 
     fn enable_irqs(&self) {
+        self.write32(REG_MCPU_IRQ_ARM, 1);
         self.write32(REG_MCPU_IRQ_ENABLE0, 0x2);
         self.write32(REG_MCPU_IRQ_ENABLE1, 0x8);
+        arch::io_wmb();
     }
 
     fn clear_irq_latches(&self) {
@@ -539,7 +557,7 @@ impl AvdRegisters {
         self.write32(REG_MCPU_CM3_ACK, 1);
         self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
         self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
-        self.enable_irqs();
+        self.mask_irqs();
         arch::io_wmb();
         self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RUN);
         arch::io_mb();
@@ -663,46 +681,46 @@ impl AvdRegisters {
         );
     }
 
-    fn init_h264_engine(&self) {
-        self.write32(REG_H264_COUNTER0, 0x78);
-        self.write32(REG_H264_COUNTER1, 0x78);
-        self.write32(REG_H264_COUNTER2, 0x78);
-        self.write32(REG_H264_COUNTER3, 0x78);
-        self.write32(REG_H264_COUNTER4, 0x20);
-        self.write32(REG_H264_CONTROL0, 0);
-        self.write32(REG_H264_CONTROL1, 0);
+    fn init_decode_engine(&self) {
+        self.write32(REG_DECODE_COUNTER0, 0x78);
+        self.write32(REG_DECODE_COUNTER1, 0x78);
+        self.write32(REG_DECODE_COUNTER2, 0x78);
+        self.write32(REG_DECODE_COUNTER3, 0x78);
+        self.write32(REG_DECODE_COUNTER4, 0x20);
+        self.write32(REG_DECODE_CONTROL0, 0);
+        self.write32(REG_DECODE_CONTROL1, 0);
         self.write32(REG_H265_CONTROL, 0);
-        self.write32(REG_H264_DMA_TRIGGER, 0);
+        self.write32(REG_DECODE_DMA_TRIGGER, 0);
         self.write32(REG_VP9_CONTROL, 0);
         self.write32(
-            REG_H264_TIMEOUT,
-            self.read32(REG_H264_TIMEOUT) | 0x0050_0000,
+            REG_DECODE_TIMEOUT,
+            self.read32(REG_DECODE_TIMEOUT) | 0x0050_0000,
         );
-        self.write32(REG_H264_STATUS_MASK, 0x3);
+        self.write32(REG_DECODE_STATUS_MASK, 0x3);
 
-        for (index, value) in AVD_H264_DMA_CONFIG.iter().copied().enumerate() {
+        for (index, value) in AVD_DECODE_DMA_CONFIG.iter().copied().enumerate() {
             self.write32(REG_AVD_DMA_CONFIG_BASE + index * 4, value);
         }
     }
 
-    fn clear_h264_status(&self, mask: u32) {
-        self.write32(REG_H264_STATUS, mask);
+    fn clear_decode_status(&self, mask: u32) {
+        self.write32(REG_DECODE_STATUS, mask);
     }
 
-    fn h264_status(&self) -> u32 {
-        self.read32(REG_H264_STATUS)
+    fn decode_status(&self) -> u32 {
+        self.read32(REG_DECODE_STATUS)
     }
 
-    fn clear_h264_latched_status(&self) -> u32 {
+    fn clear_decode_latched_status(&self) -> u32 {
         let mut last = 0;
         for _ in 0..8 {
-            let status = self.h264_status();
+            let status = self.decode_status();
             if status == 0 {
                 break;
             }
             last = status;
-            let clear = status | H264_STATUS_RECOVERY_CLEAR_MASK;
-            self.clear_h264_status(clear);
+            let clear = status | DECODE_STATUS_RECOVERY_CLEAR_MASK;
+            self.clear_decode_status(clear);
             arch::io_mb();
         }
         last
@@ -714,36 +732,42 @@ impl AvdRegisters {
         }
     }
 
-    fn configure_h264_stream(&self, instruction_fifo_dma: u64) {
-        let fifo_offset = H264_T8103_FIFO_SLOT as usize * 4;
-        let vp_offset = H264_T8103_VP_SLOT as usize * 4;
+    fn write_vp9_instructions(&self, words: &[u32]) {
+        for word in words {
+            self.write32(REG_VP9_MODE, *word);
+        }
+    }
+
+    fn configure_decode_stream(&self, instruction_fifo_dma: u64) {
+        let fifo_offset = DECODE_T8103_FIFO_SLOT as usize * 4;
+        let vp_offset = DECODE_T8103_VP_SLOT as usize * 4;
         self.write32(
-            REG_H264_INST_FIFO_BASE + fifo_offset,
+            REG_DECODE_INST_FIFO_BASE + fifo_offset,
             (instruction_fifo_dma >> 8) as u32,
         );
         self.write32(
-            REG_H264_INST_FIFO_SIZE + fifo_offset,
+            REG_DECODE_INST_FIFO_SIZE + fifo_offset,
             AVD_WORKSPACE_INST_FIFO_BYTES as u32,
         );
-        self.write32(REG_H264_INST_FIFO_READ + fifo_offset, 0);
-        self.write32(REG_H264_INST_FIFO_WRITE + fifo_offset, 0);
+        self.write32(REG_DECODE_INST_FIFO_READ + fifo_offset, 0);
+        self.write32(REG_DECODE_INST_FIFO_WRITE + fifo_offset, 0);
         self.write32(REG_H265_CONTROL + vp_offset, 0);
         self.write32(
-            REG_H264_TIMEOUT,
-            self.read32(REG_H264_TIMEOUT)
-                | (H264_VP_CM3_MASK << (H264_T8103_VP_SLOT * 5))
-                | (H264_PP_CM3_MASK << 20),
+            REG_DECODE_TIMEOUT,
+            self.read32(REG_DECODE_TIMEOUT)
+                | (DECODE_VP_CM3_MASK << (DECODE_T8103_VP_SLOT * 5))
+                | (DECODE_PP_CM3_MASK << 20),
         );
     }
 
     fn submit_h264(&self) {
-        self.write32(REG_H264_SUBMIT, H264_SUBMIT_FRAME);
+        self.write32(REG_DECODE_SUBMIT, H264_SUBMIT_FRAME);
     }
 
-    fn submit_h264_postprocess(&self) {
+    fn submit_decode_postprocess(&self) {
         self.write32(
-            REG_H264_SUBMIT,
-            0x2b00_0000 | 0x100 | (H264_T8103_FIFO_SLOT << 4) | H264_T8103_FIFO_COUNT,
+            REG_DECODE_SUBMIT,
+            0x2b00_0000 | 0x100 | (DECODE_T8103_FIFO_SLOT << 4) | DECODE_T8103_FIFO_COUNT,
         );
     }
 
@@ -779,7 +803,7 @@ impl AvdRegisters {
         self.write32(REG_DECODER_CONTROL_BASE + 0xc980, 0x8001_13ff);
         self.write32(REG_DECODER_CONTROL_BASE + 0xc9c0, 0x8001_13ff);
         self.write32(REG_PIODMA_CONFIG, 0);
-        self.write32(REG_H264_STATUS_MASK, 0x3);
+        self.write32(REG_DECODE_STATUS_MASK, 0x3);
         self.write32(REG_AVD_DMA_IRQ_CLEAR0, u32::MAX);
         self.write32(REG_AVD_DMA_IRQ_CLEAR1, u32::MAX);
         self.write32(REG_AVD_DMA_IRQ_CLEAR2, u32::MAX);
@@ -811,9 +835,9 @@ impl AvdRegisters {
         self.write32(REG_PIODMA_BASE, 0x26907000);
         self.write32(REG_WRAP_CONTROL, 0x3);
         self.write32(REG_H264_INSTRUCTION, 0);
-        self.write32(REG_H264_TIMEOUT, 0);
-        self.write32(REG_H264_PIPE_CONTROL, 0);
-        self.write32(REG_H264_PIPE_SELECT, 0x1555);
+        self.write32(REG_DECODE_TIMEOUT, 0);
+        self.write32(REG_DECODE_PIPE_CONTROL, 0);
+        self.write32(REG_DECODE_PIPE_SELECT, 0x1555);
 
         for offset in (0x1100000..=0x110b000).step_by(0x1000) {
             self.write32(offset, 0xc000_0000);
@@ -833,8 +857,8 @@ impl AvdRegisters {
         self.write32(REG_MCPU_DECODE_DMA_CONFIG, MCPU_DECODE_DMA_CONFIG);
 
         self.write32(
-            REG_H264_TIMEOUT,
-            self.read32(REG_H264_TIMEOUT) | 0x0050_0000,
+            REG_DECODE_TIMEOUT,
+            self.read32(REG_DECODE_TIMEOUT) | 0x0050_0000,
         );
         self.write32(REG_MCPU_IRQ_ARM, 1);
         self.write32(REG_MCPU_IRQ_MASK, u32::MAX);
@@ -1025,9 +1049,9 @@ impl AppleAvd {
         self.snapshot()
     }
 
-    /// Initialize the H.264 engine registers with the v3-class defaults.
-    pub fn init_h264_engine(&mut self) {
-        self.registers.init_h264_engine();
+    /// Initialize the decode engine registers with the v3-class defaults.
+    pub fn init_decode_engine(&mut self) {
+        self.registers.init_decode_engine();
         self.trace.push(AvdTraceKind::Firmware, 0x1104_0000, 0);
     }
 
@@ -1045,7 +1069,7 @@ impl AppleAvd {
             return Err("apple-avd: firmware is faulted");
         }
 
-        self.init_h264_engine();
+        self.init_decode_engine();
         self.boot_firmware(DEFAULT_AVD_FIRMWARE)
     }
 
@@ -1116,6 +1140,35 @@ impl AppleAvd {
         Ok(command.tag)
     }
 
+    /// Submit a VP9 request to the firmware mailbox.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - VP9 decode request lowered by the frontend.
+    ///
+    /// # Returns
+    ///
+    /// Driver-local firmware command tag on success.
+    pub fn submit_vp9_request(&mut self, request: &Vp9DecodeRequest) -> Result<u32, &'static str> {
+        if self.firmware_state != AvdFirmwareState::Running {
+            return Err("apple-avd: firmware is not running");
+        }
+
+        let command = self.mailbox.encode_vp9_decode(request);
+        self.registers.send_mailbox(command.raw);
+        self.trace.push(
+            AvdTraceKind::DecodeSubmit,
+            request.session_id,
+            request.frame_number as u64,
+        );
+        self.trace.push(
+            AvdTraceKind::MailboxTx,
+            command.raw as u64,
+            command.tag as u64,
+        );
+        Ok(command.tag)
+    }
+
     /// Submit a generated H.264 instruction stream to the MMIO command path.
     ///
     /// # Arguments
@@ -1135,14 +1188,54 @@ impl AppleAvd {
         if instructions.words().is_empty() {
             return Err("apple-avd: empty H.264 instruction stream");
         }
+        self.registers.mask_irqs();
+        self.registers.clear_irq_latches();
         self.registers.drain_recv_mailbox();
-        self.registers.clear_h264_latched_status();
-        self.registers.configure_h264_stream(instruction_fifo_dma);
+        self.registers.clear_decode_latched_status();
+        self.registers.configure_decode_stream(instruction_fifo_dma);
         self.registers.write_h264_instructions(instructions.words());
-        self.registers.clear_h264_status(
-            H264_STATUS_DONE_MASK | H264_STATUS_ERROR_MASK | H264_STATUS_ACCEPTED,
+        self.registers.clear_decode_status(
+            DECODE_STATUS_DONE_MASK | DECODE_STATUS_ERROR_MASK | DECODE_STATUS_ACCEPTED,
         );
-        let status_before = self.registers.h264_status();
+        let status_before = self.registers.decode_status();
+        self.trace.push(
+            AvdTraceKind::DecodeSubmit,
+            request.input.dma_addr,
+            instructions.words().len() as u64,
+        );
+        Ok(status_before)
+    }
+
+    /// Submit a generated VP9 instruction stream to the MMIO command path.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - VP9 decode request metadata.
+    /// * `instructions` - AVD VP9 instruction stream.
+    /// * `instruction_fifo_dma` - Device-visible instruction FIFO base.
+    ///
+    /// # Returns
+    ///
+    /// Status register value observed immediately before submit.
+    pub fn submit_vp9_mmio(
+        &mut self,
+        request: &Vp9DecodeRequest,
+        instructions: &AvdVp9InstructionStream,
+        instruction_fifo_dma: u64,
+    ) -> Result<u32, &'static str> {
+        if instructions.words().is_empty() {
+            return Err("apple-avd: empty VP9 instruction stream");
+        }
+        self.registers.mask_irqs();
+        self.registers.clear_irq_latches();
+        self.registers.drain_recv_mailbox();
+        self.registers.clear_decode_latched_status();
+        self.registers.configure_decode_stream(instruction_fifo_dma);
+        self.registers.write_vp9_instructions(instructions.words());
+        self.registers.clear_decode_status(
+            DECODE_STATUS_DONE_MASK | DECODE_STATUS_ERROR_MASK | DECODE_STATUS_ACCEPTED,
+        );
+        let status_before = self.registers.decode_status();
         self.trace.push(
             AvdTraceKind::DecodeSubmit,
             request.input.dma_addr,
@@ -1152,45 +1245,48 @@ impl AppleAvd {
     }
 
     /// Submit the post-process stage after the video pipe reports completion.
-    pub fn submit_h264_postprocess(&mut self) {
-        self.registers.submit_h264_postprocess();
+    pub fn submit_decode_postprocess(&mut self) {
+        self.registers.submit_decode_postprocess();
     }
 
-    /// Return the current H.264 status register.
+    /// Return the current decode status register.
     ///
     /// # Returns
     ///
-    /// Raw H.264 engine status.
-    pub fn h264_status(&self) -> u32 {
-        self.registers.h264_status()
+    /// Raw decode engine status.
+    pub fn decode_status(&self) -> u32 {
+        self.registers.decode_status()
     }
 
-    /// Clear selected H.264 status bits.
+    /// Clear selected decode status bits.
     ///
     /// # Arguments
     ///
     /// * `mask` - Status bits to acknowledge by writing them back to the
     ///   hardware status register.
-    pub fn clear_h264_status(&mut self, mask: u32) {
-        self.registers.clear_h264_status(mask);
+    pub fn clear_decode_status(&mut self, mask: u32) {
+        self.registers.clear_decode_status(mask);
     }
 
-    /// Clear H.264 status and replay engine initialization after an error.
+    /// Clear decode status and replay engine initialization after an error.
     ///
     /// # Arguments
     ///
     /// * `reason` - Driver-local reason or status value recorded in the trace.
-    pub fn recover_h264_engine(&mut self, reason: u64) {
+    pub fn recover_decode_engine(&mut self, reason: u64) {
         self.trace.push(AvdTraceKind::Fault, reason, 0);
+        self.registers.mask_irqs();
         let drained_before = self.registers.drain_recv_mailbox();
-        let status_before = self.registers.clear_h264_latched_status();
-        self.registers.init_h264_engine();
-        let status_after_init = self.registers.clear_h264_latched_status();
+        let status_before = self.registers.clear_decode_latched_status();
+        self.registers.init_decode_engine();
+        let status_after_init = self.registers.clear_decode_latched_status();
         let drained_after = self.registers.drain_recv_mailbox();
+        self.registers.clear_irq_latches();
+        self.registers.mask_irqs();
         if status_before != 0 || status_after_init != 0 || drained_before != 0 || drained_after != 0
         {
             println!(
-                "[apple-avd] recovered H.264 engine reason={:#x} status_before={:#x} status_after_init={:#x} drained_before={} drained_after={}",
+                "[apple-avd] recovered decode engine reason={:#x} status_before={:#x} status_after_init={:#x} drained_before={} drained_after={}",
                 reason, status_before, status_after_init, drained_before, drained_after
             );
         }
@@ -1268,8 +1364,8 @@ impl AppleAvd {
     }
 
     fn start_firmware(&mut self) -> Result<(), &'static str> {
-        self.registers.enable_irqs();
-        self.registers.log_boot_state("after-enable-irqs");
+        self.registers.mask_irqs();
+        self.registers.log_boot_state("before-run-masked");
         if let Err(e) = self.registers.run_cm3() {
             self.registers.log_boot_state("after-run-timeout");
             self.mark_firmware_faulted();
@@ -1278,6 +1374,7 @@ impl AppleAvd {
             return Err(e);
         }
         self.registers.log_boot_state("after-run");
+        self.registers.mask_irqs();
         self.firmware_state = AvdFirmwareState::Running;
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
         Ok(())
@@ -1385,6 +1482,45 @@ impl AvdSessionWorkspace {
         })
     }
 
+    fn new_vp9(
+        avd: &AppleAvd,
+        layout: vp9::AvdVp9FrameLayout,
+        slot_count: usize,
+    ) -> Result<Self, &'static str> {
+        if slot_count == 0 || slot_count > AVD_VP9_REFERENCE_SLOTS {
+            return Err("apple-avd: invalid VP9 workspace slot count");
+        }
+        let reference_slot_span = Self::vp9_reference_slot_span(layout)?;
+        let required = AVD_WORKSPACE_REFERENCE_OFFSET
+            .checked_add(
+                reference_slot_span
+                    .checked_mul(slot_count)
+                    .ok_or("apple-avd: VP9 workspace size overflow")?,
+            )
+            .ok_or("apple-avd: VP9 workspace size overflow")?;
+        let granule = avd.dma_context().mapping_granule().max(AVD_WORKSPACE_ALIGN);
+        let byte_len = align_up(required, granule);
+        let page_count = byte_len.div_ceil(PAGE_SIZE);
+        let pages = ContiguousPages::new_aligned(page_count, granule)
+            .ok_or("apple-avd: VP9 workspace allocation failed")?;
+        arch::clean_invalidate_dcache_to_poc_range(pages.as_vaddr(), byte_len);
+        let mapping = avd
+            .dma_context()
+            .map_phys_owned(
+                pages.as_paddr(),
+                byte_len,
+                IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+            )
+            .map_err(|_| "apple-avd: VP9 workspace DMA map failed")?;
+        Ok(Self {
+            pages,
+            mapping,
+            byte_len,
+            reference_slot_span,
+            slot_count,
+        })
+    }
+
     fn reference_slot_span(layout: h264::AvdFrameLayout) -> Result<usize, &'static str> {
         let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
         let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
@@ -1394,9 +1530,24 @@ impl AvdSessionWorkspace {
             .ok_or("apple-avd: reference workspace slot size overflow")
     }
 
+    fn vp9_reference_slot_span(layout: vp9::AvdVp9FrameLayout) -> Result<usize, &'static str> {
+        let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
+        let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
+        rvra_len
+            .checked_add(sps_len)
+            .map(|len| align_up(len, AVD_DMA_GRANULE))
+            .ok_or("apple-avd: VP9 reference workspace slot size overflow")
+    }
+
     fn is_compatible(&self, layout: h264::AvdFrameLayout, slot_count: usize) -> bool {
         slot_count <= self.slot_count
             && Self::reference_slot_span(layout)
+                .is_ok_and(|slot_span| slot_span == self.reference_slot_span)
+    }
+
+    fn is_compatible_vp9(&self, layout: vp9::AvdVp9FrameLayout, slot_count: usize) -> bool {
+        slot_count <= self.slot_count
+            && Self::vp9_reference_slot_span(layout)
                 .is_ok_and(|slot_span| slot_span == self.reference_slot_span)
     }
 
@@ -1424,6 +1575,69 @@ impl AvdSessionWorkspace {
         })
     }
 
+    fn addresses_for_vp9_slot(
+        &self,
+        slot: usize,
+        layout: vp9::AvdVp9FrameLayout,
+        references: [Option<usize>; 3],
+    ) -> Result<AvdVp9Workspace, &'static str> {
+        if slot >= self.slot_count {
+            return Err("apple-avd: invalid VP9 reference slot");
+        }
+        let base = self.mapping.dma_addr();
+        let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
+        let current_rvra = self.vp9_rvra_addrs_for_slot(slot, layout)?;
+        let mut reference_rvra = [[0u64; 4]; 3];
+        for (index, reference_slot) in references.iter().copied().enumerate() {
+            if let Some(reference_slot) = reference_slot {
+                reference_rvra[index] = self.vp9_rvra_addrs_for_slot(reference_slot, layout)?;
+            }
+        }
+        let mut pps1 = [0u64; 8];
+        for (index, addr) in pps1.iter_mut().enumerate() {
+            *addr = base + AVD_WORKSPACE_VP9_PPS1_OFFSET as u64 + index as u64 * 0x8000;
+        }
+        Ok(AvdVp9Workspace {
+            instruction_fifo_dma_addr: base + AVD_WORKSPACE_INST_FIFO_OFFSET as u64,
+            probabilities_dma_addr: base + AVD_WORKSPACE_VP9_PROBS_OFFSET as u64,
+            pps0_tile_dma_addr: base + AVD_WORKSPACE_VP9_PPS0_OFFSET as u64,
+            pps1_tile_dma_addrs: pps1,
+            pps2_tile_dma_addrs: [
+                base + AVD_WORKSPACE_VP9_PPS2_OFFSET as u64,
+                base + AVD_WORKSPACE_VP9_PPS2_OFFSET as u64 + 0x8000,
+            ],
+            sps_tile_dma_addr: base
+                + AVD_WORKSPACE_REFERENCE_OFFSET as u64
+                + slot as u64 * self.reference_slot_span as u64
+                + rvra_len as u64,
+            current_rvra_dma_addrs: current_rvra,
+            reference_rvra_dma_addrs: reference_rvra,
+        })
+    }
+
+    fn vp9_rvra_addrs_for_slot(
+        &self,
+        slot: usize,
+        layout: vp9::AvdVp9FrameLayout,
+    ) -> Result<[u64; 4], &'static str> {
+        if slot >= self.slot_count {
+            return Err("apple-avd: invalid VP9 RVRA slot");
+        }
+        let base = self.mapping.dma_addr();
+        let reference_offset = AVD_WORKSPACE_REFERENCE_OFFSET
+            + slot
+                .checked_mul(self.reference_slot_span)
+                .ok_or("apple-avd: VP9 reference workspace offset overflow")?;
+        let reference_dma_addr = base + reference_offset as u64;
+        let offsets = layout.rvra_offsets();
+        Ok([
+            reference_dma_addr + offsets[0] as u64,
+            reference_dma_addr + offsets[1] as u64,
+            reference_dma_addr + offsets[2] as u64,
+            reference_dma_addr + offsets[3] as u64,
+        ])
+    }
+
     fn instruction_fifo_vaddr(&self) -> usize {
         self.pages.as_vaddr() + AVD_WORKSPACE_INST_FIFO_OFFSET
     }
@@ -1433,6 +1647,17 @@ impl AvdSessionWorkspace {
         // SAFETY: `pages` owns `byte_len` bytes, and the instruction FIFO
         // window is inside the workspace constants checked at compile time.
         unsafe { core::slice::from_raw_parts_mut(ptr, AVD_WORKSPACE_INST_FIFO_BYTES) }
+    }
+
+    fn vp9_probabilities_vaddr(&self) -> usize {
+        self.pages.as_vaddr() + AVD_WORKSPACE_VP9_PROBS_OFFSET
+    }
+
+    fn vp9_probabilities_mut(&mut self) -> &mut [u8] {
+        let ptr = self.vp9_probabilities_vaddr() as *mut u8;
+        // SAFETY: `pages` owns `byte_len` bytes, and the VP9 probability table
+        // window sits below `AVD_WORKSPACE_REFERENCE_OFFSET`.
+        unsafe { core::slice::from_raw_parts_mut(ptr, SCARLET_VIDEO_VP9_PROBABILITY_BYTES) }
     }
 }
 
@@ -1624,6 +1849,23 @@ impl AvdBackendSession {
         valid_entries
     }
 
+    fn prune_vp9_reference_frames(&mut self, params: &ScarletVideoVp9StatelessParams) -> usize {
+        let key_frame = params.frame.flags & SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME != 0;
+        if key_frame {
+            self.clear_reference_frames();
+            return 0;
+        }
+        let refs = [
+            params.frame.last_frame_ts,
+            params.frame.golden_frame_ts,
+            params.frame.alt_frame_ts,
+        ];
+        self.retain_reference_frames(|frame| {
+            refs.iter().any(|timestamp| *timestamp == frame.timestamp)
+        });
+        self.reference_frame_count
+    }
+
     fn prepare_mapped_output(
         &mut self,
         avd: &AppleAvd,
@@ -1747,6 +1989,126 @@ impl AvdBackendSession {
         })
     }
 
+    fn prepare_mapped_output_vp9(
+        &mut self,
+        avd: &AppleAvd,
+        request: &VideoBackendDecodeRequest,
+        layout: vp9::AvdVp9FrameLayout,
+        store_reference: bool,
+        key_frame: bool,
+    ) -> Result<AvdReferenceOutput, &'static str> {
+        let payload_len = layout.output_len();
+        let slot_span = AVD_OUTPUT_SLOT_PAYLOAD_OFFSET
+            .checked_add(payload_len)
+            .map(|len| align_up(len, AVD_DMA_GRANULE))
+            .ok_or("apple-avd: VP9 output slot size overflow")?;
+        let dpb_capacity = if store_reference {
+            AVD_VP9_REFERENCE_SLOTS
+        } else {
+            1
+        };
+        if payload_len == 0 {
+            return Err("apple-avd: decoded VP9 frame exceeds mapped output slot pool");
+        }
+        let max_slot_count_by_output = (request.output_len as usize / slot_span)
+            .max(1)
+            .min(AVD_VP9_REFERENCE_SLOTS);
+        if max_slot_count_by_output < dpb_capacity.min(AVD_VP9_REFERENCE_SLOTS) {
+            return Err("apple-avd: decoded VP9 frame exceeds mapped output slot pool");
+        }
+        let slot_count = max_slot_count_by_output;
+        if key_frame {
+            self.clear_reference_frames();
+            self.next_reference_slot = 0;
+        }
+
+        let granule = avd.dma_context().mapping_granule().max(AVD_DMA_GRANULE);
+        let output_map_len = align_up(request.output_len as usize, granule);
+        let remap_output = self.output_pool.as_ref().is_none_or(|pool| {
+            pool.paddr != request.output_paddr
+                || pool.vaddr != request.output_vaddr
+                || pool.len != output_map_len
+        });
+        if remap_output {
+            let mapping = avd
+                .dma_context()
+                .map_phys_owned(
+                    request.output_paddr,
+                    output_map_len,
+                    IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
+                )
+                .map_err(|_| "apple-avd: VP9 output DMA map failed")?;
+            self.output_pool = Some(AvdMappedOutputPool {
+                paddr: request.output_paddr,
+                vaddr: request.output_vaddr,
+                len: output_map_len,
+                mapping,
+            });
+            self.clear_reference_frames();
+            self.next_reference_slot = 0;
+            self.reference_slot_len = 0;
+            self.active_slot_count = 0;
+            self.dpb_capacity = 0;
+        }
+
+        let remap_workspace = self
+            .workspace
+            .as_ref()
+            .is_none_or(|workspace| !workspace.is_compatible_vp9(layout, slot_count));
+        if remap_workspace {
+            self.workspace = Some(AvdSessionWorkspace::new_vp9(avd, layout, slot_count)?);
+            self.clear_reference_frames();
+            self.next_reference_slot = 0;
+        }
+
+        if self.reference_slot_len != slot_span
+            || self.active_slot_count != slot_count
+            || self.dpb_capacity != dpb_capacity
+        {
+            self.clear_reference_frames();
+            self.next_reference_slot = 0;
+            self.reference_slot_len = slot_span;
+            self.active_slot_count = slot_count;
+            self.dpb_capacity = dpb_capacity;
+        }
+
+        let mut slot = self.select_free_output_slot(slot_count);
+        if slot.is_none() {
+            self.remove_oldest_reference_frame();
+            slot = self.select_free_output_slot(slot_count);
+        }
+        let slot = slot.ok_or("apple-avd: no free VP9 output reference slot")?;
+        let slot_offset = slot
+            .checked_mul(slot_span)
+            .ok_or("apple-avd: VP9 output slot offset overflow")?;
+        let payload_offset_in_output = slot_offset
+            .checked_add(AVD_OUTPUT_SLOT_PAYLOAD_OFFSET)
+            .ok_or("apple-avd: VP9 output payload offset overflow")?;
+        let payload_end = payload_offset_in_output
+            .checked_add(payload_len)
+            .ok_or("apple-avd: VP9 output payload end overflow")?;
+        if payload_end > request.output_len as usize {
+            return Err("apple-avd: VP9 output payload exceeds mapped output slot pool");
+        }
+        let header_offset_in_output = payload_offset_in_output
+            .checked_sub(SCARLET_VIDEO_FRAME_HEADER_LEN)
+            .ok_or("apple-avd: VP9 output header offset underflow")?;
+        let output_pool = self
+            .output_pool
+            .as_ref()
+            .ok_or("apple-avd: mapped VP9 output pool unavailable")?;
+        Ok(AvdReferenceOutput {
+            slot,
+            slot_count,
+            dpb_capacity,
+            dma_addr: output_pool.mapping.dma_addr() + payload_offset_in_output as u64,
+            vaddr: output_pool.vaddr + payload_offset_in_output,
+            header_vaddr: output_pool.vaddr + header_offset_in_output,
+            payload_offset: request.output_offset as usize + payload_offset_in_output,
+            len: payload_len,
+        })
+    }
+
     fn select_free_output_slot(&mut self, slot_count: usize) -> Option<usize> {
         for offset in 0..slot_count {
             let candidate = (self.next_reference_slot + offset) % slot_count;
@@ -1813,14 +2175,64 @@ fn h264_reference_pictures_from_dpb(
     count
 }
 
+fn vp9_reference_pictures_from_frame(
+    params: &ScarletVideoVp9StatelessParams,
+    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+) -> [Option<AvdVp9ReferencePicture>; 3] {
+    let timestamps = [
+        params.frame.last_frame_ts,
+        params.frame.golden_frame_ts,
+        params.frame.alt_frame_ts,
+    ];
+    let mut references = [None; 3];
+    for (index, timestamp) in timestamps.iter().copied().enumerate() {
+        if timestamp == 0 {
+            continue;
+        }
+        references[index] = frames
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|frame| frame.timestamp == timestamp)
+            .map(|frame| AvdVp9ReferencePicture {
+                timestamp: frame.timestamp,
+                rvra_dma_addrs: frame.vp9_rvra_dma_addrs,
+            });
+    }
+    references
+}
+
+fn vp9_reference_slots_from_frame(
+    params: &ScarletVideoVp9StatelessParams,
+    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+) -> [Option<usize>; 3] {
+    let timestamps = [
+        params.frame.last_frame_ts,
+        params.frame.golden_frame_ts,
+        params.frame.alt_frame_ts,
+    ];
+    let mut slots = [None; 3];
+    for (index, timestamp) in timestamps.iter().copied().enumerate() {
+        if timestamp == 0 {
+            continue;
+        }
+        slots[index] = frames
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|frame| frame.timestamp == timestamp)
+            .map(|frame| frame.slot);
+    }
+    slots
+}
+
 #[derive(Clone, Copy)]
 struct AvdReferenceFrame {
     slot: usize,
     frame_number: u32,
     timestamp: u64,
-    layout: h264::AvdFrameLayout,
+    layout: AvdDecodedLayout,
     reference_dma_addr: u64,
     sps_tile_dma_addr: u64,
+    vp9_rvra_dma_addrs: [u64; 4],
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
@@ -1853,11 +2265,44 @@ struct AvdReferenceOutput {
     len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AvdDecodedLayout {
+    width: u32,
+    height: u32,
+    y_stride: u32,
+    uv_stride: u32,
+    pixel_format: u32,
+}
+
+impl From<h264::AvdFrameLayout> for AvdDecodedLayout {
+    fn from(layout: h264::AvdFrameLayout) -> Self {
+        Self {
+            width: layout.width,
+            height: layout.height,
+            y_stride: layout.y_stride,
+            uv_stride: layout.uv_stride,
+            pixel_format: layout.pixel_format,
+        }
+    }
+}
+
+impl From<vp9::AvdVp9FrameLayout> for AvdDecodedLayout {
+    fn from(layout: vp9::AvdVp9FrameLayout) -> Self {
+        Self {
+            width: layout.width,
+            height: layout.height,
+            y_stride: layout.y_stride,
+            uv_stride: layout.uv_stride,
+            pixel_format: layout.pixel_format,
+        }
+    }
+}
+
 struct AvdPendingDecode {
     stream_id: u32,
     frame_number: u32,
     timestamp: u64,
-    layout: h264::AvdFrameLayout,
+    layout: AvdDecodedLayout,
     display_x: u32,
     display_y: u32,
     display_width: u32,
@@ -1873,6 +2318,7 @@ struct AvdPendingDecode {
     dpb_capacity: usize,
     reference_dma_addr: u64,
     sps_tile_dma_addr: u64,
+    vp9_rvra_dma_addrs: [u64; 4],
     frame_num: u16,
     pic_num: i32,
     top_field_order_cnt: i32,
@@ -1882,11 +2328,11 @@ struct AvdPendingDecode {
     status_before: u32,
     command_tag: u32,
     poll_count: usize,
-    completion_phase: AvdH264CompletionPhase,
+    completion_phase: AvdDecodeCompletionPhase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AvdH264CompletionPhase {
+enum AvdDecodeCompletionPhase {
     WaitingVideo,
     WaitingPostprocess,
 }
@@ -2190,7 +2636,12 @@ impl AppleAvdVideoBackend {
     fn unmask_avd_interrupts(&self) -> InterruptResult<()> {
         let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
         let _irq_guard = IrqGuard::new();
-        avd.lock().registers.enable_irqs();
+        let avd = avd.lock();
+        if self.state.lock().pending.is_some() {
+            avd.registers.enable_irqs();
+        } else {
+            avd.registers.mask_irqs();
+        }
         arch::io_mb();
         Ok(())
     }
@@ -2199,11 +2650,22 @@ impl AppleAvdVideoBackend {
         let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
         let _irq_guard = IrqGuard::new();
         let avd = avd.lock();
+        avd.registers.mask_irqs();
         avd.registers.clear_irq_latches();
         let _ = avd.registers.drain_recv_mailbox();
         avd.registers.clear_irq_latches();
+        avd.registers.mask_irqs();
         arch::io_mb();
         Ok(())
+    }
+
+    fn arm_pending_decode_interrupts(&self, avd: &AppleAvd) {
+        if self.interrupt_id.lock().is_some() {
+            avd.registers.enable_irqs();
+        } else {
+            avd.registers.mask_irqs();
+        }
+        arch::io_mb();
     }
 
     fn avd_interrupt_cause(&self) -> InterruptResult<AvdInterruptCause> {
@@ -2227,14 +2689,14 @@ impl AppleAvdVideoBackend {
         };
         let message = avd.poll_firmware_message();
         let message_raw = message.map(|message| message.raw()).unwrap_or(0);
-        let status = avd.h264_status();
+        let status = avd.decode_status();
         let status_before = front.status_before;
         let frame_number = front.frame_number;
         let stream_id = front.stream_id;
         let poll_count = front.poll_count;
         let completion_phase = front.completion_phase;
 
-        let status_error = status != status_before && (status & H264_STATUS_ERROR_MASK) != 0;
+        let status_error = status != status_before && (status & DECODE_STATUS_ERROR_MASK) != 0;
         let firmware_panic = matches!(message, Some(AvdFirmwareMessage::Panic));
         if firmware_panic {
             println!(
@@ -2249,7 +2711,8 @@ impl AppleAvdVideoBackend {
                 message_raw
             );
             let _ = state.pending.take();
-            avd.recover_h264_engine(status as u64);
+            avd.recover_decode_engine(status as u64);
+            avd.registers.mask_irqs();
             state.reset_all_sessions();
             return Err("apple-avd: firmware panic during decode");
         }
@@ -2274,10 +2737,10 @@ impl AppleAvdVideoBackend {
             );
         }
 
-        if completion_phase == AvdH264CompletionPhase::WaitingVideo
-            && (status & H264_STATUS_ACCEPTED) != 0
+        if completion_phase == AvdDecodeCompletionPhase::WaitingVideo
+            && (status & DECODE_STATUS_ACCEPTED) != 0
         {
-            avd.clear_h264_status(H264_STATUS_ACCEPTED);
+            avd.clear_decode_status(DECODE_STATUS_ACCEPTED);
             if should_log_decode_progress(frame_number) {
                 println!(
                     "[apple-avd] decode accepted stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x}",
@@ -2287,20 +2750,20 @@ impl AppleAvdVideoBackend {
                     status_before,
                     status,
                     message_raw,
-                    H264_STATUS_ACCEPTED
+                    DECODE_STATUS_ACCEPTED
                 );
             }
         }
 
-        if completion_phase == AvdH264CompletionPhase::WaitingVideo
+        if completion_phase == AvdDecodeCompletionPhase::WaitingVideo
             && matches!(message, Some(AvdFirmwareMessage::VideoProcessorDone))
         {
-            avd.submit_h264_postprocess();
+            avd.submit_decode_postprocess();
             let front = state
                 .pending
                 .as_mut()
                 .ok_or("apple-avd: pending queue changed during video mailbox completion")?;
-            front.completion_phase = AvdH264CompletionPhase::WaitingPostprocess;
+            front.completion_phase = AvdDecodeCompletionPhase::WaitingPostprocess;
             front.poll_count = front.poll_count.saturating_add(1);
             if should_log_decode_progress(frame_number) {
                 println!(
@@ -2347,6 +2810,8 @@ impl AppleAvdVideoBackend {
                 status as u64,
                 message_raw as u64,
             );
+            avd.registers.clear_irq_latches();
+            avd.registers.mask_irqs();
         } else {
             let updated_poll_count = {
                 let front = state
@@ -2368,7 +2833,8 @@ impl AppleAvdVideoBackend {
                     message_raw
                 );
                 let _ = state.pending.take();
-                avd.recover_h264_engine(status as u64);
+                avd.recover_decode_engine(status as u64);
+                avd.registers.mask_irqs();
                 state.reset_all_sessions();
                 return Err("apple-avd: decode timed out");
             }
@@ -2391,6 +2857,25 @@ impl AppleAvdVideoBackend {
         }
         if request.input_len as usize > AVD_MAPPED_INPUT_BYTES {
             return Err("apple-avd: input exceeds mapped input buffer");
+        }
+        Ok(())
+    }
+
+    fn validate_vp9_request(
+        &self,
+        request: &VideoBackendDecodeRequest,
+    ) -> Result<(), &'static str> {
+        if request.coded_format != SCARLET_VIDEO_FORMAT_VP9 {
+            return Err("apple-avd: unsupported VP9 coded format");
+        }
+        if request.input_len == 0 {
+            return Err("apple-avd: empty VP9 input frame");
+        }
+        if request.output_len as usize <= SCARLET_VIDEO_FRAME_HEADER_LEN {
+            return Err("apple-avd: VP9 output buffer is too small");
+        }
+        if request.input_len as usize > AVD_MAPPED_INPUT_BYTES {
+            return Err("apple-avd: VP9 input exceeds mapped input buffer");
         }
         Ok(())
     }
@@ -2529,7 +3014,7 @@ impl AppleAvdVideoBackend {
             stream_id: request.stream_id,
             frame_number,
             timestamp: request.timestamp,
-            layout,
+            layout: layout.into(),
             display_x: stream_parameters.crop_left,
             display_y: stream_parameters.crop_top,
             display_width: stream_parameters.width,
@@ -2545,6 +3030,7 @@ impl AppleAvdVideoBackend {
             dpb_capacity: reference_output.dpb_capacity,
             reference_dma_addr,
             sps_tile_dma_addr,
+            vp9_rvra_dma_addrs: [0; 4],
             frame_num: decode_request.frame_num,
             pic_num: i32::from(decode_request.frame_num),
             top_field_order_cnt: decode_request.current_poc,
@@ -2554,8 +3040,157 @@ impl AppleAvdVideoBackend {
             status_before,
             command_tag,
             poll_count: 0,
-            completion_phase: AvdH264CompletionPhase::WaitingVideo,
+            completion_phase: AvdDecodeCompletionPhase::WaitingVideo,
         });
+        self.arm_pending_decode_interrupts(avd);
+        Ok(())
+    }
+
+    fn submit_vp9_prepared_locked(
+        &self,
+        avd: &mut AppleAvd,
+        state: &mut AvdBackendState,
+        request: &VideoBackendDecodeRequest,
+        stream_parameters: Vp9StreamParameters,
+        params: &ScarletVideoVp9StatelessParams,
+    ) -> Result<(), &'static str> {
+        let granule = avd.dma_context().mapping_granule().max(PAGE_SIZE);
+        let input_vaddr = request.input_vaddr;
+        let input_len = request.input_len as usize;
+        let input_clean_len = align_up(input_len, granule);
+        let input_map_len = align_up(AVD_MAPPED_INPUT_BYTES, granule);
+        arch::clean_invalidate_dcache_to_poc_range(input_vaddr, input_clean_len);
+
+        let session = state.active_session_mut(request.stream_id)?;
+        if session.coded_format != request.coded_format {
+            return Err("apple-avd: VP9 stream format mismatch");
+        }
+        let layout = stream_parameters.nv12_layout();
+        let hardware_payload_len = layout.output_len();
+        let display_payload_len = nv12_tight_payload_len(
+            stream_parameters.render_width,
+            stream_parameters.render_height,
+        )?;
+        let frame_number = session.next_frame;
+        session.next_frame = session.next_frame.wrapping_add(1);
+        let log_decode = should_log_decode_progress(frame_number);
+        let input_dma_addr = session.ensure_mapped_input(
+            avd,
+            request.input_paddr,
+            request.input_vaddr,
+            input_map_len,
+        )?;
+        let input = AvdDmaRange {
+            dma_addr: input_dma_addr,
+            len: input_len,
+        };
+        let key_frame = params.frame.flags & SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME != 0;
+        let store_reference = params.frame.refresh_frame_flags != 0;
+        let valid_references = session.prune_vp9_reference_frames(params);
+        let reference_slots = vp9_reference_slots_from_frame(params, &session.reference_frames);
+        let reference_pictures =
+            vp9_reference_pictures_from_frame(params, &session.reference_frames);
+        let reference_output =
+            session.prepare_mapped_output_vp9(avd, request, layout, store_reference, key_frame)?;
+        let output = AvdDmaRange {
+            dma_addr: reference_output.dma_addr,
+            len: hardware_payload_len,
+        };
+        let decode_request = Vp9DecodeRequest::from_stateless(
+            session.stream_id as u64,
+            frame_number,
+            params,
+            input,
+            output,
+            layout,
+        )
+        .map_err(vp9_error_to_str)?;
+
+        let (instructions, inst_len, instruction_fifo_dma, vp9_rvra_dma_addrs) = {
+            let workspace = session.ensure_workspace()?;
+            let workspace_addresses =
+                workspace.addresses_for_vp9_slot(reference_output.slot, layout, reference_slots)?;
+            workspace
+                .vp9_probabilities_mut()
+                .copy_from_slice(&params.probabilities.data);
+            arch::clean_dcache_to_poc_range(
+                workspace.vp9_probabilities_vaddr(),
+                SCARLET_VIDEO_VP9_PROBABILITY_BYTES,
+            );
+            let instructions = AvdVp9InstructionStream::build(
+                &decode_request,
+                &stream_parameters,
+                &workspace_addresses,
+                &reference_pictures,
+            );
+            let inst_len = instructions
+                .write_le_bytes(workspace.instruction_fifo_mut())
+                .map_err(vp9_error_to_str)?;
+            arch::clean_dcache_to_poc_range(workspace.instruction_fifo_vaddr(), inst_len);
+            (
+                instructions,
+                inst_len,
+                workspace_addresses.instruction_fifo_dma_addr,
+                workspace_addresses.current_rvra_dma_addrs,
+            )
+        };
+
+        arch::clean_invalidate_dcache_to_poc_range(reference_output.vaddr, reference_output.len);
+
+        let status_before =
+            avd.submit_vp9_mmio(&decode_request, &instructions, instruction_fifo_dma)?;
+        let command_tag = avd.submit_vp9_request(&decode_request)?;
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 submit stream={} frame={} key={} ref={} refs={} slot={}/{} tiles={} inst_words={} status_before={:#x} tag={:#x}",
+                request.stream_id,
+                frame_number,
+                key_frame,
+                store_reference,
+                valid_references,
+                reference_output.slot,
+                reference_output.slot_count,
+                params.tiles.tile_count,
+                instructions.words().len(),
+                status_before,
+                command_tag
+            );
+        }
+        avd.trace
+            .push(AvdTraceKind::DecodeSubmit, input_dma_addr, inst_len as u64);
+        state.pending = Some(AvdPendingDecode {
+            stream_id: request.stream_id,
+            frame_number,
+            timestamp: request.timestamp,
+            layout: layout.into(),
+            display_x: 0,
+            display_y: 0,
+            display_width: stream_parameters.render_width,
+            display_height: stream_parameters.render_height,
+            payload_len: display_payload_len,
+            output_header_vaddr: reference_output.header_vaddr,
+            output_payload_vaddr: reference_output.vaddr,
+            output_payload_dma: reference_output.dma_addr,
+            output_payload_offset: reference_output.payload_offset,
+            output_payload_len: reference_output.len,
+            reference_slot: reference_output.slot,
+            reference_slot_count: reference_output.slot_count,
+            dpb_capacity: reference_output.dpb_capacity,
+            reference_dma_addr: vp9_rvra_dma_addrs[0],
+            sps_tile_dma_addr: 0,
+            vp9_rvra_dma_addrs,
+            frame_num: 0,
+            pic_num: 0,
+            top_field_order_cnt: 0,
+            long_term: false,
+            store_reference,
+            is_idr: key_frame,
+            status_before,
+            command_tag,
+            poll_count: 0,
+            completion_phase: AvdDecodeCompletionPhase::WaitingVideo,
+        });
+        self.arm_pending_decode_interrupts(avd);
         Ok(())
     }
 }
@@ -2572,23 +3207,23 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
     fn debug_status(&self) -> Option<String> {
         let avd = self.avd().ok()?;
-        let (snapshot, h264_status, firmware) = {
+        let (snapshot, decode_status, firmware) = {
             let _irq_guard = IrqGuard::new();
             let avd = avd.lock();
             (
                 avd.debug_snapshot(),
-                avd.h264_status(),
+                avd.decode_status(),
                 avd.firmware_state_name(),
             )
         };
         let _irq_guard = IrqGuard::new();
         let state = self.state.lock();
         Some(format!(
-            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}",
+            " fw={} pending={} completed={} decode_status={:#x} status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}",
             firmware,
             state.pending_len(),
             state.completed.len(),
-            h264_status,
+            decode_status,
             snapshot.status,
             snapshot.irq_enable_status1,
             snapshot.mailbox_status,
@@ -2610,9 +3245,16 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         }
     }
 
+    fn supports_stateless_vp9(&self) -> bool {
+        true
+    }
+
     fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
-        if coded_format != SCARLET_VIDEO_FORMAT_H264 {
-            return Err("apple-avd: only H.264 sessions are supported");
+        if !matches!(
+            coded_format,
+            SCARLET_VIDEO_FORMAT_H264 | SCARLET_VIDEO_FORMAT_VP9
+        ) {
+            return Err("apple-avd: only stateless H.264/VP9 sessions are supported");
         }
         self.service_completions()?;
         let _irq_guard = IrqGuard::new();
@@ -2626,19 +3268,19 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if state.has_pending_for_stream(stream_id)? {
-            let status = avd.h264_status();
+            let status = avd.decode_status();
             println!(
-                "[apple-avd] destroying stream {} with pending decode; recovering H.264 engine without firmware restart status={:#x}",
+                "[apple-avd] destroying stream {} with pending decode; recovering decode engine without firmware restart status={:#x}",
                 stream_id, status
             );
-            avd.recover_h264_engine(status as u64);
+            avd.recover_decode_engine(status as u64);
         }
         state.destroy_session(stream_id)
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
         let _ = request;
-        Err("apple-avd: stateful H.264 submit is unsupported; use stateless H.264")
+        Err("apple-avd: stateful submit is unsupported; use stateless H.264 or VP9")
     }
 
     fn submit_h264_stateless(
@@ -2669,6 +3311,37 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             &request.decode,
             stream_parameters,
             &request.h264,
+        )
+    }
+
+    fn submit_vp9_stateless(
+        &self,
+        request: &VideoBackendVp9StatelessRequest,
+    ) -> Result<(), &'static str> {
+        self.validate_vp9_request(&request.decode)?;
+        let stream_parameters = Vp9StreamParameters::from_stateless_frame(&request.vp9.frame)
+            .map_err(vp9_error_to_str)?;
+
+        self.service_completions()?;
+        let avd = self.avd()?;
+        let _irq_guard = IrqGuard::new();
+        let mut avd = avd.lock();
+        let mut state = self.state.lock();
+        if state.pending.is_some() {
+            return Err("apple-avd: decode already pending");
+        }
+        avd.ensure_firmware_running()?;
+        {
+            let session =
+                state.session_for_submit(request.decode.stream_id, request.decode.coded_format)?;
+            session.stream_parameters = None;
+        }
+        self.submit_vp9_prepared_locked(
+            &mut avd,
+            &mut state,
+            &request.decode,
+            stream_parameters,
+            &request.vp9,
         )
     }
 
@@ -2797,6 +3470,7 @@ fn finish_pending_decode(
             layout: pending.layout,
             reference_dma_addr: pending.reference_dma_addr,
             sps_tile_dma_addr: pending.sps_tile_dma_addr,
+            vp9_rvra_dma_addrs: pending.vp9_rvra_dma_addrs,
             frame_num: pending.frame_num,
             pic_num: pending.pic_num,
             top_field_order_cnt: pending.top_field_order_cnt,
@@ -2946,7 +3620,7 @@ fn nv12_tight_payload_len(width: u32, height: u32) -> Result<usize, &'static str
 
 fn should_log_decode_completion(pending: &AvdPendingDecode, completion: AvdCompletionInfo) -> bool {
     should_log_decode_progress(pending.frame_number)
-        || (completion.status & H264_STATUS_ERROR_MASK) != 0
+        || (completion.status & DECODE_STATUS_ERROR_MASK) != 0
 }
 
 fn should_log_decode_progress(_frame_number: u32) -> bool {
@@ -2957,7 +3631,7 @@ fn should_log_decode_progress(_frame_number: u32) -> bool {
 fn sample_output_payload(
     output_vaddr: usize,
     output_len: usize,
-    layout: h264::AvdFrameLayout,
+    layout: AvdDecodedLayout,
 ) -> AvdOutputSample {
     let y_sample_len = output_len.min(AVD_OUTPUT_SAMPLE_BYTES);
     let y_bytes = if y_sample_len == 0 {
@@ -3048,6 +3722,17 @@ fn h264_error_to_str(error: H264FrontendError) -> &'static str {
         H264FrontendError::InvalidSliceRange => "apple-avd: H.264 slice range is invalid",
         H264FrontendError::InstructionStreamTooLarge => {
             "apple-avd: generated H.264 instruction stream is too large"
+        }
+    }
+}
+
+fn vp9_error_to_str(error: Vp9FrontendError) -> &'static str {
+    match error {
+        Vp9FrontendError::InvalidDimensions => "apple-avd: VP9 dimensions are invalid",
+        Vp9FrontendError::UnsupportedFrame => "apple-avd: VP9 frame uses unsupported features",
+        Vp9FrontendError::InvalidTiles => "apple-avd: VP9 tile table is invalid",
+        Vp9FrontendError::InstructionStreamTooLarge => {
+            "apple-avd: generated VP9 instruction stream is too large"
         }
     }
 }

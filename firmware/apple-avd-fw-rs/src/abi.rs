@@ -15,6 +15,8 @@ pub const MSG_UNKNOWN_IRQ: u32 = 0x0001_0000;
 
 /// AP-to-CM3 H.264 decode command kind.
 pub const CMD_H264_DECODE: u32 = 0x10;
+/// AP-to-CM3 VP9 decode command kind.
+pub const CMD_VP9_DECODE: u32 = 0x12;
 /// High-byte shift for AP-to-CM3 command kind.
 pub const CMD_KIND_SHIFT: u32 = 24;
 /// Low-bit mask for AP-to-CM3 command tags.
