@@ -58,10 +58,12 @@ pub fn switch_to_kernel_page_table() {
     mmu::sync_el1_translation_registers_if_needed();
     unsafe {
         core::arch::asm!(
+            "dsb sy",
             "msr ttbr0_el1, {}",
             "msr ttbr1_el1, {}",
+            "isb",
             "tlbi vmalle1",
-            "dsb nsh",
+            "dsb sy",
             "isb",
             in(reg) ttbr0,
             in(reg) ttbr1,
