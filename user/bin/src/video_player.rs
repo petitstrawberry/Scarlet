@@ -24,7 +24,7 @@ use core::time::Duration;
 use rust_h264::decoder::{Frame, OrderedDecoder};
 use rust_h264::nal::parse_annex_b;
 use sas_client::{SasClient, SasStream, StreamConfig};
-use scarlet_codecs::H264RequestContext;
+use scarlet_codecs::{H264RequestContext, ScarletVideoVp9StatelessParams, Vp9RequestContext};
 use scarlet_ui::{
     Application, ApplicationRunExt, Canvas, CanvasView, Color, ComponentElement, Element, Event,
     InvalidationKind, KeyCode, KeyEvent, Listenable, MouseButton, MouseEvent, Scene, Size,
@@ -99,16 +99,20 @@ const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
 const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
 const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
+const SCARLET_VIDEO_SUBMIT_VP9_STATELESS: u32 = 0x5609;
 const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
 const SCARLET_VIDEO_CAP_STATEFUL_HEVC: u32 = 1 << 2;
+const SCARLET_VIDEO_CAP_STATEFUL_VP9: u32 = 1 << 3;
 const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
+const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
 const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
 const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
-const VIRTIO_VIDEO_FORMAT_H264: u32 = 4098;
-const VIRTIO_VIDEO_FORMAT_HEVC: u32 = 4099;
-const VIRTIO_VIDEO_FORMAT_AV1: u32 = 4103;
+const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
+const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
+const SCARLET_VIDEO_FORMAT_VP9: u32 = 4102;
+const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
@@ -206,6 +210,25 @@ struct ScarletVideoH264StatelessSubmit {
     input_len: u32,
     timestamp: u64,
     params: ScarletVideoH264ParamPtrs,
+    flags: u32,
+    padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoVp9ParamPtrs {
+    frame: u64,
+    probabilities: u64,
+    tiles: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScarletVideoVp9StatelessSubmit {
+    stream_id: u32,
+    input_len: u32,
+    timestamp: u64,
+    params: ScarletVideoVp9ParamPtrs,
     flags: u32,
     padding: u32,
 }
@@ -1189,7 +1212,7 @@ fn decode_loop_software(
             "software decoder supports only H.264; use --hwdc for this video",
         ));
     }
-    let total_frames = source.access_units.len().max(1) as u32;
+    let total_frames = video_source_total_frames(&source);
     let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] software decode: {} {} access units",
@@ -1354,7 +1377,7 @@ fn decode_loop_hardware(
     queue: &DisplayQueue,
 ) -> Result<(), String> {
     let source = load_video_source(path, mp4_data)?;
-    let total_frames = source.access_units.len().max(1) as u32;
+    let total_frames = video_source_total_frames(&source);
     let mut access_unit_scratch = Vec::new();
     println!(
         "[{}] hardware decode: {} {} access units",
@@ -1406,8 +1429,11 @@ fn decode_loop_hardware(
             }
             wait_while_paused(controls);
             let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
-            else {
+            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            if !access_unit.should_display {
+                continue;
+            }
+            let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
             let presentation_time_us = access_unit
@@ -1657,8 +1683,12 @@ fn decode_loop_hardware_streaming_mp4(
                     access_unit.presentation_time_us
                 );
             }
-            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
-            else {
+            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            if !access_unit.should_display {
+                decoded += 1;
+                continue;
+            }
+            let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
             if !logged_first_decode {
@@ -1962,8 +1992,12 @@ fn decode_loop_hardware_streaming_mp4_socket(
                     access_unit.presentation_time_us
                 );
             }
-            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
-            else {
+            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            if !access_unit.should_display {
+                decoded += 1;
+                continue;
+            }
+            let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
             if !logged_first_decode {
@@ -2099,7 +2133,7 @@ fn replay_hardware_source_loops(
     queue: &DisplayQueue,
     mut loop_index: u64,
 ) -> Result<(), String> {
-    let total_frames = source.access_units.len().max(1) as u32;
+    let total_frames = video_source_total_frames(source);
     let loop_duration_us = video_source_duration_us(source);
     controls.set_media_duration_us(loop_duration_us);
     controls.set_buffered_position_us(loop_duration_us);
@@ -2144,8 +2178,11 @@ fn replay_hardware_source_loops(
             }
             wait_while_paused(controls);
             let access_unit_bytes = access_unit.bytes(Some(mp4_data), &mut access_unit_scratch)?;
-            let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?
-            else {
+            let frame = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)?;
+            if !access_unit.should_display {
+                continue;
+            }
+            let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
             let presentation_time_us = access_unit
@@ -2242,6 +2279,7 @@ struct VideoAccessUnit {
     display_rank: usize,
     presentation_time_us: u64,
     is_keyframe: bool,
+    should_display: bool,
 }
 
 fn video_source_duration_us(source: &VideoSource) -> u64 {
@@ -2253,6 +2291,16 @@ fn video_source_duration_us(source: &VideoSource) -> u64 {
         .unwrap_or(0)
         .saturating_add(FRAME_INTERVAL_MS * 1_000)
         .max(FRAME_INTERVAL_MS * 1_000)
+}
+
+fn video_source_total_frames(source: &VideoSource) -> u32 {
+    source
+        .access_units
+        .iter()
+        .filter(|unit| unit.should_display)
+        .count()
+        .max(1)
+        .min(u32::MAX as usize) as u32
 }
 
 fn video_loop_time_offset_us(
@@ -2295,13 +2343,17 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
     let publish_start_rank = source
         .access_units
         .iter()
-        .filter(|unit| unit.presentation_time_us < publish_target_us)
+        .filter(|unit| unit.should_display && unit.presentation_time_us < publish_target_us)
         .count();
     let preview_index = source
         .access_units
         .iter()
         .enumerate()
-        .find(|(_, unit)| unit.is_keyframe && unit.presentation_time_us >= publish_target_us)
+        .find(|(_, unit)| {
+            unit.should_display
+                && unit.is_keyframe
+                && unit.presentation_time_us >= publish_target_us
+        })
         .map(|(index, _)| index)
         .or_else(|| {
             source
@@ -2309,7 +2361,7 @@ fn video_seek_plan(source: &VideoSource, target_us: u64) -> VideoSeekPlan {
                 .iter()
                 .enumerate()
                 .rev()
-                .find(|(_, unit)| unit.is_keyframe)
+                .find(|(_, unit)| unit.should_display && unit.is_keyframe)
                 .map(|(index, _)| index)
         });
     VideoSeekPlan {
@@ -2378,21 +2430,24 @@ enum VideoContainerFormat {
     Mp4H264,
     Mp4Hevc,
     Mp4Av1,
+    WebmVp9,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VideoCodec {
     H264,
     Hevc,
+    Vp9,
     Av1,
 }
 
 impl VideoCodec {
     fn coded_format(self) -> u32 {
         match self {
-            VideoCodec::H264 => VIRTIO_VIDEO_FORMAT_H264,
-            VideoCodec::Hevc => VIRTIO_VIDEO_FORMAT_HEVC,
-            VideoCodec::Av1 => VIRTIO_VIDEO_FORMAT_AV1,
+            VideoCodec::H264 => SCARLET_VIDEO_FORMAT_H264,
+            VideoCodec::Hevc => SCARLET_VIDEO_FORMAT_HEVC,
+            VideoCodec::Vp9 => SCARLET_VIDEO_FORMAT_VP9,
+            VideoCodec::Av1 => SCARLET_VIDEO_FORMAT_AV1,
         }
     }
 
@@ -2400,6 +2455,7 @@ impl VideoCodec {
         match self {
             VideoCodec::H264 => "H.264",
             VideoCodec::Hevc => "HEVC",
+            VideoCodec::Vp9 => "VP9",
             VideoCodec::Av1 => "AV1",
         }
     }
@@ -2416,6 +2472,7 @@ impl VideoSource {
             VideoContainerFormat::Mp4H264 => "MP4/H.264",
             VideoContainerFormat::Mp4Hevc => "MP4/HEVC",
             VideoContainerFormat::Mp4Av1 => "MP4/AV1",
+            VideoContainerFormat::WebmVp9 => "WebM/VP9",
         }
     }
 }
@@ -2428,6 +2485,9 @@ fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource,
     if looks_like_mp4(&data) {
         return load_mp4_video_source(&data, false);
     }
+    if looks_like_webm(&data) {
+        return load_webm_vp9_video_source(&data);
+    }
     Ok(VideoSource {
         format: VideoContainerFormat::RawH264,
         estimated_total_frames: None,
@@ -2436,6 +2496,7 @@ fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource,
             .enumerate()
             .map(|(display_rank, bytes)| VideoAccessUnit {
                 is_keyframe: h264_access_unit_is_keyframe(&bytes),
+                should_display: true,
                 payload: VideoAccessUnitPayload::Owned(bytes),
                 codec: VideoCodec::H264,
                 display_rank,
@@ -2571,6 +2632,51 @@ struct Mp4Trun {
     samples: Vec<Mp4TrunSample>,
 }
 
+const EBML_ID_EBML: u32 = 0x1a45dfa3;
+const EBML_ID_SEGMENT: u32 = 0x18538067;
+const EBML_ID_INFO: u32 = 0x1549a966;
+const EBML_ID_TIMECODE_SCALE: u32 = 0x2ad7b1;
+const EBML_ID_TRACKS: u32 = 0x1654ae6b;
+const EBML_ID_TRACK_ENTRY: u32 = 0xae;
+const EBML_ID_TRACK_NUMBER: u32 = 0xd7;
+const EBML_ID_TRACK_TYPE: u32 = 0x83;
+const EBML_ID_CODEC_ID: u32 = 0x86;
+const EBML_ID_VIDEO: u32 = 0xe0;
+const EBML_ID_PIXEL_WIDTH: u32 = 0xb0;
+const EBML_ID_PIXEL_HEIGHT: u32 = 0xba;
+const EBML_ID_CLUSTER: u32 = 0x1f43b675;
+const EBML_ID_CLUSTER_TIMECODE: u32 = 0xe7;
+const EBML_ID_SIMPLE_BLOCK: u32 = 0xa3;
+const EBML_ID_BLOCK_GROUP: u32 = 0xa0;
+const EBML_ID_BLOCK: u32 = 0xa1;
+const EBML_ID_REFERENCE_BLOCK: u32 = 0xfb;
+const WEBM_TRACK_TYPE_VIDEO: u64 = 1;
+const WEBM_DEFAULT_TIMECODE_SCALE_NS: u64 = 1_000_000;
+const WEBM_SIMPLE_BLOCK_KEYFRAME: u8 = 0x80;
+const WEBM_BLOCK_LACING_MASK: u8 = 0x06;
+
+#[derive(Clone, Copy)]
+struct EbmlElement {
+    id: u32,
+    data_start: usize,
+    data_end: usize,
+    next: usize,
+}
+
+#[derive(Clone, Copy)]
+struct WebmVp9Track {
+    number: u64,
+    width: u32,
+    height: u32,
+}
+
+struct WebmBlock<'a> {
+    track_number: u64,
+    relative_timecode: i16,
+    flags: u8,
+    payload: &'a [u8],
+}
+
 fn looks_like_mp4(data: &[u8]) -> bool {
     let mut offset = 0usize;
     while let Some(mp4_box) = read_mp4_box(data, offset, data.len()) {
@@ -2580,6 +2686,487 @@ fn looks_like_mp4(data: &[u8]) -> bool {
         offset = mp4_box.data_end;
     }
     false
+}
+
+fn looks_like_webm(data: &[u8]) -> bool {
+    read_ebml_element(data, 0, data.len())
+        .map(|element| element.id == EBML_ID_EBML)
+        .unwrap_or(false)
+}
+
+fn load_webm_vp9_video_source(data: &[u8]) -> Result<VideoSource, String> {
+    let segment =
+        find_webm_segment(data).ok_or_else(|| String::from("WebM has no Segment element"))?;
+    let mut timecode_scale = WEBM_DEFAULT_TIMECODE_SCALE_NS;
+    let mut video_track = None;
+
+    let mut offset = segment.data_start;
+    while let Some(element) = read_ebml_element(data, offset, segment.data_end) {
+        match element.id {
+            EBML_ID_INFO => {
+                if let Some(scale) =
+                    parse_webm_timecode_scale(data, element.data_start, element.data_end)
+                {
+                    timecode_scale = scale.max(1);
+                }
+            }
+            EBML_ID_TRACKS => {
+                video_track = parse_webm_vp9_track(data, element.data_start, element.data_end)?;
+            }
+            _ => {}
+        }
+        offset = element.next;
+    }
+
+    let video_track =
+        video_track.ok_or_else(|| String::from("WebM has no supported VP9 video track"))?;
+    let mut access_units = Vec::new();
+    let mut offset = segment.data_start;
+    while let Some(element) = read_ebml_element(data, offset, segment.data_end) {
+        if element.id == EBML_ID_CLUSTER {
+            parse_webm_cluster(
+                data,
+                element.data_start,
+                element.data_end,
+                video_track,
+                timecode_scale,
+                &mut access_units,
+            )?;
+        }
+        offset = element.next;
+    }
+
+    if access_units.is_empty() {
+        return Err(String::from("WebM VP9 track has no video blocks"));
+    }
+    let _coded_size_hint = (video_track.width, video_track.height);
+    Ok(VideoSource {
+        format: VideoContainerFormat::WebmVp9,
+        access_units,
+        estimated_total_frames: None,
+    })
+}
+
+fn find_webm_segment(data: &[u8]) -> Option<EbmlElement> {
+    let mut offset = 0usize;
+    while let Some(element) = read_ebml_element(data, offset, data.len()) {
+        if element.id == EBML_ID_SEGMENT {
+            return Some(element);
+        }
+        offset = element.next;
+    }
+    None
+}
+
+fn parse_webm_timecode_scale(data: &[u8], start: usize, end: usize) -> Option<u64> {
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        if element.id == EBML_ID_TIMECODE_SCALE {
+            return read_webm_uint(data.get(element.data_start..element.data_end)?);
+        }
+        offset = element.next;
+    }
+    None
+}
+
+fn parse_webm_vp9_track(
+    data: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<Option<WebmVp9Track>, String> {
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        if element.id == EBML_ID_TRACK_ENTRY {
+            if let Some(track) = parse_webm_track_entry(data, element.data_start, element.data_end)?
+            {
+                return Ok(Some(track));
+            }
+        }
+        offset = element.next;
+    }
+    Ok(None)
+}
+
+fn parse_webm_track_entry(
+    data: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<Option<WebmVp9Track>, String> {
+    let mut track_number = None;
+    let mut track_type = None;
+    let mut codec_is_vp9 = false;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        match element.id {
+            EBML_ID_TRACK_NUMBER => {
+                track_number = read_webm_uint(
+                    data.get(element.data_start..element.data_end)
+                        .ok_or_else(|| String::from("WebM TrackNumber is truncated"))?,
+                );
+            }
+            EBML_ID_TRACK_TYPE => {
+                track_type = read_webm_uint(
+                    data.get(element.data_start..element.data_end)
+                        .ok_or_else(|| String::from("WebM TrackType is truncated"))?,
+                );
+            }
+            EBML_ID_CODEC_ID => {
+                codec_is_vp9 = data
+                    .get(element.data_start..element.data_end)
+                    .map(|bytes| bytes == b"V_VP9")
+                    .unwrap_or(false);
+            }
+            EBML_ID_VIDEO => {
+                let size = parse_webm_video_size(data, element.data_start, element.data_end)?;
+                width = size.0;
+                height = size.1;
+            }
+            _ => {}
+        }
+        offset = element.next;
+    }
+
+    if track_type == Some(WEBM_TRACK_TYPE_VIDEO) && codec_is_vp9 {
+        let number = track_number.ok_or_else(|| String::from("WebM VP9 track has no number"))?;
+        return Ok(Some(WebmVp9Track {
+            number,
+            width,
+            height,
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_webm_video_size(data: &[u8], start: usize, end: usize) -> Result<(u32, u32), String> {
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        match element.id {
+            EBML_ID_PIXEL_WIDTH => {
+                width = read_webm_uint(
+                    data.get(element.data_start..element.data_end)
+                        .ok_or_else(|| String::from("WebM PixelWidth is truncated"))?,
+                )
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            }
+            EBML_ID_PIXEL_HEIGHT => {
+                height = read_webm_uint(
+                    data.get(element.data_start..element.data_end)
+                        .ok_or_else(|| String::from("WebM PixelHeight is truncated"))?,
+                )
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            }
+            _ => {}
+        }
+        offset = element.next;
+    }
+    Ok((width, height))
+}
+
+fn parse_webm_cluster(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track: WebmVp9Track,
+    timecode_scale: u64,
+    access_units: &mut Vec<VideoAccessUnit>,
+) -> Result<(), String> {
+    let mut cluster_timecode = 0i64;
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        match element.id {
+            EBML_ID_CLUSTER_TIMECODE => {
+                cluster_timecode = read_webm_uint(
+                    data.get(element.data_start..element.data_end)
+                        .ok_or_else(|| String::from("WebM Cluster Timecode is truncated"))?,
+                )
+                .unwrap_or(0) as i64;
+            }
+            EBML_ID_SIMPLE_BLOCK => {
+                let block = parse_webm_block(data, element.data_start, element.data_end)?;
+                let is_keyframe = block.flags & WEBM_SIMPLE_BLOCK_KEYFRAME != 0;
+                push_webm_vp9_block(
+                    track,
+                    cluster_timecode,
+                    timecode_scale,
+                    block,
+                    is_keyframe,
+                    access_units,
+                )?;
+            }
+            EBML_ID_BLOCK_GROUP => {
+                parse_webm_block_group(
+                    data,
+                    element.data_start,
+                    element.data_end,
+                    track,
+                    cluster_timecode,
+                    timecode_scale,
+                    access_units,
+                )?;
+            }
+            _ => {}
+        }
+        offset = element.next;
+    }
+    Ok(())
+}
+
+fn parse_webm_block_group(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    track: WebmVp9Track,
+    cluster_timecode: i64,
+    timecode_scale: u64,
+    access_units: &mut Vec<VideoAccessUnit>,
+) -> Result<(), String> {
+    let mut block = None;
+    let mut has_reference_block = false;
+    let mut offset = start;
+    while let Some(element) = read_ebml_element(data, offset, end) {
+        match element.id {
+            EBML_ID_BLOCK => {
+                block = Some(parse_webm_block(
+                    data,
+                    element.data_start,
+                    element.data_end,
+                )?);
+            }
+            EBML_ID_REFERENCE_BLOCK => {
+                has_reference_block = true;
+            }
+            _ => {}
+        }
+        offset = element.next;
+    }
+    if let Some(block) = block {
+        push_webm_vp9_block(
+            track,
+            cluster_timecode,
+            timecode_scale,
+            block,
+            !has_reference_block,
+            access_units,
+        )?;
+    }
+    Ok(())
+}
+
+fn parse_webm_block<'a>(data: &'a [u8], start: usize, end: usize) -> Result<WebmBlock<'a>, String> {
+    let mut offset = start;
+    let track_number = read_ebml_vint_number(data, &mut offset, end)
+        .ok_or_else(|| String::from("WebM block track number is invalid"))?;
+    let header_end = offset
+        .checked_add(3)
+        .ok_or_else(|| String::from("WebM block header overflow"))?;
+    let header = data
+        .get(offset..header_end)
+        .ok_or_else(|| String::from("WebM block header is truncated"))?;
+    let relative_timecode = i16::from_be_bytes([header[0], header[1]]);
+    let flags = header[2];
+    if flags & WEBM_BLOCK_LACING_MASK != 0 {
+        return Err(String::from("WebM VP9 laced blocks are not supported"));
+    }
+    let payload = data
+        .get(header_end..end)
+        .ok_or_else(|| String::from("WebM block payload is truncated"))?;
+    Ok(WebmBlock {
+        track_number,
+        relative_timecode,
+        flags,
+        payload,
+    })
+}
+
+fn push_webm_vp9_block(
+    track: WebmVp9Track,
+    cluster_timecode: i64,
+    timecode_scale: u64,
+    block: WebmBlock<'_>,
+    is_keyframe: bool,
+    access_units: &mut Vec<VideoAccessUnit>,
+) -> Result<(), String> {
+    if block.track_number != track.number {
+        return Ok(());
+    }
+    if block.payload.is_empty() {
+        return Ok(());
+    }
+    let timecode = cluster_timecode.saturating_add(i64::from(block.relative_timecode));
+    let timecode = u64::try_from(timecode.max(0)).unwrap_or(0);
+    let presentation_time_us = (u128::from(timecode) * u128::from(timecode_scale) / 1_000) as u64;
+    let (payload_is_keyframe, should_display) =
+        vp9_frame_summary(block.payload).unwrap_or((is_keyframe, true));
+    let display_rank = access_units
+        .iter()
+        .filter(|unit| unit.should_display)
+        .count();
+    access_units.push(VideoAccessUnit {
+        payload: VideoAccessUnitPayload::Owned(block.payload.to_vec()),
+        codec: VideoCodec::Vp9,
+        display_rank,
+        presentation_time_us,
+        is_keyframe: is_keyframe || payload_is_keyframe,
+        should_display,
+    });
+    Ok(())
+}
+
+fn vp9_frame_summary(data: &[u8]) -> Option<(bool, bool)> {
+    let mut reader = Vp9HeaderSummaryReader::new(data);
+    if reader.read_bits(2)? != 0x2 {
+        return None;
+    }
+    let mut profile = reader.read_bit()? as u8;
+    profile |= (reader.read_bit()? as u8) << 1;
+    if profile == 3 {
+        let _ = reader.read_bit()?;
+    }
+    if reader.read_bool()? {
+        let _ = reader.read_bits(3)?;
+        return Some((false, true));
+    }
+    let key_frame = !reader.read_bool()?;
+    let show_frame = reader.read_bool()?;
+    Some((key_frame, show_frame))
+}
+
+struct Vp9HeaderSummaryReader<'a> {
+    data: &'a [u8],
+    byte_index: usize,
+    bit_index: u8,
+}
+
+impl<'a> Vp9HeaderSummaryReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_index: 0,
+            bit_index: 0,
+        }
+    }
+
+    fn read_bool(&mut self) -> Option<bool> {
+        Some(self.read_bit()? != 0)
+    }
+
+    fn read_bit(&mut self) -> Option<u32> {
+        let byte = *self.data.get(self.byte_index)?;
+        let bit = (byte >> (7 - self.bit_index)) & 1;
+        self.bit_index += 1;
+        if self.bit_index == 8 {
+            self.bit_index = 0;
+            self.byte_index += 1;
+        }
+        Some(u32::from(bit))
+    }
+
+    fn read_bits(&mut self, bits: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..bits {
+            value = (value << 1) | self.read_bit()?;
+        }
+        Some(value)
+    }
+}
+
+fn read_ebml_element(data: &[u8], offset: usize, end: usize) -> Option<EbmlElement> {
+    if offset >= end {
+        return None;
+    }
+    let mut cursor = offset;
+    let id = read_ebml_id(data, &mut cursor, end)?;
+    let size = read_ebml_size(data, &mut cursor, end)?;
+    let data_start = cursor;
+    let data_end = match size {
+        Some(size) => data_start.checked_add(usize::try_from(size).ok()?)?,
+        None => end,
+    };
+    if data_end > end {
+        return None;
+    }
+    Some(EbmlElement {
+        id,
+        data_start,
+        data_end,
+        next: data_end,
+    })
+}
+
+fn read_ebml_id(data: &[u8], offset: &mut usize, end: usize) -> Option<u32> {
+    let len = ebml_vint_len(*data.get(*offset)?)?;
+    if len > 4 || (*offset).checked_add(len)? > end {
+        return None;
+    }
+    let mut value = 0u32;
+    for byte in data.get(*offset..*offset + len)? {
+        value = (value << 8) | u32::from(*byte);
+    }
+    *offset += len;
+    Some(value)
+}
+
+fn read_ebml_size(data: &[u8], offset: &mut usize, end: usize) -> Option<Option<u64>> {
+    let first = *data.get(*offset)?;
+    let len = ebml_vint_len(first)?;
+    if (*offset).checked_add(len)? > end {
+        return None;
+    }
+    let marker = 1u8 << (8 - len);
+    let mut value = u64::from(first & !marker);
+    for byte in data.get(*offset + 1..*offset + len)? {
+        value = (value << 8) | u64::from(*byte);
+    }
+    *offset += len;
+    let unknown = (1u64 << (len * 7)) - 1;
+    if value == unknown {
+        Some(None)
+    } else {
+        Some(Some(value))
+    }
+}
+
+fn read_ebml_vint_number(data: &[u8], offset: &mut usize, end: usize) -> Option<u64> {
+    let first = *data.get(*offset)?;
+    let len = ebml_vint_len(first)?;
+    if (*offset).checked_add(len)? > end {
+        return None;
+    }
+    let marker = 1u8 << (8 - len);
+    let mut value = u64::from(first & !marker);
+    for byte in data.get(*offset + 1..*offset + len)? {
+        value = (value << 8) | u64::from(*byte);
+    }
+    *offset += len;
+    Some(value)
+}
+
+fn ebml_vint_len(first: u8) -> Option<usize> {
+    let mut marker = 0x80u8;
+    for len in 1..=8 {
+        if first & marker != 0 {
+            return Some(len);
+        }
+        marker >>= 1;
+    }
+    None
+}
+
+fn read_webm_uint(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() || bytes.len() > 8 {
+        return None;
+    }
+    let mut value = 0u64;
+    for byte in bytes {
+        value = (value << 8) | u64::from(*byte);
+    }
+    Some(value)
 }
 
 fn load_mp4_video_source(data: &[u8], can_reference_mp4_data: bool) -> Result<VideoSource, String> {
@@ -2669,6 +3256,7 @@ fn load_mp4_video_source_with_options(
                 }
             }
             VideoContainerFormat::RawH264 => unreachable!(),
+            VideoContainerFormat::WebmVp9 => unreachable!(),
         };
         let is_keyframe = if track.sync_samples.is_empty() {
             match (&payload, codec) {
@@ -2692,6 +3280,7 @@ fn load_mp4_video_source_with_options(
             display_rank: sample_layout.display_ranks[index],
             presentation_time_us: sample_layout.presentation_times_us[index],
             is_keyframe,
+            should_display: true,
         });
     }
 
@@ -4280,6 +4869,7 @@ impl ScarletVideoFrame {
 struct MappedVideoBuffer {
     stream_id: u32,
     session_commands: bool,
+    coded_format: u32,
     ptr: *mut u8,
     mmap_len: usize,
     input_offset: usize,
@@ -4314,6 +4904,7 @@ struct HardwareVideoDecoder {
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
     h264_context: H264RequestContext,
+    vp9_context: Vp9RequestContext,
 }
 
 impl HardwareVideoDecoder {
@@ -4326,13 +4917,15 @@ impl HardwareVideoDecoder {
         let caps = Self::query_capabilities(&device);
         if let Some(caps) = caps {
             println!(
-                "[{}] hardware decoder caps flags=0x{:x} stateful_h264={} stateful_av1={} stateful_hevc={} stateless_h264={}",
+                "[{}] hardware decoder caps flags=0x{:x} stateful_h264={} stateful_av1={} stateful_hevc={} stateful_vp9={} stateless_h264={} stateless_vp9={}",
                 APP_NAME,
                 caps.flags,
                 caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
                 caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
                 caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_HEVC),
-                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264)
+                caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_VP9),
+                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264),
+                caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9)
             );
         }
         let mapped = Self::map_video_buffer(&device, caps);
@@ -4347,6 +4940,7 @@ impl HardwareVideoDecoder {
             mapped,
             caps,
             h264_context: H264RequestContext::default(),
+            vp9_context: Vp9RequestContext::default(),
         })
     }
 
@@ -4386,15 +4980,17 @@ impl HardwareVideoDecoder {
     fn supports_decode_codec(&self, codec: VideoCodec) -> bool {
         self.supports_stateful_codec(codec)
             || (codec == VideoCodec::H264 && self.supports_stateless_h264())
+            || (codec == VideoCodec::Vp9 && self.supports_stateless_vp9())
     }
 
     fn supports_stateful_codec(&self, codec: VideoCodec) -> bool {
         let Some(caps) = self.caps else {
-            return true;
+            return codec != VideoCodec::Vp9;
         };
         match codec {
             VideoCodec::H264 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_H264),
             VideoCodec::Hevc => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_HEVC),
+            VideoCodec::Vp9 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_VP9),
             VideoCodec::Av1 => caps.has_flag(SCARLET_VIDEO_CAP_STATEFUL_AV1),
         }
     }
@@ -4402,6 +4998,12 @@ impl HardwareVideoDecoder {
     fn supports_stateless_h264(&self) -> bool {
         self.caps
             .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264))
+            .unwrap_or(false)
+    }
+
+    fn supports_stateless_vp9(&self) -> bool {
+        self.caps
+            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9))
             .unwrap_or(false)
     }
 
@@ -4458,9 +5060,7 @@ impl HardwareVideoDecoder {
         codec: VideoCodec,
         access_unit: &[u8],
     ) -> Result<Option<ScarletVideoFrame>, String> {
-        let Some(buffer) = self.mapped else {
-            return Ok(None);
-        };
+        let buffer = self.ensure_mapped_session_format(codec)?;
         let input_ptr = buffer.ptr;
         let input_offset = buffer.input_offset;
         let input_len = buffer.input_len;
@@ -4479,6 +5079,7 @@ impl HardwareVideoDecoder {
             );
         }
 
+        let mut should_display = true;
         if codec == VideoCodec::H264 && self.supports_stateless_h264() {
             let h264 = self.h264_context.params_for_access_unit(access_unit)?;
             let params = &h264.params;
@@ -4506,6 +5107,33 @@ impl HardwareVideoDecoder {
                 .map_err(|_| {
                     let status = self.read_decoder_status();
                     format!("hardware decoder stateless H.264 submit failed{status}")
+                })?;
+        } else if codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
+            let vp9 = self.vp9_context.params_for_frame(access_unit)?;
+            let params: &ScarletVideoVp9StatelessParams = &vp9.params;
+            should_display =
+                params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME != 0;
+            let submit = ScarletVideoVp9StatelessSubmit {
+                stream_id: buffer.stream_id,
+                input_len: access_unit.len() as u32,
+                timestamp: vp9.timestamp,
+                params: ScarletVideoVp9ParamPtrs {
+                    frame: &params.frame as *const _ as usize as u64,
+                    probabilities: &params.probabilities as *const _ as usize as u64,
+                    tiles: &params.tiles as *const _ as usize as u64,
+                },
+                flags: 0,
+                padding: 0,
+            };
+            self.device
+                .as_handle()
+                .control(
+                    SCARLET_VIDEO_SUBMIT_VP9_STATELESS,
+                    &submit as *const _ as usize,
+                )
+                .map_err(|_| {
+                    let status = self.read_decoder_status();
+                    format!("hardware decoder stateless VP9 submit failed{status}")
                 })?;
         } else if buffer.session_commands {
             let submit = ScarletVideoSessionSubmit {
@@ -4559,6 +5187,9 @@ impl HardwareVideoDecoder {
             };
             match dequeue_result {
                 Ok((1, frame)) => {
+                    if !should_display {
+                        return Ok(None);
+                    }
                     if frame.width == 0 || frame.height == 0 || frame.payload_len == 0 {
                         return Err(String::from("hardware decoder returned empty mmap frame"));
                     }
@@ -4597,6 +5228,61 @@ impl HardwareVideoDecoder {
                 }
             }
         }
+    }
+
+    fn ensure_mapped_session_format(
+        &mut self,
+        codec: VideoCodec,
+    ) -> Result<MappedVideoBuffer, String> {
+        let Some(mut buffer) = self.mapped else {
+            return Err(String::from("hardware decoder mmap buffer is unavailable"));
+        };
+        let coded_format = codec.coded_format();
+        if !buffer.session_commands || buffer.coded_format == coded_format {
+            return Ok(buffer);
+        }
+
+        let destroy = ScarletVideoSessionInfo {
+            stream_id: buffer.stream_id,
+            padding: 0,
+            buffer: ScarletVideoBufferInfo::default(),
+        };
+        let _ = self
+            .device
+            .as_handle()
+            .control(SCARLET_VIDEO_DESTROY_SESSION, &destroy as *const _ as usize);
+
+        let mut session_info = ScarletVideoSessionInfo {
+            stream_id: 0,
+            padding: coded_format,
+            buffer: ScarletVideoBufferInfo::default(),
+        };
+        self.device
+            .as_handle()
+            .control(
+                SCARLET_VIDEO_CREATE_SESSION,
+                &mut session_info as *mut _ as usize,
+            )
+            .map_err(|_| {
+                let status = self.read_decoder_status();
+                format!(
+                    "hardware decoder failed to create {} session{status}",
+                    codec.name()
+                )
+            })?;
+        if session_info.buffer.mmap_len as usize != buffer.mmap_len {
+            return Err(String::from(
+                "hardware decoder changed mmap layout while switching codec sessions",
+            ));
+        }
+        buffer.stream_id = session_info.stream_id;
+        buffer.coded_format = coded_format;
+        buffer.input_offset = session_info.buffer.input_offset as usize;
+        buffer.input_len = session_info.buffer.input_len as usize;
+        buffer.output_offset = session_info.buffer.output_offset as usize;
+        buffer.output_len = session_info.buffer.output_len as usize;
+        self.mapped = Some(buffer);
+        Ok(buffer)
     }
 
     fn map_video_buffer(
@@ -4652,6 +5338,7 @@ impl HardwareVideoDecoder {
         Some(MappedVideoBuffer {
             stream_id,
             session_commands,
+            coded_format: SCARLET_VIDEO_FORMAT_H264,
             ptr: addr as *mut u8,
             mmap_len: info.mmap_len as usize,
             input_offset: info.input_offset as usize,

@@ -62,5 +62,6 @@ pub use vp9::{
     SCARLET_VIDEO_VP9_TX_MODE_ALLOW_32X32, SCARLET_VIDEO_VP9_TX_MODE_ONLY_4X4,
     SCARLET_VIDEO_VP9_TX_MODE_SELECT, ScarletVideoVp9FrameParams, ScarletVideoVp9LoopFilter,
     ScarletVideoVp9Probabilities, ScarletVideoVp9Quantization, ScarletVideoVp9Segmentation,
-    ScarletVideoVp9StatelessParams, ScarletVideoVp9Tile, ScarletVideoVp9Tiles,
+    ScarletVideoVp9StatelessParams, ScarletVideoVp9Tile, ScarletVideoVp9Tiles, Vp9PreparedFrame,
+    Vp9RequestContext,
 };
