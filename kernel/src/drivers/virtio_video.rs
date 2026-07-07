@@ -1012,6 +1012,7 @@ impl VideoDecodeBackend for VirtioVideoDevice {
     fn capabilities(&self) -> VideoBackendCapabilities {
         VideoBackendCapabilities {
             max_sessions: MAX_VIDEO_SESSIONS as u32,
+            max_inflight_decodes: MAX_VIDEO_SESSIONS as u32,
             mapped_input_len: MAPPED_INPUT_BYTES as u32,
             mapped_output_len: MAPPED_OUTPUT_BYTES as u32,
             output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,

@@ -9,7 +9,13 @@ mod debug_device;
 mod firmware;
 pub mod h264;
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    format,
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 pub use debug::{AvdTraceEvent, AvdTraceKind};
 pub use firmware::AvdFirmwareMessage;
@@ -36,14 +42,18 @@ use scarlet::{
             SCARLET_VIDEO_H264_DPB_FLAG_VALID, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
             ScarletVideoDequeuedFrame, ScarletVideoH264DpbEntry, ScarletVideoH264StatelessParams,
             VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
-            VideoBackendH264StatelessRequest, VideoDecodeBackend, register_video_backend,
-            register_video_decode_device,
+            VideoBackendH264StatelessRequest, VideoCompletionNotifier, VideoDecodeBackend,
+            register_video_backend, register_video_decode_device,
         },
     },
     environment::PAGE_SIZE,
+    interrupt::{
+        InterruptClaim, InterruptError, InterruptId, InterruptResult, InterruptSource,
+        MaskableInterruptSource,
+    },
     mem::page::ContiguousPages,
     println,
-    sync::Mutex,
+    sync::{IrqGuard, Mutex},
     time, vm,
 };
 use scarlet_driver_apple_pmgr::{
@@ -149,7 +159,7 @@ const AVD_MCPU_CODE_BYTES: usize = 0xc000;
 const AVD_MCPU_SRAM_BYTES: usize = 0xc000;
 const AVD_MAPPED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const AVD_MAPPED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
-const AVD_MAX_SESSIONS: usize = 1;
+const AVD_MAX_SESSIONS: usize = 4;
 const AVD_WORKSPACE_ALIGN: usize = AVD_DMA_GRANULE;
 const AVD_WORKSPACE_INST_FIFO_OFFSET: usize = 0x4000;
 const AVD_WORKSPACE_INST_FIFO_BYTES: usize = 0x100000;
@@ -506,6 +516,13 @@ impl AvdRegisters {
     fn enable_irqs(&self) {
         self.write32(REG_MCPU_IRQ_ENABLE0, 0x2);
         self.write32(REG_MCPU_IRQ_ENABLE1, 0x8);
+    }
+
+    fn clear_irq_latches(&self) {
+        self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
+        self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
+        self.write32(REG_MCPU_IRQ_CLEAR, MCPU_MAILBOX1_NOT_EMPTY);
+        arch::io_wmb();
     }
 
     fn hold_cm3_in_reset(&self) {
@@ -1998,9 +2015,6 @@ impl AvdBackendState {
     }
 
     fn allocate_session(&mut self, coded_format: u32) -> Result<u32, &'static str> {
-        if self.pending.is_some() {
-            return Err("apple-avd: decode already pending");
-        }
         let index = self
             .sessions
             .iter()
@@ -2108,6 +2122,8 @@ impl AvdBackendState {
 struct AppleAvdVideoBackend {
     avd_id: u32,
     state: Mutex<AvdBackendState>,
+    completion_notifier: Mutex<Option<Weak<dyn VideoCompletionNotifier>>>,
+    interrupt_id: Mutex<Option<InterruptId>>,
 }
 
 enum AvdH264SubmitSource<'a> {
@@ -2137,6 +2153,8 @@ impl AppleAvdVideoBackend {
         Self {
             avd_id,
             state: Mutex::new(AvdBackendState::new()),
+            completion_notifier: Mutex::new(None),
+            interrupt_id: Mutex::new(None),
         }
     }
 
@@ -2144,16 +2162,67 @@ impl AppleAvdVideoBackend {
         get_apple_avd(self.avd_id).ok_or("apple-avd: backend instance disappeared")
     }
 
+    fn set_interrupt_id(&self, interrupt_id: InterruptId) {
+        let _irq_guard = IrqGuard::new();
+        *self.interrupt_id.lock() = Some(interrupt_id);
+    }
+
+    fn notify_completion(&self) {
+        let notifier = {
+            let _irq_guard = IrqGuard::new();
+            self.completion_notifier
+                .lock()
+                .as_ref()
+                .and_then(Weak::upgrade)
+        };
+        if let Some(notifier) = notifier {
+            notifier.notify_video_completion();
+        }
+    }
+
+    fn has_pending_decode(&self) -> bool {
+        let _irq_guard = IrqGuard::new();
+        self.state.lock().pending.is_some()
+    }
+
+    fn mask_avd_interrupts(&self) -> InterruptResult<()> {
+        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
+        let _irq_guard = IrqGuard::new();
+        avd.lock().registers.mask_irqs();
+        arch::io_mb();
+        Ok(())
+    }
+
+    fn unmask_avd_interrupts(&self) -> InterruptResult<()> {
+        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
+        let _irq_guard = IrqGuard::new();
+        avd.lock().registers.enable_irqs();
+        arch::io_mb();
+        Ok(())
+    }
+
+    fn clear_stale_avd_interrupts(&self) -> InterruptResult<()> {
+        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
+        let _irq_guard = IrqGuard::new();
+        let avd = avd.lock();
+        avd.registers.clear_irq_latches();
+        let _ = avd.registers.drain_recv_mailbox();
+        avd.registers.clear_irq_latches();
+        arch::io_mb();
+        Ok(())
+    }
+
     fn service_completions(&self) -> Result<(), &'static str> {
         let avd = self.avd()?;
+        let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
-        let message = avd.poll_firmware_message();
-        let message_raw = message.map(|message| message.raw()).unwrap_or(0);
-        let status = avd.h264_status();
         let Some(front) = state.pending.as_ref() else {
             return Ok(());
         };
+        let message = avd.poll_firmware_message();
+        let message_raw = message.map(|message| message.raw()).unwrap_or(0);
+        let status = avd.h264_status();
         let status_before = front.status_before;
         let frame_number = front.frame_number;
         let stream_id = front.stream_id;
@@ -2503,14 +2572,23 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         "apple-avd"
     }
 
+    fn set_completion_notifier(&self, notifier: Option<Weak<dyn VideoCompletionNotifier>>) {
+        let _irq_guard = IrqGuard::new();
+        *self.completion_notifier.lock() = notifier;
+    }
+
     fn debug_status(&self) -> Option<String> {
         let avd = self.avd().ok()?;
-        let avd = avd.lock();
-        let snapshot = avd.debug_snapshot();
-        let h264_status = avd.h264_status();
-        let firmware = avd.firmware_state_name();
-        drop(avd);
-
+        let (snapshot, h264_status, firmware) = {
+            let _irq_guard = IrqGuard::new();
+            let avd = avd.lock();
+            (
+                avd.debug_snapshot(),
+                avd.h264_status(),
+                avd.firmware_state_name(),
+            )
+        };
+        let _irq_guard = IrqGuard::new();
         let state = self.state.lock();
         Some(format!(
             " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
@@ -2527,6 +2605,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
     fn capabilities(&self) -> VideoBackendCapabilities {
         VideoBackendCapabilities {
             max_sessions: AVD_MAX_SESSIONS as u32,
+            max_inflight_decodes: 1,
             mapped_input_len: AVD_MAPPED_INPUT_BYTES as u32,
             mapped_output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
             output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
@@ -2541,12 +2620,14 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             return Err("apple-avd: only H.264 sessions are supported");
         }
         self.service_completions()?;
+        let _irq_guard = IrqGuard::new();
         let mut state = self.state.lock();
         state.allocate_session(coded_format)
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
         let avd = self.avd()?;
+        let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if state.has_pending_for_stream(stream_id)? {
@@ -2576,6 +2657,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
         self.service_completions()?;
         let avd = self.avd()?;
+        let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if state.pending.is_some() {
@@ -2612,6 +2694,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
         self.service_completions()?;
         let avd = self.avd()?;
+        let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if state.pending.is_some() {
@@ -2637,6 +2720,7 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         stream_id: u32,
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
         self.service_completions()?;
+        let _irq_guard = IrqGuard::new();
         let mut state = self.state.lock();
         let session_index = state.session_index(stream_id)?;
         if !state.sessions[session_index].active {
@@ -2649,6 +2733,40 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             return Ok(None);
         };
         Ok(state.completed.remove(index))
+    }
+}
+
+impl InterruptSource for AppleAvdVideoBackend {
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        let _irq_guard = IrqGuard::new();
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        if !self.has_pending_decode() {
+            self.clear_stale_avd_interrupts()?;
+            return Ok(InterruptClaim::Handled);
+        }
+
+        if let Err(error) = self.service_completions() {
+            println!("[apple-avd] IRQ completion service failed: {}", error);
+        }
+        self.notify_completion();
+        Ok(InterruptClaim::Handled)
+    }
+}
+
+impl MaskableInterruptSource for AppleAvdVideoBackend {
+    fn mask_source(&self) -> InterruptResult<()> {
+        self.mask_avd_interrupts()
+    }
+
+    fn unmask_source(&self) -> InterruptResult<()> {
+        self.unmask_avd_interrupts()
+    }
+
+    fn clear_pending_source(&self) -> InterruptResult<()> {
+        self.clear_stale_avd_interrupts()
     }
 }
 
@@ -3153,14 +3271,34 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
     }
     let id = register_avd(avd);
-    let backend: Arc<dyn VideoDecodeBackend> = Arc::new(AppleAvdVideoBackend::new(id));
-    let backend_id = register_video_backend(Arc::clone(&backend));
-    let video_name = register_video_decode_device(Arc::clone(&backend));
+    let backend = Arc::new(AppleAvdVideoBackend::new(id));
+    let interrupt_id = if let Some(irq_resource) = device
+        .get_resources()
+        .iter()
+        .find(|resource| matches!(resource.res_type, PlatformDeviceResourceType::IRQ))
+    {
+        let interrupt_id = scarlet::interrupt::resolve_platform_irq(irq_resource)
+            .map_err(|_| "apple-avd: failed to resolve IRQ")?;
+        backend.set_interrupt_id(interrupt_id);
+        let interrupt_source: Arc<dyn MaskableInterruptSource> = backend.clone();
+        scarlet::interrupt::register_and_enable_interrupt_source(
+            interrupt_source,
+            arch::get_cpu().get_cpuid() as u32,
+        )
+        .map_err(|_| "apple-avd: failed to register IRQ handler")?;
+        Some(interrupt_id)
+    } else {
+        println!("[apple-avd] no IRQ resource; completion will rely on polling");
+        None
+    };
+    let video_backend: Arc<dyn VideoDecodeBackend> = backend.clone();
+    let backend_id = register_video_backend(Arc::clone(&video_backend));
+    let video_name = register_video_decode_device(Arc::clone(&video_backend));
     #[cfg(feature = "debug-device")]
-    debug_device::register_avd_debug_device(id, Arc::clone(&backend));
+    debug_device::register_avd_debug_device(id, Arc::clone(&video_backend));
 
     println!(
-        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} reset={} status={:#x} irq_status={:#x}",
+        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} interrupt={:?} reset={} status={:#x} irq_status={:#x}",
         device.name(),
         id,
         backend_id,
@@ -3169,6 +3307,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         paddr,
         size,
         irq,
+        interrupt_id,
         has_reset,
         snapshot.status,
         snapshot.irq_status
