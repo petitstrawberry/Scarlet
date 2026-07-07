@@ -1022,6 +1022,7 @@ fn parse_tiles(
     if cursor > data.len() {
         return Err(String::from("VP9 tile data is truncated"));
     }
+    let mut remaining = data.len() - cursor;
 
     let mut tiles = ScarletVideoVp9Tiles {
         tile_count: tile_count as u32,
@@ -1031,10 +1032,11 @@ fn parse_tiles(
         for col in 0..tile_cols {
             let index = row * tile_cols + col;
             let size = if index + 1 == tile_count {
-                data.len()
-                    .checked_sub(cursor)
-                    .ok_or_else(|| String::from("VP9 tile payload offset overflow"))?
+                remaining
             } else {
+                if remaining < 4 {
+                    return Err(String::from("VP9 tile size table is truncated"));
+                }
                 let size_end = cursor
                     .checked_add(4)
                     .ok_or_else(|| String::from("VP9 tile size offset overflow"))?;
@@ -1042,12 +1044,13 @@ fn parse_tiles(
                     .get(cursor..size_end)
                     .ok_or_else(|| String::from("VP9 tile size table is truncated"))?;
                 cursor = size_end;
-                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+                remaining -= 4;
+                u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
             };
             let end = cursor
                 .checked_add(size)
                 .ok_or_else(|| String::from("VP9 tile payload size overflow"))?;
-            if size == 0 || end > data.len() {
+            if size == 0 || size > remaining || end > data.len() {
                 return Err(String::from("VP9 tile payload is truncated"));
             }
             tiles.tiles[index] = ScarletVideoVp9Tile {
@@ -1057,6 +1060,7 @@ fn parse_tiles(
                 size: size as u32,
             };
             cursor = end;
+            remaining -= size;
         }
     }
     Ok(tiles)

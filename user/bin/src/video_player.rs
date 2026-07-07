@@ -1202,6 +1202,7 @@ fn decode_loop_software(
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
 ) -> Result<(), String> {
+    println!("[{}] loading video source {}", APP_NAME, path);
     let source = load_video_source(path, mp4_data)?;
     if source
         .access_units
@@ -1376,6 +1377,7 @@ fn decode_loop_hardware(
     clock: Option<&AudioClock>,
     queue: &DisplayQueue,
 ) -> Result<(), String> {
+    println!("[{}] loading video source {}", APP_NAME, path);
     let source = load_video_source(path, mp4_data)?;
     let total_frames = video_source_total_frames(&source);
     let mut access_unit_scratch = Vec::new();
@@ -2395,6 +2397,10 @@ enum VideoAccessUnitPayload {
         size: usize,
         config: Av1Config,
     },
+    WebmSample {
+        offset: usize,
+        size: usize,
+    },
 }
 
 impl VideoAccessUnit {
@@ -2420,6 +2426,15 @@ impl VideoAccessUnit {
                     .ok_or_else(|| String::from("MP4 AV1 sample points outside file"))?;
                 av1_sample_to_scarlet_into(config, sample, scratch)?;
                 Ok(scratch)
+            }
+            VideoAccessUnitPayload::WebmSample { offset, size } => {
+                let data = mp4_data
+                    .ok_or_else(|| String::from("container backing data is unavailable"))?;
+                let end = offset
+                    .checked_add(*size)
+                    .ok_or_else(|| String::from("WebM sample offset overflow"))?;
+                data.get(*offset..end)
+                    .ok_or_else(|| String::from("WebM sample points outside file"))
             }
         }
     }
@@ -2479,14 +2494,20 @@ impl VideoSource {
 
 fn load_video_source(path: &str, mp4_data: Option<&[u8]>) -> Result<VideoSource, String> {
     if let Some(data) = mp4_data {
-        return load_mp4_video_source(data, true);
+        if looks_like_mp4(data) {
+            return load_mp4_video_source(data, true);
+        }
+        if looks_like_webm(data) {
+            return load_webm_vp9_video_source(data, true);
+        }
+        return Err(String::from("container has no supported video track"));
     }
     let data = read_file(path)?;
     if looks_like_mp4(&data) {
         return load_mp4_video_source(&data, false);
     }
     if looks_like_webm(&data) {
-        return load_webm_vp9_video_source(&data);
+        return load_webm_vp9_video_source(&data, false);
     }
     Ok(VideoSource {
         format: VideoContainerFormat::RawH264,
@@ -2674,6 +2695,7 @@ struct WebmBlock<'a> {
     track_number: u64,
     relative_timecode: i16,
     flags: u8,
+    payload_offset: usize,
     payload: &'a [u8],
 }
 
@@ -2694,7 +2716,10 @@ fn looks_like_webm(data: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-fn load_webm_vp9_video_source(data: &[u8]) -> Result<VideoSource, String> {
+fn load_webm_vp9_video_source(
+    data: &[u8],
+    can_reference_webm_data: bool,
+) -> Result<VideoSource, String> {
     let segment =
         find_webm_segment(data).ok_or_else(|| String::from("WebM has no Segment element"))?;
     let mut timecode_scale = WEBM_DEFAULT_TIMECODE_SCALE_NS;
@@ -2730,6 +2755,7 @@ fn load_webm_vp9_video_source(data: &[u8]) -> Result<VideoSource, String> {
                 element.data_end,
                 video_track,
                 timecode_scale,
+                can_reference_webm_data,
                 &mut access_units,
             )?;
         }
@@ -2874,6 +2900,7 @@ fn parse_webm_cluster(
     end: usize,
     track: WebmVp9Track,
     timecode_scale: u64,
+    can_reference_webm_data: bool,
     access_units: &mut Vec<VideoAccessUnit>,
 ) -> Result<(), String> {
     let mut cluster_timecode = 0i64;
@@ -2896,6 +2923,7 @@ fn parse_webm_cluster(
                     timecode_scale,
                     block,
                     is_keyframe,
+                    can_reference_webm_data,
                     access_units,
                 )?;
             }
@@ -2907,6 +2935,7 @@ fn parse_webm_cluster(
                     track,
                     cluster_timecode,
                     timecode_scale,
+                    can_reference_webm_data,
                     access_units,
                 )?;
             }
@@ -2924,6 +2953,7 @@ fn parse_webm_block_group(
     track: WebmVp9Track,
     cluster_timecode: i64,
     timecode_scale: u64,
+    can_reference_webm_data: bool,
     access_units: &mut Vec<VideoAccessUnit>,
 ) -> Result<(), String> {
     let mut block = None;
@@ -2952,6 +2982,7 @@ fn parse_webm_block_group(
             timecode_scale,
             block,
             !has_reference_block,
+            can_reference_webm_data,
             access_units,
         )?;
     }
@@ -2980,6 +3011,7 @@ fn parse_webm_block<'a>(data: &'a [u8], start: usize, end: usize) -> Result<Webm
         track_number,
         relative_timecode,
         flags,
+        payload_offset: header_end,
         payload,
     })
 }
@@ -2990,6 +3022,7 @@ fn push_webm_vp9_block(
     timecode_scale: u64,
     block: WebmBlock<'_>,
     is_keyframe: bool,
+    can_reference_webm_data: bool,
     access_units: &mut Vec<VideoAccessUnit>,
 ) -> Result<(), String> {
     if block.track_number != track.number {
@@ -3007,8 +3040,16 @@ fn push_webm_vp9_block(
         .iter()
         .filter(|unit| unit.should_display)
         .count();
+    let payload = if can_reference_webm_data {
+        VideoAccessUnitPayload::WebmSample {
+            offset: block.payload_offset,
+            size: block.payload.len(),
+        }
+    } else {
+        VideoAccessUnitPayload::Owned(block.payload.to_vec())
+    };
     access_units.push(VideoAccessUnit {
-        payload: VideoAccessUnitPayload::Owned(block.payload.to_vec()),
+        payload,
         codec: VideoCodec::Vp9,
         display_rank,
         presentation_time_us,
@@ -4905,6 +4946,7 @@ struct HardwareVideoDecoder {
     caps: Option<ScarletVideoCapabilities>,
     h264_context: H264RequestContext,
     vp9_context: Vp9RequestContext,
+    vp9_debug_submits: u32,
 }
 
 impl HardwareVideoDecoder {
@@ -4941,6 +4983,7 @@ impl HardwareVideoDecoder {
             caps,
             h264_context: H264RequestContext::default(),
             vp9_context: Vp9RequestContext::default(),
+            vp9_debug_submits: 0,
         })
     }
 
@@ -5109,10 +5152,37 @@ impl HardwareVideoDecoder {
                     format!("hardware decoder stateless H.264 submit failed{status}")
                 })?;
         } else if codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
+            let log_vp9_submit = self.vp9_debug_submits < 4;
+            if log_vp9_submit {
+                println!(
+                    "[{}] VP9 stateless prepare input={} stream={}",
+                    APP_NAME,
+                    access_unit.len(),
+                    buffer.stream_id
+                );
+            }
             let vp9 = self.vp9_context.params_for_frame(access_unit)?;
             let params: &ScarletVideoVp9StatelessParams = &vp9.params;
             should_display =
                 params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME != 0;
+            if log_vp9_submit {
+                println!(
+                    "[{}] VP9 stateless parsed ts={} key={} show={} size={}x{} render={}x{} tiles={} uh={} ch={} flags=0x{:x}",
+                    APP_NAME,
+                    vp9.timestamp,
+                    params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME
+                        != 0,
+                    should_display,
+                    u32::from(params.frame.frame_width_minus_1) + 1,
+                    u32::from(params.frame.frame_height_minus_1) + 1,
+                    u32::from(params.frame.render_width_minus_1) + 1,
+                    u32::from(params.frame.render_height_minus_1) + 1,
+                    params.tiles.tile_count,
+                    params.frame.uncompressed_header_size,
+                    params.frame.compressed_header_size,
+                    params.frame.flags
+                );
+            }
             let submit = ScarletVideoVp9StatelessSubmit {
                 stream_id: buffer.stream_id,
                 input_len: access_unit.len() as u32,
@@ -5125,6 +5195,12 @@ impl HardwareVideoDecoder {
                 flags: 0,
                 padding: 0,
             };
+            if log_vp9_submit {
+                println!(
+                    "[{}] VP9 stateless submit begin ts={} stream={}",
+                    APP_NAME, vp9.timestamp, buffer.stream_id
+                );
+            }
             self.device
                 .as_handle()
                 .control(
@@ -5135,6 +5211,13 @@ impl HardwareVideoDecoder {
                     let status = self.read_decoder_status();
                     format!("hardware decoder stateless VP9 submit failed{status}")
                 })?;
+            if log_vp9_submit {
+                println!(
+                    "[{}] VP9 stateless submit ok ts={} stream={}",
+                    APP_NAME, vp9.timestamp, buffer.stream_id
+                );
+            }
+            self.vp9_debug_submits = self.vp9_debug_submits.saturating_add(1);
         } else if buffer.session_commands {
             let submit = ScarletVideoSessionSubmit {
                 stream_id: buffer.stream_id,
@@ -8025,10 +8108,16 @@ pub extern "C" fn main() -> i32 {
     if args.hardware_decode {
         println!("[{}] hardware decoder {}", APP_NAME, VIDEO_DEVICE_PATH);
     }
-    let mp4_data = if is_mp4_path(&video_path) && !args.streaming {
-        println!("[{}] loading MP4 {}", APP_NAME, video_path);
+    let video_is_mp4 = is_mp4_path(&video_path);
+    let video_is_webm = is_webm_path(&video_path);
+    let mp4_data = if (video_is_mp4 || video_is_webm) && !args.streaming {
+        let container = if video_is_webm { "WebM" } else { "MP4" };
+        println!("[{}] loading {} {}", APP_NAME, container, video_path);
         Some(Arc::new(read_file(&video_path).unwrap_or_else(|_| {
-            println!("[{}] Application error: failed to read MP4 file", APP_NAME);
+            println!(
+                "[{}] Application error: failed to read video container",
+                APP_NAME
+            );
             Vec::new()
         })))
     } else {
@@ -8063,9 +8152,13 @@ pub extern "C" fn main() -> i32 {
         } else {
             Some(PlayerAudioSource::Wav(path))
         }
-    } else if let Some(data) = &mp4_data {
-        println!("[{}] audio MP4/AAC", APP_NAME);
-        Some(PlayerAudioSource::Mp4Aac(data.clone()))
+    } else if video_is_mp4 {
+        if let Some(data) = &mp4_data {
+            println!("[{}] audio MP4/AAC", APP_NAME);
+            Some(PlayerAudioSource::Mp4Aac(data.clone()))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -8092,6 +8185,10 @@ pub extern "C" fn main() -> i32 {
 
 fn is_mp4_path(path: &str) -> bool {
     path.ends_with(".mp4") || path.ends_with(".m4v") || path.ends_with(".m4a")
+}
+
+fn is_webm_path(path: &str) -> bool {
+    path.ends_with(".webm")
 }
 
 struct PlayerArgs {

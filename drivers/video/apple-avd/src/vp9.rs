@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use scarlet::device::video::{
     SCARLET_VIDEO_PIXEL_FORMAT_NV12, SCARLET_VIDEO_VP9_FRAME_FLAG_ERROR_RESILIENT,
     SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME, SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME,
@@ -274,27 +276,25 @@ impl Vp9DecodeRequest {
 
 /// AVD v3-style instruction stream produced from one VP9 frame.
 pub struct AvdVp9InstructionStream {
-    words: [u32; AVD_VP9_MAX_INSTRUCTION_WORDS],
-    len: usize,
+    words: Vec<u32>,
     overflowed: bool,
 }
 
 impl AvdVp9InstructionStream {
     fn new() -> Self {
-        Self {
-            words: [0; AVD_VP9_MAX_INSTRUCTION_WORDS],
-            len: 0,
-            overflowed: false,
-        }
+        let mut words = Vec::new();
+        let overflowed = words
+            .try_reserve_exact(AVD_VP9_MAX_INSTRUCTION_WORDS)
+            .is_err();
+        Self { words, overflowed }
     }
 
     fn push_word(&mut self, value: u32) {
-        if let Some(slot) = self.words.get_mut(self.len) {
-            *slot = value;
-            self.len += 1;
-        } else {
+        if self.overflowed || self.words.len() >= AVD_VP9_MAX_INSTRUCTION_WORDS {
             self.overflowed = true;
+            return;
         }
+        self.words.push(value);
     }
 
     /// Generate an AVD VP9 instruction stream.
@@ -479,7 +479,7 @@ impl AvdVp9InstructionStream {
     ///
     /// Instruction word slice.
     pub fn words(&self) -> &[u32] {
-        &self.words[..self.len]
+        &self.words
     }
 
     /// Copy this stream as little-endian u32 words.
@@ -495,7 +495,7 @@ impl AvdVp9InstructionStream {
         if self.overflowed {
             return Err(Vp9FrontendError::InstructionStreamTooLarge);
         }
-        let byte_len = self.len * core::mem::size_of::<u32>();
+        let byte_len = self.words.len() * core::mem::size_of::<u32>();
         if byte_len > dst.len() {
             return Err(Vp9FrontendError::InstructionStreamTooLarge);
         }

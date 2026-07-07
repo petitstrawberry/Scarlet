@@ -157,7 +157,7 @@ const DECODE_T8103_VP_SLOT: u32 = 2;
 const DECODE_T8103_FIFO_SLOT: u32 = 0;
 const DECODE_T8103_FIFO_COUNT: u32 = 7;
 const AVD_TRACE_CAPACITY: usize = 128;
-const AVD_DECODE_TRACE_FRAMES: u32 = 0;
+const AVD_DECODE_TRACE_FRAMES: u32 = 4;
 const AVD_DECODE_PROGRESS_INTERVAL: u32 = 0;
 const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
 const AVD_OUTPUT_UV_SAMPLE_BYTES: usize = 256;
@@ -1501,9 +1501,36 @@ impl AvdSessionWorkspace {
         let granule = avd.dma_context().mapping_granule().max(AVD_WORKSPACE_ALIGN);
         let byte_len = align_up(required, granule);
         let page_count = byte_len.div_ceil(PAGE_SIZE);
+        println!(
+            "[apple-avd] vp9 workspace alloc begin layout={}x{} y_stride={} slot_count={} slot_span={} required={} byte_len={} pages={} granule={}",
+            layout.width,
+            layout.height,
+            layout.y_stride,
+            slot_count,
+            reference_slot_span,
+            required,
+            byte_len,
+            page_count,
+            granule
+        );
         let pages = ContiguousPages::new_aligned(page_count, granule)
             .ok_or("apple-avd: VP9 workspace allocation failed")?;
+        println!(
+            "[apple-avd] vp9 workspace alloc ok vaddr={:#x} paddr={:#x}",
+            pages.as_vaddr(),
+            pages.as_paddr()
+        );
+        println!(
+            "[apple-avd] vp9 workspace cache clean begin len={}",
+            byte_len
+        );
         arch::clean_invalidate_dcache_to_poc_range(pages.as_vaddr(), byte_len);
+        println!("[apple-avd] vp9 workspace cache clean ok");
+        println!(
+            "[apple-avd] vp9 workspace dma map begin paddr={:#x} len={}",
+            pages.as_paddr(),
+            byte_len
+        );
         let mapping = avd
             .dma_context()
             .map_phys_owned(
@@ -1512,6 +1539,10 @@ impl AvdSessionWorkspace {
                 IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
             )
             .map_err(|_| "apple-avd: VP9 workspace DMA map failed")?;
+        println!(
+            "[apple-avd] vp9 workspace dma map ok dma={:#x}",
+            mapping.dma_addr()
+        );
         Ok(Self {
             pages,
             mapping,
@@ -1996,6 +2027,7 @@ impl AvdBackendSession {
         layout: vp9::AvdVp9FrameLayout,
         store_reference: bool,
         key_frame: bool,
+        log_decode: bool,
     ) -> Result<AvdReferenceOutput, &'static str> {
         let payload_len = layout.output_len();
         let slot_span = AVD_OUTPUT_SLOT_PAYLOAD_OFFSET
@@ -2030,6 +2062,18 @@ impl AvdBackendSession {
                 || pool.len != output_map_len
         });
         if remap_output {
+            println!(
+                "[apple-avd] vp9 output map begin layout={}x{} payload={} slot_span={} slot_count={} dpb={} paddr={:#x} vaddr={:#x} len={}",
+                layout.width,
+                layout.height,
+                payload_len,
+                slot_span,
+                slot_count,
+                dpb_capacity,
+                request.output_paddr,
+                request.output_vaddr,
+                output_map_len
+            );
             let mapping = avd
                 .dma_context()
                 .map_phys_owned(
@@ -2038,6 +2082,10 @@ impl AvdBackendSession {
                     IommuMapFlags::READ | IommuMapFlags::WRITE | IommuMapFlags::COHERENT,
                 )
                 .map_err(|_| "apple-avd: VP9 output DMA map failed")?;
+            println!(
+                "[apple-avd] vp9 output map ok dma={:#x}",
+                mapping.dma_addr()
+            );
             self.output_pool = Some(AvdMappedOutputPool {
                 paddr: request.output_paddr,
                 vaddr: request.output_vaddr,
@@ -2056,6 +2104,14 @@ impl AvdBackendSession {
             .as_ref()
             .is_none_or(|workspace| !workspace.is_compatible_vp9(layout, slot_count));
         if remap_workspace {
+            println!(
+                "[apple-avd] vp9 workspace remap layout={}x{} slot_count={} rvra_len={} sps_len={}",
+                layout.width,
+                layout.height,
+                slot_count,
+                layout.rvra_len(),
+                layout.sps_scratch_len()
+            );
             self.workspace = Some(AvdSessionWorkspace::new_vp9(avd, layout, slot_count)?);
             self.clear_reference_frames();
             self.next_reference_slot = 0;
@@ -2078,6 +2134,12 @@ impl AvdBackendSession {
             slot = self.select_free_output_slot(slot_count);
         }
         let slot = slot.ok_or("apple-avd: no free VP9 output reference slot")?;
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 output slot={} slot_count={} slot_span={} payload_len={} store_ref={} key={}",
+                slot, slot_count, slot_span, payload_len, store_reference, key_frame
+            );
+        }
         let slot_offset = slot
             .checked_mul(slot_span)
             .ok_or("apple-avd: VP9 output slot offset overflow")?;
@@ -3059,7 +3121,21 @@ impl AppleAvdVideoBackend {
         let input_len = request.input_len as usize;
         let input_clean_len = align_up(input_len, granule);
         let input_map_len = align_up(AVD_MAPPED_INPUT_BYTES, granule);
+        let log_request = request.timestamp <= 4;
+        if log_request {
+            println!(
+                "[apple-avd] vp9 prepare entry stream={} ts={} input_len={} input_clean_len={} input_map_len={}",
+                request.stream_id, request.timestamp, input_len, input_clean_len, input_map_len
+            );
+            println!(
+                "[apple-avd] vp9 input cache clean begin vaddr={:#x} len={}",
+                input_vaddr, input_clean_len
+            );
+        }
         arch::clean_invalidate_dcache_to_poc_range(input_vaddr, input_clean_len);
+        if log_request {
+            println!("[apple-avd] vp9 input cache clean ok");
+        }
 
         let session = state.active_session_mut(request.stream_id)?;
         if session.coded_format != request.coded_format {
@@ -3073,13 +3149,35 @@ impl AppleAvdVideoBackend {
         )?;
         let frame_number = session.next_frame;
         session.next_frame = session.next_frame.wrapping_add(1);
-        let log_decode = should_log_decode_progress(frame_number);
+        let log_decode = log_request || should_log_decode_progress(frame_number);
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 frame begin stream={} frame={} ts={} coded={}x{} render={}x{} tiles={} flags={:#x} refresh={:#x}",
+                request.stream_id,
+                frame_number,
+                request.timestamp,
+                stream_parameters.width,
+                stream_parameters.height,
+                stream_parameters.render_width,
+                stream_parameters.render_height,
+                params.tiles.tile_count,
+                params.frame.flags,
+                params.frame.refresh_frame_flags
+            );
+            println!(
+                "[apple-avd] vp9 input map begin paddr={:#x} vaddr={:#x} len={}",
+                request.input_paddr, request.input_vaddr, input_map_len
+            );
+        }
         let input_dma_addr = session.ensure_mapped_input(
             avd,
             request.input_paddr,
             request.input_vaddr,
             input_map_len,
         )?;
+        if log_decode {
+            println!("[apple-avd] vp9 input map ok dma={:#x}", input_dma_addr);
+        }
         let input = AvdDmaRange {
             dma_addr: input_dma_addr,
             len: input_len,
@@ -3090,12 +3188,36 @@ impl AppleAvdVideoBackend {
         let reference_slots = vp9_reference_slots_from_frame(params, &session.reference_frames);
         let reference_pictures =
             vp9_reference_pictures_from_frame(params, &session.reference_frames);
-        let reference_output =
-            session.prepare_mapped_output_vp9(avd, request, layout, store_reference, key_frame)?;
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 output prepare begin refs={} store_ref={} key={}",
+                valid_references, store_reference, key_frame
+            );
+        }
+        let reference_output = session.prepare_mapped_output_vp9(
+            avd,
+            request,
+            layout,
+            store_reference,
+            key_frame,
+            log_decode,
+        )?;
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 output prepare ok slot={} dma={:#x} vaddr={:#x} len={}",
+                reference_output.slot,
+                reference_output.dma_addr,
+                reference_output.vaddr,
+                reference_output.len
+            );
+        }
         let output = AvdDmaRange {
             dma_addr: reference_output.dma_addr,
             len: hardware_payload_len,
         };
+        if log_decode {
+            println!("[apple-avd] vp9 decode request build begin");
+        }
         let decode_request = Vp9DecodeRequest::from_stateless(
             session.stream_id as u64,
             frame_number,
@@ -3105,28 +3227,63 @@ impl AppleAvdVideoBackend {
             layout,
         )
         .map_err(vp9_error_to_str)?;
+        if log_decode {
+            println!("[apple-avd] vp9 decode request build ok");
+        }
 
         let (instructions, inst_len, instruction_fifo_dma, vp9_rvra_dma_addrs) = {
+            if log_decode {
+                println!("[apple-avd] vp9 workspace access begin");
+            }
             let workspace = session.ensure_workspace()?;
             let workspace_addresses =
                 workspace.addresses_for_vp9_slot(reference_output.slot, layout, reference_slots)?;
+            if log_decode {
+                println!(
+                    "[apple-avd] vp9 workspace access ok fifo_dma={:#x} probs_dma={:#x} rvra0={:#x}",
+                    workspace_addresses.instruction_fifo_dma_addr,
+                    workspace_addresses.probabilities_dma_addr,
+                    workspace_addresses.current_rvra_dma_addrs[0]
+                );
+            }
             workspace
                 .vp9_probabilities_mut()
                 .copy_from_slice(&params.probabilities.data);
+            if log_decode {
+                println!("[apple-avd] vp9 probabilities cache clean begin");
+            }
             arch::clean_dcache_to_poc_range(
                 workspace.vp9_probabilities_vaddr(),
                 SCARLET_VIDEO_VP9_PROBABILITY_BYTES,
             );
+            if log_decode {
+                println!("[apple-avd] vp9 probabilities cache clean ok");
+                println!("[apple-avd] vp9 instruction build begin");
+            }
             let instructions = AvdVp9InstructionStream::build(
                 &decode_request,
                 &stream_parameters,
                 &workspace_addresses,
                 &reference_pictures,
             );
+            if log_decode {
+                println!(
+                    "[apple-avd] vp9 instruction build ok words={}",
+                    instructions.words().len()
+                );
+                println!("[apple-avd] vp9 instruction write begin");
+            }
             let inst_len = instructions
                 .write_le_bytes(workspace.instruction_fifo_mut())
                 .map_err(vp9_error_to_str)?;
+            if log_decode {
+                println!("[apple-avd] vp9 instruction write ok bytes={}", inst_len);
+                println!("[apple-avd] vp9 instruction cache clean begin");
+            }
             arch::clean_dcache_to_poc_range(workspace.instruction_fifo_vaddr(), inst_len);
+            if log_decode {
+                println!("[apple-avd] vp9 instruction cache clean ok");
+            }
             (
                 instructions,
                 inst_len,
@@ -3135,11 +3292,34 @@ impl AppleAvdVideoBackend {
             )
         };
 
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 output cache invalidate begin vaddr={:#x} len={}",
+                reference_output.vaddr, reference_output.len
+            );
+        }
         arch::clean_invalidate_dcache_to_poc_range(reference_output.vaddr, reference_output.len);
+        if log_decode {
+            println!("[apple-avd] vp9 output cache invalidate ok");
+            println!(
+                "[apple-avd] vp9 mmio submit begin fifo_dma={:#x}",
+                instruction_fifo_dma
+            );
+        }
 
         let status_before =
             avd.submit_vp9_mmio(&decode_request, &instructions, instruction_fifo_dma)?;
+        if log_decode {
+            println!(
+                "[apple-avd] vp9 mmio submit ok status_before={:#x}",
+                status_before
+            );
+            println!("[apple-avd] vp9 mailbox submit begin");
+        }
         let command_tag = avd.submit_vp9_request(&decode_request)?;
+        if log_decode {
+            println!("[apple-avd] vp9 mailbox submit ok tag={:#x}", command_tag);
+        }
         if log_decode {
             println!(
                 "[apple-avd] vp9 submit stream={} frame={} key={} ref={} refs={} slot={}/{} tiles={} inst_words={} status_before={:#x} tag={:#x}",
@@ -3318,23 +3498,64 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         &self,
         request: &VideoBackendVp9StatelessRequest,
     ) -> Result<(), &'static str> {
+        let log_request = request.decode.timestamp <= 4;
+        if log_request {
+            println!(
+                "[apple-avd] vp9 stateless ioctl begin stream={} ts={} input_len={} coded_format={}",
+                request.decode.stream_id,
+                request.decode.timestamp,
+                request.decode.input_len,
+                request.decode.coded_format
+            );
+        }
         self.validate_vp9_request(&request.decode)?;
+        if log_request {
+            println!("[apple-avd] vp9 stateless validate ok");
+        }
         let stream_parameters = Vp9StreamParameters::from_stateless_frame(&request.vp9.frame)
             .map_err(vp9_error_to_str)?;
+        if log_request {
+            println!(
+                "[apple-avd] vp9 stateless stream params ok coded={}x{} render={}x{} tiles={}x{}",
+                stream_parameters.width,
+                stream_parameters.height,
+                stream_parameters.render_width,
+                stream_parameters.render_height,
+                1u32 << stream_parameters.tile_cols_log2,
+                1u32 << stream_parameters.tile_rows_log2
+            );
+            println!("[apple-avd] vp9 service completions begin");
+        }
 
         self.service_completions()?;
+        if log_request {
+            println!("[apple-avd] vp9 service completions ok");
+            println!("[apple-avd] vp9 state lock begin");
+        }
         let avd = self.avd()?;
         let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
+        if log_request {
+            println!("[apple-avd] vp9 state lock ok");
+        }
         if state.pending.is_some() {
             return Err("apple-avd: decode already pending");
         }
+        if log_request {
+            println!("[apple-avd] vp9 firmware ensure begin");
+        }
         avd.ensure_firmware_running()?;
+        if log_request {
+            println!("[apple-avd] vp9 firmware ensure ok");
+        }
         {
             let session =
                 state.session_for_submit(request.decode.stream_id, request.decode.coded_format)?;
             session.stream_parameters = None;
+        }
+        if log_request {
+            println!("[apple-avd] vp9 prepared submit begin");
         }
         self.submit_vp9_prepared_locked(
             &mut avd,
@@ -3342,7 +3563,11 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             &request.decode,
             stream_parameters,
             &request.vp9,
-        )
+        )?;
+        if log_request {
+            println!("[apple-avd] vp9 stateless ioctl ok");
+        }
+        Ok(())
     }
 
     fn dequeue_frame(
