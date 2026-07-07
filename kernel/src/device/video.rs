@@ -5,7 +5,13 @@
 //! contract. Keep the command values, mapped-buffer structures, and frame
 //! constants here so backend implementations do not drift apart.
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::VecDeque,
+    format,
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,7 +24,7 @@ use crate::object::capability::{
     ControlOps, MemoryMappingInfo, MemoryMappingOps,
     selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
 };
-use crate::sync::Mutex;
+use crate::sync::{IrqGuard, Mutex, Waker};
 use crate::task::mytask;
 
 /// FourCC-like Scarlet frame stream magic.
@@ -113,6 +119,8 @@ pub const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 pub struct VideoBackendCapabilities {
     /// Maximum number of simultaneously owned decode sessions.
     pub max_sessions: u32,
+    /// Maximum number of decode requests the backend can own concurrently.
+    pub max_inflight_decodes: u32,
     /// Maximum byte length accepted in the mapped input area.
     pub mapped_input_len: u32,
     /// Maximum byte length produced in the mapped output area.
@@ -197,6 +205,7 @@ pub struct VideoBackendDecodeRequest {
 }
 
 /// Backend request for stateless H.264 decode.
+#[derive(Clone, Copy, Debug)]
 pub struct VideoBackendH264StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
@@ -211,6 +220,16 @@ pub struct VideoBackendDecodedFrame {
     pub stream_id: u32,
     /// User-visible decoded frame metadata.
     pub frame: ScarletVideoDequeuedFrame,
+}
+
+/// Receiver for backend decode-completion notifications.
+pub trait VideoCompletionNotifier: Send + Sync {
+    /// Notify that backend decode-completion state may have changed.
+    ///
+    /// Backends call this after an interrupt, poll, or error path observes
+    /// completion progress. The notifier should re-check backend state because
+    /// notifications are edge hints and can be coalesced.
+    fn notify_video_completion(&self);
 }
 
 /// Common interface for Scarlet video decode backends.
@@ -238,6 +257,20 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// Capabilities used by `/dev/video*` frontends.
     fn capabilities(&self) -> VideoBackendCapabilities;
+
+    /// Install or remove the frontend completion notifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `notifier` - Weak reference to the frontend scheduler that should be
+    ///   woken when backend completion state changes, or `None` to disconnect
+    ///   the notifier.
+    ///
+    /// # Returns
+    ///
+    /// This hook is best-effort and returns no status. Backends that do not
+    /// generate asynchronous completion notifications can ignore it.
+    fn set_completion_notifier(&self, _notifier: Option<Weak<dyn VideoCompletionNotifier>>) {}
 
     /// Create a decode session.
     ///
@@ -310,6 +343,118 @@ static VIDEO_BACKENDS: Mutex<Vec<Arc<dyn VideoDecodeBackend>>> = Mutex::new(Vec:
 static VIDEO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const DEFAULT_STREAM_ID: u32 = 1;
 const VIDEO_MAPPED_BUFFER_ALIGN: usize = 0x4000;
+const VIDEO_MAX_INFLIGHT_DECODES: usize = 32;
+const VIDEO_MAX_QUEUED_JOBS: usize = 16;
+const VIDEO_MAX_COMPLETED_FRAMES: usize = 16;
+const VIDEO_MAX_STREAM_ERRORS: usize = 16;
+
+#[derive(Clone, Copy)]
+enum VideoQueuedJob {
+    Decode(VideoBackendDecodeRequest),
+    H264Stateless(VideoBackendH264StatelessRequest),
+}
+
+impl VideoQueuedJob {
+    fn stream_id(&self) -> u32 {
+        match self {
+            Self::Decode(request) => request.stream_id,
+            Self::H264Stateless(request) => request.decode.stream_id,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VideoStreamError {
+    stream_id: u32,
+    error: &'static str,
+}
+
+struct VideoSchedulerState {
+    current_streams: Vec<u32>,
+    queued: VecDeque<VideoQueuedJob>,
+    completed: VecDeque<VideoBackendDecodedFrame>,
+    errors: VecDeque<VideoStreamError>,
+}
+
+impl VideoSchedulerState {
+    fn new(max_inflight_decodes: usize) -> Self {
+        Self {
+            current_streams: Vec::with_capacity(max_inflight_decodes),
+            queued: VecDeque::with_capacity(VIDEO_MAX_QUEUED_JOBS),
+            completed: VecDeque::with_capacity(VIDEO_MAX_COMPLETED_FRAMES),
+            errors: VecDeque::with_capacity(VIDEO_MAX_STREAM_ERRORS),
+        }
+    }
+
+    fn has_pending_stream(&self, stream_id: u32) -> bool {
+        self.current_streams.contains(&stream_id)
+            || self.queued.iter().any(|job| job.stream_id() == stream_id)
+            || self
+                .completed
+                .iter()
+                .any(|frame| frame.stream_id == stream_id)
+    }
+
+    fn push_completed(&mut self, frame: VideoBackendDecodedFrame) {
+        if self.completed.len() >= VIDEO_MAX_COMPLETED_FRAMES {
+            let _ = self.completed.pop_front();
+        }
+        self.completed.push_back(frame);
+    }
+
+    fn push_error(&mut self, stream_id: u32, error: &'static str) {
+        if self.errors.len() >= VIDEO_MAX_STREAM_ERRORS {
+            let _ = self.errors.pop_front();
+        }
+        self.errors.push_back(VideoStreamError { stream_id, error });
+    }
+
+    fn remove_completed(&mut self, stream_id: u32) -> Option<VideoBackendDecodedFrame> {
+        let index = self
+            .completed
+            .iter()
+            .position(|frame| frame.stream_id == stream_id)?;
+        self.completed.remove(index)
+    }
+
+    fn remove_error(&mut self, stream_id: u32) -> Option<&'static str> {
+        let index = self
+            .errors
+            .iter()
+            .position(|error| error.stream_id == stream_id)?;
+        self.errors.remove(index).map(|error| error.error)
+    }
+
+    fn remove_stream_queues(&mut self, stream_id: u32) {
+        self.queued.retain(|job| job.stream_id() != stream_id);
+        self.completed.retain(|frame| frame.stream_id != stream_id);
+        self.errors.retain(|error| error.stream_id != stream_id);
+    }
+
+    fn clear_current_stream(&mut self, stream_id: u32) {
+        if let Some(index) = self
+            .current_streams
+            .iter()
+            .position(|current| *current == stream_id)
+        {
+            self.current_streams.swap_remove(index);
+        }
+    }
+}
+
+fn max_inflight_from_capabilities(caps: VideoBackendCapabilities) -> usize {
+    let requested = if caps.max_inflight_decodes == 0 {
+        1
+    } else {
+        caps.max_inflight_decodes as usize
+    };
+    let session_limited = if caps.max_sessions == 0 {
+        requested
+    } else {
+        requested.min(caps.max_sessions as usize)
+    };
+    session_limited.clamp(1, VIDEO_MAX_INFLIGHT_DECODES)
+}
 
 /// Register a video decode backend.
 ///
@@ -339,13 +484,19 @@ pub fn register_video_backend(backend: Arc<dyn VideoDecodeBackend>) -> usize {
 pub fn register_video_decode_device(backend: Arc<dyn VideoDecodeBackend>) -> String {
     let id = VIDEO_DEVICE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = format!("video{}", id);
-    let device: Arc<dyn Device> = Arc::new(ScarletVideoDevice::new(backend));
+    let device = Arc::new(ScarletVideoDevice::new(Arc::clone(&backend)));
+    let notifier: Arc<dyn VideoCompletionNotifier> = device.clone();
+    backend.set_completion_notifier(Some(Arc::downgrade(&notifier)));
+    let device: Arc<dyn Device> = device;
     DeviceManager::get_manager().register_device_with_name(name.clone(), device);
     name
 }
 
 struct ScarletVideoDevice {
     backend: Arc<dyn VideoDecodeBackend>,
+    scheduler: Mutex<VideoSchedulerState>,
+    completion_waker: Waker,
+    max_inflight_decodes: usize,
     mapped_buffer: Mutex<Option<ContiguousPages>>,
     last_error: Mutex<Option<&'static str>>,
     next_timestamp: Mutex<u64>,
@@ -353,8 +504,12 @@ struct ScarletVideoDevice {
 
 impl ScarletVideoDevice {
     fn new(backend: Arc<dyn VideoDecodeBackend>) -> Self {
+        let max_inflight_decodes = max_inflight_from_capabilities(backend.capabilities());
         Self {
             backend,
+            scheduler: Mutex::new(VideoSchedulerState::new(max_inflight_decodes)),
+            completion_waker: Waker::new_interruptible("scarlet_video"),
+            max_inflight_decodes,
             mapped_buffer: Mutex::new(None),
             last_error: Mutex::new(None),
             next_timestamp: Mutex::new(1),
@@ -411,25 +566,27 @@ impl ScarletVideoDevice {
         let backend_status = self.backend.debug_status().unwrap_or_default();
         if let Some(error) = error {
             crate::println!(
-                "[scarlet-video] {} error={} stream={} backend={} caps=0x{:x} sessions={} input={} output={}{}",
+                "[scarlet-video] {} error={} stream={} backend={} caps=0x{:x} sessions={} inflight={} input={} output={}{}",
                 event,
                 error,
                 stream_id,
                 self.backend.name(),
                 caps.user_flags(),
                 caps.max_sessions,
+                caps.max_inflight_decodes,
                 caps.mapped_input_len,
                 caps.mapped_output_len,
                 backend_status
             );
         } else {
             crate::println!(
-                "[scarlet-video] {} stream={} backend={} caps=0x{:x} sessions={} input={} output={}{}",
+                "[scarlet-video] {} stream={} backend={} caps=0x{:x} sessions={} inflight={} input={} output={}{}",
                 event,
                 stream_id,
                 self.backend.name(),
                 caps.user_flags(),
                 caps.max_sessions,
+                caps.max_inflight_decodes,
                 caps.mapped_input_len,
                 caps.mapped_output_len,
                 backend_status
@@ -469,6 +626,151 @@ impl ScarletVideoDevice {
         let timestamp = *next;
         *next = next.wrapping_add(1);
         timestamp
+    }
+
+    fn enqueue_decode_job(&self, job: VideoQueuedJob) -> Result<(), &'static str> {
+        let stream_id = job.stream_id();
+        {
+            let _irq_guard = IrqGuard::new();
+            let mut scheduler = self.scheduler.lock();
+            if scheduler.has_pending_stream(stream_id) {
+                return Err("scarlet-video: stream decode already pending");
+            }
+            if scheduler.queued.len() >= VIDEO_MAX_QUEUED_JOBS {
+                return Err("scarlet-video: decode queue is full");
+            }
+            scheduler.queued.push_back(job);
+        }
+
+        self.pump_scheduler();
+        self.completion_waker.wake_all();
+        Ok(())
+    }
+
+    fn pump_scheduler(&self) {
+        loop {
+            let mut made_progress = false;
+            let mut current_index = 0;
+            while let Some(stream_id) = self.current_scheduled_stream(current_index) {
+                match self.backend.dequeue_frame(stream_id) {
+                    Ok(Some(frame)) => {
+                        {
+                            let _irq_guard = IrqGuard::new();
+                            let mut scheduler = self.scheduler.lock();
+                            scheduler.clear_current_stream(stream_id);
+                            scheduler.push_completed(frame);
+                        }
+                        self.completion_waker.wake_all();
+                        made_progress = true;
+                        continue;
+                    }
+                    Ok(None) => current_index += 1,
+                    Err(error) => {
+                        {
+                            let _irq_guard = IrqGuard::new();
+                            let mut scheduler = self.scheduler.lock();
+                            scheduler.clear_current_stream(stream_id);
+                            scheduler.push_error(stream_id, error);
+                        }
+                        self.completion_waker.wake_all();
+                        made_progress = true;
+                        continue;
+                    }
+                }
+            }
+
+            let mut dispatched = false;
+            while let Some(job) = self.take_next_job() {
+                let stream_id = job.stream_id();
+                let result = match job {
+                    VideoQueuedJob::Decode(request) => self.backend.submit_decode(&request),
+                    VideoQueuedJob::H264Stateless(request) => {
+                        self.backend.submit_h264_stateless(&request)
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        self.completion_waker.wake_all();
+                        dispatched = true;
+                    }
+                    Err(error) => {
+                        {
+                            let _irq_guard = IrqGuard::new();
+                            let mut scheduler = self.scheduler.lock();
+                            scheduler.clear_current_stream(stream_id);
+                            scheduler.push_error(stream_id, error);
+                        }
+                        self.completion_waker.wake_all();
+                        made_progress = true;
+                    }
+                }
+            }
+
+            if !made_progress && !dispatched {
+                return;
+            }
+        }
+    }
+
+    fn current_scheduled_stream(&self, index: usize) -> Option<u32> {
+        let _irq_guard = IrqGuard::new();
+        self.scheduler.lock().current_streams.get(index).copied()
+    }
+
+    fn take_next_job(&self) -> Option<VideoQueuedJob> {
+        let _irq_guard = IrqGuard::new();
+        let mut scheduler = self.scheduler.lock();
+        if scheduler.current_streams.len() >= self.max_inflight_decodes {
+            return None;
+        }
+        let job = scheduler.queued.pop_front()?;
+        scheduler.current_streams.push(job.stream_id());
+        Some(job)
+    }
+
+    fn dequeue_scheduled_frame(
+        &self,
+        stream_id: u32,
+    ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
+        self.pump_scheduler();
+        let _irq_guard = IrqGuard::new();
+        let mut scheduler = self.scheduler.lock();
+        if let Some(error) = scheduler.remove_error(stream_id) {
+            return Err(error);
+        }
+        Ok(scheduler.remove_completed(stream_id))
+    }
+
+    fn destroy_scheduled_stream(&self, stream_id: u32) -> Result<(), &'static str> {
+        {
+            let _irq_guard = IrqGuard::new();
+            let mut scheduler = self.scheduler.lock();
+            scheduler.remove_stream_queues(stream_id);
+        }
+        let result = self.backend.destroy_session(stream_id);
+        {
+            let _irq_guard = IrqGuard::new();
+            let mut scheduler = self.scheduler.lock();
+            scheduler.clear_current_stream(stream_id);
+        }
+        result?;
+        self.pump_scheduler();
+        self.completion_waker.wake_all();
+        Ok(())
+    }
+
+    fn scheduler_ready(&self, interest: ReadyInterest) -> ReadySet {
+        self.pump_scheduler();
+        let _irq_guard = IrqGuard::new();
+        let scheduler = self.scheduler.lock();
+        let mut set = ReadySet::none();
+        if interest.read && (!scheduler.completed.is_empty() || !scheduler.errors.is_empty()) {
+            set.read = true;
+        }
+        if interest.write && scheduler.queued.len() < VIDEO_MAX_QUEUED_JOBS {
+            set.write = true;
+        }
+        set
     }
 
     fn mapped_decode_request(
@@ -529,7 +831,7 @@ impl ScarletVideoDevice {
             return Err("scarlet-video: backend does not support coded format");
         }
         let request = self.mapped_decode_request(stream_id, coded_format, input_len, timestamp)?;
-        self.backend.submit_decode(&request)
+        self.enqueue_decode_job(VideoQueuedJob::Decode(request))
     }
 
     fn h264_stateless_params(
@@ -584,7 +886,7 @@ impl ScarletVideoDevice {
 
     fn handle_destroy_session(&self, arg: usize) -> Result<i32, &'static str> {
         let info: ScarletVideoSessionInfo = read_user_value(arg)?;
-        self.backend.destroy_session(info.stream_id)?;
+        self.destroy_scheduled_stream(info.stream_id)?;
         *self.next_timestamp.lock() = 1;
         Ok(0)
     }
@@ -649,7 +951,7 @@ impl ScarletVideoDevice {
             )?;
             let h264 = self.h264_stateless_params(submit.params)?;
             let request = VideoBackendH264StatelessRequest { decode, h264 };
-            self.backend.submit_h264_stateless(&request)
+            self.enqueue_decode_job(VideoQueuedJob::H264Stateless(request))
         })();
 
         match result {
@@ -665,7 +967,7 @@ impl ScarletVideoDevice {
     }
 
     fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
-        let decoded = match self.backend.dequeue_frame(DEFAULT_STREAM_ID) {
+        let decoded = match self.dequeue_scheduled_frame(DEFAULT_STREAM_ID) {
             Ok(decoded) => decoded,
             Err(e) => {
                 *self.last_error.lock() = Some(e);
@@ -688,7 +990,7 @@ impl ScarletVideoDevice {
         } else {
             dequeued.stream_id
         };
-        let decoded = match self.backend.dequeue_frame(stream_id) {
+        let decoded = match self.dequeue_scheduled_frame(stream_id) {
             Ok(decoded) => decoded,
             Err(e) => {
                 *self.last_error.lock() = Some(e);
@@ -712,12 +1014,13 @@ impl ScarletVideoDevice {
         let last_error = self.last_error.lock().unwrap_or("none");
         let backend_status = self.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} input={} output={} last_error={}{}\n",
+            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} inflight={} input={} output={} last_error={}{}\n",
             self.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
             caps.supports_stateless_h264,
             caps.max_sessions,
+            caps.max_inflight_decodes,
             caps.mapped_input_len,
             caps.mapped_output_len,
             last_error,
@@ -817,7 +1120,7 @@ impl ScarletVideoOpen {
             requested_stream_id,
             current
         );
-        if let Err(e) = self.device.backend.destroy_session(current) {
+        if let Err(e) = self.device.destroy_scheduled_stream(current) {
             self.device
                 .log_backend_state("destroy_session failed", current, Some(e));
             return Err(e);
@@ -954,7 +1257,8 @@ impl ScarletVideoOpen {
             return Err("scarlet-video: backend does not support coded format");
         }
         let request = self.mapped_decode_request(stream_id, coded_format, input_len, timestamp)?;
-        self.device.backend.submit_decode(&request)
+        self.device
+            .enqueue_decode_job(VideoQueuedJob::Decode(request))
     }
 
     fn dequeue_frame(
@@ -962,7 +1266,7 @@ impl ScarletVideoOpen {
         stream_id: u32,
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
         let stream_id = self.checked_stream_id(stream_id)?;
-        self.device.backend.dequeue_frame(stream_id)
+        self.device.dequeue_scheduled_frame(stream_id)
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
@@ -976,12 +1280,13 @@ impl ScarletVideoOpen {
         let last_error = self.last_error.lock().unwrap_or("none");
         let backend_status = self.device.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} input={} output={} last_error={}{}\n",
+            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} inflight={} input={} output={} last_error={}{}\n",
             self.device.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
             caps.supports_stateless_h264,
             caps.max_sessions,
+            caps.max_inflight_decodes,
             caps.mapped_input_len,
             caps.mapped_output_len,
             last_error,
@@ -999,7 +1304,7 @@ impl Drop for ScarletVideoOpen {
                 self as *const _ as usize,
                 stream_id
             );
-            match self.device.backend.destroy_session(stream_id) {
+            match self.device.destroy_scheduled_stream(stream_id) {
                 Ok(()) => {
                     self.device
                         .log_backend_state("drop destroy ok", stream_id, None);
@@ -1189,7 +1494,8 @@ impl ControlOps for ScarletVideoOpen {
                     )?;
                     let h264 = self.device.h264_stateless_params(submit.params)?;
                     let request = VideoBackendH264StatelessRequest { decode, h264 };
-                    self.device.backend.submit_h264_stateless(&request)
+                    self.device
+                        .enqueue_decode_job(VideoQueuedJob::H264Stateless(request))
                 })();
 
                 match result {
@@ -1516,28 +1822,57 @@ impl MemoryMappingOps for ScarletVideoDevice {
 
 impl Selectable for ScarletVideoDevice {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
-        let mut set = ReadySet::none();
-        if interest.read {
-            set.read = true;
-        }
-        if interest.write {
-            set.write = true;
-        }
-        set
+        self.scheduler_ready(interest)
     }
 
     fn wait_until_ready(
         &self,
-        _interest: ReadyInterest,
-        _trapframe: &mut Trapframe,
-        _timeout_ticks: Option<u64>,
-        _min_wait_ticks: u64,
+        interest: ReadyInterest,
+        trapframe: &mut Trapframe,
+        timeout_ticks: Option<u64>,
+        min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
+        let current = self.current_ready(interest);
+        if (interest.read && current.read) || (interest.write && current.write) {
+            return SelectWaitOutcome::Ready;
+        }
+
+        let task_id = {
+            use crate::arch::get_cpu;
+            let cpu_id = get_cpu().get_cpuid();
+            crate::sched::scheduler::current_task_id(cpu_id).unwrap_or(0)
+        };
+
+        let woke = if min_wait_ticks > 0 {
+            self.completion_waker.wait_with_min_timeout(
+                task_id,
+                trapframe,
+                timeout_ticks,
+                min_wait_ticks,
+            )
+        } else {
+            self.completion_waker
+                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+        };
+
+        if timeout_ticks.is_some() && !woke {
+            let after = self.current_ready(interest);
+            if !((interest.read && after.read) || (interest.write && after.write)) {
+                return SelectWaitOutcome::TimedOut;
+            }
+        }
+
         SelectWaitOutcome::Ready
     }
 
     fn is_nonblocking(&self) -> bool {
         true
+    }
+}
+
+impl VideoCompletionNotifier for ScarletVideoDevice {
+    fn notify_video_completion(&self) {
+        self.completion_waker.wake_all();
     }
 }
 
