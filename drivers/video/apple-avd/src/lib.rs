@@ -128,6 +128,7 @@ const REG_WRAP_INIT: usize = 0x1400018;
 const MCPU_CONTROL_RESET: u32 = 0xe;
 const MCPU_CONTROL_RUN: u32 = 0x1;
 const MCPU_DECODE_DMA_CONFIG: u32 = 0x108e_b30;
+const MCPU_IRQ_ENABLE1_PENDING: u32 = 0x1;
 const MCPU_MAILBOX1_NOT_EMPTY: u32 = 0x8;
 const H264_SUBMIT_START: u32 = 1;
 const H264_SUBMIT_FRAME: u32 = 0x2b000107;
@@ -504,7 +505,7 @@ impl AvdRegisters {
         self.read32(REG_MCPU_STATUS)
     }
 
-    fn irq_status(&self) -> u32 {
+    fn irq_enable_status1(&self) -> u32 {
         self.read32(REG_MCPU_IRQ_ENABLE1)
     }
 
@@ -845,10 +846,24 @@ impl AvdRegisters {
 pub struct AvdStatusSnapshot {
     /// Top-level AVD status register.
     pub status: u32,
-    /// Top-level AVD IRQ status register.
-    pub irq_status: u32,
+    /// MCPU IRQ enable/status register.
+    pub irq_enable_status1: u32,
     /// CM3-to-AP mailbox status bits.
-    pub mailbox: u32,
+    pub mailbox_status: u32,
+    /// Raw CM3-to-AP mailbox word.
+    pub mailbox_raw: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AvdInterruptCause {
+    irq_enable_status1: u32,
+    mailbox_raw: u32,
+}
+
+impl AvdInterruptCause {
+    fn is_asserted(self) -> bool {
+        self.mailbox_raw != 0 || (self.irq_enable_status1 & MCPU_IRQ_ENABLE1_PENDING) != 0
+    }
 }
 
 struct AvdFirmwareImage {
@@ -1220,8 +1235,9 @@ impl AppleAvd {
     fn snapshot(&self) -> AvdStatusSnapshot {
         AvdStatusSnapshot {
             status: self.registers.status(),
-            irq_status: self.registers.irq_status(),
-            mailbox: self.registers.recv_mailbox_status(),
+            irq_enable_status1: self.registers.irq_enable_status1(),
+            mailbox_status: self.registers.recv_mailbox_status(),
+            mailbox_raw: self.registers.recv_mailbox(),
         }
     }
 
@@ -2190,6 +2206,17 @@ impl AppleAvdVideoBackend {
         Ok(())
     }
 
+    fn avd_interrupt_cause(&self) -> InterruptResult<AvdInterruptCause> {
+        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
+        let _irq_guard = IrqGuard::new();
+        let avd = avd.lock();
+        let snapshot = avd.snapshot();
+        Ok(AvdInterruptCause {
+            irq_enable_status1: snapshot.irq_enable_status1,
+            mailbox_raw: snapshot.mailbox_raw,
+        })
+    }
+
     fn service_completions(&self) -> Result<(), &'static str> {
         let avd = self.avd()?;
         let _irq_guard = IrqGuard::new();
@@ -2557,14 +2584,15 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         let _irq_guard = IrqGuard::new();
         let state = self.state.lock();
         Some(format!(
-            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_status={:#x} mailbox={:#x}",
+            " fw={} pending={} completed={} h264_status={:#x} status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}",
             firmware,
             state.pending_len(),
             state.completed.len(),
             h264_status,
             snapshot.status,
-            snapshot.irq_status,
-            snapshot.mailbox
+            snapshot.irq_enable_status1,
+            snapshot.mailbox_status,
+            snapshot.mailbox_raw
         ))
     }
 
@@ -2672,6 +2700,11 @@ impl InterruptSource for AppleAvdVideoBackend {
     }
 
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        let cause = self.avd_interrupt_cause()?;
+        if !cause.is_asserted() {
+            return Ok(InterruptClaim::NotMine);
+        }
+
         if !self.has_pending_decode() {
             self.clear_stale_avd_interrupts()?;
             return Ok(InterruptClaim::Handled);
@@ -3223,7 +3256,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     debug_device::register_avd_debug_device(id, Arc::clone(&video_backend));
 
     println!(
-        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} interrupt={:?} reset={} status={:#x} irq_status={:#x}",
+        "[apple-avd] registered {} id={} backend={} video={} soc={} mmio={:#x}+{:#x} irq={:?} interrupt={:?} reset={} status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}",
         device.name(),
         id,
         backend_id,
@@ -3235,7 +3268,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         interrupt_id,
         has_reset,
         snapshot.status,
-        snapshot.irq_status
+        snapshot.irq_enable_status1,
+        snapshot.mailbox_status,
+        snapshot.mailbox_raw
     );
 
     Ok(())

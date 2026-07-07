@@ -167,7 +167,7 @@ impl AppleAvdDebugDevice {
             concat!(
                 "avd{} name={} soc={} mmio={:#x}+{:#x} irq={:?}\n",
                 "firmware={} fw_dma={:#x} fw_len={}\n",
-                "status={:#x} irq_status={:#x} mailbox={:#x}\n",
+                "status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n",
                 "backend={} sessions={} input={} output={} stateful_h264={} stateful_av1={} stateful_hevc={} stateless_h264={}\n"
             ),
             self.avd_id,
@@ -180,8 +180,9 @@ impl AppleAvdDebugDevice {
             avd.firmware_dma_addr().unwrap_or(0),
             avd.firmware_image_size().unwrap_or(0),
             snapshot.status,
-            snapshot.irq_status,
-            snapshot.mailbox,
+            snapshot.irq_enable_status1,
+            snapshot.mailbox_status,
+            snapshot.mailbox_raw,
             self.backend.name(),
             caps.max_sessions,
             caps.mapped_input_len,
@@ -201,18 +202,20 @@ impl AppleAvdDebugDevice {
         format!(
             concat!(
                 "fw-ping avd{} state={} message={:?}\n",
-                "before status={:#x} irq_status={:#x} mailbox={:#x}\n",
-                "after status={:#x} irq_status={:#x} mailbox={:#x}\n"
+                "before status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n",
+                "after status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n"
             ),
             self.avd_id,
             avd.firmware_state_name(),
             message,
             before.status,
-            before.irq_status,
-            before.mailbox,
+            before.irq_enable_status1,
+            before.mailbox_status,
+            before.mailbox_raw,
             after.status,
-            after.irq_status,
-            after.mailbox
+            after.irq_enable_status1,
+            after.mailbox_status,
+            after.mailbox_raw
         )
     }
 
