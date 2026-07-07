@@ -262,6 +262,10 @@ name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
+name = "scarlet-codecs"
+version = "0.16.0"
+
+[[package]]
 name = "scarlet-desktop-config"
 version = "0.1.0"
 dependencies = [
@@ -548,6 +552,7 @@ dependencies = [
  "sas-protocol",
  "sbus",
  "sbus-client",
+ "scarlet-codecs",
  "scarlet-desktop-config",
  "scarlet-os",
  "scarlet-std",

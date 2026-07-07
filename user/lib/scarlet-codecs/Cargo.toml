@@ -1,0 +1,8 @@
+[package]
+name = "scarlet-codecs"
+version = "0.16.0"
+edition = "2024"
+
+[lib]
+name = "scarlet_codecs"
+path = "src/lib.rs"

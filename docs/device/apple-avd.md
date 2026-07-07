@@ -5,8 +5,8 @@ This document tracks the Scarlet-side bring-up plan for Apple Video Decoder
 
 ## Initial Goal
 
-Decode H.264 Annex B access units with Apple AVD and return NV12 frames through
-the Scarlet video decode device contract at `/dev/video0`.
+Decode userspace-prepared stateless H.264 requests with Apple AVD and return
+NV12 frames through the Scarlet video decode device contract at `/dev/video0`.
 
 The first working path is:
 
@@ -21,9 +21,11 @@ video_player
 ```
 
 SWS remains BGRA-only for the initial implementation. Native NV12 surfaces,
-GPU shader conversion, V4L2 Request API, HEVC, VP9, AV1, HDR, and full error
-recovery are explicitly out of scope until H.264 playback works through the
-existing Scarlet video API.
+GPU shader conversion, HEVC, VP9, AV1, HDR, and full error recovery are
+explicitly out of scope until H.264 playback works through the existing Scarlet
+video API. The kernel contract is intentionally close to a V4L2 Request API
+split: userspace owns codec parsing and DPB management, while the AVD driver
+lowers validated stateless parameters to hardware commands.
 
 ## Firmware ABI
 
@@ -73,13 +75,17 @@ The branch currently provides:
   `clear-trace`, then read the device to fetch the report.
 - `kernel::device::video`: shared `/dev/video*` ABI definitions plus a decode
   backend registry used by AVD and future non-VirtIO backends.
+- `user/lib/scarlet-codecs`: userspace codec request builders. The current H.264
+  module owns Annex B scanning, SPS/PPS/slice parsing, POC, DPB, and reference
+  list construction for `video_player`.
 
 The `/dev/video0` AVD frontend implements the shared mmap/ioctl entrypoints and
-submits H.264 Annex B access units through the Apple AVD backend. The backend
-parses SPS/slice metadata, supports progressive 8-bit 4:2:0 H.264, and expects
-one pending decode at a time. Reference pictures are retained in four workspace
-slots and copied back into the current single-buffer NV12 userspace layout on
-completion.
+accepts `SCARLET_VIDEO_SUBMIT_H264_STATELESS` requests. Userspace supplies
+SPS/PPS/slice metadata, POC, DPB entries, and reference lists. The backend
+validates the AVD-supported subset, lowers generic stateless H.264 parameters
+to AVD instruction streams, and expects one pending decode at a time. Reference
+pictures are retained in AVD workspace slots and copied back into the current
+single-buffer NV12 userspace layout on completion.
 
 Useful build checks:
 
@@ -110,7 +116,7 @@ The `/dev/avd0` debug device currently provides the equivalent commands:
 | `info` | Print ADT/MMIO/IRQ, firmware state, current status registers, and backend capabilities. |
 | `fw-ping` | Poll the firmware mailbox and report before/after status snapshots. |
 | `dart-test` | Allocate a 16 KiB-aligned buffer, map it through the AVD DART context, clean/invalidate cache, and report the IOVA. |
-| `decode-one` | Submit the built-in 16x16 H.264 Annex B IDR access unit through the same AVD backend used by `/dev/videoN`. |
+| `decode-one` | Submit the built-in 16x16 H.264 IDR sample with fixed stateless parameters through the same AVD backend used by `/dev/videoN`. |
 | `poll-decode` | Poll completion for a previously submitted `decode-one` request. |
 | `trace` | Dump retained MMIO/mailbox/decode trace events. |
 | `clear-trace` | Clear retained trace events. |

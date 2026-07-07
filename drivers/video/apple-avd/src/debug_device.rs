@@ -9,8 +9,14 @@ use scarlet::{
         iommu::IommuMapFlags,
         manager::DeviceManager,
         video::{
-            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN, VideoBackendDecodeRequest,
-            VideoDecodeBackend,
+            SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
+            SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
+            SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT,
+            SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE,
+            SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, ScarletVideoH264DecodeParams,
+            ScarletVideoH264Pps, ScarletVideoH264ScalingMatrix, ScarletVideoH264SliceParams,
+            ScarletVideoH264Sps, ScarletVideoH264StatelessParams, VideoBackendDecodeRequest,
+            VideoBackendH264StatelessRequest, VideoDecodeBackend,
         },
     },
     environment::PAGE_SIZE,
@@ -33,6 +39,62 @@ const SAMPLE_H264_AU: &[u8] = &[
     0x40, 0x00, 0x00, 0x03, 0x00, 0xa3, 0xc5, 0x8b, 0xe0, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x0f,
     0xc8, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x3a, 0x26, 0x28, 0x00, 0x09, 0x02, 0xe0,
 ];
+
+fn sample_h264_stateless_params() -> ScarletVideoH264StatelessParams {
+    ScarletVideoH264StatelessParams {
+        sps: ScarletVideoH264Sps {
+            profile_idc: 66,
+            constraint_set_flags: 0xc0,
+            level_idc: 30,
+            seq_parameter_set_id: 0,
+            chroma_format_idc: 1,
+            bit_depth_luma_minus8: 0,
+            bit_depth_chroma_minus8: 0,
+            log2_max_frame_num_minus4: 0,
+            pic_order_cnt_type: 2,
+            log2_max_pic_order_cnt_lsb_minus4: 0,
+            max_num_ref_frames: 0,
+            num_ref_frames_in_pic_order_cnt_cycle: 0,
+            pic_width_in_mbs_minus1: 0,
+            pic_height_in_map_units_minus1: 0,
+            flags: SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY
+                | SCARLET_VIDEO_H264_SPS_FLAG_DIRECT_8X8_INFERENCE,
+            ..Default::default()
+        },
+        pps: ScarletVideoH264Pps {
+            pic_parameter_set_id: 0,
+            seq_parameter_set_id: 0,
+            num_slice_groups_minus1: 0,
+            num_ref_idx_l0_default_active_minus1: 0,
+            num_ref_idx_l1_default_active_minus1: 0,
+            weighted_bipred_idc: 0,
+            pic_init_qp_minus26: -3,
+            pic_init_qs_minus26: 0,
+            chroma_qp_index_offset: 0,
+            second_chroma_qp_index_offset: 0,
+            flags: SCARLET_VIDEO_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT,
+        },
+        scaling_matrix: ScarletVideoH264ScalingMatrix::default(),
+        slice_params: ScarletVideoH264SliceParams {
+            header_bit_size: 24,
+            nal_offset: 36,
+            nal_len: 10,
+            first_mb_in_slice: 0,
+            slice_type: 7,
+            pic_parameter_set_id: 0,
+            slice_qp_delta: -3,
+            disable_deblocking_filter_idc: 1,
+            ..Default::default()
+        },
+        decode_params: ScarletVideoH264DecodeParams {
+            nal_ref_idc: 3,
+            frame_num: 0,
+            flags: SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
 
 pub(crate) fn register_avd_debug_device(avd_id: u32, backend: Arc<dyn VideoDecodeBackend>) {
     let Some(avd) = get_apple_avd(avd_id) else {
@@ -106,7 +168,7 @@ impl AppleAvdDebugDevice {
                 "avd{} name={} soc={} mmio={:#x}+{:#x} irq={:?}\n",
                 "firmware={} fw_dma={:#x} fw_len={}\n",
                 "status={:#x} irq_status={:#x} mailbox={:#x}\n",
-                "backend={} sessions={} input={} output={} stateful_h264={} stateful_av1={} stateless_h264={}\n"
+                "backend={} sessions={} input={} output={} stateful_h264={} stateful_av1={} stateful_hevc={} stateless_h264={}\n"
             ),
             self.avd_id,
             avd.name(),
@@ -126,6 +188,7 @@ impl AppleAvdDebugDevice {
             caps.mapped_output_len,
             caps.supports_h264,
             caps.supports_av1,
+            caps.supports_hevc,
             caps.supports_stateless_h264
         )
     }
@@ -250,7 +313,11 @@ impl AppleAvdDebugDevice {
             output_len: AVD_MAPPED_OUTPUT_BYTES as u32,
             timestamp: SAMPLE_H264_TIMESTAMP,
         };
-        self.backend.submit_decode(&request)?;
+        let request = VideoBackendH264StatelessRequest {
+            decode: request,
+            h264: sample_h264_stateless_params(),
+        };
+        self.backend.submit_h264_stateless(&request)?;
         *self.decode_pending.lock() = true;
         self.poll_decode()
     }

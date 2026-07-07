@@ -9,12 +9,17 @@ video and Apple AVD backends both plug into the same frontend.
 
 The current API is intentionally small:
 
-- `write()` / `read()` provide a compatibility path for one H.264 Annex B access
-  unit at a time.
+- `write()` / `read()` provide a compatibility path for stateful backends that
+  accept one coded access unit at a time.
 - `mmap()` plus `control()` commands provide the preferred zero-copy-ish path
   used by `video_player`.
 - Session-aware commands allow several independent task groups to own separate
   streams on the same device.
+- Stateless H.264 submit mirrors the V4L2 Request API split: userspace parses
+  SPS/PPS/slice headers and manages DPB/reference lists, while the kernel
+  validates copied parameters and lowers them to the selected backend.
+  `user/lib/scarlet-codecs` contains the userspace request builder used by
+  `video_player`; future stateless codecs should follow the same split.
 
 This interface is not a stable userspace ABI yet. The structures below document
 the current state so that callers and future driver changes have a shared
@@ -36,10 +41,13 @@ The kernel side accepts these coded stream formats:
 | Name | Value |
 | --- | ---: |
 | H.264 | `4098` |
+| HEVC/H.265 | `4099` |
 | AV1 | `4103` |
 
-The convenience `write()` path is H.264-only. The mapped control path carries the
-coded format in each submit request.
+The convenience `write()` path is backend-specific compatibility behavior. The
+mapped control path carries the coded format in each submit request. Apple AVD
+currently advertises stateless H.264 rather than stateful H.264, so callers must
+use `SCARLET_VIDEO_SUBMIT_H264_STATELESS` there.
 
 ## Frame Format
 
@@ -59,7 +67,7 @@ reported as `0x3432_3076` (`v024`).
 
 ## `write()` / `read()` Path
 
-The stream path is useful as a simple smoke test:
+The stream path is useful as a simple smoke test on stateful backends:
 
 1. Open `/dev/video0`.
 2. Write one H.264 Annex B access unit.
@@ -68,7 +76,8 @@ The stream path is useful as a simple smoke test:
 
 Only one pending decode is allowed per stream. If the backend has not produced a
 frame yet, reads may return status text or zero bytes rather than a complete
-frame. New users should prefer the mapped control path.
+frame. New users should prefer the mapped control path. Stateless backends such
+as Apple AVD do not parse the Annex B stream in the kernel.
 
 ## Mapped Buffer Layout
 
@@ -100,6 +109,8 @@ these layouts as a portable cross-OS ABI.
 | `SCARLET_VIDEO_SUBMIT_SESSION` | `0x5604` | `*const ScarletVideoSessionSubmit` | `0` |
 | `SCARLET_VIDEO_DEQUEUE_SESSION` | `0x5605` | `*mut ScarletVideoSessionDequeuedFrame` | `1` if ready, `0` if empty |
 | `SCARLET_VIDEO_DESTROY_SESSION` | `0x5606` | `*const ScarletVideoSessionInfo` | `0` |
+| `SCARLET_VIDEO_GET_CAPS` | `0x5607` | `*mut ScarletVideoCapabilities` | `0` |
+| `SCARLET_VIDEO_SUBMIT_H264_STATELESS` | `0x5608` | `*const ScarletVideoH264StatelessSubmit` | `0` |
 
 `SCARLET_VIDEO_GET_BUFFER` uses the default stream, stream id `1`. New code
 should use `SCARLET_VIDEO_CREATE_SESSION` first; passing `stream_id = 0`

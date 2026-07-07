@@ -59,6 +59,8 @@ pub const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 pub const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 /// Backend accepts stateful AV1 access units through legacy submit ioctls.
 pub const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
+/// Backend accepts stateful HEVC access units through legacy submit ioctls.
+pub const SCARLET_VIDEO_CAP_STATEFUL_HEVC: u32 = 1 << 2;
 /// Backend accepts stateless H.264 requests.
 pub const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
 /// Backend supports the common mmap input/output buffer.
@@ -111,6 +113,8 @@ pub const SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM: u32 = 1 << 1;
 
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
+/// Scarlet coded format value for HEVC/H.265.
+pub const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
 /// Scarlet coded format value for AV1.
 pub const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 
@@ -131,6 +135,8 @@ pub struct VideoBackendCapabilities {
     pub supports_h264: bool,
     /// Whether stateful AV1 access units are accepted.
     pub supports_av1: bool,
+    /// Whether stateful HEVC access units are accepted.
+    pub supports_hevc: bool,
     /// Whether stateless H.264 requests are accepted.
     pub supports_stateless_h264: bool,
 }
@@ -148,6 +154,7 @@ impl VideoBackendCapabilities {
     pub fn supports_format(&self, coded_format: u32) -> bool {
         match coded_format {
             SCARLET_VIDEO_FORMAT_H264 => self.supports_h264,
+            SCARLET_VIDEO_FORMAT_HEVC => self.supports_hevc,
             SCARLET_VIDEO_FORMAT_AV1 => self.supports_av1,
             _ => false,
         }
@@ -165,6 +172,9 @@ impl VideoBackendCapabilities {
         }
         if self.supports_av1 {
             flags |= SCARLET_VIDEO_CAP_STATEFUL_AV1;
+        }
+        if self.supports_hevc {
+            flags |= SCARLET_VIDEO_CAP_STATEFUL_HEVC;
         }
         if self.supports_stateless_h264 {
             flags |= SCARLET_VIDEO_CAP_STATELESS_H264;
