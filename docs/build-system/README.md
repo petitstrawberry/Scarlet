@@ -306,7 +306,7 @@ source = "../../user/video_player"
 package = "video_player"
 bin = "video_player"
 default-features = false
-features = ["h264-stateful-hw", "mp4-aac"]
+features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
 to = "/system/scarlet/bin/video_player"
 ```
 

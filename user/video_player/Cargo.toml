@@ -4,7 +4,7 @@ version = "0.16.0"
 edition = "2024"
 
 [features]
-default = ["h264-stateful-hw", "mp4-aac"]
+default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
 av1-stateful-hw = []
 h264-stateful-hw = []
 # H.264 stateless and software paths are opt-in because H.264/AVC may be

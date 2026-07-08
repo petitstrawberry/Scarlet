@@ -10,11 +10,12 @@ per build or per filesystem bundle.
 The crate default is:
 
 ```toml
-default = ["h264-stateful-hw", "mp4-aac"]
+default = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
 ```
 
-That enables MP4/AAC playback and the stateful H.264 hardware decoder path.
-For H.264 decode, the default path is stateful hardware decode only.
+That enables MP4/AAC playback, stateful AV1 hardware decode, and the stateful
+H.264 hardware decoder path. For H.264 decode, the default path is stateful
+hardware decode only.
 
 ## Opt-In Codec Paths
 
@@ -23,8 +24,8 @@ For H.264 decode, the default path is stateful hardware decode only.
 - `h264-sw` enables the software H.264 decoder dependency.
 - `vp9-stateless-hw` enables userspace VP9 request building through
   `scarlet-codecs/vp9`.
-- `vp9-stateful-hw`, `hevc-stateful-hw`, and `av1-stateful-hw` reserve stateful
-  hardware decode paths.
+- `vp9-stateful-hw` and `hevc-stateful-hw` reserve stateful hardware decode
+  paths.
 
 H.264/AVC may be patent-encumbered in some jurisdictions. Stateless and
 software H.264 support are therefore explicit opt-ins.

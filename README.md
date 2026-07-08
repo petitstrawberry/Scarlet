@@ -140,9 +140,9 @@ See [Scarlet Distribution Model](docs/architecture/distro-model.md) and
 
 The in-tree `video_player` is built as its own user program crate under
 `user/video_player`. The default build enables the stateful H.264 hardware path
-only for H.264 decode; other codec paths are selected explicitly by crate or
-bundle features. See [`user/video_player`](user/video_player/README.md) for the
-codec feature policy.
+for H.264 decode and stateful AV1 hardware decode. Other codec paths are
+selected explicitly by crate or bundle features. See
+[`user/video_player`](user/video_player/README.md) for the codec feature policy.
 
 ## Build and Run
 
