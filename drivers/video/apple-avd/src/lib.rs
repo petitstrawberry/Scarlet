@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod common;
 mod debug;
 mod debug_device;
 mod firmware;
@@ -17,14 +18,15 @@ use alloc::{
     vec::Vec,
 };
 
+pub use common::AvdDmaRange;
 pub use debug::{AvdTraceEvent, AvdTraceKind};
 pub use firmware::AvdFirmwareMessage;
 
 use debug::AvdTraceLog;
 use firmware::AvdFirmwareMailbox;
 use h264::{
-    AvdDmaRange, AvdH264InstructionStream, AvdH264ReferencePicture, AvdH264Workspace,
-    H264DecodeRequest, H264FrontendError, H264StreamParameters,
+    AvdH264InstructionStream, AvdH264ReferencePicture, AvdH264Workspace, H264DecodeRequest,
+    H264FrontendError, H264StreamParameters,
 };
 use scarlet::{
     arch::{self, mmio},
@@ -183,12 +185,17 @@ const AVD_WORKSPACE_VP9_PPS0_OFFSET: usize = 0x190000;
 const AVD_WORKSPACE_VP9_PPS1_OFFSET: usize = 0x198000;
 const AVD_WORKSPACE_VP9_PPS2_OFFSET: usize = 0x1d8000;
 const AVD_WORKSPACE_REFERENCE_OFFSET: usize = 0x400000;
-const AVD_H264_MAX_DPB_FRAMES: usize = 16;
+const AVD_REFERENCE_FRAME_TABLE_LEN: usize = 16;
 const AVD_H264_EXTRA_DECODE_SLOTS: usize = 1;
-const AVD_H264_MAX_OUTPUT_SLOTS: usize = AVD_H264_MAX_DPB_FRAMES + AVD_H264_EXTRA_DECODE_SLOTS;
+const AVD_H264_OUTPUT_SLOTS: usize = AVD_REFERENCE_FRAME_TABLE_LEN + AVD_H264_EXTRA_DECODE_SLOTS;
 const AVD_VP9_MAX_REFERENCE_FRAMES: usize = 8;
 const AVD_VP9_REFERENCE_SLOTS: usize = 4;
-const AVD_COMPLETED_FRAME_QUEUE_LEN: usize = AVD_MAX_SESSIONS * AVD_H264_MAX_OUTPUT_SLOTS;
+const AVD_MAX_OUTPUT_SLOTS: usize = if AVD_H264_OUTPUT_SLOTS > AVD_VP9_REFERENCE_SLOTS {
+    AVD_H264_OUTPUT_SLOTS
+} else {
+    AVD_VP9_REFERENCE_SLOTS
+};
+const AVD_COMPLETED_FRAME_QUEUE_LEN: usize = AVD_MAX_SESSIONS * AVD_MAX_OUTPUT_SLOTS;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
 const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
@@ -1463,15 +1470,15 @@ struct AvdSessionWorkspace {
 }
 
 impl AvdSessionWorkspace {
-    fn new(
+    fn new_h264(
         avd: &AppleAvd,
         layout: h264::AvdFrameLayout,
         slot_count: usize,
     ) -> Result<Self, &'static str> {
-        if slot_count == 0 || slot_count > AVD_H264_MAX_OUTPUT_SLOTS {
+        if slot_count == 0 || slot_count > AVD_H264_OUTPUT_SLOTS {
             return Err("apple-avd: invalid workspace slot count");
         }
-        let reference_slot_span = Self::reference_slot_span(layout)?;
+        let reference_slot_span = Self::h264_reference_slot_span(layout)?;
         let required = AVD_WORKSPACE_REFERENCE_OFFSET
             .checked_add(
                 reference_slot_span
@@ -1575,7 +1582,7 @@ impl AvdSessionWorkspace {
         })
     }
 
-    fn reference_slot_span(layout: h264::AvdFrameLayout) -> Result<usize, &'static str> {
+    fn h264_reference_slot_span(layout: h264::AvdFrameLayout) -> Result<usize, &'static str> {
         let rvra_len = align_up(layout.rvra_len(), AVD_DMA_GRANULE);
         let sps_len = align_up(layout.sps_scratch_len(), AVD_DMA_GRANULE);
         rvra_len
@@ -1660,9 +1667,9 @@ impl AvdSessionWorkspace {
         Ok(())
     }
 
-    fn is_compatible(&self, layout: h264::AvdFrameLayout, slot_count: usize) -> bool {
+    fn is_compatible_h264(&self, layout: h264::AvdFrameLayout, slot_count: usize) -> bool {
         slot_count <= self.slot_count
-            && Self::reference_slot_span(layout)
+            && Self::h264_reference_slot_span(layout)
                 .is_ok_and(|slot_span| slot_span == self.reference_slot_span)
     }
 
@@ -1672,7 +1679,7 @@ impl AvdSessionWorkspace {
                 .is_ok_and(|slot_span| slot_span == self.reference_slot_span)
     }
 
-    fn addresses_for_slot(
+    fn addresses_for_h264_slot(
         &self,
         slot: usize,
         layout: h264::AvdFrameLayout,
@@ -1792,7 +1799,7 @@ struct AvdBackendSession {
     workspace: Option<AvdSessionWorkspace>,
     input_pool: Option<AvdMappedInputPool>,
     output_pool: Option<AvdMappedOutputPool>,
-    reference_frames: [Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+    reference_frames: [Option<AvdReferenceFrame>; AVD_REFERENCE_FRAME_TABLE_LEN],
     reference_frame_count: usize,
     next_reference_slot: usize,
     reference_slot_len: usize,
@@ -1881,7 +1888,7 @@ impl AvdBackendSession {
             workspace: None,
             input_pool: None,
             output_pool: None,
-            reference_frames: [None; AVD_H264_MAX_DPB_FRAMES],
+            reference_frames: [None; AVD_REFERENCE_FRAME_TABLE_LEN],
             reference_frame_count: 0,
             next_reference_slot: 0,
             reference_slot_len: 0,
@@ -1966,7 +1973,7 @@ impl AvdBackendSession {
 
     fn insert_reference_frame(&mut self, frame: AvdReferenceFrame) -> Result<(), &'static str> {
         self.remove_reference_slot(frame.slot);
-        if self.reference_frame_count >= AVD_H264_MAX_DPB_FRAMES {
+        if self.reference_frame_count >= AVD_REFERENCE_FRAME_TABLE_LEN {
             self.remove_oldest_reference_frame();
         }
         let Some(entry) = self
@@ -2029,7 +2036,7 @@ impl AvdBackendSession {
             .count();
         let target_references = valid_entries
             .min(max_references)
-            .min(AVD_H264_MAX_DPB_FRAMES);
+            .min(AVD_REFERENCE_FRAME_TABLE_LEN);
         if target_references == 0 {
             self.clear_reference_frames();
             return valid_entries;
@@ -2074,7 +2081,7 @@ impl AvdBackendSession {
             .map(|len| align_up(len, AVD_DMA_GRANULE))
             .ok_or("apple-avd: output slot size overflow")?;
         let mut dpb_capacity =
-            (stream_parameters.max_num_ref_frames as usize).min(AVD_H264_MAX_DPB_FRAMES);
+            (stream_parameters.max_num_ref_frames as usize).min(AVD_REFERENCE_FRAME_TABLE_LEN);
         if store_reference && dpb_capacity == 0 {
             dpb_capacity = 1;
         }
@@ -2082,13 +2089,13 @@ impl AvdBackendSession {
             .checked_add(AVD_H264_EXTRA_DECODE_SLOTS)
             .ok_or("apple-avd: output slot count overflow")?
             .max(1)
-            .min(AVD_H264_MAX_OUTPUT_SLOTS);
+            .min(AVD_H264_OUTPUT_SLOTS);
         if payload_len == 0 {
             return Err("apple-avd: decoded frame exceeds mapped output slot pool");
         }
         let max_slot_count_by_output = (request.output_len as usize / slot_span)
             .max(1)
-            .min(AVD_H264_MAX_OUTPUT_SLOTS);
+            .min(AVD_H264_OUTPUT_SLOTS);
         if max_slot_count_by_output < minimum_slot_count {
             return Err("apple-avd: decoded frame exceeds mapped output slot pool");
         }
@@ -2130,9 +2137,9 @@ impl AvdBackendSession {
         let remap_workspace = self
             .workspace
             .as_ref()
-            .is_none_or(|workspace| !workspace.is_compatible(layout, slot_count));
+            .is_none_or(|workspace| !workspace.is_compatible_h264(layout, slot_count));
         if remap_workspace {
-            self.workspace = Some(AvdSessionWorkspace::new(avd, layout, slot_count)?);
+            self.workspace = Some(AvdSessionWorkspace::new_h264(avd, layout, slot_count)?);
             self.clear_reference_frames();
             self.next_reference_slot = 0;
         }
@@ -2367,8 +2374,8 @@ fn dpb_entry_matches_reference(
 
 fn h264_reference_pictures_from_dpb(
     dpb: &[ScarletVideoH264DpbEntry; 16],
-    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
-    out: &mut [AvdH264ReferencePicture; AVD_H264_MAX_DPB_FRAMES],
+    frames: &[Option<AvdReferenceFrame>; AVD_REFERENCE_FRAME_TABLE_LEN],
+    out: &mut [AvdH264ReferencePicture; AVD_REFERENCE_FRAME_TABLE_LEN],
 ) -> usize {
     let mut count = 0usize;
     for entry in dpb
@@ -2401,7 +2408,7 @@ fn h264_reference_pictures_from_dpb(
 
 fn vp9_reference_pictures_from_frame(
     params: &ScarletVideoVp9StatelessParams,
-    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+    frames: &[Option<AvdReferenceFrame>; AVD_REFERENCE_FRAME_TABLE_LEN],
 ) -> [Option<AvdVp9ReferencePicture>; 3] {
     let timestamps = [
         params.frame.last_frame_ts,
@@ -2427,7 +2434,7 @@ fn vp9_reference_pictures_from_frame(
 
 fn vp9_reference_slots_from_frame(
     params: &ScarletVideoVp9StatelessParams,
-    frames: &[Option<AvdReferenceFrame>; AVD_H264_MAX_DPB_FRAMES],
+    frames: &[Option<AvdReferenceFrame>; AVD_REFERENCE_FRAME_TABLE_LEN],
 ) -> [Option<usize>; 3] {
     let timestamps = [
         params.frame.last_frame_ts,
@@ -3190,7 +3197,7 @@ impl AppleAvdVideoBackend {
         let is_idr = params.decode_params.flags & SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR != 0;
         let store_reference = params.decode_params.nal_ref_idc != 0;
         let max_references =
-            (stream_parameters.max_num_ref_frames as usize).min(AVD_H264_MAX_DPB_FRAMES);
+            (stream_parameters.max_num_ref_frames as usize).min(AVD_REFERENCE_FRAME_TABLE_LEN);
         let valid_dpb_entries =
             session.prune_reference_frames_for_dpb(&params.decode_params.dpb, max_references);
         let reference_output = session.prepare_mapped_output(
@@ -3216,7 +3223,7 @@ impl AppleAvdVideoBackend {
         )
         .map_err(h264_error_to_str)?;
         let mut reference_picture_storage =
-            [AvdH264ReferencePicture::default(); AVD_H264_MAX_DPB_FRAMES];
+            [AvdH264ReferencePicture::default(); AVD_REFERENCE_FRAME_TABLE_LEN];
         let reference_picture_count = h264_reference_pictures_from_dpb(
             &decode_request.dpb,
             &session.reference_frames,
@@ -3227,7 +3234,7 @@ impl AppleAvdVideoBackend {
         let (instructions, inst_len, instruction_fifo_dma, reference_dma_addr, sps_tile_dma_addr) = {
             let workspace = session.ensure_workspace()?;
             let workspace_addresses =
-                workspace.addresses_for_slot(reference_output.slot, layout)?;
+                workspace.addresses_for_h264_slot(reference_output.slot, layout)?;
             let reference_dma_addr = workspace_addresses.reference_dma_addr;
             let sps_tile_dma_addr = workspace_addresses.sps_tile_dma_addr;
             let instructions = AvdH264InstructionStream::build(

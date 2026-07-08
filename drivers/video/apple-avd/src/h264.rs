@@ -12,6 +12,8 @@ use scarlet::device::video::{
     ScarletVideoH264Sps, ScarletVideoH264StatelessParams,
 };
 
+pub use crate::AvdDmaRange;
+
 const AVD_H264_MAX_INSTRUCTION_WORDS: usize = 1024;
 const AVD_H264_MAX_REFERENCES: usize = 16;
 const H264_MAX_REF_LIST_ENTRIES: usize = 32;
@@ -91,15 +93,6 @@ impl H264DecodeFlags {
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
     }
-}
-
-/// Device-visible buffer range.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AvdDmaRange {
-    /// Device-visible DMA address.
-    pub dma_addr: u64,
-    /// Byte length of the range.
-    pub len: usize,
 }
 
 /// Decoded NV12 frame layout expected from Apple AVD.

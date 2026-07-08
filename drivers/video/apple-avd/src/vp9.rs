@@ -9,7 +9,7 @@ use scarlet::device::video::{
     ScarletVideoVp9Tile,
 };
 
-use crate::h264::AvdDmaRange;
+use crate::AvdDmaRange;
 
 const AVD_VP9_MAX_INSTRUCTION_WORDS: usize = 4096;
 
