@@ -3663,15 +3663,12 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
     }
 
     fn supports_stateless_vp9(&self) -> bool {
-        true
+        false
     }
 
     fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
-        if !matches!(
-            coded_format,
-            SCARLET_VIDEO_FORMAT_H264 | SCARLET_VIDEO_FORMAT_VP9
-        ) {
-            return Err("apple-avd: only stateless H.264/VP9 sessions are supported");
+        if coded_format != SCARLET_VIDEO_FORMAT_H264 {
+            return Err("apple-avd: only stateless H.264 sessions are supported");
         }
         self.service_completions()?;
         let _irq_guard = IrqGuard::new();
@@ -3733,78 +3730,9 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
 
     fn submit_vp9_stateless(
         &self,
-        request: &VideoBackendVp9StatelessRequest,
+        _request: &VideoBackendVp9StatelessRequest,
     ) -> Result<(), &'static str> {
-        let log_request = request.decode.timestamp <= 4;
-        if log_request {
-            println!(
-                "[apple-avd] vp9 stateless ioctl begin stream={} ts={} input_len={} coded_format={}",
-                request.decode.stream_id,
-                request.decode.timestamp,
-                request.decode.input_len,
-                request.decode.coded_format
-            );
-        }
-        self.validate_vp9_request(&request.decode)?;
-        if log_request {
-            println!("[apple-avd] vp9 stateless validate ok");
-        }
-        let stream_parameters = Vp9StreamParameters::from_stateless_frame(&request.vp9.frame)
-            .map_err(vp9_error_to_str)?;
-        if log_request {
-            println!(
-                "[apple-avd] vp9 stateless stream params ok coded={}x{} render={}x{} tiles={}x{}",
-                stream_parameters.width,
-                stream_parameters.height,
-                stream_parameters.render_width,
-                stream_parameters.render_height,
-                1u32 << stream_parameters.tile_cols_log2,
-                1u32 << stream_parameters.tile_rows_log2
-            );
-            println!("[apple-avd] vp9 service completions begin");
-        }
-
-        self.service_completions()?;
-        if log_request {
-            println!("[apple-avd] vp9 service completions ok");
-            println!("[apple-avd] vp9 state lock begin");
-        }
-        let avd = self.avd()?;
-        let _irq_guard = IrqGuard::new();
-        let mut avd = avd.lock();
-        let mut state = self.state.lock();
-        if log_request {
-            println!("[apple-avd] vp9 state lock ok");
-        }
-        if state.pending.is_some() {
-            return Err("apple-avd: decode already pending");
-        }
-        if log_request {
-            println!("[apple-avd] vp9 firmware ensure begin");
-        }
-        avd.ensure_firmware_running()?;
-        if log_request {
-            println!("[apple-avd] vp9 firmware ensure ok");
-        }
-        {
-            let session =
-                state.session_for_submit(request.decode.stream_id, request.decode.coded_format)?;
-            session.stream_parameters = None;
-        }
-        if log_request {
-            println!("[apple-avd] vp9 prepared submit begin");
-        }
-        self.submit_vp9_prepared_locked(
-            &mut avd,
-            &mut state,
-            &request.decode,
-            stream_parameters,
-            &request.vp9,
-        )?;
-        if log_request {
-            println!("[apple-avd] vp9 stateless ioctl ok");
-        }
-        Ok(())
+        Err("apple-avd: stateless VP9 is disabled")
     }
 
     fn dequeue_frame(
