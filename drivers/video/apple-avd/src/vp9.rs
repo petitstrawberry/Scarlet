@@ -79,17 +79,13 @@ impl AvdVp9FrameLayout {
     ///
     /// Four RVRA section offsets in bytes.
     pub fn rvra_offsets(&self) -> [u32; 4] {
+        let width = align_up_u32(self.width, 32);
         let height = align_up_u32(self.height, 32);
-        let luma = self.y_stride * height;
-        let chroma = luma / 2;
-        let meta =
+        let size0 = width * height + (width * height) / 4;
+        let size1 =
             (self.width.next_power_of_two() * self.height.next_power_of_two() / 32).max(0x100);
-        [
-            luma,
-            luma + meta,
-            luma + meta + chroma,
-            luma + meta + chroma / 2,
-        ]
+        let size2 = size0 / 2;
+        [size0, 0, size0 + size1 + size2, size0 + size1]
     }
 
     /// Return the AVD RVRA scratch size for this frame layout.
@@ -98,7 +94,18 @@ impl AvdVp9FrameLayout {
     ///
     /// Required RVRA scratch bytes.
     pub fn rvra_len(&self) -> usize {
-        align_up_usize(self.rvra_offsets()[2] as usize, 0x4000)
+        let offsets = self.rvra_offsets();
+        let aligned = align_up_usize(offsets[2] as usize, 0x4000);
+        aligned
+            + if self.width < 1000 {
+                0x4000
+            } else if self.width < 1800 {
+                2 * 0x4000
+            } else if self.width < 3800 {
+                3 * 0x4000
+            } else {
+                9 * 0x4000
+            }
     }
 
     /// Return the AVD VP9 SPS scratch size for this frame layout.
@@ -107,7 +114,7 @@ impl AvdVp9FrameLayout {
     ///
     /// Required SPS scratch bytes.
     pub fn sps_scratch_len(&self) -> usize {
-        6 * 0x8000
+        7 * 0x8000
     }
 }
 
@@ -182,6 +189,23 @@ impl Vp9StreamParameters {
     pub fn nv12_layout(&self) -> AvdVp9FrameLayout {
         AvdVp9FrameLayout::nv12(self.width, self.height)
     }
+}
+
+/// VP9 frame-state values that affect AVD-private scratch selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AvdVp9PictureState {
+    /// Access unit index in the current VP9 stream.
+    pub access_index: u32,
+    /// Number of keyframes seen after applying the current frame begin step.
+    pub keyframe_count: u32,
+    /// Inter-frame index since the most recent keyframe.
+    pub keyframe_index: u32,
+    /// Whether the previous decoded frame was a keyframe.
+    pub last_was_keyframe: bool,
+    /// Refresh flags from the previous decoded frame.
+    pub last_refresh_flags: u8,
+    /// Accumulated refresh mask used by the AVD VP9 HAL.
+    pub accumulated_refresh_mask: u8,
 }
 
 /// Device-visible addresses of AVD VP9 session work areas.
@@ -318,11 +342,12 @@ impl AvdVp9InstructionStream {
         stream: &Vp9StreamParameters,
         workspace: &AvdVp9Workspace,
         references: &[Option<AvdVp9ReferencePicture>; 3],
+        picture_state: AvdVp9PictureState,
     ) -> Self {
         let mut words = Self::new();
         let frame = &request.params.frame;
         let key_frame = frame.flags & SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME != 0;
-        let inst_fifo_slot = request.frame_number % 7;
+        let inst_fifo_slot = 0;
         let coded_hw = pack_hw(stream.width, stream.height);
         let y_addr = request.output.dma_addr;
         let uv_addr =
@@ -350,7 +375,11 @@ impl AvdVp9InstructionStream {
             txfm |= 1;
         }
         push(&mut words, txfm, "hdr_2c_txfm_mode");
-        push(&mut words, make_flags1(frame), "hdr_40_flags1_pt1");
+        push(
+            &mut words,
+            make_flags1(frame, picture_state),
+            "hdr_40_flags1_pt1",
+        );
         for _ in 0..8 {
             push(&mut words, 0, "hdr_scaling_list_zero");
         }
@@ -370,7 +399,7 @@ impl AvdVp9InstructionStream {
             (workspace.pps0_tile_dma_addr >> 8) as u32,
             "hdr_118_pps0_tile_addr_lsb8",
         );
-        let pps1_index = ((request.frame_number / 128) as usize + 1) % 8;
+        let pps1_index = ((picture_state.access_index / 128) as usize + 1) % 8;
         push(
             &mut words,
             (workspace.pps1_tile_dma_addrs[pps1_index] >> 8) as u32,
@@ -381,8 +410,7 @@ impl AvdVp9InstructionStream {
             (workspace.pps1_tile_dma_addrs[pps1_index] >> 8) as u32,
             "hdr_108_pps1_tile_addr_lsb8",
         );
-        let pps2_a = (request.frame_number as usize) & 1;
-        let pps2_b = pps2_a ^ 1;
+        let (pps2_a, pps2_b) = pps2_indices(frame, picture_state);
         push(
             &mut words,
             (workspace.pps2_tile_dma_addrs[pps2_a] >> 8) as u32,
@@ -399,7 +427,7 @@ impl AvdVp9InstructionStream {
             u32::from(frame.quantization.base_q_idx) * 0x8000,
             "hdr_4c_base_q_idx",
         );
-        push(&mut words, 0x0020_ffff, "hdr_44_flags1_pt2");
+        push(&mut words, 0x0020_3fff, "hdr_44_flags1_pt2");
         push(
             &mut words,
             u32::from(frame.loop_filter.level) * 0x4000,
@@ -531,7 +559,7 @@ fn validate_tiles(
     Ok(())
 }
 
-fn make_flags1(frame: &ScarletVideoVp9FrameParams) -> u32 {
+fn make_flags1(frame: &ScarletVideoVp9FrameParams, picture_state: AvdVp9PictureState) -> u32 {
     let mut flags = 0;
     flags |= bit(0, true);
     flags |= bit(
@@ -544,7 +572,7 @@ fn make_flags1(frame: &ScarletVideoVp9FrameParams) -> u32 {
     );
     if frame.flags & SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME == 0 {
         flags |= bit(19, true);
-        flags |= bit(21, true);
+        flags |= bit(21, picture_state.keyframe_index > 0);
         if frame.interpolation_filter != SCARLET_VIDEO_VP9_INTERP_FILTER_SWITCHABLE {
             if frame.interpolation_filter == SCARLET_VIDEO_VP9_INTERP_FILTER_EIGHTTAP {
                 flags |= bit(16, true);
@@ -557,10 +585,36 @@ fn make_flags1(frame: &ScarletVideoVp9FrameParams) -> u32 {
             frame.interpolation_filter == SCARLET_VIDEO_VP9_INTERP_FILTER_SWITCHABLE,
         );
     }
-    flags |= bit(4, true);
-    flags |= bit(8, frame.refresh_frame_flags & (1 << 1) != 0);
-    flags |= bit(9, frame.refresh_frame_flags & (1 << 0) != 0);
+    if picture_state.last_refresh_flags == 0b11 || picture_state.keyframe_index < 1 {
+        flags |= bit(4, true);
+    } else {
+        flags |= bit(5, true);
+    }
+    flags |= bit(
+        8,
+        picture_state.accumulated_refresh_mask & (1 << 1) != 0 || picture_state.keyframe_index < 1,
+    );
+    flags |= bit(9, picture_state.accumulated_refresh_mask & (1 << 0) != 0);
     flags
+}
+
+fn pps2_indices(
+    frame: &ScarletVideoVp9FrameParams,
+    picture_state: AvdVp9PictureState,
+) -> (usize, usize) {
+    let key_frame = frame.flags & SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME != 0;
+    if key_frame {
+        let index = usize::from(picture_state.keyframe_count & 1 == 0);
+        return (index, index);
+    }
+    if picture_state.last_was_keyframe {
+        let first = (picture_state.keyframe_count & 1) as usize;
+        let second = usize::from(picture_state.keyframe_count & 1 == 0);
+        return (first, second);
+    }
+    let first = ((picture_state.keyframe_index + picture_state.keyframe_count) & 1) as usize;
+    let second = first ^ 1;
+    (first, second)
 }
 
 fn stream_refs(

@@ -1,10 +1,8 @@
 use scarlet::device::video::avd_fw;
 
 use crate::h264::H264DecodeRequest;
-use crate::vp9::Vp9DecodeRequest;
 
 const CMD_H264_DECODE: u32 = 0x10;
-const CMD_VP9_DECODE: u32 = 0x12;
 const CMD_TAG_MASK: u32 = 0x0000_ffff;
 const CMD_KIND_SHIFT: u32 = 24;
 
@@ -118,27 +116,6 @@ impl AvdFirmwareMailbox {
         let stream_hint = ((request.session_id as u32) ^ request.frame_number) & 0xff;
         AvdFirmwareCommand {
             raw: (CMD_H264_DECODE << CMD_KIND_SHIFT) | (stream_hint << 16) | tag,
-            tag,
-        }
-    }
-
-    /// Encode a VP9 decode command.
-    ///
-    /// # Arguments
-    ///
-    /// * `request` - VP9 decode request whose session and frame numbers are
-    ///   folded into the command word.
-    ///
-    /// # Returns
-    ///
-    /// Firmware command word and tag.
-    pub fn encode_vp9_decode(&mut self, request: &Vp9DecodeRequest) -> AvdFirmwareCommand {
-        let tag = self.next_tag & CMD_TAG_MASK;
-        self.next_tag = self.next_tag.wrapping_add(1) & CMD_TAG_MASK;
-
-        let stream_hint = ((request.session_id as u32) ^ request.frame_number) & 0xff;
-        AvdFirmwareCommand {
-            raw: (CMD_VP9_DECODE << CMD_KIND_SHIFT) | (stream_hint << 16) | tag,
             tag,
         }
     }

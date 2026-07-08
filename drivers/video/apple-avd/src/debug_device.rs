@@ -168,7 +168,7 @@ impl AppleAvdDebugDevice {
                 "avd{} name={} soc={} mmio={:#x}+{:#x} irq={:?}\n",
                 "firmware={} fw_dma={:#x} fw_len={}\n",
                 "status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n",
-                "backend={} sessions={} input={} output={} stateful_h264={} stateful_av1={} stateful_hevc={} stateless_h264={}\n"
+                "backend={} sessions={} input={} output={} stateful_h264={} stateful_av1={} stateful_hevc={} stateless_h264={} stateless_vp9={}\n"
             ),
             self.avd_id,
             avd.name(),
@@ -190,7 +190,8 @@ impl AppleAvdDebugDevice {
             caps.supports_h264,
             caps.supports_av1,
             caps.supports_hevc,
-            caps.supports_stateless_h264
+            caps.supports_stateless_h264,
+            self.backend.supports_stateless_vp9()
         )
     }
 

@@ -3,10 +3,11 @@
 This document tracks the Scarlet-side bring-up plan for Apple Video Decoder
 (AVD) on Apple Silicon.
 
-## Initial Goal
+## Current Goal
 
-Decode userspace-prepared stateless H.264 requests with Apple AVD and return
-NV12 frames through the Scarlet video decode device contract at `/dev/video0`.
+Decode userspace-prepared stateless H.264 and VP9 requests with Apple AVD and
+return NV12 frames through the Scarlet video decode device contract at
+`/dev/video0`.
 
 The first working path is:
 
@@ -21,17 +22,20 @@ video_player
 ```
 
 SWS remains BGRA-only for the initial implementation. Native NV12 surfaces,
-GPU shader conversion, HEVC, VP9, AV1, HDR, and full error recovery are
-explicitly out of scope until H.264 playback works through the existing Scarlet
-video API. The kernel contract is intentionally close to a V4L2 Request API
-split: userspace owns codec parsing and DPB management, while the AVD driver
-lowers validated stateless parameters to hardware commands.
+GPU shader conversion, HEVC, AV1, HDR, and full error recovery are still out of
+scope for this bring-up branch. The kernel contract uses a Scarlet stateless
+request split: userspace owns codec parsing, compressed-header processing,
+probability/context updates, and reference management; the AVD driver validates
+the accepted subset and lowers stateless parameters to hardware commands.
 
 ## Firmware ABI
 
 Scarlet loads a small `thumbv7m-none-eabi` firmware into the AVD Cortex-M3 SRAM.
 The firmware is not a codec parser. It applies version/tier tunables, enables
-NVIC, forwards DONE/ERROR IRQs, and reports panic/debug state to the kernel.
+NVIC, arms decode IRQ forwarding for the H.264 mailbox path, forwards DONE/ERROR
+IRQs, and reports panic/debug state to the kernel. VP9 bring-up currently uses
+the direct decode-engine MMIO path documented in
+[`apple-avd-vp9.md`](apple-avd-vp9.md), not a firmware mailbox decode command.
 
 Firmware-to-kernel messages:
 
@@ -65,11 +69,12 @@ The branch currently provides:
   IRQ forwarding, and panic reporting.
 - `drivers/video/apple-avd`: an Apple platform driver that probes AVD MMIO,
   resolves the DART-backed DMA context, embeds and starts the Rust CM3 firmware,
-  initializes the H.264 engine MMIO defaults, DART-maps input/output/workspace
-  buffers, keeps decoded reference frames in the AVD workspace, generates a
-  first-pass AVD H.264 instruction stream, records firmware/mailbox trace
-  events, registers a Scarlet video backend, and exposes a `/dev/videoN`
-  hardware frontend through the common Scarlet video device layer.
+  initializes the decode engine MMIO defaults, DART-maps input/output/workspace
+  buffers, keeps decoded reference frames in AVD workspace slots, lowers
+  stateless H.264 and VP9 requests to AVD instruction streams, records
+  firmware/mailbox trace events, registers a Scarlet video backend, and exposes
+  a `/dev/videoN` hardware frontend through the common Scarlet video device
+  layer.
 - `/dev/avd0`: a text debug device for the first registered AVD instance. Write
   `info`, `fw-ping`, `dart-test`, `decode-one`, `poll-decode`, `trace`, or
   `clear-trace`, then read the device to fetch the report.
@@ -80,12 +85,18 @@ The branch currently provides:
   list construction for `video_player`.
 
 The `/dev/video0` AVD frontend implements the shared mmap/ioctl entrypoints and
-accepts `SCARLET_VIDEO_SUBMIT_H264_STATELESS` requests. Userspace supplies
-SPS/PPS/slice metadata, POC, DPB entries, and reference lists. The backend
-validates the AVD-supported subset, lowers generic stateless H.264 parameters
-to AVD instruction streams, and expects one pending decode at a time. Reference
-pictures are retained in AVD workspace slots and copied back into the current
-single-buffer NV12 userspace layout on completion.
+accepts `SCARLET_VIDEO_SUBMIT_H264_STATELESS` and
+`SCARLET_VIDEO_SUBMIT_VP9_STATELESS` requests. For H.264, userspace supplies
+SPS/PPS/slice metadata, POC, DPB entries, and reference lists. For VP9,
+userspace supplies uncompressed-header fields, the compressed-header-derived
+probability state, tile byte ranges, and last/golden/alternate reference
+timestamps. The backend validates the AVD-supported subset, lowers generic
+stateless parameters to AVD instruction streams, and expects one pending decode
+at a time. Reference pictures are retained in AVD workspace slots and copied
+back into the current single-buffer NV12 userspace layout on completion.
+VP9 hardware bring-up should use the trace-first workflow in
+[`apple-avd-vp9-re.md`](apple-avd-vp9-re.md) before changing AVD-private DMA,
+workspace, or instruction-lowering rules.
 
 Useful build checks:
 
@@ -100,9 +111,12 @@ cargo check --manifest-path drivers/video/apple-avd/Cargo.toml
 1. Build Rust CM3 firmware binaries for known AVD version/tier combinations.
 2. Bring up MMIO, PMGR, DART, SRAM load, CM3 boot, and mailbox receive.
 3. Port AVD engine initialization, instruction FIFO, and H.264 submit path.
-4. Decode one known-good H.264 frame into NV12 and verify a checksum.
-5. Expose AVD through `/dev/videoN` behind the current mapped session API.
-6. Add reference tracking, frame ordering, teardown cleanup, IRQ completion,
+4. Add VP9 stateless request lowering using userspace-supplied probability and
+   tile state.
+5. Decode one known-good H.264 frame into NV12 and verify a checksum.
+6. Decode one known-good VP9 frame into NV12 and verify a checksum.
+7. Expose AVD through `/dev/videoN` behind the current mapped session API.
+8. Add reference tracking, frame ordering, teardown cleanup, IRQ completion,
    cache maintenance audit, and recovery paths.
 
 ## Debug Hooks
@@ -118,7 +132,7 @@ The `/dev/avd0` debug device currently provides the equivalent commands:
 | `dart-test` | Allocate a 16 KiB-aligned buffer, map it through the AVD DART context, clean/invalidate cache, and report the IOVA. |
 | `decode-one` | Submit the built-in 16x16 H.264 IDR sample with fixed stateless parameters through the same AVD backend used by `/dev/videoN`. |
 | `poll-decode` | Poll completion for a previously submitted `decode-one` request. |
-| `trace` | Dump retained MMIO/mailbox/decode trace events. |
+| `trace` | Dump retained MMIO/mailbox/decode trace events, including VP9 `InstructionWord` entries for instruction FIFO comparison. |
 | `clear-trace` | Clear retained trace events. |
 
 The first smoke media target is `/root/media/bad_apple.h264`, after a smaller

@@ -13,6 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::mem;
 use core::simd::cmp::SimdOrd;
 use core::simd::{
     Simd,
@@ -35,7 +36,7 @@ use std::fs::{File, OpenOptions};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::task::{SCHED_UTIL_SCALE, exit};
 use std::{format, println, thread};
 #[cfg(feature = "mp4-aac")]
@@ -116,6 +117,8 @@ const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
+
+static VP9_STATELESS_DUMP_DIR: OnceLock<String> = OnceLock::new();
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -4940,6 +4943,99 @@ impl MappedVideoBuffer {
     }
 }
 
+fn enable_vp9_stateless_dump(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let _ = std::fs::create_directory(path);
+    let _ = VP9_STATELESS_DUMP_DIR.set(String::from(path));
+    println!("[{}] VP9 stateless dump {}", APP_NAME, path);
+}
+
+fn join_dump_path(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{}{}", dir, name)
+    } else {
+        format!("{}/{}", dir, name)
+    }
+}
+
+fn struct_bytes<T>(value: &T) -> &[u8] {
+    // SAFETY: Scarlet video request structs are #[repr(C)] plain data copied
+    // through the kernel ABI. The byte slice is only used synchronously for a
+    // diagnostic dump while `value` is still alive.
+    unsafe { core::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
+}
+
+fn dump_file(path: &str, data: &[u8]) -> Result<(), String> {
+    let mut file = File::create(path).map_err(|err| format!("create {} failed: {}", path, err))?;
+    file.write_all(data)
+        .map_err(|err| format!("write {} failed: {}", path, err))
+}
+
+fn dump_vp9_stateless_request(
+    dir: &str,
+    timestamp: u64,
+    access_unit: &[u8],
+    params: &ScarletVideoVp9StatelessParams,
+) -> Result<(), String> {
+    let prefix = format!("scarlet-vp9.{:016x}", timestamp);
+    dump_file(
+        &join_dump_path(dir, &format!("{}.input.bin", prefix)),
+        access_unit,
+    )?;
+    dump_file(
+        &join_dump_path(dir, &format!("{}.frame-params.bin", prefix)),
+        struct_bytes(&params.frame),
+    )?;
+    dump_file(
+        &join_dump_path(dir, &format!("{}.probs.bin", prefix)),
+        &params.probabilities.data,
+    )?;
+    dump_file(
+        &join_dump_path(dir, &format!("{}.tiles.bin", prefix)),
+        struct_bytes(&params.tiles),
+    )?;
+
+    let manifest = format!(
+        "format=scarlet-vp9-stateless\n\
+timestamp={}\n\
+input_len={}\n\
+frame_width={}\n\
+frame_height={}\n\
+render_width={}\n\
+render_height={}\n\
+flags=0x{:x}\n\
+profile={}\n\
+bit_depth={}\n\
+tile_count={}\n\
+tile_cols_log2={}\n\
+tile_rows_log2={}\n\
+uncompressed_header_size={}\n\
+compressed_header_size={}\n\
+refresh_frame_flags=0x{:x}\n",
+        timestamp,
+        access_unit.len(),
+        u32::from(params.frame.frame_width_minus_1) + 1,
+        u32::from(params.frame.frame_height_minus_1) + 1,
+        u32::from(params.frame.render_width_minus_1) + 1,
+        u32::from(params.frame.render_height_minus_1) + 1,
+        params.frame.flags,
+        params.frame.profile,
+        params.frame.bit_depth,
+        params.tiles.tile_count,
+        params.frame.tile_cols_log2,
+        params.frame.tile_rows_log2,
+        params.frame.uncompressed_header_size,
+        params.frame.compressed_header_size,
+        params.frame.refresh_frame_flags,
+    );
+    dump_file(
+        &join_dump_path(dir, &format!("{}.manifest.txt", prefix)),
+        manifest.as_bytes(),
+    )
+}
+
 struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
@@ -5195,6 +5291,12 @@ impl HardwareVideoDecoder {
                 flags: 0,
                 padding: 0,
             };
+            if let Some(dir) = VP9_STATELESS_DUMP_DIR.get()
+                && let Err(err) =
+                    dump_vp9_stateless_request(dir, vp9.timestamp, access_unit, params)
+            {
+                println!("[{}] VP9 stateless dump failed: {}", APP_NAME, err);
+            }
             if log_vp9_submit {
                 println!(
                     "[{}] VP9 stateless submit begin ts={} stream={}",
@@ -8102,6 +8204,9 @@ fn fill_bgra(buffer: &mut [u8], color: [u8; 4]) {
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     let args = parse_args(std::env::args().collect());
+    if let Some(path) = args.vp9_stateless_dump_dir.as_deref() {
+        enable_vp9_stateless_dump(path);
+    }
     let video_path = args.video_path;
     let window_title = video_window_title(args.title.as_deref(), &video_path);
     println!("[{}] playing {}", APP_NAME, video_path);
@@ -8202,6 +8307,7 @@ struct PlayerArgs {
     stream_complete_path: Option<String>,
     stream_socket_path: Option<String>,
     audio_socket_path: Option<String>,
+    vp9_stateless_dump_dir: Option<String>,
 }
 
 fn parse_args(args: Vec<String>) -> PlayerArgs {
@@ -8215,6 +8321,7 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
     let mut stream_complete_path = None;
     let mut stream_socket_path = None;
     let mut audio_socket_path = None;
+    let mut vp9_stateless_dump_dir = None;
 
     let mut args = args.into_iter().skip(1);
     while let Some(arg) = args.next() {
@@ -8252,6 +8359,10 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
             stream_complete_path = args.next();
         } else if let Some(path) = arg.strip_prefix("--stream-complete=") {
             stream_complete_path = Some(String::from(path));
+        } else if arg == "--dump-vp9-stateless" {
+            vp9_stateless_dump_dir = args.next();
+        } else if let Some(path) = arg.strip_prefix("--dump-vp9-stateless=") {
+            vp9_stateless_dump_dir = Some(String::from(path));
         } else {
             positional.push(arg);
         }
@@ -8273,6 +8384,7 @@ fn parse_args(args: Vec<String>) -> PlayerArgs {
         stream_complete_path,
         stream_socket_path,
         audio_socket_path,
+        vp9_stateless_dump_dir,
     }
 }
 

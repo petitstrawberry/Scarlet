@@ -13,6 +13,8 @@ pub enum AvdTraceKind {
     MailboxRx,
     /// H.264 decode request submission.
     DecodeSubmit,
+    /// Generated instruction FIFO word.
+    InstructionWord,
     /// Decode completion notification.
     DecodeComplete,
     /// Hardware or firmware fault.

@@ -15,9 +15,9 @@ The current API is intentionally small:
   used by `video_player`.
 - Session-aware commands allow several independent task groups to own separate
   streams on the same device.
-- Stateless H.264 submit mirrors the V4L2 Request API split: userspace parses
-  SPS/PPS/slice headers and manages DPB/reference lists, while the kernel
-  validates copied parameters and lowers them to the selected backend.
+- Stateless H.264 and VP9 submit use a Scarlet request split: userspace parses
+  codec headers and manages codec reference state, while the kernel validates
+  copied parameters and lowers them to the selected backend.
   `user/lib/scarlet-codecs` contains the userspace request builder used by
   `video_player`; future stateless codecs should follow the same split.
 
@@ -42,12 +42,14 @@ The kernel side accepts these coded stream formats:
 | --- | ---: |
 | H.264 | `4098` |
 | HEVC/H.265 | `4099` |
+| VP9 | `4102` |
 | AV1 | `4103` |
 
 The convenience `write()` path is backend-specific compatibility behavior. The
-mapped control path carries the coded format in each submit request. Apple AVD
-currently advertises stateless H.264 rather than stateful H.264, so callers must
-use `SCARLET_VIDEO_SUBMIT_H264_STATELESS` there.
+mapped control path carries the coded format in each stateful submit request.
+Apple AVD advertises stateless H.264 and VP9 rather than stateful codec
+parsing, so callers must use `SCARLET_VIDEO_SUBMIT_H264_STATELESS` or
+`SCARLET_VIDEO_SUBMIT_VP9_STATELESS` there.
 
 ## Frame Format
 
@@ -111,11 +113,17 @@ these layouts as a portable cross-OS ABI.
 | `SCARLET_VIDEO_DESTROY_SESSION` | `0x5606` | `*const ScarletVideoSessionInfo` | `0` |
 | `SCARLET_VIDEO_GET_CAPS` | `0x5607` | `*mut ScarletVideoCapabilities` | `0` |
 | `SCARLET_VIDEO_SUBMIT_H264_STATELESS` | `0x5608` | `*const ScarletVideoH264StatelessSubmit` | `0` |
+| `SCARLET_VIDEO_SUBMIT_VP9_STATELESS` | `0x5609` | `*const ScarletVideoVp9StatelessSubmit` | `0` |
 
 `SCARLET_VIDEO_GET_BUFFER` uses the default stream, stream id `1`. New code
 should use `SCARLET_VIDEO_CREATE_SESSION` first; passing `stream_id = 0`
 allocates an available session, while passing a nonzero `stream_id` claims or
 queries that session.
+
+For `SCARLET_VIDEO_CREATE_SESSION`, `ScarletVideoSessionInfo.padding` is treated
+as an optional input coded format. `0` preserves the historical default of
+H.264. Callers creating a VP9 stateless session pass `SCARLET_VIDEO_FORMAT_VP9`
+there; the kernel clears the field before copying the structure back.
 
 ## ABI Structures
 
@@ -174,6 +182,38 @@ struct ScarletVideoSessionDequeuedFrame {
 
 If `timestamp` is zero on submit, the driver assigns a monotonically increasing
 per-session timestamp. `flags` is currently always zero.
+
+## Stateless VP9
+
+`SCARLET_VIDEO_SUBMIT_VP9_STATELESS` takes mapped input bytes plus userspace
+pointers to:
+
+- `ScarletVideoVp9FrameParams`: uncompressed-header derived frame syntax,
+  render size, tile log2 dimensions, refresh flags, and last/golden/alternate
+  reference timestamps.
+- `ScarletVideoVp9Probabilities`: the 0x774-byte packed probability state after
+  userspace parses the VP9 compressed header.
+- `ScarletVideoVp9Tiles`: byte ranges for every tile payload inside the mapped
+  input frame.
+
+The kernel does not parse VP9 bitstream headers or maintain the VP9 frame
+context as codec state. Userspace demuxes frames, parses the uncompressed and
+compressed headers, updates probability state, constructs the tile table, and
+tracks reference timestamps. The backend validates the AVD-supported subset and
+lowers the request to hardware commands. Apple AVD's VP9-specific direct submit
+sequence is tracked in [`apple-avd-vp9.md`](apple-avd-vp9.md).
+
+For Apple AVD VP9 bring-up, `video_player` can dump the userspace stateless
+request before ioctl submission:
+
+```bash
+video_player --hwdc --dump-vp9-stateless root/vp9-dump root/example.webm
+```
+
+The dump contains Scarlet's generic VP9 ABI structures, not Apple/macOS
+`frame_params`. Use the trace workflow in
+[`apple-avd-vp9-re.md`](apple-avd-vp9-re.md) to compare those structures against
+m1n1 captures and `eiln/avd`.
 
 ## Typical Mapped Decode Sequence
 
