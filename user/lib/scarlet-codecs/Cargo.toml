@@ -2,6 +2,18 @@
 name = "scarlet-codecs"
 version = "0.16.0"
 edition = "2024"
+description = "Userspace codec request builders for Scarlet stateless video decode"
+readme = "README.md"
+
+[features]
+default = []
+# H.264/AVC can be patent-encumbered in some jurisdictions. Keep it opt-in,
+# like FFmpeg-style deployments that make patented codecs an explicit choice.
+h264 = []
+vp9 = []
+
+[package.metadata.scarlet-codecs]
+h264_patent_notice = "The h264 feature is disabled by default because H.264/AVC may be patent-encumbered in some jurisdictions."
 
 [lib]
 name = "scarlet_codecs"

@@ -9,10 +9,13 @@
 extern crate alloc;
 
 /// H.264/AVC stateless request construction.
+#[cfg(feature = "h264")]
 pub mod h264;
 /// VP9 stateless request construction.
+#[cfg(feature = "vp9")]
 pub mod vp9;
 
+#[cfg(feature = "h264")]
 pub use h264::{
     H264PreparedAccessUnit, H264RequestContext, SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR,
     SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM, SCARLET_VIDEO_H264_DPB_FLAG_VALID,
@@ -36,6 +39,7 @@ pub use h264::{
     ScarletVideoH264Sps, ScarletVideoH264StatelessParams, ScarletVideoH264WeightFactors,
 };
 
+#[cfg(feature = "vp9")]
 pub use vp9::{
     SCARLET_VIDEO_VP9_FRAME_FLAG_ALLOW_HIGH_PREC_MV,
     SCARLET_VIDEO_VP9_FRAME_FLAG_COLOR_RANGE_FULL_SWING,

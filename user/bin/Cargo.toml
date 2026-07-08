@@ -3,10 +3,6 @@ name = "userprogram"
 version = "0.16.0"
 edition = "2024"
 
-[features]
-default = ["mp4-aac"]
-mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
-
 [profile.dev]
 panic = "abort"
 
@@ -167,10 +163,6 @@ name = "mplayer"
 path = "src/mplayer.rs"
 
 [[bin]]
-name = "video_player"
-path = "src/video_player.rs"
-
-[[bin]]
 name = "sas"
 path = "src/sas/main.rs"
 
@@ -182,7 +174,6 @@ gpu = { path = "../lib/gpu" }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-codecs = { path = "../lib/scarlet-codecs" }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
@@ -193,9 +184,6 @@ sas-client = { path = "../lib/sas-client", default-features = false, features = 
 vm-fdt = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde-json-core = { package = "serde-json-core", version = "0.6", default-features = false }
-rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
-symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
-symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../lib/scarlet-abi" }

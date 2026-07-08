@@ -1,6 +1,20 @@
 #![no_std]
 #![no_main]
 #![feature(portable_simd)]
+#![allow(
+    clippy::bool_comparison,
+    clippy::collapsible_if,
+    clippy::default_constructed_unit_structs,
+    clippy::manual_div_ceil,
+    clippy::manual_saturating_arithmetic,
+    clippy::slow_vector_initialization,
+    clippy::too_many_arguments,
+    clippy::useless_format
+)]
+
+mod h264_stateless_hw;
+mod h264_sw;
+mod vp9_stateless_hw;
 
 extern crate alloc;
 extern crate scarlet_std as std;
@@ -13,7 +27,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::mem;
 use core::simd::cmp::SimdOrd;
 use core::simd::{
     Simd,
@@ -22,10 +35,7 @@ use core::simd::{
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
 
-use rust_h264::decoder::{Frame, OrderedDecoder};
-use rust_h264::nal::parse_annex_b;
 use sas_client::{SasClient, SasStream, StreamConfig};
-use scarlet_codecs::{H264RequestContext, ScarletVideoVp9StatelessParams, Vp9RequestContext};
 use scarlet_ui::{
     Application, ApplicationRunExt, Canvas, CanvasView, Color, ComponentElement, Element, Event,
     InvalidationKind, KeyCode, KeyEvent, Listenable, MouseButton, MouseEvent, Scene, Size,
@@ -36,7 +46,7 @@ use std::fs::{File, OpenOptions};
 use std::handle::capability::memory_mapping::{flags as mmap_flags, munmap, prot};
 use std::io::{ErrorKind, Read, SeekFrom};
 use std::socket::Socket;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::task::{SCHED_UTIL_SCALE, exit};
 use std::{format, println, thread};
 #[cfg(feature = "mp4-aac")]
@@ -99,8 +109,6 @@ const SCARLET_VIDEO_SUBMIT_SESSION: u32 = 0x5604;
 const SCARLET_VIDEO_DEQUEUE_SESSION: u32 = 0x5605;
 const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
 const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
-const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
-const SCARLET_VIDEO_SUBMIT_VP9_STATELESS: u32 = 0x5609;
 const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
@@ -117,8 +125,6 @@ const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
-
-static VP9_STATELESS_DUMP_DIR: OnceLock<String> = OnceLock::new();
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -195,47 +201,6 @@ impl ScarletVideoCapabilities {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoH264ParamPtrs {
-    sps: u64,
-    pps: u64,
-    scaling_matrix: u64,
-    pred_weights: u64,
-    slice_params: u64,
-    decode_params: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoH264StatelessSubmit {
-    stream_id: u32,
-    input_len: u32,
-    timestamp: u64,
-    params: ScarletVideoH264ParamPtrs,
-    flags: u32,
-    padding: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoVp9ParamPtrs {
-    frame: u64,
-    probabilities: u64,
-    tiles: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ScarletVideoVp9StatelessSubmit {
-    stream_id: u32,
-    input_len: u32,
-    timestamp: u64,
-    params: ScarletVideoVp9ParamPtrs,
-    flags: u32,
-    padding: u32,
-}
-
 struct VideoFrameStore {
     data: Mutex<VideoFrameData>,
 }
@@ -259,21 +224,6 @@ impl VideoFrameStore {
                 total_frames: 0,
             }),
         }
-    }
-
-    fn update_from_frame(&self, frame: &Frame, current_frame: u32, total_frames: u32) {
-        let width = frame.width;
-        let height = frame.height;
-        let mut data = self.data.lock();
-        let required_len = width as usize * height as usize * 4;
-        if data.pixels.len() != required_len {
-            data.pixels.resize(required_len, 0);
-        }
-        yuv420_to_bgra(frame, &mut data.pixels);
-        data.width = width;
-        data.height = height;
-        data.current_frame = current_frame;
-        data.total_frames = total_frames;
     }
 
     fn update_from_nv12(
@@ -1077,7 +1027,7 @@ fn start_decoder_thread(
                     )
                 }
             } else {
-                decode_loop_software(
+                h264_sw::decode_loop(
                     &path,
                     mp4_data.as_deref().map(Vec::as_slice),
                     &controls,
@@ -1196,179 +1146,6 @@ fn start_controls_thread(controls: Arc<ControlsOverlay>, paint_signal: Arc<Paint
             }
         }
     });
-}
-
-fn decode_loop_software(
-    path: &str,
-    mp4_data: Option<&[u8]>,
-    controls: &ControlsOverlay,
-    clock: Option<&AudioClock>,
-    queue: &DisplayQueue,
-) -> Result<(), String> {
-    println!("[{}] loading video source {}", APP_NAME, path);
-    let source = load_video_source(path, mp4_data)?;
-    if source
-        .access_units
-        .iter()
-        .any(|unit| unit.codec != VideoCodec::H264)
-    {
-        return Err(String::from(
-            "software decoder supports only H.264; use --hwdc for this video",
-        ));
-    }
-    let total_frames = video_source_total_frames(&source);
-    let mut access_unit_scratch = Vec::new();
-    println!(
-        "[{}] software decode: {} {} access units",
-        APP_NAME,
-        source.description(),
-        source.access_units.len()
-    );
-    let loop_duration_us = video_source_duration_us(&source);
-    controls.set_media_duration_us(loop_duration_us);
-    controls.set_buffered_position_us(loop_duration_us);
-    let mut loop_index = 0u64;
-    let mut seek_epoch = controls.current_seek_epoch();
-    let mut seek_target_us = 0u64;
-
-    loop {
-        let mut decoder = OrderedDecoder::<u64>::new();
-        let seek_plan = video_seek_plan(&source, seek_target_us);
-        let mut display_index = seek_plan.publish_start_rank;
-        let loop_time_offset_us = video_loop_time_offset_us(clock, loop_duration_us, loop_index);
-        let mut restart_for_seek = false;
-
-        for access_unit in &source.access_units[seek_plan.decode_start_index..] {
-            if let Some(target_us) = consume_seek_request(controls, &mut seek_epoch) {
-                queue.clear();
-                seek_target_us = target_us;
-                loop_index = 0;
-                restart_for_seek = true;
-                break;
-            }
-            wait_while_paused(controls);
-            let access_unit_bytes = access_unit.bytes(mp4_data, &mut access_unit_scratch)?;
-            let nals = parse_annex_b(access_unit_bytes);
-            let unit_presentation_time_us = access_unit
-                .presentation_time_us
-                .saturating_add(loop_time_offset_us);
-            for nal in &nals {
-                match decoder.decode_nal_with_meta(nal, unit_presentation_time_us) {
-                    Ok(frames) => {
-                        for (frame, presentation_time_us) in frames {
-                            if presentation_time_us
-                                < seek_plan
-                                    .publish_target_us
-                                    .saturating_add(loop_time_offset_us)
-                            {
-                                continue;
-                            }
-                            match queue.push_frame(
-                                DisplayItem::frame(
-                                    DecodedVideoFrame::Software(frame),
-                                    presentation_time_us,
-                                    display_index,
-                                    total_frames,
-                                    seek_epoch,
-                                ),
-                                controls,
-                            ) {
-                                QueuePush::Pushed => {
-                                    display_index += 1;
-                                }
-                                QueuePush::StaleEpoch => {
-                                    queue.clear();
-                                    seek_target_us = controls.current_seek_target_us();
-                                    seek_epoch = controls.current_seek_epoch();
-                                    loop_index = 0;
-                                    restart_for_seek = true;
-                                    break;
-                                }
-                                QueuePush::Closed => return Ok(()),
-                            }
-                        }
-                        if restart_for_seek {
-                            break;
-                        }
-                    }
-                    Err(err) => return Err(format!("decode failed: {err}")),
-                }
-            }
-            if restart_for_seek {
-                break;
-            }
-        }
-
-        if restart_for_seek {
-            continue;
-        }
-        for (frame, presentation_time_us) in decoder.flush_with_meta() {
-            if presentation_time_us
-                < seek_plan
-                    .publish_target_us
-                    .saturating_add(loop_time_offset_us)
-            {
-                continue;
-            }
-            match queue.push_frame(
-                DisplayItem::frame(
-                    DecodedVideoFrame::Software(frame),
-                    presentation_time_us,
-                    display_index,
-                    total_frames,
-                    seek_epoch,
-                ),
-                controls,
-            ) {
-                QueuePush::Pushed => {
-                    display_index += 1;
-                }
-                QueuePush::StaleEpoch => {
-                    queue.clear();
-                    seek_target_us = controls.current_seek_target_us();
-                    seek_epoch = controls.current_seek_epoch();
-                    loop_index = 0;
-                    restart_for_seek = true;
-                    break;
-                }
-                QueuePush::Closed => return Ok(()),
-            }
-        }
-
-        if restart_for_seek {
-            continue;
-        }
-
-        if !controls.is_loop_enabled() {
-            match queue.push_frame(DisplayItem::EndOfPass { seek_epoch }, controls) {
-                QueuePush::Pushed => {}
-                QueuePush::StaleEpoch => {
-                    queue.clear();
-                    seek_target_us = controls.current_seek_target_us();
-                    seek_epoch = controls.current_seek_epoch();
-                    loop_index = 0;
-                    continue;
-                }
-                QueuePush::Closed => return Ok(()),
-            }
-            println!("[{}] finished: {} frames", APP_NAME, display_index);
-            seek_target_us = wait_for_replay_or_seek_request(controls).unwrap_or(0);
-            if let Some(clock) = clock {
-                clock.reset_for_replay();
-            }
-            queue.clear();
-            seek_epoch = controls.current_seek_epoch();
-            loop_index = 0;
-            continue;
-        }
-        println!(
-            "[{}] loop {} complete: {} frames",
-            APP_NAME,
-            loop_index + 1,
-            display_index
-        );
-        loop_index = loop_index.saturating_add(1);
-    }
 }
 
 fn decode_loop_hardware(
@@ -2479,8 +2256,21 @@ impl VideoCodec {
     }
 }
 
+fn stateful_hardware_feature_enabled(codec: VideoCodec) -> bool {
+    match codec {
+        VideoCodec::H264 => cfg!(feature = "h264-stateful-hw"),
+        VideoCodec::Hevc => cfg!(feature = "hevc-stateful-hw"),
+        VideoCodec::Vp9 => cfg!(feature = "vp9-stateful-hw"),
+        VideoCodec::Av1 => cfg!(feature = "av1-stateful-hw"),
+    }
+}
+
 fn streaming_hardware_codec_supported(codec: VideoCodec) -> bool {
-    matches!(codec, VideoCodec::H264 | VideoCodec::Hevc)
+    match codec {
+        VideoCodec::H264 => cfg!(feature = "h264-stateful-hw"),
+        VideoCodec::Hevc => cfg!(feature = "hevc-stateful-hw"),
+        VideoCodec::Vp9 | VideoCodec::Av1 => false,
+    }
 }
 
 impl VideoSource {
@@ -2600,6 +2390,7 @@ struct Av1Config {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 struct AacConfig {
     audio_specific_config: Vec<u8>,
     sample_rate: u32,
@@ -3389,6 +3180,7 @@ fn mp4_estimated_total_frames(
     Some(estimated.max(sample_count).min(u32::MAX as usize).max(1) as u32)
 }
 
+#[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 struct Mp4AacAudioSource {
     data: Arc<Vec<u8>>,
     config: AacConfig,
@@ -3396,11 +3188,13 @@ struct Mp4AacAudioSource {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 struct SampleRange {
     offset: usize,
     size: usize,
 }
 
+#[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 fn load_mp4_aac_audio_source(data: Arc<Vec<u8>>) -> Result<Mp4AacAudioSource, String> {
     let mut offset = 0usize;
     let mut audio_track = None;
@@ -3455,6 +3249,7 @@ fn find_mp4_video_track(data: &[u8], start: usize, end: usize) -> Result<Option<
     Ok(None)
 }
 
+#[cfg_attr(not(feature = "mp4-aac"), allow(dead_code))]
 fn find_mp4_audio_track(data: &[u8], start: usize, end: usize) -> Result<Option<Mp4Track>, String> {
     let mut offset = start;
     while let Some(mp4_box) = read_mp4_box(data, offset, end) {
@@ -4943,105 +4738,12 @@ impl MappedVideoBuffer {
     }
 }
 
-fn enable_vp9_stateless_dump(path: &str) {
-    if path.is_empty() {
-        return;
-    }
-    let _ = std::fs::create_directory(path);
-    let _ = VP9_STATELESS_DUMP_DIR.set(String::from(path));
-    println!("[{}] VP9 stateless dump {}", APP_NAME, path);
-}
-
-fn join_dump_path(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') {
-        format!("{}{}", dir, name)
-    } else {
-        format!("{}/{}", dir, name)
-    }
-}
-
-fn struct_bytes<T>(value: &T) -> &[u8] {
-    // SAFETY: Scarlet video request structs are #[repr(C)] plain data copied
-    // through the kernel ABI. The byte slice is only used synchronously for a
-    // diagnostic dump while `value` is still alive.
-    unsafe { core::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
-}
-
-fn dump_file(path: &str, data: &[u8]) -> Result<(), String> {
-    let mut file = File::create(path).map_err(|err| format!("create {} failed: {}", path, err))?;
-    file.write_all(data)
-        .map_err(|err| format!("write {} failed: {}", path, err))
-}
-
-fn dump_vp9_stateless_request(
-    dir: &str,
-    timestamp: u64,
-    access_unit: &[u8],
-    params: &ScarletVideoVp9StatelessParams,
-) -> Result<(), String> {
-    let prefix = format!("scarlet-vp9.{:016x}", timestamp);
-    dump_file(
-        &join_dump_path(dir, &format!("{}.input.bin", prefix)),
-        access_unit,
-    )?;
-    dump_file(
-        &join_dump_path(dir, &format!("{}.frame-params.bin", prefix)),
-        struct_bytes(&params.frame),
-    )?;
-    dump_file(
-        &join_dump_path(dir, &format!("{}.probs.bin", prefix)),
-        &params.probabilities.data,
-    )?;
-    dump_file(
-        &join_dump_path(dir, &format!("{}.tiles.bin", prefix)),
-        struct_bytes(&params.tiles),
-    )?;
-
-    let manifest = format!(
-        "format=scarlet-vp9-stateless\n\
-timestamp={}\n\
-input_len={}\n\
-frame_width={}\n\
-frame_height={}\n\
-render_width={}\n\
-render_height={}\n\
-flags=0x{:x}\n\
-profile={}\n\
-bit_depth={}\n\
-tile_count={}\n\
-tile_cols_log2={}\n\
-tile_rows_log2={}\n\
-uncompressed_header_size={}\n\
-compressed_header_size={}\n\
-refresh_frame_flags=0x{:x}\n",
-        timestamp,
-        access_unit.len(),
-        u32::from(params.frame.frame_width_minus_1) + 1,
-        u32::from(params.frame.frame_height_minus_1) + 1,
-        u32::from(params.frame.render_width_minus_1) + 1,
-        u32::from(params.frame.render_height_minus_1) + 1,
-        params.frame.flags,
-        params.frame.profile,
-        params.frame.bit_depth,
-        params.tiles.tile_count,
-        params.frame.tile_cols_log2,
-        params.frame.tile_rows_log2,
-        params.frame.uncompressed_header_size,
-        params.frame.compressed_header_size,
-        params.frame.refresh_frame_flags,
-    );
-    dump_file(
-        &join_dump_path(dir, &format!("{}.manifest.txt", prefix)),
-        manifest.as_bytes(),
-    )
-}
-
 struct HardwareVideoDecoder {
     device: File,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
-    h264_context: H264RequestContext,
-    vp9_context: Vp9RequestContext,
+    h264_stateless_context: h264_stateless_hw::Context,
+    vp9_stateless_context: vp9_stateless_hw::Context,
     vp9_debug_submits: u32,
 }
 
@@ -5077,8 +4779,8 @@ impl HardwareVideoDecoder {
             device,
             mapped,
             caps,
-            h264_context: H264RequestContext::default(),
-            vp9_context: Vp9RequestContext::default(),
+            h264_stateless_context: h264_stateless_hw::Context::default(),
+            vp9_stateless_context: vp9_stateless_hw::Context::default(),
             vp9_debug_submits: 0,
         })
     }
@@ -5118,11 +4820,14 @@ impl HardwareVideoDecoder {
 
     fn supports_decode_codec(&self, codec: VideoCodec) -> bool {
         self.supports_stateful_codec(codec)
-            || (codec == VideoCodec::H264 && self.supports_stateless_h264())
-            || (codec == VideoCodec::Vp9 && self.supports_stateless_vp9())
+            || (codec == VideoCodec::H264 && h264_stateless_hw::supported(self.caps))
+            || (codec == VideoCodec::Vp9 && vp9_stateless_hw::supported(self.caps))
     }
 
     fn supports_stateful_codec(&self, codec: VideoCodec) -> bool {
+        if !stateful_hardware_feature_enabled(codec) {
+            return false;
+        }
         let Some(caps) = self.caps else {
             return codec != VideoCodec::Vp9;
         };
@@ -5135,15 +4840,11 @@ impl HardwareVideoDecoder {
     }
 
     fn supports_stateless_h264(&self) -> bool {
-        self.caps
-            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_H264))
-            .unwrap_or(false)
+        h264_stateless_hw::supported(self.caps)
     }
 
     fn supports_stateless_vp9(&self) -> bool {
-        self.caps
-            .map(|caps| caps.has_flag(SCARLET_VIDEO_CAP_STATELESS_VP9))
-            .unwrap_or(false)
+        vp9_stateless_hw::supported(self.caps)
     }
 
     fn decode_access_unit_stream(
@@ -5219,108 +4920,27 @@ impl HardwareVideoDecoder {
         }
 
         let mut should_display = true;
+        let mut stateless_submitted = false;
         if codec == VideoCodec::H264 && self.supports_stateless_h264() {
-            let h264 = self.h264_context.params_for_access_unit(access_unit)?;
-            let params = &h264.params;
-            let submit = ScarletVideoH264StatelessSubmit {
-                stream_id: buffer.stream_id,
-                input_len: access_unit.len() as u32,
-                timestamp: h264.timestamp,
-                params: ScarletVideoH264ParamPtrs {
-                    sps: &params.sps as *const _ as usize as u64,
-                    pps: &params.pps as *const _ as usize as u64,
-                    scaling_matrix: &params.scaling_matrix as *const _ as usize as u64,
-                    pred_weights: &params.pred_weights as *const _ as usize as u64,
-                    slice_params: &params.slice_params as *const _ as usize as u64,
-                    decode_params: &params.decode_params as *const _ as usize as u64,
-                },
-                flags: 0,
-                padding: 0,
-            };
-            self.device
-                .as_handle()
-                .control(
-                    SCARLET_VIDEO_SUBMIT_H264_STATELESS,
-                    &submit as *const _ as usize,
-                )
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder stateless H.264 submit failed{status}")
-                })?;
-        } else if codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
-            let log_vp9_submit = self.vp9_debug_submits < 4;
-            if log_vp9_submit {
-                println!(
-                    "[{}] VP9 stateless prepare input={} stream={}",
-                    APP_NAME,
-                    access_unit.len(),
-                    buffer.stream_id
-                );
-            }
-            let vp9 = self.vp9_context.params_for_frame(access_unit)?;
-            let params: &ScarletVideoVp9StatelessParams = &vp9.params;
-            should_display =
-                params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME != 0;
-            if log_vp9_submit {
-                println!(
-                    "[{}] VP9 stateless parsed ts={} key={} show={} size={}x{} render={}x{} tiles={} uh={} ch={} flags=0x{:x}",
-                    APP_NAME,
-                    vp9.timestamp,
-                    params.frame.flags & scarlet_codecs::SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME
-                        != 0,
-                    should_display,
-                    u32::from(params.frame.frame_width_minus_1) + 1,
-                    u32::from(params.frame.frame_height_minus_1) + 1,
-                    u32::from(params.frame.render_width_minus_1) + 1,
-                    u32::from(params.frame.render_height_minus_1) + 1,
-                    params.tiles.tile_count,
-                    params.frame.uncompressed_header_size,
-                    params.frame.compressed_header_size,
-                    params.frame.flags
-                );
-            }
-            let submit = ScarletVideoVp9StatelessSubmit {
-                stream_id: buffer.stream_id,
-                input_len: access_unit.len() as u32,
-                timestamp: vp9.timestamp,
-                params: ScarletVideoVp9ParamPtrs {
-                    frame: &params.frame as *const _ as usize as u64,
-                    probabilities: &params.probabilities as *const _ as usize as u64,
-                    tiles: &params.tiles as *const _ as usize as u64,
-                },
-                flags: 0,
-                padding: 0,
-            };
-            if let Some(dir) = VP9_STATELESS_DUMP_DIR.get()
-                && let Err(err) =
-                    dump_vp9_stateless_request(dir, vp9.timestamp, access_unit, params)
-            {
-                println!("[{}] VP9 stateless dump failed: {}", APP_NAME, err);
-            }
-            if log_vp9_submit {
-                println!(
-                    "[{}] VP9 stateless submit begin ts={} stream={}",
-                    APP_NAME, vp9.timestamp, buffer.stream_id
-                );
-            }
-            self.device
-                .as_handle()
-                .control(
-                    SCARLET_VIDEO_SUBMIT_VP9_STATELESS,
-                    &submit as *const _ as usize,
-                )
-                .map_err(|_| {
-                    let status = self.read_decoder_status();
-                    format!("hardware decoder stateless VP9 submit failed{status}")
-                })?;
-            if log_vp9_submit {
-                println!(
-                    "[{}] VP9 stateless submit ok ts={} stream={}",
-                    APP_NAME, vp9.timestamp, buffer.stream_id
-                );
-            }
-            self.vp9_debug_submits = self.vp9_debug_submits.saturating_add(1);
-        } else if buffer.session_commands {
+            h264_stateless_hw::submit(
+                &mut self.device,
+                &mut self.h264_stateless_context,
+                buffer.stream_id,
+                access_unit,
+            )?;
+            stateless_submitted = true;
+        }
+        if !stateless_submitted && codec == VideoCodec::Vp9 && self.supports_stateless_vp9() {
+            should_display = vp9_stateless_hw::submit(
+                &mut self.device,
+                &mut self.vp9_stateless_context,
+                buffer.stream_id,
+                access_unit,
+                &mut self.vp9_debug_submits,
+            )?;
+            stateless_submitted = true;
+        }
+        if !stateless_submitted && buffer.session_commands {
             let submit = ScarletVideoSessionSubmit {
                 stream_id: buffer.stream_id,
                 input_len: access_unit.len() as u32,
@@ -5335,7 +4955,7 @@ impl HardwareVideoDecoder {
                     let status = self.read_decoder_status();
                     format!("hardware decoder mmap submit failed{status}")
                 })?;
-        } else {
+        } else if !stateless_submitted {
             let submit = ScarletVideoSubmit {
                 input_len: access_unit.len() as u32,
                 coded_format: codec.coded_format(),
@@ -5578,7 +5198,8 @@ impl Drop for HardwareVideoDecoder {
 }
 
 enum DecodedVideoFrame {
-    Software(Frame),
+    #[cfg_attr(not(feature = "h264-sw"), allow(dead_code))]
+    Software(h264_sw::DecodedFrame),
     Hardware(ScarletVideoFrame),
 }
 
@@ -5630,9 +5251,7 @@ impl DisplayItem {
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Frame { frame, .. } => match frame {
-                DecodedVideoFrame::Software(frame) => {
-                    frame.width as usize * frame.height as usize * 3 / 2
-                }
+                DecodedVideoFrame::Software(frame) => h264_sw::estimated_bytes(frame),
                 DecodedVideoFrame::Hardware(frame) => {
                     let payload_len = frame.payload().len();
                     if payload_len != 0 {
@@ -6735,7 +6354,7 @@ fn publish_frame(
     let current_frame = (display_index + 1).min(u32::MAX as usize) as u32;
     match frame {
         DecodedVideoFrame::Software(frame) => {
-            frame_store.update_from_frame(&frame, current_frame, total_frames);
+            h264_sw::update_frame_store(frame_store, &frame, current_frame, total_frames)?;
         }
         DecodedVideoFrame::Hardware(frame) => {
             frame_store.update_from_nv12(&frame, current_frame, total_frames)?;
@@ -7032,10 +6651,6 @@ fn read_u64_be(bytes: &[u8]) -> u64 {
     ])
 }
 
-fn yuv420_to_bgra(frame: &Frame, pixels: &mut [u8]) {
-    yuv420_to_bgra_simd(frame, pixels);
-}
-
 fn nv12_to_bgra(width: u32, height: u32, nv12: &[u8], pixels: &mut [u8]) {
     nv12_to_bgra_simd(width, height, nv12, pixels);
 }
@@ -7089,65 +6704,6 @@ fn nv12_to_bgra_simd(width: u32, height: u32, nv12: &[u8], pixels: &mut [u8]) {
             let uv_offset = uv_row + (x & !1);
             let u_value = uv_plane[uv_offset] as i32;
             let v_value = uv_plane[uv_offset + 1] as i32;
-            let (r, g, b) = yuv_to_rgb(y_value, u_value, v_value);
-            let offset = (y_row + x) * 4;
-            pixels[offset] = b;
-            pixels[offset + 1] = g;
-            pixels[offset + 2] = r;
-            pixels[offset + 3] = 255;
-            x += 1;
-        }
-    }
-}
-
-fn yuv420_to_bgra_simd(frame: &Frame, pixels: &mut [u8]) {
-    const LANES: usize = 8;
-
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let chroma_width = width / 2;
-
-    for y in 0..height {
-        let y_row = y * width;
-        let uv_row = (y / 2) * chroma_width;
-        let mut x = 0usize;
-
-        while x + LANES <= width {
-            let y_values =
-                Simd::<u8, LANES>::from_slice(&frame.y[y_row + x..y_row + x + LANES]).cast::<i32>();
-            let u_base = uv_row + x / 2;
-            let v_base = uv_row + x / 2;
-            let u_values = Simd::<i32, LANES>::from_array([
-                frame.u[u_base] as i32,
-                frame.u[u_base] as i32,
-                frame.u[u_base + 1] as i32,
-                frame.u[u_base + 1] as i32,
-                frame.u[u_base + 2] as i32,
-                frame.u[u_base + 2] as i32,
-                frame.u[u_base + 3] as i32,
-                frame.u[u_base + 3] as i32,
-            ]);
-            let v_values = Simd::<i32, LANES>::from_array([
-                frame.v[v_base] as i32,
-                frame.v[v_base] as i32,
-                frame.v[v_base + 1] as i32,
-                frame.v[v_base + 1] as i32,
-                frame.v[v_base + 2] as i32,
-                frame.v[v_base + 2] as i32,
-                frame.v[v_base + 3] as i32,
-                frame.v[v_base + 3] as i32,
-            ]);
-
-            let (r, g, b) = yuv_to_rgb_simd(y_values, u_values, v_values);
-            store_bgra8(pixels, (y_row + x) * 4, r, g, b);
-
-            x += LANES;
-        }
-
-        while x < width {
-            let y_value = frame.y[y_row + x] as i32;
-            let u_value = frame.u[uv_row + x / 2] as i32;
-            let v_value = frame.v[uv_row + x / 2] as i32;
             let (r, g, b) = yuv_to_rgb(y_value, u_value, v_value);
             let offset = (y_row + x) * 4;
             pixels[offset] = b;
@@ -8205,7 +7761,7 @@ fn fill_bgra(buffer: &mut [u8], color: [u8; 4]) {
 pub extern "C" fn main() -> i32 {
     let args = parse_args(std::env::args().collect());
     if let Some(path) = args.vp9_stateless_dump_dir.as_deref() {
-        enable_vp9_stateless_dump(path);
+        vp9_stateless_hw::enable_dump(path);
     }
     let video_path = args.video_path;
     let window_title = video_window_title(args.title.as_deref(), &video_path);
