@@ -474,10 +474,14 @@ impl CharDevice for AppleAvdDebugDevice {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        let command = core::str::from_utf8(buffer)
-            .map_err(|_| "apple-avd-debug: command is not UTF-8")?
-            .trim();
-        self.run_command(command)?;
+        let Ok(command) = core::str::from_utf8(buffer) else {
+            *self.last_report.lock() = String::from("apple-avd-debug: command is not UTF-8\n");
+            return Ok(buffer.len());
+        };
+        let command = command.trim();
+        if let Err(error) = self.run_command(command) {
+            *self.last_report.lock() = format!("{}\ncommand: {}\n", error, command);
+        }
         Ok(buffer.len())
     }
 

@@ -926,7 +926,14 @@ impl FileObject for DevFileObject {
     }
 
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
-        // Device files cannot be truncated
+        // Opening a character device through shell redirection uses O_TRUNC.
+        // Treat truncate-to-zero as a no-op for device special files, matching
+        // the way byte-stream devices such as /dev/null are commonly used.
+        if _size == 0 {
+            return Ok(());
+        }
+
+        // Device files cannot be resized.
         Err(StreamError::from(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
             "Cannot truncate device files",
