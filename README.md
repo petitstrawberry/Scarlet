@@ -136,6 +136,14 @@ kernel features, module set, ordered image layers, boot image format, and runner
 See [Scarlet Distribution Model](docs/architecture/distro-model.md) and
 [Scarlet Build System](docs/build-system/README.md).
 
+## Media Codecs
+
+The in-tree `video_player` is built as its own user program crate under
+`user/video_player`. The default build enables the stateful H.264 hardware path
+only for H.264 decode; other codec paths are selected explicitly by crate or
+bundle features. See [`user/video_player`](user/video_player/README.md) for the
+codec feature policy.
+
 ## Build and Run
 
 The `cargo make` tasks are convenience wrappers around `cargo scarlet`.

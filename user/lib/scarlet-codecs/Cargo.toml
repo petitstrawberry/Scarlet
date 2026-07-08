@@ -7,8 +7,7 @@ readme = "README.md"
 
 [features]
 default = []
-# H.264/AVC can be patent-encumbered in some jurisdictions. Keep it opt-in,
-# like FFmpeg-style deployments that make patented codecs an explicit choice.
+# H.264/AVC can be patent-encumbered in some jurisdictions. Keep it opt-in.
 h264 = []
 vp9 = []
 
