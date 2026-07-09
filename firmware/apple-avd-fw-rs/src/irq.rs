@@ -1,9 +1,6 @@
 //! Cortex-M3 interrupt handling for the Apple AVD firmware.
 
-use crate::abi::{
-    CMD_H264_DECODE, CMD_VP9_DECODE, MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR,
-    command_kind, command_tag,
-};
+use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR};
 use crate::mailbox::send_message;
 
 /// Number of external NVIC lines enabled by the AVD firmware.
@@ -45,33 +42,11 @@ const PACKED_STATUS: bool = false;
 
 /// Enable all known AVD NVIC external IRQ lines.
 pub fn enable_all_nvic_irqs() {
-    arm_decode_irqs();
-}
-
-/// Enable AVD decode IRQ delivery through NVIC.
-pub fn arm_decode_irqs() {
     for word in 0..(NVIC_EXTERNAL_IRQS / 32) {
-        let reg = (NVIC_ISER_BASE + word * 4) as *mut u32;
+        let set_enable = (NVIC_ISER_BASE + word * 4) as *mut u32;
         // SAFETY: NVIC ISER registers are memory-mapped Cortex-M system control registers.
         unsafe {
-            core::ptr::write_volatile(reg, u32::MAX);
-        }
-    }
-}
-
-/// Dispatch one AP-to-CM3 mailbox command.
-///
-/// # Arguments
-///
-/// * `command` - Raw AP-to-CM3 command word.
-pub fn dispatch_mailbox_command(command: u32) {
-    match command_kind(command) {
-        CMD_H264_DECODE => arm_decode_irqs(),
-        CMD_VP9_DECODE => arm_decode_irqs(),
-        _ => {
-            let kind = command_kind(command) & 0xff;
-            let tag = command_tag(command) & 0xff;
-            send_message(MSG_UNKNOWN_IRQ | (kind << 8) | tag);
+            core::ptr::write_volatile(set_enable, u32::MAX);
         }
     }
 }

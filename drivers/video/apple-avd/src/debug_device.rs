@@ -196,19 +196,17 @@ impl AppleAvdDebugDevice {
     }
 
     fn run_fw_ping(&self) -> String {
-        let mut avd = self.avd.lock();
+        let avd = self.avd.lock();
         let before = avd.debug_snapshot();
-        let message = avd.poll_firmware_message();
         let after = avd.debug_snapshot();
         format!(
             concat!(
-                "fw-ping avd{} state={} message={:?}\n",
+                "fw-ping avd{} state={} message=irq-only\n",
                 "before status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n",
                 "after status={:#x} irq_enable_status1={:#x} mailbox_status={:#x} mailbox_raw={:#x}\n"
             ),
             self.avd_id,
             avd.firmware_state_name(),
-            message,
             before.status,
             before.irq_enable_status1,
             before.mailbox_status,

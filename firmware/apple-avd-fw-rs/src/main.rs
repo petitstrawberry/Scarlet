@@ -9,8 +9,8 @@ mod vector;
 
 use core::arch::asm;
 
-use abi::{MSG_PANIC, MSG_READY};
-use mailbox::{receive_command, send_message, signal_booted};
+use abi::MSG_PANIC;
+use mailbox::{send_message, signal_booted};
 
 /// Firmware reset entry point.
 #[unsafe(no_mangle)]
@@ -19,12 +19,8 @@ pub extern "C" fn reset_handler() -> ! {
     irq::enable_all_nvic_irqs();
     enable_interrupts();
     signal_booted();
-    send_message(MSG_READY);
 
     loop {
-        if let Some(command) = receive_command() {
-            dispatch_command(command);
-        }
         wait_for_interrupt();
     }
 }
@@ -52,8 +48,4 @@ fn wait_for_interrupt() {
     unsafe {
         asm!("wfi", options(nomem, nostack, preserves_flags));
     }
-}
-
-fn dispatch_command(command: u32) {
-    irq::dispatch_mailbox_command(command);
 }
