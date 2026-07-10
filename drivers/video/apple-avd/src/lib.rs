@@ -145,6 +145,8 @@ const MBOX1_NOT_EMPTY: u32 = 0x8;
 const VP9_SUBMIT_FRAME: u32 = 0x2bfff107;
 const VP9_SUBMIT_TILE: u32 = 0x2bfff007;
 const DECODE_STATUS_ERROR_MASK: u32 = 0x0000_0003;
+const DECODE_STATUS_H264_VP_ACK: u32 = 0x0000_1000;
+const DECODE_STATUS_H264_PP_ACK: u32 = 0x0040_0000;
 const DECODE_VP_CM3_MASK: u32 = 0x7;
 const DECODE_PP_CM3_MASK: u32 = 0x5;
 const DECODE_T8103_H264_VP_SLOT: u32 = 2;
@@ -1095,6 +1097,7 @@ impl AppleAvd {
     /// * `instructions` - AVD H.264 instruction stream.
     pub fn start_h264_decode(&mut self, instructions: &AvdH264InstructionStream) {
         self.registers.write_h264_instructions(instructions.words());
+        self.registers.submit_decode_postprocess();
         arch::io_mb();
     }
 
@@ -2880,7 +2883,9 @@ impl AppleAvdVideoBackend {
         if completion_phase == AvdDecodeCompletionPhase::WaitingVideo
             && matches!(message, AvdFirmwareMessage::VideoProcessorDone)
         {
-            self.registers.submit_decode_postprocess();
+            self.registers
+                .clear_decode_status(DECODE_STATUS_H264_VP_ACK);
+            arch::io_mb();
             let front = state
                 .pending
                 .as_mut()
@@ -2894,6 +2899,9 @@ impl AppleAvdVideoBackend {
 
         if completed_by_mailbox {
             self.invalidate_watchdog_from_irq();
+            self.registers
+                .clear_decode_status(DECODE_STATUS_H264_PP_ACK);
+            arch::io_mb();
             let completion = AvdCompletionInfo {
                 status_before,
                 status,

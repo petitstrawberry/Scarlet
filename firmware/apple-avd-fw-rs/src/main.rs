@@ -14,8 +14,9 @@ use mailbox::signal_booted;
 /// Firmware reset entry point.
 #[unsafe(no_mangle)]
 pub extern "C" fn reset_handler() -> ! {
+    irq::disable_systick();
     tunables::apply_selected_tunables();
-    irq::enable_all_nvic_irqs();
+    irq::enable_known_nvic_irqs();
     enable_interrupts();
     signal_booted();
 
