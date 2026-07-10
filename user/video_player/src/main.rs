@@ -156,6 +156,45 @@ fn release_payload_buffer(buf: Vec<u8>) {
     }
 }
 
+/// Recycle pool for converted BGRA frame buffers (~676 KB each at 480×360).
+static BGRA_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+fn acquire_bgra_buffer(len: usize) -> Vec<u8> {
+    let mut pool = BGRA_POOL.lock();
+    while let Some(buf) = pool.pop() {
+        if buf.capacity() >= len {
+            drop(pool);
+            let mut buf = buf;
+            buf.resize(len, 0);
+            return buf;
+        }
+    }
+    drop(pool);
+    vec![0; len]
+}
+
+fn release_bgra_buffer(buf: Vec<u8>) {
+    let mut pool = BGRA_POOL.lock();
+    if pool.len() < DISPLAY_QUEUE_MAX_FRAMES {
+        pool.push(buf);
+    }
+}
+
+struct BgraFrame {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl Drop for BgraFrame {
+    fn drop(&mut self) {
+        let pixels = core::mem::take(&mut self.pixels);
+        if !pixels.is_empty() {
+            release_bgra_buffer(pixels);
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ScarletVideoBufferInfo {
@@ -289,6 +328,20 @@ impl VideoFrameStore {
         data.current_frame = current_frame;
         data.total_frames = total_frames;
         Ok(())
+    }
+
+    fn swap_bgra(&self, mut bgra: BgraFrame, current_frame: u32, total_frames: u32) {
+        let mut data = self.data.lock();
+        let required_len = bgra.width as usize * bgra.height as usize * 4;
+        if data.pixels.len() == required_len {
+            core::mem::swap(&mut data.pixels, &mut bgra.pixels);
+        } else {
+            data.pixels = core::mem::take(&mut bgra.pixels);
+        }
+        data.width = bgra.width;
+        data.height = bgra.height;
+        data.current_frame = current_frame;
+        data.total_frames = total_frames;
     }
 
     fn mark_complete(&self) {
@@ -1248,6 +1301,7 @@ fn decode_loop_hardware(
             let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
+            let frame = hardware_frame_to_bgra(frame)?;
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
@@ -1260,7 +1314,7 @@ fn decode_loop_hardware(
                     queue,
                     presentation_time_us,
                     seek_epoch,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                 )? {
                     queue.clear();
                     seek_target_us = controls.current_seek_target_us();
@@ -1270,11 +1324,7 @@ fn decode_loop_hardware(
                     break;
                 }
             } else {
-                reorder.push(
-                    access_unit.display_rank,
-                    presentation_time_us,
-                    DecodedVideoFrame::Hardware(frame.into_owned()),
-                )?;
+                reorder.push(access_unit.display_rank, presentation_time_us, frame)?;
                 if !reorder.publish_ready(controls, queue, seek_epoch)? {
                     queue.clear();
                     seek_target_us = controls.current_seek_target_us();
@@ -1511,12 +1561,13 @@ fn decode_loop_hardware_streaming_mp4(
                 decoded += 1;
                 continue;
             }
+            let frame = hardware_frame_to_bgra(frame)?;
             if controls.is_scrubbing() {
                 publish_seek_preview(
                     frame_store,
                     paint_signal,
                     controls,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                     access_unit.display_rank,
                     stream_total_frames(&source, decoded, complete),
                     access_unit.presentation_time_us,
@@ -1532,7 +1583,7 @@ fn decode_loop_hardware_streaming_mp4(
                     queue,
                     access_unit.presentation_time_us,
                     active_seek_epoch,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                 )? {
                     queue.clear();
                     seek_epoch = controls.current_seek_epoch();
@@ -1543,7 +1594,7 @@ fn decode_loop_hardware_streaming_mp4(
                 reorder.push(
                     access_unit.display_rank,
                     access_unit.presentation_time_us,
-                    DecodedVideoFrame::Hardware(frame.into_owned()),
+                    frame,
                 )?;
                 if !reorder.publish_ready(controls, queue, active_seek_epoch)? {
                     queue.clear();
@@ -1820,12 +1871,13 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 decoded += 1;
                 continue;
             }
+            let frame = hardware_frame_to_bgra(frame)?;
             if controls.is_scrubbing() {
                 publish_seek_preview(
                     frame_store,
                     paint_signal,
                     controls,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                     access_unit.display_rank,
                     stream_total_frames(&source, decoded, complete),
                     access_unit.presentation_time_us,
@@ -1841,7 +1893,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
                     queue,
                     access_unit.presentation_time_us,
                     active_seek_epoch,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                 )? {
                     queue.clear();
                     seek_epoch = controls.current_seek_epoch();
@@ -1852,7 +1904,7 @@ fn decode_loop_hardware_streaming_mp4_socket(
                 reorder.push(
                     access_unit.display_rank,
                     access_unit.presentation_time_us,
-                    DecodedVideoFrame::Hardware(frame.into_owned()),
+                    frame,
                 )?;
                 if !reorder.publish_ready(controls, queue, active_seek_epoch)? {
                     queue.clear();
@@ -1997,6 +2049,7 @@ fn replay_hardware_source_loops(
             let Some(frame) = frame else {
                 return Err(String::from("hardware decoder produced no frame"));
             };
+            let frame = hardware_frame_to_bgra(frame)?;
             let presentation_time_us = access_unit
                 .presentation_time_us
                 .saturating_add(loop_time_offset_us);
@@ -2009,7 +2062,7 @@ fn replay_hardware_source_loops(
                     queue,
                     presentation_time_us,
                     seek_epoch,
-                    DecodedVideoFrame::Hardware(frame),
+                    frame,
                 )? {
                     queue.clear();
                     seek_target_us = controls.current_seek_target_us();
@@ -2019,11 +2072,7 @@ fn replay_hardware_source_loops(
                     break;
                 }
             } else {
-                reorder.push(
-                    access_unit.display_rank,
-                    presentation_time_us,
-                    DecodedVideoFrame::Hardware(frame.into_owned()),
-                )?;
+                reorder.push(access_unit.display_rank, presentation_time_us, frame)?;
                 if !reorder.publish_ready(controls, queue, seek_epoch)? {
                     queue.clear();
                     seek_target_us = controls.current_seek_target_us();
@@ -5243,7 +5292,9 @@ impl Drop for HardwareVideoDecoder {
 enum DecodedVideoFrame {
     #[cfg_attr(not(feature = "h264-sw"), allow(dead_code))]
     Software(h264_sw::DecodedFrame),
+    #[allow(dead_code)]
     Hardware(ScarletVideoFrame),
+    Bgra(BgraFrame),
 }
 
 enum DisplayItem {
@@ -5275,6 +5326,7 @@ impl DisplayItem {
         let frame = match frame {
             DecodedVideoFrame::Software(frame) => DecodedVideoFrame::Software(frame),
             DecodedVideoFrame::Hardware(frame) => DecodedVideoFrame::Hardware(frame.into_owned()),
+            DecodedVideoFrame::Bgra(bgra) => DecodedVideoFrame::Bgra(bgra),
         };
         Self::Frame {
             frame,
@@ -5303,6 +5355,7 @@ impl DisplayItem {
                         frame.width as usize * frame.height as usize * 3 / 2
                     }
                 }
+                DecodedVideoFrame::Bgra(bgra) => bgra.pixels.len(),
             },
             Self::EndOfPass { .. } => 0,
         }
@@ -5597,11 +5650,12 @@ fn publish_hardware_seek_preview(
     let Some(frame) = decoder.decode_access_unit(access_unit.codec, access_unit_bytes)? else {
         return Ok(true);
     };
+    let frame = hardware_frame_to_bgra(frame)?;
     publish_seek_preview(
         frame_store,
         paint_signal,
         controls,
-        DecodedVideoFrame::Hardware(frame),
+        frame,
         access_unit.display_rank,
         total_frames,
         access_unit.presentation_time_us,
@@ -6385,6 +6439,32 @@ fn publish_seek_preview(
     Ok(controls.current_seek_epoch() == seek_epoch)
 }
 
+fn hardware_frame_to_bgra(frame: ScarletVideoFrame) -> Result<DecodedVideoFrame, String> {
+    let width = frame.width;
+    let height = frame.height;
+    if frame.pixel_format != NV12_VIDEO_RANGE_PIXEL_FORMAT {
+        return Err(format!(
+            "hardware decoder returned unsupported pixel format 0x{:08x}",
+            frame.pixel_format
+        ));
+    }
+    let required_nv12_len = width as usize * height as usize * 3 / 2;
+    let payload = frame.payload();
+    if payload.len() < required_nv12_len {
+        return Err(String::from(
+            "hardware decoder returned truncated NV12 frame",
+        ));
+    }
+    let bgra_len = width as usize * height as usize * 4;
+    let mut pixels = acquire_bgra_buffer(bgra_len);
+    nv12_to_bgra(width, height, payload, &mut pixels);
+    Ok(DecodedVideoFrame::Bgra(BgraFrame {
+        pixels,
+        width,
+        height,
+    }))
+}
+
 fn publish_frame(
     frame_store: &VideoFrameStore,
     paint_signal: &PaintSignal,
@@ -6401,6 +6481,9 @@ fn publish_frame(
         }
         DecodedVideoFrame::Hardware(frame) => {
             frame_store.update_from_nv12(&frame, current_frame, total_frames)?;
+        }
+        DecodedVideoFrame::Bgra(bgra) => {
+            frame_store.swap_bgra(bgra, current_frame, total_frames);
         }
     }
     paint_signal.notify();
