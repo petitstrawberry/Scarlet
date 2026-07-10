@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 
-use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE};
+use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR};
 use crate::mailbox::send_message;
 
 /// Number of external NVIC lines exposed by the AVD Cortex-M3.
@@ -17,6 +17,7 @@ const SYST_CSR: usize = 0xe000_e010;
 const DECODE_STATUS_UNK: u32 = 1 << 0;
 const DECODE_STATUS_ERR: u32 = 1 << 1;
 const DECODE_STATUS_DONE: u32 = 1 << 2;
+const DECODE_STATUS_CLEAR_POLLS: usize = 1_024;
 #[cfg(feature = "v2-t0")]
 const H264_STATUS_OFFSET: usize = 0x4060;
 #[cfg(feature = "v2-t0")]
@@ -114,7 +115,7 @@ pub fn h264_status_irq1() {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_unknown(pipe: u32) {
-    clear_decode_status(pipe, DECODE_STATUS_UNK);
+    clear_decode_status_or_fault(pipe, DECODE_STATUS_UNK);
 }
 
 /// Handle a video-pipe DONE IRQ.
@@ -123,7 +124,7 @@ pub fn video_pipe_unknown(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_done(pipe: u32) {
-    clear_decode_status(pipe, DECODE_STATUS_DONE);
+    clear_decode_status_or_fault(pipe, DECODE_STATUS_DONE);
     send_message(MSG_VP_DONE | (pipe & 0xff));
 }
 
@@ -133,18 +134,18 @@ pub fn video_pipe_done(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_error(pipe: u32) {
-    clear_decode_status(pipe, DECODE_STATUS_ERR);
-    send_message(pipe);
+    clear_decode_status_or_fault(pipe, DECODE_STATUS_ERR);
+    report_decode_fault(pipe)
 }
 
 /// Handle submit-queue unknown-status IRQ.
 pub fn submit_unknown() {
-    clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_UNK);
+    clear_decode_status_or_fault(IRQ_SUBMIT_SLOT, DECODE_STATUS_UNK);
 }
 
 /// Handle a post-process DONE IRQ.
 pub fn post_process_done() {
-    clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE);
+    clear_decode_status_or_fault(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE);
     send_message(MSG_PP_DONE);
 }
 
@@ -179,17 +180,35 @@ pub fn fatal_exception(exception: u32) -> ! {
     unknown_irq(1000 + exception)
 }
 
-fn clear_decode_status(slot: u32, status: u32) {
+fn clear_decode_status_or_fault(slot: u32, status: u32) {
+    if !clear_decode_status(slot, status) {
+        report_decode_fault(slot);
+    }
+}
+
+fn clear_decode_status(slot: u32, status: u32) -> bool {
     let ptr = decode_status_ptr(slot);
     let mask = decode_status_mask(slot, status);
     // SAFETY: These are AVD decode status registers in the CM3-visible MMIO
     // window; writing the observed bits acknowledges the corresponding IRQ.
+    // Verify deassertion before exception return so a level IRQ cannot retrigger.
+    // The bound prevents broken hardware from trapping the CM3 in MMIO polling.
     unsafe {
         core::ptr::write_volatile(ptr, mask);
-        while core::ptr::read_volatile(ptr) & mask != 0 {
+        asm!("dsb sy", options(nostack, preserves_flags));
+        for _ in 0..DECODE_STATUS_CLEAR_POLLS {
+            if core::ptr::read_volatile(ptr) & mask == 0 {
+                return true;
+            }
             core::hint::spin_loop();
         }
     }
+    false
+}
+
+fn report_decode_fault(slot: u32) -> ! {
+    send_message(MSG_VP_ERROR | (slot & 0xff));
+    wait_forever()
 }
 
 fn decode_status_ptr(slot: u32) -> *mut u32 {

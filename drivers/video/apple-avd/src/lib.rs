@@ -3723,8 +3723,10 @@ fn prepare_pending_decode_output(
             sample.uv_non_neutral
         );
     }
-    compact_nv12_output_payload(&pending)?;
-    arch::clean_dcache_to_poc_range(pending.output_payload_vaddr, pending.payload_len);
+    let compacted = compact_nv12_output_payload(pending)?;
+    if compacted {
+        arch::clean_dcache_to_poc_range(pending.output_payload_vaddr, pending.payload_len);
+    }
     write_frame_header(
         pending.output_header_vaddr,
         pending.display_width,
@@ -3733,7 +3735,6 @@ fn prepare_pending_decode_output(
         pending.payload_len as u32,
     )?;
     arch::clean_dcache_to_poc_range(pending.output_header_vaddr, SCARLET_VIDEO_FRAME_HEADER_LEN);
-
     Ok(())
 }
 
@@ -3777,7 +3778,7 @@ fn commit_pending_decode(
     Ok(())
 }
 
-fn compact_nv12_output_payload(pending: &AvdPendingDecode) -> Result<(), &'static str> {
+fn compact_nv12_output_payload(pending: &AvdPendingDecode) -> Result<bool, &'static str> {
     if pending.layout.pixel_format != SCARLET_VIDEO_PIXEL_FORMAT_NV12 {
         return Err("apple-avd: unsupported decoded pixel format");
     }
@@ -3847,7 +3848,7 @@ fn compact_nv12_output_payload(pending: &AvdPendingDecode) -> Result<(), &'stati
         && pending.layout.y_stride == pending.display_width
         && pending.layout.uv_stride == pending.display_width
     {
-        return Ok(());
+        return Ok(false);
     }
 
     let base = pending.output_payload_vaddr;
@@ -3871,7 +3872,7 @@ fn compact_nv12_output_payload(pending: &AvdPendingDecode) -> Result<(), &'stati
             core::ptr::copy(src as *const u8, dst as *mut u8, display_width);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn plane_copy_end(

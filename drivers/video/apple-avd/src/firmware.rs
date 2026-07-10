@@ -39,6 +39,8 @@ impl AvdFirmwareMessage {
             Self::UnknownIrq(raw & !avd_fw::MSG_UNKNOWN_IRQ)
         } else if raw & avd_fw::MSG_PP_DONE != 0 {
             Self::PostProcessorDone
+        } else if raw & avd_fw::MSG_VP_ERROR != 0 {
+            Self::VideoProcessorError(raw & !avd_fw::MSG_VP_ERROR)
         } else if raw & avd_fw::MSG_VP_DONE != 0 {
             Self::VideoProcessorDone
         } else {
@@ -54,7 +56,7 @@ impl AvdFirmwareMessage {
     pub fn raw(self) -> u32 {
         match self {
             Self::VideoProcessorDone => avd_fw::MSG_VP_DONE,
-            Self::VideoProcessorError(pipe) => pipe,
+            Self::VideoProcessorError(pipe) => avd_fw::MSG_VP_ERROR | pipe,
             Self::PostProcessorDone => avd_fw::MSG_PP_DONE,
             Self::UnknownIrq(irq) => avd_fw::MSG_UNKNOWN_IRQ | irq,
             Self::Raw(value) => value,
