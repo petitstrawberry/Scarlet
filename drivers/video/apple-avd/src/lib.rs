@@ -1046,12 +1046,14 @@ impl AppleAvd {
     /// requested.
     pub fn boot_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
         validate_firmware_image(image)?;
-        println!(
-            "[apple-avd] boot begin firmware_len={} power_on={} reset_source={}",
-            image.len(),
-            self.power.is_on(),
-            self.reset_source()
-        );
+        if AVD_BOOT_DEBUG_LOGGING {
+            println!(
+                "[apple-avd] boot begin firmware_len={} power_on={} reset_source={}",
+                image.len(),
+                self.power.is_on(),
+                self.reset_source()
+            );
+        }
         self.prepare_for_firmware(image)?;
         self.start_firmware()?;
         self.firmware_image = Some(AvdFirmwareImage { size: image.len() });
@@ -3589,7 +3591,11 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
             .map_err(h264_error_to_str)?;
 
         let avd = self.avd()?;
-        avd.lock().ensure_firmware_running()?;
+        {
+            let mut avd_guard = avd.lock();
+            avd_guard.reset_hardware()?;
+            avd_guard.ensure_firmware_running()?;
+        }
         let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
