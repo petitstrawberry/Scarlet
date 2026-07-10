@@ -126,6 +126,36 @@ const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 const VIDEO_DECODE_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 7 / 8;
 const VIDEO_DISPLAY_UTIL_MIN: u32 = SCHED_UTIL_SCALE * 3 / 4;
 
+/// Sized to cover display-queue depth + reorder hold/batch so steady-state
+/// decode never allocates.
+const PAYLOAD_POOL_MAX_BUFFERS: usize =
+    DISPLAY_QUEUE_MAX_FRAMES + STREAM_REORDER_HOLD_SAMPLES + STREAM_DECODE_BATCH_SAMPLES;
+
+/// Recycle pool for decoded-frame payload buffers. Eliminates per-frame heap
+/// churn for the ~253 KB NV12 payloads at 30 fps.
+static PAYLOAD_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+fn acquire_payload_buffer(len: usize) -> Vec<u8> {
+    let mut pool = PAYLOAD_POOL.lock();
+    while let Some(buf) = pool.pop() {
+        if buf.capacity() >= len {
+            drop(pool);
+            let mut buf = buf;
+            buf.resize(len, 0);
+            return buf;
+        }
+    }
+    drop(pool);
+    vec![0; len]
+}
+
+fn release_payload_buffer(buf: Vec<u8>) {
+    let mut pool = PAYLOAD_POOL.lock();
+    if pool.len() < PAYLOAD_POOL_MAX_BUFFERS {
+        pool.push(buf);
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ScarletVideoBufferInfo {
@@ -4683,6 +4713,17 @@ enum ScarletVideoPayload {
     Mapped { ptr: *const u8, len: usize },
 }
 
+impl Drop for ScarletVideoPayload {
+    fn drop(&mut self) {
+        match self {
+            ScarletVideoPayload::Owned(buf) => {
+                release_payload_buffer(core::mem::take(buf));
+            }
+            ScarletVideoPayload::Mapped { .. } => {}
+        }
+    }
+}
+
 impl ScarletVideoFrame {
     fn payload(&self) -> &[u8] {
         match &self.payload {
@@ -4698,7 +4739,10 @@ impl ScarletVideoFrame {
 
     fn into_owned(mut self) -> Self {
         if matches!(&self.payload, ScarletVideoPayload::Mapped { .. }) {
-            self.payload = ScarletVideoPayload::Owned(self.payload().to_vec());
+            let len = self.payload().len();
+            let mut buf = acquire_payload_buffer(len);
+            buf[..len].copy_from_slice(self.payload());
+            self.payload = ScarletVideoPayload::Owned(buf);
         }
         self
     }
@@ -4884,8 +4928,7 @@ impl HardwareVideoDecoder {
             return Err(String::from("hardware decoder returned empty frame"));
         }
 
-        let mut payload = Vec::new();
-        payload.resize(payload_len, 0);
+        let mut payload = acquire_payload_buffer(payload_len);
         read_exact_file(&mut self.device, &mut payload)?;
         Ok(Some(ScarletVideoFrame {
             width,
