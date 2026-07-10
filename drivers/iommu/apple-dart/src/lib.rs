@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use scarlet::sync::Mutex;
 
 use scarlet::{
-    arch::mmio,
+    arch::{self, mmio},
     device::{
         DeviceInfo,
         iommu::{
@@ -24,6 +24,7 @@ use scarlet::{
     early_println,
     environment::PAGE_SIZE,
     mem::page::ContiguousPages,
+    time,
 };
 
 const DART_PARAMS1: usize = 0x00;
@@ -33,6 +34,7 @@ const DART_TTBR: usize = 0x200;
 const DART_ENABLE_STREAMS: usize = 0xfc;
 const DART_DISABLE_STREAMS: usize = 0xfd;
 const DART_STREAM_COMMAND: usize = 0x20;
+const DART_STREAM_SELECT: usize = 0x34;
 const DART_ERROR_STATUS: usize = 0x40;
 
 const DART_TCR_TRANSLATE_ENABLE: u32 = 1 << 7;
@@ -45,6 +47,7 @@ const DART_PARAMS1_SHIFT: u32 = 24;
 const DART_PARAMS1_MASK: u32 = 0xf << DART_PARAMS1_SHIFT;
 
 const DART_STREAM_COMMAND_BUSY: u32 = 1 << 2;
+const DART_STREAM_COMMAND_BUSY_TIMEOUT_US: usize = 100;
 
 const DART_PAGE_SHIFT: usize = 14;
 const DART_IOVA_BITS: usize = 36;
@@ -63,7 +66,7 @@ const DART_PTE_NO_READ: u64 = 1 << 8;
 const DART_PADDR_MASK: u64 =
     ((1u64 << DART_PADDR_BITS) - 1) & !((1u64 << DART_PADDR_FIELD_SHIFT) - 1);
 
-const DART_STREAM_COMMAND_INV_ALL: u32 = 0;
+const DART_STREAM_COMMAND_INV_ALL: u32 = 1 << 20;
 
 /// Apple DART IOMMU hardware instance.
 #[derive(Clone)]
@@ -123,15 +126,21 @@ impl DartInstance {
         unsafe { mmio::write32(self.base_addr + offset, val) }
     }
 
-    fn invalidate_all_tlbs(&self) {
+    fn invalidate_all_tlbs(&self) -> Result<(), IommuError> {
+        self.write32(DART_STREAM_SELECT, u32::MAX);
         self.write32(DART_STREAM_COMMAND, DART_STREAM_COMMAND_INV_ALL);
-        while self.read32(DART_STREAM_COMMAND) & DART_STREAM_COMMAND_BUSY != 0 {
-            core::hint::spin_loop();
+        arch::io_wmb();
+        for _ in 0..DART_STREAM_COMMAND_BUSY_TIMEOUT_US {
+            if self.read32(DART_STREAM_COMMAND) & DART_STREAM_COMMAND_BUSY == 0 {
+                return Ok(());
+            }
+            time::udelay(1);
         }
+        Err(IommuError::Busy)
     }
 
-    fn enable_streams(&self, sid: usize) {
-        self.write32(DART_ENABLE_STREAMS, sid as u32);
+    fn enable_streams(&self) {
+        self.write32(DART_ENABLE_STREAMS, u32::MAX);
     }
 
     fn set_tcr(&self, sid: usize, val: u32) {
@@ -151,15 +160,10 @@ impl DartInstance {
     /// * `ttbr_paddr` - Physical address of the root page table.
     /// * `num_levels` - Number of page table levels used by the domain.
     pub fn enable_translation(&self, sid: usize, ttbr_paddr: usize, num_levels: u32) {
+        self.enable_streams();
         self.set_ttbr(sid, ttbr_paddr);
-
-        let level_bits = match num_levels {
-            3 => 0b10,
-            4 => 0b11,
-            _ => 0b10,
-        };
-        let tcr = DART_TCR_TRANSLATE_ENABLE | level_bits;
-        self.set_tcr(sid, tcr);
+        let _ = num_levels;
+        self.set_tcr(sid, DART_TCR_TRANSLATE_ENABLE);
     }
 
     /// Disable translated DMA for a stream ID.
@@ -177,6 +181,7 @@ impl DartInstance {
     ///
     /// * `sid` - Stream ID to configure for bypass.
     pub fn enable_bypass(&self, sid: usize) {
+        self.enable_streams();
         if !self.params.supports_bypass {
             self.enable_translation(sid, 0, 3);
             return;
@@ -421,8 +426,7 @@ impl IommuDomain for DartDomain {
     }
 
     fn flush(&self) -> Result<(), IommuError> {
-        self.dart.invalidate_all_tlbs();
-        Ok(())
+        self.dart.invalidate_all_tlbs()
     }
 }
 
@@ -727,11 +731,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     for sid in 0..dart.params.num_streams as usize {
         dart.disable_translation(sid);
     }
-    for sid in 0..dart.params.num_streams as usize {
-        dart.enable_streams(sid);
-    }
+    dart.enable_streams();
 
-    dart.invalidate_all_tlbs();
+    dart.invalidate_all_tlbs()
+        .map_err(|_| "apple-dart: timed out invalidating TLBs during probe")?;
     dart.write32(DART_ERROR_STATUS, 0xffff_ffff);
 
     let phandle = device

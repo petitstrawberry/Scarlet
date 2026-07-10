@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/std-bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-userbin-std", "fmt-drivers", "fmt-modules"]
+dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check"]
 
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
@@ -51,6 +51,12 @@ cwd = "user/bin"
 command = "cargo"
 args = ["make", "fmt-check"]
 
+[tasks.fmt-video-player-check]
+description = "Check video_player formatting"
+cwd = "user/video_player"
+command = "cargo"
+args = ["make", "fmt-check"]
+
 [tasks.fmt-userbin-std-check]
 description = "Check Rust std user program formatting"
 cwd = "user/std-bin"
@@ -77,11 +83,11 @@ done
 
 [tasks.clippy-riscv64]
 description = "Run clippy for all components (RISC-V)"
-dependencies = ["clippy-kernel", "clippy-project-riscv64", "clippy-userlib", "clippy-userbin"]
+dependencies = ["clippy-kernel", "clippy-project-riscv64", "clippy-userlib", "clippy-userbin", "clippy-video-player"]
 
 [tasks.clippy-aarch64]
 description = "Run clippy for all components (AArch64)"
-dependencies = ["clippy-kernel", "clippy-project-aarch64", "clippy-userlib", "clippy-userbin"]
+dependencies = ["clippy-kernel", "clippy-project-aarch64", "clippy-userlib", "clippy-userbin", "clippy-video-player"]
 
 [tasks.clippy-kernel]
 description = "Run clippy for kernel"
@@ -113,6 +119,12 @@ args = ["make", "clippy"]
 [tasks.clippy-userbin]
 description = "Run clippy for user programs by calling sub Makefile.toml"
 cwd = "user/bin"
+command = "cargo"
+args = ["make", "clippy"]
+
+[tasks.clippy-video-player]
+description = "Run clippy for video_player"
+cwd = "user/video_player"
 command = "cargo"
 args = ["make", "clippy"]
 [tasks.fmt-kernel]
@@ -148,6 +160,12 @@ args = ["make", "fmt"]
 [tasks.fmt-userbin]
 description = "Format user program code"
 cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-video-player]
+description = "Format video_player code"
+cwd = "user/video_player"
 command = "cargo"
 args = ["make", "fmt"]
 
@@ -339,31 +357,35 @@ dependencies = ["build-userlib-debug-aarch64"]
 
 [tasks.build-userbin-debug-riscv64]
 description = "Build user programs for RISC-V in debug mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build"]
 dependencies = ["build-userlib-debug-riscv64"]
+script = [
+    "cd user/bin && cargo make build",
+    "cd user/video_player && cargo make build"
+]
 
 [tasks.build-userbin-debug-aarch64]
 description = "Build user programs for AArch64 in debug mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build-aarch64"]
 dependencies = ["build-userlib-debug-aarch64"]
+script = [
+    "cd user/bin && cargo make build-aarch64",
+    "cd user/video_player && cargo make build-aarch64"
+]
 
 [tasks.build-userbin-release-riscv64]
 description = "Build user programs for RISC-V in release mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build-release"]
 dependencies = ["build-userlib-release-riscv64"]
+script = [
+    "cd user/bin && cargo make build-release",
+    "cd user/video_player && cargo make build-release"
+]
 
 [tasks.build-userbin-release-aarch64]
 description = "Build user programs for AArch64 in release mode"
-cwd = "user/bin"
-command = "cargo"
-args = ["make", "build-release-aarch64"]
 dependencies = ["build-userlib-release-aarch64"]
+script = [
+    "cd user/bin && cargo make build-release-aarch64",
+    "cd user/video_player && cargo make build-release-aarch64"
+]
 
 [tasks.build-userbin-std-debug-riscv64]
 description = "Build Rust std user programs for RISC-V in debug mode"
@@ -399,7 +421,7 @@ dependencies = ["build-userbin-debug-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-project-riscv64", "clean-project-aarch64", "clean-project-aarch64-microvm", "clean-userlib", "clean-userbin", "clean-userbin-std"]
+dependencies = ["clean-kernel", "clean-project-riscv64", "clean-project-aarch64", "clean-project-aarch64-microvm", "clean-userlib", "clean-userbin", "clean-video-player", "clean-userbin-std"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -434,6 +456,12 @@ args = ["make", "clean"]
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
 cwd = "user/bin"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-video-player]
+description = "Clean video_player build artifacts"
+cwd = "user/video_player"
 command = "cargo"
 args = ["clean"]
 

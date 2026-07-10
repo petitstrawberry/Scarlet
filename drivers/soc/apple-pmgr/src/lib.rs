@@ -13,7 +13,7 @@ use scarlet::sync::Mutex;
 use scarlet::device::power::PowerManager;
 use scarlet::device::reset::ResetController;
 use scarlet::{
-    arch::mmio,
+    arch::{self, mmio},
     device::{
         DeviceInfo,
         manager::{DeviceManager, DriverPriority},
@@ -21,7 +21,7 @@ use scarlet::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
     },
-    early_println,
+    early_println, time,
 };
 
 // =============================================================================
@@ -36,6 +36,8 @@ const PMGR_PS_ACTUAL: u32 = 0xf << 4;
 const PMGR_PS_ACTUAL_SHIFT: u32 = 4;
 /// Reset assert bit
 const PMGR_RESET: u32 = 1 << 31;
+/// Device-disable bit used to quiesce a domain before reset
+const PMGR_DEVICE_DISABLE: u32 = 1 << 10;
 /// Auto power management enable
 const PMGR_AUTO_ENABLE: u32 = 1 << 28;
 /// Device was power-gated flag
@@ -106,6 +108,8 @@ struct PmgrInstance {
     size: usize,
     /// Power domains managed by this PMGR block
     domains: BTreeMap<u32, ApplePmDomain>,
+    /// Serializes PMGR register read-modify-write sequences.
+    register_lock: Mutex<()>,
 }
 
 impl PmgrInstance {
@@ -116,6 +120,7 @@ impl PmgrInstance {
             base_addr,
             size,
             domains: BTreeMap::new(),
+            register_lock: Mutex::new(()),
         }
     }
 
@@ -132,6 +137,7 @@ impl PmgrInstance {
     }
 
     fn enable_domain_local(&self, domain: &ApplePmDomain) -> Result<(), &'static str> {
+        let _register_guard = self.register_lock.lock();
         if domain.always_on {
             return Ok(());
         }
@@ -170,6 +176,7 @@ impl PmgrInstance {
     ///
     /// Sets PS_TARGET to PWRGATE (0x0), then polls PS_ACTUAL until it reaches PWRGATE.
     fn disable_domain_local(&self, domain: &ApplePmDomain) -> Result<(), &'static str> {
+        let _register_guard = self.register_lock.lock();
         if domain.always_on {
             return Ok(());
         }
@@ -205,14 +212,27 @@ impl PmgrInstance {
 
     /// Assert reset on a power domain.
     fn reset_assert_domain_local(&self, domain: &ApplePmDomain) {
+        let _register_guard = self.register_lock.lock();
+
         let reg = self.read_reg(domain);
-        self.write_reg(domain, reg | PMGR_RESET);
+        self.write_reg(
+            domain,
+            (reg & !(PMGR_FLAGS | PMGR_DEVICE_DISABLE)) | PMGR_DEVICE_DISABLE,
+        );
+        let reg = self.read_reg(domain);
+        self.write_reg(domain, (reg & !(PMGR_FLAGS | PMGR_RESET)) | PMGR_RESET);
+        arch::io_wmb();
     }
 
     /// Deassert reset on a power domain.
     fn reset_deassert_domain_local(&self, domain: &ApplePmDomain) {
+        let _register_guard = self.register_lock.lock();
+
         let reg = self.read_reg(domain);
-        self.write_reg(domain, reg & !PMGR_RESET);
+        self.write_reg(domain, reg & !(PMGR_FLAGS | PMGR_RESET));
+        let reg = self.read_reg(domain);
+        self.write_reg(domain, reg & !(PMGR_FLAGS | PMGR_DEVICE_DISABLE));
+        arch::io_wmb();
     }
 
     /// Check if a power domain is currently powered on.
@@ -245,16 +265,18 @@ impl PmgrInstance {
             .unwrap_or(Err("pmgr: instance not found"))
     }
 
-    fn reset_assert_domain(domain: &ApplePmDomain) {
-        let _ = Self::with_instance(domain, |instance| {
+    fn reset_assert_domain(domain: &ApplePmDomain) -> Result<(), &'static str> {
+        Self::with_instance(domain, |instance| {
             instance.reset_assert_domain_local(domain)
-        });
+        })
+        .ok_or("pmgr: instance not found")
     }
 
-    fn reset_deassert_domain(domain: &ApplePmDomain) {
-        let _ = Self::with_instance(domain, |instance| {
+    fn reset_deassert_domain(domain: &ApplePmDomain) -> Result<(), &'static str> {
+        Self::with_instance(domain, |instance| {
             instance.reset_deassert_domain_local(domain)
-        });
+        })
+        .ok_or("pmgr: instance not found")
     }
 
     fn is_domain_on(domain: &ApplePmDomain) -> bool {
@@ -297,16 +319,23 @@ impl ResetController for ApplePmDomain {
         if spec.len() != self.reset_cells() {
             return Err("apple-pmgr: invalid reset specifier");
         }
-        PmgrInstance::reset_assert_domain(self);
-        Ok(())
+        PmgrInstance::reset_assert_domain(self)
     }
 
     fn deassert_reset(&self, spec: &[u32]) -> Result<(), &'static str> {
         if spec.len() != self.reset_cells() {
             return Err("apple-pmgr: invalid reset specifier");
         }
-        PmgrInstance::reset_deassert_domain(self);
-        Ok(())
+        PmgrInstance::reset_deassert_domain(self)
+    }
+
+    fn reset(&self, spec: &[u32]) -> Result<(), &'static str> {
+        if spec.len() != self.reset_cells() {
+            return Err("apple-pmgr: invalid reset specifier");
+        }
+        PmgrInstance::reset_assert_domain(self)?;
+        time::udelay(1);
+        PmgrInstance::reset_deassert_domain(self)
     }
 }
 

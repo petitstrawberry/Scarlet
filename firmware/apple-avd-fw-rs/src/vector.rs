@@ -2,9 +2,7 @@
 
 use core::arch::global_asm;
 
-use crate::abi::MSG_PANIC;
 use crate::irq;
-use crate::mailbox::send_message;
 
 #[cfg(feature = "v2-t0")]
 global_asm!(".equ __avd_stack_top, 0x1000c000");
@@ -179,7 +177,7 @@ global_asm!(
 macro_rules! default_irq_handler {
     ($name:ident, $irq:expr) => {
         #[unsafe(no_mangle)]
-        pub extern "C" fn $name() {
+        pub extern "C" fn $name() -> ! {
             irq::unknown_irq($irq);
         }
     };
@@ -234,31 +232,25 @@ macro_rules! h264_status_irq_handler {
 /// Non-maskable interrupt handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn nmi_handler() -> ! {
-    send_message(MSG_PANIC | 0x10);
-    loop {
-        core::hint::spin_loop();
-    }
+    irq::unknown_exception()
 }
 
 /// HardFault handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn hardfault_handler() -> ! {
-    send_message(MSG_PANIC | 0x20);
-    loop {
-        core::hint::spin_loop();
-    }
+    irq::unknown_exception()
 }
 
 /// Default exception handler.
 #[unsafe(no_mangle)]
-pub extern "C" fn default_exception_handler() {
-    send_message(MSG_PANIC | 0x30);
+pub extern "C" fn default_exception_handler() -> ! {
+    irq::unknown_exception()
 }
 
 /// SysTick handler.
 #[unsafe(no_mangle)]
 pub extern "C" fn systick_handler() {
-    irq::unknown_irq(15);
+    irq::disable_systick();
 }
 
 pipe_irq_handlers!(irq18_handler, irq19_handler, irq20_handler, 0);
@@ -268,7 +260,10 @@ pipe_irq_handlers!(irq33_handler, irq34_handler, irq35_handler, 3);
 submit_unknown_irq_handler!(irq38_handler);
 post_process_irq_handler!(irq40_handler);
 
+#[cfg(feature = "v2-t0")]
 h264_status_irq_handler!(irq1_handler);
+#[cfg(not(feature = "v2-t0"))]
+default_irq_handler!(irq1_handler, 1);
 
 submit_unknown_irq_handler!(irq62_handler);
 post_process_irq_handler!(irq64_handler);

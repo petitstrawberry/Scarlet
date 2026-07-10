@@ -23,24 +23,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "adler"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f26201604c87b1e01bd3d98f8d5d9a8fcbb815e8cedb41ffccbeb4bf593a35fe"
-
-[[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -59,10 +41,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
-name = "cfg-if"
-version = "1.0.4"
+name = "bytemuck"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "core_maths"
@@ -86,30 +68,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
-name = "framebuffer"
-version = "0.16.0"
-dependencies = [
- "scarlet-std",
-]
-
-[[package]]
-name = "gpu"
-version = "0.16.0"
-dependencies = [
- "scarlet-std",
-]
-
-[[package]]
-name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
- "allocator-api2",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -118,6 +76,15 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
+]
+
+[[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -142,12 +109,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "miniz_oxide"
-version = "0.7.4"
+name = "num-complex"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8a240ddb74feaf34a79a7add65a741f3167852fba007066dcac1ca548d89c08"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
- "adler",
+ "num-traits",
 ]
 
 [[package]]
@@ -158,12 +125,6 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
-
-[[package]]
-name = "once_cell"
-version = "1.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "owned_ttf_parser"
@@ -193,10 +154,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryu"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+name = "rust_h264"
+version = "0.4.0"
+source = "git+https://github.com/petitstrawberry/rust_h264.git?rev=a559fe2545fd88def12146dcc06286475b53ead3#a559fe2545fd88def12146dcc06286475b53ead3"
 
 [[package]]
 name = "sas-client"
@@ -214,30 +174,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "sbus"
-version = "0.1.0"
-dependencies = [
- "scarlet-std",
-]
-
-[[package]]
-name = "sbus-client"
-version = "0.1.0"
-dependencies = [
- "sbus",
- "scarlet-std",
-]
-
-[[package]]
 name = "scarlet-abi"
 version = "0.16.0"
 
 [[package]]
-name = "scarlet-desktop-config"
-version = "0.1.0"
-dependencies = [
- "scarlet-std",
-]
+name = "scarlet-codecs"
+version = "0.16.0"
 
 [[package]]
 name = "scarlet-os"
@@ -254,7 +196,7 @@ version = "0.16.0"
 dependencies = [
  "lock_api",
  "scarlet-sys",
- "spin",
+ "spin 0.10.0",
  "talc",
 ]
 
@@ -262,12 +204,12 @@ dependencies = [
 name = "scarlet-std"
 version = "0.16.0"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown",
  "scarlet-abi",
  "scarlet-os",
  "scarlet-rt",
  "scarlet-sys",
- "spin",
+ "spin 0.10.0",
 ]
 
 [[package]]
@@ -328,53 +270,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "scpm"
-version = "0.1.0"
-dependencies = [
- "miniz_oxide",
- "scarlet-std",
- "tar-no-std",
-]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
-name = "serde"
-version = "1.0.228"
+name = "spin"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
-dependencies = [
- "serde_core",
- "serde_derive",
-]
-
-[[package]]
-name = "serde-json-core"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b81787e655bd59cecadc91f7b6b8651330b2be6c33246039a65e5cd6f4e0828"
-dependencies = [
- "ryu",
- "serde",
-]
-
-[[package]]
-name = "serde_core"
-version = "1.0.228"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
-dependencies = [
- "serde_derive",
-]
-
-[[package]]
-name = "serde_derive"
-version = "1.0.228"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "spin"
@@ -401,6 +306,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "symphonia-codec-aac"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-common"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "log",
+ "symphonia-core",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+ "symphonia-std",
+]
+
+[[package]]
+name = "symphonia-std"
+version = "0.6.0"
+source = "git+https://github.com/petitstrawberry/Symphonia.git?rev=71f92f0bc0fdd9d4f2a77129a543ee6c99611009#71f92f0bc0fdd9d4f2a77129a543ee6c99611009"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -418,17 +367,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
 dependencies = [
  "lock_api",
-]
-
-[[package]]
-name = "tar-no-std"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "715f9a4586706a61c571cb5ee1c3ac2bbb2cf63e15bce772307b95befef5f5ee"
-dependencies = [
- "bitflags",
- "log",
- "num-traits",
 ]
 
 [[package]]
@@ -453,61 +391,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
-name = "userprogram"
+name = "video_player"
 version = "0.16.0"
 dependencies = [
- "framebuffer",
- "gpu",
+ "rust_h264",
  "sas-client",
- "sas-protocol",
- "sbus",
- "sbus-client",
- "scarlet-desktop-config",
- "scarlet-os",
+ "scarlet-codecs",
  "scarlet-std",
  "scarlet-ui",
- "scarlet-ui-macros",
- "scpm",
- "serde",
- "serde-json-core",
- "sws-client",
- "sws-protocol",
- "vm-fdt",
-]
-
-[[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vm-fdt"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
-dependencies = [
- "hashbrown 0.14.5",
-]
-
-[[package]]
-name = "zerocopy"
-version = "0.8.52"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
-dependencies = [
- "zerocopy-derive",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.52"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "symphonia-codec-aac",
+ "symphonia-core",
 ]
 
 [[package]]

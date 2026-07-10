@@ -52,6 +52,8 @@ pub const SCARLET_VIDEO_DESTROY_SESSION: u32 = 0x5606;
 pub const SCARLET_VIDEO_GET_CAPS: u32 = 0x5607;
 /// Submit a stateless H.264 decode request for a mapped video session.
 pub const SCARLET_VIDEO_SUBMIT_H264_STATELESS: u32 = 0x5608;
+/// Submit a stateless VP9 decode request for a mapped video session.
+pub const SCARLET_VIDEO_SUBMIT_VP9_STATELESS: u32 = 0x5609;
 
 /// Version of `ScarletVideoCapabilities`.
 pub const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
@@ -59,8 +61,14 @@ pub const SCARLET_VIDEO_CAPS_VERSION: u32 = 1;
 pub const SCARLET_VIDEO_CAP_STATEFUL_H264: u32 = 1 << 0;
 /// Backend accepts stateful AV1 access units through legacy submit ioctls.
 pub const SCARLET_VIDEO_CAP_STATEFUL_AV1: u32 = 1 << 1;
+/// Backend accepts stateful HEVC access units through legacy submit ioctls.
+pub const SCARLET_VIDEO_CAP_STATEFUL_HEVC: u32 = 1 << 2;
+/// Backend accepts stateful VP9 access units through legacy submit ioctls.
+pub const SCARLET_VIDEO_CAP_STATEFUL_VP9: u32 = 1 << 3;
 /// Backend accepts stateless H.264 requests.
 pub const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
+/// Backend accepts stateless VP9 requests.
+pub const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
 /// Backend supports the common mmap input/output buffer.
 pub const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
 /// Backend supports multiple mapped stream sessions.
@@ -109,8 +117,89 @@ pub const SCARLET_VIDEO_H264_DPB_FLAG_VALID: u32 = 1 << 0;
 /// H.264 DPB entry is a long-term reference picture.
 pub const SCARLET_VIDEO_H264_DPB_FLAG_LONG_TERM: u32 = 1 << 1;
 
+/// VP9 loop filter deltas are enabled.
+pub const SCARLET_VIDEO_VP9_LOOP_FILTER_FLAG_DELTA_ENABLED: u8 = 1 << 0;
+/// VP9 loop filter deltas are updated by this frame.
+pub const SCARLET_VIDEO_VP9_LOOP_FILTER_FLAG_DELTA_UPDATE: u8 = 1 << 1;
+/// VP9 segmentation is enabled.
+pub const SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_ENABLED: u8 = 1 << 0;
+/// VP9 segmentation map is updated by this frame.
+pub const SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_UPDATE_MAP: u8 = 1 << 1;
+/// VP9 segmentation map uses temporal prediction.
+pub const SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_TEMPORAL_UPDATE: u8 = 1 << 2;
+/// VP9 segmentation feature data is updated by this frame.
+pub const SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_UPDATE_DATA: u8 = 1 << 3;
+/// VP9 segmentation feature data uses absolute values.
+pub const SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_ABS_OR_DELTA_UPDATE: u8 = 1 << 4;
+/// VP9 frame is a key frame.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_KEY_FRAME: u32 = 1 << 0;
+/// VP9 frame should be shown.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_SHOW_FRAME: u32 = 1 << 1;
+/// VP9 frame uses error resilient mode.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_ERROR_RESILIENT: u32 = 1 << 2;
+/// VP9 frame is intra-only.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_INTRA_ONLY: u32 = 1 << 3;
+/// VP9 frame allows high precision motion vectors.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_ALLOW_HIGH_PREC_MV: u32 = 1 << 4;
+/// VP9 frame refreshes the selected frame context.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_REFRESH_FRAME_CTX: u32 = 1 << 5;
+/// VP9 frame uses parallel decode mode.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_PARALLEL_DEC_MODE: u32 = 1 << 6;
+/// VP9 frame uses horizontal chroma subsampling.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_X_SUBSAMPLING: u32 = 1 << 7;
+/// VP9 frame uses vertical chroma subsampling.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_Y_SUBSAMPLING: u32 = 1 << 8;
+/// VP9 stream uses full-swing color range.
+pub const SCARLET_VIDEO_VP9_FRAME_FLAG_COLOR_RANGE_FULL_SWING: u32 = 1 << 9;
+/// VP9 last reference sign bias bit.
+pub const SCARLET_VIDEO_VP9_SIGN_BIAS_LAST: u8 = 1 << 0;
+/// VP9 golden reference sign bias bit.
+pub const SCARLET_VIDEO_VP9_SIGN_BIAS_GOLDEN: u8 = 1 << 1;
+/// VP9 alternate reference sign bias bit.
+pub const SCARLET_VIDEO_VP9_SIGN_BIAS_ALT: u8 = 1 << 2;
+/// No VP9 frame context reset.
+pub const SCARLET_VIDEO_VP9_RESET_FRAME_CTX_NONE: u8 = 0;
+/// Reset the selected VP9 frame context.
+pub const SCARLET_VIDEO_VP9_RESET_FRAME_CTX_SPEC: u8 = 1;
+/// Reset all VP9 frame contexts.
+pub const SCARLET_VIDEO_VP9_RESET_FRAME_CTX_ALL: u8 = 2;
+/// VP9 eighttap interpolation filter.
+pub const SCARLET_VIDEO_VP9_INTERP_FILTER_EIGHTTAP: u8 = 0;
+/// VP9 smooth eighttap interpolation filter.
+pub const SCARLET_VIDEO_VP9_INTERP_FILTER_EIGHTTAP_SMOOTH: u8 = 1;
+/// VP9 sharp eighttap interpolation filter.
+pub const SCARLET_VIDEO_VP9_INTERP_FILTER_EIGHTTAP_SHARP: u8 = 2;
+/// VP9 bilinear interpolation filter.
+pub const SCARLET_VIDEO_VP9_INTERP_FILTER_BILINEAR: u8 = 3;
+/// VP9 switchable interpolation filter.
+pub const SCARLET_VIDEO_VP9_INTERP_FILTER_SWITCHABLE: u8 = 4;
+/// VP9 single-reference prediction mode.
+pub const SCARLET_VIDEO_VP9_REFERENCE_MODE_SINGLE_REFERENCE: u8 = 0;
+/// VP9 compound-reference prediction mode.
+pub const SCARLET_VIDEO_VP9_REFERENCE_MODE_COMPOUND_REFERENCE: u8 = 1;
+/// VP9 selectable reference prediction mode.
+pub const SCARLET_VIDEO_VP9_REFERENCE_MODE_SELECT: u8 = 2;
+/// VP9 transform mode only 4x4.
+pub const SCARLET_VIDEO_VP9_TX_MODE_ONLY_4X4: u8 = 0;
+/// VP9 transform mode allows 8x8.
+pub const SCARLET_VIDEO_VP9_TX_MODE_ALLOW_8X8: u8 = 1;
+/// VP9 transform mode allows 16x16.
+pub const SCARLET_VIDEO_VP9_TX_MODE_ALLOW_16X16: u8 = 2;
+/// VP9 transform mode allows 32x32.
+pub const SCARLET_VIDEO_VP9_TX_MODE_ALLOW_32X32: u8 = 3;
+/// VP9 transform mode is selected per block.
+pub const SCARLET_VIDEO_VP9_TX_MODE_SELECT: u8 = 4;
+/// VP9 probability table bytes in Scarlet's current canonical packed layout.
+pub const SCARLET_VIDEO_VP9_PROBABILITY_BYTES: usize = 0x774;
+/// Maximum VP9 tiles described in one stateless request.
+pub const SCARLET_VIDEO_VP9_MAX_TILES: usize = 256;
+
 /// Scarlet coded format value for H.264.
 pub const SCARLET_VIDEO_FORMAT_H264: u32 = 4098;
+/// Scarlet coded format value for HEVC/H.265.
+pub const SCARLET_VIDEO_FORMAT_HEVC: u32 = 4099;
+/// Scarlet coded format value for VP9.
+pub const SCARLET_VIDEO_FORMAT_VP9: u32 = 4102;
 /// Scarlet coded format value for AV1.
 pub const SCARLET_VIDEO_FORMAT_AV1: u32 = 4103;
 
@@ -131,6 +220,8 @@ pub struct VideoBackendCapabilities {
     pub supports_h264: bool,
     /// Whether stateful AV1 access units are accepted.
     pub supports_av1: bool,
+    /// Whether stateful HEVC access units are accepted.
+    pub supports_hevc: bool,
     /// Whether stateless H.264 requests are accepted.
     pub supports_stateless_h264: bool,
 }
@@ -148,6 +239,7 @@ impl VideoBackendCapabilities {
     pub fn supports_format(&self, coded_format: u32) -> bool {
         match coded_format {
             SCARLET_VIDEO_FORMAT_H264 => self.supports_h264,
+            SCARLET_VIDEO_FORMAT_HEVC => self.supports_hevc,
             SCARLET_VIDEO_FORMAT_AV1 => self.supports_av1,
             _ => false,
         }
@@ -165,6 +257,9 @@ impl VideoBackendCapabilities {
         }
         if self.supports_av1 {
             flags |= SCARLET_VIDEO_CAP_STATEFUL_AV1;
+        }
+        if self.supports_hevc {
+            flags |= SCARLET_VIDEO_CAP_STATEFUL_HEVC;
         }
         if self.supports_stateless_h264 {
             flags |= SCARLET_VIDEO_CAP_STATELESS_H264;
@@ -213,6 +308,15 @@ pub struct VideoBackendH264StatelessRequest {
     pub h264: ScarletVideoH264StatelessParams,
 }
 
+/// Backend request for stateless VP9 decode.
+#[derive(Clone, Copy, Debug)]
+pub struct VideoBackendVp9StatelessRequest {
+    /// Common mapped decode buffers.
+    pub decode: VideoBackendDecodeRequest,
+    /// Copied stateless VP9 parameters supplied by userspace.
+    pub vp9: ScarletVideoVp9StatelessParams,
+}
+
 /// Decoded frame returned by a backend.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VideoBackendDecodedFrame {
@@ -257,6 +361,15 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// Capabilities used by `/dev/video*` frontends.
     fn capabilities(&self) -> VideoBackendCapabilities;
+
+    /// Return whether the backend accepts stateless VP9 requests.
+    ///
+    /// # Returns
+    ///
+    /// `true` when `SCARLET_VIDEO_SUBMIT_VP9_STATELESS` is supported.
+    fn supports_stateless_vp9(&self) -> bool {
+        false
+    }
 
     /// Install or remove the frontend completion notifier.
     ///
@@ -324,6 +437,23 @@ pub trait VideoDecodeBackend: Send + Sync {
         Err("scarlet-video: backend does not support stateless H.264")
     }
 
+    /// Submit one stateless VP9 decode request.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Mapped buffers and VP9 syntax parameters for one decode
+    ///   request.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the backend accepted the request.
+    fn submit_vp9_stateless(
+        &self,
+        _request: &VideoBackendVp9StatelessRequest,
+    ) -> Result<(), &'static str> {
+        Err("scarlet-video: backend does not support stateless VP9")
+    }
+
     /// Dequeue one decoded frame if available.
     ///
     /// # Arguments
@@ -352,6 +482,7 @@ const VIDEO_MAX_STREAM_ERRORS: usize = 16;
 enum VideoQueuedJob {
     Decode(VideoBackendDecodeRequest),
     H264Stateless(VideoBackendH264StatelessRequest),
+    Vp9Stateless(VideoBackendVp9StatelessRequest),
 }
 
 impl VideoQueuedJob {
@@ -359,6 +490,7 @@ impl VideoQueuedJob {
         match self {
             Self::Decode(request) => request.stream_id,
             Self::H264Stateless(request) => request.decode.stream_id,
+            Self::Vp9Stateless(request) => request.decode.stream_id,
         }
     }
 }
@@ -550,9 +682,13 @@ impl ScarletVideoDevice {
 
     fn capabilities_info(&self) -> ScarletVideoCapabilities {
         let caps = self.backend.capabilities();
+        let mut flags = caps.user_flags();
+        if self.backend.supports_stateless_vp9() {
+            flags |= SCARLET_VIDEO_CAP_STATELESS_VP9;
+        }
         ScarletVideoCapabilities {
             version: SCARLET_VIDEO_CAPS_VERSION,
-            flags: caps.user_flags(),
+            flags,
             max_sessions: caps.max_sessions,
             output_pixel_format: caps.output_pixel_format,
             mapped_input_len: caps.mapped_input_len,
@@ -563,6 +699,12 @@ impl ScarletVideoDevice {
 
     fn log_backend_state(&self, event: &str, stream_id: u32, error: Option<&'static str>) {
         let caps = self.backend.capabilities();
+        let flags = caps.user_flags()
+            | if self.backend.supports_stateless_vp9() {
+                SCARLET_VIDEO_CAP_STATELESS_VP9
+            } else {
+                0
+            };
         let backend_status = self.backend.debug_status().unwrap_or_default();
         if let Some(error) = error {
             crate::println!(
@@ -571,7 +713,7 @@ impl ScarletVideoDevice {
                 error,
                 stream_id,
                 self.backend.name(),
-                caps.user_flags(),
+                flags,
                 caps.max_sessions,
                 caps.max_inflight_decodes,
                 caps.mapped_input_len,
@@ -584,7 +726,7 @@ impl ScarletVideoDevice {
                 event,
                 stream_id,
                 self.backend.name(),
-                caps.user_flags(),
+                flags,
                 caps.max_sessions,
                 caps.max_inflight_decodes,
                 caps.mapped_input_len,
@@ -686,6 +828,9 @@ impl ScarletVideoDevice {
                     VideoQueuedJob::Decode(request) => self.backend.submit_decode(&request),
                     VideoQueuedJob::H264Stateless(request) => {
                         self.backend.submit_h264_stateless(&request)
+                    }
+                    VideoQueuedJob::Vp9Stateless(request) => {
+                        self.backend.submit_vp9_stateless(&request)
                     }
                 };
                 match result {
@@ -858,6 +1003,21 @@ impl ScarletVideoDevice {
         })
     }
 
+    fn vp9_stateless_params(
+        &self,
+        ptrs: ScarletVideoVp9ParamPtrs,
+    ) -> Result<ScarletVideoVp9StatelessParams, &'static str> {
+        if ptrs.frame == 0 || ptrs.probabilities == 0 || ptrs.tiles == 0 {
+            return Err("scarlet-video: stateless VP9 parameter pointer is null");
+        }
+
+        Ok(ScarletVideoVp9StatelessParams {
+            frame: read_user_value(ptrs.frame as usize)?,
+            probabilities: read_user_value(ptrs.probabilities as usize)?,
+            tiles: read_user_value(ptrs.tiles as usize)?,
+        })
+    }
+
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
         let info = self.buffer_info()?;
         write_user_value(arg, &info)?;
@@ -872,8 +1032,13 @@ impl ScarletVideoDevice {
 
     fn handle_create_session(&self, arg: usize) -> Result<i32, &'static str> {
         let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
+        let coded_format = if info.padding == 0 {
+            SCARLET_VIDEO_FORMAT_H264
+        } else {
+            info.padding
+        };
         let stream_id = if info.stream_id == 0 {
-            self.backend.create_session(SCARLET_VIDEO_FORMAT_H264)?
+            self.backend.create_session(coded_format)?
         } else {
             info.stream_id
         };
@@ -966,6 +1131,43 @@ impl ScarletVideoDevice {
         }
     }
 
+    fn handle_submit_vp9_stateless(&self, arg: usize) -> Result<i32, &'static str> {
+        let submit: ScarletVideoVp9StatelessSubmit = read_user_value(arg)?;
+        let result = (|| {
+            if submit.flags != 0 {
+                return Err("scarlet-video: stateless VP9 submit flags must be zero");
+            }
+            if !self.backend.supports_stateless_vp9() {
+                return Err("scarlet-video: backend does not support stateless VP9");
+            }
+            let stream_id = if submit.stream_id == 0 {
+                DEFAULT_STREAM_ID
+            } else {
+                submit.stream_id
+            };
+            let decode = self.mapped_decode_request(
+                stream_id,
+                SCARLET_VIDEO_FORMAT_VP9,
+                submit.input_len as usize,
+                submit.timestamp,
+            )?;
+            let vp9 = self.vp9_stateless_params(submit.params)?;
+            let request = VideoBackendVp9StatelessRequest { decode, vp9 };
+            self.enqueue_decode_job(VideoQueuedJob::Vp9Stateless(request))
+        })();
+
+        match result {
+            Ok(()) => {
+                *self.last_error.lock() = None;
+                Ok(0)
+            }
+            Err(e) => {
+                *self.last_error.lock() = Some(e);
+                Err(e)
+            }
+        }
+    }
+
     fn handle_dequeue(&self, arg: usize) -> Result<i32, &'static str> {
         let decoded = match self.dequeue_scheduled_frame(DEFAULT_STREAM_ID) {
             Ok(decoded) => decoded,
@@ -1014,11 +1216,12 @@ impl ScarletVideoDevice {
         let last_error = self.last_error.lock().unwrap_or("none");
         let backend_status = self.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} inflight={} input={} output={} last_error={}{}\n",
+            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} stateless_vp9={} sessions={} inflight={} input={} output={} last_error={}{}\n",
             self.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
             caps.supports_stateless_h264,
+            self.backend.supports_stateless_vp9(),
             caps.max_sessions,
             caps.max_inflight_decodes,
             caps.mapped_input_len,
@@ -1035,6 +1238,7 @@ struct ScarletVideoOpen {
     last_error: Mutex<Option<&'static str>>,
     next_timestamp: Mutex<u64>,
     stream_id: Mutex<Option<u32>>,
+    coded_format: Mutex<u32>,
 }
 
 impl ScarletVideoOpen {
@@ -1056,6 +1260,7 @@ impl ScarletVideoOpen {
             last_error: Mutex::new(None),
             next_timestamp: Mutex::new(1),
             stream_id: Mutex::new(Some(stream_id)),
+            coded_format: Mutex::new(SCARLET_VIDEO_FORMAT_H264),
         })
     }
 
@@ -1063,25 +1268,42 @@ impl ScarletVideoOpen {
         (*self.stream_id.lock()).ok_or("scarlet-video: video session is closed")
     }
 
-    fn create_or_query_session(&self, requested_stream_id: u32) -> Result<u32, &'static str> {
+    fn create_or_query_session(
+        &self,
+        requested_stream_id: u32,
+        coded_format: u32,
+    ) -> Result<u32, &'static str> {
+        let coded_format = if coded_format == 0 {
+            SCARLET_VIDEO_FORMAT_H264
+        } else {
+            coded_format
+        };
+        let existing_stream = *self.stream_id.lock();
+        if let Some(current) = existing_stream {
+            let current_format = *self.coded_format.lock();
+            if current_format != coded_format && requested_stream_id == 0 {
+                self.destroy_current_session(current)?;
+            }
+        }
         let mut stream_id = self.stream_id.lock();
         match *stream_id {
             Some(current) if requested_stream_id == 0 || requested_stream_id == current => {
+                let current_format = *self.coded_format.lock();
+                if current_format != coded_format {
+                    return Err("scarlet-video: stream already exists with another coded format");
+                }
                 crate::println!(
-                    "[scarlet-video] create_session query open={:#x} requested={} stream={}",
+                    "[scarlet-video] create_session query open={:#x} requested={} stream={} format={}",
                     self as *const _ as usize,
                     requested_stream_id,
-                    current
+                    current,
+                    coded_format
                 );
                 Ok(current)
             }
             Some(_) => Err("scarlet-video: stream id belongs to another open"),
             None if requested_stream_id == 0 => {
-                let new_stream_id = match self
-                    .device
-                    .backend
-                    .create_session(SCARLET_VIDEO_FORMAT_H264)
-                {
+                let new_stream_id = match self.device.backend.create_session(coded_format) {
                     Ok(new_stream_id) => {
                         self.device.log_backend_state(
                             "create_session reopen ok",
@@ -1097,6 +1319,7 @@ impl ScarletVideoOpen {
                     }
                 };
                 *stream_id = Some(new_stream_id);
+                *self.coded_format.lock() = coded_format;
                 Ok(new_stream_id)
             }
             None => Err("scarlet-video: cannot claim an explicit closed stream id"),
@@ -1128,6 +1351,7 @@ impl ScarletVideoOpen {
         self.device
             .log_backend_state("destroy_session ok", current, None);
         *self.stream_id.lock() = None;
+        *self.coded_format.lock() = 0;
         *self.next_timestamp.lock() = 1;
         Ok(())
     }
@@ -1280,11 +1504,12 @@ impl ScarletVideoOpen {
         let last_error = self.last_error.lock().unwrap_or("none");
         let backend_status = self.device.backend.debug_status().unwrap_or_default();
         format!(
-            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} sessions={} inflight={} input={} output={} last_error={}{}\n",
+            "scarlet-video backend={} stateful_h264={} stateful_av1={} stateless_h264={} stateless_vp9={} sessions={} inflight={} input={} output={} last_error={}{}\n",
             self.device.backend.name(),
             caps.supports_h264,
             caps.supports_av1,
             caps.supports_stateless_h264,
+            self.device.backend.supports_stateless_vp9(),
             caps.max_sessions,
             caps.max_inflight_decodes,
             caps.mapped_input_len,
@@ -1428,7 +1653,7 @@ impl ControlOps for ScarletVideoOpen {
             SCARLET_VIDEO_GET_CAPS => self.device.handle_get_caps(arg),
             SCARLET_VIDEO_CREATE_SESSION => {
                 let mut info: ScarletVideoSessionInfo = read_user_value(arg)?;
-                let stream_id = self.create_or_query_session(info.stream_id)?;
+                let stream_id = self.create_or_query_session(info.stream_id, info.padding)?;
                 info.stream_id = stream_id;
                 info.padding = 0;
                 info.buffer = self.buffer_info()?;
@@ -1496,6 +1721,39 @@ impl ControlOps for ScarletVideoOpen {
                     let request = VideoBackendH264StatelessRequest { decode, h264 };
                     self.device
                         .enqueue_decode_job(VideoQueuedJob::H264Stateless(request))
+                })();
+
+                match result {
+                    Ok(()) => {
+                        *self.last_error.lock() = None;
+                        Ok(0)
+                    }
+                    Err(e) => {
+                        *self.last_error.lock() = Some(e);
+                        Err(e)
+                    }
+                }
+            }
+            SCARLET_VIDEO_SUBMIT_VP9_STATELESS => {
+                let submit: ScarletVideoVp9StatelessSubmit = read_user_value(arg)?;
+                let result = (|| {
+                    if submit.flags != 0 {
+                        return Err("scarlet-video: stateless VP9 submit flags must be zero");
+                    }
+                    if !self.device.backend.supports_stateless_vp9() {
+                        return Err("scarlet-video: backend does not support stateless VP9");
+                    }
+                    let stream_id = self.checked_stream_id(submit.stream_id)?;
+                    let decode = self.mapped_decode_request(
+                        stream_id,
+                        SCARLET_VIDEO_FORMAT_VP9,
+                        submit.input_len as usize,
+                        submit.timestamp,
+                    )?;
+                    let vp9 = self.device.vp9_stateless_params(submit.params)?;
+                    let request = VideoBackendVp9StatelessRequest { decode, vp9 };
+                    self.device
+                        .enqueue_decode_job(VideoQueuedJob::Vp9Stateless(request))
                 })();
 
                 match result {
@@ -1739,6 +1997,7 @@ impl ControlOps for ScarletVideoDevice {
             SCARLET_VIDEO_DESTROY_SESSION => self.handle_destroy_session(arg),
             SCARLET_VIDEO_GET_CAPS => self.handle_get_caps(arg),
             SCARLET_VIDEO_SUBMIT_H264_STATELESS => self.handle_submit_h264_stateless(arg),
+            SCARLET_VIDEO_SUBMIT_VP9_STATELESS => self.handle_submit_vp9_stateless(arg),
             _ => Err("scarlet-video: unsupported control command"),
         }
     }
@@ -1771,6 +2030,10 @@ impl ControlOps for ScarletVideoDevice {
             (
                 SCARLET_VIDEO_SUBMIT_H264_STATELESS,
                 "Submit stateless H.264 decode request for a stream"
+            ),
+            (
+                SCARLET_VIDEO_SUBMIT_VP9_STATELESS,
+                "Submit stateless VP9 decode request for a stream"
             ),
         ]
     }
@@ -2307,6 +2570,179 @@ pub struct ScarletVideoH264StatelessParams {
     pub decode_params: ScarletVideoH264DecodeParams,
 }
 
+/// VP9 loop filter parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9LoopFilter {
+    /// VP9 reference loop-filter deltas.
+    pub ref_deltas: [i8; 4],
+    /// VP9 mode loop-filter deltas.
+    pub mode_deltas: [i8; 2],
+    /// VP9 loop filter level.
+    pub level: u8,
+    /// VP9 loop filter sharpness.
+    pub sharpness: u8,
+    /// `SCARLET_VIDEO_VP9_LOOP_FILTER_FLAG_*` bitset.
+    pub flags: u8,
+    /// Reserved padding.
+    pub reserved: [u8; 7],
+}
+
+/// VP9 quantization parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9Quantization {
+    /// VP9 base qindex.
+    pub base_q_idx: u8,
+    /// VP9 Y DC quantizer delta.
+    pub delta_q_y_dc: i8,
+    /// VP9 UV DC quantizer delta.
+    pub delta_q_uv_dc: i8,
+    /// VP9 UV AC quantizer delta.
+    pub delta_q_uv_ac: i8,
+    /// Reserved padding.
+    pub reserved: [u8; 4],
+}
+
+/// VP9 segmentation parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9Segmentation {
+    /// Segment feature data indexed by segment and feature id.
+    pub feature_data: [[i16; 4]; 8],
+    /// Segment feature enable masks.
+    pub feature_enabled: [u8; 8],
+    /// Segment tree probabilities.
+    pub tree_probs: [u8; 7],
+    /// Temporal prediction probabilities.
+    pub pred_probs: [u8; 3],
+    /// `SCARLET_VIDEO_VP9_SEGMENTATION_FLAG_*` bitset.
+    pub flags: u8,
+    /// Reserved padding.
+    pub reserved: [u8; 5],
+}
+
+/// VP9 per-frame parameters for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9FrameParams {
+    /// VP9 loop filter parameters.
+    pub loop_filter: ScarletVideoVp9LoopFilter,
+    /// VP9 quantization parameters.
+    pub quantization: ScarletVideoVp9Quantization,
+    /// VP9 segmentation parameters.
+    pub segmentation: ScarletVideoVp9Segmentation,
+    /// `SCARLET_VIDEO_VP9_FRAME_FLAG_*` bitset.
+    pub flags: u32,
+    /// Compressed VP9 header byte size.
+    pub compressed_header_size: u16,
+    /// Uncompressed VP9 header byte size.
+    pub uncompressed_header_size: u16,
+    /// VP9 coded frame width minus one.
+    pub frame_width_minus_1: u16,
+    /// VP9 coded frame height minus one.
+    pub frame_height_minus_1: u16,
+    /// VP9 render width minus one.
+    pub render_width_minus_1: u16,
+    /// VP9 render height minus one.
+    pub render_height_minus_1: u16,
+    /// Last reference frame timestamp.
+    pub last_frame_ts: u64,
+    /// Golden reference frame timestamp.
+    pub golden_frame_ts: u64,
+    /// Alternate reference frame timestamp.
+    pub alt_frame_ts: u64,
+    /// VP9 reference sign-bias bitset.
+    pub ref_frame_sign_bias: u8,
+    /// VP9 frame context reset mode.
+    pub reset_frame_context: u8,
+    /// VP9 frame context index.
+    pub frame_context_idx: u8,
+    /// VP9 profile.
+    pub profile: u8,
+    /// VP9 component bit depth.
+    pub bit_depth: u8,
+    /// VP9 interpolation filter.
+    pub interpolation_filter: u8,
+    /// Log2 VP9 tile column count.
+    pub tile_cols_log2: u8,
+    /// Log2 VP9 tile row count.
+    pub tile_rows_log2: u8,
+    /// VP9 reference mode.
+    pub reference_mode: u8,
+    /// VP9 refresh frame flags from the uncompressed header.
+    pub refresh_frame_flags: u8,
+    /// VP9 show-existing-frame reference index.
+    pub show_existing_frame_index: u8,
+    /// VP9 transform mode.
+    pub tx_mode: u8,
+    /// Reserved padding.
+    pub reserved: [u8; 4],
+}
+
+/// VP9 tile byte range for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9Tile {
+    /// Tile row index.
+    pub row: u16,
+    /// Tile column index.
+    pub col: u16,
+    /// Byte offset of the tile payload in the mapped coded input.
+    pub offset: u32,
+    /// Byte size of the tile payload.
+    pub size: u32,
+}
+
+/// VP9 tile table for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScarletVideoVp9Tiles {
+    /// Number of valid tile entries.
+    pub tile_count: u32,
+    /// Reserved padding.
+    pub reserved: u32,
+    /// Valid tile byte ranges.
+    pub tiles: [ScarletVideoVp9Tile; SCARLET_VIDEO_VP9_MAX_TILES],
+}
+
+impl Default for ScarletVideoVp9Tiles {
+    fn default() -> Self {
+        Self {
+            tile_count: 0,
+            reserved: 0,
+            tiles: [ScarletVideoVp9Tile::default(); SCARLET_VIDEO_VP9_MAX_TILES],
+        }
+    }
+}
+
+/// VP9 probability state for stateless decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScarletVideoVp9Probabilities {
+    /// Packed VP9 probability state prepared by userspace.
+    pub data: [u8; SCARLET_VIDEO_VP9_PROBABILITY_BYTES],
+}
+
+impl Default for ScarletVideoVp9Probabilities {
+    fn default() -> Self {
+        Self {
+            data: [0; SCARLET_VIDEO_VP9_PROBABILITY_BYTES],
+        }
+    }
+}
+
+/// Copied stateless VP9 parameters for a backend submit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9StatelessParams {
+    /// VP9 per-frame syntax parameters.
+    pub frame: ScarletVideoVp9FrameParams,
+    /// VP9 packed probability state.
+    pub probabilities: ScarletVideoVp9Probabilities,
+    /// VP9 tile table.
+    pub tiles: ScarletVideoVp9Tiles,
+}
+
 /// Userspace pointers to stateless H.264 parameter structures.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -2325,6 +2761,18 @@ pub struct ScarletVideoH264ParamPtrs {
     pub decode_params: u64,
 }
 
+/// Userspace pointers to stateless VP9 parameter structures.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9ParamPtrs {
+    /// Pointer to `ScarletVideoVp9FrameParams`.
+    pub frame: u64,
+    /// Pointer to `ScarletVideoVp9Probabilities`.
+    pub probabilities: u64,
+    /// Pointer to `ScarletVideoVp9Tiles`.
+    pub tiles: u64,
+}
+
 /// Stateless H.264 mapped-buffer submit request.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -2337,6 +2785,24 @@ pub struct ScarletVideoH264StatelessSubmit {
     pub timestamp: u64,
     /// Pointers to userspace parameter structures.
     pub params: ScarletVideoH264ParamPtrs,
+    /// Reserved for future per-submit flags.
+    pub flags: u32,
+    /// Reserved padding.
+    pub padding: u32,
+}
+
+/// Stateless VP9 mapped-buffer submit request.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScarletVideoVp9StatelessSubmit {
+    /// Backend stream/session identifier, or zero for the default stream.
+    pub stream_id: u32,
+    /// Number of bytes written to the mapped input area.
+    pub input_len: u32,
+    /// Presentation timestamp carried through dequeue.
+    pub timestamp: u64,
+    /// Pointers to userspace parameter structures.
+    pub params: ScarletVideoVp9ParamPtrs,
     /// Reserved for future per-submit flags.
     pub flags: u32,
     /// Reserved padding.
@@ -2421,13 +2887,9 @@ fn align_up(value: usize, align: usize) -> usize {
 
 /// Apple AVD firmware-to-kernel mailbox ABI.
 pub mod avd_fw {
-    /// Firmware initialized and waiting for work.
-    pub const MSG_READY: u32 = 0x0000_0001;
-    /// Firmware panic or hardfault.
-    pub const MSG_PANIC: u32 = 0x0000_0002;
     /// Video pipe decode completed.
     pub const MSG_VP_DONE: u32 = 0x0000_0100;
-    /// Video pipe decode error.
+    /// Video pipe decode or IRQ acknowledgement failed.
     pub const MSG_VP_ERROR: u32 = 0x0000_0200;
     /// Post-process pipe completed.
     pub const MSG_PP_DONE: u32 = 0x0000_1000;

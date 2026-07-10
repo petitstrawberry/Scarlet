@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 use spin::{Mutex, RwLock};
 
 use crate::device::video::{
-    SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FRAME_HEADER_LEN,
-    SCARLET_VIDEO_FRAME_MAGIC, SCARLET_VIDEO_PIXEL_FORMAT_NV12, ScarletVideoDequeuedFrame,
-    VideoBackendCapabilities, VideoBackendDecodeRequest, VideoBackendDecodedFrame,
-    VideoDecodeBackend,
+    SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FORMAT_HEVC,
+    SCARLET_VIDEO_FRAME_HEADER_LEN, SCARLET_VIDEO_FRAME_MAGIC, SCARLET_VIDEO_PIXEL_FORMAT_NV12,
+    ScarletVideoDequeuedFrame, VideoBackendCapabilities, VideoBackendDecodeRequest,
+    VideoBackendDecodedFrame, VideoDecodeBackend,
 };
 use crate::drivers::virtio::device::Register;
 use crate::drivers::virtio::features::VIRTIO_F_VERSION_1;
@@ -46,6 +46,7 @@ const VIRTIO_VIDEO_QUEUE_TYPE_INPUT: u32 = 256;
 const VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT: u32 = 257;
 const VIRTIO_VIDEO_PLANES_LAYOUT_SINGLE_BUFFER: u32 = 1;
 const VIRTIO_VIDEO_FORMAT_H264: u32 = SCARLET_VIDEO_FORMAT_H264;
+const VIRTIO_VIDEO_FORMAT_HEVC: u32 = SCARLET_VIDEO_FORMAT_HEVC;
 const VIRTIO_VIDEO_FORMAT_AV1: u32 = SCARLET_VIDEO_FORMAT_AV1;
 const VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES: u32 = 0;
 
@@ -374,6 +375,7 @@ impl VirtioVideoDevice {
         let mut tag = [0u8; 64];
         let name = match coded_format {
             VIRTIO_VIDEO_FORMAT_H264 => b"scarlet-videotoolbox-h264".as_slice(),
+            VIRTIO_VIDEO_FORMAT_HEVC => b"scarlet-videotoolbox-hevc".as_slice(),
             VIRTIO_VIDEO_FORMAT_AV1 => b"scarlet-videotoolbox-av1".as_slice(),
             _ => return Err("Unsupported VirtIO video coded format"),
         };
@@ -411,7 +413,7 @@ impl VirtioVideoDevice {
         }
         if !matches!(
             coded_format,
-            VIRTIO_VIDEO_FORMAT_H264 | VIRTIO_VIDEO_FORMAT_AV1
+            VIRTIO_VIDEO_FORMAT_H264 | VIRTIO_VIDEO_FORMAT_HEVC | VIRTIO_VIDEO_FORMAT_AV1
         ) {
             return Err("Unsupported VirtIO video coded format");
         }
@@ -1018,6 +1020,7 @@ impl VideoDecodeBackend for VirtioVideoDevice {
             output_pixel_format: SCARLET_VIDEO_PIXEL_FORMAT_NV12,
             supports_h264: true,
             supports_av1: true,
+            supports_hevc: true,
             supports_stateless_h264: false,
         }
     }

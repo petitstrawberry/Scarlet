@@ -206,7 +206,7 @@ pub struct InterruptManager {
     external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
     enabled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, CpuId>>>,
     interrupt_sources:
-        spin::Lazy<spin::Mutex<HashMap<InterruptId, alloc::vec::Vec<Arc<dyn InterruptSource>>>>>,
+        spin::Lazy<spin::Mutex<HashMap<InterruptId, Arc<[Arc<dyn InterruptSource>]>>>>,
     unhandled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, usize>>>,
 }
 
@@ -391,7 +391,7 @@ impl InterruptManager {
         if let Some(sources) = sources {
             let mut handled = false;
             let mut first_error = None;
-            for source in sources {
+            for source in sources.iter() {
                 match source.claim_interrupt() {
                     Ok(claim) => handled |= claim.is_handled(),
                     Err(error) => {
@@ -697,7 +697,12 @@ impl InterruptManager {
 
         self.irq_desc_or_legacy(interrupt_id);
         let mut sources = self.interrupt_sources.lock();
-        sources.entry(interrupt_id).or_default().push(source);
+        let mut updated = sources
+            .get(&interrupt_id)
+            .map_or_else(Vec::new, |registered| registered.iter().cloned().collect());
+        updated.push(source);
+        let updated: Arc<[Arc<dyn InterruptSource>]> = Arc::from(updated);
+        sources.insert(interrupt_id, updated);
         Ok(())
     }
 

@@ -78,8 +78,13 @@ impl KernelTimer {
     }
 }
 
-// Global tick counter (monotonic, incremented by timer interrupt)
+// Last architected-counter tick processed by the global timekeeper.
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn current_counter_tick() -> u64 {
+    get_time_us() / TICK_INTERVAL_US
+}
 
 /// The CPU ID designated as the global timekeeper.
 /// Only this CPU advances TICK_COUNT and fires software timers.
@@ -95,9 +100,9 @@ pub fn set_global_timekeeper(cpu_id: usize) {
 /// Timer interrupt handler. Called on every CPU local timer interrupt.
 ///
 /// - Re-arms the per-CPU local timer (all CPUs).
-/// - Advances the global TICK_COUNT and fires software timers only on the
-///   designated global timekeeper CPU, so global time advances exactly once
-///   per quantum system-wide regardless of how many CPUs are running.
+/// - Advances software timers from the architected counter only on the
+///   designated global timekeeper CPU. Delayed/coalesced timer IRQs therefore
+///   cannot make software time run slow.
 /// - Always calls sched_on_tick() for per-CPU scheduler accounting.
 pub fn tick(trapframe: &mut Trapframe) {
     tick_with_scheduler(trapframe, true);
@@ -119,7 +124,8 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     // Only the designated global timekeeper advances global time and fires
     // software timers. All other CPUs skip this block entirely.
     if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
-        let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = current_counter_tick();
+        TICK_COUNT.store(now, Ordering::Relaxed);
         check_software_timers(now);
     }
 
@@ -131,7 +137,7 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
 
 /// Get the current tick count (monotonic, since boot)
 pub fn get_tick() -> u64 {
-    TICK_COUNT.load(Ordering::Relaxed)
+    current_counter_tick()
 }
 
 pub fn get_time_ns() -> u64 {

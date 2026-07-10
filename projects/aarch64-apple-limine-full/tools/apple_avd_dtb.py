@@ -31,6 +31,8 @@ PMGR_DEVICE_ID_MASK = 0xffff
 PMGR_DIE_ID_SHIFT = 28
 PMGR_DIE_ID_MASK = 0xf
 PMGR_DIE_OFFSET = 0x2000000000
+AIC_IRQ = 0
+IRQ_TYPE_LEVEL_HIGH = 4
 
 
 class AvdDtbError(RuntimeError):
@@ -346,6 +348,8 @@ def extract_avd_info_from_adt(
     soc = soc or _infer_soc(machine, compatibles)
     avd_clock_gates = _node_u32_list(avd, "clock-gates", AVD_ADT_PATH)
     dart_clock_gates = _node_u32_list(dart, "clock-gates", DART_AVD_ADT_PATH)
+    avd_interrupts = _node_u32_list(avd, "interrupts", AVD_ADT_PATH)
+    dart_interrupts = _node_u32_list(dart, "interrupts", DART_AVD_ADT_PATH)
     return {
         "machine": machine,
         "soc": soc,
@@ -355,6 +359,7 @@ def extract_avd_info_from_adt(
             "base": avd_base,
             "size": avd_size,
             "compatible": _node_compatibles(avd),
+            "interrupts": avd_interrupts,
             "clock_gates": avd_clock_gates,
             "clock_gate_devices": _pmgr_clock_gate_devices(adt, avd_clock_gates),
         },
@@ -363,6 +368,7 @@ def extract_avd_info_from_adt(
             "base": dart_base,
             "size": dart_size,
             "compatible": _node_compatibles(dart),
+            "interrupts": dart_interrupts,
             "clock_gates": dart_clock_gates,
             "clock_gate_devices": _pmgr_clock_gate_devices(adt, dart_clock_gates),
         },
@@ -390,6 +396,9 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
         raise AvdDtbError("AVD info contains a zero-sized reg range")
     if not re.fullmatch(r"t[0-9]{4}", soc):
         raise AvdDtbError(f"unsupported Apple SoC name: {soc}")
+    avd_interrupts = _u32_list(avd.get("interrupts"), "avd.interrupts")
+    if len(avd_interrupts) < 2:
+        raise AvdDtbError("AVD info is missing the two hardware interrupts")
     return {
         **info,
         "soc": soc,
@@ -399,6 +408,7 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
             "adt_path": str(avd.get("adt_path", AVD_ADT_PATH)),
             "base": avd_base,
             "size": avd_size,
+            "interrupts": avd_interrupts,
             "clock_gates": _u32_list(avd.get("clock_gates"), "avd.clock_gates"),
             "clock_gate_devices": _clock_gate_devices(
                 avd.get("clock_gate_devices"), "avd.clock_gate_devices"
@@ -409,6 +419,7 @@ def validate_info(info: dict[str, Any]) -> dict[str, Any]:
             "adt_path": str(dart.get("adt_path", DART_AVD_ADT_PATH)),
             "base": dart_base,
             "size": dart_size,
+            "interrupts": _u32_list(dart.get("interrupts"), "dart.interrupts"),
             "clock_gates": _u32_list(dart.get("clock_gates"), "dart.clock_gates"),
             "clock_gate_devices": _clock_gate_devices(
                 dart.get("clock_gate_devices"), "dart.clock_gate_devices"
@@ -441,25 +452,35 @@ def _extract_braced_block(text: str, open_brace: int) -> str | None:
     return None
 
 
-def _node_blocks(text: str, node_name_pattern: str) -> list[str]:
+def _named_node_blocks(text: str, node_name_pattern: str) -> list[tuple[str, str]]:
     blocks = []
-    pattern = re.compile(rf"(?m)^\s*(?:[A-Za-z0-9_]+:\s*)?{node_name_pattern}\s*\{{")
+    pattern = re.compile(
+        rf"(?m)^\s*(?:[A-Za-z0-9_]+:\s*)?(?P<node>{node_name_pattern})\s*\{{"
+    )
     for match in pattern.finditer(text):
         open_brace = text.find("{", match.start(), match.end())
         block = _extract_braced_block(text, open_brace)
         if block is not None:
-            blocks.append(block)
+            blocks.append((match.group("node"), block))
     return blocks
 
 
-def _first_iommus_phandle(block: str) -> int | None:
-    match = re.search(r"\biommus\s*=\s*<\s*([^>\s]+)", block)
+def _node_blocks(text: str, node_name_pattern: str) -> list[str]:
+    return [block for _, block in _named_node_blocks(text, node_name_pattern)]
+
+
+def _first_property_phandle(block: str, name: str) -> int | None:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*<\s*([^>\s]+)", block)
     if match is None:
         return None
     try:
         return int(match.group(1), 0)
     except ValueError:
         return None
+
+
+def _first_iommus_phandle(block: str) -> int | None:
+    return _first_property_phandle(block, "iommus")
 
 
 def _first_phandle(block: str) -> int | None:
@@ -472,29 +493,118 @@ def _first_phandle(block: str) -> int | None:
         return None
 
 
-def _dts_has_working_avd(text: str, require_pmgr_clock_gates: bool = False) -> bool:
-    avd_iommus = []
+def _dts_has_working_avd(
+    text: str,
+    require_pmgr_clock_gates: bool = False,
+    require_interrupts: bool = False,
+    require_power_reset: bool = False,
+) -> bool:
+    avd_references = []
     dart_phandles = set()
+    power_phandles = set()
     for block in _node_blocks(text, r"avd@[0-9a-fA-F]+"):
         if re.search(r"apple,t[0-9]{4}-avd|apple,avd", block):
             if require_pmgr_clock_gates and "apple,pmgr-clock-gate-paddrs" not in block:
                 continue
-            phandle = _first_iommus_phandle(block)
-            if phandle is not None:
-                avd_iommus.append(phandle)
+            if require_interrupts and (
+                "interrupt-parent" not in block or "interrupts" not in block
+            ):
+                continue
+            if require_power_reset and (
+                "power-domains" not in block or "resets" not in block
+            ):
+                continue
+            iommu_phandle = _first_iommus_phandle(block)
+            power_phandle = _first_property_phandle(block, "power-domains")
+            reset_phandle = _first_property_phandle(block, "resets")
+            if iommu_phandle is not None:
+                avd_references.append(
+                    (iommu_phandle, power_phandle, reset_phandle)
+                )
     for block in _node_blocks(text, r"iommu@[0-9a-fA-F]+"):
         if re.search(r"apple,t[0-9]{4}-dart|apple,dart", block):
             phandle = _first_phandle(block)
             if phandle is not None:
                 dart_phandles.add(phandle)
-    return any(phandle in dart_phandles for phandle in avd_iommus)
+    for block in _node_blocks(text, r"power-controller@[0-9a-fA-F]+"):
+        phandle = _first_phandle(block)
+        if phandle is not None:
+            power_phandles.add(phandle)
+    return any(
+        iommu_phandle in dart_phandles
+        and (
+            not require_power_reset
+            or (
+                power_phandle is not None
+                and power_phandle == reset_phandle
+                and power_phandle in power_phandles
+            )
+        )
+        for iommu_phandle, power_phandle, reset_phandle in avd_references
+    )
 
 
-def dtb_has_avd(dtb: pathlib.Path, require_pmgr_clock_gates: bool = False) -> bool:
+def dtb_has_avd(
+    dtb: pathlib.Path,
+    require_pmgr_clock_gates: bool = False,
+    require_interrupts: bool = False,
+    require_power_reset: bool = False,
+) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         dts = pathlib.Path(tmp) / "base.dts"
         text = _dtb_to_dts(dtb, dts)
-    return _dts_has_working_avd(text, require_pmgr_clock_gates)
+    return _dts_has_working_avd(
+        text,
+        require_pmgr_clock_gates,
+        require_interrupts,
+        require_power_reset,
+    )
+
+
+def _first_u32_property(block: str, name: str) -> int | None:
+    match = re.search(rf"{re.escape(name)}\s*=\s*<\s*([^>\s]+)", block)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1), 0)
+    except ValueError:
+        return None
+
+
+def _apple_aic_info(dtb: pathlib.Path) -> tuple[int, int]:
+    with tempfile.TemporaryDirectory() as tmp:
+        dts = pathlib.Path(tmp) / "base.dts"
+        text = _dtb_to_dts(dtb, dts)
+    for block in _node_blocks(text, r"interrupt-controller@[0-9a-fA-F]+"):
+        if not re.search(r"apple,t[0-9]{4}-aic|apple,aic", block):
+            continue
+        phandle = _first_phandle(block)
+        interrupt_cells = _first_u32_property(block, "#interrupt-cells")
+        if phandle is not None and interrupt_cells is not None:
+            return phandle, interrupt_cells
+    raise AvdDtbError("guest DTB is missing the Apple AIC interrupt controller")
+
+
+def _apple_power_domain_info(
+    dtb: pathlib.Path, label: str
+) -> tuple[int | None, str, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        dts = pathlib.Path(tmp) / "base.dts"
+        text = _dtb_to_dts(dtb, dts)
+    label_pattern = re.compile(rf'\blabel\s*=\s*"{re.escape(label)}"\s*;')
+    for parent_name, parent_block in _named_node_blocks(
+        text, r"power-management@[0-9a-fA-F]+"
+    ):
+        for node_name, block in _named_node_blocks(
+            parent_block, r"power-controller@[0-9a-fA-F]+"
+        ):
+            if label_pattern.search(block):
+                return (
+                    _first_phandle(block),
+                    f"{GUEST_SOC_PATH}/{parent_name}",
+                    node_name,
+                )
+    raise AvdDtbError(f'guest DTB is missing the Apple "{label}" power domain')
 
 
 def _next_phandle(dtb: pathlib.Path) -> int:
@@ -539,6 +649,27 @@ def _optional_u64_property(indent: str, name: str, values: list[int]) -> str:
     return f"{indent}{name} = <{_u64_cells(values)}>;\n"
 
 
+def _optional_interrupt_properties(
+    indent: str,
+    interrupts: list[int],
+    aic_phandle: int,
+    aic_interrupt_cells: int,
+) -> str:
+    if not interrupts:
+        return ""
+    if aic_interrupt_cells != 3:
+        raise AvdDtbError(
+            f"unsupported Apple AIC interrupt cell count: {aic_interrupt_cells}"
+        )
+    cells = []
+    for interrupt in interrupts:
+        cells.extend((AIC_IRQ, interrupt, IRQ_TYPE_LEVEL_HIGH))
+    return (
+        f"{indent}interrupt-parent = <0x{aic_phandle:x}>;\n"
+        f"{indent}interrupts = <{_u32_cells(cells)}>;\n"
+    )
+
+
 def _dts_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -576,7 +707,14 @@ def _clock_gate_names(info_node: dict[str, Any]) -> list[str]:
     return out
 
 
-def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
+def _overlay_dts(
+    info: dict[str, Any],
+    dart_phandle: int,
+    aic_phandle: int,
+    aic_interrupt_cells: int,
+    avd_power_phandle: int,
+    avd_power_target: tuple[str, str] | None,
+) -> str:
     info = validate_info(info)
     soc = info["soc"]
     avd = info["avd"]
@@ -602,11 +740,34 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
     dart_names = _optional_string_list_property(
         "                ", "apple,pmgr-clock-gate-names", _clock_gate_names(dart)
     )
+    avd_interrupts = _optional_interrupt_properties(
+        "                ", avd["interrupts"], aic_phandle, aic_interrupt_cells
+    )
+    dart_interrupts = _optional_interrupt_properties(
+        "                ", dart["interrupts"], aic_phandle, aic_interrupt_cells
+    )
+    power_fragment = ""
+    avd_fragment_index = 0
+    avd_power_reference = f"0x{avd_power_phandle:x}"
+    if avd_power_target is not None:
+        parent_path, node_name = avd_power_target
+        power_fragment = f"""
+    fragment@0 {{
+        target-path = "{parent_path}";
+        __overlay__ {{
+            avd_power: {node_name} {{
+                phandle = <0x{avd_power_phandle:x}>;
+            }};
+        }};
+    }};
+"""
+        avd_fragment_index = 1
+        avd_power_reference = "&avd_power"
     return f"""/dts-v1/;
 /plugin/;
 
 / {{
-    fragment@0 {{
+{power_fragment}    fragment@{avd_fragment_index} {{
         target-path = "{GUEST_SOC_PATH}";
         __overlay__ {{
             #address-cells = <2>;
@@ -615,7 +776,8 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             dart_avd: iommu@{dart["base"]:x} {{
                 compatible = "apple,{soc}-dart", "apple,dart";
                 reg = {_reg_cells(dart["base"], dart["size"])};
-{dart_clock_gates}                apple,adt-path = "{dart["adt_path"]}";
+{dart_interrupts}{dart_clock_gates}                power-domains = <{avd_power_reference}>;
+                apple,adt-path = "{dart["adt_path"]}";
 {dart_paddrs}{dart_names}                #iommu-cells = <1>;
                 status = "okay";
                 phandle = <0x{dart_phandle:x}>;
@@ -624,8 +786,10 @@ def _overlay_dts(info: dict[str, Any], dart_phandle: int) -> str:
             avd@{avd["base"]:x} {{
                 compatible = "apple,{soc}-avd", "apple,avd";
                 reg = {_reg_cells(avd["base"], avd["size"])};
-{avd_clock_gates}                apple,adt-path = "{avd["adt_path"]}";
-{avd_paddrs}{avd_names}                iommus = <&dart_avd 0x{sid:x}>;
+{avd_interrupts}{avd_clock_gates}                apple,adt-path = "{avd["adt_path"]}";
+{avd_paddrs}{avd_names}                power-domains = <{avd_power_reference}>;
+                resets = <{avd_power_reference}>;
+                iommus = <&dart_avd 0x{sid:x}>;
                 status = "okay";
             }};
         }};
@@ -640,7 +804,12 @@ def patch_dtb_file(input_dtb: pathlib.Path, output_dtb: pathlib.Path, info: dict
     require_pmgr_clock_gates = bool(
         _clock_gate_paddrs(info["avd"]) or _clock_gate_paddrs(info["dart"])
     )
-    if dtb_has_avd(input_dtb, require_pmgr_clock_gates):
+    if dtb_has_avd(
+        input_dtb,
+        require_pmgr_clock_gates,
+        require_interrupts=True,
+        require_power_reset=True,
+    ):
         if input_dtb.resolve() != output_dtb.resolve():
             output_dtb.write_bytes(input_dtb.read_bytes())
         return False
@@ -649,7 +818,29 @@ def patch_dtb_file(input_dtb: pathlib.Path, output_dtb: pathlib.Path, info: dict
         tmp_path = pathlib.Path(tmp)
         overlay_dts = tmp_path / "apple-avd-overlay.dts"
         overlay_dtbo = tmp_path / "apple-avd-overlay.dtbo"
-        overlay_dts.write_text(_overlay_dts(info, _next_phandle(input_dtb)))
+        aic_phandle, aic_interrupt_cells = _apple_aic_info(input_dtb)
+        existing_power_phandle, power_parent_path, power_node_name = (
+            _apple_power_domain_info(input_dtb, "avd_sys")
+        )
+        next_phandle = _next_phandle(input_dtb)
+        if existing_power_phandle is None:
+            avd_power_phandle = next_phandle
+            dart_phandle = next_phandle + 1
+            avd_power_target = (power_parent_path, power_node_name)
+        else:
+            avd_power_phandle = existing_power_phandle
+            dart_phandle = next_phandle
+            avd_power_target = None
+        overlay_dts.write_text(
+            _overlay_dts(
+                info,
+                dart_phandle,
+                aic_phandle,
+                aic_interrupt_cells,
+                avd_power_phandle,
+                avd_power_target,
+            )
+        )
         _run([
             _tool("dtc"),
             "-@",
@@ -750,6 +941,8 @@ def describe_info(info: dict[str, Any]) -> str:
     return (
         f"soc={info['soc']} avd={info['avd']['base']:#x}+{info['avd']['size']:#x} "
         f"dart={info['dart']['base']:#x}+{info['dart']['size']:#x} sid={info['sid']:#x}"
+        f" irqs: avd=[{_u32_cells(info['avd']['interrupts'])}] "
+        f"dart=[{_u32_cells(info['dart']['interrupts'])}]"
         f"{clock_gates}{pmgr_devices}"
     )
 

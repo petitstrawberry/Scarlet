@@ -296,12 +296,29 @@ bin = "sh"
 to = "/system/scarlet/bin/sh"
 ```
 
+Cargo layers can also control Cargo feature selection for that one installed
+binary:
+
+```toml
+[[layers]]
+kind = "cargo"
+source = "../../user/video_player"
+package = "video_player"
+bin = "video_player"
+default-features = false
+features = ["av1-stateful-hw", "h264-stateful-hw", "mp4-aac"]
+to = "/system/scarlet/bin/video_player"
+```
+
 | Field | Description |
 |-------|-------------|
 | `kind` | Must be `"cargo"` |
 | `source` | Path or git source of the Cargo workspace |
 | `package` | Cargo package name |
 | `bin` | Binary target name |
+| `default-features` | Optional Cargo default feature switch |
+| `features` | Optional Cargo feature list |
+| `replace` | Replace earlier cargo layers with the same `to` path |
 | `to` | Install path inside the image |
 
 ### Script (`kind = "script"`)
