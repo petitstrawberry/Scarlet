@@ -9,8 +9,7 @@ mod vector;
 
 use core::arch::asm;
 
-use abi::MSG_PANIC;
-use mailbox::{send_message, signal_booted};
+use mailbox::signal_booted;
 
 /// Firmware reset entry point.
 #[unsafe(no_mangle)]
@@ -28,10 +27,7 @@ pub extern "C" fn reset_handler() -> ! {
 /// Panic handler for firmware faults that reach Rust.
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    send_message(MSG_PANIC);
-    loop {
-        wait_for_interrupt();
-    }
+    irq::fatal_exception(0)
 }
 
 #[inline(always)]

@@ -1,6 +1,8 @@
 //! Cortex-M3 interrupt handling for the Apple AVD firmware.
 
-use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE, MSG_VP_ERROR};
+use core::arch::asm;
+
+use crate::abi::{MSG_PP_DONE, MSG_UNKNOWN_IRQ, MSG_VP_DONE};
 use crate::mailbox::send_message;
 
 /// Number of external NVIC lines enabled by the AVD firmware.
@@ -10,9 +12,6 @@ const NVIC_ISER_BASE: usize = 0xe000_e100;
 const DECODE_STATUS_UNK: u32 = 1 << 0;
 const DECODE_STATUS_ERR: u32 = 1 << 1;
 const DECODE_STATUS_DONE: u32 = 1 << 2;
-const H264_STATUS_OFFSET: usize = 0x4060;
-const H264_STATUS_IRQ1: u32 = 0x800;
-const DECODE_STATUS_CLEAR_POLLS: usize = 100_000;
 
 #[cfg(feature = "v2-t0")]
 const DECODE_CTRL_BASE: usize = 0x4010_0000;
@@ -51,11 +50,6 @@ pub fn enable_all_nvic_irqs() {
     }
 }
 
-/// Handle the early H.264 status IRQ observed when a frame is accepted.
-pub fn h264_status_irq1() {
-    clear_h264_status(H264_STATUS_IRQ1);
-}
-
 /// Handle a video-pipe unknown-status IRQ.
 ///
 /// # Arguments
@@ -71,10 +65,7 @@ pub fn video_pipe_unknown(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_done(pipe: u32) {
-    if !clear_decode_status(pipe, DECODE_STATUS_DONE) {
-        send_message(MSG_VP_ERROR | (pipe & 0xff));
-        return;
-    }
+    clear_decode_status(pipe, DECODE_STATUS_DONE);
     send_message(MSG_VP_DONE | (pipe & 0xff));
 }
 
@@ -84,8 +75,8 @@ pub fn video_pipe_done(pipe: u32) {
 ///
 /// * `pipe` - Hardware video pipe index.
 pub fn video_pipe_error(pipe: u32) {
-    let _ = clear_decode_status(pipe, DECODE_STATUS_ERR);
-    send_message(MSG_VP_ERROR | (pipe & 0xff));
+    clear_decode_status(pipe, DECODE_STATUS_ERR);
+    send_message(pipe);
 }
 
 /// Handle submit-queue unknown-status IRQ.
@@ -95,10 +86,7 @@ pub fn submit_unknown() {
 
 /// Handle a post-process DONE IRQ.
 pub fn post_process_done() {
-    if !clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE) {
-        send_message(MSG_VP_ERROR | (IRQ_SUBMIT_SLOT & 0xff));
-        return;
-    }
+    clear_decode_status(IRQ_SUBMIT_SLOT, DECODE_STATUS_DONE);
     send_message(MSG_PP_DONE);
 }
 
@@ -107,33 +95,42 @@ pub fn post_process_done() {
 /// # Arguments
 ///
 /// * `irq` - IRQ number reported by the vector entry.
-pub fn unknown_irq(irq: u32) {
-    send_message(MSG_UNKNOWN_IRQ | (irq & 0xff));
+pub fn unknown_irq(irq: u32) -> ! {
+    send_message(MSG_UNKNOWN_IRQ | irq);
+    wait_forever()
 }
 
-fn clear_decode_status(slot: u32, status: u32) -> bool {
+/// Report the active Cortex-M exception using the Asahi firmware numbering.
+pub fn unknown_exception() -> ! {
+    let ipsr: u32;
+    // SAFETY: Reading IPSR is side-effect free and identifies the active exception.
+    unsafe {
+        asm!("mrs {ipsr}, ipsr", ipsr = out(reg) ipsr, options(nomem, nostack, preserves_flags));
+    }
+    let exception = ipsr & 0x1ff;
+    let irq = if exception < 16 {
+        1000 + exception
+    } else {
+        exception - 16
+    };
+    unknown_irq(irq)
+}
+
+/// Report a firmware failure that occurred outside an exception handler.
+pub fn fatal_exception(exception: u32) -> ! {
+    unknown_irq(1000 + exception)
+}
+
+fn clear_decode_status(slot: u32, status: u32) {
     let ptr = decode_status_ptr(slot);
     let mask = decode_status_mask(slot, status);
     // SAFETY: These are AVD decode status registers in the CM3-visible MMIO
     // window; writing the observed bits acknowledges the corresponding IRQ.
     unsafe {
         core::ptr::write_volatile(ptr, mask);
-        for _ in 0..DECODE_STATUS_CLEAR_POLLS {
-            if core::ptr::read_volatile(ptr) & mask == 0 {
-                return true;
-            }
+        while core::ptr::read_volatile(ptr) & mask != 0 {
             core::hint::spin_loop();
         }
-    }
-    false
-}
-
-fn clear_h264_status(status: u32) {
-    let ptr = (DECODE_CTRL_BASE + H264_STATUS_OFFSET) as *mut u32;
-    // SAFETY: This is the CM3-visible alias of the H.264 status register.
-    // Writing the observed bit acknowledges the corresponding IRQ.
-    unsafe {
-        core::ptr::write_volatile(ptr, status);
     }
 }
 
@@ -151,5 +148,14 @@ fn decode_status_mask(slot: u32, status: u32) -> u32 {
         status << (slot * 5)
     } else {
         status
+    }
+}
+
+fn wait_forever() -> ! {
+    loop {
+        // SAFETY: `wfi` waits for an interrupt and has no Rust-visible side effects.
+        unsafe {
+            asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
     }
 }

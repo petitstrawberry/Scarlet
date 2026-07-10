@@ -556,6 +556,31 @@ impl DmaContext {
         granule
     }
 
+    /// Restore IOMMU stream programming after a device power-domain reset.
+    ///
+    /// Page tables and DMA mappings remain owned by their domains, but a reset
+    /// may clear controller-side stream registers such as TTBRs and TCRs. This
+    /// reattaches every resolved stream and flushes the restored domains.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all stream attachments and domain flushes completed.
+    pub fn restore_iommu(&self) -> Result<(), IommuError> {
+        if let Some(attachment) = &self.iommu {
+            for stream in &attachment.streams {
+                attachment.domain.attach_stream(*stream)?;
+            }
+            attachment.domain.flush()?;
+        }
+        for attachment in &self.additional_iommus {
+            for stream in &attachment.streams {
+                attachment.domain.attach_stream(*stream)?;
+            }
+            attachment.domain.flush()?;
+        }
+        Ok(())
+    }
+
     /// Map a physical memory range and return an owned DMA mapping.
     ///
     /// The returned mapping automatically unmaps the DMA address when dropped.

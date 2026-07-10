@@ -17,6 +17,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use common::AvdDmaRange;
 pub use debug::{AvdTraceEvent, AvdTraceKind};
@@ -34,7 +35,8 @@ use scarlet::{
         iommu::{DmaContext, DmaMapping, IommuDomainConfig, IommuDomainType, IommuMapFlags},
         manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer},
         platform::{
-            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+            PlatformDeviceDriver, PlatformDeviceInfo,
+            resource::{PlatformDeviceResource, PlatformDeviceResourceType},
         },
         reset::ResetHandle,
         video::{
@@ -52,16 +54,18 @@ use scarlet::{
     },
     environment::PAGE_SIZE,
     interrupt::{
-        InterruptClaim, InterruptError, InterruptId, InterruptResult, InterruptSource,
+        InterruptClaim, InterruptId, InterruptManager, InterruptResult, InterruptSource,
         MaskableInterruptSource,
     },
     mem::page::ContiguousPages,
     println,
     sync::{IrqGuard, Mutex},
-    time, vm,
+    time,
+    timer::{TimerHandler, add_timer, cancel_timer, get_tick, ms_to_ticks},
+    vm,
 };
 use scarlet_driver_apple_pmgr::{
-    PmgrDomain, pmgr_get_domain_by_label, pmgr_get_domain_by_register_paddr,
+    PmgrDomain, pmgr_get_domain_by_phandle, pmgr_get_domain_by_register_paddr,
 };
 use vp9::{
     AvdVp9InstructionStream, AvdVp9ReferencePicture, AvdVp9Workspace, Vp9DecodeRequest,
@@ -82,20 +86,20 @@ const REG_MCPU_CODE: usize = 0x1080000;
 const REG_MCPU_SRAM: usize = 0x108c000;
 const REG_DECODER_CONTROL_BASE: usize = 0x1100000;
 const REG_MCPU_CONTROL: usize = 0x1098008;
-const REG_MCPU_IRQ_ENABLE0: usize = 0x1098010;
-const REG_MCPU_IRQ_ENABLE1: usize = 0x1098048;
-const REG_MCPU_IRQ_CLEAR: usize = 0x109804c;
+const REG_CM3_IRQ_ENABLE: usize = 0x1098010;
+const REG_MBOX_IRQ_ENABLE: usize = 0x1098048;
+const REG_MBOX_IRQ_CLEAR: usize = 0x109804c;
 const REG_MCPU_AP_ACK: usize = 0x1098050;
 const REG_MCPU_DECODE_DMA_CONFIG: usize = 0x1098054;
 const REG_MAILBOX_AP_TO_CM3: usize = 0x1098058;
-const REG_MCPU_AP_IRQ_CLEAR: usize = 0x109805c;
-const REG_MAILBOX_CM3_TO_AP: usize = 0x1098064;
+const REG_MBOX1_STATUS: usize = 0x109805c;
+const REG_MBOX1_RETRIEVE: usize = 0x1098064;
 const REG_MCPU_CM3_ACK: usize = 0x1098068;
-const REG_MCPU_CM3_IRQ_CLEAR: usize = 0x1098074;
-const REG_MCPU_IRQ_ARM: usize = 0x109807c;
-const REG_MCPU_IRQ_MASK: usize = 0x1098080;
-const REG_MCPU_STATUS: usize = 0x1098090;
-const REG_MCPU_CONTROL_98: usize = 0x1098098;
+const REG_CM3_IRQ_CLEAR: usize = 0x1098074;
+const REG_MCPU_INIT_7C: usize = 0x109807c;
+const REG_MCPU_INIT_80: usize = 0x1098080;
+const REG_FLAG0_SET: usize = 0x1098090;
+const REG_FLAG0_CLEAR: usize = 0x1098098;
 const REG_H264_INSTRUCTION: usize = 0x1104000;
 const REG_H265_INSTRUCTION: usize = 0x1104004;
 const REG_H264_MODE: usize = 0x110400c;
@@ -111,7 +115,7 @@ const REG_DECODE_CONTROL1: usize = 0x110403c;
 const REG_H265_CONTROL: usize = 0x1104040;
 const REG_DECODE_DMA_TRIGGER: usize = 0x1104048;
 const REG_VP9_CONTROL: usize = 0x110404c;
-const REG_DECODE_TIMEOUT: usize = 0x110405c;
+const REG_DECODE_CM3_IRQ_MASK: usize = 0x110405c;
 const REG_DECODE_STATUS: usize = 0x1104060;
 const REG_DECODE_STATUS_MASK: usize = 0x1104064;
 const REG_DECODE_INST_FIFO_BASE: usize = 0x1104068;
@@ -133,26 +137,14 @@ const REG_WRAP_CONTROL: usize = 0x1400000;
 const REG_WRAP_IDLE: usize = 0x1400014;
 const REG_WRAP_INIT: usize = 0x1400018;
 
-const MCPU_CONTROL_RESET: u32 = 0xe;
+const MCPU_CONTROL_STOP: u32 = 0xe;
 const MCPU_CONTROL_RUN: u32 = 0x1;
 const MCPU_DECODE_DMA_CONFIG: u32 = 0x108e_b30;
-const MCPU_MAILBOX1_NOT_EMPTY: u32 = 0x8;
+const MBOX_ENABLE: u32 = 0x1;
+const MBOX1_NOT_EMPTY: u32 = 0x8;
 const VP9_SUBMIT_FRAME: u32 = 0x2bfff107;
 const VP9_SUBMIT_TILE: u32 = 0x2bfff007;
-const DECODE_STATUS_DONE_MASK: u32 = 0x0084_2108;
 const DECODE_STATUS_ERROR_MASK: u32 = 0x0000_0003;
-const DECODE_STATUS_ACCEPTED: u32 = 0x0000_0800;
-const DECODE_STATUS_VIDEO_PHASE_MASK: u32 = 0x00c0_0000;
-const DECODE_STATUS_POSTPROCESS_PHASE_MASK: u32 = 0x0000_3000;
-const DECODE_STATUS_POSTPROCESS_DONE: u32 = 0x0000_2000;
-const DECODE_STATUS_VP9_VIDEO_DONE_CLEAR: u32 = 0x0002_0000;
-const DECODE_STATUS_POSTPROCESS_DONE_CLEAR: u32 = 0x0040_0000;
-const DECODE_STATUS_RECOVERY_CLEAR_MASK: u32 = DECODE_STATUS_DONE_MASK
-    | DECODE_STATUS_ERROR_MASK
-    | DECODE_STATUS_ACCEPTED
-    | DECODE_STATUS_VIDEO_PHASE_MASK
-    | DECODE_STATUS_POSTPROCESS_PHASE_MASK
-    | 0x0200_0000;
 const DECODE_VP_CM3_MASK: u32 = 0x7;
 const DECODE_PP_CM3_MASK: u32 = 0x5;
 const DECODE_T8103_H264_VP_SLOT: u32 = 2;
@@ -160,8 +152,9 @@ const DECODE_T8103_VP9_VP_SLOT: u32 = 3;
 const DECODE_T8103_FIFO_SLOT: u32 = 0;
 const DECODE_T8103_FIFO_COUNT: u32 = 7;
 const AVD_TRACE_CAPACITY: usize = 128;
-const AVD_DECODE_TRACE_FRAMES: u32 = 4;
+const AVD_DECODE_TRACE_FRAMES: u32 = 0;
 const AVD_DECODE_PROGRESS_INTERVAL: u32 = 0;
+const AVD_BOOT_DEBUG_LOGGING: bool = false;
 const AVD_OUTPUT_SAMPLE_BYTES: usize = 4096;
 const AVD_OUTPUT_UV_SAMPLE_BYTES: usize = 256;
 const AVD_DMA_GRANULE: usize = 0x4000;
@@ -193,9 +186,9 @@ const AVD_MAX_OUTPUT_SLOTS: usize = if AVD_H264_OUTPUT_SLOTS > AVD_VP9_REFERENCE
 };
 const AVD_COMPLETED_FRAME_QUEUE_LEN: usize = AVD_MAX_SESSIONS * AVD_MAX_OUTPUT_SLOTS;
 const AVD_OUTPUT_SLOT_PAYLOAD_OFFSET: usize = AVD_DMA_GRANULE;
-const AVD_MCPU_RUN_POLLS: usize = 100;
 const AVD_MCPU_RUN_POLL_US: u64 = 10;
-const AVD_DECODE_POLL_LIMIT: usize = 10_000;
+const AVD_MCPU_RUN_TIMEOUT_US: u64 = 10_000;
+const AVD_WATCHDOG_TIMEOUT_MS: u64 = 2_000;
 const AVD_PMGR_CLOCK_GATE_PADDRS_PROPERTY: &str = "apple,pmgr-clock-gate-paddrs";
 
 const AVD_DECODE_DMA_CONFIG: [u32; 30] = [
@@ -543,61 +536,55 @@ impl AvdRegisters {
     }
 
     fn status(&self) -> u32 {
-        self.read32(REG_MCPU_STATUS)
+        self.read32(REG_FLAG0_SET)
     }
 
     fn irq_enable_status1(&self) -> u32 {
-        self.read32(REG_MCPU_IRQ_ENABLE1)
+        self.read32(REG_MBOX_IRQ_ENABLE)
     }
 
-    fn mask_irqs(&self) {
-        self.write32(REG_MCPU_IRQ_ARM, 0);
-        self.write32(REG_MCPU_IRQ_ENABLE0, 0);
-        self.write32(REG_MCPU_IRQ_ENABLE1, 0);
+    fn mask_mailbox_irq(&self) {
+        self.write32(REG_MBOX_IRQ_ENABLE, 0);
         arch::io_wmb();
     }
 
-    fn enable_irqs(&self) {
-        self.write32(REG_MCPU_IRQ_ARM, 1);
-        self.write32(REG_MCPU_IRQ_ENABLE0, 0x2);
-        self.write32(REG_MCPU_IRQ_ENABLE1, 0x8);
+    fn unmask_mailbox_irq(&self) {
+        self.write32(REG_MBOX_IRQ_ENABLE, MBOX1_NOT_EMPTY);
         arch::io_wmb();
     }
 
-    fn clear_irq_latches(&self) {
-        self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
-        self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
-        self.write32(REG_MCPU_IRQ_CLEAR, MCPU_MAILBOX1_NOT_EMPTY);
+    fn ack_mailbox_irq(&self) {
+        self.write32(REG_MBOX_IRQ_CLEAR, MBOX1_NOT_EMPTY);
         arch::io_wmb();
     }
 
     fn hold_cm3_in_reset(&self) {
-        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RESET);
-        self.mask_irqs();
+        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_STOP);
+        self.write32(REG_CM3_IRQ_ENABLE, 0);
+        self.mask_mailbox_irq();
+        arch::io_wmb();
+    }
+
+    fn shutdown_cm3(&self) {
+        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_STOP);
+        self.write32(REG_FLAG0_CLEAR, 1);
+        self.write32(REG_MBOX_IRQ_ENABLE, 0);
+        arch::io_mb();
     }
 
     fn run_cm3(&self) -> Result<(), &'static str> {
-        self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RESET);
-        self.mask_irqs();
-        self.mask_irqs();
-        self.write32(REG_MCPU_AP_ACK, 1);
-        self.write32(REG_MCPU_CM3_ACK, 1);
-        self.write32(REG_MCPU_AP_IRQ_CLEAR, 1);
-        self.write32(REG_MCPU_CM3_IRQ_CLEAR, 1);
-        self.mask_irqs();
-        arch::io_wmb();
+        self.write32(REG_MBOX1_STATUS, MBOX_ENABLE);
+        self.write32(REG_MBOX_IRQ_ENABLE, MBOX1_NOT_EMPTY);
         self.write32(REG_MCPU_CONTROL, MCPU_CONTROL_RUN);
         arch::io_mb();
 
-        for _ in 0..AVD_MCPU_RUN_POLLS {
+        for _ in 0..(AVD_MCPU_RUN_TIMEOUT_US / AVD_MCPU_RUN_POLL_US) {
             if self.status() == 1 {
-                self.write32(REG_WRAP_IDLE, 0);
                 return Ok(());
             }
             time::udelay(AVD_MCPU_RUN_POLL_US);
         }
 
-        self.write32(REG_WRAP_IDLE, 0);
         Err("apple-avd: CM3 run status did not assert")
     }
 
@@ -616,43 +603,38 @@ impl AvdRegisters {
         if image.len() > AVD_MCPU_CODE_BYTES {
             return Err("apple-avd: firmware image exceeds CM3 code window");
         }
-        self.clear_window(REG_MCPU_CODE, AVD_MCPU_CODE_BYTES);
-        self.clear_window(REG_MCPU_SRAM, AVD_MCPU_SRAM_BYTES);
         self.write_buffer(REG_MCPU_CODE, image);
         arch::io_wmb();
         Ok(())
     }
 
     fn recv_mailbox(&self) -> u32 {
-        self.read32(REG_MAILBOX_CM3_TO_AP)
+        self.read32(REG_MBOX1_RETRIEVE)
     }
 
     fn recv_mailbox_status(&self) -> u32 {
-        self.read32(REG_MCPU_AP_IRQ_CLEAR)
-    }
-
-    fn clear_recv_mailbox(&self) {
-        self.write32(REG_MCPU_IRQ_CLEAR, MCPU_MAILBOX1_NOT_EMPTY);
-        arch::io_wmb();
+        self.read32(REG_MBOX1_STATUS)
     }
 
     fn log_boot_state(&self, label: &str) {
+        if !AVD_BOOT_DEBUG_LOGGING {
+            return;
+        }
         println!(
-            "[apple-avd] boot {} ctrl={:#x} status={:#x} irq0={:#x} irq1={:#x} irq_arm={:#x} irq_mask={:#x} mcpu98={:#x} ap_ack={:#x} cm3_ack={:#x} ap_clr={:#x} cm3_clr={:#x} ap2cm3={:#x} cm32ap_status={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
+            "[apple-avd] boot {} ctrl={:#x} flag0={:#x} cm3_irq_enable={:#x} mbox_irq_enable={:#x} init7c={:#x} init80={:#x} flag0_clear={:#x} ap_ack={:#x} cm3_ack={:#x} mbox1_status={:#x} cm3_irq_clear={:#x} ap2cm3={:#x} wrap_ctl={:#x} wrap_idle={:#x} wrap_init={:#x} top={:#x} dart=[{:#x},{:#x},{:#x}]",
             label,
             self.read32(REG_MCPU_CONTROL),
-            self.read32(REG_MCPU_STATUS),
-            self.read32(REG_MCPU_IRQ_ENABLE0),
-            self.read32(REG_MCPU_IRQ_ENABLE1),
-            self.read32(REG_MCPU_IRQ_ARM),
-            self.read32(REG_MCPU_IRQ_MASK),
-            self.read32(REG_MCPU_CONTROL_98),
+            self.read32(REG_FLAG0_SET),
+            self.read32(REG_CM3_IRQ_ENABLE),
+            self.read32(REG_MBOX_IRQ_ENABLE),
+            self.read32(REG_MCPU_INIT_7C),
+            self.read32(REG_MCPU_INIT_80),
+            self.read32(REG_FLAG0_CLEAR),
             self.read32(REG_MCPU_AP_ACK),
             self.read32(REG_MCPU_CM3_ACK),
-            self.read32(REG_MCPU_AP_IRQ_CLEAR),
-            self.read32(REG_MCPU_CM3_IRQ_CLEAR),
+            self.read32(REG_MBOX1_STATUS),
+            self.read32(REG_CM3_IRQ_CLEAR),
             self.read32(REG_MAILBOX_AP_TO_CM3),
-            self.recv_mailbox_status(),
             self.read32(REG_WRAP_CONTROL),
             self.read32(REG_WRAP_IDLE),
             self.read32(REG_WRAP_INIT),
@@ -664,6 +646,9 @@ impl AvdRegisters {
     }
 
     fn log_code_window(&self, label: &str, image: &[u8]) {
+        if !AVD_BOOT_DEBUG_LOGGING {
+            return;
+        }
         let image_sp = read_image_word(image, 0);
         let image_reset = read_image_word(image, 4);
         println!(
@@ -692,8 +677,8 @@ impl AvdRegisters {
         self.write32(REG_DECODE_DMA_TRIGGER, 0);
         self.write32(REG_VP9_CONTROL, 0);
         self.write32(
-            REG_DECODE_TIMEOUT,
-            self.read32(REG_DECODE_TIMEOUT) | 0x0050_0000,
+            REG_DECODE_CM3_IRQ_MASK,
+            self.read32(REG_DECODE_CM3_IRQ_MASK) | 0x0050_0000,
         );
         self.write32(REG_DECODE_STATUS_MASK, 0x3);
 
@@ -708,21 +693,6 @@ impl AvdRegisters {
 
     fn decode_status(&self) -> u32 {
         self.read32(REG_DECODE_STATUS)
-    }
-
-    fn clear_decode_latched_status(&self) -> u32 {
-        let mut last = 0;
-        for _ in 0..8 {
-            let status = self.decode_status();
-            if status == 0 {
-                break;
-            }
-            last = status;
-            let clear = status | DECODE_STATUS_RECOVERY_CLEAR_MASK;
-            self.clear_decode_status(clear);
-            arch::io_mb();
-        }
-        last
     }
 
     fn write_h264_instructions(&self, words: &[u32]) {
@@ -752,8 +722,8 @@ impl AvdRegisters {
         self.write32(REG_DECODE_INST_FIFO_WRITE + fifo_offset, 0);
         self.write32(pipe.control_register(), 0);
         self.write32(
-            REG_DECODE_TIMEOUT,
-            self.read32(REG_DECODE_TIMEOUT)
+            REG_DECODE_CM3_IRQ_MASK,
+            self.read32(REG_DECODE_CM3_IRQ_MASK)
                 | (DECODE_VP_CM3_MASK << (vp_slot * 5))
                 | (DECODE_PP_CM3_MASK << 20),
         );
@@ -839,7 +809,7 @@ impl AvdRegisters {
         self.write32(REG_PIODMA_BASE, 0x26907000);
         self.write32(REG_WRAP_CONTROL, 0x3);
         self.write32(REG_H264_INSTRUCTION, 0);
-        self.write32(REG_DECODE_TIMEOUT, 0);
+        self.write32(REG_DECODE_CM3_IRQ_MASK, 0);
         self.write32(REG_DECODE_PIPE_CONTROL, 0);
         self.write32(REG_DECODE_PIPE_SELECT, 0x1555);
 
@@ -861,11 +831,11 @@ impl AvdRegisters {
         self.write32(REG_MCPU_DECODE_DMA_CONFIG, MCPU_DECODE_DMA_CONFIG);
 
         self.write32(
-            REG_DECODE_TIMEOUT,
-            self.read32(REG_DECODE_TIMEOUT) | 0x0050_0000,
+            REG_DECODE_CM3_IRQ_MASK,
+            self.read32(REG_DECODE_CM3_IRQ_MASK) | 0x0050_0000,
         );
-        self.write32(REG_MCPU_IRQ_ARM, 1);
-        self.write32(REG_MCPU_IRQ_MASK, u32::MAX);
+        self.write32(REG_MCPU_INIT_7C, 1);
+        self.write32(REG_MCPU_INIT_80, u32::MAX);
     }
 }
 
@@ -895,8 +865,8 @@ pub struct AppleAvd {
     irq: Option<u32>,
     registers: AvdRegisters,
     dma: DmaContext,
-    power: Option<PmgrDomain>,
-    reset: Option<ResetHandle>,
+    power: PmgrDomain,
+    reset: ResetHandle,
     trace: AvdTraceLog,
     firmware_state: AvdFirmwareState,
     firmware_image: Option<AvdFirmwareImage>,
@@ -911,8 +881,8 @@ impl AppleAvd {
         irq: Option<u32>,
         registers: AvdRegisters,
         dma: DmaContext,
-        power: Option<PmgrDomain>,
-        reset: Option<ResetHandle>,
+        power: PmgrDomain,
+        reset: ResetHandle,
     ) -> Self {
         Self {
             name,
@@ -1059,7 +1029,6 @@ impl AppleAvd {
             return Err("apple-avd: firmware is faulted");
         }
 
-        self.init_decode_engine();
         self.boot_firmware(DEFAULT_AVD_FIRMWARE)
     }
 
@@ -1078,10 +1047,7 @@ impl AppleAvd {
         println!(
             "[apple-avd] boot begin firmware_len={} power_on={} reset_source={}",
             image.len(),
-            self.power
-                .as_ref()
-                .map(|power| power.is_on())
-                .unwrap_or(true),
+            self.power.is_on(),
             self.reset_source()
         );
         self.prepare_for_firmware(image)?;
@@ -1111,14 +1077,8 @@ impl AppleAvd {
         if instructions.words().is_empty() {
             return Err("apple-avd: empty H.264 instruction stream");
         }
-        self.registers.mask_irqs();
-        self.registers.clear_irq_latches();
-        self.registers.clear_decode_latched_status();
         self.registers
             .configure_decode_stream(instruction_fifo_dma, AvdDecodePipe::H264);
-        self.registers.clear_decode_status(
-            DECODE_STATUS_DONE_MASK | DECODE_STATUS_ERROR_MASK | DECODE_STATUS_ACCEPTED,
-        );
         let status_before = self.registers.decode_status();
         self.trace.push(
             AvdTraceKind::DecodeSubmit,
@@ -1158,8 +1118,6 @@ impl AppleAvd {
         if instructions.words().is_empty() {
             return Err("apple-avd: empty VP9 instruction stream");
         }
-        self.registers.mask_irqs();
-        self.registers.clear_irq_latches();
         self.registers
             .configure_decode_stream(instruction_fifo_dma, AvdDecodePipe::Vp9);
         for (index, word) in instructions.words().iter().enumerate() {
@@ -1225,18 +1183,16 @@ impl AppleAvd {
     /// `Ok(())` when the hardware reset and firmware boot completed.
     pub fn reset_firmware_after_decode_fault(&mut self, reason: u64) -> Result<(), &'static str> {
         self.trace.push(AvdTraceKind::Fault, reason, 1);
-        self.registers.mask_irqs();
-        let status_before = self.registers.clear_decode_latched_status();
+        self.registers.mask_mailbox_irq();
+        let status_before = self.registers.decode_status();
         self.firmware_state = AvdFirmwareState::Missing;
         println!(
             "[apple-avd] resetting firmware after decode fault reason={:#x} status_before={:#x}",
             reason, status_before
         );
+        self.reset_hardware()?;
         self.boot_firmware(DEFAULT_AVD_FIRMWARE)?;
-        self.registers.mask_irqs();
-        let status_after = self.registers.clear_decode_latched_status();
-        self.registers.clear_irq_latches();
-        self.registers.mask_irqs();
+        let status_after = self.registers.decode_status();
         println!(
             "[apple-avd] firmware reset after decode fault ok reason={:#x} status_after={:#x}",
             reason, status_after
@@ -1244,39 +1200,34 @@ impl AppleAvd {
         Ok(())
     }
 
+    fn shutdown_firmware(&mut self) {
+        self.registers.shutdown_cm3();
+        self.firmware_state = AvdFirmwareState::Missing;
+        self.firmware_image = None;
+        self.trace.push(AvdTraceKind::Firmware, 0, 0);
+    }
+
     /// Receive one firmware mailbox message after a device interrupt.
     ///
     /// # Returns
     ///
     /// Classified firmware message when the interrupt delivered a non-zero word.
-    fn receive_firmware_message_word(&mut self) -> Option<AvdFirmwareMessageWord> {
+    fn receive_firmware_message_word(&mut self) -> AvdFirmwareMessageWord {
         let raw = self.registers.recv_mailbox();
-        if raw == 0 {
-            return None;
-        }
-
+        self.registers.ack_mailbox_irq();
         let message = AvdFirmwareMessage::decode(raw);
-        self.registers.clear_recv_mailbox();
         self.trace.push(AvdTraceKind::MailboxRx, raw as u64, 0);
         match message {
-            AvdFirmwareMessage::Ready => {
-                self.firmware_state = AvdFirmwareState::Running;
-                self.trace.push(AvdTraceKind::Firmware, raw as u64, 0);
-            }
             AvdFirmwareMessage::VideoProcessorDone | AvdFirmwareMessage::PostProcessorDone => {
                 self.trace.push(AvdTraceKind::DecodeComplete, raw as u64, 0);
             }
-            AvdFirmwareMessage::Panic => {
-                self.mark_firmware_faulted();
-                self.trace.push(AvdTraceKind::Fault, raw as u64, 0);
-            }
-            AvdFirmwareMessage::VideoProcessorError => {
+            AvdFirmwareMessage::VideoProcessorError(_) | AvdFirmwareMessage::UnknownIrq(_) => {
                 self.trace.push(AvdTraceKind::Fault, raw as u64, 0);
             }
             _ => {}
         }
 
-        Some(AvdFirmwareMessageWord { raw, message })
+        AvdFirmwareMessageWord { raw, message }
     }
 
     fn snapshot(&self) -> AvdStatusSnapshot {
@@ -1289,16 +1240,9 @@ impl AppleAvd {
     }
 
     fn prepare_for_firmware(&mut self, image: &[u8]) -> Result<(), &'static str> {
-        self.reset_hardware()?;
-        self.registers.log_boot_state("before-init");
-        self.registers.init_hardware();
-        self.registers.log_boot_state("after-init");
-        self.registers.hold_cm3_in_reset();
-        self.registers.log_boot_state("after-hold-reset");
+        self.ensure_powered()?;
         self.registers.stage_firmware_image(image)?;
         self.registers.log_code_window("after-stage", image);
-        self.registers.clear_irq_latches();
-        self.registers.log_boot_state("after-clear-mailbox");
         self.firmware_state = AvdFirmwareState::Staged;
         self.trace.push(
             AvdTraceKind::Firmware,
@@ -1309,8 +1253,7 @@ impl AppleAvd {
     }
 
     fn start_firmware(&mut self) -> Result<(), &'static str> {
-        self.registers.mask_irqs();
-        self.registers.log_boot_state("before-run-masked");
+        self.registers.log_boot_state("before-run");
         if let Err(e) = self.registers.run_cm3() {
             self.registers.log_boot_state("after-run-timeout");
             self.mark_firmware_faulted();
@@ -1319,34 +1262,33 @@ impl AppleAvd {
             return Err(e);
         }
         self.registers.log_boot_state("after-run");
-        self.registers.mask_irqs();
         self.firmware_state = AvdFirmwareState::Running;
         self.trace.push(AvdTraceKind::Firmware, 1, 0);
         Ok(())
     }
 
     fn reset_hardware(&mut self) -> Result<(), &'static str> {
-        if let Some(power) = &self.power {
-            if !power.is_on() {
-                power.enable()?;
-                time::udelay(10);
-            }
-        }
-
-        if let Some(reset) = &self.reset {
-            reset.reset()?;
-            time::udelay(10);
-        } else {
-            println!("[apple-avd] reset unavailable; skipping PMGR reset fallback");
-        }
+        self.ensure_powered()?;
+        self.reset.reset()?;
+        self.dma
+            .restore_iommu()
+            .map_err(|_| "apple-avd: failed to restore DART after reset")?;
 
         self.firmware_state = AvdFirmwareState::Missing;
         self.trace.push(AvdTraceKind::Firmware, 0, 0);
         Ok(())
     }
 
+    fn ensure_powered(&self) -> Result<(), &'static str> {
+        if !self.power.is_on() {
+            self.power.enable()?;
+            time::udelay(10);
+        }
+        Ok(())
+    }
+
     fn reset_source(&self) -> &'static str {
-        if self.reset.is_some() { "fdt" } else { "none" }
+        "fdt"
     }
 
     fn mark_firmware_faulted(&mut self) {
@@ -2445,6 +2387,7 @@ impl From<vp9::AvdVp9FrameLayout> for AvdDecodedLayout {
     }
 }
 
+#[derive(Clone, Copy)]
 struct AvdPendingDecode {
     kind: AvdPendingDecodeKind,
     stream_id: u32,
@@ -2475,7 +2418,6 @@ struct AvdPendingDecode {
     is_idr: bool,
     status_before: u32,
     command_tag: u32,
-    poll_count: usize,
     completion_phase: AvdDecodeCompletionPhase,
 }
 
@@ -2618,7 +2560,9 @@ impl AvdCompletedQueue {
 struct AvdBackendState {
     sessions: [AvdBackendSession; AVD_MAX_SESSIONS],
     pending: Option<AvdPendingDecode>,
+    irq_completion: Option<AvdCompletionInfo>,
     completed: AvdCompletedQueue,
+    recovery_reason: Option<u64>,
 }
 
 impl AvdBackendState {
@@ -2626,7 +2570,9 @@ impl AvdBackendState {
         Self {
             sessions: core::array::from_fn(AvdBackendSession::new),
             pending: None,
+            irq_completion: None,
             completed: AvdCompletedQueue::new(),
+            recovery_reason: None,
         }
     }
 
@@ -2650,7 +2596,14 @@ impl AvdBackendState {
             session.reset();
         }
         self.pending = None;
+        self.irq_completion = None;
         self.completed.clear();
+    }
+
+    fn defer_recovery(&mut self, reason: u64) {
+        self.pending = None;
+        self.irq_completion = None;
+        self.recovery_reason = Some(reason);
     }
 
     fn session_index(&self, stream_id: u32) -> Result<usize, &'static str> {
@@ -2733,23 +2686,37 @@ impl AvdBackendState {
     fn pending_len(&self) -> usize {
         usize::from(self.pending.is_some())
     }
+
+    fn has_active_sessions(&self) -> bool {
+        self.sessions.iter().any(|session| session.active)
+    }
 }
 
 struct AppleAvdVideoBackend {
     avd_id: u32,
+    registers: AvdRegisters,
+    self_weak: Weak<AppleAvdVideoBackend>,
+    watchdog_generation: AtomicUsize,
+    watchdog_timer_id: Mutex<Option<u64>>,
+    process_lock: Mutex<()>,
     state: Mutex<AvdBackendState>,
     completion_notifier: Mutex<Option<Weak<dyn VideoCompletionNotifier>>>,
     interrupt_id: Mutex<Option<InterruptId>>,
 }
 
 impl AppleAvdVideoBackend {
-    fn new(avd_id: u32) -> Self {
-        Self {
+    fn new(avd_id: u32, registers: AvdRegisters) -> Arc<Self> {
+        Arc::new_cyclic(|self_weak| Self {
             avd_id,
+            registers,
+            self_weak: self_weak.clone(),
+            watchdog_generation: AtomicUsize::new(0),
+            watchdog_timer_id: Mutex::new(None),
+            process_lock: Mutex::new(()),
             state: Mutex::new(AvdBackendState::new()),
             completion_notifier: Mutex::new(None),
             interrupt_id: Mutex::new(None),
-        }
+        })
     }
 
     fn avd(&self) -> Result<Arc<Mutex<AppleAvd>>, &'static str> {
@@ -2779,35 +2746,100 @@ impl AppleAvdVideoBackend {
         self.state.lock().pending.is_some()
     }
 
-    fn mask_avd_interrupts(&self) -> InterruptResult<()> {
-        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
+    fn recover_deferred_firmware(&self) -> Result<(), &'static str> {
+        let reason = {
+            let _irq_guard = IrqGuard::new();
+            self.state.lock().recovery_reason.take()
+        };
+        let Some(reason) = reason else {
+            return Ok(());
+        };
+
+        self.cancel_watchdog();
+        let avd = self.avd()?;
+        let result = avd.lock().reset_firmware_after_decode_fault(reason);
+        if let Err(error) = result {
+            let _irq_guard = IrqGuard::new();
+            self.state.lock().recovery_reason = Some(reason);
+            return Err(error);
+        }
         let _irq_guard = IrqGuard::new();
-        avd.lock().registers.mask_irqs();
+        self.state.lock().reset_all_sessions();
+        Ok(())
+    }
+
+    fn drain_irq_completion(&self) -> Result<(), &'static str> {
+        let work = {
+            let _irq_guard = IrqGuard::new();
+            let mut state = self.state.lock();
+            let Some(completion) = state.irq_completion.take() else {
+                return Ok(());
+            };
+            let pending = state
+                .pending
+                .take()
+                .ok_or("apple-avd: IRQ completion has no pending decode")?;
+            (pending, completion)
+        };
+
+        self.cancel_watchdog();
+        prepare_pending_decode_output(&work.0, work.1)?;
+
+        let _irq_guard = IrqGuard::new();
+        let mut state = self.state.lock();
+        commit_pending_decode(&mut state, work.0)
+    }
+
+    fn arm_watchdog(&self) -> Result<(), &'static str> {
+        let generation = self
+            .watchdog_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        if let Some(timer_id) = self.watchdog_timer_id.lock().take() {
+            cancel_timer(timer_id);
+        }
+        let handler: Arc<dyn TimerHandler> = self
+            .self_weak
+            .upgrade()
+            .ok_or("apple-avd: watchdog backend disappeared")?;
+        let expires = get_tick().saturating_add(ms_to_ticks(AVD_WATCHDOG_TIMEOUT_MS));
+        let timer_id = add_timer(expires, &handler, generation);
+        *self.watchdog_timer_id.lock() = Some(timer_id);
+        Ok(())
+    }
+
+    fn invalidate_watchdog_from_irq(&self) {
+        self.watchdog_generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn cancel_watchdog(&self) {
+        self.watchdog_generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(timer_id) = self.watchdog_timer_id.lock().take() {
+            cancel_timer(timer_id);
+        }
+    }
+
+    fn mask_avd_interrupts(&self) -> InterruptResult<()> {
+        self.registers.mask_mailbox_irq();
         arch::io_mb();
         Ok(())
     }
 
     fn unmask_avd_interrupts(&self) -> InterruptResult<()> {
-        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
-        let _irq_guard = IrqGuard::new();
-        let avd = avd.lock();
-        if self.state.lock().pending.is_some() {
-            avd.registers.enable_irqs();
-        } else {
-            avd.registers.mask_irqs();
-        }
+        self.registers.unmask_mailbox_irq();
         arch::io_mb();
         Ok(())
     }
 
     fn clear_stale_avd_interrupts(&self) -> InterruptResult<()> {
-        let avd = self.avd().map_err(|_| InterruptError::HardwareError)?;
-        let _irq_guard = IrqGuard::new();
-        let avd = avd.lock();
-        avd.registers.mask_irqs();
-        avd.registers.clear_irq_latches();
-        avd.registers.mask_irqs();
+        self.registers.ack_mailbox_irq();
         arch::io_mb();
+        Ok(())
+    }
+
+    fn discard_unexpected_mailbox_message(&self) -> InterruptResult<()> {
+        let _ = self.registers.recv_mailbox();
+        self.registers.ack_mailbox_irq();
         Ok(())
     }
 
@@ -2815,262 +2847,72 @@ impl AppleAvdVideoBackend {
         *self.interrupt_id.lock()
     }
 
-    fn arm_pending_decode_interrupts(&self, avd: &AppleAvd) -> Option<InterruptId> {
-        let interrupt_id = self.pending_interrupt_id();
-        avd.registers.enable_irqs();
-        arch::io_mb();
-        interrupt_id
+    fn arm_pending_decode_interrupts(&self, _avd: &AppleAvd) -> Option<InterruptId> {
+        self.pending_interrupt_id()
     }
 
-    fn service_completion_message(&self) -> Result<(), &'static str> {
-        let avd = self.avd()?;
+    fn service_completion_message(&self) -> Result<bool, &'static str> {
         let _irq_guard = IrqGuard::new();
-        let mut avd = avd.lock();
         let mut state = self.state.lock();
         let Some(front) = state.pending.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
-        let message_word = avd.receive_firmware_message_word();
-        let message = message_word.map(|word| word.message);
-        let message_raw = message_word.map(|word| word.raw).unwrap_or(0);
-        let status = avd.decode_status();
+        let message_raw = self.registers.recv_mailbox();
+        self.registers.ack_mailbox_irq();
+        let message = AvdFirmwareMessage::decode(message_raw);
+        let status = self.registers.decode_status();
         let status_before = front.status_before;
-        let frame_number = front.frame_number;
-        let stream_id = front.stream_id;
-        let pending_kind = front.kind;
-        let poll_count = front.poll_count;
         let completion_phase = front.completion_phase;
 
-        let status_error = status != status_before && (status & DECODE_STATUS_ERROR_MASK) != 0;
-        let firmware_panic = matches!(message, Some(AvdFirmwareMessage::Panic));
-        if firmware_panic {
-            println!(
-                "[apple-avd] firmware panic stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:?}/{:#x}",
-                stream_id,
-                frame_number,
-                completion_phase,
-                poll_count,
-                status_before,
-                status,
-                message,
-                message_raw
-            );
-            let _ = state.pending.take();
-            state.reset_all_sessions();
-            if let Err(error) = avd.reset_firmware_after_decode_fault(status as u64) {
-                println!("[apple-avd] firmware panic reset failed: {}", error);
-                return Err(error);
-            }
-            return Err("apple-avd: firmware panic during decode");
-        }
-
         let unknown_irq = match message {
-            Some(AvdFirmwareMessage::UnknownIrq(irq)) => Some(irq),
+            AvdFirmwareMessage::UnknownIrq(irq) => Some(irq),
             _ => None,
         };
-        let processor_error = matches!(message, Some(AvdFirmwareMessage::VideoProcessorError))
-            || unknown_irq.is_some();
-        if (status_error || processor_error)
-            && (poll_count < 4 || poll_count % 1000 == 0 || message_raw != 0)
-        {
-            println!(
-                "[apple-avd] decode error pending watchdog stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:?}/{:#x}",
-                stream_id,
-                frame_number,
-                completion_phase,
-                poll_count,
-                status_before,
-                status,
-                message,
-                message_raw
-            );
-        }
-        if let Some(irq) = unknown_irq {
-            println!(
-                "[apple-avd] decode unknown irq stream={} frame={} kind={:?} phase={:?} poll={} irq={} status_before={:#x} status={:#x} status_delta={:#x} msg={:#x} idr={} ref={} slot={}/{} dpb={} frame_num={} poc={} ref_dma={:#x} sps_dma={:#x} out={:#x}+{}",
-                stream_id,
-                frame_number,
-                pending_kind,
-                completion_phase,
-                poll_count,
-                irq,
-                status_before,
-                status,
-                status ^ status_before,
-                message_raw,
-                front.is_idr,
-                front.store_reference,
-                front.reference_slot,
-                front.reference_slot_count,
-                front.dpb_capacity,
-                front.frame_num,
-                front.top_field_order_cnt,
-                front.reference_dma_addr,
-                front.sps_tile_dma_addr,
-                front.output_payload_dma,
-                front.output_payload_len
-            );
-        }
-        if processor_error || status_error {
-            let _ = state.pending.take();
-            state.reset_all_sessions();
-            if let Err(error) = avd.reset_firmware_after_decode_fault(status as u64) {
-                println!("[apple-avd] decode error reset failed: {}", error);
-                return Err(error);
-            }
+        let processor_error =
+            matches!(message, AvdFirmwareMessage::VideoProcessorError(_)) || unknown_irq.is_some();
+        if processor_error {
+            self.invalidate_watchdog_from_irq();
+            self.registers.mask_mailbox_irq();
+            state.defer_recovery(u64::from(status));
             return Err("apple-avd: decode firmware error");
         }
 
         if completion_phase == AvdDecodeCompletionPhase::WaitingVideo
-            && (status & DECODE_STATUS_ACCEPTED) != 0
+            && matches!(message, AvdFirmwareMessage::VideoProcessorDone)
         {
-            avd.clear_decode_status(DECODE_STATUS_ACCEPTED);
-            if should_log_decode_progress(frame_number) {
-                println!(
-                    "[apple-avd] decode accepted stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x}",
-                    stream_id,
-                    frame_number,
-                    poll_count,
-                    status_before,
-                    status,
-                    message_raw,
-                    DECODE_STATUS_ACCEPTED
-                );
-            }
-        }
-
-        if pending_kind == AvdPendingDecodeKind::H264
-            && completion_phase == AvdDecodeCompletionPhase::WaitingVideo
-            && matches!(message, Some(AvdFirmwareMessage::VideoProcessorDone))
-        {
-            avd.submit_decode_postprocess();
+            self.registers.submit_decode_postprocess();
             let front = state
                 .pending
                 .as_mut()
                 .ok_or("apple-avd: pending queue changed during video mailbox completion")?;
             front.completion_phase = AvdDecodeCompletionPhase::WaitingPostprocess;
-            front.poll_count = front.poll_count.saturating_add(1);
-            if should_log_decode_progress(frame_number) {
-                println!(
-                    "[apple-avd] decode video mailbox stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} submit_pp=true",
-                    stream_id, frame_number, poll_count, status_before, status, message_raw
-                );
-            }
-            return Ok(());
+            return Ok(false);
         }
 
-        if pending_kind == AvdPendingDecodeKind::H264
-            && completion_phase == AvdDecodeCompletionPhase::WaitingVideo
-            && matches!(message, Some(AvdFirmwareMessage::PostProcessorDone))
-        {
-            println!(
-                "[apple-avd] stale postprocess mailbox while waiting for video stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x}",
-                stream_id, frame_number, poll_count, status_before, status, message_raw
-            );
-        }
+        let completed_by_mailbox = completion_phase == AvdDecodeCompletionPhase::WaitingPostprocess
+            && matches!(message, AvdFirmwareMessage::PostProcessorDone);
 
-        let vp9_video_done_by_status = pending_kind == AvdPendingDecodeKind::Vp9
-            && completion_phase == AvdDecodeCompletionPhase::WaitingVideo
-            && (status & DECODE_STATUS_VIDEO_PHASE_MASK) == DECODE_STATUS_VIDEO_PHASE_MASK;
-        if vp9_video_done_by_status {
-            avd.clear_decode_status(DECODE_STATUS_VP9_VIDEO_DONE_CLEAR);
-            avd.submit_decode_postprocess();
-            let front = state
-                .pending
-                .as_mut()
-                .ok_or("apple-avd: pending queue changed during VP9 video completion")?;
-            front.completion_phase = AvdDecodeCompletionPhase::WaitingPostprocess;
-            front.poll_count = front.poll_count.saturating_add(1);
-            if should_log_decode_progress(frame_number) {
-                println!(
-                    "[apple-avd] vp9 decode video status stream={} frame={} poll={} status_before={:#x} status={:#x} msg={:#x} clear={:#x} submit_pp=true",
-                    stream_id,
-                    frame_number,
-                    poll_count,
-                    status_before,
-                    status,
-                    message_raw,
-                    DECODE_STATUS_VP9_VIDEO_DONE_CLEAR
-                );
-            }
-            return Ok(());
-        }
-
-        let completed_by_mailbox = pending_kind == AvdPendingDecodeKind::H264
-            && completion_phase == AvdDecodeCompletionPhase::WaitingPostprocess
-            && matches!(message, Some(AvdFirmwareMessage::PostProcessorDone));
-        let completed_by_status = pending_kind == AvdPendingDecodeKind::Vp9
-            && completion_phase == AvdDecodeCompletionPhase::WaitingPostprocess
-            && (status & DECODE_STATUS_POSTPROCESS_PHASE_MASK) == DECODE_STATUS_POSTPROCESS_DONE;
-        if should_log_decode_progress(frame_number)
-            && (message_raw != 0 || status != status_before || poll_count == 0)
-            && (poll_count < 4 || message_raw != 0 || poll_count % 1000 == 0)
-        {
-            println!(
-                "[apple-avd] decode poll stream={} frame={} phase={:?} poll={} status_before={:#x} status={:#x} msg={:#x}",
-                stream_id,
-                frame_number,
-                completion_phase,
-                poll_count,
-                status_before,
-                status,
-                message_raw
-            );
-        }
-
-        if completed_by_mailbox || completed_by_status {
-            if completed_by_status && pending_kind == AvdPendingDecodeKind::Vp9 {
-                avd.clear_decode_status(DECODE_STATUS_POSTPROCESS_DONE_CLEAR);
-            }
-            let pending = state
-                .pending
-                .take()
-                .ok_or("apple-avd: pending queue changed under completion")?;
+        if completed_by_mailbox {
+            self.invalidate_watchdog_from_irq();
             let completion = AvdCompletionInfo {
                 status_before,
                 status,
                 message_raw,
-                by_mailbox: completed_by_mailbox,
-                by_status: completed_by_status,
+                by_mailbox: true,
+                by_status: false,
             };
-            finish_pending_decode(&mut state, pending, completion)?;
-            avd.trace.push(
-                AvdTraceKind::DecodeComplete,
-                status as u64,
-                message_raw as u64,
-            );
-            avd.registers.clear_irq_latches();
-            avd.registers.mask_irqs();
-        } else {
-            let updated_poll_count = {
-                let front = state
-                    .pending
-                    .as_mut()
-                    .ok_or("apple-avd: pending queue changed under poll")?;
-                front.poll_count = front.poll_count.saturating_add(1);
-                front.poll_count
-            };
-            if updated_poll_count > AVD_DECODE_POLL_LIMIT {
-                println!(
-                    "[apple-avd] decode timeout stream={} frame={} phase={:?} polls={} status_before={:#x} status={:#x} msg={:#x}",
-                    stream_id,
-                    frame_number,
-                    completion_phase,
-                    updated_poll_count,
-                    status_before,
-                    status,
-                    message_raw
-                );
-                let _ = state.pending.take();
-                state.reset_all_sessions();
-                if let Err(error) = avd.reset_firmware_after_decode_fault(status as u64) {
-                    println!("[apple-avd] decode timeout reset failed: {}", error);
-                    return Err(error);
-                }
-                return Err("apple-avd: decode timed out");
+            if state.irq_completion.replace(completion).is_some() {
+                self.registers.mask_mailbox_irq();
+                state.defer_recovery(u64::from(status));
+                return Err("apple-avd: duplicate post-process completion");
             }
+            return Ok(true);
         }
-        Ok(())
+
+        self.invalidate_watchdog_from_irq();
+        self.registers.mask_mailbox_irq();
+        state.defer_recovery(u64::from(status));
+        Err("apple-avd: unexpected firmware mailbox transition")
     }
 
     fn validate_h264_request(
@@ -3241,6 +3083,7 @@ impl AppleAvdVideoBackend {
         }
         avd.trace
             .push(AvdTraceKind::DecodeSubmit, input_dma_addr, inst_len as u64);
+        self.arm_watchdog()?;
         state.pending = Some(AvdPendingDecode {
             kind: AvdPendingDecodeKind::H264,
             stream_id: request.stream_id,
@@ -3271,7 +3114,6 @@ impl AppleAvdVideoBackend {
             is_idr: decode_request.slice.is_idr(),
             status_before,
             command_tag,
-            poll_count: 0,
             completion_phase: AvdDecodeCompletionPhase::WaitingVideo,
         });
         let interrupt_id = self.arm_pending_decode_interrupts(avd);
@@ -3561,7 +3403,6 @@ impl AppleAvdVideoBackend {
             is_idr: key_frame,
             status_before,
             command_tag,
-            poll_count: 0,
             completion_phase: AvdDecodeCompletionPhase::WaitingVideo,
         });
         self.arm_pending_decode_interrupts(avd);
@@ -3579,6 +3420,34 @@ impl AppleAvdVideoBackend {
             );
         }
         Ok(())
+    }
+}
+
+impl TimerHandler for AppleAvdVideoBackend {
+    fn on_timer_expired(self: Arc<Self>, generation: usize) {
+        if self.watchdog_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+
+        let status = self.registers.decode_status();
+        let timed_out = {
+            let _irq_guard = IrqGuard::new();
+            let mut state = self.state.lock();
+            if self.watchdog_generation.load(Ordering::Acquire) != generation
+                || state.pending.is_none()
+                || state.irq_completion.is_some()
+            {
+                false
+            } else {
+                self.registers.mask_mailbox_irq();
+                state.defer_recovery(u64::from(status));
+                true
+            }
+        };
+
+        if timed_out {
+            self.notify_completion();
+        }
     }
 }
 
@@ -3637,28 +3506,62 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
     }
 
     fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
+        let _process_guard = self.process_lock.lock();
         if coded_format != SCARLET_VIDEO_FORMAT_H264 {
             return Err("apple-avd: only stateless H.264 sessions are supported");
         }
+        self.recover_deferred_firmware()?;
+        self.drain_irq_completion()?;
         let _irq_guard = IrqGuard::new();
         let mut state = self.state.lock();
         state.allocate_session(coded_format)
     }
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
+        let _process_guard = self.process_lock.lock();
+        self.cancel_watchdog();
+        self.recover_deferred_firmware()?;
+        self.drain_irq_completion()?;
         let avd = self.avd()?;
-        let _irq_guard = IrqGuard::new();
-        let mut avd = avd.lock();
-        let mut state = self.state.lock();
-        if state.has_pending_for_stream(stream_id)? {
+        let (had_pending, status) = {
+            let _irq_guard = IrqGuard::new();
+            let avd = avd.lock();
+            let mut state = self.state.lock();
+            let had_pending = state.has_pending_for_stream(stream_id)?;
             let status = avd.decode_status();
+            if had_pending {
+                avd.registers.mask_mailbox_irq();
+                let _ = state.pending.take();
+                state.irq_completion = None;
+            }
+            (had_pending, status)
+        };
+
+        if had_pending {
             println!(
                 "[apple-avd] destroying stream {} with pending decode; resetting firmware status={:#x}",
                 stream_id, status
             );
-            avd.reset_firmware_after_decode_fault(status as u64)?;
+            if let Err(error) = avd
+                .lock()
+                .reset_firmware_after_decode_fault(u64::from(status))
+            {
+                let _irq_guard = IrqGuard::new();
+                self.state.lock().defer_recovery(u64::from(status));
+                return Err(error);
+            }
         }
-        state.destroy_session(stream_id)
+
+        let no_active_sessions = {
+            let _irq_guard = IrqGuard::new();
+            let mut state = self.state.lock();
+            state.destroy_session(stream_id)?;
+            !state.has_active_sessions()
+        };
+        if no_active_sessions {
+            avd.lock().shutdown_firmware();
+        }
+        Ok(())
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
@@ -3670,18 +3573,21 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         &self,
         request: &VideoBackendH264StatelessRequest,
     ) -> Result<(), &'static str> {
+        let _process_guard = self.process_lock.lock();
+        self.recover_deferred_firmware()?;
+        self.drain_irq_completion()?;
         self.validate_h264_request(&request.decode)?;
         let stream_parameters = H264StreamParameters::from_stateless_sps(&request.h264.sps)
             .map_err(h264_error_to_str)?;
 
         let avd = self.avd()?;
+        avd.lock().ensure_firmware_running()?;
         let _irq_guard = IrqGuard::new();
         let mut avd = avd.lock();
         let mut state = self.state.lock();
         if state.pending.is_some() {
             return Err("apple-avd: decode already pending");
         }
-        avd.ensure_firmware_running()?;
         {
             let session =
                 state.session_for_submit(request.decode.stream_id, request.decode.coded_format)?;
@@ -3707,9 +3613,9 @@ impl VideoDecodeBackend for AppleAvdVideoBackend {
         &self,
         stream_id: u32,
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
-        if self.pending_interrupt_id().is_none() {
-            self.service_completion_message()?;
-        }
+        let _process_guard = self.process_lock.lock();
+        self.recover_deferred_firmware()?;
+        self.drain_irq_completion()?;
         let _irq_guard = IrqGuard::new();
         let mut state = self.state.lock();
         let session_index = state.session_index(stream_id)?;
@@ -3735,14 +3641,15 @@ impl InterruptSource for AppleAvdVideoBackend {
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
         let has_pending = self.has_pending_decode();
         if !has_pending {
-            self.clear_stale_avd_interrupts()?;
+            self.discard_unexpected_mailbox_message()?;
             return Ok(InterruptClaim::Handled);
         }
 
-        if let Err(error) = self.service_completion_message() {
-            println!("[apple-avd] IRQ completion service failed: {}", error);
+        match self.service_completion_message() {
+            Ok(true) => self.notify_completion(),
+            Ok(false) => {}
+            Err(_) => self.notify_completion(),
         }
-        self.notify_completion();
         Ok(InterruptClaim::Handled)
     }
 }
@@ -3761,9 +3668,8 @@ impl MaskableInterruptSource for AppleAvdVideoBackend {
     }
 }
 
-fn finish_pending_decode(
-    state: &mut AvdBackendState,
-    pending: AvdPendingDecode,
+fn prepare_pending_decode_output(
+    pending: &AvdPendingDecode,
     completion: AvdCompletionInfo,
 ) -> Result<(), &'static str> {
     arch::invalidate_dcache_to_poc_range(pending.output_payload_vaddr, pending.output_payload_len);
@@ -3814,6 +3720,13 @@ fn finish_pending_decode(
     )?;
     arch::clean_dcache_to_poc_range(pending.output_header_vaddr, SCARLET_VIDEO_FRAME_HEADER_LEN);
 
+    Ok(())
+}
+
+fn commit_pending_decode(
+    state: &mut AvdBackendState,
+    pending: AvdPendingDecode,
+) -> Result<(), &'static str> {
     let session = state.session_mut(pending.stream_id)?;
     if pending.is_idr {
         session.clear_reference_frames();
@@ -4108,47 +4021,48 @@ fn first_mem_resource(device: &PlatformDeviceInfo) -> Option<(usize, usize)> {
         })
 }
 
-fn first_irq(device: &PlatformDeviceInfo) -> Option<u32> {
+fn irq_resource(device: &PlatformDeviceInfo, index: usize) -> Option<&PlatformDeviceResource> {
     device
         .get_resources()
         .iter()
-        .find(|resource| matches!(resource.res_type, PlatformDeviceResourceType::IRQ))
-        .map(|resource| resource.start as u32)
+        .filter(|resource| matches!(resource.res_type, PlatformDeviceResourceType::IRQ))
+        .nth(index)
 }
 
-fn resolve_avd_reset(device: &PlatformDeviceInfo) -> Result<Option<ResetHandle>, &'static str> {
+fn resolve_avd_reset(device: &PlatformDeviceInfo) -> Result<ResetHandle, &'static str> {
     match DeviceManager::get_manager().resolve_reset_by_index(device, 0) {
-        Ok(reset) => Ok(Some(reset)),
+        Ok(reset) => Ok(reset),
         Err(e) if is_probe_defer(e) => probe_defer(),
-        Err(e @ ("reset: resets missing" | "reset: index out of range")) => {
-            println!("[apple-avd] reset unavailable: {}", e);
-            Ok(None)
+        Err("reset: resets missing" | "reset: index out of range") => {
+            Err("apple-avd: avd_sys reset is required")
         }
         Err(e) => Err(e),
     }
 }
 
-fn resolve_avd_power_domain() -> Result<Option<PmgrDomain>, &'static str> {
-    match pmgr_get_domain_by_label("avd_sys") {
+fn resolve_avd_power_domain(device: &PlatformDeviceInfo) -> Result<PmgrDomain, &'static str> {
+    let property = device
+        .property("power-domains")
+        .ok_or("apple-avd: avd_sys power domain is required")?;
+    let bytes = property.value();
+    if bytes.len() != 4 {
+        return Err("apple-avd: malformed avd_sys power-domains property");
+    }
+    let phandle = u32::from_be_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| "apple-avd: malformed avd_sys power-domains property")?,
+    );
+    if phandle == 0 {
+        return Err("apple-avd: invalid avd_sys power-domain phandle");
+    }
+
+    match pmgr_get_domain_by_phandle(phandle) {
         Ok(power) => {
-            let was_on = power.is_on();
             power.enable()?;
-            println!(
-                "[apple-avd] power domain '{}' enabled before={} after={}",
-                power.label(),
-                was_on,
-                power.is_on()
-            );
-            Ok(Some(power))
+            Ok(power)
         }
-        Err(e @ "pmgr: registry not initialized") => {
-            println!("[apple-avd] PMGR not ready for avd_sys: {}", e);
-            probe_defer()
-        }
-        Err(e @ "pmgr: domain label not found") => {
-            println!("[apple-avd] power domain avd_sys unavailable: {}", e);
-            Ok(None)
-        }
+        Err("pmgr: registry not initialized" | "pmgr: pwrstate phandle not found") => probe_defer(),
         Err(e) => Err(e),
     }
 }
@@ -4241,55 +4155,42 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     )?;
 
     let soc = AppleAvdSoc::from_device(device);
-    let irq = first_irq(device);
+    let irq_resource = irq_resource(device, 1).ok_or("apple-avd: missing mailbox IRQ")?;
+    let irq = Some(irq_resource.start as u32);
     enable_adt_pmgr_clock_gates(device)?;
-    let power = resolve_avd_power_domain()?;
+    let power = resolve_avd_power_domain(device)?;
     let reset = resolve_avd_reset(device)?;
-    let has_reset = reset.is_some();
+    let registers = AvdRegisters::new(vaddr);
     let mut avd = AppleAvd::new(
         device.name(),
         soc,
         paddr,
         size,
         irq,
-        AvdRegisters::new(vaddr),
+        registers,
         dma,
         power,
         reset,
     );
+    registers.mask_mailbox_irq();
+    registers.ack_mailbox_irq();
+    arch::io_mb();
     let snapshot = avd.snapshot();
     avd.trace
         .push(AvdTraceKind::Probe, paddr as u64, size as u64);
-    avd.registers.mask_irqs();
-    avd.registers.hold_cm3_in_reset();
-    match avd.boot_firmware(DEFAULT_AVD_FIRMWARE) {
-        Ok(()) => println!("[apple-avd] probe firmware boot succeeded"),
-        Err(e) => {
-            println!("[apple-avd] probe firmware boot failed: {}", e);
-            return Err(e);
-        }
-    }
     let id = register_avd(avd);
-    let backend = Arc::new(AppleAvdVideoBackend::new(id));
-    let interrupt_id = if let Some(irq_resource) = device
-        .get_resources()
-        .iter()
-        .find(|resource| matches!(resource.res_type, PlatformDeviceResourceType::IRQ))
-    {
-        let interrupt_id = scarlet::interrupt::resolve_platform_irq(irq_resource)
-            .map_err(|_| "apple-avd: failed to resolve IRQ")?;
-        backend.set_interrupt_id(interrupt_id);
-        let interrupt_source: Arc<dyn MaskableInterruptSource> = backend.clone();
-        scarlet::interrupt::register_and_enable_interrupt_source(
-            interrupt_source,
-            arch::get_cpu().get_cpuid() as u32,
-        )
-        .map_err(|_| "apple-avd: failed to register IRQ handler")?;
-        Some(interrupt_id)
-    } else {
-        println!("[apple-avd] no IRQ resource; completion will rely on polling");
-        None
-    };
+    let backend = AppleAvdVideoBackend::new(id, registers);
+    let interrupt_id = scarlet::interrupt::resolve_platform_irq(irq_resource)
+        .map_err(|_| "apple-avd: failed to resolve mailbox IRQ")?;
+    backend.set_interrupt_id(interrupt_id);
+    let interrupt_source: Arc<dyn InterruptSource> = backend.clone();
+    let interrupt_manager = InterruptManager::global();
+    interrupt_manager
+        .register_interrupt_source(interrupt_id, interrupt_source)
+        .map_err(|_| "apple-avd: failed to register mailbox IRQ handler")?;
+    interrupt_manager
+        .enable_external_interrupt(interrupt_id, arch::get_cpu().get_cpuid() as u32)
+        .map_err(|_| "apple-avd: failed to enable mailbox IRQ")?;
     let video_backend: Arc<dyn VideoDecodeBackend> = backend.clone();
     let backend_id = register_video_backend(Arc::clone(&video_backend));
     let video_name = register_video_decode_device(Arc::clone(&video_backend));
@@ -4305,8 +4206,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         paddr,
         size,
         irq,
-        interrupt_id,
-        has_reset,
+        Some(interrupt_id),
+        true,
         snapshot.status,
         snapshot.irq_enable_status1,
         snapshot.mailbox_status,
