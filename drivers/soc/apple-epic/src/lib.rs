@@ -58,6 +58,16 @@ const SUBTYPE_STD_SERVICE: u16 = 0xc0;
 // Flags.
 const FLAG_INLINE: u8 = 0x08;
 
+#[inline(always)]
+fn dma_clean(vaddr: usize, len: usize) {
+    scarlet::arch::clean_dcache_to_poc_range(vaddr, len);
+}
+
+#[inline(always)]
+fn dma_invalidate(vaddr: usize, len: usize) {
+    scarlet::arch::invalidate_dcache_to_poc_range(vaddr, len);
+}
+
 // =============================================================================
 // Wire Structures (packed, little-endian, DMA-shared)
 // =============================================================================
@@ -125,22 +135,33 @@ struct EpicAnnounce {
 struct EpicDmaBuffer {
     /// Kernel virtual address of TX buffer (host → coprocessor).
     tx_virt: usize,
-    /// Physical address (DVA) of TX buffer.
+    /// CPU physical address of the TX buffer.
     tx_paddr: usize,
+    /// Device virtual address of the TX buffer.
+    tx_dva: u64,
     /// Kernel virtual address of RX buffer (coprocessor → host).
     rx_virt: usize,
-    /// Physical address (DVA) of RX buffer.
+    /// CPU physical address of the RX buffer.
     rx_paddr: usize,
+    /// Device virtual address of the RX buffer.
+    rx_dva: u64,
+    remoteproc: Arc<dyn RemoteProcessor>,
 }
 
 impl EpicDmaBuffer {
-    fn alloc() -> Result<Self, &'static str> {
+    fn alloc(remoteproc: Arc<dyn RemoteProcessor>) -> Result<Self, &'static str> {
         let pages = (EPIC_BUFFER_SIZE + 4095) / 4096;
 
-        let tx_paddr = pmm::alloc_contiguous_pages(pages)
+        let align_pages = remoteproc.dma_alignment().div_ceil(4096);
+        let tx_paddr = pmm::alloc_contiguous_pages_aligned(pages, align_pages)
             .ok_or("apple-epic: failed to allocate TX DMA buffer")?;
-        let rx_paddr = pmm::alloc_contiguous_pages(pages)
-            .ok_or("apple-epic: failed to allocate RX DMA buffer")?;
+        let rx_paddr = match pmm::alloc_contiguous_pages_aligned(pages, align_pages) {
+            Some(paddr) => paddr,
+            None => {
+                pmm::free_contiguous_pages(tx_paddr, pages);
+                return Err("apple-epic: failed to allocate RX DMA buffer");
+            }
+        };
 
         let tx_virt = vm::phys_to_virt(tx_paddr);
         let rx_virt = vm::phys_to_virt(rx_paddr);
@@ -150,18 +171,43 @@ impl EpicDmaBuffer {
             core::ptr::write_bytes(tx_virt as *mut u8, 0, EPIC_BUFFER_SIZE);
             core::ptr::write_bytes(rx_virt as *mut u8, 0, EPIC_BUFFER_SIZE);
         }
+        dma_clean(tx_virt, EPIC_BUFFER_SIZE);
+        dma_clean(rx_virt, EPIC_BUFFER_SIZE);
+
+        let tx_dva = match remoteproc.map_dma(tx_paddr, EPIC_BUFFER_SIZE) {
+            Ok(dva) => dva,
+            Err(_) => {
+                pmm::free_contiguous_pages(tx_paddr, pages);
+                pmm::free_contiguous_pages(rx_paddr, pages);
+                return Err("apple-epic: failed to map TX DMA buffer");
+            }
+        };
+        let rx_dva = match remoteproc.map_dma(rx_paddr, EPIC_BUFFER_SIZE) {
+            Ok(dva) => dva,
+            Err(_) => {
+                remoteproc.unmap_dma(tx_dva, EPIC_BUFFER_SIZE);
+                pmm::free_contiguous_pages(tx_paddr, pages);
+                pmm::free_contiguous_pages(rx_paddr, pages);
+                return Err("apple-epic: failed to map RX DMA buffer");
+            }
+        };
 
         Ok(Self {
             tx_virt,
             tx_paddr,
+            tx_dva,
             rx_virt,
             rx_paddr,
+            rx_dva,
+            remoteproc,
         })
     }
 }
 
 impl Drop for EpicDmaBuffer {
     fn drop(&mut self) {
+        self.remoteproc.unmap_dma(self.tx_dva, EPIC_BUFFER_SIZE);
+        self.remoteproc.unmap_dma(self.rx_dva, EPIC_BUFFER_SIZE);
         let pages = (EPIC_BUFFER_SIZE + 4095) / 4096;
         pmm::free_contiguous_pages(self.tx_paddr, pages);
         pmm::free_contiguous_pages(self.rx_paddr, pages);
@@ -228,12 +274,13 @@ impl EpicEndpoint {
     ///
     /// An EPIC endpoint using the supplied AFK transport.
     pub fn from_afk(afk: Arc<Mutex<AfkEndpoint>>) -> Result<Self, &'static str> {
-        let dma = EpicDmaBuffer::alloc()?;
+        let remoteproc = afk.lock().remoteproc();
+        let dma = EpicDmaBuffer::alloc(remoteproc)?;
 
         early_println!(
             "[apple-epic] DMA buffers: TX={:#x} RX={:#x} ({} bytes each)",
-            dma.tx_paddr,
-            dma.rx_paddr,
+            dma.tx_dva,
+            dma.rx_dva,
             EPIC_BUFFER_SIZE
         );
 
@@ -260,6 +307,8 @@ impl EpicEndpoint {
     /// - Notifications (`TYPE_NOTIFY`)
     /// - Command replies (matched to pending commands)
     pub fn poll(&mut self) {
+        self.afk.lock().drain_rbep();
+
         loop {
             let action: Option<(u32, u32, Vec<u8>)> = {
                 let mut afk = self.afk.lock();
@@ -281,7 +330,14 @@ impl EpicEndpoint {
                         self.handle_notify(channel, &payload);
                     }
                     TYPE_REPLY => {
-                        self.handle_notify_ack(channel, &payload);
+                        // DCP firmware may publish a service announcement as
+                        // either NOTIFY or REPLY. Asahi Linux accepts both for
+                        // channels that have not been registered yet.
+                        if self.is_service_announce(&payload) {
+                            self.handle_notify(channel, &payload);
+                        } else {
+                            self.handle_notify_ack(channel, &payload);
+                        }
                     }
                     _ => {
                         early_println!(
@@ -344,6 +400,19 @@ impl EpicEndpoint {
         self.services.iter().find(|s| s.channel == channel)
     }
 
+    /// Return the first announced service channel.
+    ///
+    /// Some Apple firmware revisions put the matchable class in serialized
+    /// announcement properties rather than in the fixed name field. Endpoints
+    /// that define exactly one service can use this as a compatible fallback.
+    ///
+    /// # Returns
+    ///
+    /// First service channel, or `None` before any announcement is received.
+    pub fn first_service_channel(&self) -> Option<u32> {
+        self.services.first().map(|service| service.channel)
+    }
+
     /// Get the list of discovered service names.
     pub fn service_names(&self) -> Vec<&str> {
         self.services.iter().map(|s| s.name.as_str()).collect()
@@ -383,7 +452,32 @@ impl EpicEndpoint {
         data: &[u8],
     ) -> Result<Vec<u8>, &'static str> {
         self.send_command(channel, group, command, data)?;
-        self.wait_reply(channel)
+        self.wait_reply(channel, SUBTYPE_STD_SERVICE)
+    }
+
+    /// Send a raw EPIC command and wait for its DMA reply.
+    ///
+    /// Unlike [`Self::call_by_channel`], this does not prepend the standard
+    /// service-call header. DCP's iBoot display service uses subtype `0xc0`
+    /// with its own command header in the DMA buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - Announced EPIC service channel.
+    /// * `subtype` - EPIC command subtype.
+    /// * `data` - Complete service-specific DMA payload.
+    ///
+    /// # Returns
+    ///
+    /// Raw reply bytes copied from the endpoint RX buffer.
+    pub fn call_raw_by_channel(
+        &mut self,
+        channel: u32,
+        subtype: u16,
+        data: &[u8],
+    ) -> Result<Vec<u8>, &'static str> {
+        self.send_raw_command(channel, subtype, data)?;
+        self.wait_reply(channel, subtype)
     }
 
     /// Send a standard service call without waiting for a reply.
@@ -424,28 +518,57 @@ impl EpicEndpoint {
                 );
             }
         }
+        dma_clean(self.dma.tx_virt, total);
 
+        self.send_dma_command(channel, SUBTYPE_STD_SERVICE, total, None)
+    }
+
+    fn send_raw_command(
+        &mut self,
+        channel: u32,
+        subtype: u16,
+        data: &[u8],
+    ) -> Result<(), &'static str> {
+        if data.len() > EPIC_BUFFER_SIZE {
+            return Err("apple-epic: raw command data too large");
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), self.dma.tx_virt as *mut u8, data.len());
+        }
+        dma_clean(self.dma.tx_virt, data.len());
+        self.send_dma_command(channel, subtype, data.len(), Some(0))
+    }
+
+    fn send_dma_command(
+        &mut self,
+        channel: u32,
+        subtype: u16,
+        tx_len: usize,
+        fixed_sub_seq: Option<u16>,
+    ) -> Result<(), &'static str> {
         let hdr_size =
             mem::size_of::<EpicHdr>() + mem::size_of::<EpicSubHdr>() + mem::size_of::<EpicCmd>();
-        let tx_data = unsafe { core::slice::from_raw_parts(self.dma.tx_virt as *const u8, total) };
 
         let seq = self.next_seq();
-        let mut msg_buf = alloc::vec![0u8; hdr_size + tx_data.len()];
+        let sub_seq = fixed_sub_seq.unwrap_or(seq);
+        let mut msg_buf = alloc::vec![0u8; hdr_size];
         self.write_epic_headers(
             &mut msg_buf,
             CAT_COMMAND,
-            SUBTYPE_STD_SERVICE,
+            subtype,
             seq,
-            tx_data.len() as u32,
+            sub_seq,
+            mem::size_of::<EpicCmd>() as u32,
         );
 
         // Write EpicCmd after headers
         let cmd = EpicCmd {
             retcode: 0,
-            rxbuf: self.dma.rx_paddr as u64,
-            txbuf: self.dma.tx_paddr as u64,
+            rxbuf: self.dma.rx_dva,
+            txbuf: self.dma.tx_dva,
             rxlen: EPIC_BUFFER_SIZE as u32,
-            txlen: total as u32,
+            txlen: tx_len as u32,
             rxcookie: 0,
             txcookie: 0,
         };
@@ -459,9 +582,6 @@ impl EpicEndpoint {
             );
         }
 
-        // Append TX data
-        msg_buf[hdr_size..].copy_from_slice(tx_data);
-
         let mut afk = self.afk.lock();
         afk.send(channel, TYPE_COMMAND, &msg_buf)?;
 
@@ -469,13 +589,19 @@ impl EpicEndpoint {
     }
 
     /// Wait for a reply on the specified channel.
-    fn wait_reply(&mut self, channel: u32) -> Result<Vec<u8>, &'static str> {
+    fn wait_reply(&mut self, channel: u32, expected_subtype: u16) -> Result<Vec<u8>, &'static str> {
         let start = time::current_time();
 
         loop {
             if time::current_time().saturating_sub(start) >= EPIC_REPLY_TIMEOUT_US {
                 return Err("apple-epic: timeout waiting for command reply");
             }
+
+            // Match Asahi Linux's AFK command loop: consume the RTKit
+            // notification before inspecting the DMA ring. Besides providing
+            // the ownership handoff, this acknowledges the ASC mailbox so a
+            // following command can receive its own RBEP_RECV notification.
+            self.afk.lock().drain_rbep();
 
             loop {
                 let action: Option<(u32, u32, Vec<u8>)> = {
@@ -492,16 +618,22 @@ impl EpicEndpoint {
 
                 match action {
                     Some((msg_type, ch, payload)) => {
-                        if ch == channel && msg_type == TYPE_REPLY {
+                        if ch == channel
+                            && msg_type == TYPE_REPLY
+                            && self.is_command_reply(&payload, expected_subtype)
+                        {
                             return self.parse_reply(&payload);
                         }
-                        if msg_type == TYPE_NOTIFY {
+                        if msg_type == TYPE_NOTIFY
+                            || (msg_type == TYPE_REPLY && self.is_service_announce(&payload))
+                        {
                             self.handle_notify(ch, &payload);
                         } else if ch == channel {
                             early_println!(
-                                "[apple-epic] unexpected type={} on ch={}",
+                                "[apple-epic] unexpected type={} on ch={} while waiting for subtype={:#x}",
                                 msg_type,
-                                channel
+                                channel,
+                                expected_subtype
                             );
                         }
                     }
@@ -535,28 +667,28 @@ impl EpicEndpoint {
         buf: &mut [u8],
         category: u8,
         msg_type: u16,
-        seq: u16,
+        header_seq: u16,
+        sub_seq: u16,
         payload_len: u32,
     ) {
         let hdr = EpicHdr {
             version: EPIC_HDR_VERSION,
-            seq: self.seq,
+            seq: header_seq,
             _pad: 0,
             unk: 0,
             timestamp: 0,
         };
 
-        let sub_hdr_size = mem::size_of::<EpicSubHdr>() + payload_len as usize;
         let sub = EpicSubHdr {
-            length: sub_hdr_size as u32,
+            length: payload_len,
             version: EPIC_SUBHDR_VERSION,
             category,
             msg_type,
             timestamp: 0,
-            seq,
+            seq: sub_seq,
             unk: 0,
             flags: 0,
-            inline_len: payload_len,
+            inline_len: 0,
         };
 
         unsafe {
@@ -576,6 +708,32 @@ impl EpicEndpoint {
     // =========================================================================
     // Private: message handling
     // =========================================================================
+
+    fn is_service_announce(&self, payload: &[u8]) -> bool {
+        if payload.len() < mem::size_of::<EpicHdr>() + mem::size_of::<EpicSubHdr>() {
+            return false;
+        }
+
+        let sub: EpicSubHdr = unsafe {
+            core::ptr::read_unaligned(
+                payload.as_ptr().add(mem::size_of::<EpicHdr>()) as *const EpicSubHdr
+            )
+        };
+        sub.category == CAT_REPORT && sub.msg_type == SUBTYPE_ANNOUNCE
+    }
+
+    fn is_command_reply(&self, payload: &[u8], expected_subtype: u16) -> bool {
+        if payload.len() < mem::size_of::<EpicHdr>() + mem::size_of::<EpicSubHdr>() {
+            return false;
+        }
+
+        let sub: EpicSubHdr = unsafe {
+            core::ptr::read_unaligned(
+                payload.as_ptr().add(mem::size_of::<EpicHdr>()) as *const EpicSubHdr
+            )
+        };
+        sub.category == CAT_REPLY && sub.msg_type == expected_subtype
+    }
 
     fn handle_notify(&mut self, channel: u32, payload: &[u8]) {
         if payload.len() < mem::size_of::<EpicHdr>() + mem::size_of::<EpicSubHdr>() {
@@ -658,7 +816,7 @@ impl EpicEndpoint {
         let ack_size = mem::size_of::<EpicHdr>() + mem::size_of::<EpicSubHdr>();
         let mut ack = alloc::vec![0u8; ack_size];
 
-        self.write_epic_headers(&mut ack, CAT_REPLY, sub.msg_type, sub.seq, 0);
+        self.write_epic_headers(&mut ack, CAT_REPLY, sub.msg_type, sub.seq, sub.seq, 0);
 
         let mut afk = self.afk.lock();
         let _ = afk.send(channel, TYPE_NOTIFY_ACK, &ack);
@@ -682,10 +840,26 @@ impl EpicEndpoint {
             return Err("apple-epic: command returned non-zero retcode");
         }
 
-        let rx_len = cmd.rxlen as usize;
-        if rx_len > EPIC_BUFFER_SIZE {
+        let reported_rx_len = cmd.rxlen as usize;
+        if reported_rx_len > EPIC_BUFFER_SIZE {
             return Err("apple-epic: reply rxlen exceeds buffer size");
         }
+
+        // The DCP writes reply data through DMA into Scarlet's cacheable
+        // direct map. Invalidate it after the inline command reply publishes
+        // the completed length and before the CPU reads the response body.
+        //
+        // Some DCP firmware leaves EpicCmd.rxlen as zero. Asahi Linux does not
+        // use that returned field to limit the copy: it copies the output size
+        // supplied by the caller. Keep the reported length when present, but
+        // fall back to the allocated RX buffer so service-specific protocols
+        // such as iBoot can use their own embedded response length.
+        let rx_len = if reported_rx_len == 0 {
+            EPIC_BUFFER_SIZE
+        } else {
+            reported_rx_len
+        };
+        dma_invalidate(self.dma.rx_virt, rx_len);
 
         let reply_data =
             unsafe { core::slice::from_raw_parts(self.dma.rx_virt as *const u8, rx_len) };

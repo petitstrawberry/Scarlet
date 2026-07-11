@@ -164,6 +164,31 @@ impl DartInstance {
         self.set_ttbr(sid, ttbr_paddr);
         let _ = num_levels;
         self.set_tcr(sid, DART_TCR_TRANSLATE_ENABLE);
+        let _ = self.invalidate_all_tlbs();
+    }
+
+    /// Read the physical address of the root page table currently installed
+    /// for a stream ID, or `None` when the TTBR is not valid.
+    ///
+    /// The TTBR register survives a `disable_translation` call — only the
+    /// TCR is cleared — so this can be used to recover the page table that
+    /// was installed by firmware or a previous boot stage.
+    ///
+    /// # Arguments
+    ///
+    /// * `sid` - Stream ID whose TTBR to read.
+    ///
+    /// # Returns
+    ///
+    /// Physical address of the L1 root page table, or `None` when TTBR
+    /// is not valid.
+    pub fn ttbr_paddr(&self, sid: usize) -> Option<usize> {
+        let ttbr = self.read32(DART_TTBR + sid * 4);
+        if ttbr & DART_TTBR_VALID == 0 {
+            return None;
+        }
+        let paddr_high = (ttbr & !DART_TTBR_VALID) as usize;
+        Some(paddr_high << 12)
     }
 
     /// Disable translated DMA for a stream ID.
@@ -443,7 +468,8 @@ fn dart_pte_flags(flags: IommuMapFlags) -> u64 {
 
 /// Apple DART three-level page table.
 pub struct DartPageTable {
-    root: ContiguousPages,
+    root_vaddr: usize,
+    root_paddr: usize,
     tables: Vec<ContiguousPages>,
     page_shift: usize,
     bits_per_level: usize,
@@ -489,9 +515,57 @@ impl DartPageTable {
         let iova_index_bits = DART_IOVA_BITS - page_shift;
         let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
         let root = Self::allocate_table(table_size)?;
+        let root_vaddr = root.as_vaddr();
+        let root_paddr = root.as_paddr();
+        core::mem::forget(root);
 
         Ok(Self {
-            root,
+            root_vaddr,
+            root_paddr,
+            tables: Vec::new(),
+            page_shift,
+            bits_per_level,
+            table_levels,
+            pte_count,
+            table_size,
+        })
+    }
+
+    /// Wrap a pre-existing root page table installed by firmware.
+    ///
+    /// The root table at `root_paddr` must already be mapped in the kernel
+    /// linear mapping. New leaf and intermediate entries are added in-place,
+    /// matching m1n1's `dart_init(keep_pts=true)` behaviour.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_paddr` - Physical address of the existing L1 root table.
+    /// * `page_shift` - Hardware DART page shift reported by PARAMS1.
+    ///
+    /// # Returns
+    ///
+    /// A page table that reads and writes through the existing root.
+    pub fn wrap_existing(root_paddr: usize, page_shift: u32) -> Result<Self, &'static str> {
+        let page_shift = page_shift as usize;
+        if page_shift < DART_PTE_SIZE_SHIFT || page_shift < PAGE_SIZE.trailing_zeros() as usize {
+            return Err("dart: invalid page shift");
+        }
+
+        let bits_per_level = page_shift - DART_PTE_SIZE_SHIFT;
+        if bits_per_level == 0 || DART_IOVA_BITS <= page_shift {
+            return Err("dart: invalid page table geometry");
+        }
+
+        let table_size = 1usize
+            .checked_shl(page_shift as u32)
+            .ok_or("dart: page table size overflow")?;
+        let pte_count = table_size / core::mem::size_of::<u64>();
+        let iova_index_bits = DART_IOVA_BITS - page_shift;
+        let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
+
+        Ok(Self {
+            root_vaddr: scarlet::vm::phys_to_virt(root_paddr),
+            root_paddr,
             tables: Vec::new(),
             page_shift,
             bits_per_level,
@@ -544,7 +618,7 @@ impl DartPageTable {
     ///
     /// `Ok(())` when the mapping is installed.
     pub fn map_page(&mut self, iova: usize, paddr: usize, flags: u64) -> Result<(), &'static str> {
-        let mut table_vaddr = self.root.as_vaddr();
+        let mut table_vaddr = self.root_vaddr;
         for level in (1..self.table_levels).rev() {
             let index = self.table_index(iova, level);
             let pte = Self::read_pte(table_vaddr, index);
@@ -575,7 +649,7 @@ impl DartPageTable {
     ///
     /// * `iova` - I/O virtual address to unmap.
     pub fn unmap_page(&mut self, iova: usize) {
-        let mut table_vaddr = self.root.as_vaddr();
+        let mut table_vaddr = self.root_vaddr;
         for level in (1..self.table_levels).rev() {
             let index = self.table_index(iova, level);
             let pte = Self::read_pte(table_vaddr, index);
@@ -595,7 +669,7 @@ impl DartPageTable {
     ///
     /// Root page table physical address.
     pub fn root_paddr(&self) -> usize {
-        self.root.as_paddr()
+        self.root_paddr
     }
 
     /// Return the page size used by this DART page table.
@@ -639,6 +713,63 @@ impl DartPageTable {
         let pages = size.div_ceil(page_size);
         for i in 0..pages {
             self.map_page(iova + i * page_size, paddr + i * page_size, flags)?;
+        }
+        Ok(())
+    }
+
+    /// Import all valid leaf mappings from a pre-existing page table.
+    ///
+    /// Walks every level of the page table rooted at `root_paddr` and
+    /// recreates each valid leaf PTE inside this [`DartPageTable`]. This
+    /// is used to carry forward firmware/bootloader DART mappings (e.g.
+    /// coprocessor firmware segments) when replacing the TTBR with a
+    /// kernel-owned page table.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_paddr` - Physical address of the existing L1 root table.
+    ///
+    /// # Returns
+    ///
+    /// Number of leaf entries that were imported.
+    pub fn import_from_existing(&mut self, root_paddr: usize) -> Result<usize, &'static str> {
+        let mut imported = 0;
+        self.import_level(root_paddr, self.table_levels, 0, &mut imported)?;
+        Ok(imported)
+    }
+
+    fn import_level(
+        &mut self,
+        table_paddr: usize,
+        level: usize,
+        iova_base: usize,
+        imported: &mut usize,
+    ) -> Result<(), &'static str> {
+        let table_vaddr = scarlet::vm::phys_to_virt(table_paddr);
+
+        let shift = if level <= 1 {
+            self.page_shift
+        } else {
+            self.page_shift + (level - 1) * self.bits_per_level
+        };
+
+        for i in 0..self.pte_count {
+            let pte = Self::read_pte(table_vaddr, i);
+            if pte & DART_PTE_VALID == 0 {
+                continue;
+            }
+
+            let iova = iova_base | (i << shift);
+
+            if level <= 1 {
+                let leaf_paddr = Self::pte_to_paddr(pte);
+                let leaf_flags = pte & !DART_PADDR_MASK;
+                self.map_page(iova, leaf_paddr, leaf_flags)?;
+                *imported += 1;
+            } else {
+                let next_paddr = Self::pte_to_paddr(pte);
+                self.import_level(next_paddr, level - 1, iova, imported)?;
+            }
         }
         Ok(())
     }
@@ -729,6 +860,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     );
 
     for sid in 0..dart.params.num_streams as usize {
+        let ttbr = dart.read32(DART_TTBR + sid * 4);
+        if ttbr & DART_TTBR_VALID != 0 {
+            continue;
+        }
         dart.disable_translation(sid);
     }
     dart.enable_streams();

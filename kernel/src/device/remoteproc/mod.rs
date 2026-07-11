@@ -65,6 +65,40 @@ pub struct RemoteprocFirmware {
     pub regions: Vec<RemoteprocMemoryRegion>,
 }
 
+/// DMA address translator owned by a remote-processor driver.
+///
+/// Coprocessors behind an IOMMU cannot consume CPU physical addresses directly.
+/// Transport layers use this interface when allocating command queues and shared
+/// buffers so every DMA object is mapped before its address is sent to firmware.
+pub trait RemoteprocDmaMapper: Send + Sync {
+    /// Return the minimum physical and virtual alignment for DMA mappings.
+    ///
+    /// # Returns
+    ///
+    /// Required alignment in bytes.
+    fn alignment(&self) -> usize;
+
+    /// Map a physically contiguous buffer into the processor address space.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical base address of the buffer.
+    /// * `size` - Buffer size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Device virtual address visible to the remote processor.
+    fn map(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError>;
+
+    /// Release a mapping previously returned by [`Self::map`].
+    ///
+    /// # Arguments
+    ///
+    /// * `dva` - Device virtual address returned by [`Self::map`].
+    /// * `size` - Original mapping size in bytes.
+    fn unmap(&self, dva: u64, size: usize);
+}
+
 /// Identifier for a service exposed by a remote processor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RemoteprocServiceId(pub u32);
@@ -255,6 +289,44 @@ pub trait RemoteProcessor: Send + Sync {
     ///
     /// Service registered for `id`, or `None` when missing.
     fn get_service(&self, id: RemoteprocServiceId) -> Option<Arc<dyn RemoteprocService>>;
+
+    /// Map a transport DMA buffer into the processor address space.
+    ///
+    /// Identity-mapped processors use the default implementation. IOMMU-backed
+    /// processors override this method and keep the mapping alive until
+    /// [`Self::unmap_dma`] is called.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical base address of the contiguous buffer.
+    /// * `size` - Buffer size in bytes.
+    ///
+    /// # Returns
+    ///
+    /// Device virtual address visible to the processor.
+    fn map_dma(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError> {
+        let _ = size;
+        Ok(paddr as u64)
+    }
+
+    /// Release a transport DMA mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `dva` - Device virtual address returned by [`Self::map_dma`].
+    /// * `size` - Original mapping size in bytes.
+    fn unmap_dma(&self, dva: u64, size: usize) {
+        let _ = (dva, size);
+    }
+
+    /// Return the allocation alignment required by [`Self::map_dma`].
+    ///
+    /// # Returns
+    ///
+    /// Required DMA buffer alignment in bytes.
+    fn dma_alignment(&self) -> usize {
+        crate::environment::PAGE_SIZE
+    }
 }
 
 #[cfg(test)]

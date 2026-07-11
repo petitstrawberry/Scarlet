@@ -140,8 +140,10 @@ unsafe impl Sync for AfkRingBuffer {}
 struct AfkSharedBuffer {
     /// Kernel virtual address.
     virt: *mut u8,
-    /// Physical address (used as DVA/IOVA for now).
+    /// CPU physical address backing the shared mapping.
     paddr: usize,
+    /// Device virtual address sent to the coprocessor.
+    dva: u64,
     /// Total buffer size in bytes.
     size: usize,
     /// Tag from GETBUF, used to validate INIT_TX/INIT_RX messages.
@@ -157,6 +159,7 @@ unsafe impl Sync for AfkSharedBuffer {}
 /// Manages a pair of ring buffers (TX and RX) within a single shared DMA
 /// buffer, communicating with one coprocessor endpoint via RBEP.
 pub struct AfkEndpoint {
+    remoteproc: Arc<dyn RemoteProcessor>,
     service: Arc<dyn RemoteprocService>,
     ep: u8,
     shared: Option<AfkSharedBuffer>,
@@ -192,6 +195,16 @@ fn rbep_type(msg: u64) -> u64 {
     field_get(msg, RBEP_TYPE_MASK)
 }
 
+#[inline(always)]
+fn dma_clean(ptr: *const u8, len: usize) {
+    scarlet::arch::clean_dcache_to_poc_range(ptr as usize, len);
+}
+
+#[inline(always)]
+fn dma_invalidate(ptr: *const u8, len: usize) {
+    scarlet::arch::invalidate_dcache_to_poc_range(ptr as usize, len);
+}
+
 /// DMA write barrier — ensures preceding writes are visible to the coprocessor.
 #[inline(always)]
 unsafe fn dma_wmb() {
@@ -215,6 +228,15 @@ unsafe fn dma_mb() {
 // =============================================================================
 
 impl AfkEndpoint {
+    /// Return the remote processor that owns this endpoint's DMA address space.
+    ///
+    /// # Returns
+    ///
+    /// Shared remote processor reference.
+    pub fn remoteproc(&self) -> Arc<dyn RemoteProcessor> {
+        self.remoteproc.clone()
+    }
+
     /// Create a new AFK endpoint (not started).
     ///
     /// # Arguments
@@ -233,6 +255,7 @@ impl AfkEndpoint {
             .ok_or("apple-afk: RTKit service not found")?;
 
         Ok(Self {
+            remoteproc,
             service,
             ep,
             shared: None,
@@ -301,6 +324,7 @@ impl AfkEndpoint {
         }
 
         let rb = &self.tx;
+        dma_invalidate(rb.hdr as *const u8, mem::size_of::<AfkRingBufferHeader>());
         let rptr = self.read_rptr(rb.hdr);
         let wptr = self.read_wptr(rb.hdr);
 
@@ -326,7 +350,7 @@ impl AfkEndpoint {
 
         // Handle wrap: if payload won't fit above wptr, write sentinel at start
         if data.len() > rb.bufsz as usize - new_wptr {
-            let sentinel = unsafe { rb.buf as *mut AfkQueueEntry };
+            let sentinel = rb.buf as *mut AfkQueueEntry;
             unsafe {
                 core::ptr::addr_of_mut!((*sentinel).magic).write_volatile(QE_MAGIC);
                 core::ptr::addr_of_mut!((*sentinel).size).write_volatile(data.len() as u32);
@@ -348,11 +372,19 @@ impl AfkEndpoint {
             new_wptr = 0;
         }
 
+        // The shared allocation uses Scarlet's cacheable direct map. Clean the
+        // queue data before publishing the new write pointer, mirroring the
+        // ownership guarantees of Asahi Linux's coherent DMA allocation.
+        dma_clean(rb.buf as *const u8, rb.bufsz as usize);
+
         // Barrier + update write pointer
         unsafe {
             dma_wmb();
             core::ptr::addr_of_mut!((*rb.hdr).wptr).write_volatile(new_wptr as u32);
         }
+        // SAFETY: a ready TX ring owns a valid shared header mapping.
+        let wptr_ptr = unsafe { core::ptr::addr_of!((*rb.hdr).wptr) };
+        dma_clean(wptr_ptr as *const u8, mem::size_of::<u32>());
 
         // Notify coprocessor
         self.send_rbep(RBEP_SEND, new_wptr as u64)?;
@@ -371,7 +403,23 @@ impl AfkEndpoint {
         }
 
         let rb = &self.rx;
+        dma_invalidate(rb.hdr as *const u8, mem::size_of::<AfkRingBufferHeader>());
         let rptr = self.read_rptr(rb.hdr);
+        let wptr = self.read_wptr(rb.hdr);
+        if rptr == wptr || rptr as usize > rb.bufsz as usize - AfkQueueEntry::HEADER_SIZE {
+            return None;
+        }
+
+        // Asahi Linux performs dma_rmb() here because its allocation is DMA
+        // coherent. Scarlet's direct map is cacheable, so invalidate the queue
+        // entry explicitly before inspecting it.
+        dma_invalidate(
+            unsafe { rb.buf.add(rptr as usize) } as *const u8,
+            AfkQueueEntry::HEADER_SIZE,
+        );
+        unsafe {
+            dma_mb();
+        }
         let hdr_ptr = unsafe { rb.buf.add(rptr as usize) } as *const AfkQueueEntry;
 
         let magic = unsafe { core::ptr::addr_of!((*hdr_ptr).magic).read_volatile() };
@@ -383,10 +431,11 @@ impl AfkEndpoint {
 
         // Handle wrap: if entry crosses buffer end, re-read from start
         if rptr as usize + AfkQueueEntry::HEADER_SIZE + size > rb.bufsz as usize {
+            dma_invalidate(rb.buf as *const u8, AfkQueueEntry::HEADER_SIZE);
             unsafe {
                 core::ptr::addr_of_mut!((*rb.hdr).rptr).write_volatile(0);
             }
-            let wrapped = unsafe { rb.buf as *const AfkQueueEntry };
+            let wrapped = rb.buf as *const AfkQueueEntry;
             let wrapped_magic = unsafe { core::ptr::addr_of!((*wrapped).magic).read_volatile() };
             if wrapped_magic != QE_MAGIC {
                 return None;
@@ -395,8 +444,17 @@ impl AfkEndpoint {
 
         // Read entry header (re-read in case of wrap)
         let final_rptr = self.read_rptr(rb.hdr);
+        let final_hdr = unsafe { rb.buf.add(final_rptr as usize) } as *const AfkQueueEntry;
+        let final_size = unsafe { core::ptr::addr_of!((*final_hdr).size).read_volatile() } as usize;
+        if final_rptr as usize + AfkQueueEntry::HEADER_SIZE + final_size > rb.bufsz as usize {
+            return None;
+        }
+        dma_invalidate(
+            final_hdr as *const u8,
+            AfkQueueEntry::HEADER_SIZE + final_size,
+        );
         let entry = unsafe {
-            let p = rb.buf.add(final_rptr as usize) as *const AfkQueueEntry;
+            let p = final_hdr;
             AfkQueueEntry {
                 magic: core::ptr::addr_of!((*p).magic).read_volatile(),
                 size: core::ptr::addr_of!((*p).size).read_volatile(),
@@ -453,6 +511,9 @@ impl AfkEndpoint {
         unsafe {
             core::ptr::addr_of_mut!((*rb.hdr).rptr).write_volatile(new_rptr as u32);
         }
+        // SAFETY: a ready RX ring owns a valid shared header mapping.
+        let rptr_ptr = unsafe { core::ptr::addr_of!((*rb.hdr).rptr) };
+        dma_clean(rptr_ptr as *const u8, mem::size_of::<u32>());
     }
 
     /// Shutdown the AFK endpoint.
@@ -521,7 +582,8 @@ impl AfkEndpoint {
         let size = size_blocks << BLOCK_SHIFT;
 
         let pages = (size + 4095) / 4096;
-        let paddr = pmm::alloc_contiguous_pages(pages)
+        let align_pages = self.remoteproc.dma_alignment().div_ceil(4096);
+        let paddr = pmm::alloc_contiguous_pages_aligned(pages, align_pages)
             .ok_or("apple-afk: failed to allocate shared buffer")?;
 
         let virt = vm::phys_to_virt(paddr);
@@ -531,9 +593,19 @@ impl AfkEndpoint {
             core::ptr::write_bytes(virt as *mut u8, 0, size);
         }
 
-        // TODO: Proper DART IOMMU mapping. For now use physical address as DVA
-        // (works in bypass mode or when DART is not active).
-        let dva = paddr as u64;
+        // The kernel direct map is cacheable, unlike the coherent DMA mapping
+        // used by Asahi Linux.  Hand ownership of the initialized buffer to
+        // DCP explicitly so dirty zero-filled cache lines cannot hide firmware
+        // ring-buffer initialization.
+        dma_clean(virt as *const u8, size);
+
+        let dva = match self.remoteproc.map_dma(paddr, size) {
+            Ok(dva) => dva,
+            Err(error) => {
+                pmm::free_contiguous_pages(paddr, pages);
+                return Err(remoteproc_error(error));
+            }
+        };
 
         early_println!(
             "[apple-afk] ep {}: shared buffer {} bytes at paddr={:#x}, dva={:#x}",
@@ -546,6 +618,7 @@ impl AfkEndpoint {
         self.shared = Some(AfkSharedBuffer {
             virt: virt as *mut u8,
             paddr,
+            dva,
             size,
             tag,
         });
@@ -629,6 +702,7 @@ impl AfkEndpoint {
         }
 
         let hdr_ptr = unsafe { shared.virt.add(base) } as *mut AfkRingBufferHeader;
+        dma_invalidate(hdr_ptr as *const u8, mem::size_of::<AfkRingBufferHeader>());
         let hdr_bufsz = unsafe { core::ptr::addr_of!((*hdr_ptr).bufsz).read_volatile() } as usize;
 
         // Validate: bufsz + header size == total ring buffer size
@@ -695,6 +769,25 @@ impl AfkEndpoint {
             .map(|message| message.map(|message| message.words[0]))
             .map_err(remoteproc_error)
     }
+
+    /// Drain pending RBEP notifications from the RTKit mailbox.
+    ///
+    /// The coprocessor sends an RBEP_RECV for every write to the RX ring
+    /// buffer. These must be consumed to keep the mailbox from filling up
+    /// and to provide an implicit DMA read barrier before the AP inspects
+    /// the ring buffer contents.
+    pub fn drain_rbep(&self) {
+        while let Ok(Some(msg)) = self.recv_rbep() {
+            let msg_type = rbep_type(msg);
+            if msg_type != RBEP_RECV {
+                early_println!(
+                    "[apple-afk] ep {}: unexpected runtime RBEP type={:#x}",
+                    self.ep,
+                    msg_type
+                );
+            }
+        }
+    }
 }
 
 fn remoteproc_error(error: RemoteprocError) -> &'static str {
@@ -715,6 +808,7 @@ fn remoteproc_error(error: RemoteprocError) -> &'static str {
 impl Drop for AfkEndpoint {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.take() {
+            self.remoteproc.unmap_dma(shared.dva, shared.size);
             let pages = (shared.size + 4095) / 4096;
             pmm::free_contiguous_pages(shared.paddr, pages);
             early_println!(

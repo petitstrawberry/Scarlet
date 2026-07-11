@@ -26,6 +26,8 @@ use scarlet::vm;
 
 const ASC_CPU_CONTROL: usize = 0x0044;
 const ASC_CPU_CONTROL_START: u32 = 0x10;
+const ASC_MAILBOX_OFFSET: usize = 0x8000;
+const ASC_CPU_MMIO_SIZE: usize = 0x1000;
 
 const ASC_MBOX_A2I_CONTROL: usize = 0x0110;
 const ASC_MBOX_I2A_CONTROL: usize = 0x0114;
@@ -51,6 +53,7 @@ pub struct AscMessage {
 /// Apple ASC mailbox MMIO driver.
 pub struct AppleAsc {
     base: usize,
+    cpu_base: usize,
 }
 
 /// Mailbox channel wrapper for one Apple ASC mailbox queue.
@@ -81,24 +84,49 @@ pub struct AppleAscMailboxController {
 impl AppleAsc {
     /// Create a new ASC instance from an MMIO base address.
     pub const fn new(base: usize) -> Self {
-        Self { base }
+        Self {
+            base,
+            cpu_base: base,
+        }
+    }
+
+    /// Create an ASC instance with separate mailbox and CPU-control mappings.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - Virtual base of the ASC mailbox register block.
+    /// * `cpu_base` - Virtual base of the coprocessor CPU-control register block.
+    ///
+    /// # Returns
+    ///
+    /// An ASC instance using the supplied register mappings.
+    pub const fn new_with_cpu_base(base: usize, cpu_base: usize) -> Self {
+        Self { base, cpu_base }
     }
 
     /// Start the ASC IOP CPU.
     pub fn cpu_start(&self) {
-        // SAFETY: `self.base` points to a mapped ASC MMIO region.
+        // SAFETY: `self.cpu_base` points to a mapped coprocessor MMIO region.
+        let ctrl = unsafe { mmio::read32(self.cpu_base + ASC_CPU_CONTROL) };
+        // SAFETY: `self.cpu_base` points to a mapped coprocessor MMIO region.
         unsafe {
-            mmio::write32(self.base + ASC_CPU_CONTROL, ASC_CPU_CONTROL_START);
+            mmio::write32(
+                self.cpu_base + ASC_CPU_CONTROL,
+                ctrl | ASC_CPU_CONTROL_START,
+            );
         }
     }
 
     /// Stop the ASC IOP CPU by clearing START bit.
     pub fn cpu_stop(&self) {
-        // SAFETY: `self.base` points to a mapped ASC MMIO region.
-        let ctrl = unsafe { mmio::read32(self.base + ASC_CPU_CONTROL) };
-        // SAFETY: `self.base` points to a mapped ASC MMIO region.
+        // SAFETY: `self.cpu_base` points to a mapped coprocessor MMIO region.
+        let ctrl = unsafe { mmio::read32(self.cpu_base + ASC_CPU_CONTROL) };
+        // SAFETY: `self.cpu_base` points to a mapped coprocessor MMIO region.
         unsafe {
-            mmio::write32(self.base + ASC_CPU_CONTROL, ctrl & !ASC_CPU_CONTROL_START);
+            mmio::write32(
+                self.cpu_base + ASC_CPU_CONTROL,
+                ctrl & !ASC_CPU_CONTROL_START,
+            );
         }
     }
 
@@ -388,7 +416,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-asc: invalid memory resource")?;
 
     let base = vm::ioremap(paddr, size).map_err(|_| "apple-asc: ioremap failed")?;
-    let asc = Arc::new(AppleAsc::new(base));
+    let cpu_paddr = paddr
+        .checked_sub(ASC_MAILBOX_OFFSET)
+        .ok_or("apple-asc: invalid mailbox base")?;
+    let cpu_base = vm::ioremap(cpu_paddr, ASC_CPU_MMIO_SIZE)
+        .map_err(|_| "apple-asc: CPU control ioremap failed")?;
+    let asc = Arc::new(AppleAsc::new_with_cpu_base(base, cpu_base));
 
     ASC_REGISTRY.lock().push(Arc::clone(&asc));
 

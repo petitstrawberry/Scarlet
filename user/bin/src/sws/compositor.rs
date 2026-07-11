@@ -415,6 +415,8 @@ pub struct Compositor {
     backbuffer_stride: u32,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
+    swapchain_previous_damage: PresentDamage,
+    swapchain_buffer_prepared: bool,
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
@@ -481,6 +483,14 @@ impl Compositor {
         // Open the modern display endpoint. The legacy framebuffer node remains
         // a compatibility path for direct framebuffer clients.
         let display = DisplaySurface::open_primary().map_err(|_| "Failed to open display")?;
+        println!(
+            "[Compositor] Direct scanout swapchain: {}",
+            if display.has_swapchain() {
+                "enabled"
+            } else {
+                "unavailable (compatibility framebuffer path)"
+            }
+        );
 
         // Get screen dimensions
         let var_info = display
@@ -556,6 +566,8 @@ impl Compositor {
             backbuffer_stride,
             full_redraw_needed: true,
             pending_damage: Vec::new(),
+            swapchain_previous_damage: None,
+            swapchain_buffer_prepared: false,
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
@@ -1179,7 +1191,16 @@ impl Compositor {
         Ok(())
     }
 
-    fn present_damage(&self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
+    fn present_damage(&mut self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
+        if self.display.has_swapchain() {
+            self.display
+                .present()
+                .map_err(|_| "Failed to present display")?;
+            self.swapchain_previous_damage = dirty_rects;
+            self.swapchain_buffer_prepared = false;
+            return Ok(());
+        }
+
         // Present only the damage SWS actually composed. Legacy framebuffer
         // clients keep their own full-frame compatibility path.
         match dirty_rects {
@@ -1205,9 +1226,19 @@ impl Compositor {
     }
 
     fn composite_pending_to_display(&mut self) -> Result<PresentDamage, &'static str> {
-        let dirty_rects = self.pending_present_damage();
-        self.composite_damage_to_display(&dirty_rects)?;
-        Ok(dirty_rects)
+        let current_damage = self.pending_present_damage();
+        let mut update_damage = current_damage.clone();
+
+        // With two alternating scanout buffers, the buffer acquired now was
+        // last shown two frames ago. Apply the previous frame's damage once,
+        // then this frame's damage, instead of rebuilding all 16 MiB.
+        if self.display.has_swapchain() && !self.swapchain_buffer_prepared {
+            Self::merge_present_damage(&mut update_damage, self.swapchain_previous_damage.clone());
+            self.swapchain_buffer_prepared = true;
+        }
+
+        self.composite_damage_to_display(&update_damage)?;
+        Ok(current_damage)
     }
 
     /// Composite all layers directly to the display backing store.

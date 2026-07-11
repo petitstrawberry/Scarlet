@@ -201,6 +201,40 @@ pub trait GraphicsDevice: Device {
         self.present_framebuffer_region(&config, physical_addr, region)
     }
 
+    /// Return the number of CPU-mappable scanout buffers available for direct presentation.
+    fn scanout_buffer_count(&self) -> usize {
+        0
+    }
+
+    /// Return configuration and physical address for one direct scanout buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Scanout buffer index.
+    ///
+    /// # Returns
+    ///
+    /// Buffer configuration and physical address, or an error when unsupported.
+    fn get_scanout_buffer_info(
+        &self,
+        _index: usize,
+    ) -> Result<(FramebufferConfig, usize), &'static str> {
+        Err("Direct scanout buffers are not supported")
+    }
+
+    /// Present one direct scanout buffer atomically.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Scanout buffer index previously exposed for drawing.
+    ///
+    /// # Returns
+    ///
+    /// Success after the old front buffer is safe to reuse.
+    fn present_scanout_buffer(&self, _index: usize) -> Result<(), &'static str> {
+        Err("Direct scanout buffers are not supported")
+    }
+
     /// Present a GPU resource through the display pipeline.
     ///
     /// This is the display-side boundary for accelerated producers. GPU
