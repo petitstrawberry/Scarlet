@@ -54,7 +54,7 @@ const IBOOT_SWAP_BEGIN: u32 = 15;
 const IBOOT_SWAP_SET_LAYER: u32 = 16;
 const IBOOT_SWAP_END: u32 = 18;
 
-const SURFACE_FMT_XRGB2101010: u32 = 9;
+const SURFACE_FMT_BGRA8888: u32 = 1;
 const ADDR_FORMAT_PLANAR: u32 = 1;
 const COLORSPACE_DISPLAY_P3: u32 = 2;
 const EOTF_GAMMA_SDR: u32 = 1;
@@ -421,7 +421,7 @@ fn make_layer(config: &FramebufferConfig, dva: u64) -> DcpLayer {
     layer.plane_count = 1;
     layer.width = config.width;
     layer.height = config.height;
-    layer.surface_format = SURFACE_FMT_XRGB2101010;
+    layer.surface_format = SURFACE_FMT_BGRA8888;
     layer.colorspace = COLORSPACE_DISPLAY_P3;
     layer.eotf = EOTF_GAMMA_SDR;
     layer
@@ -617,10 +617,6 @@ impl GraphicsDevice for AppleDcpGraphics {
             .iboot
             .swap(&layer, self.config.width, self.config.height)?;
 
-        // The iBoot endpoint used during firmware handoff exposes no explicit
-        // completion event. Keep the old front buffer owned by DCP for one
-        // complete scan period before returning it to the compositor.
-        time::udelay(state.frame_delay_us);
         state.front = index;
         Ok(())
     }
@@ -800,7 +796,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let config = FramebufferConfig {
         width: timing.width,
         height: timing.height,
-        format: PixelFormat::XRGB2101010,
+        format: PixelFormat::BGRA8888,
         stride: timing.width.saturating_mul(4),
     };
     let frame_delay_us = if timing.fps == 0 {

@@ -415,8 +415,7 @@ pub struct Compositor {
     backbuffer_stride: u32,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
-    swapchain_previous_damage: PresentDamage,
-    swapchain_buffer_prepared: bool,
+    presented_damage: Vec<PresentDamage>,
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
@@ -548,8 +547,10 @@ impl Compositor {
 
         let backbuffer_stride = screen_width * bytes_per_pixel;
         let buffer_size = (screen_width * screen_height * bytes_per_pixel) as usize;
-        let mut backbuffer = Vec::with_capacity(buffer_size);
-        backbuffer.resize(buffer_size, 0);
+        let mut backbuffer = Vec::new();
+        if !display.has_swapchain() {
+            backbuffer.resize(buffer_size, 0);
+        }
 
         Ok(Self {
             display,
@@ -566,8 +567,7 @@ impl Compositor {
             backbuffer_stride,
             full_redraw_needed: true,
             pending_damage: Vec::new(),
-            swapchain_previous_damage: None,
-            swapchain_buffer_prepared: false,
+            presented_damage: Vec::new(),
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
@@ -1111,20 +1111,6 @@ impl Compositor {
         rects[best_index] = Self::union_damage_rect(rects[best_index], rect);
     }
 
-    fn merge_present_damage(accumulated: &mut PresentDamage, next: PresentDamage) {
-        match (accumulated, next) {
-            (accum @ Some(_), None) => {
-                *accum = None;
-            }
-            (Some(accumulated_rects), Some(next_rects)) => {
-                for rect in next_rects {
-                    Self::push_damage_rect(accumulated_rects, rect);
-                }
-            }
-            (None, _) => {}
-        }
-    }
-
     fn add_pending_damage(&mut self, rect: (i32, i32, u32, u32)) {
         if !ENABLE_DIRTY_RECT {
             self.full_redraw_needed = true;
@@ -1136,6 +1122,18 @@ impl Compositor {
         };
 
         Self::push_damage_rect(&mut self.pending_damage, (sx0, sy0, w, h));
+    }
+
+    fn merge_present_damage(accumulated: &mut PresentDamage, next: &PresentDamage) {
+        match (accumulated, next) {
+            (accumulated @ Some(_), None) => *accumulated = None,
+            (Some(accumulated_rects), Some(next_rects)) => {
+                for rect in next_rects.iter().copied() {
+                    Self::push_damage_rect(accumulated_rects, rect);
+                }
+            }
+            (None, _) => {}
+        }
     }
 
     /// Mark a window's entire area as damaged and request full redraw
@@ -1196,8 +1194,6 @@ impl Compositor {
             self.display
                 .present()
                 .map_err(|_| "Failed to present display")?;
-            self.swapchain_previous_damage = dirty_rects;
-            self.swapchain_buffer_prepared = false;
             return Ok(());
         }
 
@@ -1227,24 +1223,37 @@ impl Compositor {
 
     fn composite_pending_to_display(&mut self) -> Result<PresentDamage, &'static str> {
         let current_damage = self.pending_present_damage();
-        let mut update_damage = current_damage.clone();
+        let mut redraw_damage = current_damage.clone();
 
-        // With two alternating scanout buffers, the buffer acquired now was
-        // last shown two frames ago. Apply the previous frame's damage once,
-        // then this frame's damage, instead of rebuilding all 16 MiB.
-        if self.display.has_swapchain() && !self.swapchain_buffer_prepared {
-            Self::merge_present_damage(&mut update_damage, self.swapchain_previous_damage.clone());
-            self.swapchain_buffer_prepared = true;
+        if self.display.has_swapchain() {
+            let age = self.display.buffer_age().unwrap_or(0) as usize;
+            if age == 0 || age > self.presented_damage.len() {
+                redraw_damage = None;
+            } else {
+                let first = self.presented_damage.len() - age;
+                for damage in &self.presented_damage[first..] {
+                    Self::merge_present_damage(&mut redraw_damage, damage);
+                }
+            }
         }
 
-        self.composite_damage_to_display(&update_damage)?;
+        self.composite_damage_to_display(&redraw_damage)?;
         Ok(current_damage)
     }
 
     /// Composite all layers directly to the display backing store.
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
         let dirty_rects = self.composite_pending_to_display()?;
-        self.present_damage(dirty_rects)
+        self.present_damage(dirty_rects.clone())?;
+
+        if self.display.has_swapchain() {
+            self.presented_damage.push(dirty_rects);
+            let capacity = self.display.swapchain_buffer_count();
+            if self.presented_damage.len() > capacity {
+                self.presented_damage.remove(0);
+            }
+        }
+        Ok(())
     }
 
     fn validate_vram_samples(
@@ -1735,7 +1744,18 @@ impl Compositor {
         &mut self,
         dirty: Option<(i32, i32, u32, u32)>,
     ) -> Result<(), &'static str> {
-        let backbuffer_len = self.backbuffer.len();
+        let direct_mapping = if self.display.has_swapchain() {
+            Some(
+                self.display
+                    .get_mapping_info()
+                    .ok_or("Direct scanout buffer is not mapped")?,
+            )
+        } else {
+            None
+        };
+        let backbuffer_len = direct_mapping
+            .map(|(_, length)| length)
+            .unwrap_or(self.backbuffer.len());
         let stride = self.backbuffer_stride;
 
         // Clip dirty region to screen bounds.
@@ -1764,7 +1784,13 @@ impl Compositor {
         // Mutate backbuffer within a limited scope so we can immutably borrow `self`
         // afterwards for validation/present.
         {
-            let backbuffer = &mut self.backbuffer;
+            let backbuffer: &mut [u8] = if let Some((address, length)) = direct_mapping {
+                // SAFETY: DisplaySurface owns this live writable mmap for the
+                // currently acquired scanout buffer and reports its exact size.
+                unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) }
+            } else {
+                self.backbuffer.as_mut_slice()
+            };
 
             // Layer 1: Fill background (only within dirty region).
             // Pre-calculate values outside the loop
@@ -1837,21 +1863,29 @@ impl Compositor {
             );
         }
 
-        // Validate composition against expected pixels before presenting.
-        self.validate_vram_samples(&self.backbuffer, stride, dirty, "after display composite");
-
-        // Present only the dirty region when available.
-        let src_off = (y0 as usize)
-            .saturating_mul(stride as usize)
-            .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
-        if src_off >= backbuffer_len {
-            return Err("Backbuffer offset out of range");
+        if LOG_RENDER_VALIDATION {
+            let rendered: &[u8] = if let Some((address, length)) = direct_mapping {
+                // SAFETY: the mapping remains live and is only read here after
+                // the mutable rendering borrow above has ended.
+                unsafe { core::slice::from_raw_parts(address as *const u8, length) }
+            } else {
+                self.backbuffer.as_slice()
+            };
+            self.validate_vram_samples(rendered, stride, dirty, "after display composite");
         }
-        let src = &self.backbuffer[src_off..];
 
-        self.display
-            .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
-            .map_err(|_| "Failed to write backbuffer")?;
+        if !self.display.has_swapchain() {
+            let src_off = (y0 as usize)
+                .saturating_mul(stride as usize)
+                .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
+            if src_off >= backbuffer_len {
+                return Err("Backbuffer offset out of range");
+            }
+            let src = &self.backbuffer[src_off..];
+            self.display
+                .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
+                .map_err(|_| "Failed to write backbuffer")?;
+        }
 
         Ok(())
     }
@@ -2185,17 +2219,14 @@ impl Compositor {
 
             // Re-composite and present if needed
             if self.has_pending_redraw(needs_redraw) {
-                let mut present_damage = self.composite_pending_to_display()?;
                 needs_redraw |= self.wait_for_frame_batch()?;
                 if self.full_redraw_needed {
                     sws_debug!("[Compositor] Full redraw triggered");
                 }
                 if self.has_pending_redraw(needs_redraw) {
-                    let next_damage = self.composite_pending_to_display()?;
-                    Self::merge_present_damage(&mut present_damage, next_damage);
+                    self.composite_and_present()?;
+                    self.event_counter += 1;
                 }
-                self.present_damage(present_damage)?;
-                self.event_counter += 1;
             }
 
             // Sleep until IPC/input explicitly signals that new work is queued.

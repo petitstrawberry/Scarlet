@@ -230,7 +230,7 @@ pub trait GraphicsDevice: Device {
     ///
     /// # Returns
     ///
-    /// Success after the old front buffer is safe to reuse.
+    /// Success after the presentation request has been submitted.
     fn present_scanout_buffer(&self, _index: usize) -> Result<(), &'static str> {
         Err("Direct scanout buffers are not supported")
     }
