@@ -12,8 +12,8 @@ use alloc::vec;
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, munmap, prot},
         HandleError, HandleResult,
+        capability::memory_mapping::{flags, munmap, prot},
     },
     io::SeekFrom,
 };

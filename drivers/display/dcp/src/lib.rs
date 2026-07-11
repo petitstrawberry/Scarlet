@@ -9,6 +9,10 @@
 
 extern crate alloc;
 
+mod iomfb;
+
+use iomfb::{BandwidthRegisters, Iomfb};
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -19,6 +23,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use scarlet::device::graphics::output::{DisplayOutput, DisplayRegion};
 use scarlet::device::graphics::{FramebufferConfig, GraphicsDevice, PixelFormat};
 use scarlet::device::manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer};
+use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use scarlet::device::remoteproc::{RemoteProcessor, RemoteprocDmaMapper, RemoteprocError};
 use scarlet::device::{Device, DeviceType};
@@ -50,9 +55,6 @@ const IBOOT_GET_HPD: u32 = 3;
 const IBOOT_GET_TIMING_MODES: u32 = 4;
 const IBOOT_GET_COLOR_MODES: u32 = 5;
 const IBOOT_SET_MODE: u32 = 6;
-const IBOOT_SWAP_BEGIN: u32 = 15;
-const IBOOT_SWAP_SET_LAYER: u32 = 16;
-const IBOOT_SWAP_END: u32 = 18;
 
 const SURFACE_FMT_BGRA8888: u32 = 1;
 const ADDR_FORMAT_PLANAR: u32 = 1;
@@ -107,15 +109,6 @@ struct DcpLayer {
     _pad: [u8; 3],
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
-struct DcpRect {
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-}
-
 fn bytes_of<T>(value: &T) -> &[u8] {
     // SAFETY: the wire structs are plain repr(C, packed) values and the slice
     // does not outlive the borrowed value.
@@ -151,6 +144,116 @@ fn device_phandle(device: &PlatformDeviceInfo) -> Option<u32> {
     property_phandle(device, "phandle").or_else(|| property_phandle(device, "linux,phandle"))
 }
 
+fn phandle_reg(phandle: u32, index: usize) -> Option<(usize, usize)> {
+    let fdt = scarlet::device::fdt::FdtManager::get_manager().get_fdt()?;
+    for node in fdt.all_nodes() {
+        let node_phandle = node
+            .property("phandle")
+            .or_else(|| node.property("linux,phandle"))
+            .and_then(|property| read_be_u32(property.value, 0));
+        if node_phandle != Some(phandle) {
+            continue;
+        }
+        let region = node.reg()?.nth(index)?;
+        return Some((region.starting_address as usize, region.size.unwrap_or(0)));
+    }
+    None
+}
+
+fn device_clock_frequency(device: &PlatformDeviceInfo) -> u64 {
+    let referenced = device
+        .property("clocks")
+        .and_then(|property| read_be_u32(property.value(), 0));
+    if let Some(phandle) = referenced
+        && let Some(fdt) = scarlet::device::fdt::FdtManager::get_manager().get_fdt()
+    {
+        for node in fdt.all_nodes() {
+            let node_phandle = node
+                .property("phandle")
+                .or_else(|| node.property("linux,phandle"))
+                .and_then(|property| read_be_u32(property.value, 0));
+            if node_phandle == Some(phandle)
+                && let Some(frequency) = node
+                    .property("clock-frequency")
+                    .and_then(|property| read_be_u32(property.value, 0))
+            {
+                return frequency as u64;
+            }
+        }
+    }
+
+    device
+        .property("clock-frequency")
+        .and_then(|property| read_be_u32(property.value(), 0))
+        .unwrap_or(0) as u64
+}
+
+fn iomfb_registers(
+    device: &PlatformDeviceInfo,
+) -> Result<(Vec<(usize, usize)>, Option<BandwidthRegisters>), &'static str> {
+    let mut registers = device
+        .get_resources()
+        .iter()
+        .filter(|resource| matches!(resource.res_type, PlatformDeviceResourceType::MEM))
+        .skip(1)
+        .map(|resource| {
+            let size = resource
+                .end
+                .checked_sub(resource.start)
+                .and_then(|length| length.checked_add(1))
+                .ok_or("apple-dcp: invalid display register resource")?;
+            Ok((resource.start, size))
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+
+    let Some(scratch_property) = device.property("apple,bw-scratch") else {
+        return Ok((registers, None));
+    };
+    let scratch = scratch_property.value();
+    let scratch_phandle = read_be_u32(scratch, 0).ok_or("apple-dcp: invalid bw-scratch phandle")?;
+    let scratch_reg = read_be_u32(scratch, 4).ok_or("apple-dcp: invalid bw-scratch reg")? as usize;
+    let scratch_index =
+        read_be_u32(scratch, 8).ok_or("apple-dcp: invalid bw-scratch index")? as usize;
+    let scratch_offset =
+        read_be_u32(scratch, 12).ok_or("apple-dcp: invalid bw-scratch offset")? as usize;
+    if scratch_index != registers.len() {
+        return Err("apple-dcp: unexpected bw-scratch display index");
+    }
+    let scratch_resource = phandle_reg(scratch_phandle, scratch_reg)
+        .ok_or("apple-dcp: bw-scratch resource not found")?;
+    registers.push(scratch_resource);
+
+    let mut doorbell = 0;
+    let mut doorbell_bit = 0;
+    if let Some(doorbell_property) = device.property("apple,bw-doorbell") {
+        let value = doorbell_property.value();
+        let phandle = read_be_u32(value, 0).ok_or("apple-dcp: invalid bw-doorbell phandle")?;
+        let reg = read_be_u32(value, 4).ok_or("apple-dcp: invalid bw-doorbell reg")? as usize;
+        let index = read_be_u32(value, 8).ok_or("apple-dcp: invalid bw-doorbell index")? as usize;
+        if index != registers.len() {
+            return Err("apple-dcp: unexpected bw-doorbell display index");
+        }
+        let resource =
+            phandle_reg(phandle, reg).ok_or("apple-dcp: bw-doorbell resource not found")?;
+        doorbell = resource.0 as u64;
+        registers.push(resource);
+        let dcp_index = device
+            .property("apple,dcp-index")
+            .and_then(|property| read_be_u32(property.value(), 0))
+            .unwrap_or(0);
+        doorbell_bit = 2 + dcp_index;
+    }
+
+    Ok((
+        registers,
+        Some(BandwidthRegisters {
+            scratch: scratch_resource.0.saturating_add(scratch_offset) as u64,
+            doorbell,
+            doorbell_bit,
+        }),
+    ))
+}
+
 fn iommu_spec(device: &PlatformDeviceInfo) -> Option<(u32, usize)> {
     let value = device.property("iommus")?.value();
     Some((read_be_u32(value, 0)?, read_be_u32(value, 4)? as usize))
@@ -181,6 +284,30 @@ fn find_display_iommu() -> Option<(u32, usize, u32)> {
             read_be_u32(iommus.value, 0)?,
             read_be_u32(iommus.value, 4)? as usize,
             read_be_u32(phandle.value, 0)?,
+        ));
+    }
+    None
+}
+
+fn find_piodma_iommu(dcp_phandle: u32) -> Option<(u32, usize, u32)> {
+    let fdt = scarlet::device::fdt::FdtManager::get_manager().get_fdt()?;
+    for node in fdt.all_nodes() {
+        let phandle = node
+            .property("phandle")
+            .or_else(|| node.property("linux,phandle"))
+            .and_then(|property| read_be_u32(property.value, 0));
+        if phandle != Some(dcp_phandle) {
+            continue;
+        }
+        let piodma = node.children().find(|child| child.name == "piodma")?;
+        let iommus = piodma.property("iommus")?;
+        let piodma_phandle = piodma
+            .property("phandle")
+            .or_else(|| piodma.property("linux,phandle"))?;
+        return Some((
+            read_be_u32(iommus.value, 0)?,
+            read_be_u32(iommus.value, 4)? as usize,
+            read_be_u32(piodma_phandle.value, 0)?,
         ));
     }
     None
@@ -280,7 +407,6 @@ impl RemoteprocDmaMapper for DcpDmaMapper {
 struct DcpIboot {
     endpoint: EpicEndpoint,
     channel: u32,
-    firmware_v13: bool,
 }
 
 impl DcpIboot {
@@ -303,7 +429,7 @@ impl DcpIboot {
         // for commands with a defined output payload.
         let expects_output = matches!(
             operation,
-            IBOOT_GET_HPD | IBOOT_GET_TIMING_MODES | IBOOT_GET_COLOR_MODES | IBOOT_SWAP_BEGIN
+            IBOOT_GET_HPD | IBOOT_GET_TIMING_MODES | IBOOT_GET_COLOR_MODES
         );
         if reply.len() < 8 {
             return if expects_output {
@@ -385,32 +511,6 @@ impl DcpIboot {
         self.call(IBOOT_SET_SURFACE, bytes_of(layer))?;
         Ok(())
     }
-
-    fn swap(&mut self, layer: &DcpLayer, width: u32, height: u32) -> Result<(), &'static str> {
-        self.call(IBOOT_SWAP_BEGIN, &[])?;
-
-        let extra = if self.firmware_v13 { 8 } else { 0 };
-        let layer_offset = 8;
-        let rect_offset = layer_offset + mem::size_of::<DcpLayer>() + extra;
-        let mut payload = alloc::vec![0u8; rect_offset + 2 * mem::size_of::<DcpRect>() + 4];
-        payload[4..8].copy_from_slice(&0u32.to_le_bytes());
-        payload[layer_offset..layer_offset + mem::size_of::<DcpLayer>()]
-            .copy_from_slice(bytes_of(layer));
-        let rect = DcpRect {
-            width,
-            height,
-            x: 0,
-            y: 0,
-        };
-        payload[rect_offset..rect_offset + mem::size_of::<DcpRect>()]
-            .copy_from_slice(bytes_of(&rect));
-        payload
-            [rect_offset + mem::size_of::<DcpRect>()..rect_offset + 2 * mem::size_of::<DcpRect>()]
-            .copy_from_slice(bytes_of(&rect));
-        self.call(IBOOT_SWAP_SET_LAYER, &payload)?;
-        self.call(IBOOT_SWAP_END, &[0; 12])?;
-        Ok(())
-    }
 }
 
 fn make_layer(config: &FramebufferConfig, dva: u64) -> DcpLayer {
@@ -447,9 +547,9 @@ fn choose_color(modes: &[DcpColorMode]) -> Option<DcpColorMode> {
 }
 
 struct DcpState {
-    iboot: DcpIboot,
+    _iboot: DcpIboot,
+    iomfb: Iomfb,
     front: usize,
-    frame_delay_us: u64,
 }
 
 pub struct AppleDcpGraphics {
@@ -461,6 +561,7 @@ pub struct AppleDcpGraphics {
     _rtkit: Arc<AppleRtkit>,
     _dcp_table: Arc<Mutex<DartPageTable>>,
     _display_table: Arc<Mutex<DartPageTable>>,
+    _piodma_table: Arc<Mutex<DartPageTable>>,
 }
 
 impl AppleDcpGraphics {
@@ -559,22 +660,15 @@ impl GraphicsDevice for AppleDcpGraphics {
             region,
         );
         arch::io_wmb();
-        let layer = make_layer(&self.config, self.scanout_dva[next]);
-        state
-            .iboot
-            .swap(&layer, self.config.width, self.config.height)?;
-
-        // iBoot has no DRM-like vblank completion event. Wait one scan period
-        // before recycling the buffer that was front-most before this swap.
-        time::udelay(state.frame_delay_us);
-
-        // Keep both scanout buffers coherent. The next damage-only present can
-        // therefore update either buffer without resurrecting older pixels.
-        self.copy_region(
-            self.scanout[next].as_paddr(),
-            self.scanout[state.front].as_paddr(),
-            region,
-        );
+        let swap_id = state.iomfb.swap_start()?;
+        state.iomfb.swap_submit(
+            swap_id,
+            self.scanout_dva[next],
+            self.config.width,
+            self.config.height,
+            self.config.stride,
+        )?;
+        state.iomfb.wait_swap_complete(swap_id)?;
         state.front = next;
         Ok(())
     }
@@ -612,11 +706,15 @@ impl GraphicsDevice for AppleDcpGraphics {
         if index == state.front {
             return Err("apple-dcp: scanout buffer is already front-most");
         }
-        let layer = make_layer(&self.config, dva);
-        state
-            .iboot
-            .swap(&layer, self.config.width, self.config.height)?;
-
+        let swap_id = state.iomfb.swap_start()?;
+        state.iomfb.swap_submit(
+            swap_id,
+            dva,
+            self.config.width,
+            self.config.height,
+            self.config.stride,
+        )?;
+        state.iomfb.wait_swap_complete(swap_id)?;
         state.front = index;
         Ok(())
     }
@@ -673,22 +771,6 @@ impl Selectable for AppleDcpGraphics {
     }
 }
 
-fn firmware_is_v13(device: &PlatformDeviceInfo) -> bool {
-    let Some(value) = device.property("apple,firmware-compat") else {
-        return true;
-    };
-    let value = value.value();
-    let major_end = value
-        .iter()
-        .position(|byte| *byte == b'.')
-        .unwrap_or(value.len());
-    core::str::from_utf8(&value[..major_end])
-        .ok()
-        .and_then(|major| major.parse::<u32>().ok())
-        .map(|major| major >= 13)
-        .unwrap_or(true)
-}
-
 fn probe_deferred(message: &'static str) -> Result<(), &'static str> {
     early_println!("[apple-dcp] {}, deferring", message);
     let result = probe_defer();
@@ -704,12 +786,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         iommu_spec(device).ok_or("apple-dcp: missing DCP IOMMU")?;
     let (display_dart_phandle, display_stream, display_phandle) =
         find_display_iommu().ok_or("apple-dcp: display-subsystem IOMMU missing")?;
+    let (piodma_dart_phandle, piodma_stream, piodma_phandle) =
+        find_piodma_iommu(dcp_phandle).ok_or("apple-dcp: PIODMA IOMMU missing")?;
 
     let Some(dcp_dart) = get_dart_by_phandle(dcp_dart_phandle) else {
         return probe_deferred("DCP DART is not ready");
     };
     let Some(display_dart) = get_dart_by_phandle(display_dart_phandle) else {
         return probe_deferred("display DART is not ready");
+    };
+    let Some(piodma_dart) = get_dart_by_phandle(piodma_dart_phandle) else {
+        return probe_deferred("PIODMA DART is not ready");
     };
 
     let dcp_root = dcp_dart
@@ -718,6 +805,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let display_root = display_dart
         .ttbr_paddr(display_stream)
         .ok_or("apple-dcp: display DART has no valid TTBR")?;
+    let piodma_root = piodma_dart
+        .ttbr_paddr(piodma_stream)
+        .ok_or("apple-dcp: PIODMA DART has no valid TTBR")?;
 
     let dcp_table = Arc::new(Mutex::new(DartPageTable::wrap_existing(
         dcp_root,
@@ -727,9 +817,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         display_root,
         display_dart.page_shift(),
     )?));
+    let piodma_table = Arc::new(Mutex::new(DartPageTable::wrap_existing(
+        piodma_root,
+        piodma_dart.page_shift(),
+    )?));
 
     let dcp_handoff = map_handoff_regions(&mut dcp_table.lock(), dcp_phandle)?;
     let display_handoff = map_handoff_regions(&mut display_table.lock(), display_phandle)?;
+    let piodma_handoff = map_handoff_regions(&mut piodma_table.lock(), piodma_phandle)?;
     if dcp_handoff == 0 {
         return Err("apple-dcp: no firmware handoff mappings");
     }
@@ -739,6 +834,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         display_stream,
         display_root,
         display_table.lock().translation_levels(),
+    );
+    piodma_dart.enable_translation(
+        piodma_stream,
+        piodma_root,
+        piodma_table.lock().translation_levels(),
     );
 
     let mailbox_phandle = property_phandle(device, "mboxes")
@@ -770,11 +870,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|service| service.channel)
         .or_else(|| endpoint.first_service_channel())
         .ok_or("apple-dcp: disp0-service not announced")?;
-    let mut iboot = DcpIboot {
-        endpoint,
-        channel,
-        firmware_v13: firmware_is_v13(device),
-    };
+    let mut iboot = DcpIboot { endpoint, channel };
 
     iboot.set_power(true)?;
     let mut status = (false, 0, 0);
@@ -798,11 +894,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         height: timing.height,
         format: PixelFormat::BGRA8888,
         stride: timing.width.saturating_mul(4),
-    };
-    let frame_delay_us = if timing.fps == 0 {
-        17_667
-    } else {
-        (1_000_000u64 << 16).div_ceil(timing.fps as u64) + 1_000
     };
     let visible_size = config.size();
     let allocation_size = visible_size
@@ -858,6 +949,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     arch::io_wmb();
     iboot.set_surface(&make_layer(&config, scanout_dva[0] as u64))?;
+    let (registers, bandwidth) = iomfb_registers(device)?;
+    let clock_frequency = device_clock_frequency(device);
+    let mut iomfb = Iomfb::new(
+        rtkit.clone(),
+        registers,
+        bandwidth,
+        clock_frequency,
+        Arc::clone(&piodma_table),
+        Arc::clone(&piodma_dart),
+        piodma_stream,
+    )?;
+    iomfb.start()?;
+    iomfb.power_on()?;
 
     let graphics = Arc::new(AppleDcpGraphics {
         config: config.clone(),
@@ -865,13 +969,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         scanout: [scanout0, scanout1],
         scanout_dva: [scanout_dva[0] as u64, scanout_dva[1] as u64],
         state: Mutex::new(DcpState {
-            iboot,
+            _iboot: iboot,
+            iomfb,
             front: 0,
-            frame_delay_us,
         }),
         _rtkit: rtkit,
         _dcp_table: dcp_table,
         _display_table: display_table,
+        _piodma_table: piodma_table,
     });
     let device_id = DeviceManager::get_manager()
         .register_device_with_name(alloc::string::String::from("apple-dcp"), graphics.clone());
@@ -883,13 +988,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     early_println!(
-        "[apple-dcp] native panel {}x{} @ {}.{:02} Hz, handoff maps dcp={} display={}",
+        "[apple-dcp] native panel {}x{} @ {}.{:02} Hz, handoff maps dcp={} display={} piodma={}",
         config.width,
         config.height,
         timing.fps >> 16,
         ((timing.fps & 0xffff) * 100 + 0x7fff) >> 16,
         dcp_handoff,
-        display_handoff
+        display_handoff,
+        piodma_handoff
     );
     Ok(())
 }

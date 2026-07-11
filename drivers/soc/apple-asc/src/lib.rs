@@ -6,6 +6,7 @@ extern crate alloc;
 extern crate std;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
@@ -21,6 +22,10 @@ use scarlet::device::mailbox::{
 use scarlet::device::manager::{DeviceManager, DriverPriority};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
+use scarlet::interrupt::{
+    InterruptClaim, InterruptId, InterruptManager, InterruptResult, InterruptSource,
+};
+use scarlet::sync::Waker;
 use scarlet::time;
 use scarlet::vm;
 
@@ -54,6 +59,9 @@ pub struct AscMessage {
 pub struct AppleAsc {
     base: usize,
     cpu_base: usize,
+    interrupt_id: Mutex<Option<InterruptId>>,
+    pending_messages: Mutex<VecDeque<AscMessage>>,
+    recv_waker: Waker,
 }
 
 /// Mailbox channel wrapper for one Apple ASC mailbox queue.
@@ -87,6 +95,9 @@ impl AppleAsc {
         Self {
             base,
             cpu_base: base,
+            interrupt_id: Mutex::new(None),
+            pending_messages: Mutex::new(VecDeque::new()),
+            recv_waker: Waker::new_uninterruptible("apple_asc_rx"),
         }
     }
 
@@ -101,7 +112,13 @@ impl AppleAsc {
     ///
     /// An ASC instance using the supplied register mappings.
     pub const fn new_with_cpu_base(base: usize, cpu_base: usize) -> Self {
-        Self { base, cpu_base }
+        Self {
+            base,
+            cpu_base,
+            interrupt_id: Mutex::new(None),
+            pending_messages: Mutex::new(VecDeque::new()),
+            recv_waker: Waker::new_uninterruptible("apple_asc_rx"),
+        }
     }
 
     /// Start the ASC IOP CPU.
@@ -131,10 +148,15 @@ impl AppleAsc {
     }
 
     /// Check whether there is a pending IOP->AP message.
-    pub fn can_recv(&self) -> bool {
+    fn hardware_can_recv(&self) -> bool {
         // SAFETY: `self.base` points to a mapped ASC MMIO region.
         let status = unsafe { mmio::read32(self.base + ASC_MBOX_I2A_CONTROL) };
         (status & ASC_MBOX_CTRL_EMPTY) == 0
+    }
+
+    /// Check whether there is a pending IOP->AP message.
+    pub fn can_recv(&self) -> bool {
+        !self.pending_messages.lock().is_empty() || self.hardware_can_recv()
     }
 
     /// Send one AP->IOP message.
@@ -170,7 +192,15 @@ impl AppleAsc {
 
     /// Receive one IOP->AP message.
     pub fn recv(&self, msg: &mut AscMessage) -> Result<(), &'static str> {
-        if !self.can_recv() {
+        if let Some(pending) = self.pending_messages.lock().pop_front() {
+            *msg = pending;
+            return Ok(());
+        }
+        self.recv_hardware(msg)
+    }
+
+    fn recv_hardware(&self, msg: &mut AscMessage) -> Result<(), &'static str> {
+        if !self.hardware_can_recv() {
             return Err("apple-asc: no message available");
         }
 
@@ -196,12 +226,56 @@ impl AppleAsc {
                 return self.recv(msg);
             }
 
-            if time::current_time().saturating_sub(start) >= timeout_us {
+            let elapsed = time::current_time().saturating_sub(start);
+            if elapsed >= timeout_us {
                 return Err("apple-asc: recv timeout");
             }
 
+            if self.interrupt_id.lock().is_some()
+                && let Some(task) = scarlet::task::mytask()
+            {
+                let remaining = timeout_us - elapsed;
+                let ticks = scarlet::timer::us_to_ticks(remaining).max(1);
+                if !self.recv_waker.wait_with_timeout(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    Some(ticks),
+                ) {
+                    return Err("apple-asc: recv timeout");
+                }
+                continue;
+            }
+
+            // Early boot has no schedulable task context yet.
             time::udelay(ASC_POLL_DELAY_US);
         }
+    }
+}
+
+impl InterruptSource for AppleAsc {
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        if !self.hardware_can_recv() {
+            return Ok(InterruptClaim::NotMine);
+        }
+
+        let mut received = VecDeque::new();
+        while self.hardware_can_recv() {
+            let mut message = AscMessage { msg0: 0, msg1: 0 };
+            if self.recv_hardware(&mut message).is_err() {
+                break;
+            }
+            received.push_back(message);
+        }
+        if received.is_empty() {
+            return Ok(InterruptClaim::NotMine);
+        }
+        self.pending_messages.lock().append(&mut received);
+        self.recv_waker.wake_all();
+        Ok(InterruptClaim::Handled)
     }
 }
 
@@ -422,6 +496,26 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let cpu_base = vm::ioremap(cpu_paddr, ASC_CPU_MMIO_SIZE)
         .map_err(|_| "apple-asc: CPU control ioremap failed")?;
     let asc = Arc::new(AppleAsc::new_with_cpu_base(base, cpu_base));
+
+    let irq_resources: Vec<_> = device
+        .get_resources()
+        .iter()
+        .filter(|resource| matches!(resource.res_type, PlatformDeviceResourceType::IRQ))
+        .collect();
+    if let Some(resource) = irq_resources.get(3) {
+        let interrupt_id = resource
+            .irq_metadata
+            .as_ref()
+            .map(|metadata| metadata.irq_number)
+            .unwrap_or(resource.start as InterruptId);
+        *asc.interrupt_id.lock() = Some(interrupt_id);
+        InterruptManager::global()
+            .register_interrupt_source(interrupt_id, asc.clone())
+            .map_err(|_| "apple-asc: failed to register receive IRQ")?;
+        InterruptManager::global()
+            .enable_external_interrupt(interrupt_id, 0)
+            .map_err(|_| "apple-asc: failed to enable receive IRQ")?;
+    }
 
     ASC_REGISTRY.lock().push(Arc::clone(&asc));
 

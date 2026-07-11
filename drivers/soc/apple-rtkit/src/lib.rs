@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp;
@@ -20,6 +21,7 @@ use scarlet::vm;
 use scarlet_driver_apple_asc::{AppleAsc, AscMessage};
 
 /// RTKit message with endpoint and 64-bit payload.
+#[derive(Clone, Copy)]
 pub struct RtkitMessage {
     /// Endpoint number.
     pub ep: u8,
@@ -140,6 +142,7 @@ pub struct AppleRtkit {
     crash_handler: Arc<Mutex<Option<Arc<dyn RemoteprocCrashHandler>>>>,
     dma_mapper: Option<Arc<dyn RemoteprocDmaMapper>>,
     syslog_buffers: Arc<Mutex<Vec<SyslogBuffer>>>,
+    pending_messages: Arc<Mutex<VecDeque<RtkitMessage>>>,
 }
 
 struct SyslogBuffer {
@@ -162,6 +165,7 @@ impl AppleRtkit {
             crash_handler: Arc::new(Mutex::new(None)),
             dma_mapper: None,
             syslog_buffers: Arc::new(Mutex::new(Vec::new())),
+            pending_messages: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -368,6 +372,111 @@ impl AppleRtkit {
         }
 
         Ok(true)
+    }
+
+    /// Receive one non-system message for a specific endpoint.
+    ///
+    /// Messages for other application endpoints are retained until their
+    /// respective consumer polls them.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - RTKit endpoint whose next message should be returned.
+    /// * `msg` - Destination for the received message.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a message for `endpoint` was returned, or `false` when no
+    /// message is currently available.
+    pub fn recv_endpoint(
+        &self,
+        endpoint: u8,
+        msg: &mut RtkitMessage,
+    ) -> Result<bool, &'static str> {
+        {
+            let mut pending_messages = self.pending_messages.lock();
+            if let Some(index) = pending_messages
+                .iter()
+                .position(|pending| pending.ep == endpoint)
+            {
+                let pending = pending_messages
+                    .remove(index)
+                    .ok_or("apple-rtkit: pending message disappeared")?;
+                *msg = pending;
+                return Ok(true);
+            }
+        }
+
+        loop {
+            let mut received = RtkitMessage { ep: 0, msg: 0 };
+            if !self.recv(&mut received)? {
+                return Ok(false);
+            }
+            if received.ep == endpoint {
+                *msg = received;
+                return Ok(true);
+            }
+            self.pending_messages.lock().push_back(received);
+        }
+    }
+
+    /// Receive one message for a specific endpoint with a bounded timeout.
+    ///
+    /// Messages for other endpoints are queued for their respective consumers.
+    /// This uses the ASC transport's bounded receive primitive instead of a
+    /// caller-side busy loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - RTKit endpoint to receive from.
+    /// * `msg` - Destination for the received message.
+    /// * `timeout_us` - Maximum wait time in microseconds.
+    ///
+    /// # Returns
+    ///
+    /// Success when one message for `endpoint` is returned, or an error on
+    /// timeout or transport failure.
+    pub fn recv_endpoint_timeout(
+        &self,
+        endpoint: u8,
+        msg: &mut RtkitMessage,
+        timeout_us: u64,
+    ) -> Result<(), &'static str> {
+        {
+            let mut pending_messages = self.pending_messages.lock();
+            if let Some(index) = pending_messages
+                .iter()
+                .position(|pending| pending.ep == endpoint)
+            {
+                *msg = pending_messages
+                    .remove(index)
+                    .ok_or("apple-rtkit: pending message disappeared")?;
+                return Ok(());
+            }
+        }
+
+        let start = time::current_time();
+        loop {
+            let elapsed = time::current_time().saturating_sub(start);
+            if elapsed >= timeout_us {
+                return Err("apple-rtkit: endpoint receive timeout");
+            }
+
+            let mut asc_msg = AscMessage { msg0: 0, msg1: 0 };
+            self.asc.recv_timeout(&mut asc_msg, timeout_us - elapsed)?;
+            let mut received = RtkitMessage {
+                ep: asc_msg.msg1 as u8,
+                msg: asc_msg.msg0,
+            };
+            if self.handle_internal_message(&mut received)? {
+                continue;
+            }
+            if received.ep == endpoint {
+                *msg = received;
+                return Ok(());
+            }
+            self.pending_messages.lock().push_back(received);
+        }
     }
 
     /// Start a specific RTKit endpoint.
@@ -582,7 +691,9 @@ impl AppleRtkit {
         if request_iova != 0 {
             early_println!(
                 "[apple-rtkit] ep {} pre-allocated buffer size={:#x} iova={:#x}",
-                msg.ep, requested_size << 12, request_iova
+                msg.ep,
+                requested_size << 12,
+                request_iova
             );
             return Ok(true);
         }
@@ -600,8 +711,11 @@ impl AppleRtkit {
                 let paddr = pmm::alloc_contiguous_pages_aligned(npages, align_pages)
                     .ok_or("apple-rtkit: failed to allocate syslog buffer")?;
                 let virt = vm::phys_to_virt(paddr);
-                unsafe { core::ptr::write_bytes(virt as *mut u8, 0, size_bytes); }
-                let mapped = self.map_dma(paddr, size_bytes)
+                unsafe {
+                    core::ptr::write_bytes(virt as *mut u8, 0, size_bytes);
+                }
+                let mapped = self
+                    .map_dma(paddr, size_bytes)
                     .map_err(|_| "apple-rtkit: failed to map syslog buffer")?;
                 self.syslog_buffers.lock().push(SyslogBuffer {
                     ep: msg.ep,
@@ -611,7 +725,10 @@ impl AppleRtkit {
                 });
                 early_println!(
                     "[apple-rtkit] ep {} buffer {:#x} bytes at paddr={:#x} dva={:#x}",
-                    msg.ep, size_bytes, paddr, mapped
+                    msg.ep,
+                    size_bytes,
+                    paddr,
+                    mapped
                 );
                 mapped
             }
@@ -732,6 +849,7 @@ impl AppleRtkit {
             crash_handler: self.crash_handler.clone(),
             dma_mapper: self.dma_mapper.clone(),
             syslog_buffers: self.syslog_buffers.clone(),
+            pending_messages: self.pending_messages.clone(),
         })
     }
 }
@@ -799,13 +917,9 @@ impl RemoteprocService for AppleRtkitService {
 
     fn try_recv(&self) -> Result<Option<RemoteprocMessage>, RemoteprocError> {
         let mut rtkit_message = RtkitMessage { ep: 0, msg: 0 };
-        // The existing RTKit receive primitive consumes the next non-internal
-        // endpoint message globally and does not yet maintain per-endpoint
-        // queues, so this service currently accepts whichever endpoint message
-        // is pending and exposes its payload through this wrapper.
         let received = self
             .rtkit
-            .recv(&mut rtkit_message)
+            .recv_endpoint(self.endpoint, &mut rtkit_message)
             .map_err(|_| RemoteprocError::TransportError)?;
         if !received {
             return Ok(None);
