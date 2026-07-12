@@ -1,8 +1,8 @@
 //! Global allocator using the talc crate.
 //!
 //! This module provides a global allocator based on `talc`, a high-performance
-//! no_std allocator. It uses a custom OOM handler that extends the heap via
-//! the `sbrk` system call when memory runs out.
+//! no_std allocator. It uses a custom OOM handler that claims additional heap
+//! regions via the `sbrk` system call when memory runs out.
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
@@ -12,18 +12,13 @@ use talc::{OomHandler, Span, Talc, Talck};
 /// Minimum extension size (4 KiB).
 const MIN_EXTEND_SIZE: usize = 4096;
 
-/// Custom OOM handler that extends the heap using the sbrk syscall.
-pub struct SbrkOomHandler {
-    /// Current heap span (base to end).
-    heap: Span,
-}
+/// Custom OOM handler that claims heap regions using the sbrk syscall.
+pub struct SbrkOomHandler;
 
 impl SbrkOomHandler {
     /// Create a new uninitialized handler.
     pub const fn new() -> Self {
-        Self {
-            heap: Span::empty(),
-        }
+        Self
     }
 }
 
@@ -35,50 +30,33 @@ impl Default for SbrkOomHandler {
 
 impl OomHandler for SbrkOomHandler {
     fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
-        // Calculate how much memory we need
-        let required = layout.size().max(layout.align() * 2) + 64;
-        let extend_size = required.max(MIN_EXTEND_SIZE);
-        // Round up to alignment of usize for simplicity
-        let aligned_size = (extend_size + core::mem::size_of::<usize>() - 1)
-            & !(core::mem::size_of::<usize>() - 1);
+        let required = layout.size().max(layout.align().checked_mul(2).ok_or(())?);
+        let extend_size = required.checked_add(MIN_EXTEND_SIZE).ok_or(())?;
+        let aligned_size =
+            extend_size.checked_add(MIN_EXTEND_SIZE - 1).ok_or(())? & !(MIN_EXTEND_SIZE - 1);
 
-        // Call sbrk to get more memory
-        let result = sbrk(aligned_size);
+        // Talc automatically merges adjacent claimed spans through `extend`.
+        // Reserve one unclaimed page after each heap so independently claimed
+        // sbrk regions can never take that path.
+        let reservation_size = aligned_size.checked_add(MIN_EXTEND_SIZE).ok_or(())?;
+        let result = sbrk(reservation_size);
         if result == usize::MAX {
             // sbrk failed
             return Err(());
         }
 
         let new_base = result as *mut u8;
-        let new_acme = unsafe { new_base.add(aligned_size) };
+        let new_span = Span::new(new_base, new_base.wrapping_add(aligned_size));
 
-        // Check if this is the first allocation or if we can extend
-        if let Some((_base, acme)) = talc.oom_handler.heap.get_base_acme() {
-            // Check if the new memory is contiguous with the existing heap
-            if acme == new_base {
-                // Extend the existing heap
-                let old_heap = talc.oom_handler.heap;
-                let new_heap = old_heap.extend(0, aligned_size);
-                talc.oom_handler.heap = unsafe { talc.extend(old_heap, new_heap) };
-            } else {
-                // Non-contiguous: claim as a new heap region
-                // This can happen if something else called sbrk
-                let new_span = Span::new(new_base, new_acme);
-                if let Ok(claimed) = unsafe { talc.claim(new_span) } {
-                    // Note: we lose track of the old heap span, but talc still manages it
-                    talc.oom_handler.heap = claimed;
-                } else {
-                    return Err(());
-                }
-            }
-        } else {
-            // First allocation: claim the new memory
-            let new_span = Span::new(new_base, new_acme);
-            match unsafe { talc.claim(new_span) } {
-                Ok(claimed) => talc.oom_handler.heap = claimed,
-                Err(_) => return Err(()),
-            }
-        }
+        // Treat every sbrk allocation as an independent Talc heap. `extend`
+        // requires Talc boundary metadata at the old span's acme, but the
+        // program break is also managed by the kernel and cannot provide that
+        // invariant reliably.
+        // SAFETY: A successful sbrk call grants this process exclusive,
+        // readable and writable access to the returned contiguous range. The
+        // claimed portion cannot overlap an earlier claimed range. The final
+        // page in this sbrk reservation intentionally remains unclaimed.
+        unsafe { talc.claim(new_span) }.map_err(|_| ())?;
 
         Ok(())
     }
