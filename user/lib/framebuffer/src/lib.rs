@@ -39,6 +39,10 @@ pub mod display_commands {
     pub const DISPLAY_PRESENT: u32 = 0x5001;
     /// Present a display surface region.
     pub const DISPLAY_PRESENT_REGION: u32 = 0x5002;
+    /// Get direct scanout swapchain information.
+    pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
+    /// Present one direct scanout buffer.
+    pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -59,6 +63,9 @@ pub const DISPLAY_PIXEL_FORMAT_RGB565: u32 = 7;
 pub const DISPLAY_PIXEL_FORMAT_ARGB1555: u32 = 8;
 /// 16-bit XRGB1555 pixel layout.
 pub const DISPLAY_PIXEL_FORMAT_XRGB1555: u32 = 9;
+
+/// Maximum number of damage rectangles carried by one present request.
+pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
 
 /// Display surface information.
 #[repr(C)]
@@ -93,6 +100,40 @@ pub struct DisplayPresentRegion {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+}
+
+/// Direct scanout swapchain information.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplaySwapchainInfo {
+    /// Number of scanout buffers.
+    pub buffer_count: u32,
+    /// Bytes in each mappable buffer.
+    pub buffer_len: u32,
+    /// Scanout buffer currently displayed by the hardware.
+    pub front_buffer: u32,
+    /// Reserved for ABI alignment and future flags.
+    pub reserved: u32,
+    /// mmap offset of the first direct scanout buffer.
+    pub first_buffer_offset: usize,
+}
+
+/// Argument for `DISPLAY_PRESENT_BUFFER`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentBuffer {
+    /// Direct scanout buffer index.
+    pub index: u32,
+    /// Reserved for future fence flags.
+    pub flags: u32,
+    /// Number of valid entries in `damage`.
+    ///
+    /// Zero means the complete buffer was modified.
+    pub damage_count: u32,
+    /// Reserved for ABI alignment.
+    pub reserved: u32,
+    /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
+    pub damage_ptr: usize,
 }
 
 /// Color bit field information
@@ -281,6 +322,11 @@ pub struct DisplaySurface {
     mapped_backing_id: usize,
     scratch_line: alloc::vec::Vec<u8>,
     cached_info: Option<DisplayInfo>,
+    swapchain_buffers: alloc::vec::Vec<(usize, usize)>,
+    swapchain_presented_at: alloc::vec::Vec<Option<u64>>,
+    swapchain_pending_damage: alloc::vec::Vec<alloc::vec::Vec<DisplayPresentRegion>>,
+    present_sequence: u64,
+    draw_buffer: usize,
 }
 
 impl DisplaySurface {
@@ -358,6 +404,11 @@ impl DisplaySurface {
             mapped_backing_id: 0,
             scratch_line: alloc::vec::Vec::new(),
             cached_info: None,
+            swapchain_buffers: alloc::vec::Vec::new(),
+            swapchain_presented_at: alloc::vec::Vec::new(),
+            swapchain_pending_damage: alloc::vec::Vec::new(),
+            present_sequence: 0,
+            draw_buffer: 0,
         };
         let _ = display.setup_mmap();
         Ok(display)
@@ -371,6 +422,60 @@ impl DisplaySurface {
 
         let handle = self.file.as_handle();
         let mapper = handle.as_memory_mapping()?;
+        let mut swapchain = DisplaySwapchainInfo::default();
+        if self
+            .file
+            .as_handle()
+            .control(
+                display_commands::DISPLAY_GET_SWAPCHAIN,
+                &mut swapchain as *mut DisplaySwapchainInfo as usize,
+            )
+            .is_ok()
+            && swapchain.buffer_count >= 2
+            && swapchain.buffer_len != 0
+            && swapchain.front_buffer < swapchain.buffer_count
+        {
+            let buffer_len = swapchain.buffer_len as usize;
+            let buffer_count = swapchain.buffer_count as usize;
+            let mut offsets = alloc::vec::Vec::with_capacity(buffer_count);
+            for index in 0..swapchain.buffer_count as usize {
+                let offset = index
+                    .checked_mul(buffer_len)
+                    .and_then(|relative| swapchain.first_buffer_offset.checked_add(relative))
+                    .ok_or(HandleError::InvalidParameter)?;
+                offsets.push(offset);
+            }
+
+            let mut mapped_buffers = alloc::vec::Vec::with_capacity(buffer_count);
+            for offset in offsets {
+                let address = match mapper.mmap(
+                    0,
+                    buffer_len,
+                    prot::READ | prot::WRITE,
+                    flags::SHARED,
+                    offset,
+                ) {
+                    Ok(address) => address,
+                    Err(_) => {
+                        for (mapped_addr, mapped_size) in mapped_buffers.drain(..) {
+                            let _ = munmap(mapped_addr, mapped_size);
+                        }
+                        return Err(HandleError::SystemError(-1));
+                    }
+                };
+                mapped_buffers.push((address, buffer_len));
+            }
+            self.swapchain_buffers = mapped_buffers;
+            self.swapchain_presented_at
+                .resize(self.swapchain_buffers.len(), None);
+            self.swapchain_pending_damage
+                .resize_with(self.swapchain_buffers.len(), alloc::vec::Vec::new);
+            self.draw_buffer = (swapchain.front_buffer as usize + 1) % self.swapchain_buffers.len();
+            self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
+            self.mapped_backing_id = info.backing_id;
+            self.cached_info = Some(info);
+            return Ok(());
+        }
         let mapped_addr = mapper
             .mmap(
                 0,
@@ -640,8 +745,19 @@ impl DisplaySurface {
             return Ok(());
         }
 
-        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
-            let _ = munmap(mapped_addr, mapped_size);
+        if self.swapchain_buffers.is_empty() {
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer.take() {
+                let _ = munmap(mapped_addr, mapped_size);
+            }
+        } else {
+            for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
+                let _ = munmap(mapped_addr, mapped_size);
+            }
+            self.swapchain_presented_at.clear();
+            self.swapchain_pending_damage.clear();
+            self.present_sequence = 0;
+            self.draw_buffer = 0;
+            self.mapped_buffer = None;
         }
         self.mapped_backing_id = 0;
         self.cached_info = None;
@@ -661,15 +777,164 @@ impl DisplaySurface {
         self.mapped_buffer
     }
 
+    /// Return whether this surface uses directly mapped scanout buffers.
+    ///
+    /// # Returns
+    ///
+    /// `true` when presentation swaps between mapped scanout buffers.
+    pub fn has_swapchain(&self) -> bool {
+        !self.swapchain_buffers.is_empty()
+    }
+
+    /// Return the number of directly mapped scanout buffers.
+    ///
+    /// # Returns
+    ///
+    /// The scanout buffer count, or zero when swap is unavailable.
+    pub fn swapchain_buffer_count(&self) -> usize {
+        self.swapchain_buffers.len()
+    }
+
+    /// Return the scanout buffer currently available for drawing.
+    ///
+    /// # Returns
+    ///
+    /// The draw buffer index, or `None` when direct scanout is unavailable.
+    pub fn draw_buffer_index(&self) -> Option<usize> {
+        if self.swapchain_buffers.is_empty() {
+            None
+        } else {
+            Some(self.draw_buffer)
+        }
+    }
+
+    /// Return how many completed presents occurred since the current draw buffer was shown.
+    ///
+    /// Zero means the buffer has never been presented and requires a full copy.
+    ///
+    /// # Returns
+    ///
+    /// The current draw buffer age, or `None` when swap is unavailable.
+    pub fn buffer_age(&self) -> Option<u64> {
+        if self.swapchain_buffers.is_empty() {
+            return None;
+        }
+
+        Some(match self.swapchain_presented_at[self.draw_buffer] {
+            Some(sequence) => self.present_sequence.saturating_sub(sequence),
+            None => 0,
+        })
+    }
+
     /// Present the whole display surface.
     ///
     /// # Returns
     ///
     /// Success or HandleError on failure.
-    pub fn present(&self) -> HandleResult<()> {
+    pub fn present(&mut self) -> HandleResult<()> {
+        if !self.swapchain_buffers.is_empty() {
+            return self.present_swapchain_regions(&[]);
+        }
         self.file
             .as_handle()
             .control(display_commands::DISPLAY_PRESENT, 0)?;
+        Ok(())
+    }
+
+    /// Present the current scanout buffer with the regions copied by the producer.
+    ///
+    /// An empty slice denotes a complete-buffer update.
+    ///
+    /// # Arguments
+    ///
+    /// * `regions` - Updated display regions, or an empty slice for a full update.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn present_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if self.swapchain_buffers.is_empty() {
+            return self.present();
+        }
+        self.present_swapchain_regions(regions)
+    }
+
+    fn present_swapchain_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if regions.len() > DISPLAY_MAX_DAMAGE_RECTS {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let request = DisplayPresentBuffer {
+            index: self.draw_buffer as u32,
+            damage_count: regions.len() as u32,
+            damage_ptr: regions.as_ptr() as usize,
+            ..DisplayPresentBuffer::default()
+        };
+        self.file.as_handle().control(
+            display_commands::DISPLAY_PRESENT_BUFFER,
+            &request as *const DisplayPresentBuffer as usize,
+        )?;
+        self.present_sequence = self.present_sequence.saturating_add(1);
+        self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
+        self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
+        self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
+        Ok(())
+    }
+
+    fn copy_presented_region_to_buffer(
+        &self,
+        presented_index: usize,
+        destination_index: usize,
+        region: DisplayPresentRegion,
+    ) -> HandleResult<()> {
+        let info = self.cached_info.ok_or(HandleError::InvalidParameter)?;
+        let bytes_per_pixel = Self::display_bytes_per_pixel(info.format);
+        let x = region.x.min(info.width) as usize;
+        let y = region.y.min(info.height) as usize;
+        let width = region.width.min(info.width.saturating_sub(region.x)) as usize;
+        let height = region.height.min(info.height.saturating_sub(region.y)) as usize;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let (source, source_len) = *self
+            .swapchain_buffers
+            .get(presented_index)
+            .ok_or(HandleError::InvalidParameter)?;
+        let (destination, destination_len) = *self
+            .swapchain_buffers
+            .get(destination_index)
+            .ok_or(HandleError::InvalidParameter)?;
+        let stride = info.stride as usize;
+        let row_bytes = width
+            .checked_mul(bytes_per_pixel)
+            .ok_or(HandleError::InvalidParameter)?;
+        let x_bytes = x
+            .checked_mul(bytes_per_pixel)
+            .ok_or(HandleError::InvalidParameter)?;
+
+        for row in 0..height {
+            let offset = y
+                .checked_add(row)
+                .and_then(|line| line.checked_mul(stride))
+                .and_then(|line| line.checked_add(x_bytes))
+                .ok_or(HandleError::InvalidParameter)?;
+            let end = offset
+                .checked_add(row_bytes)
+                .ok_or(HandleError::InvalidParameter)?;
+            if end > source_len || end > destination_len {
+                return Err(HandleError::InvalidParameter);
+            }
+            // SAFETY: Category 10 (out-of-bounds access) is prevented by the
+            // checked row range above. Distinct swapchain mmaps do not overlap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (source as *const u8).add(offset),
+                    (destination as *mut u8).add(offset),
+                    row_bytes,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -685,8 +950,41 @@ impl DisplaySurface {
     /// # Returns
     ///
     /// Success or HandleError on failure.
-    pub fn present_region(&self, x: u32, y: u32, width: u32, height: u32) -> HandleResult<()> {
+    pub fn present_region(&mut self, x: u32, y: u32, width: u32, height: u32) -> HandleResult<()> {
         if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        if !self.swapchain_buffers.is_empty() {
+            let region = DisplayPresentRegion {
+                x,
+                y,
+                width,
+                height,
+            };
+            let presented_index = self.draw_buffer;
+            let mut regions = core::mem::take(
+                self.swapchain_pending_damage
+                    .get_mut(presented_index)
+                    .ok_or(HandleError::InvalidParameter)?,
+            );
+            regions.push(region);
+            let present_result = if regions.len() > DISPLAY_MAX_DAMAGE_RECTS {
+                self.present()
+            } else {
+                self.present_regions(&regions)
+            };
+            if let Err(error) = present_result {
+                self.swapchain_pending_damage[presented_index] = regions;
+                return Err(error);
+            }
+            for destination_index in 0..self.swapchain_buffers.len() {
+                if destination_index == presented_index {
+                    continue;
+                }
+                self.copy_presented_region_to_buffer(presented_index, destination_index, region)?;
+                self.swapchain_pending_damage[destination_index].push(region);
+            }
             return Ok(());
         }
 
@@ -1745,8 +2043,14 @@ impl Drop for Framebuffer {
 
 impl Drop for DisplaySurface {
     fn drop(&mut self) {
-        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
-            let _ = munmap(mapped_addr, mapped_size);
+        if self.swapchain_buffers.is_empty() {
+            if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+                let _ = munmap(mapped_addr, mapped_size);
+            }
+        } else {
+            for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
+                let _ = munmap(mapped_addr, mapped_size);
+            }
         }
     }
 }

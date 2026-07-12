@@ -12,6 +12,7 @@ use spin::RwLock;
 
 use super::{FramebufferConfig, PixelFormat, manager::FramebufferResource, output::DisplayRegion};
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
+use crate::library::std::usercopy::copy_from_user;
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::vm::addr::phys_to_virt;
@@ -27,6 +28,10 @@ pub mod display_commands {
     pub const DISPLAY_PRESENT: u32 = 0x5001;
     /// Present a display surface region.
     pub const DISPLAY_PRESENT_REGION: u32 = 0x5002;
+    /// Get direct scanout swapchain information.
+    pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
+    /// Present one direct scanout buffer.
+    pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -47,6 +52,9 @@ pub const DISPLAY_PIXEL_FORMAT_RGB565: u32 = 7;
 pub const DISPLAY_PIXEL_FORMAT_ARGB1555: u32 = 8;
 /// 16-bit XRGB1555 pixel layout.
 pub const DISPLAY_PIXEL_FORMAT_XRGB1555: u32 = 9;
+
+/// Maximum number of damage rectangles carried by one present request.
+pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
 
 /// Display surface information.
 #[repr(C)]
@@ -81,6 +89,40 @@ pub struct DisplayPresentRegion {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+}
+
+/// Direct scanout swapchain information.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplaySwapchainInfo {
+    /// Number of scanout buffers.
+    pub buffer_count: u32,
+    /// Bytes in each mappable buffer.
+    pub buffer_len: u32,
+    /// Scanout buffer currently displayed by the hardware.
+    pub front_buffer: u32,
+    /// Reserved for ABI alignment and future flags.
+    pub reserved: u32,
+    /// mmap offset of the first direct scanout buffer.
+    pub first_buffer_offset: usize,
+}
+
+/// Argument for `DISPLAY_PRESENT_BUFFER`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentBuffer {
+    /// Direct scanout buffer index.
+    pub index: u32,
+    /// Reserved for future fence flags.
+    pub flags: u32,
+    /// Number of valid entries in `damage`.
+    ///
+    /// Zero means the complete buffer was modified.
+    pub damage_count: u32,
+    /// Reserved for ABI alignment.
+    pub reserved: u32,
+    /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
+    pub damage_ptr: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -166,8 +208,10 @@ impl DisplayCharDevice {
         DeviceManager::get_manager()
     }
 
-    fn page_aligned_size(size: usize) -> usize {
-        (size + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1)
+    fn page_aligned_size(size: usize) -> Result<usize, &'static str> {
+        size.checked_add(crate::environment::PAGE_SIZE - 1)
+            .map(|size| size & !(crate::environment::PAGE_SIZE - 1))
+            .ok_or("Display backing size overflow")
     }
 
     fn current_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
@@ -177,7 +221,7 @@ impl DisplayCharDevice {
         {
             if let Some(graphics_device) = device.as_graphics_device() {
                 let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
-                let size = Self::page_aligned_size(config.size());
+                let size = Self::page_aligned_size(config.size())?;
                 return Ok(DisplayBackingInfo {
                     config,
                     physical_addr,
@@ -270,6 +314,107 @@ impl DisplayCharDevice {
             region.width,
             region.height,
         ))?;
+        Ok(0)
+    }
+
+    fn handle_get_swapchain(&self, arg: usize) -> Result<i32, &'static str> {
+        let target_ptr = Self::translated_ptr(arg)?;
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        let count = graphics.scanout_buffer_count();
+        if count == 0 {
+            return Err("Display swapchain is not supported");
+        }
+        let (config, _) = graphics.get_scanout_buffer_info(0)?;
+        let front_buffer = graphics
+            .front_scanout_buffer()
+            .ok_or("Display front scanout buffer is unavailable")?;
+        if front_buffer >= count {
+            return Err("Display front scanout buffer is invalid");
+        }
+        let buffer_len = Self::page_aligned_size(config.size())?;
+        let buffer_count = u32::try_from(count).map_err(|_| "Display scanout count exceeds ABI")?;
+        let buffer_len_u32 =
+            u32::try_from(buffer_len).map_err(|_| "Display scanout size exceeds ABI")?;
+        let front_buffer =
+            u32::try_from(front_buffer).map_err(|_| "Display front scanout exceeds ABI")?;
+        let info = DisplaySwapchainInfo {
+            buffer_count,
+            buffer_len: buffer_len_u32,
+            front_buffer,
+            reserved: 0,
+            first_buffer_offset: buffer_len,
+        };
+        // SAFETY: target_ptr is a translated caller-provided output pointer.
+        unsafe { core::ptr::write(target_ptr as *mut DisplaySwapchainInfo, info) };
+        Ok(0)
+    }
+
+    fn handle_present_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid display present pointer");
+        }
+        let request = if let Some(task) = crate::task::mytask() {
+            let mut request = core::mem::MaybeUninit::<DisplayPresentBuffer>::uninit();
+            // SAFETY: the byte slice covers the complete uninitialized request,
+            // which copy_from_user initializes before assume_init.
+            let bytes = unsafe {
+                core::slice::from_raw_parts_mut(
+                    request.as_mut_ptr() as *mut u8,
+                    core::mem::size_of::<DisplayPresentBuffer>(),
+                )
+            };
+            copy_from_user(task, arg, bytes)
+                .map_err(|_| "Failed to copy display present from user")?;
+            // SAFETY: copy_from_user initialized every byte of the request.
+            unsafe { request.assume_init() }
+        } else {
+            // SAFETY: in-kernel callers provide a valid request pointer.
+            unsafe { core::ptr::read(arg as *const DisplayPresentBuffer) }
+        };
+        let damage_count = request.damage_count as usize;
+        if damage_count > DISPLAY_MAX_DAMAGE_RECTS {
+            return Err("Display present has too many damage rectangles");
+        }
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        if damage_count != 0 && request.damage_ptr == 0 {
+            return Err("Display present has a null damage pointer");
+        }
+        let damage_bytes_len = damage_count
+            .checked_mul(core::mem::size_of::<DisplayPresentRegion>())
+            .ok_or("Display damage size overflow")?;
+        let mut damage_bytes = vec![0u8; damage_bytes_len];
+        if damage_count != 0 {
+            let task = crate::task::mytask().ok_or("Display present has no current task")?;
+            copy_from_user(task, request.damage_ptr, &mut damage_bytes)
+                .map_err(|_| "Failed to copy display damage from user")?;
+        }
+
+        let mut regions = Vec::with_capacity(damage_count);
+        for bytes in damage_bytes.chunks_exact(core::mem::size_of::<DisplayPresentRegion>()) {
+            // SAFETY: each chunk has the exact structure size and read_unaligned
+            // does not require the byte vector to provide structure alignment.
+            let damage =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const DisplayPresentRegion) };
+            regions.push(DisplayRegion::new(
+                damage.x,
+                damage.y,
+                damage.width,
+                damage.height,
+            ));
+        }
+        graphics.present_scanout_buffer_regions(request.index as usize, &regions)?;
         Ok(0)
     }
 
@@ -404,6 +549,8 @@ impl ControlOps for DisplayCharDevice {
             DISPLAY_GET_INFO => self.handle_get_info(arg),
             DISPLAY_PRESENT => self.handle_present(),
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
+            DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
+            DISPLAY_PRESENT_BUFFER => self.handle_present_buffer(arg),
             _ => Err("Unsupported display control command"),
         }
     }
@@ -414,6 +561,8 @@ impl ControlOps for DisplayCharDevice {
             (DISPLAY_GET_INFO, "Get display surface information"),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
+            (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
+            (DISPLAY_PRESENT_BUFFER, "Present direct scanout buffer"),
         ]
     }
 }
@@ -439,7 +588,27 @@ impl MemoryMappingOps for DisplayCharDevice {
             return Err("Display backing physical address must be page-aligned");
         }
         if offset >= info.size {
-            return Err("Offset exceeds display backing size");
+            let device = self
+                .device_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .ok_or("Display source device not found")?;
+            let graphics = device
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?;
+            let relative = offset - info.size;
+            let index = relative / info.size;
+            let buffer_offset = relative % info.size;
+            let (_, physical_addr) = graphics.get_scanout_buffer_info(index)?;
+            if length > info.size - buffer_offset {
+                return Err("Requested length exceeds scanout buffer size");
+            }
+            let mapping_paddr = physical_addr
+                .checked_add(buffer_offset)
+                .ok_or("Display scanout physical address overflow")?;
+            return Ok(
+                crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
+                    .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+            );
         }
 
         let available_size = info.size - offset;
@@ -447,12 +616,14 @@ impl MemoryMappingOps for DisplayCharDevice {
             return Err("Requested length exceeds available display backing size");
         }
 
-        Ok(crate::object::capability::MemoryMappingInfo::new(
-            info.physical_addr + offset,
-            0x3,
-            true,
+        let mapping_paddr = info
+            .physical_addr
+            .checked_add(offset)
+            .ok_or("Display backing physical address overflow")?;
+        Ok(
+            crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
+                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
         )
-        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable))
     }
 
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {

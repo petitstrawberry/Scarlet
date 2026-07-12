@@ -41,6 +41,10 @@ path = "src/fb_test.rs"
 name = "gpu_probe"
 path = "src/gpu_probe.rs"
 
+[[bin]]
+name = "dcp_flip_test"
+path = "src/dcp_flip_test.rs"
+
  [[bin]]
  name = "socket_server"
  path = "src/socket_server.rs"

@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-driver-dcp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel" }
+scarlet-driver-apple-dart = { path = "../../iommu/apple-dart" }
+scarlet-driver-apple-asc = { path = "../../soc/apple-asc" }
+scarlet-driver-apple-rtkit = { path = "../../soc/apple-rtkit" }
+scarlet-driver-apple-afk = { path = "../../soc/apple-afk" }
+scarlet-driver-apple-epic = { path = "../../soc/apple-epic" }

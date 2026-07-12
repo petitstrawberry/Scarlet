@@ -248,6 +248,16 @@ impl GraphicsManager {
             *framebuffers = Some(HashMap::new());
         }
         let map = framebuffers.as_ref().unwrap();
+        if map
+            .values()
+            .any(|resource| resource.source_device_id == device_id)
+        {
+            crate::early_println!(
+                "[GraphicsManager] Graphics device {} is already registered",
+                device_id
+            );
+            return Ok(());
+        }
         let logical_name = format!("fb{}", map.len());
         drop(framebuffers);
 
@@ -872,6 +882,36 @@ mod tests {
         let page_aligned_size = (800 * 600 * 4 + crate::environment::PAGE_SIZE - 1)
             & !(crate::environment::PAGE_SIZE - 1);
         assert_eq!(fb.size, page_aligned_size);
+    }
+
+    #[test_case]
+    fn test_duplicate_source_device_registration_is_idempotent() {
+        let manager = test_utils::create_test_graphics_manager();
+        let device_manager = DeviceManager::new_for_test();
+        let mut device = GenericGraphicsDevice::new("test-gpu");
+        device.set_framebuffer_config(FramebufferConfig::new(640, 480, PixelFormat::BGRA8888));
+        device.set_framebuffer_address(0x90000000);
+        let shared_device: SharedDevice = Arc::new(device);
+
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    7,
+                    shared_device.clone(),
+                    &device_manager,
+                )
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device_with_device_manager(
+                    7,
+                    shared_device,
+                    &device_manager,
+                )
+                .is_ok()
+        );
+        assert_eq!(manager.get_framebuffer_count(), 1);
     }
 
     #[test_case]

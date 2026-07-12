@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp;
@@ -9,15 +10,18 @@ use core::cmp;
 use scarlet::sync::Mutex;
 
 use scarlet::device::remoteproc::{
-    RemoteProcessor, RemoteprocCrashHandler, RemoteprocError, RemoteprocFirmware,
-    RemoteprocMemoryRegion, RemoteprocMessage, RemoteprocService, RemoteprocServiceClient,
-    RemoteprocServiceId, RemoteprocState,
+    RemoteProcessor, RemoteprocCrashHandler, RemoteprocDmaMapper, RemoteprocError,
+    RemoteprocFirmware, RemoteprocMemoryRegion, RemoteprocMessage, RemoteprocService,
+    RemoteprocServiceClient, RemoteprocServiceId, RemoteprocState,
 };
-use scarlet::early_println;
+use scarlet::mem::pmm;
+use scarlet::println;
 use scarlet::time;
+use scarlet::vm;
 use scarlet_driver_apple_asc::{AppleAsc, AscMessage};
 
 /// RTKit message with endpoint and 64-bit payload.
+#[derive(Clone, Copy)]
 pub struct RtkitMessage {
     /// Endpoint number.
     pub ep: u8,
@@ -93,8 +97,8 @@ const RTKIT_OSLOG_INIT: u64 = 1;
 const RTKIT_OSLOG_ACK: u64 = 3;
 
 const MSG_BUFFER_REQUEST: u64 = 1;
-const MSG_BUFFER_REQUEST_SIZE: u64 = 0x0FF0_0000_0000_0000;
-const MSG_BUFFER_REQUEST_IOVA: u64 = 0x0000_0FFF_FFFF_FFFF;
+const MSG_BUFFER_REQUEST_SIZE: u64 = 0x000F_F000_0000_0000;
+const MSG_BUFFER_REQUEST_IOVA: u64 = 0x0000_03FF_FFFF_FFFF;
 
 /// RTKit powered off state.
 pub const RTKIT_POWER_OFF: u32 = 0x00;
@@ -135,6 +139,16 @@ pub struct AppleRtkit {
     ep_bitmap: Arc<Mutex<u64>>,
     firmware_regions: Arc<Mutex<Vec<RemoteprocMemoryRegion>>>,
     crash_handler: Arc<Mutex<Option<Arc<dyn RemoteprocCrashHandler>>>>,
+    dma_mapper: Option<Arc<dyn RemoteprocDmaMapper>>,
+    syslog_buffers: Arc<Mutex<Vec<SyslogBuffer>>>,
+    pending_messages: Arc<Mutex<VecDeque<RtkitMessage>>>,
+}
+
+struct SyslogBuffer {
+    ep: u8,
+    paddr: usize,
+    dva: u64,
+    pages: usize,
 }
 
 impl AppleRtkit {
@@ -148,12 +162,34 @@ impl AppleRtkit {
             ep_bitmap: Arc::new(Mutex::new(0)),
             firmware_regions: Arc::new(Mutex::new(Vec::new())),
             crash_handler: Arc::new(Mutex::new(None)),
+            dma_mapper: None,
+            syslog_buffers: Arc::new(Mutex::new(Vec::new())),
+            pending_messages: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// Create an RTKit instance whose transport buffers are mapped by an IOMMU.
+    ///
+    /// # Arguments
+    ///
+    /// * `asc` - ASC mailbox used by RTKit.
+    /// * `dma_mapper` - Mapper for AFK, EPIC, and other shared buffers.
+    ///
+    /// # Returns
+    ///
+    /// A new RTKit protocol instance using device virtual addresses.
+    pub fn new_with_dma_mapper(
+        asc: Arc<AppleAsc>,
+        dma_mapper: Arc<dyn RemoteprocDmaMapper>,
+    ) -> Self {
+        let mut rtkit = Self::new(asc);
+        rtkit.dma_mapper = Some(dma_mapper);
+        rtkit
     }
 
     /// Perform the RTKit boot handshake.
     pub fn boot(&self) -> Result<(), &'static str> {
-        self.boot_inner(&RTKIT_DEFAULT_ENDPOINTS, false, true)
+        self.boot_inner(&[], false, true)
     }
 
     /// Wake RTKit without asserting CPU_RUN.
@@ -166,7 +202,7 @@ impl AppleRtkit {
     ///
     /// `Ok(())` when RTKit reaches the powered-on state.
     pub fn wake(&self) -> Result<(), &'static str> {
-        self.boot_inner(&RTKIT_DEFAULT_ENDPOINTS, false, false)
+        self.boot_inner(&[], false, false)
     }
 
     /// Perform the RTKit boot handshake and start required endpoints.
@@ -214,9 +250,11 @@ impl AppleRtkit {
         start_cpu: bool,
     ) -> Result<(), &'static str> {
         if start_cpu {
+            println!("[apple-rtkit] starting ASC CPU");
             self.asc.cpu_start();
         }
 
+        println!("[apple-rtkit] requesting IOP INIT");
         self.send(&RtkitMessage {
             ep: RTKIT_EP_MGMT,
             msg: mgmt_msg(
@@ -225,12 +263,34 @@ impl AppleRtkit {
             ),
         })?;
 
-        let hello = self.wait_mgmt_msg(MGMT_MSG_HELLO, RTKIT_BOOT_TIMEOUT_US)?;
+        println!("[apple-rtkit] waiting for HELLO");
+        let hello = self
+            .wait_mgmt_msg(MGMT_MSG_HELLO, RTKIT_BOOT_TIMEOUT_US)
+            .map_err(|_| "apple-rtkit: timeout waiting for HELLO")?;
         self.handle_hello(hello)?;
+        println!("[apple-rtkit] HELLO negotiated");
 
-        self.handle_epmap_sequence()?;
+        self.handle_epmap_sequence()
+            .map_err(|_| "apple-rtkit: endpoint-map handshake failed")?;
+        println!("[apple-rtkit] endpoint map received");
 
-        for &ep in endpoints {
+        // RTKit advertises a standard set of system endpoints used for crash,
+        // log, and report buffers. Start every advertised default before
+        // waiting for IOP ON, matching m1n1's boot sequence.
+        for &ep in &RTKIT_DEFAULT_ENDPOINTS {
+            if self.endpoint_supported(ep) {
+                self.start_ep(ep)?;
+            }
+        }
+
+        // Start any additional required system endpoints supplied by a client.
+        for &ep in endpoints
+            .iter()
+            .filter(|&&ep| ep < RTKIT_APP_ENDPOINT_START)
+        {
+            if RTKIT_DEFAULT_ENDPOINTS.contains(&ep) {
+                continue;
+            }
             if self.endpoint_supported(ep) {
                 self.start_ep(ep)?;
             } else if require_endpoints {
@@ -238,8 +298,11 @@ impl AppleRtkit {
             }
         }
 
+        println!("[apple-rtkit] waiting for IOP ON");
         loop {
-            let msg = self.wait_any_mgmt_msg(RTKIT_BOOT_TIMEOUT_US)?;
+            let msg = self
+                .wait_any_mgmt_msg(RTKIT_BOOT_TIMEOUT_US)
+                .map_err(|_| "apple-rtkit: timeout waiting for IOP ON")?;
             let msg_type = field_get(msg, MGMT_TYPE);
             if msg_type == MGMT_MSG_IOP_PWR_STATE_ACK {
                 let pwr = field_get(msg, MGMT_PWR_STATE) as u32;
@@ -257,16 +320,18 @@ impl AppleRtkit {
                 field_prep(MGMT_PWR_STATE, RTKIT_POWER_ON as u64),
             ),
         })?;
+        *self.ap_power.lock() = RTKIT_POWER_ON;
 
-        loop {
-            let msg = self.wait_any_mgmt_msg(RTKIT_BOOT_TIMEOUT_US)?;
-            let msg_type = field_get(msg, MGMT_TYPE);
-            if msg_type == MGMT_MSG_AP_PWR_STATE {
-                let pwr = field_get(msg, MGMT_PWR_STATE) as u32;
-                *self.ap_power.lock() = pwr;
-                if pwr == RTKIT_POWER_ON {
-                    break;
-                }
+        println!("[apple-rtkit] AP ON requested");
+
+        for &ep in endpoints
+            .iter()
+            .filter(|&&ep| ep >= RTKIT_APP_ENDPOINT_START)
+        {
+            if self.endpoint_supported(ep) {
+                self.start_ep_raw(ep)?;
+            } else if require_endpoints {
+                return Err("apple-rtkit: requested endpoint unavailable");
             }
         }
 
@@ -308,16 +373,121 @@ impl AppleRtkit {
         Ok(true)
     }
 
+    /// Receive one non-system message for a specific endpoint.
+    ///
+    /// Messages for other application endpoints are retained until their
+    /// respective consumer polls them.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - RTKit endpoint whose next message should be returned.
+    /// * `msg` - Destination for the received message.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a message for `endpoint` was returned, or `false` when no
+    /// message is currently available.
+    pub fn recv_endpoint(
+        &self,
+        endpoint: u8,
+        msg: &mut RtkitMessage,
+    ) -> Result<bool, &'static str> {
+        {
+            let mut pending_messages = self.pending_messages.lock();
+            if let Some(index) = pending_messages
+                .iter()
+                .position(|pending| pending.ep == endpoint)
+            {
+                let pending = pending_messages
+                    .remove(index)
+                    .ok_or("apple-rtkit: pending message disappeared")?;
+                *msg = pending;
+                return Ok(true);
+            }
+        }
+
+        loop {
+            let mut received = RtkitMessage { ep: 0, msg: 0 };
+            if !self.recv(&mut received)? {
+                return Ok(false);
+            }
+            if received.ep == endpoint {
+                *msg = received;
+                return Ok(true);
+            }
+            self.pending_messages.lock().push_back(received);
+        }
+    }
+
+    /// Receive one message for a specific endpoint with a bounded timeout.
+    ///
+    /// Messages for other endpoints are queued for their respective consumers.
+    /// This uses the ASC transport's bounded receive primitive instead of a
+    /// caller-side busy loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - RTKit endpoint to receive from.
+    /// * `msg` - Destination for the received message.
+    /// * `timeout_us` - Maximum wait time in microseconds.
+    ///
+    /// # Returns
+    ///
+    /// Success when one message for `endpoint` is returned, or an error on
+    /// timeout or transport failure.
+    pub fn recv_endpoint_timeout(
+        &self,
+        endpoint: u8,
+        msg: &mut RtkitMessage,
+        timeout_us: u64,
+    ) -> Result<(), &'static str> {
+        {
+            let mut pending_messages = self.pending_messages.lock();
+            if let Some(index) = pending_messages
+                .iter()
+                .position(|pending| pending.ep == endpoint)
+            {
+                *msg = pending_messages
+                    .remove(index)
+                    .ok_or("apple-rtkit: pending message disappeared")?;
+                return Ok(());
+            }
+        }
+
+        let start = time::current_time();
+        loop {
+            let elapsed = time::current_time().saturating_sub(start);
+            if elapsed >= timeout_us {
+                return Err("apple-rtkit: endpoint receive timeout");
+            }
+
+            let mut asc_msg = AscMessage { msg0: 0, msg1: 0 };
+            self.asc.recv_timeout(&mut asc_msg, timeout_us - elapsed)?;
+            let mut received = RtkitMessage {
+                ep: asc_msg.msg1 as u8,
+                msg: asc_msg.msg0,
+            };
+            if self.handle_internal_message(&mut received)? {
+                continue;
+            }
+            if received.ep == endpoint {
+                *msg = received;
+                return Ok(());
+            }
+            self.pending_messages.lock().push_back(received);
+        }
+    }
+
     /// Start a specific RTKit endpoint.
     pub fn start_ep(&self, ep: u8) -> Result<(), &'static str> {
         if !self.endpoint_supported(ep) {
             return Err("apple-rtkit: endpoint unavailable");
         }
 
-        if ep >= RTKIT_APP_ENDPOINT_START && !self.is_running() {
-            return Err("apple-rtkit: application endpoint requires running RTKit");
-        }
+        self.start_ep_raw(ep)
+    }
 
+    fn start_ep_raw(&self, ep: u8) -> Result<(), &'static str> {
         let payload = field_prep(MGMT_MSG_START_EP_IDX, ep as u64) | MGMT_MSG_START_EP_FLAG;
         self.send(&RtkitMessage {
             ep: RTKIT_EP_MGMT,
@@ -366,6 +536,7 @@ impl AppleRtkit {
 
             let ep = asc_msg.msg1 as u8;
             if ep == RTKIT_EP_MGMT {
+                let _ = self.handle_mgmt_message(asc_msg.msg0)?;
                 return Ok(asc_msg.msg0);
             }
 
@@ -460,13 +631,93 @@ impl AppleRtkit {
                 let pwr = field_get(mgmt_msg_raw, MGMT_PWR_STATE) as u32;
                 *self.iop_power.lock() = pwr;
             }
+            MGMT_MSG_AP_PWR_STATE => {
+                let pwr = field_get(mgmt_msg_raw, MGMT_PWR_STATE) as u32;
+                *self.ap_power.lock() = pwr;
+            }
             _ => {}
         }
         Ok(())
     }
 
     fn handle_crashlog_message(&self, msg: &RtkitMessage) -> Result<bool, &'static str> {
+        if field_get(msg.msg, RTKIT_SYSLOG_TYPE) == MSG_BUFFER_REQUEST
+            && self
+                .syslog_buffers
+                .lock()
+                .iter()
+                .any(|buffer| buffer.ep == RTKIT_EP_CRASHLOG)
+        {
+            *self.crashed.lock() = true;
+            self.dump_crashlog();
+            return Err("apple-rtkit: coprocessor crashed");
+        }
         self.handle_buffer_request(msg)
+    }
+
+    fn dump_crashlog(&self) {
+        let buffers = self.syslog_buffers.lock();
+        let Some(buffer) = buffers.iter().find(|buffer| buffer.ep == RTKIT_EP_CRASHLOG) else {
+            return;
+        };
+        let size = buffer.pages.saturating_mul(scarlet::environment::PAGE_SIZE);
+        if buffer.paddr == 0 || size < 0x20 {
+            println!("[apple-rtkit] coprocessor crashed; crashlog is not CPU-addressable");
+            return;
+        }
+
+        let vaddr = vm::phys_to_virt(buffer.paddr);
+        scarlet::arch::invalidate_dcache_to_poc_range(vaddr, size);
+        // SAFETY: the DART translation identifies the firmware-owned crashlog mapping.
+        let bytes = unsafe { core::slice::from_raw_parts(vaddr as *const u8, size) };
+        let read_u32 = |offset: usize| {
+            bytes
+                .get(offset..offset + 4)
+                .and_then(|value| value.try_into().ok())
+                .map(u32::from_le_bytes)
+        };
+        let Some(header) = read_u32(0) else {
+            return;
+        };
+        let total_size = read_u32(8).unwrap_or(0) as usize;
+        println!(
+            "[apple-rtkit] coprocessor crashed: crashlog={:#x} version={} size={:#x}",
+            header,
+            read_u32(4).unwrap_or(0),
+            total_size
+        );
+
+        let limit = core::cmp::min(total_size, size);
+        let mut offset = 0x20usize;
+        while offset + 16 <= limit {
+            let Some(section) = read_u32(offset) else {
+                break;
+            };
+            let section_size = read_u32(offset + 12).unwrap_or(0) as usize;
+            if section_size < 16 || offset.saturating_add(section_size) > limit {
+                break;
+            }
+            if section == 0x4373_7472 && section_size >= 20 {
+                let payload = &bytes[offset + 20..offset + section_size];
+                let end = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(payload.len());
+                if let Ok(message) = core::str::from_utf8(&payload[..end]) {
+                    println!("[apple-rtkit] crash: {}", message);
+                }
+            } else if section == 0x4376_6572 && section_size >= 32 {
+                let payload = &bytes[offset + 32..offset + section_size];
+                let end = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(payload.len());
+                if let Ok(version) = core::str::from_utf8(&payload[..end]) {
+                    println!("[apple-rtkit] firmware: {}", version);
+                }
+            }
+            offset += section_size;
+        }
     }
 
     fn handle_syslog_message(&self, msg: &RtkitMessage) -> Result<bool, &'static str> {
@@ -510,17 +761,71 @@ impl AppleRtkit {
         }
 
         let requested_size = field_get(msg.msg, MSG_BUFFER_REQUEST_SIZE);
-        early_println!(
-            "[apple-rtkit] endpoint {} buffer request size={:#x}, replying dummy iova=0",
-            msg.ep,
-            requested_size
-        );
+        let request_iova = field_get(msg.msg, MSG_BUFFER_REQUEST_IOVA);
+
+        if request_iova != 0 {
+            let mut buffers = self.syslog_buffers.lock();
+            if !buffers.iter().any(|buffer| buffer.ep == msg.ep) {
+                let paddr = self
+                    .dma_mapper
+                    .as_ref()
+                    .and_then(|mapper| mapper.translate(request_iova))
+                    .unwrap_or(0);
+                buffers.push(SyslogBuffer {
+                    ep: msg.ep,
+                    paddr,
+                    dva: request_iova,
+                    pages: ((requested_size << 12) as usize)
+                        .div_ceil(scarlet::environment::PAGE_SIZE),
+                });
+            }
+            println!(
+                "[apple-rtkit] ep {} pre-allocated buffer size={:#x} iova={:#x}",
+                msg.ep,
+                requested_size << 12,
+                request_iova
+            );
+            return Ok(true);
+        }
+
+        let dva = {
+            let buffers = self.syslog_buffers.lock();
+            if let Some(existing) = buffers.iter().find(|b| b.ep == msg.ep) {
+                existing.dva
+            } else {
+                drop(buffers);
+                let size_bytes = (requested_size << 12) as usize;
+                let align = self.dma_alignment();
+                let align_pages = align.div_ceil(scarlet::environment::PAGE_SIZE);
+                let npages = size_bytes.div_ceil(scarlet::environment::PAGE_SIZE);
+                let paddr = pmm::alloc_contiguous_pages_aligned(npages, align_pages)
+                    .ok_or("apple-rtkit: failed to allocate syslog buffer")?;
+                let virt = vm::phys_to_virt(paddr);
+                unsafe {
+                    core::ptr::write_bytes(virt as *mut u8, 0, size_bytes);
+                }
+                let mapped = self
+                    .map_dma(paddr, size_bytes)
+                    .map_err(|_| "apple-rtkit: failed to map syslog buffer")?;
+                self.syslog_buffers.lock().push(SyslogBuffer {
+                    ep: msg.ep,
+                    paddr,
+                    dva: mapped,
+                    pages: npages,
+                });
+                println!(
+                    "[apple-rtkit] ep {} buffer {:#x} bytes at paddr={:#x} dva={:#x}",
+                    msg.ep, size_bytes, paddr, mapped
+                );
+                mapped
+            }
+        };
 
         let reply = RtkitMessage {
             ep: msg.ep,
             msg: field_prep(RTKIT_SYSLOG_TYPE, MSG_BUFFER_REQUEST)
                 | field_prep(MSG_BUFFER_REQUEST_SIZE, requested_size)
-                | field_prep(MSG_BUFFER_REQUEST_IOVA, 0),
+                | field_prep(MSG_BUFFER_REQUEST_IOVA, dva),
         };
         self.send(&reply)?;
 
@@ -597,6 +902,26 @@ impl RemoteProcessor for AppleRtkit {
             endpoint,
         )))
     }
+
+    fn map_dma(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError> {
+        match self.dma_mapper.as_ref() {
+            Some(mapper) => mapper.map(paddr, size),
+            None => Ok(paddr as u64),
+        }
+    }
+
+    fn unmap_dma(&self, dva: u64, size: usize) {
+        if let Some(mapper) = self.dma_mapper.as_ref() {
+            mapper.unmap(dva, size);
+        }
+    }
+
+    fn dma_alignment(&self) -> usize {
+        self.dma_mapper
+            .as_ref()
+            .map(|mapper| mapper.alignment())
+            .unwrap_or(scarlet::environment::PAGE_SIZE)
+    }
 }
 
 impl AppleRtkit {
@@ -609,6 +934,9 @@ impl AppleRtkit {
             ep_bitmap: self.ep_bitmap.clone(),
             firmware_regions: self.firmware_regions.clone(),
             crash_handler: self.crash_handler.clone(),
+            dma_mapper: self.dma_mapper.clone(),
+            syslog_buffers: self.syslog_buffers.clone(),
+            pending_messages: self.pending_messages.clone(),
         })
     }
 }
@@ -676,13 +1004,9 @@ impl RemoteprocService for AppleRtkitService {
 
     fn try_recv(&self) -> Result<Option<RemoteprocMessage>, RemoteprocError> {
         let mut rtkit_message = RtkitMessage { ep: 0, msg: 0 };
-        // The existing RTKit receive primitive consumes the next non-internal
-        // endpoint message globally and does not yet maintain per-endpoint
-        // queues, so this service currently accepts whichever endpoint message
-        // is pending and exposes its payload through this wrapper.
         let received = self
             .rtkit
-            .recv(&mut rtkit_message)
+            .recv_endpoint(self.endpoint, &mut rtkit_message)
             .map_err(|_| RemoteprocError::TransportError)?;
         if !received {
             return Ok(None);
