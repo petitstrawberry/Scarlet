@@ -45,8 +45,9 @@ impl OomHandler for SbrkOomHandler {
             return Err(());
         }
 
+        let new_end = result.checked_add(aligned_size).ok_or(())?;
         let new_base = result as *mut u8;
-        let new_span = Span::new(new_base, new_base.wrapping_add(aligned_size));
+        let new_span = Span::new(new_base, new_end as *mut u8);
 
         // Treat every sbrk allocation as an independent Talc heap. `extend`
         // requires Talc boundary metadata at the old span's acme, but the
