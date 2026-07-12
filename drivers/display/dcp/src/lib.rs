@@ -387,11 +387,29 @@ impl RemoteprocDmaMapper for DcpDmaMapper {
     }
 
     fn map(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError> {
-        if !paddr.is_multiple_of(self.page_size) {
+        if size == 0 || !paddr.is_multiple_of(self.page_size) {
             return Err(RemoteprocError::LoadFailed);
         }
-        let size = size.div_ceil(self.page_size) * self.page_size;
-        let iova = self.next_iova.fetch_add(size, Ordering::Relaxed);
+        let size = size
+            .div_ceil(self.page_size)
+            .checked_mul(self.page_size)
+            .ok_or(RemoteprocError::LoadFailed)?;
+        let mut iova = self.next_iova.load(Ordering::Relaxed);
+        loop {
+            let next = iova
+                .checked_add(size)
+                .filter(|next| *next <= DCP_SCANOUT_IOVA_BASE)
+                .ok_or(RemoteprocError::LoadFailed)?;
+            match self.next_iova.compare_exchange_weak(
+                iova,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => iova = current,
+            }
+        }
         let mut table = self.table.lock();
         table
             .map_contiguous(iova, paddr, size, DCP_DART_FLAGS)

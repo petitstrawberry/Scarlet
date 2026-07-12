@@ -74,7 +74,6 @@ const MGMT_MSG_IOP_PWR_STATE: u64 = 6;
 const MGMT_MSG_IOP_PWR_STATE_ACK: u64 = 7;
 const MGMT_MSG_EPMAP: u64 = 8;
 const MGMT_MSG_AP_PWR_STATE: u64 = 0xb;
-const MGMT_MSG_AP_PWR_STATE_ACK: u64 = 0xb;
 
 const MGMT_MSG_HELLO_MINVER: u64 = 0x0000_0000_0000_FFFF;
 const MGMT_MSG_HELLO_MAXVER: u64 = 0x0000_0000_FFFF_0000;
@@ -632,7 +631,7 @@ impl AppleRtkit {
                 let pwr = field_get(mgmt_msg_raw, MGMT_PWR_STATE) as u32;
                 *self.iop_power.lock() = pwr;
             }
-            MGMT_MSG_AP_PWR_STATE_ACK => {
+            MGMT_MSG_AP_PWR_STATE => {
                 let pwr = field_get(mgmt_msg_raw, MGMT_PWR_STATE) as u32;
                 *self.ap_power.lock() = pwr;
             }

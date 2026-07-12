@@ -208,8 +208,10 @@ impl DisplayCharDevice {
         DeviceManager::get_manager()
     }
 
-    fn page_aligned_size(size: usize) -> usize {
-        (size + crate::environment::PAGE_SIZE - 1) & !(crate::environment::PAGE_SIZE - 1)
+    fn page_aligned_size(size: usize) -> Result<usize, &'static str> {
+        size.checked_add(crate::environment::PAGE_SIZE - 1)
+            .map(|size| size & !(crate::environment::PAGE_SIZE - 1))
+            .ok_or("Display backing size overflow")
     }
 
     fn current_backing_info(&self) -> Result<DisplayBackingInfo, &'static str> {
@@ -219,7 +221,7 @@ impl DisplayCharDevice {
         {
             if let Some(graphics_device) = device.as_graphics_device() {
                 let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
-                let size = Self::page_aligned_size(config.size());
+                let size = Self::page_aligned_size(config.size())?;
                 return Ok(DisplayBackingInfo {
                     config,
                     physical_addr,
@@ -335,11 +337,16 @@ impl DisplayCharDevice {
         if front_buffer >= count {
             return Err("Display front scanout buffer is invalid");
         }
-        let buffer_len = Self::page_aligned_size(config.size());
+        let buffer_len = Self::page_aligned_size(config.size())?;
+        let buffer_count = u32::try_from(count).map_err(|_| "Display scanout count exceeds ABI")?;
+        let buffer_len_u32 =
+            u32::try_from(buffer_len).map_err(|_| "Display scanout size exceeds ABI")?;
+        let front_buffer =
+            u32::try_from(front_buffer).map_err(|_| "Display front scanout exceeds ABI")?;
         let info = DisplaySwapchainInfo {
-            buffer_count: count as u32,
-            buffer_len: buffer_len as u32,
-            front_buffer: front_buffer as u32,
+            buffer_count,
+            buffer_len: buffer_len_u32,
+            front_buffer,
             reserved: 0,
             first_buffer_offset: buffer_len,
         };
@@ -592,15 +599,16 @@ impl MemoryMappingOps for DisplayCharDevice {
             let index = relative / info.size;
             let buffer_offset = relative % info.size;
             let (_, physical_addr) = graphics.get_scanout_buffer_info(index)?;
-            if buffer_offset + length > info.size {
+            if length > info.size - buffer_offset {
                 return Err("Requested length exceeds scanout buffer size");
             }
-            return Ok(crate::object::capability::MemoryMappingInfo::new(
-                physical_addr + buffer_offset,
-                0x3,
-                true,
-            )
-            .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable));
+            let mapping_paddr = physical_addr
+                .checked_add(buffer_offset)
+                .ok_or("Display scanout physical address overflow")?;
+            return Ok(
+                crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
+                    .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+            );
         }
 
         let available_size = info.size - offset;
@@ -608,12 +616,14 @@ impl MemoryMappingOps for DisplayCharDevice {
             return Err("Requested length exceeds available display backing size");
         }
 
-        Ok(crate::object::capability::MemoryMappingInfo::new(
-            info.physical_addr + offset,
-            0x3,
-            true,
+        let mapping_paddr = info
+            .physical_addr
+            .checked_add(offset)
+            .ok_or("Display backing physical address overflow")?;
+        Ok(
+            crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
+                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
         )
-        .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable))
     }
 
     fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
