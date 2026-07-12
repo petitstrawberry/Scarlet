@@ -27,6 +27,10 @@ pub mod display_commands {
     pub const DISPLAY_PRESENT: u32 = 0x5001;
     /// Present a display surface region.
     pub const DISPLAY_PRESENT_REGION: u32 = 0x5002;
+    /// Get direct scanout swapchain information.
+    pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
+    /// Present one direct scanout buffer.
+    pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -81,6 +85,28 @@ pub struct DisplayPresentRegion {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+}
+
+/// Direct scanout swapchain information.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplaySwapchainInfo {
+    /// Number of scanout buffers.
+    pub buffer_count: u32,
+    /// Bytes in each mappable buffer.
+    pub buffer_len: u32,
+    /// mmap offset of the first direct scanout buffer.
+    pub first_buffer_offset: usize,
+}
+
+/// Argument for `DISPLAY_PRESENT_BUFFER`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisplayPresentBuffer {
+    /// Direct scanout buffer index.
+    pub index: u32,
+    /// Reserved for future fence flags.
+    pub flags: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +299,46 @@ impl DisplayCharDevice {
         Ok(0)
     }
 
+    fn handle_get_swapchain(&self, arg: usize) -> Result<i32, &'static str> {
+        let target_ptr = Self::translated_ptr(arg)?;
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        let count = graphics.scanout_buffer_count();
+        if count == 0 {
+            return Err("Display swapchain is not supported");
+        }
+        let (config, _) = graphics.get_scanout_buffer_info(0)?;
+        let buffer_len = Self::page_aligned_size(config.size());
+        let info = DisplaySwapchainInfo {
+            buffer_count: count as u32,
+            buffer_len: buffer_len as u32,
+            first_buffer_offset: buffer_len,
+        };
+        // SAFETY: target_ptr is a translated caller-provided output pointer.
+        unsafe { core::ptr::write(target_ptr as *mut DisplaySwapchainInfo, info) };
+        Ok(0)
+    }
+
+    fn handle_present_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let target_ptr = Self::translated_ptr(arg)?;
+        // SAFETY: target_ptr is a translated caller-provided input pointer.
+        let request = unsafe { core::ptr::read(target_ptr as *const DisplayPresentBuffer) };
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        graphics.present_scanout_buffer(request.index as usize)?;
+        Ok(0)
+    }
+
     fn present_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
         let device = self
             .device_manager()
@@ -404,6 +470,8 @@ impl ControlOps for DisplayCharDevice {
             DISPLAY_GET_INFO => self.handle_get_info(arg),
             DISPLAY_PRESENT => self.handle_present(),
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
+            DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
+            DISPLAY_PRESENT_BUFFER => self.handle_present_buffer(arg),
             _ => Err("Unsupported display control command"),
         }
     }
@@ -414,6 +482,8 @@ impl ControlOps for DisplayCharDevice {
             (DISPLAY_GET_INFO, "Get display surface information"),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
+            (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
+            (DISPLAY_PRESENT_BUFFER, "Present direct scanout buffer"),
         ]
     }
 }
@@ -439,7 +509,25 @@ impl MemoryMappingOps for DisplayCharDevice {
             return Err("Display backing physical address must be page-aligned");
         }
         if offset >= info.size {
-            return Err("Offset exceeds display backing size");
+            let device = self
+                .device_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .ok_or("Display source device not found")?;
+            let graphics = device
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?;
+            let relative = offset - info.size;
+            let index = relative / info.size;
+            let buffer_offset = relative % info.size;
+            let (_, physical_addr) = graphics.get_scanout_buffer_info(index)?;
+            if buffer_offset + length > info.size {
+                return Err("Requested length exceeds scanout buffer size");
+            }
+            return Ok(crate::object::capability::MemoryMappingInfo::new(
+                physical_addr + buffer_offset,
+                0x3,
+                true,
+            ));
         }
 
         let available_size = info.size - offset;

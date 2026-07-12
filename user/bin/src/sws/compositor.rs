@@ -481,6 +481,14 @@ impl Compositor {
         // Open the modern display endpoint. The legacy framebuffer node remains
         // a compatibility path for direct framebuffer clients.
         let display = DisplaySurface::open_primary().map_err(|_| "Failed to open display")?;
+        println!(
+            "[Compositor] Scanout swap: {}",
+            if display.has_swapchain() {
+                "enabled"
+            } else {
+                "unavailable"
+            }
+        );
 
         // Get screen dimensions
         let var_info = display
@@ -1179,7 +1187,28 @@ impl Compositor {
         Ok(())
     }
 
-    fn present_damage(&self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
+    fn present_damage(&mut self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
+        if self.display.has_swapchain() {
+            let (address, length) = self
+                .display
+                .get_mapping_info()
+                .ok_or("Back scanout buffer is not mapped")?;
+            let copy_len = self.backbuffer.len().min(length);
+            // SAFETY: DisplaySurface owns the writable mmap for the currently
+            // acquired non-visible scanout buffer and reports its exact size.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.backbuffer.as_ptr(),
+                    address as *mut u8,
+                    copy_len,
+                );
+            }
+            self.display
+                .present()
+                .map_err(|_| "Failed to swap display buffer")?;
+            return Ok(());
+        }
+
         // Present only the damage SWS actually composed. Legacy framebuffer
         // clients keep their own full-frame compatibility path.
         match dirty_rects {
@@ -1599,8 +1628,12 @@ impl Compositor {
                     if window_offset + 4 <= window_buffer.len()
                         && screen_offset + 4 <= screen_buffer.len()
                     {
-                        screen_buffer[screen_offset..screen_offset + 4]
-                            .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
+                        screen_buffer[screen_offset..screen_offset + 3]
+                            .copy_from_slice(&window_buffer[window_offset..window_offset + 3]);
+                        // Opaque windows ignore their source alpha. Keeping a
+                        // fractional alpha in the final scanout lets DCP blend
+                        // against an older underlay and leaves visible trails.
+                        screen_buffer[screen_offset + 3] = 255;
                     }
                 }
             }
@@ -1809,18 +1842,20 @@ impl Compositor {
         // Validate composition against expected pixels before presenting.
         self.validate_vram_samples(&self.backbuffer, stride, dirty, "after display composite");
 
-        // Present only the dirty region when available.
-        let src_off = (y0 as usize)
-            .saturating_mul(stride as usize)
-            .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
-        if src_off >= backbuffer_len {
-            return Err("Backbuffer offset out of range");
-        }
-        let src = &self.backbuffer[src_off..];
+        if !self.display.has_swapchain() {
+            // Present only the dirty region when direct scanout is unavailable.
+            let src_off = (y0 as usize)
+                .saturating_mul(stride as usize)
+                .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
+            if src_off >= backbuffer_len {
+                return Err("Backbuffer offset out of range");
+            }
+            let src = &self.backbuffer[src_off..];
 
-        self.display
-            .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
-            .map_err(|_| "Failed to write backbuffer")?;
+            self.display
+                .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
+                .map_err(|_| "Failed to write backbuffer")?;
+        }
 
         Ok(())
     }
