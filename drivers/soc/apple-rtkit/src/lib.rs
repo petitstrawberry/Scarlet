@@ -14,7 +14,7 @@ use scarlet::device::remoteproc::{
     RemoteprocFirmware, RemoteprocMemoryRegion, RemoteprocMessage, RemoteprocService,
     RemoteprocServiceClient, RemoteprocServiceId, RemoteprocState,
 };
-use scarlet::early_println;
+use scarlet::println;
 use scarlet::mem::pmm;
 use scarlet::time;
 use scarlet::vm;
@@ -251,11 +251,11 @@ impl AppleRtkit {
         start_cpu: bool,
     ) -> Result<(), &'static str> {
         if start_cpu {
-            early_println!("[apple-rtkit] starting ASC CPU");
+            println!("[apple-rtkit] starting ASC CPU");
             self.asc.cpu_start();
         }
 
-        early_println!("[apple-rtkit] requesting IOP INIT");
+        println!("[apple-rtkit] requesting IOP INIT");
         self.send(&RtkitMessage {
             ep: RTKIT_EP_MGMT,
             msg: mgmt_msg(
@@ -264,16 +264,16 @@ impl AppleRtkit {
             ),
         })?;
 
-        early_println!("[apple-rtkit] waiting for HELLO");
+        println!("[apple-rtkit] waiting for HELLO");
         let hello = self
             .wait_mgmt_msg(MGMT_MSG_HELLO, RTKIT_BOOT_TIMEOUT_US)
             .map_err(|_| "apple-rtkit: timeout waiting for HELLO")?;
         self.handle_hello(hello)?;
-        early_println!("[apple-rtkit] HELLO negotiated");
+        println!("[apple-rtkit] HELLO negotiated");
 
         self.handle_epmap_sequence()
             .map_err(|_| "apple-rtkit: endpoint-map handshake failed")?;
-        early_println!("[apple-rtkit] endpoint map received");
+        println!("[apple-rtkit] endpoint map received");
 
         // RTKit advertises a standard set of system endpoints used for crash,
         // log, and report buffers. Start every advertised default before
@@ -299,7 +299,7 @@ impl AppleRtkit {
             }
         }
 
-        early_println!("[apple-rtkit] waiting for IOP ON");
+        println!("[apple-rtkit] waiting for IOP ON");
         loop {
             let msg = self
                 .wait_any_mgmt_msg(RTKIT_BOOT_TIMEOUT_US)
@@ -323,7 +323,7 @@ impl AppleRtkit {
         })?;
         *self.ap_power.lock() = RTKIT_POWER_ON;
 
-        early_println!("[apple-rtkit] AP ON requested");
+        println!("[apple-rtkit] AP ON requested");
 
         for &ep in endpoints
             .iter()
@@ -642,7 +642,83 @@ impl AppleRtkit {
     }
 
     fn handle_crashlog_message(&self, msg: &RtkitMessage) -> Result<bool, &'static str> {
+        if field_get(msg.msg, RTKIT_SYSLOG_TYPE) == MSG_BUFFER_REQUEST
+            && self
+                .syslog_buffers
+                .lock()
+                .iter()
+                .any(|buffer| buffer.ep == RTKIT_EP_CRASHLOG)
+        {
+            *self.crashed.lock() = true;
+            self.dump_crashlog();
+            return Err("apple-rtkit: coprocessor crashed");
+        }
         self.handle_buffer_request(msg)
+    }
+
+    fn dump_crashlog(&self) {
+        let buffers = self.syslog_buffers.lock();
+        let Some(buffer) = buffers.iter().find(|buffer| buffer.ep == RTKIT_EP_CRASHLOG) else {
+            return;
+        };
+        let size = buffer.pages.saturating_mul(scarlet::environment::PAGE_SIZE);
+        if buffer.paddr == 0 || size < 0x20 {
+            println!("[apple-rtkit] coprocessor crashed; crashlog is not CPU-addressable");
+            return;
+        }
+
+        let vaddr = vm::phys_to_virt(buffer.paddr);
+        scarlet::arch::invalidate_dcache_to_poc_range(vaddr, size);
+        // SAFETY: the DART translation identifies the firmware-owned crashlog mapping.
+        let bytes = unsafe { core::slice::from_raw_parts(vaddr as *const u8, size) };
+        let read_u32 = |offset: usize| {
+            bytes
+                .get(offset..offset + 4)
+                .and_then(|value| value.try_into().ok())
+                .map(u32::from_le_bytes)
+        };
+        let Some(header) = read_u32(0) else {
+            return;
+        };
+        let total_size = read_u32(8).unwrap_or(0) as usize;
+        println!(
+            "[apple-rtkit] coprocessor crashed: crashlog={:#x} version={} size={:#x}",
+            header,
+            read_u32(4).unwrap_or(0),
+            total_size
+        );
+
+        let limit = core::cmp::min(total_size, size);
+        let mut offset = 0x20usize;
+        while offset + 16 <= limit {
+            let Some(section) = read_u32(offset) else {
+                break;
+            };
+            let section_size = read_u32(offset + 12).unwrap_or(0) as usize;
+            if section_size < 16 || offset.saturating_add(section_size) > limit {
+                break;
+            }
+            if section == 0x4373_7472 && section_size >= 20 {
+                let payload = &bytes[offset + 20..offset + section_size];
+                let end = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(payload.len());
+                if let Ok(message) = core::str::from_utf8(&payload[..end]) {
+                    println!("[apple-rtkit] crash: {}", message);
+                }
+            } else if section == 0x4376_6572 && section_size >= 32 {
+                let payload = &bytes[offset + 32..offset + section_size];
+                let end = payload
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(payload.len());
+                if let Ok(version) = core::str::from_utf8(&payload[..end]) {
+                    println!("[apple-rtkit] firmware: {}", version);
+                }
+            }
+            offset += section_size;
+        }
     }
 
     fn handle_syslog_message(&self, msg: &RtkitMessage) -> Result<bool, &'static str> {
@@ -689,7 +765,22 @@ impl AppleRtkit {
         let request_iova = field_get(msg.msg, MSG_BUFFER_REQUEST_IOVA);
 
         if request_iova != 0 {
-            early_println!(
+            let mut buffers = self.syslog_buffers.lock();
+            if !buffers.iter().any(|buffer| buffer.ep == msg.ep) {
+                let paddr = self
+                    .dma_mapper
+                    .as_ref()
+                    .and_then(|mapper| mapper.translate(request_iova))
+                    .unwrap_or(0);
+                buffers.push(SyslogBuffer {
+                    ep: msg.ep,
+                    paddr,
+                    dva: request_iova,
+                    pages: ((requested_size << 12) as usize)
+                        .div_ceil(scarlet::environment::PAGE_SIZE),
+                });
+            }
+            println!(
                 "[apple-rtkit] ep {} pre-allocated buffer size={:#x} iova={:#x}",
                 msg.ep,
                 requested_size << 12,
@@ -723,7 +814,7 @@ impl AppleRtkit {
                     dva: mapped,
                     pages: npages,
                 });
-                early_println!(
+                println!(
                     "[apple-rtkit] ep {} buffer {:#x} bytes at paddr={:#x} dva={:#x}",
                     msg.ep,
                     size_bytes,

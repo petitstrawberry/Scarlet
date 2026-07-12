@@ -274,6 +274,16 @@ pub trait GraphicsDevice: Device {
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
 
+    /// Wait for the most recently submitted page flip to complete.
+    ///
+    /// Devices with asynchronous [`present_scanout_buffer`] implementations
+    /// override this so callers can block until the hardware has finished
+    /// flipping to the new front buffer. The default is a no-op for devices
+    /// that flip synchronously.
+    fn wait_for_vblank(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     /// Get display outputs provided by this device.
     ///
     /// Default returns empty — devices that don't support multi-output

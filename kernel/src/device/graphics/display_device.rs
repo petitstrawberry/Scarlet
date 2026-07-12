@@ -31,6 +31,8 @@ pub mod display_commands {
     pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
     /// Present one direct scanout buffer.
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
+    /// Wait for the most recently submitted page flip to complete.
+    pub const DISPLAY_WAIT_FLIP: u32 = 0x5005;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -339,6 +341,18 @@ impl DisplayCharDevice {
         Ok(0)
     }
 
+    fn handle_wait_flip(&self) -> Result<i32, &'static str> {
+        let device = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let graphics = device
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?;
+        graphics.wait_for_vblank()?;
+        Ok(0)
+    }
+
     fn present_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
         let device = self
             .device_manager()
@@ -465,25 +479,27 @@ impl CharDevice for DisplayCharDevice {
 impl ControlOps for DisplayCharDevice {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         use display_commands::*;
-
         match command {
             DISPLAY_GET_INFO => self.handle_get_info(arg),
             DISPLAY_PRESENT => self.handle_present(),
             DISPLAY_PRESENT_REGION => self.handle_present_region(arg),
             DISPLAY_GET_SWAPCHAIN => self.handle_get_swapchain(arg),
             DISPLAY_PRESENT_BUFFER => self.handle_present_buffer(arg),
+            DISPLAY_WAIT_FLIP => self.handle_wait_flip(),
             _ => Err("Unsupported display control command"),
         }
     }
 
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         use display_commands::*;
+
         vec![
             (DISPLAY_GET_INFO, "Get display surface information"),
             (DISPLAY_PRESENT, "Present whole display surface"),
             (DISPLAY_PRESENT_REGION, "Present display surface region"),
             (DISPLAY_GET_SWAPCHAIN, "Get direct scanout swapchain"),
             (DISPLAY_PRESENT_BUFFER, "Present direct scanout buffer"),
+            (DISPLAY_WAIT_FLIP, "Wait for page flip completion"),
         ]
     }
 }
@@ -523,12 +539,15 @@ impl MemoryMappingOps for DisplayCharDevice {
             if buffer_offset + length > info.size {
                 return Err("Requested length exceeds scanout buffer size");
             }
+            // Direct scanout pages are ordinary RAM shared with the DCP. Keep
+            // the userspace and HHDM aliases Normal cacheable so the software
+            // compositor can render efficiently; the driver cleans the range
+            // to PoC immediately before publishing the buffer to hardware.
             return Ok(crate::object::capability::MemoryMappingInfo::new(
                 physical_addr + buffer_offset,
                 0x3,
                 true,
-            )
-            .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable));
+            ));
         }
 
         let available_size = info.size - offset;

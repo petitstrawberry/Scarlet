@@ -31,6 +31,7 @@ const DART_PARAMS1: usize = 0x00;
 const DART_PARAMS2: usize = 0x04;
 const DART_TCR: usize = 0x100;
 const DART_TTBR: usize = 0x200;
+const DART_TTBR_COUNT: usize = 4;
 const DART_ENABLE_STREAMS: usize = 0xfc;
 const DART_DISABLE_STREAMS: usize = 0xfd;
 const DART_STREAM_COMMAND: usize = 0x20;
@@ -50,7 +51,8 @@ const DART_STREAM_COMMAND_BUSY: u32 = 1 << 2;
 const DART_STREAM_COMMAND_BUSY_TIMEOUT_US: usize = 100;
 
 const DART_PAGE_SHIFT: usize = 14;
-const DART_IOVA_BITS: usize = 36;
+const DART_IAS_BITS: usize = 32;
+const DART_IAS_MASK: usize = (1usize << DART_IAS_BITS) - 1;
 const DART_PADDR_BITS: usize = 36;
 const DART_PADDR_FIELD_SHIFT: usize = 12;
 const DART_PTE_SIZE_SHIFT: usize = 3;
@@ -67,6 +69,10 @@ const DART_PADDR_MASK: u64 =
     ((1u64 << DART_PADDR_BITS) - 1) & !((1u64 << DART_PADDR_FIELD_SHIFT) - 1);
 
 const DART_STREAM_COMMAND_INV_ALL: u32 = 1 << 20;
+
+const fn dart_ttbr_offset(sid: usize, index: usize) -> usize {
+    DART_TTBR + (sid * DART_TTBR_COUNT + index) * core::mem::size_of::<u32>()
+}
 
 /// Apple DART IOMMU hardware instance.
 #[derive(Clone)]
@@ -127,9 +133,9 @@ impl DartInstance {
     }
 
     fn invalidate_all_tlbs(&self) -> Result<(), IommuError> {
+        arch::io_wmb();
         self.write32(DART_STREAM_SELECT, u32::MAX);
         self.write32(DART_STREAM_COMMAND, DART_STREAM_COMMAND_INV_ALL);
-        arch::io_wmb();
         for _ in 0..DART_STREAM_COMMAND_BUSY_TIMEOUT_US {
             if self.read32(DART_STREAM_COMMAND) & DART_STREAM_COMMAND_BUSY == 0 {
                 return Ok(());
@@ -149,7 +155,7 @@ impl DartInstance {
 
     fn set_ttbr(&self, sid: usize, paddr: usize) {
         let val = (paddr >> 12) as u32 | DART_TTBR_VALID;
-        self.write32(DART_TTBR + sid * 4, val);
+        self.write32(dart_ttbr_offset(sid, 0), val);
     }
 
     /// Enable translated DMA for a stream ID.
@@ -165,6 +171,18 @@ impl DartInstance {
         let _ = num_levels;
         self.set_tcr(sid, DART_TCR_TRANSLATE_ENABLE);
         let _ = self.invalidate_all_tlbs();
+    }
+
+    /// Publish page-table updates and invalidate cached translations.
+    ///
+    /// Unlike [`Self::enable_translation`], this preserves the TTBR and TCR
+    /// installed by firmware. This is required for locked DART streams.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after invalidation completes, or an IOMMU error on timeout.
+    pub fn sync_page_tables(&self) -> Result<(), IommuError> {
+        self.invalidate_all_tlbs()
     }
 
     /// Read the physical address of the root page table currently installed
@@ -183,7 +201,7 @@ impl DartInstance {
     /// Physical address of the L1 root page table, or `None` when TTBR
     /// is not valid.
     pub fn ttbr_paddr(&self, sid: usize) -> Option<usize> {
-        let ttbr = self.read32(DART_TTBR + sid * 4);
+        let ttbr = self.read32(dart_ttbr_offset(sid, 0));
         if ttbr & DART_TTBR_VALID == 0 {
             return None;
         }
@@ -347,11 +365,12 @@ impl IommuDomain for DartBypassDomain {
     }
 }
 
-/// Apple DART translation domain backed by a private page table.
+/// Apple DART translation domain backed by an owned or firmware page table.
 pub struct DartDomain {
     dart: Arc<DartInstance>,
     page_table: Mutex<DartPageTable>,
     attached_streams: Mutex<alloc::vec::Vec<u32>>,
+    firmware_stream: Option<u32>,
 }
 
 impl DartDomain {
@@ -372,6 +391,48 @@ impl DartDomain {
             dart,
             page_table: Mutex::new(page_table),
             attached_streams: Mutex::new(alloc::vec::Vec::new()),
+            firmware_stream: None,
+        })
+    }
+
+    /// Wrap the page table already installed for a firmware-owned stream.
+    ///
+    /// The existing TTBR is read from the DART and its physical root is
+    /// accessed through Scarlet's runtime direct map. The TTBR and TCR are
+    /// preserved; later mapping operations only update PTEs and invalidate
+    /// cached translations, matching Asahi Linux's locked-DART path.
+    ///
+    /// # Arguments
+    ///
+    /// * `dart` - DART hardware instance containing the firmware stream.
+    /// * `stream` - Firmware-owned stream whose existing TTBR should be used.
+    ///
+    /// # Returns
+    ///
+    /// A domain backed by the existing page table, or an IOMMU error when the
+    /// stream is invalid or has no valid TTBR.
+    pub fn wrap_existing(
+        dart: Arc<DartInstance>,
+        stream: IommuStreamId,
+    ) -> Result<Self, IommuError> {
+        if stream.substream_id.is_some() {
+            return Err(IommuError::NotSupported);
+        }
+        if stream.id >= dart.params.num_streams {
+            return Err(IommuError::AttachFailed);
+        }
+
+        let root_paddr = dart
+            .ttbr_paddr(stream.id as usize)
+            .ok_or(IommuError::DomainAllocationFailed)?;
+        let page_table = DartPageTable::wrap_existing(root_paddr, dart.page_shift())
+            .map_err(|_| IommuError::DomainAllocationFailed)?;
+
+        Ok(Self {
+            dart,
+            page_table: Mutex::new(page_table),
+            attached_streams: Mutex::new(alloc::vec![stream.id]),
+            firmware_stream: Some(stream.id),
         })
     }
 
@@ -391,6 +452,17 @@ impl DartDomain {
 impl IommuDomain for DartDomain {
     fn attach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
         let sid = self.validate_stream(stream)?;
+        if let Some(firmware_stream) = self.firmware_stream {
+            if stream.id != firmware_stream {
+                return Err(IommuError::AttachFailed);
+            }
+            let mut attached_streams = self.attached_streams.lock();
+            if !attached_streams.contains(&stream.id) {
+                attached_streams.push(stream.id);
+            }
+            return Ok(());
+        }
+
         let page_table = self.page_table.lock();
         let root_paddr = page_table.root_paddr();
         let levels = page_table.translation_levels();
@@ -407,7 +479,9 @@ impl IommuDomain for DartDomain {
 
     fn detach_stream(&self, stream: IommuStreamId) -> Result<(), IommuError> {
         let sid = self.validate_stream(stream)?;
-        self.dart.disable_translation(sid);
+        if self.firmware_stream.is_none() {
+            self.dart.disable_translation(sid);
+        }
 
         let mut attached_streams = self.attached_streams.lock();
         attached_streams.retain(|attached_sid| *attached_sid != sid as u32);
@@ -424,7 +498,12 @@ impl IommuDomain for DartDomain {
     ) -> Result<(), IommuError> {
         self.page_table
             .lock()
-            .map_contiguous(iova as usize, paddr, len, dart_pte_flags(flags))
+            .map_contiguous(
+                (iova as usize) & DART_IAS_MASK,
+                paddr,
+                len,
+                dart_pte_flags(flags),
+            )
             .map_err(|_| IommuError::MapFailed)?;
         self.flush()
     }
@@ -433,9 +512,10 @@ impl IommuDomain for DartDomain {
         let page_size = self.page_size();
         let pages = len.div_ceil(page_size);
         let mut page_table = self.page_table.lock();
+        let iova = (iova as usize) & DART_IAS_MASK;
 
         for page in 0..pages {
-            page_table.unmap_page(iova as usize + page * page_size);
+            page_table.unmap_page(iova + page * page_size);
         }
 
         drop(page_table);
@@ -451,7 +531,7 @@ impl IommuDomain for DartDomain {
     }
 
     fn flush(&self) -> Result<(), IommuError> {
-        self.dart.invalidate_all_tlbs()
+        self.dart.sync_page_tables()
     }
 }
 
@@ -504,7 +584,7 @@ impl DartPageTable {
         }
 
         let bits_per_level = page_shift - DART_PTE_SIZE_SHIFT;
-        if bits_per_level == 0 || DART_IOVA_BITS <= page_shift {
+        if bits_per_level == 0 || DART_IAS_BITS <= page_shift {
             return Err("dart: invalid page table geometry");
         }
 
@@ -512,7 +592,7 @@ impl DartPageTable {
             .checked_shl(page_shift as u32)
             .ok_or("dart: page table size overflow")?;
         let pte_count = table_size / core::mem::size_of::<u64>();
-        let iova_index_bits = DART_IOVA_BITS - page_shift;
+        let iova_index_bits = DART_IAS_BITS - page_shift;
         let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
         let root = Self::allocate_table(table_size)?;
         let root_vaddr = root.as_vaddr();
@@ -533,9 +613,9 @@ impl DartPageTable {
 
     /// Wrap a pre-existing root page table installed by firmware.
     ///
-    /// The root table at `root_paddr` must already be mapped in the kernel
-    /// linear mapping. New leaf and intermediate entries are added in-place,
-    /// matching m1n1's `dart_init(keep_pts=true)` behaviour.
+    /// The root table at `root_paddr` must be reachable through the kernel
+    /// runtime direct map. New leaf and intermediate entries are added
+    /// in-place, matching Asahi Linux's locked-DART page-table handling.
     ///
     /// # Arguments
     ///
@@ -552,7 +632,7 @@ impl DartPageTable {
         }
 
         let bits_per_level = page_shift - DART_PTE_SIZE_SHIFT;
-        if bits_per_level == 0 || DART_IOVA_BITS <= page_shift {
+        if bits_per_level == 0 || DART_IAS_BITS <= page_shift {
             return Err("dart: invalid page table geometry");
         }
 
@@ -560,7 +640,7 @@ impl DartPageTable {
             .checked_shl(page_shift as u32)
             .ok_or("dart: page table size overflow")?;
         let pte_count = table_size / core::mem::size_of::<u64>();
-        let iova_index_bits = DART_IOVA_BITS - page_shift;
+        let iova_index_bits = DART_IAS_BITS - page_shift;
         let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
 
         Ok(Self {
@@ -661,6 +741,32 @@ impl DartPageTable {
         }
         let leaf_index = self.leaf_index(iova);
         Self::write_pte(table_vaddr, leaf_index, 0);
+    }
+
+    /// Resolve an IOVA through the current DART page table.
+    ///
+    /// # Arguments
+    ///
+    /// * `iova` - Device virtual address to resolve.
+    ///
+    /// # Returns
+    ///
+    /// The mapped physical address, including the page offset, when present.
+    pub fn translate_iova(&self, iova: usize) -> Option<usize> {
+        let mut table_vaddr = self.root_vaddr;
+        for level in (1..self.table_levels).rev() {
+            let pte = Self::read_pte(table_vaddr, self.table_index(iova, level));
+            if pte & DART_PTE_VALID == 0 {
+                return None;
+            }
+            table_vaddr = scarlet::vm::phys_to_virt(Self::pte_to_paddr(pte));
+        }
+
+        let pte = Self::read_pte(table_vaddr, self.leaf_index(iova));
+        if pte & DART_PTE_VALID == 0 {
+            return None;
+        }
+        Some(Self::pte_to_paddr(pte) | (iova & (self.page_size() - 1)))
     }
 
     /// Return the physical address of the root page table.
@@ -860,7 +966,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     );
 
     for sid in 0..dart.params.num_streams as usize {
-        let ttbr = dart.read32(DART_TTBR + sid * 4);
+        let ttbr = dart.read32(dart_ttbr_offset(sid, 0));
         if ttbr & DART_TTBR_VALID != 0 {
             continue;
         }

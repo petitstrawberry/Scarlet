@@ -5,12 +5,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
+use scarlet::device::iommu::{IommuDomain, IommuMapFlags};
 use scarlet::device::remoteproc::RemoteProcessor;
-use scarlet::early_println;
 use scarlet::mem::page::ContiguousPages;
-use scarlet::sync::Mutex;
+use scarlet::println;
 use scarlet::time;
-use scarlet_driver_apple_dart::{DartInstance, DartPageTable};
+use scarlet_driver_apple_dart::DartDomain;
 use scarlet_driver_apple_rtkit::{AppleRtkit, RtkitMessage};
 
 const ENDPOINT: u8 = 0x37;
@@ -30,13 +30,19 @@ const SHMEM_FLAG: u64 = 4 << 4;
 
 const CONTEXT_CALLBACK: u8 = 0;
 const CONTEXT_COMMAND: u8 = 2;
+const CONTEXT_ASYNC: u8 = 3;
+const CONTEXT_OOB_CALLBACK: u8 = 4;
+const CONTEXT_OOB_COMMAND: u8 = 6;
+const CONTEXT_OOB_ASYNC: u8 = 7;
 const CALLBACK_OFFSET: usize = 0x60000;
-const SWAP_SUBMIT_SIZE: usize = 6276;
-const SWAP_SURFACE_SIZE: usize = 556;
-const SWAP_SURFACES_OFFSET: usize = 1128;
-const SWAP_SURFACE_IOVA_OFFSET: usize = 3352;
-const DART_FLAGS: u64 = 1;
-
+const SWAP_SUBMIT_SIZE_V12_3: usize = 2916;
+const SWAP_SUBMIT_SIZE_V13_5: usize = 6276;
+const SWAP_SURFACE_SIZE_V12_3: usize = 516;
+const SWAP_SURFACE_SIZE_V13_5: usize = 556;
+const SWAP_SURFACES_OFFSET_V12_3: usize = 800;
+const SWAP_SURFACES_OFFSET_V13_5: usize = 1128;
+const SWAP_SURFACE_IOVA_OFFSET_V12_3: usize = 2864;
+const SWAP_SURFACE_IOVA_OFFSET_V13_5: usize = 3352;
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct PacketHeader {
@@ -117,17 +123,16 @@ pub struct Iomfb {
     shmem: ContiguousPages,
     shmem_dva: u64,
     last_completed_swap: u32,
-    callback_ends: Vec<usize>,
+    callback_ends: Vec<(u8, usize)>,
     registers: Vec<(usize, usize)>,
     allocations: Vec<Allocation>,
     physical_mappings: Vec<PhysicalMapping>,
     next_descriptor_id: u32,
     bandwidth: Option<BandwidthRegisters>,
     clock_frequency: u64,
-    piodma_table: Arc<Mutex<DartPageTable>>,
-    piodma_dart: Arc<DartInstance>,
-    piodma_stream: usize,
+    piodma_domain: Arc<DartDomain>,
     main_display: bool,
+    firmware_12_3: bool,
 }
 
 impl Iomfb {
@@ -145,13 +150,12 @@ impl Iomfb {
         registers: Vec<(usize, usize)>,
         bandwidth: Option<BandwidthRegisters>,
         clock_frequency: u64,
-        piodma_table: Arc<Mutex<DartPageTable>>,
-        piodma_dart: Arc<DartInstance>,
-        piodma_stream: usize,
+        piodma_domain: Arc<DartDomain>,
+        firmware_12_3: bool,
     ) -> Result<Self, &'static str> {
         let pages = SHMEM_SIZE.div_ceil(scarlet::environment::PAGE_SIZE);
-        let shmem =
-            ContiguousPages::new(pages).ok_or("apple-dcp: IOMFB shmem allocation failed")?;
+        let shmem = ContiguousPages::new_aligned(pages, rtkit.dma_alignment())
+            .ok_or("apple-dcp: IOMFB shmem allocation failed")?;
         // SAFETY: the live contiguous allocation covers exactly `SHMEM_SIZE` bytes.
         unsafe { core::ptr::write_bytes(shmem.as_ptr() as *mut u8, 0, SHMEM_SIZE) };
         scarlet::arch::clean_dcache_to_poc_range(shmem.as_ptr() as usize, SHMEM_SIZE);
@@ -177,10 +181,9 @@ impl Iomfb {
             next_descriptor_id: 1,
             bandwidth,
             clock_frequency,
-            piodma_table,
-            piodma_dart,
-            piodma_stream,
+            piodma_domain,
             main_display: true,
+            firmware_12_3,
         };
         transport.wait_initialized()?;
         Ok(transport)
@@ -254,6 +257,36 @@ impl Iomfb {
         )
     }
 
+    fn channel_offset(context: u8) -> Result<usize, &'static str> {
+        match context {
+            CONTEXT_CALLBACK => Ok(CALLBACK_OFFSET),
+            CONTEXT_ASYNC => Ok(0x40000),
+            CONTEXT_OOB_CALLBACK => Ok(0x68000),
+            CONTEXT_OOB_ASYNC => Ok(0x48000),
+            _ => Self::tx_offset(context),
+        }
+    }
+
+    fn tx_offset(context: u8) -> Result<usize, &'static str> {
+        match context {
+            CONTEXT_CALLBACK | CONTEXT_COMMAND => Ok(0),
+            CONTEXT_OOB_CALLBACK | CONTEXT_OOB_COMMAND => Ok(0x08000),
+            _ => Err("apple-dcp: unsupported IOMFB transmit context"),
+        }
+    }
+
+    fn nested_command_context(context: u8, end: usize) -> (u8, usize) {
+        match context {
+            CONTEXT_CALLBACK => (CONTEXT_CALLBACK, end),
+            CONTEXT_COMMAND => (CONTEXT_CALLBACK, 0),
+            CONTEXT_OOB_CALLBACK => (CONTEXT_OOB_CALLBACK, end),
+            CONTEXT_OOB_COMMAND => (CONTEXT_OOB_CALLBACK, 0),
+            CONTEXT_ASYNC => (CONTEXT_COMMAND, 0),
+            CONTEXT_OOB_ASYNC => (CONTEXT_OOB_COMMAND, 0),
+            _ => (CONTEXT_COMMAND, 0),
+        }
+    }
+
     fn write_packet(
         &mut self,
         offset: usize,
@@ -293,10 +326,7 @@ impl Iomfb {
         offset: usize,
         length: usize,
     ) -> Result<(), &'static str> {
-        if context != CONTEXT_CALLBACK {
-            return Err("apple-dcp: unsupported IOMFB callback context");
-        }
-        let base = CALLBACK_OFFSET
+        let base = Self::channel_offset(context)?
             .checked_add(offset)
             .ok_or("apple-dcp: IOMFB callback offset overflow")?;
         scarlet::arch::invalidate_dcache_to_poc_range(self.shmem.as_ptr() as usize + base, length);
@@ -306,7 +336,7 @@ impl Iomfb {
         let callback_end = offset
             .checked_add(length.div_ceil(PACKET_ALIGNMENT) * PACKET_ALIGNMENT)
             .ok_or("apple-dcp: IOMFB callback stack overflow")?;
-        self.callback_ends.push(callback_end);
+        self.callback_ends.push((context, callback_end));
 
         if header.output_len != 0 {
             let output_offset = input_offset + header.input_len as usize;
@@ -345,7 +375,12 @@ impl Iomfb {
             }
             b"D100" => {
                 let mut response = [0u8; 4];
-                self.call(*b"A374", &[], &mut response)
+                let tag = if self.firmware_12_3 {
+                    *b"A358"
+                } else {
+                    *b"A374"
+                };
+                self.call(tag, &[], &mut response)
             }
             b"D206" => {
                 let mut response = [0u8; 4];
@@ -458,7 +493,7 @@ impl Iomfb {
             _ => {
                 let input_len = header.input_len;
                 let output_len = header.output_len;
-                early_println!(
+                println!(
                     "[apple-dcp] unsupported IOMFB callback {}{}{}{} in={} out={}",
                     tag[0] as char,
                     tag[1] as char,
@@ -582,30 +617,23 @@ impl Iomfb {
             )
         };
         if !already_mapped {
-            let page_size = 1usize << self.piodma_dart.page_shift();
+            let page_size = self.piodma_domain.page_size();
             if !(paddr.is_multiple_of(page_size) && (dva as usize).is_multiple_of(page_size)) {
                 let output =
                     self.shared_slice_mut(input_offset + input_len, header.output_len as usize)?;
                 write_u32(output, 16, 22);
                 return Ok(());
             }
-            let mut table = self.piodma_table.lock();
-            if table
-                .map_contiguous(dva as usize, paddr, size, DART_FLAGS)
+            if self
+                .piodma_domain
+                .map(dva, paddr, size, IommuMapFlags::READ | IommuMapFlags::WRITE)
                 .is_err()
             {
-                drop(table);
                 let output =
                     self.shared_slice_mut(input_offset + input_len, header.output_len as usize)?;
                 write_u32(output, 16, 22);
                 return Ok(());
             }
-            self.piodma_dart.enable_translation(
-                self.piodma_stream,
-                table.root_paddr(),
-                table.translation_levels(),
-            );
-            drop(table);
             self.allocations[index].piodma_mapped = true;
         }
 
@@ -636,41 +664,28 @@ impl Iomfb {
         let Some(index) = self.allocations.iter().position(|allocation| {
             allocation.id == id && allocation.dva == dva && allocation.piodma_mapped
         }) else {
-            early_println!(
+            println!(
                 "[apple-dcp] ignoring invalid D202 descriptor={} dva={:#x}",
-                id,
-                dva
+                id, dva
             );
             return Ok(());
         };
-        self.unmap_piodma(index);
-        Ok(())
+        self.unmap_piodma(index)
     }
 
-    fn unmap_piodma(&mut self, allocation_index: usize) {
+    fn unmap_piodma(&mut self, allocation_index: usize) -> Result<(), &'static str> {
         let (dva, size, mapped) = {
             let allocation = &self.allocations[allocation_index];
-            (
-                allocation.dva as usize,
-                allocation.size,
-                allocation.piodma_mapped,
-            )
+            (allocation.dva, allocation.size, allocation.piodma_mapped)
         };
         if !mapped {
-            return;
+            return Ok(());
         }
-        let page_size = 1usize << self.piodma_dart.page_shift();
-        let mut table = self.piodma_table.lock();
-        for offset in (0..size).step_by(page_size) {
-            table.unmap_page(dva + offset);
-        }
-        self.piodma_dart.enable_translation(
-            self.piodma_stream,
-            table.root_paddr(),
-            table.translation_levels(),
-        );
-        drop(table);
+        self.piodma_domain
+            .unmap(dva, size)
+            .map_err(|_| "apple-dcp: PIODMA unmap failed")?;
         self.allocations[allocation_index].piodma_mapped = false;
+        Ok(())
     }
 
     fn handle_allocate_buffer(
@@ -693,8 +708,7 @@ impl Iomfb {
         let page_size = scarlet::environment::PAGE_SIZE;
         let dma_size = size.div_ceil(self.rtkit.dma_alignment()) * self.rtkit.dma_alignment();
         let pages = dma_size.div_ceil(page_size);
-        let align_pages = self.rtkit.dma_alignment().div_ceil(page_size);
-        let allocation = ContiguousPages::new_aligned(pages, align_pages)
+        let allocation = ContiguousPages::new_aligned(pages, self.rtkit.dma_alignment())
             .ok_or("apple-dcp: D451 allocation failed")?;
         // SAFETY: the contiguous allocation covers `dma_size` bytes.
         unsafe { core::ptr::write_bytes(allocation.as_ptr() as *mut u8, 0, dma_size) };
@@ -791,7 +805,7 @@ impl Iomfb {
             .iter()
             .position(|allocation| allocation.id == id)
         {
-            self.unmap_piodma(index);
+            self.unmap_piodma(index)?;
             let allocation = self.allocations.remove(index);
             self.rtkit.unmap_dma(allocation.dva, allocation.size);
         } else if let Some(index) = self
@@ -810,15 +824,39 @@ impl Iomfb {
     }
 
     fn handle_boot_callback(&mut self) -> Result<(), &'static str> {
-        self.call(*b"A373", &[], &mut [])?;
+        let set_create_dfb = if self.firmware_12_3 {
+            *b"A357"
+        } else {
+            *b"A373"
+        };
+        self.call(set_create_dfb, &[], &mut [])?;
         let mut default_fb = [0u8; 4];
-        self.call(*b"A445", &[], &mut default_fb)?;
+        let create_default_fb = if self.firmware_12_3 {
+            *b"A443"
+        } else {
+            *b"A445"
+        };
+        self.call(create_default_fb, &[], &mut default_fb)?;
         self.call(*b"A029", &[], &mut [])?;
-        self.call(*b"A466", &1u32.to_le_bytes(), &mut [])?;
+        let flush_supports_power = if self.firmware_12_3 {
+            *b"A463"
+        } else {
+            *b"A466"
+        };
+        self.call(flush_supports_power, &1u32.to_le_bytes(), &mut [])?;
         let mut late_init = [0u8; 4];
-        self.call(*b"A000", &1u32.to_le_bytes(), &mut late_init)?;
+        if self.firmware_12_3 {
+            self.call(*b"A000", &[], &mut late_init)?;
+        } else {
+            self.call(*b"A000", &1u32.to_le_bytes(), &mut late_init)?;
+        }
         let mut refresh_properties = [0u8; 4];
-        self.call(*b"A463", &[], &mut refresh_properties)
+        let refresh = if self.firmware_12_3 {
+            *b"A460"
+        } else {
+            *b"A463"
+        };
+        self.call(refresh, &[], &mut refresh_properties)
     }
 
     /// Run the Asahi v13.3 IOMFB start sequence.
@@ -836,8 +874,18 @@ impl Iomfb {
         self.call(*b"A426", &color_remap_request, &mut color_remap_response)?;
 
         let mut video_power_response = [0u8; 4];
-        self.call(*b"A449", &0u32.to_le_bytes(), &mut video_power_response)?;
-        self.call(*b"A456", &[], &mut [])?;
+        let video_power = if self.firmware_12_3 {
+            *b"A447"
+        } else {
+            *b"A449"
+        };
+        self.call(video_power, &0u32.to_le_bytes(), &mut video_power_response)?;
+        let first_client_open = if self.firmware_12_3 {
+            *b"A454"
+        } else {
+            *b"A456"
+        };
+        self.call(first_client_open, &[], &mut [])?;
         let mut main_display = [0u8; 4];
         self.call(*b"A411", &[], &mut main_display)?;
         self.main_display = u32::from_le_bytes(main_display) != 0;
@@ -858,13 +906,24 @@ impl Iomfb {
             let mut parameter = [0u8; 40];
             write_u32(&mut parameter, 0, 14);
             write_u32(&mut parameter, 36, 3);
-            self.call(*b"A441", &parameter, &mut [])?;
+            let tag = if self.firmware_12_3 {
+                *b"A439"
+            } else {
+                *b"A441"
+            };
+            let mut parameter_response = [0u8; 4];
+            self.call(tag, &parameter, &mut parameter_response)?;
         }
 
         let mut request = [0u8; 12];
         write_u64(&mut request, 0, 1);
         let mut response = [0u8; 8];
-        self.call(*b"A472", &request, &mut response)?;
+        let tag = if self.firmware_12_3 {
+            *b"A468"
+        } else {
+            *b"A472"
+        };
+        self.call(tag, &request, &mut response)?;
         let result = u32::from_le_bytes(
             response[4..8]
                 .try_into()
@@ -877,14 +936,16 @@ impl Iomfb {
     }
 
     fn call(&mut self, tag: [u8; 4], input: &[u8], output: &mut [u8]) -> Result<(), &'static str> {
-        let expected_context = if self.callback_ends.is_empty() {
-            CONTEXT_COMMAND
-        } else {
-            CONTEXT_CALLBACK
-        };
-        let packet_offset = self.callback_ends.last().copied().unwrap_or(0);
+        let (expected_context, packet_offset) = self
+            .callback_ends
+            .last()
+            .copied()
+            .map(|(context, end)| Self::nested_command_context(context, end))
+            .unwrap_or((CONTEXT_COMMAND, 0));
+        let packet_base = Self::tx_offset(expected_context)?;
         let wire_tag = [tag[3], tag[2], tag[1], tag[0]];
-        let length = self.write_packet(packet_offset, wire_tag, input, output.len())?;
+        let length =
+            self.write_packet(packet_base + packet_offset, wire_tag, input, output.len())?;
         self.rtkit.send(&RtkitMessage {
             ep: ENDPOINT,
             msg: Self::rpc_message(expected_context, length, packet_offset, false),
@@ -902,11 +963,7 @@ impl Iomfb {
             }
             let (context, offset, callback_length, ack) = Self::parse_rpc(message);
             if ack && context == expected_context {
-                let response_base = if expected_context == CONTEXT_CALLBACK {
-                    CALLBACK_OFFSET
-                } else {
-                    0
-                };
+                let response_base = Self::channel_offset(expected_context)?;
                 scarlet::arch::invalidate_dcache_to_poc_range(
                     self.shmem.as_ptr() as usize + response_base + packet_offset,
                     length,
@@ -962,7 +1019,23 @@ impl Iomfb {
         height: u32,
         stride: u32,
     ) -> Result<(), &'static str> {
-        let mut request = vec![0u8; SWAP_SUBMIT_SIZE];
+        let (submit_size, surface_size, surfaces_offset, surface_iova_offset) =
+            if self.firmware_12_3 {
+                (
+                    SWAP_SUBMIT_SIZE_V12_3,
+                    SWAP_SURFACE_SIZE_V12_3,
+                    SWAP_SURFACES_OFFSET_V12_3,
+                    SWAP_SURFACE_IOVA_OFFSET_V12_3,
+                )
+            } else {
+                (
+                    SWAP_SUBMIT_SIZE_V13_5,
+                    SWAP_SURFACE_SIZE_V13_5,
+                    SWAP_SURFACES_OFFSET_V13_5,
+                    SWAP_SURFACE_IOVA_OFFSET_V13_5,
+                )
+            };
+        let mut request = vec![0u8; submit_size];
         write_u32(&mut request, 80, swap_id);
         write_u32(&mut request, 132, 0);
         write_u32(&mut request, 136, 0);
@@ -975,7 +1048,7 @@ impl Iomfb {
         write_u32(&mut request, 260, 1 << 2);
         write_u32(&mut request, 264, 1 << 2);
 
-        let surface = SWAP_SURFACES_OFFSET + 2 * SWAP_SURFACE_SIZE;
+        let surface = surfaces_offset + 2 * surface_size;
         write_u32(&mut request, surface + 3, 1);
         write_u32(&mut request, surface + 7, 1);
         write_u32(&mut request, surface + 11, u32::from_le_bytes(*b"ARGB"));
@@ -997,18 +1070,27 @@ impl Iomfb {
         request[surface + 115] = 1;
         request[surface + 116] = 1;
         write_u64(&mut request, surface + 329, 1);
-        write_u64(&mut request, SWAP_SURFACE_IOVA_OFFSET + 2 * 8, surface_dva);
+        write_u64(&mut request, surface_iova_offset + 2 * 8, surface_dva);
 
-        request[6263..6267].fill(1);
-        request[6263 + 2] = 0;
-        request[6267..6272].fill(1);
-        request[6273] = 1;
-        request[6274] = 1;
+        if self.firmware_12_3 {
+            request[2909] = 1;
+            request[2910..2914].fill(1);
+            request[2912] = 0;
+            request[2914] = 1;
+        } else {
+            request[6263..6267].fill(1);
+            request[6265] = 0;
+            request[6267..6272].fill(1);
+            request[6273] = 1;
+            request[6274] = 1;
+        }
 
         let mut output = [0u8; 12];
-        self.call(*b"A408", &request, &mut output)?;
+        let output_len = if self.firmware_12_3 { 8 } else { 12 };
+        self.call(*b"A408", &request, &mut output[..output_len])?;
+        let result_offset = if self.firmware_12_3 { 1 } else { 5 };
         let result = u32::from_le_bytes(
-            output[5..9]
+            output[result_offset..result_offset + 4]
                 .try_into()
                 .map_err(|_| "apple-dcp: invalid IOMFB swap_submit response")?,
         );
@@ -1050,7 +1132,7 @@ impl Iomfb {
 impl Drop for Iomfb {
     fn drop(&mut self) {
         for index in 0..self.allocations.len() {
-            self.unmap_piodma(index);
+            let _ = self.unmap_piodma(index);
         }
         for allocation in &self.allocations {
             self.rtkit.unmap_dma(allocation.dva, allocation.size);

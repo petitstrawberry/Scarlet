@@ -90,6 +90,20 @@ pub trait RemoteprocDmaMapper: Send + Sync {
     /// Device virtual address visible to the remote processor.
     fn map(&self, paddr: usize, size: usize) -> Result<u64, RemoteprocError>;
 
+    /// Resolve an existing device virtual address to a physical address.
+    ///
+    /// # Arguments
+    ///
+    /// * `dva` - Device virtual address to resolve.
+    ///
+    /// # Returns
+    ///
+    /// The mapped physical address when the mapper can inspect its page table.
+    fn translate(&self, dva: u64) -> Option<usize> {
+        let _ = dva;
+        None
+    }
+
     /// Release a mapping previously returned by [`Self::map`].
     ///
     /// # Arguments

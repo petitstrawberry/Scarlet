@@ -22,19 +22,20 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use scarlet::device::graphics::output::{DisplayOutput, DisplayRegion};
 use scarlet::device::graphics::{FramebufferConfig, GraphicsDevice, PixelFormat};
+use scarlet::device::iommu::IommuStreamId;
 use scarlet::device::manager::{DeviceManager, DriverPriority, is_probe_defer, probe_defer};
 use scarlet::device::platform::resource::PlatformDeviceResourceType;
 use scarlet::device::platform::{PlatformDeviceDriver, PlatformDeviceInfo};
 use scarlet::device::remoteproc::{RemoteProcessor, RemoteprocDmaMapper, RemoteprocError};
-use scarlet::device::{Device, DeviceType};
-use scarlet::early_println;
+use scarlet::device::{Device, DeviceInfo, DeviceType};
 use scarlet::mem::page::ContiguousPages;
 use scarlet::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use scarlet::object::capability::{ControlOps, MemoryMappingOps};
+use scarlet::println;
 use scarlet::sync::Mutex;
 use scarlet::{arch, environment, time};
 use scarlet_driver_apple_asc::get_apple_asc_by_phandle;
-use scarlet_driver_apple_dart::{DartInstance, DartPageTable, get_dart_by_phandle};
+use scarlet_driver_apple_dart::{DartDomain, DartInstance, DartPageTable, get_dart_by_phandle};
 use scarlet_driver_apple_epic::EpicEndpoint;
 use scarlet_driver_apple_rtkit::AppleRtkit;
 
@@ -46,6 +47,7 @@ const DCP_STATUS_RETRY_US: u64 = 100_000;
 // m1n1 reserves 0x1000_0000..0x2000_0000 for its own RTKit/display handoff.
 // Keep Scarlet-owned mappings in a disjoint range.
 const DCP_DYNAMIC_IOVA_BASE: usize = 0x3000_0000;
+const T8103_ASC_DRAM_MASK: u64 = 0xf_0000_0000;
 const DCP_SCANOUT_IOVA_BASE: usize = 0x4000_0000;
 const DCP_DART_FLAGS: u64 = 1;
 
@@ -289,7 +291,7 @@ fn find_display_iommu() -> Option<(u32, usize, u32)> {
     None
 }
 
-fn find_piodma_iommu(dcp_phandle: u32) -> Option<(u32, usize, u32)> {
+fn find_piodma_iommu(dcp_phandle: u32) -> Option<(u32, usize)> {
     let fdt = scarlet::device::fdt::FdtManager::get_manager().get_fdt()?;
     for node in fdt.all_nodes() {
         let phandle = node
@@ -301,13 +303,9 @@ fn find_piodma_iommu(dcp_phandle: u32) -> Option<(u32, usize, u32)> {
         }
         let piodma = node.children().find(|child| child.name == "piodma")?;
         let iommus = piodma.property("iommus")?;
-        let piodma_phandle = piodma
-            .property("phandle")
-            .or_else(|| piodma.property("linux,phandle"))?;
         return Some((
             read_be_u32(iommus.value, 0)?,
             read_be_u32(iommus.value, 4)? as usize,
-            read_be_u32(piodma_phandle.value, 0)?,
         ));
     }
     None
@@ -353,25 +351,33 @@ fn map_handoff_regions(
 struct DcpDmaMapper {
     table: Arc<Mutex<DartPageTable>>,
     dart: Arc<DartInstance>,
-    stream: usize,
     next_iova: AtomicUsize,
     page_size: usize,
+    dva_base: u64,
 }
 
 impl DcpDmaMapper {
     fn new(
         table: Arc<Mutex<DartPageTable>>,
         dart: Arc<DartInstance>,
-        stream: usize,
         page_size: usize,
+        dva_base: u64,
     ) -> Self {
         Self {
             table,
             dart,
-            stream,
             next_iova: AtomicUsize::new(DCP_DYNAMIC_IOVA_BASE),
             page_size,
+            dva_base,
         }
+    }
+
+    fn dva_from_iova(&self, iova: usize) -> u64 {
+        self.dva_base | iova as u64
+    }
+
+    fn iova_from_dva(&self, dva: u64) -> usize {
+        (dva & !self.dva_base) as usize
     }
 }
 
@@ -391,16 +397,24 @@ impl RemoteprocDmaMapper for DcpDmaMapper {
             .map_contiguous(iova, paddr, size, DCP_DART_FLAGS)
             .map_err(|_| RemoteprocError::LoadFailed)?;
         self.dart
-            .enable_translation(self.stream, table.root_paddr(), table.translation_levels());
-        Ok(iova as u64)
+            .sync_page_tables()
+            .map_err(|_| RemoteprocError::LoadFailed)?;
+        Ok(self.dva_from_iova(iova))
+    }
+
+    fn translate(&self, dva: u64) -> Option<usize> {
+        self.table.lock().translate_iova(self.iova_from_dva(dva))
     }
 
     fn unmap(&self, dva: u64, size: usize) {
         let pages = size.div_ceil(self.page_size);
+        let iova = self.iova_from_dva(dva);
         let mut table = self.table.lock();
         for page in 0..pages {
-            table.unmap_page(dva as usize + page * self.page_size);
+            table.unmap_page(iova + page * self.page_size);
         }
+        drop(table);
+        let _ = self.dart.sync_page_tables();
     }
 }
 
@@ -550,51 +564,18 @@ struct DcpState {
     _iboot: DcpIboot,
     iomfb: Iomfb,
     front: usize,
+    pending_swap: Option<(u32, usize)>,
 }
 
 pub struct AppleDcpGraphics {
     config: FramebufferConfig,
-    render: ContiguousPages,
     scanout: [ContiguousPages; 2],
     scanout_dva: [u64; 2],
     state: Mutex<DcpState>,
     _rtkit: Arc<AppleRtkit>,
     _dcp_table: Arc<Mutex<DartPageTable>>,
     _display_table: Arc<Mutex<DartPageTable>>,
-    _piodma_table: Arc<Mutex<DartPageTable>>,
-}
-
-impl AppleDcpGraphics {
-    fn copy_region(&self, source_paddr: usize, destination_paddr: usize, region: DisplayRegion) {
-        let bytes_per_pixel = self.config.format.bytes_per_pixel();
-        let row_bytes = region.width as usize * bytes_per_pixel;
-        let source = scarlet::vm::phys_to_virt(source_paddr);
-        let destination = scarlet::vm::phys_to_virt(destination_paddr);
-        for row in 0..region.height as usize {
-            let offset = (region.y as usize + row) * self.config.stride as usize
-                + region.x as usize * bytes_per_pixel;
-            // SAFETY: the caller clips the region to the configured surface and
-            // both allocations contain the full stride-by-height buffer.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (source + offset) as *const u8,
-                    (destination + offset) as *mut u8,
-                    row_bytes,
-                );
-            }
-        }
-    }
-
-    fn clipped_region(&self, region: DisplayRegion) -> DisplayRegion {
-        let x = region.x.min(self.config.width);
-        let y = region.y.min(self.config.height);
-        DisplayRegion::new(
-            x,
-            y,
-            region.width.min(self.config.width.saturating_sub(x)),
-            region.height.min(self.config.height.saturating_sub(y)),
-        )
-    }
+    _piodma_domain: Arc<DartDomain>,
 }
 
 impl Device for AppleDcpGraphics {
@@ -629,47 +610,43 @@ impl GraphicsDevice for AppleDcpGraphics {
     }
 
     fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
-        Ok(self.render.as_paddr())
+        let front = self.state.lock().front;
+        Ok(self.scanout[front ^ 1].as_paddr())
     }
 
     fn present_framebuffer_region(
         &self,
         config: &FramebufferConfig,
         physical_addr: usize,
-        region: DisplayRegion,
+        _region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        if physical_addr != self.render.as_paddr()
+        let mut state = self.state.lock();
+        let back = state.front ^ 1;
+
+        if physical_addr != self.scanout[back].as_paddr()
             || config.width != self.config.width
             || config.height != self.config.height
             || config.stride != self.config.stride
             || config.format != self.config.format
         {
-            return Err("apple-dcp: framebuffer does not match render surface");
+            return Err("apple-dcp: framebuffer does not match back buffer");
         }
 
-        let region = self.clipped_region(region);
-        if region.width == 0 || region.height == 0 {
-            return Ok(());
-        }
+        // The compositor rendered directly into the back scanout buffer through
+        // its cacheable mapping. Clean the range so DCP observes the writes via
+        // the DART before the atomic page flip.
+        arch::clean_dcache_to_poc_range(self.scanout[back].as_vaddr(), self.config.size());
 
-        let mut state = self.state.lock();
-        let next = state.front ^ 1;
-        self.copy_region(
-            self.render.as_paddr(),
-            self.scanout[next].as_paddr(),
-            region,
-        );
-        arch::io_wmb();
         let swap_id = state.iomfb.swap_start()?;
         state.iomfb.swap_submit(
             swap_id,
-            self.scanout_dva[next],
+            self.scanout_dva[back],
             self.config.width,
             self.config.height,
             self.config.stride,
         )?;
         state.iomfb.wait_swap_complete(swap_id)?;
-        state.front = next;
+        state.front = back;
         Ok(())
     }
 
@@ -697,10 +674,7 @@ impl GraphicsDevice for AppleDcpGraphics {
             .get(index)
             .ok_or("apple-dcp: invalid scanout DVA index")?;
 
-        // Direct scanout is exposed to userspace as DeviceBurstable memory, so
-        // compositor writes reach the point of coherency without a cacheable
-        // alias. Order those writes before publishing the buffer to DCP.
-        arch::io_wmb();
+        arch::clean_dcache_to_poc_range(self.scanout[index].as_vaddr(), self.config.size());
 
         let mut state = self.state.lock();
         if index == state.front {
@@ -714,8 +688,16 @@ impl GraphicsDevice for AppleDcpGraphics {
             self.config.height,
             self.config.stride,
         )?;
-        state.iomfb.wait_swap_complete(swap_id)?;
-        state.front = index;
+        state.pending_swap = Some((swap_id, index));
+        Ok(())
+    }
+
+    fn wait_for_vblank(&self) -> Result<(), &'static str> {
+        let mut state = self.state.lock();
+        if let Some((swap_id, index)) = state.pending_swap.take() {
+            state.iomfb.wait_swap_complete(swap_id)?;
+            state.front = index;
+        }
         Ok(())
     }
 
@@ -772,7 +754,7 @@ impl Selectable for AppleDcpGraphics {
 }
 
 fn probe_deferred(message: &'static str) -> Result<(), &'static str> {
-    early_println!("[apple-dcp] {}, deferring", message);
+    println!("[apple-dcp] {}, deferring", message);
     let result = probe_defer();
     if let Err(error) = result {
         debug_assert!(is_probe_defer(error));
@@ -786,7 +768,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         iommu_spec(device).ok_or("apple-dcp: missing DCP IOMMU")?;
     let (display_dart_phandle, display_stream, display_phandle) =
         find_display_iommu().ok_or("apple-dcp: display-subsystem IOMMU missing")?;
-    let (piodma_dart_phandle, piodma_stream, piodma_phandle) =
+    let (piodma_dart_phandle, piodma_stream) =
         find_piodma_iommu(dcp_phandle).ok_or("apple-dcp: PIODMA IOMMU missing")?;
 
     let Some(dcp_dart) = get_dart_by_phandle(dcp_dart_phandle) else {
@@ -805,10 +787,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let display_root = display_dart
         .ttbr_paddr(display_stream)
         .ok_or("apple-dcp: display DART has no valid TTBR")?;
-    let piodma_root = piodma_dart
-        .ttbr_paddr(piodma_stream)
-        .ok_or("apple-dcp: PIODMA DART has no valid TTBR")?;
-
     let dcp_table = Arc::new(Mutex::new(DartPageTable::wrap_existing(
         dcp_root,
         dcp_dart.page_shift(),
@@ -817,30 +795,31 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         display_root,
         display_dart.page_shift(),
     )?));
-    let piodma_table = Arc::new(Mutex::new(DartPageTable::wrap_existing(
-        piodma_root,
-        piodma_dart.page_shift(),
-    )?));
+    let piodma_stream_id =
+        u32::try_from(piodma_stream).map_err(|_| "apple-dcp: PIODMA stream ID out of range")?;
+    let piodma_domain = Arc::new(
+        DartDomain::wrap_existing(
+            Arc::clone(&piodma_dart),
+            IommuStreamId {
+                id: piodma_stream_id,
+                substream_id: None,
+            },
+        )
+        .map_err(|_| "apple-dcp: PIODMA firmware page table unavailable")?,
+    );
 
     let dcp_handoff = map_handoff_regions(&mut dcp_table.lock(), dcp_phandle)?;
     let display_handoff = map_handoff_regions(&mut display_table.lock(), display_phandle)?;
-    let piodma_handoff = map_handoff_regions(&mut piodma_table.lock(), piodma_phandle)?;
     if dcp_handoff == 0 {
         return Err("apple-dcp: no firmware handoff mappings");
     }
 
-    dcp_dart.enable_translation(dcp_stream, dcp_root, dcp_table.lock().translation_levels());
-    display_dart.enable_translation(
-        display_stream,
-        display_root,
-        display_table.lock().translation_levels(),
-    );
-    piodma_dart.enable_translation(
-        piodma_stream,
-        piodma_root,
-        piodma_table.lock().translation_levels(),
-    );
-
+    dcp_dart
+        .sync_page_tables()
+        .map_err(|_| "apple-dcp: DCP DART sync failed")?;
+    display_dart
+        .sync_page_tables()
+        .map_err(|_| "apple-dcp: display DART sync failed")?;
     let mailbox_phandle = property_phandle(device, "mboxes")
         .or_else(|| property_phandle(device, "mailboxes"))
         .ok_or("apple-dcp: missing ASC mailbox")?;
@@ -849,11 +828,22 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     };
 
     let page_size = 1usize << dcp_dart.page_shift();
+    let dva_base = device
+        .property("apple,asc-dram-mask")
+        .or_else(|| device.property("asc-dram-mask"))
+        .and_then(|property| read_be_u64(property.value(), 0))
+        .unwrap_or_else(|| {
+            if device.compatible().contains(&"apple,t8103-dcp") {
+                T8103_ASC_DRAM_MASK
+            } else {
+                0
+            }
+        });
     let mapper = Arc::new(DcpDmaMapper::new(
         Arc::clone(&dcp_table),
         Arc::clone(&dcp_dart),
-        dcp_stream,
         page_size,
+        dva_base,
     ));
     let rtkit = Arc::new(AppleRtkit::new_with_dma_mapper(asc, mapper));
     // Match Asahi Linux's afk_start() ordering: complete the RTKit power
@@ -901,82 +891,97 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-dcp: scanout size overflow")?
         .div_ceil(page_size)
         * page_size;
-    let render_pages = visible_size.div_ceil(environment::PAGE_SIZE);
     let scanout_pages = allocation_size.div_ceil(environment::PAGE_SIZE);
-    let render = ContiguousPages::new(render_pages).ok_or("apple-dcp: render allocation failed")?;
     let scanout0 = ContiguousPages::new_aligned(scanout_pages, page_size)
         .ok_or("apple-dcp: scanout 0 allocation failed")?;
     let scanout1 = ContiguousPages::new_aligned(scanout_pages, page_size)
         .ok_or("apple-dcp: scanout 1 allocation failed")?;
 
-    // SAFETY: all three page allocations are live and cover the requested sizes.
+    // SAFETY: both page allocations are live and cover `allocation_size` bytes.
     unsafe {
-        core::ptr::write_bytes(render.as_ptr() as *mut u8, 0, visible_size);
         core::ptr::write_bytes(scanout0.as_ptr() as *mut u8, 0, allocation_size);
         core::ptr::write_bytes(scanout1.as_ptr() as *mut u8, 0, allocation_size);
     }
     arch::clean_dcache_to_poc_range(scanout0.as_ptr() as usize, allocation_size);
     arch::clean_dcache_to_poc_range(scanout1.as_ptr() as usize, allocation_size);
 
-    let scanout_dva = [
+    let scanout_iova = [
         DCP_SCANOUT_IOVA_BASE,
         DCP_SCANOUT_IOVA_BASE + allocation_size,
     ];
+    let scanout_dva = [
+        dva_base | scanout_iova[0] as u64,
+        dva_base | scanout_iova[1] as u64,
+    ];
     for (index, scanout) in [&scanout0, &scanout1].iter().enumerate() {
         dcp_table.lock().map_contiguous(
-            scanout_dva[index],
+            scanout_iova[index],
             scanout.as_paddr(),
             allocation_size,
             DCP_DART_FLAGS,
         )?;
         display_table.lock().map_contiguous(
-            scanout_dva[index],
+            scanout_iova[index],
             scanout.as_paddr(),
             allocation_size,
             DCP_DART_FLAGS,
         )?;
     }
-    let dcp_geometry = {
-        let table = dcp_table.lock();
-        (table.root_paddr(), table.translation_levels())
-    };
-    let display_geometry = {
-        let table = display_table.lock();
-        (table.root_paddr(), table.translation_levels())
-    };
-    dcp_dart.enable_translation(dcp_stream, dcp_geometry.0, dcp_geometry.1);
-    display_dart.enable_translation(display_stream, display_geometry.0, display_geometry.1);
+    dcp_dart
+        .sync_page_tables()
+        .map_err(|_| "apple-dcp: DCP scanout DART sync failed")?;
+    display_dart
+        .sync_page_tables()
+        .map_err(|_| "apple-dcp: display scanout DART sync failed")?;
 
     arch::io_wmb();
-    iboot.set_surface(&make_layer(&config, scanout_dva[0] as u64))?;
+    iboot.set_surface(&make_layer(&config, scanout_dva[0]))?;
     let (registers, bandwidth) = iomfb_registers(device)?;
     let clock_frequency = device_clock_frequency(device);
+    let firmware_compat = device
+        .property("apple,firmware-compat")
+        .ok_or("apple-dcp: missing apple,firmware-compat")?;
+    let firmware_compat = firmware_compat.value();
+    let firmware_major =
+        read_be_u32(firmware_compat, 0).ok_or("apple-dcp: invalid firmware compatibility")?;
+    let firmware_minor =
+        read_be_u32(firmware_compat, 4).ok_or("apple-dcp: invalid firmware compatibility")?;
+    let firmware_patch =
+        read_be_u32(firmware_compat, 8).ok_or("apple-dcp: invalid firmware compatibility")?;
+    let firmware_12_3 = match (firmware_major, firmware_minor, firmware_patch) {
+        (12, 3, 0) => true,
+        (13, 3, 0) | (13, 5, 0) => false,
+        _ => return Err("apple-dcp: unsupported firmware compatibility"),
+    };
+    println!(
+        "[apple-dcp] IOMFB firmware compatibility {}.{}.{}",
+        firmware_major, firmware_minor, firmware_patch
+    );
     let mut iomfb = Iomfb::new(
         rtkit.clone(),
         registers,
         bandwidth,
         clock_frequency,
-        Arc::clone(&piodma_table),
-        Arc::clone(&piodma_dart),
-        piodma_stream,
+        Arc::clone(&piodma_domain),
+        firmware_12_3,
     )?;
     iomfb.start()?;
     iomfb.power_on()?;
 
     let graphics = Arc::new(AppleDcpGraphics {
         config: config.clone(),
-        render,
         scanout: [scanout0, scanout1],
-        scanout_dva: [scanout_dva[0] as u64, scanout_dva[1] as u64],
+        scanout_dva,
         state: Mutex::new(DcpState {
             _iboot: iboot,
             iomfb,
             front: 0,
+            pending_swap: None,
         }),
         _rtkit: rtkit,
         _dcp_table: dcp_table,
         _display_table: display_table,
-        _piodma_table: piodma_table,
+        _piodma_domain: piodma_domain,
     });
     let device_id = DeviceManager::get_manager()
         .register_device_with_name(alloc::string::String::from("apple-dcp"), graphics.clone());
@@ -987,15 +992,14 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         scarlet::earlyfb::deactivate();
     }
 
-    early_println!(
-        "[apple-dcp] native panel {}x{} @ {}.{:02} Hz, handoff maps dcp={} display={} piodma={}",
+    println!(
+        "[apple-dcp] native panel {}x{} @ {}.{:02} Hz, handoff maps dcp={} display={}",
         config.width,
         config.height,
         timing.fps >> 16,
         ((timing.fps & 0xffff) * 100 + 0x7fff) >> 16,
         dcp_handoff,
-        display_handoff,
-        piodma_handoff
+        display_handoff
     );
     Ok(())
 }

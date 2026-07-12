@@ -415,7 +415,7 @@ pub struct Compositor {
     backbuffer_stride: u32,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
-    presented_damage: Vec<PresentDamage>,
+    swapchain_previous_damage: PresentDamage,
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
@@ -548,9 +548,7 @@ impl Compositor {
         let backbuffer_stride = screen_width * bytes_per_pixel;
         let buffer_size = (screen_width * screen_height * bytes_per_pixel) as usize;
         let mut backbuffer = Vec::new();
-        if !display.has_swapchain() {
-            backbuffer.resize(buffer_size, 0);
-        }
+        backbuffer.resize(buffer_size, 0);
 
         Ok(Self {
             display,
@@ -567,7 +565,7 @@ impl Compositor {
             backbuffer_stride,
             full_redraw_needed: true,
             pending_damage: Vec::new(),
-            presented_damage: Vec::new(),
+            swapchain_previous_damage: None,
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
@@ -1189,70 +1187,24 @@ impl Compositor {
         Ok(())
     }
 
-    fn present_damage(&mut self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
-        if self.display.has_swapchain() {
-            self.display
-                .present()
-                .map_err(|_| "Failed to present display")?;
-            return Ok(());
-        }
-
-        // Present only the damage SWS actually composed. Legacy framebuffer
-        // clients keep their own full-frame compatibility path.
-        match dirty_rects {
-            None => self
-                .display
-                .present()
-                .map_err(|_| "Failed to present display")?,
-            Some(rects) => {
-                for (x, y, width, height) in rects {
-                    let Some((x, y, width, height)) =
-                        self.clamp_rect_to_screen((x, y, width, height))
-                    else {
-                        continue;
-                    };
-                    self.display
-                        .present_region(x as u32, y as u32, width, height)
-                        .map_err(|_| "Failed to present display region")?;
-                }
-            }
-        }
-
+    fn present_damage(&mut self, _dirty_rects: PresentDamage) -> Result<(), &'static str> {
+        self.display
+            .present()
+            .map_err(|_| "Failed to present display")?;
         Ok(())
     }
 
     fn composite_pending_to_display(&mut self) -> Result<PresentDamage, &'static str> {
         let current_damage = self.pending_present_damage();
-        let mut redraw_damage = current_damage.clone();
-
-        if self.display.has_swapchain() {
-            let age = self.display.buffer_age().unwrap_or(0) as usize;
-            if age == 0 || age > self.presented_damage.len() {
-                redraw_damage = None;
-            } else {
-                let first = self.presented_damage.len() - age;
-                for damage in &self.presented_damage[first..] {
-                    Self::merge_present_damage(&mut redraw_damage, damage);
-                }
-            }
-        }
-
-        self.composite_damage_to_display(&redraw_damage)?;
+        self.composite_damage_to_display(&current_damage)?;
         Ok(current_damage)
     }
 
     /// Composite all layers directly to the display backing store.
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
+        self.display.wait_for_flip().map_err(|_| "Failed to wait for flip")?;
         let dirty_rects = self.composite_pending_to_display()?;
-        self.present_damage(dirty_rects.clone())?;
-
-        if self.display.has_swapchain() {
-            self.presented_damage.push(dirty_rects);
-            let capacity = self.display.swapchain_buffer_count();
-            if self.presented_damage.len() > capacity {
-                self.presented_damage.remove(0);
-            }
-        }
+        self.present_damage(dirty_rects)?;
         Ok(())
     }
 
@@ -1744,21 +1696,13 @@ impl Compositor {
         &mut self,
         dirty: Option<(i32, i32, u32, u32)>,
     ) -> Result<(), &'static str> {
-        let direct_mapping = if self.display.has_swapchain() {
-            Some(
-                self.display
-                    .get_mapping_info()
-                    .ok_or("Direct scanout buffer is not mapped")?,
-            )
+        let scanout_mapping = if self.display.has_swapchain() {
+            self.display.get_mapping_info()
         } else {
             None
         };
-        let backbuffer_len = direct_mapping
-            .map(|(_, length)| length)
-            .unwrap_or(self.backbuffer.len());
         let stride = self.backbuffer_stride;
 
-        // Clip dirty region to screen bounds.
         let (x0, y0, w, h) = match dirty {
             None => (0i32, 0i32, self.screen_width, self.screen_height),
             Some((dx, dy, dw, dh)) => {
@@ -1777,30 +1721,20 @@ impl Compositor {
         };
 
         if w == 0 || h == 0 {
-            // Nothing to redraw.
             return Ok(());
         }
 
-        // Mutate backbuffer within a limited scope so we can immutably borrow `self`
-        // afterwards for validation/present.
-        {
-            let backbuffer: &mut [u8] = if let Some((address, length)) = direct_mapping {
-                // SAFETY: DisplaySurface owns this live writable mmap for the
-                // currently acquired scanout buffer and reports its exact size.
-                unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) }
-            } else {
-                self.backbuffer.as_mut_slice()
-            };
+        let x0_usize = x0 as usize;
+        let y0_u32 = y0 as u32;
+        let w_usize = w as usize;
+        let h_usize = h as usize;
+        let stride_usize = stride as usize;
+        let bytes_per_pixel_usize = self.bytes_per_pixel as usize;
+        let row_len = w_usize.saturating_mul(bytes_per_pixel_usize);
 
-            // Layer 1: Fill background (only within dirty region).
-            // Pre-calculate values outside the loop
-            let x0_usize = x0 as usize;
-            let y0_u32 = y0 as u32;
-            let w_usize = w as usize;
-            let h_usize = h as usize;
-            let stride_usize = stride as usize;
-            let bytes_per_pixel_usize = self.bytes_per_pixel as usize;
-            let row_len = w_usize.saturating_mul(bytes_per_pixel_usize);
+        {
+            let backbuffer = self.backbuffer.as_mut_slice();
+            let backbuffer_len = backbuffer.len();
 
             for yy in 0..h_usize {
                 let sy = y0_u32.saturating_add(yy as u32);
@@ -1814,7 +1748,6 @@ impl Compositor {
                 }
             }
 
-            // Layer 2: Draw windows (clipped to dirty region).
             let clip = if dirty.is_some() {
                 Some((x0, y0, w, h))
             } else {
@@ -1838,7 +1771,6 @@ impl Compositor {
                 );
             }
 
-            // Layer 2.5: Draw interactive resize outline (if any)
             if let Some(rect) = self.resize_outline {
                 Self::draw_outline_rect_to_buffer(
                     screen_width,
@@ -1851,7 +1783,6 @@ impl Compositor {
                 );
             }
 
-            // Layer 3: Draw cursor
             let cursor = &self.cursor;
             cursor.draw_to_buffer_direct_clipped(
                 backbuffer,
@@ -1863,27 +1794,21 @@ impl Compositor {
             );
         }
 
-        if LOG_RENDER_VALIDATION {
-            let rendered: &[u8] = if let Some((address, length)) = direct_mapping {
-                // SAFETY: the mapping remains live and is only read here after
-                // the mutable rendering borrow above has ended.
-                unsafe { core::slice::from_raw_parts(address as *const u8, length) }
-            } else {
-                self.backbuffer.as_slice()
-            };
-            self.validate_vram_samples(rendered, stride, dirty, "after display composite");
-        }
-
-        if !self.display.has_swapchain() {
-            let src_off = (y0 as usize)
-                .saturating_mul(stride as usize)
-                .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
-            if src_off >= backbuffer_len {
-                return Err("Backbuffer offset out of range");
-            }
-            let src = &self.backbuffer[src_off..];
+        if let Some((address, length)) = scanout_mapping {
+            let scanout =
+                unsafe { core::slice::from_raw_parts_mut(address as *mut u8, length) };
+            let copy_len = self.backbuffer.len().min(scanout.len());
+            scanout[..copy_len].copy_from_slice(&self.backbuffer[..copy_len]);
+        } else {
             self.display
-                .write_bgra_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
+                .write_bgra_strided(
+                    0,
+                    0,
+                    self.screen_width,
+                    self.screen_height,
+                    &self.backbuffer,
+                    stride_usize,
+                )
                 .map_err(|_| "Failed to write backbuffer")?;
         }
 
@@ -2201,7 +2126,13 @@ impl Compositor {
     }
 
     fn wait_for_frame_batch(&mut self) -> Result<bool, &'static str> {
-        thread::sleep(FRAME_BATCH_INTERVAL);
+        // A direct DCP present waits for the hardware swap-complete callback,
+        // which already paces continuous redraws at the panel refresh rate.
+        // Sleeping another frame here halves throughput and adds one frame of
+        // latency. The compatibility framebuffer path still needs the timer.
+        if !self.display.has_swapchain() {
+            thread::sleep(FRAME_BATCH_INTERVAL);
+        }
         self.consume_event_signal_if_ready();
         self.process_pending_events()
     }

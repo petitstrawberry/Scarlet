@@ -12,8 +12,8 @@ use alloc::vec;
 use std::{
     fs::File,
     handle::{
-        HandleError, HandleResult,
         capability::memory_mapping::{flags, munmap, prot},
+        HandleError, HandleResult,
     },
     io::SeekFrom,
 };
@@ -43,6 +43,8 @@ pub mod display_commands {
     pub const DISPLAY_GET_SWAPCHAIN: u32 = 0x5003;
     /// Present one direct scanout buffer.
     pub const DISPLAY_PRESENT_BUFFER: u32 = 0x5004;
+    /// Wait for the most recently submitted page flip to complete.
+    pub const DISPLAY_WAIT_FLIP: u32 = 0x5005;
 }
 
 /// 32-bit RGBA pixel layout.
@@ -799,6 +801,17 @@ impl DisplaySurface {
         self.file
             .as_handle()
             .control(display_commands::DISPLAY_PRESENT, 0)?;
+        Ok(())
+    }
+
+    /// Wait for the previous page flip to complete.
+    ///
+    /// Call this before rendering into the back buffer to guarantee the
+    /// hardware has finished scanning out from it.
+    pub fn wait_for_flip(&self) -> HandleResult<()> {
+        self.file
+            .as_handle()
+            .control(display_commands::DISPLAY_WAIT_FLIP, 0)?;
         Ok(())
     }
 
