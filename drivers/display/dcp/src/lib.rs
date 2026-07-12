@@ -693,6 +693,10 @@ impl GraphicsDevice for AppleDcpGraphics {
         self.scanout.len()
     }
 
+    fn front_scanout_buffer(&self) -> Option<usize> {
+        Some(self.state.lock().front)
+    }
+
     fn get_scanout_buffer_info(
         &self,
         index: usize,

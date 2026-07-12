@@ -110,6 +110,10 @@ pub struct DisplaySwapchainInfo {
     pub buffer_count: u32,
     /// Bytes in each mappable buffer.
     pub buffer_len: u32,
+    /// Scanout buffer currently displayed by the hardware.
+    pub front_buffer: u32,
+    /// Reserved for ABI alignment and future flags.
+    pub reserved: u32,
     /// mmap offset of the first direct scanout buffer.
     pub first_buffer_offset: usize,
 }
@@ -427,6 +431,7 @@ impl DisplaySurface {
             .is_ok()
             && swapchain.buffer_count >= 2
             && swapchain.buffer_len != 0
+            && swapchain.front_buffer < swapchain.buffer_count
         {
             for index in 0..swapchain.buffer_count as usize {
                 let offset = swapchain.first_buffer_offset + index * swapchain.buffer_len as usize;
@@ -443,8 +448,8 @@ impl DisplaySurface {
                     .push((address, swapchain.buffer_len as usize));
                 self.swapchain_presented_at.push(None);
             }
-            // Scanout zero is installed by iBoot and therefore starts front-most.
-            self.draw_buffer = 1;
+            self.draw_buffer =
+                (swapchain.front_buffer as usize + 1) % self.swapchain_buffers.len();
             self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
             self.mapped_backing_id = info.backing_id;
             self.cached_info = Some(info);
@@ -766,6 +771,19 @@ impl DisplaySurface {
     /// The scanout buffer count, or zero when swap is unavailable.
     pub fn swapchain_buffer_count(&self) -> usize {
         self.swapchain_buffers.len()
+    }
+
+    /// Return the scanout buffer currently available for drawing.
+    ///
+    /// # Returns
+    ///
+    /// The draw buffer index, or `None` when direct scanout is unavailable.
+    pub fn draw_buffer_index(&self) -> Option<usize> {
+        if self.swapchain_buffers.is_empty() {
+            None
+        } else {
+            Some(self.draw_buffer)
+        }
     }
 
     /// Return how many completed presents occurred since the current draw buffer was shown.

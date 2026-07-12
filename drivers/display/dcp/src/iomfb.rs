@@ -43,6 +43,8 @@ const SWAP_SURFACES_OFFSET_V12_3: usize = 800;
 const SWAP_SURFACES_OFFSET_V13_5: usize = 1128;
 const SWAP_SURFACE_IOVA_OFFSET_V12_3: usize = 2864;
 const SWAP_SURFACE_IOVA_OFFSET_V13_5: usize = 3352;
+const SWAP_SURFACE_2: u32 = 1 << 2;
+const SWAP_SET_BACKGROUND: u32 = 1 << 31;
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct PacketHeader {
@@ -133,6 +135,7 @@ pub struct Iomfb {
     piodma_domain: Arc<DartDomain>,
     main_display: bool,
     firmware_12_3: bool,
+    surfaces_cleared: bool,
 }
 
 impl Iomfb {
@@ -184,6 +187,7 @@ impl Iomfb {
             piodma_domain,
             main_display: true,
             firmware_12_3,
+            surfaces_cleared: false,
         };
         transport.wait_initialized()?;
         Ok(transport)
@@ -1045,8 +1049,17 @@ impl Iomfb {
         write_u32(&mut request, 232, 0);
         write_u32(&mut request, 236, width);
         write_u32(&mut request, 240, height);
-        write_u32(&mut request, 260, 1 << 2);
-        write_u32(&mut request, 264, 1 << 2);
+        let clear_boot_surfaces = !self.surfaces_cleared;
+        let swap_mask = if clear_boot_surfaces {
+            SWAP_SET_BACKGROUND | 0x7
+        } else {
+            SWAP_SURFACE_2
+        };
+        write_u32(&mut request, 260, swap_mask);
+        write_u32(&mut request, 264, swap_mask);
+        if clear_boot_surfaces {
+            write_u32(&mut request, 268, 0xff00_0000);
+        }
 
         let surface = surfaces_offset + 2 * surface_size;
         write_u32(&mut request, surface + 3, 1);
@@ -1097,6 +1110,7 @@ impl Iomfb {
         if result != 0 {
             return Err("apple-dcp: IOMFB swap_submit failed");
         }
+        self.surfaces_cleared = true;
         Ok(())
     }
 

@@ -194,3 +194,10 @@ source = "../../user/bin"
 package = "user-bin"
 bin = "scarlet_mozc"
 to = "/system/scarlet/bin/scarlet_mozc"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/bin"
+package = "user-bin"
+bin = "dcp_flip_test"
+to = "/system/scarlet/bin/dcp_flip_test"

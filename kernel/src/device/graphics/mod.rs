@@ -206,6 +206,15 @@ pub trait GraphicsDevice: Device {
         0
     }
 
+    /// Return the scanout buffer currently displayed by the hardware.
+    ///
+    /// # Returns
+    ///
+    /// The front buffer index, or `None` when direct scanout is unsupported.
+    fn front_scanout_buffer(&self) -> Option<usize> {
+        None
+    }
+
     /// Return configuration and physical address for one direct scanout buffer.
     ///
     /// # Arguments

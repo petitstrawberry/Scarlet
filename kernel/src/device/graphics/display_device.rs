@@ -99,6 +99,10 @@ pub struct DisplaySwapchainInfo {
     pub buffer_count: u32,
     /// Bytes in each mappable buffer.
     pub buffer_len: u32,
+    /// Scanout buffer currently displayed by the hardware.
+    pub front_buffer: u32,
+    /// Reserved for ABI alignment and future flags.
+    pub reserved: u32,
     /// mmap offset of the first direct scanout buffer.
     pub first_buffer_offset: usize,
 }
@@ -325,10 +329,18 @@ impl DisplayCharDevice {
             return Err("Display swapchain is not supported");
         }
         let (config, _) = graphics.get_scanout_buffer_info(0)?;
+        let front_buffer = graphics
+            .front_scanout_buffer()
+            .ok_or("Display front scanout buffer is unavailable")?;
+        if front_buffer >= count {
+            return Err("Display front scanout buffer is invalid");
+        }
         let buffer_len = Self::page_aligned_size(config.size());
         let info = DisplaySwapchainInfo {
             buffer_count: count as u32,
             buffer_len: buffer_len as u32,
+            front_buffer: front_buffer as u32,
+            reserved: 0,
             first_buffer_offset: buffer_len,
         };
         // SAFETY: target_ptr is a translated caller-provided output pointer.
