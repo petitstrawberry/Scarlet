@@ -587,7 +587,8 @@ impl MemoryMappingOps for DisplayCharDevice {
                 physical_addr + buffer_offset,
                 0x3,
                 true,
-            ));
+            )
+            .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable));
         }
 
         let available_size = info.size - offset;
