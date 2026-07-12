@@ -1958,6 +1958,14 @@ impl Task {
                         .vm_manager
                         .add_memory_map(shared_mmap.clone())
                         .map_err(|_| "Failed to add shared memory map to child task")?;
+                    if let Some(owner) = &shared_mmap.owner {
+                        owner.on_mapped(
+                            shared_mmap.vmarea.start,
+                            shared_mmap.pmarea.start,
+                            shared_mmap.vmarea.size(),
+                            shared_mmap.vmarea.start - shared_mmap.vm_start,
+                        );
+                    }
 
                     // Pre-map trampoline page if applicable
                     if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
@@ -2902,13 +2910,37 @@ pub fn task_initial_kernel_entrypoint() -> ! {
 mod tests {
     use alloc::string::ToString;
     use alloc::sync::Arc;
-    use core::sync::atomic::Ordering;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::INIT_TASK_ID;
-    use crate::object::capability::memory_mapping::AccessOp;
+    use crate::object::capability::memory_mapping::{
+        AccessOp, MemoryMappingInfo, MemoryMappingOps,
+    };
     use crate::sched::scheduler::{add_task, finalize_zombie, get_task_by_id, reset};
     use crate::task::{CloneFlags, CloneFlagsDef, TaskState};
     use crate::vm::addr::{phys_to_virt, virt_to_phys};
+
+    struct MappingCountOwner {
+        mappings: AtomicUsize,
+    }
+
+    impl MemoryMappingOps for MappingCountOwner {
+        fn get_mapping_info(
+            &self,
+            _offset: usize,
+            _length: usize,
+        ) -> Result<MemoryMappingInfo, &'static str> {
+            Err("mapping info is not used by this test")
+        }
+
+        fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+            self.mappings.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+            self.mappings.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 
     #[test_case]
     fn test_set_brk() {
@@ -3719,6 +3751,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test_case]
+    fn test_clone_task_notifies_shared_mapping_owner() {
+        reset();
+
+        use crate::environment::PAGE_SIZE;
+        use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+        let mut parent = super::new_user_task("ParentWithOwnedShared".to_string(), 0);
+        parent.init();
+
+        let owner = Arc::new(MappingCountOwner {
+            mappings: AtomicUsize::new(1),
+        });
+        let owner_ops: Arc<dyn MemoryMappingOps> = owner.clone();
+        let shared_vaddr = 0x9000;
+        parent
+            .vm_manager
+            .add_memory_map(VirtualMemoryMap {
+                pmarea: MemoryArea {
+                    start: 0x8000_0000,
+                    end: 0x8000_0000 + PAGE_SIZE - 1,
+                },
+                vmarea: MemoryArea {
+                    start: shared_vaddr,
+                    end: shared_vaddr + PAGE_SIZE - 1,
+                },
+                vm_start: shared_vaddr,
+                permissions: VirtualMemoryPermission::Read as usize,
+                is_shared: true,
+                memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+                owner: Some(owner_ops),
+            })
+            .unwrap();
+
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(
+            owner.mappings.load(Ordering::SeqCst),
+            2,
+            "fork must notify the owner about the child's shared mapping"
+        );
+
+        drop(child);
+        assert_eq!(
+            owner.mappings.load(Ordering::SeqCst),
+            1,
+            "dropping the child must retain the parent's mapping"
+        );
     }
 
     #[test_case]
