@@ -359,32 +359,32 @@ dependencies = ["build-userlib-debug-aarch64"]
 description = "Build user programs for RISC-V in debug mode"
 dependencies = ["build-userlib-debug-riscv64"]
 script = [
-    "cd user/bin && cargo make build",
-    "cd user/video_player && cargo make build"
+    "(cd user/bin && cargo make build)",
+    "(cd user/video_player && cargo make build)"
 ]
 
 [tasks.build-userbin-debug-aarch64]
 description = "Build user programs for AArch64 in debug mode"
 dependencies = ["build-userlib-debug-aarch64"]
 script = [
-    "cd user/bin && cargo make build-aarch64",
-    "cd user/video_player && cargo make build-aarch64"
+    "(cd user/bin && cargo make build-aarch64)",
+    "(cd user/video_player && cargo make build-aarch64)"
 ]
 
 [tasks.build-userbin-release-riscv64]
 description = "Build user programs for RISC-V in release mode"
 dependencies = ["build-userlib-release-riscv64"]
 script = [
-    "cd user/bin && cargo make build-release",
-    "cd user/video_player && cargo make build-release"
+    "(cd user/bin && cargo make build-release)",
+    "(cd user/video_player && cargo make build-release)"
 ]
 
 [tasks.build-userbin-release-aarch64]
 description = "Build user programs for AArch64 in release mode"
 dependencies = ["build-userlib-release-aarch64"]
 script = [
-    "cd user/bin && cargo make build-release-aarch64",
-    "cd user/video_player && cargo make build-release-aarch64"
+    "(cd user/bin && cargo make build-release-aarch64)",
+    "(cd user/video_player && cargo make build-release-aarch64)"
 ]
 
 [tasks.build-userbin-std-debug-riscv64]
