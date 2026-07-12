@@ -562,16 +562,13 @@ fn choose_color(modes: &[DcpColorMode]) -> Option<DcpColorMode> {
 
 struct DcpState {
     _iboot: DcpIboot,
-    iomfb: Iomfb,
-    front: usize,
-    pending_swap: Option<(u32, usize)>,
+    _iomfb: Iomfb,
 }
 
 pub struct AppleDcpGraphics {
     config: FramebufferConfig,
-    scanout: [ContiguousPages; 2],
-    scanout_dva: [u64; 2],
-    state: Mutex<DcpState>,
+    scanout: ContiguousPages,
+    _state: Mutex<DcpState>,
     _rtkit: Arc<AppleRtkit>,
     _dcp_table: Arc<Mutex<DartPageTable>>,
     _display_table: Arc<Mutex<DartPageTable>>,
@@ -610,8 +607,7 @@ impl GraphicsDevice for AppleDcpGraphics {
     }
 
     fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
-        let front = self.state.lock().front;
-        Ok(self.scanout[front ^ 1].as_paddr())
+        Ok(self.scanout.as_paddr())
     }
 
     fn present_framebuffer_region(
@@ -620,84 +616,19 @@ impl GraphicsDevice for AppleDcpGraphics {
         physical_addr: usize,
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        let mut state = self.state.lock();
-        let back = state.front ^ 1;
-
-        if physical_addr != self.scanout[back].as_paddr()
+        if physical_addr != self.scanout.as_paddr()
             || config.width != self.config.width
             || config.height != self.config.height
             || config.stride != self.config.stride
             || config.format != self.config.format
         {
-            return Err("apple-dcp: framebuffer does not match back buffer");
+            return Err("apple-dcp: framebuffer does not match scanout surface");
         }
 
-        // The compositor rendered directly into the back scanout buffer through
-        // its cacheable mapping. Clean the range so DCP observes the writes via
-        // the DART before the atomic page flip.
-        arch::clean_dcache_to_poc_range(self.scanout[back].as_vaddr(), self.config.size());
-
-        let swap_id = state.iomfb.swap_start()?;
-        state.iomfb.swap_submit(
-            swap_id,
-            self.scanout_dva[back],
-            self.config.width,
-            self.config.height,
-            self.config.stride,
-        )?;
-        state.iomfb.wait_swap_complete(swap_id)?;
-        state.front = back;
-        Ok(())
-    }
-
-    fn scanout_buffer_count(&self) -> usize {
-        self.scanout.len()
-    }
-
-    fn get_scanout_buffer_info(
-        &self,
-        index: usize,
-    ) -> Result<(FramebufferConfig, usize), &'static str> {
-        let scanout = self
-            .scanout
-            .get(index)
-            .ok_or("apple-dcp: invalid scanout buffer index")?;
-        Ok((self.config.clone(), scanout.as_paddr()))
-    }
-
-    fn present_scanout_buffer(&self, index: usize) -> Result<(), &'static str> {
-        if index >= self.scanout.len() {
-            return Err("apple-dcp: invalid scanout buffer index");
-        }
-        let dva = *self
-            .scanout_dva
-            .get(index)
-            .ok_or("apple-dcp: invalid scanout DVA index")?;
-
-        arch::clean_dcache_to_poc_range(self.scanout[index].as_vaddr(), self.config.size());
-
-        let mut state = self.state.lock();
-        if index == state.front {
-            return Err("apple-dcp: scanout buffer is already front-most");
-        }
-        let swap_id = state.iomfb.swap_start()?;
-        state.iomfb.swap_submit(
-            swap_id,
-            dva,
-            self.config.width,
-            self.config.height,
-            self.config.stride,
-        )?;
-        state.pending_swap = Some((swap_id, index));
-        Ok(())
-    }
-
-    fn wait_for_vblank(&self) -> Result<(), &'static str> {
-        let mut state = self.state.lock();
-        if let Some((swap_id, index)) = state.pending_swap.take() {
-            state.iomfb.wait_swap_complete(swap_id)?;
-            state.front = index;
-        }
+        // Compatibility path: SWS writes directly into the one surface that
+        // iBoot installed for scanout. Publish those device-memory writes, but
+        // do not copy the frame or submit an IOMFB page flip.
+        arch::io_wmb();
         Ok(())
     }
 
@@ -894,39 +825,27 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let scanout_pages = allocation_size.div_ceil(environment::PAGE_SIZE);
     let scanout0 = ContiguousPages::new_aligned(scanout_pages, page_size)
         .ok_or("apple-dcp: scanout 0 allocation failed")?;
-    let scanout1 = ContiguousPages::new_aligned(scanout_pages, page_size)
-        .ok_or("apple-dcp: scanout 1 allocation failed")?;
 
-    // SAFETY: both page allocations are live and cover `allocation_size` bytes.
+    // SAFETY: the page allocation is live and covers `allocation_size` bytes.
     unsafe {
         core::ptr::write_bytes(scanout0.as_ptr() as *mut u8, 0, allocation_size);
-        core::ptr::write_bytes(scanout1.as_ptr() as *mut u8, 0, allocation_size);
     }
     arch::clean_dcache_to_poc_range(scanout0.as_ptr() as usize, allocation_size);
-    arch::clean_dcache_to_poc_range(scanout1.as_ptr() as usize, allocation_size);
 
-    let scanout_iova = [
-        DCP_SCANOUT_IOVA_BASE,
-        DCP_SCANOUT_IOVA_BASE + allocation_size,
-    ];
-    let scanout_dva = [
-        dva_base | scanout_iova[0] as u64,
-        dva_base | scanout_iova[1] as u64,
-    ];
-    for (index, scanout) in [&scanout0, &scanout1].iter().enumerate() {
-        dcp_table.lock().map_contiguous(
-            scanout_iova[index],
-            scanout.as_paddr(),
-            allocation_size,
-            DCP_DART_FLAGS,
-        )?;
-        display_table.lock().map_contiguous(
-            scanout_iova[index],
-            scanout.as_paddr(),
-            allocation_size,
-            DCP_DART_FLAGS,
-        )?;
-    }
+    let scanout_iova = DCP_SCANOUT_IOVA_BASE;
+    let scanout_dva = dva_base | scanout_iova as u64;
+    dcp_table.lock().map_contiguous(
+        scanout_iova,
+        scanout0.as_paddr(),
+        allocation_size,
+        DCP_DART_FLAGS,
+    )?;
+    display_table.lock().map_contiguous(
+        scanout_iova,
+        scanout0.as_paddr(),
+        allocation_size,
+        DCP_DART_FLAGS,
+    )?;
     dcp_dart
         .sync_page_tables()
         .map_err(|_| "apple-dcp: DCP scanout DART sync failed")?;
@@ -935,7 +854,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map_err(|_| "apple-dcp: display scanout DART sync failed")?;
 
     arch::io_wmb();
-    iboot.set_surface(&make_layer(&config, scanout_dva[0]))?;
+    iboot.set_surface(&make_layer(&config, scanout_dva))?;
     let (registers, bandwidth) = iomfb_registers(device)?;
     let clock_frequency = device_clock_frequency(device);
     let firmware_compat = device
@@ -970,13 +889,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let graphics = Arc::new(AppleDcpGraphics {
         config: config.clone(),
-        scanout: [scanout0, scanout1],
-        scanout_dva,
-        state: Mutex::new(DcpState {
+        scanout: scanout0,
+        _state: Mutex::new(DcpState {
             _iboot: iboot,
-            iomfb,
-            front: 0,
-            pending_swap: None,
+            _iomfb: iomfb,
         }),
         _rtkit: rtkit,
         _dcp_table: dcp_table,

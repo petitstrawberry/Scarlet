@@ -201,41 +201,6 @@ pub trait GraphicsDevice: Device {
         self.present_framebuffer_region(&config, physical_addr, region)
     }
 
-    /// Return the number of CPU-mappable scanout buffers available for direct presentation.
-    fn scanout_buffer_count(&self) -> usize {
-        0
-    }
-
-    /// Return configuration and physical address for one direct scanout buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - Scanout buffer index.
-    ///
-    /// # Returns
-    ///
-    /// Buffer configuration and physical address, or an error when unsupported.
-    fn get_scanout_buffer_info(
-        &self,
-        _index: usize,
-    ) -> Result<(FramebufferConfig, usize), &'static str> {
-        Err("Direct scanout buffers are not supported")
-    }
-
-    /// Present one direct scanout buffer atomically.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - Scanout buffer index previously exposed for drawing.
-    ///
-    /// # Returns
-    ///
-    /// Success after the hardware reports completion and the previous front
-    /// buffer is safe to acquire for drawing.
-    fn present_scanout_buffer(&self, _index: usize) -> Result<(), &'static str> {
-        Err("Direct scanout buffers are not supported")
-    }
-
     /// Present a GPU resource through the display pipeline.
     ///
     /// This is the display-side boundary for accelerated producers. GPU
@@ -273,16 +238,6 @@ pub trait GraphicsDevice: Device {
 
     /// Initialize the graphics device (idempotent)
     fn init_graphics(&self) -> Result<(), &'static str>;
-
-    /// Wait for the most recently submitted page flip to complete.
-    ///
-    /// Devices with asynchronous [`present_scanout_buffer`] implementations
-    /// override this so callers can block until the hardware has finished
-    /// flipping to the new front buffer. The default is a no-op for devices
-    /// that flip synchronously.
-    fn wait_for_vblank(&self) -> Result<(), &'static str> {
-        Ok(())
-    }
 
     /// Get display outputs provided by this device.
     ///
