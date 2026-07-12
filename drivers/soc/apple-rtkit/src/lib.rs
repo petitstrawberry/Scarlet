@@ -14,8 +14,8 @@ use scarlet::device::remoteproc::{
     RemoteprocFirmware, RemoteprocMemoryRegion, RemoteprocMessage, RemoteprocService,
     RemoteprocServiceClient, RemoteprocServiceId, RemoteprocState,
 };
-use scarlet::println;
 use scarlet::mem::pmm;
+use scarlet::println;
 use scarlet::time;
 use scarlet::vm;
 use scarlet_driver_apple_asc::{AppleAsc, AscMessage};
@@ -816,10 +816,7 @@ impl AppleRtkit {
                 });
                 println!(
                     "[apple-rtkit] ep {} buffer {:#x} bytes at paddr={:#x} dva={:#x}",
-                    msg.ep,
-                    size_bytes,
-                    paddr,
-                    mapped
+                    msg.ep, size_bytes, paddr, mapped
                 );
                 mapped
             }
