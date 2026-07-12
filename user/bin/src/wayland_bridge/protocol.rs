@@ -258,6 +258,8 @@ pub mod surface_request {
     pub const COMMIT: u16 = 6;
     pub const SET_BUFFER_TRANSFORM: u16 = 7;
     pub const SET_BUFFER_SCALE: u16 = 8;
+    /// Damage in buffer (physical) coordinates. Available since wl_surface version 4.
+    pub const DAMAGE_BUFFER: u16 = 9;
 }
 
 /// wl_surface opcodes (events from server)

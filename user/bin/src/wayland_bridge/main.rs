@@ -261,6 +261,10 @@ struct WaylandBridge {
     last_left_button_serial: Option<u32>,
     /// Last left-button press time
     last_left_button_time: Option<u32>,
+    /// Output scale factor (integer, from SWS output_scale_milli).
+    /// Advertised via wl_output.scale so Wayland clients render at full
+    /// physical resolution under HiDPI.
+    output_scale: i32,
 }
 
 impl WaylandBridge {
@@ -312,6 +316,7 @@ impl WaylandBridge {
             left_button_down: false,
             last_left_button_serial: None,
             last_left_button_time: None,
+            output_scale: 1,
         })
     }
 
@@ -356,7 +361,60 @@ impl WaylandBridge {
             self.extension_id = Some(extension_id);
             bridge_log!("[Bridge] Registered as extension with ID: {}", extension_id);
         }
+
+        self.query_output_scale()?;
+
         Ok(())
+    }
+
+    /// Query the current output scale from SWS and store it as an integer.
+    ///
+    /// Converts SWS milli-units (1000 = 1.0x, 2000 = 2.0x) to the nearest
+    /// integer, matching the `wl_output.scale` requirement of being a
+    /// positive integer.
+    fn query_output_scale(&mut self) -> Result<(), &'static str> {
+        let sws_conn = self.sws_connection.as_mut().ok_or("Not connected to SWS")?;
+
+        let header =
+            protocol_sws::MessageHeader::new(protocol_sws::client_msg::GET_OUTPUT_SCALE, 0);
+        sws_conn
+            .write(&header.to_le_bytes())
+            .map_err(|_| "Failed to send GET_OUTPUT_SCALE")?;
+
+        if let protocol_sws::ServerMessage::OutputScale { scale_milli } = self
+            .wait_for_sws_message(|msg| {
+                matches!(msg, protocol_sws::ServerMessage::OutputScale { .. })
+            })?
+        {
+            let scale = ((scale_milli + 500) / 1000).max(1) as i32;
+            bridge_log!(
+                "[Bridge] Output scale: milli={} -> integer {}",
+                scale_milli,
+                scale
+            );
+            self.output_scale = scale;
+        }
+
+        Ok(())
+    }
+
+    /// Convert SWS physical pixel coordinate to Wayland surface-local
+    /// (logical) coordinate using the focused surface's buffer_scale.
+    fn physical_to_logical_x(&self, x: i32) -> i32 {
+        let scale = self.focused_surface_scale();
+        if scale > 0 { x / scale } else { x }
+    }
+
+    fn physical_to_logical_y(&self, y: i32) -> i32 {
+        let scale = self.focused_surface_scale();
+        if scale > 0 { y / scale } else { y }
+    }
+
+    fn focused_surface_scale(&self) -> i32 {
+        self.focused_surface
+            .and_then(|sid| self.surface_manager.get_surface(sid))
+            .map(|s| s.buffer_scale.max(1))
+            .unwrap_or(1)
     }
 
     fn allocate_serial(&mut self) -> u32 {
@@ -407,8 +465,12 @@ impl WaylandBridge {
         if let Some(pointer_id) = self.focused_pointer {
             let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
             msg.add_arg(WaylandArg::Uint(self.pending_pointer_time));
-            msg.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
-            msg.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+            msg.add_arg(WaylandArg::Fixed(
+                self.physical_to_logical_x(self.pointer_x) << 8,
+            ));
+            msg.add_arg(WaylandArg::Fixed(
+                self.physical_to_logical_y(self.pointer_y) << 8,
+            ));
             self.pending_pointer_messages.push(msg);
             self.pending_pointer_id = Some(pointer_id);
         }
@@ -466,8 +528,12 @@ impl WaylandBridge {
             let mut enter = WaylandMessage::new(pointer_id, input::pointer_event::ENTER);
             enter.add_arg(WaylandArg::Uint(serial));
             enter.add_arg(WaylandArg::Object(surface_id));
-            enter.add_arg(WaylandArg::Fixed(self.pointer_x << 8));
-            enter.add_arg(WaylandArg::Fixed(self.pointer_y << 8));
+            enter.add_arg(WaylandArg::Fixed(
+                self.physical_to_logical_x(self.pointer_x) << 8,
+            ));
+            enter.add_arg(WaylandArg::Fixed(
+                self.physical_to_logical_y(self.pointer_y) << 8,
+            ));
             messages.push(enter);
         }
 
@@ -1922,6 +1988,12 @@ impl WaylandBridge {
                                 }
 
                                 if interface_name == "wl_output" {
+                                    let scale = self.output_scale;
+                                    bridge_log!(
+                                        "[Bridge] Advertising wl_output.scale = {} to client",
+                                        scale
+                                    );
+
                                     let mut msgs = Vec::new();
                                     let mut geom = WaylandMessage::new(
                                         new_id,
@@ -1940,15 +2012,15 @@ impl WaylandBridge {
                                     let mut mode =
                                         WaylandMessage::new(new_id, protocol::output_event::MODE);
                                     mode.add_arg(WaylandArg::Uint(1)); // current
-                                    mode.add_arg(WaylandArg::Int(800)); // width
-                                    mode.add_arg(WaylandArg::Int(600)); // height
+                                    mode.add_arg(WaylandArg::Int(800 * scale)); // width (physical)
+                                    mode.add_arg(WaylandArg::Int(600 * scale)); // height (physical)
                                     mode.add_arg(WaylandArg::Int(60000)); // refresh mHz
                                     msgs.push(mode);
 
-                                    let mut scale =
+                                    let mut scale_msg =
                                         WaylandMessage::new(new_id, protocol::output_event::SCALE);
-                                    scale.add_arg(WaylandArg::Int(1));
-                                    msgs.push(scale);
+                                    scale_msg.add_arg(WaylandArg::Int(scale));
+                                    msgs.push(scale_msg);
 
                                     let done =
                                         WaylandMessage::new(new_id, protocol::output_event::DONE);
@@ -2132,6 +2204,30 @@ impl WaylandBridge {
             protocol::surface_request::DAMAGE => {
                 if is_debug_enabled() {
                     bridge_log!("[Bridge] wl_surface.damage on surface {}", surface_id);
+                }
+                if payload.len() >= 16 {
+                    let x = Self::parse_i32(payload, 0).unwrap_or(0);
+                    let y = Self::parse_i32(payload, 4).unwrap_or(0);
+                    let width = Self::parse_i32(payload, 8).unwrap_or(0);
+                    let height = Self::parse_i32(payload, 12).unwrap_or(0);
+                    if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        let scale = surface.buffer_scale.max(1);
+                        surface.add_damage(
+                            x.saturating_mul(scale),
+                            y.saturating_mul(scale),
+                            width.saturating_mul(scale),
+                            height.saturating_mul(scale),
+                        );
+                    }
+                }
+                Ok(Vec::new())
+            }
+            protocol::surface_request::DAMAGE_BUFFER => {
+                if is_debug_enabled() {
+                    bridge_log!(
+                        "[Bridge] wl_surface.damage_buffer on surface {}",
+                        surface_id
+                    );
                 }
                 if payload.len() >= 16 {
                     let x = Self::parse_i32(payload, 0).unwrap_or(0);
