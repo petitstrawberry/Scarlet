@@ -415,6 +415,7 @@ pub struct Compositor {
     backbuffer_stride: u32,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
+    presented_damage: Vec<PresentDamage>,
     event_counter: u64,
     left_button_down: bool,
     last_left_down_cursor: Option<(i32, i32)>,
@@ -564,6 +565,7 @@ impl Compositor {
             backbuffer_stride,
             full_redraw_needed: true,
             pending_damage: Vec::new(),
+            presented_damage: Vec::new(),
             event_counter: 0,
             left_button_down: false,
             last_left_down_cursor: None,
@@ -1189,23 +1191,27 @@ impl Compositor {
 
     fn present_damage(&mut self, dirty_rects: PresentDamage) -> Result<(), &'static str> {
         if self.display.has_swapchain() {
-            let (address, length) = self
-                .display
-                .get_mapping_info()
-                .ok_or("Back scanout buffer is not mapped")?;
-            let copy_len = self.backbuffer.len().min(length);
-            // SAFETY: DisplaySurface owns the writable mmap for the currently
-            // acquired non-visible scanout buffer and reports its exact size.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    self.backbuffer.as_ptr(),
-                    address as *mut u8,
-                    copy_len,
-                );
+            let age = self.display.buffer_age().unwrap_or(0) as usize;
+            let mut copy_damage = dirty_rects.clone();
+            if age == 0 || age > self.presented_damage.len() {
+                copy_damage = None;
+            } else {
+                let first = self.presented_damage.len() - age;
+                for damage in &self.presented_damage[first..] {
+                    Self::merge_present_damage(&mut copy_damage, damage.clone());
+                }
             }
+
+            self.copy_backbuffer_damage_to_scanout(&copy_damage)?;
             self.display
                 .present()
                 .map_err(|_| "Failed to swap display buffer")?;
+
+            self.presented_damage.push(dirty_rects);
+            let capacity = self.display.swapchain_buffer_count();
+            if self.presented_damage.len() > capacity {
+                self.presented_damage.remove(0);
+            }
             return Ok(());
         }
 
@@ -1226,6 +1232,66 @@ impl Compositor {
                     self.display
                         .present_region(x as u32, y as u32, width, height)
                         .map_err(|_| "Failed to present display region")?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn copy_backbuffer_damage_to_scanout(
+        &self,
+        damage: &PresentDamage,
+    ) -> Result<(), &'static str> {
+        let (address, length) = self
+            .display
+            .get_mapping_info()
+            .ok_or("Back scanout buffer is not mapped")?;
+
+        match damage {
+            None => {
+                if self.backbuffer.len() > length {
+                    return Err("Full scanout copy exceeds buffer bounds");
+                }
+                let copy_len = self.backbuffer.len();
+                // SAFETY: DisplaySurface owns the writable mmap for the current
+                // non-visible scanout buffer and reports its exact size.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.backbuffer.as_ptr(),
+                        address as *mut u8,
+                        copy_len,
+                    );
+                }
+            }
+            Some(rects) => {
+                let stride = self.backbuffer_stride as usize;
+                let bytes_per_pixel = self.bytes_per_pixel as usize;
+                for rect in rects.iter().copied() {
+                    let Some((x, y, width, height)) = self.clamp_rect_to_screen(rect) else {
+                        continue;
+                    };
+                    let row_bytes = width as usize * bytes_per_pixel;
+                    for row in 0..height as usize {
+                        let offset = (y as usize + row)
+                            .saturating_mul(stride)
+                            .saturating_add(x as usize * bytes_per_pixel);
+                        if offset.saturating_add(row_bytes) > self.backbuffer.len()
+                            || offset.saturating_add(row_bytes) > length
+                        {
+                            return Err("Scanout damage copy exceeds buffer bounds");
+                        }
+                        // SAFETY: both ranges were checked against their live
+                        // buffers and the scanout mapping does not overlap the
+                        // compositor-owned backbuffer.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                self.backbuffer.as_ptr().add(offset),
+                                (address as *mut u8).add(offset),
+                                row_bytes,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2171,7 +2237,12 @@ impl Compositor {
     }
 
     fn wait_for_frame_batch(&mut self) -> Result<bool, &'static str> {
-        thread::sleep(FRAME_BATCH_INTERVAL);
+        // Synchronous DCP presentation already waits for the next completed
+        // page flip. Sleeping for another frame here would double-pace the
+        // compositor and reduce interactive updates to roughly 30 Hz.
+        if !self.display.has_swapchain() {
+            thread::sleep(FRAME_BATCH_INTERVAL);
+        }
         self.consume_event_signal_if_ready();
         self.process_pending_events()
     }

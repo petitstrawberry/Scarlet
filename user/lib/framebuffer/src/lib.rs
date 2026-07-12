@@ -308,6 +308,8 @@ pub struct DisplaySurface {
     scratch_line: alloc::vec::Vec<u8>,
     cached_info: Option<DisplayInfo>,
     swapchain_buffers: alloc::vec::Vec<(usize, usize)>,
+    swapchain_presented_at: alloc::vec::Vec<Option<u64>>,
+    present_sequence: u64,
     draw_buffer: usize,
 }
 
@@ -387,6 +389,8 @@ impl DisplaySurface {
             scratch_line: alloc::vec::Vec::new(),
             cached_info: None,
             swapchain_buffers: alloc::vec::Vec::new(),
+            swapchain_presented_at: alloc::vec::Vec::new(),
+            present_sequence: 0,
             draw_buffer: 0,
         };
         let _ = display.setup_mmap();
@@ -426,6 +430,7 @@ impl DisplaySurface {
                     .map_err(|_| HandleError::SystemError(-1))?;
                 self.swapchain_buffers
                     .push((address, swapchain.buffer_len as usize));
+                self.swapchain_presented_at.push(None);
             }
             // Scanout zero is installed by iBoot and therefore starts front-most.
             self.draw_buffer = 1;
@@ -711,6 +716,9 @@ impl DisplaySurface {
             for (mapped_addr, mapped_size) in self.swapchain_buffers.drain(..) {
                 let _ = munmap(mapped_addr, mapped_size);
             }
+            self.swapchain_presented_at.clear();
+            self.present_sequence = 0;
+            self.draw_buffer = 0;
             self.mapped_buffer = None;
         }
         self.mapped_backing_id = 0;
@@ -740,6 +748,33 @@ impl DisplaySurface {
         !self.swapchain_buffers.is_empty()
     }
 
+    /// Return the number of directly mapped scanout buffers.
+    ///
+    /// # Returns
+    ///
+    /// The scanout buffer count, or zero when swap is unavailable.
+    pub fn swapchain_buffer_count(&self) -> usize {
+        self.swapchain_buffers.len()
+    }
+
+    /// Return how many completed presents occurred since the current draw buffer was shown.
+    ///
+    /// Zero means the buffer has never been presented and requires a full copy.
+    ///
+    /// # Returns
+    ///
+    /// The current draw buffer age, or `None` when swap is unavailable.
+    pub fn buffer_age(&self) -> Option<u64> {
+        if self.swapchain_buffers.is_empty() {
+            return None;
+        }
+
+        Some(match self.swapchain_presented_at[self.draw_buffer] {
+            Some(sequence) => self.present_sequence.saturating_sub(sequence),
+            None => 0,
+        })
+    }
+
     /// Present the whole display surface.
     ///
     /// # Returns
@@ -755,6 +790,8 @@ impl DisplaySurface {
                 display_commands::DISPLAY_PRESENT_BUFFER,
                 &request as *const DisplayPresentBuffer as usize,
             )?;
+            self.present_sequence = self.present_sequence.saturating_add(1);
+            self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
             self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
             self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
             return Ok(());
