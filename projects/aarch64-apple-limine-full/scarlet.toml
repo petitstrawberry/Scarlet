@@ -41,6 +41,7 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 "scarlet-driver-apple-spi" = { path = "../../drivers/spi/apple-spi", enabled = true }
 "scarlet-driver-apple-spi-hid" = { path = "../../drivers/spi/apple-spi-hid", enabled = true }
 "scarlet-driver-dpxbar" = { path = "../../drivers/display/dpxbar", enabled = true }
+"scarlet-driver-dcp" = { path = "../../drivers/display/dcp", enabled = true }
 "scarlet-driver-dcpext" = { path = "../../drivers/display/dcpext", enabled = true }
 
 [images]
