@@ -236,6 +236,27 @@ pub trait GraphicsDevice: Device {
         Err("Direct scanout buffers are not supported")
     }
 
+    /// Present one direct scanout buffer with the regions modified by the producer.
+    ///
+    /// An empty region list means the complete buffer was modified.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Scanout buffer index previously exposed for drawing.
+    /// * `regions` - Modified framebuffer regions, or an empty slice for a full update.
+    ///
+    /// # Returns
+    ///
+    /// Success after the hardware reports completion and the previous front
+    /// buffer is safe to acquire for drawing.
+    fn present_scanout_buffer_regions(
+        &self,
+        index: usize,
+        _regions: &[DisplayRegion],
+    ) -> Result<(), &'static str> {
+        self.present_scanout_buffer(index)
+    }
+
     /// Present a GPU resource through the display pipeline.
     ///
     /// This is the display-side boundary for accelerated producers. GPU

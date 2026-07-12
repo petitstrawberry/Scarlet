@@ -64,6 +64,9 @@ pub const DISPLAY_PIXEL_FORMAT_ARGB1555: u32 = 8;
 /// 16-bit XRGB1555 pixel layout.
 pub const DISPLAY_PIXEL_FORMAT_XRGB1555: u32 = 9;
 
+/// Maximum number of damage rectangles carried by one present request.
+pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
+
 /// Display surface information.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,6 +122,14 @@ pub struct DisplayPresentBuffer {
     pub index: u32,
     /// Reserved for future fence flags.
     pub flags: u32,
+    /// Number of valid entries in `damage`.
+    ///
+    /// Zero means the complete buffer was modified.
+    pub damage_count: u32,
+    /// Reserved for ABI alignment.
+    pub reserved: u32,
+    /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
+    pub damage_ptr: usize,
 }
 
 /// Color bit field information
@@ -782,23 +793,51 @@ impl DisplaySurface {
     /// Success or HandleError on failure.
     pub fn present(&mut self) -> HandleResult<()> {
         if !self.swapchain_buffers.is_empty() {
-            let request = DisplayPresentBuffer {
-                index: self.draw_buffer as u32,
-                flags: 0,
-            };
-            self.file.as_handle().control(
-                display_commands::DISPLAY_PRESENT_BUFFER,
-                &request as *const DisplayPresentBuffer as usize,
-            )?;
-            self.present_sequence = self.present_sequence.saturating_add(1);
-            self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
-            self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
-            self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
-            return Ok(());
+            return self.present_swapchain_regions(&[]);
         }
         self.file
             .as_handle()
             .control(display_commands::DISPLAY_PRESENT, 0)?;
+        Ok(())
+    }
+
+    /// Present the current scanout buffer with the regions copied by the producer.
+    ///
+    /// An empty slice denotes a complete-buffer update.
+    ///
+    /// # Arguments
+    ///
+    /// * `regions` - Updated display regions, or an empty slice for a full update.
+    ///
+    /// # Returns
+    ///
+    /// Success or HandleError on failure.
+    pub fn present_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if self.swapchain_buffers.is_empty() {
+            return self.present();
+        }
+        self.present_swapchain_regions(regions)
+    }
+
+    fn present_swapchain_regions(&mut self, regions: &[DisplayPresentRegion]) -> HandleResult<()> {
+        if regions.len() > DISPLAY_MAX_DAMAGE_RECTS {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let request = DisplayPresentBuffer {
+            index: self.draw_buffer as u32,
+            damage_count: regions.len() as u32,
+            damage_ptr: regions.as_ptr() as usize,
+            ..DisplayPresentBuffer::default()
+        };
+        self.file.as_handle().control(
+            display_commands::DISPLAY_PRESENT_BUFFER,
+            &request as *const DisplayPresentBuffer as usize,
+        )?;
+        self.present_sequence = self.present_sequence.saturating_add(1);
+        self.swapchain_presented_at[self.draw_buffer] = Some(self.present_sequence);
+        self.draw_buffer = (self.draw_buffer + 1) % self.swapchain_buffers.len();
+        self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
         Ok(())
     }
 

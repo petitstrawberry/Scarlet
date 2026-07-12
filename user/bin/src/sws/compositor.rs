@@ -6,7 +6,7 @@ use super::ipc::{IpcEvent, IpcServer, send_message_to_client, send_response_to_c
 use super::window::WindowManager;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
-use framebuffer::DisplaySurface;
+use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use std::env;
 use std::fs::File;
 use std::handle::Handle;
@@ -1203,9 +1203,29 @@ impl Compositor {
             }
 
             self.copy_backbuffer_damage_to_scanout(&copy_damage)?;
-            self.display
-                .present()
-                .map_err(|_| "Failed to swap display buffer")?;
+            match &copy_damage {
+                None => self
+                    .display
+                    .present()
+                    .map_err(|_| "Failed to swap display buffer")?,
+                Some(rects) => {
+                    let mut regions = Vec::with_capacity(rects.len());
+                    for rect in rects.iter().copied() {
+                        let Some((x, y, width, height)) = self.clamp_rect_to_screen(rect) else {
+                            continue;
+                        };
+                        regions.push(DisplayPresentRegion {
+                            x: x as u32,
+                            y: y as u32,
+                            width,
+                            height,
+                        });
+                    }
+                    self.display
+                        .present_regions(&regions)
+                        .map_err(|_| "Failed to swap damaged display buffer")?;
+                }
+            }
 
             self.presented_damage.push(dirty_rects);
             let capacity = self.display.swapchain_buffer_count();

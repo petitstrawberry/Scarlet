@@ -12,6 +12,7 @@ use spin::RwLock;
 
 use super::{FramebufferConfig, PixelFormat, manager::FramebufferResource, output::DisplayRegion};
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
+use crate::library::std::usercopy::copy_from_user;
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::vm::addr::phys_to_virt;
@@ -51,6 +52,9 @@ pub const DISPLAY_PIXEL_FORMAT_RGB565: u32 = 7;
 pub const DISPLAY_PIXEL_FORMAT_ARGB1555: u32 = 8;
 /// 16-bit XRGB1555 pixel layout.
 pub const DISPLAY_PIXEL_FORMAT_XRGB1555: u32 = 9;
+
+/// Maximum number of damage rectangles carried by one present request.
+pub const DISPLAY_MAX_DAMAGE_RECTS: usize = 32;
 
 /// Display surface information.
 #[repr(C)]
@@ -107,6 +111,14 @@ pub struct DisplayPresentBuffer {
     pub index: u32,
     /// Reserved for future fence flags.
     pub flags: u32,
+    /// Number of valid entries in `damage`.
+    ///
+    /// Zero means the complete buffer was modified.
+    pub damage_count: u32,
+    /// Reserved for ABI alignment.
+    pub reserved: u32,
+    /// User pointer to `damage_count` [`DisplayPresentRegion`] entries.
+    pub damage_ptr: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -325,9 +337,31 @@ impl DisplayCharDevice {
     }
 
     fn handle_present_buffer(&self, arg: usize) -> Result<i32, &'static str> {
-        let target_ptr = Self::translated_ptr(arg)?;
-        // SAFETY: target_ptr is a translated caller-provided input pointer.
-        let request = unsafe { core::ptr::read(target_ptr as *const DisplayPresentBuffer) };
+        if arg == 0 {
+            return Err("Invalid display present pointer");
+        }
+        let request = if let Some(task) = crate::task::mytask() {
+            let mut request = core::mem::MaybeUninit::<DisplayPresentBuffer>::uninit();
+            // SAFETY: the byte slice covers the complete uninitialized request,
+            // which copy_from_user initializes before assume_init.
+            let bytes = unsafe {
+                core::slice::from_raw_parts_mut(
+                    request.as_mut_ptr() as *mut u8,
+                    core::mem::size_of::<DisplayPresentBuffer>(),
+                )
+            };
+            copy_from_user(task, arg, bytes)
+                .map_err(|_| "Failed to copy display present from user")?;
+            // SAFETY: copy_from_user initialized every byte of the request.
+            unsafe { request.assume_init() }
+        } else {
+            // SAFETY: in-kernel callers provide a valid request pointer.
+            unsafe { core::ptr::read(arg as *const DisplayPresentBuffer) }
+        };
+        let damage_count = request.damage_count as usize;
+        if damage_count > DISPLAY_MAX_DAMAGE_RECTS {
+            return Err("Display present has too many damage rectangles");
+        }
         let device = self
             .device_manager()
             .get_device(self.fb_resource.source_device_id)
@@ -335,7 +369,33 @@ impl DisplayCharDevice {
         let graphics = device
             .as_graphics_device()
             .ok_or("Display source device is not graphics-capable")?;
-        graphics.present_scanout_buffer(request.index as usize)?;
+        if damage_count != 0 && request.damage_ptr == 0 {
+            return Err("Display present has a null damage pointer");
+        }
+        let damage_bytes_len = damage_count
+            .checked_mul(core::mem::size_of::<DisplayPresentRegion>())
+            .ok_or("Display damage size overflow")?;
+        let mut damage_bytes = vec![0u8; damage_bytes_len];
+        if damage_count != 0 {
+            let task = crate::task::mytask().ok_or("Display present has no current task")?;
+            copy_from_user(task, request.damage_ptr, &mut damage_bytes)
+                .map_err(|_| "Failed to copy display damage from user")?;
+        }
+
+        let mut regions = Vec::with_capacity(damage_count);
+        for bytes in damage_bytes.chunks_exact(core::mem::size_of::<DisplayPresentRegion>()) {
+            // SAFETY: each chunk has the exact structure size and read_unaligned
+            // does not require the byte vector to provide structure alignment.
+            let damage =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const DisplayPresentRegion) };
+            regions.push(DisplayRegion::new(
+                damage.x,
+                damage.y,
+                damage.width,
+                damage.height,
+            ));
+        }
+        graphics.present_scanout_buffer_regions(request.index as usize, &regions)?;
         Ok(0)
     }
 

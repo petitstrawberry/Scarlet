@@ -577,6 +577,51 @@ pub struct AppleDcpGraphics {
     _piodma_domain: Arc<DartDomain>,
 }
 
+impl AppleDcpGraphics {
+    fn clean_scanout_regions(
+        &self,
+        scanout: &ContiguousPages,
+        regions: &[DisplayRegion],
+    ) -> Result<(), &'static str> {
+        if regions.is_empty() {
+            arch::clean_dcache_to_poc_range(scanout.as_vaddr(), self.config.size());
+            return Ok(());
+        }
+
+        let stride = self.config.stride as usize;
+        let bytes_per_pixel = self.config.format.bytes_per_pixel();
+        for region in regions {
+            let x = region.x.min(self.config.width);
+            let y = region.y.min(self.config.height);
+            let width = region.width.min(self.config.width.saturating_sub(x));
+            let height = region.height.min(self.config.height.saturating_sub(y));
+            if width == 0 || height == 0 {
+                continue;
+            }
+
+            let start = (y as usize)
+                .checked_mul(stride)
+                .and_then(|offset| offset.checked_add(x as usize * bytes_per_pixel))
+                .ok_or("apple-dcp: scanout damage offset overflow")?;
+            let end = (y as usize + height as usize - 1)
+                .checked_mul(stride)
+                .and_then(|offset| {
+                    offset.checked_add((x as usize + width as usize) * bytes_per_pixel)
+                })
+                .ok_or("apple-dcp: scanout damage end overflow")?;
+            if end > self.config.size() {
+                return Err("apple-dcp: scanout damage exceeds buffer");
+            }
+
+            // One continuous clean per rectangle includes the row gaps between
+            // its first and last pixels. This trades a small amount of extra
+            // cache traffic for far fewer cache-maintenance barriers.
+            arch::clean_dcache_to_poc_range(scanout.as_vaddr() + start, end - start);
+        }
+        Ok(())
+    }
+}
+
 impl Device for AppleDcpGraphics {
     fn device_type(&self) -> DeviceType {
         DeviceType::Graphics
@@ -660,6 +705,14 @@ impl GraphicsDevice for AppleDcpGraphics {
     }
 
     fn present_scanout_buffer(&self, index: usize) -> Result<(), &'static str> {
+        self.present_scanout_buffer_regions(index, &[])
+    }
+
+    fn present_scanout_buffer_regions(
+        &self,
+        index: usize,
+        regions: &[DisplayRegion],
+    ) -> Result<(), &'static str> {
         let scanout = self
             .scanout
             .get(index)
@@ -674,7 +727,7 @@ impl GraphicsDevice for AppleDcpGraphics {
             return Err("apple-dcp: scanout buffer is already front-most");
         }
 
-        arch::clean_dcache_to_poc_range(scanout.as_vaddr(), self.config.size());
+        self.clean_scanout_regions(scanout, regions)?;
         let swap_id = state.iomfb.swap_start()?;
         state.iomfb.swap_submit(
             swap_id,
