@@ -448,8 +448,7 @@ impl DisplaySurface {
                     .push((address, swapchain.buffer_len as usize));
                 self.swapchain_presented_at.push(None);
             }
-            self.draw_buffer =
-                (swapchain.front_buffer as usize + 1) % self.swapchain_buffers.len();
+            self.draw_buffer = (swapchain.front_buffer as usize + 1) % self.swapchain_buffers.len();
             self.mapped_buffer = Some(self.swapchain_buffers[self.draw_buffer]);
             self.mapped_backing_id = info.backing_id;
             self.cached_info = Some(info);
