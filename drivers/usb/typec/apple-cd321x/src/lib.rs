@@ -22,12 +22,22 @@ use scarlet::{
 const CD321X_MAX_7BIT_ADDRESS: usize = 0x7f;
 const TPS_MAX_LEN: usize = 64;
 const I2C_SETTLE_US: u64 = 500;
+const TPS_CMD_POLL_US: u64 = 1_000;
+const TPS_CMD_TIMEOUT_US: u64 = 1_000_000;
 
 const TPS_REG_VID: u8 = 0x00;
 const TPS_REG_MODE: u8 = 0x03;
+const TPS_REG_CMD1: u8 = 0x08;
+const TPS_REG_DATA1: u8 = 0x09;
 const TPS_REG_STATUS: u8 = 0x1a;
+const TPS_REG_SYSTEM_POWER_STATE: u8 = 0x20;
 const TPS_REG_POWER_STATUS: u8 = 0x3f;
 const TPS_REG_DATA_STATUS: u8 = 0x5f;
+
+const TPS_SYSTEM_POWER_STATE_S0: u8 = 0;
+const TPS_INVALID_CMD: u32 = u32::from_le_bytes(*b"!CMD");
+const TPS_TASK_TIMEOUT: u8 = 1;
+const TPS_TASK_REJECTED: u8 = 3;
 
 const TPS_STATUS_PLUG_PRESENT: u32 = 1 << 0;
 const TPS_STATUS_PLUG_UPSIDE_DOWN: u32 = 1 << 4;
@@ -86,6 +96,68 @@ impl AppleCd321x {
 
     fn read_u32(&self, register: u8) -> Result<u32, I2cError> {
         Ok(u32::from_le_bytes(self.read_exact::<4>(register)?))
+    }
+
+    fn read_u8(&self, register: u8) -> Result<u8, I2cError> {
+        Ok(self.read_exact::<1>(register)?[0])
+    }
+
+    fn write_block(&self, register: u8, payload: &[u8]) -> Result<(), I2cError> {
+        if payload.len() > TPS_MAX_LEN {
+            return Err(I2cError::InvalidArg);
+        }
+
+        let mut frame = [0u8; TPS_MAX_LEN + 2];
+        frame[0] = register;
+        frame[1] = u8::try_from(payload.len()).map_err(|_| I2cError::InvalidArg)?;
+        frame[2..payload.len() + 2].copy_from_slice(payload);
+        let message = I2cMessage::write(self.address, &frame[..payload.len() + 2], true);
+        self.bus.transfer(&mut [message])?;
+        udelay(I2C_SETTLE_US);
+        Ok(())
+    }
+
+    fn execute_command(&self, command: [u8; 4], input: &[u8]) -> Result<(), I2cError> {
+        let active_command = self.read_u32(TPS_REG_CMD1)?;
+        if active_command != 0 && active_command != TPS_INVALID_CMD {
+            return Err(I2cError::BusError);
+        }
+
+        if !input.is_empty() {
+            self.write_block(TPS_REG_DATA1, input)?;
+        }
+        self.write_block(TPS_REG_CMD1, &command)?;
+
+        let mut remaining = TPS_CMD_TIMEOUT_US;
+        while remaining != 0 {
+            let status = self.read_u32(TPS_REG_CMD1)?;
+            if status == TPS_INVALID_CMD {
+                return Err(I2cError::InvalidArg);
+            }
+            if status == 0 {
+                return match self.read_u8(TPS_REG_DATA1)? {
+                    TPS_TASK_TIMEOUT => Err(I2cError::Timeout),
+                    TPS_TASK_REJECTED => Err(I2cError::BusError),
+                    _ => Ok(()),
+                };
+            }
+            udelay(TPS_CMD_POLL_US);
+            remaining = remaining.saturating_sub(TPS_CMD_POLL_US);
+        }
+
+        Err(I2cError::Timeout)
+    }
+
+    fn switch_to_s0(&self) -> Result<bool, I2cError> {
+        if self.read_u8(TPS_REG_SYSTEM_POWER_STATE)? == TPS_SYSTEM_POWER_STATE_S0 {
+            return Ok(false);
+        }
+
+        self.execute_command(*b"SSPS", &[TPS_SYSTEM_POWER_STATE_S0])?;
+        if self.read_u8(TPS_REG_SYSTEM_POWER_STATE)? != TPS_SYSTEM_POWER_STATE_S0 {
+            return Err(I2cError::BusError);
+        }
+        Ok(true)
     }
 
     fn snapshot(&self) -> Result<Cd321xSnapshot, I2cError> {
@@ -186,6 +258,15 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let (bus_phandle, bus) = resolve_i2c_bus(device)?;
     let address = read_i2c_address(device)?;
     let controller = Arc::new(AppleCd321x::new(bus, address, bus_phandle));
+    let power_state_changed = controller
+        .switch_to_s0()
+        .map_err(|_| "apple-cd321x: failed to switch to S0")?;
+    if power_state_changed {
+        early_println!(
+            "[apple-cd321x] {} switched system power state to S0",
+            device.name()
+        );
+    }
     let snapshot = controller.snapshot().map_err(|_| {
         early_println!(
             "[apple-cd321x] failed to read status for {} bus-phandle={:#x} addr={:#x}",

@@ -8,4 +8,4 @@ path = "src/lib.rs"
 
 [dependencies]
 fdt = "0.1.5"
-scarlet = { path = "../../../kernel" }
+scarlet = { path = "../../../kernel", default-features = false }

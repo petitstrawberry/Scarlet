@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use scarlet::{
     arch::mmio,
@@ -375,9 +376,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     if is_host {
         dwc3.enable_usb3_host_phy()?;
     }
-    *APPLE_DWC3.lock() = Some(dwc3);
-
-    early_println!("[apple-dwc3] registered");
 
     if is_host {
         let irq_resource = device
@@ -399,11 +397,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             scarlet::drivers::usb::xhci::bind_xhci_mmio(base_addr, interrupt_id, dma_context)
         {
             early_println!("[apple-dwc3] xHCI bind failed: {}", e);
-            *APPLE_DWC3.lock() = None;
             return Err(e);
         }
         early_println!("[apple-dwc3] xHCI bound successfully");
     }
+
+    APPLE_DWC3.lock().push(dwc3);
+    early_println!("[apple-dwc3] registered");
 
     Ok(())
 }
@@ -521,11 +521,10 @@ fn resolve_reset(device: &PlatformDeviceInfo) -> Result<Option<ResetHandle>, &'s
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    *APPLE_DWC3.lock() = None;
     Ok(())
 }
 
-static APPLE_DWC3: Mutex<Option<AppleDwc3>> = Mutex::new(None);
+static APPLE_DWC3: Mutex<Vec<AppleDwc3>> = Mutex::new(Vec::new());
 
 fn register_dwc3_driver() {
     let driver = PlatformDeviceDriver::new(
