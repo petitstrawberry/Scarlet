@@ -70,7 +70,6 @@ pub extern "C" fn _kernel_trap_entry() {
         
         30: // Sync
             msr daifset, #0xf       // Mask interrupts
-            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #304        // Alloc Trapframe
             stp x0, x1, [sp, #0]    // Save x0, x1 first
             mov x1, #0              // x1 (Arg2) = Kind: Sync
@@ -78,7 +77,6 @@ pub extern "C" fn _kernel_trap_entry() {
 
         31: // IRQ
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #1              // x1 (Arg2) = Kind: IRQ
@@ -86,7 +84,6 @@ pub extern "C" fn _kernel_trap_entry() {
 
         32: // FIQ
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #2              // x1 (Arg2) = Kind: FIQ
@@ -94,7 +91,6 @@ pub extern "C" fn _kernel_trap_entry() {
 
         33: // SError
             msr daifset, #0xf
-            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #304
             stp x0, x1, [sp, #0]
             mov x1, #3              // x1 (Arg2) = Kind: SError
@@ -123,6 +119,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
             // Save captured kernel SP (SP_EL1 at exception entry)
             // Reuse Trapframe.tpidrro_el0 field for kernel traps (unused here).
+            add x20, sp, #304
             str x20, [sp, #280]
 
             // Save System Registers
@@ -193,5 +190,22 @@ pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind:
     } else {
         // Exception (Sync/SError/FIQ)
         arch_exception_handler(trapframe, trap_kind);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test_case]
+    fn kernel_trap_prologue_saves_x20_before_scratch_use() {
+        let source = include_str!("kernel.rs");
+        let save = source
+            .find("stp x20, x21, [sp, #160]")
+            .expect("kernel trap entry must save x20");
+        let scratch = source
+            .find("add x20, sp, #304")
+            .expect("kernel trap entry must recover the pre-trap stack pointer");
+
+        assert!(save < scratch);
+        assert!(!source.contains("mov x20,\u{20}sp"));
     }
 }
