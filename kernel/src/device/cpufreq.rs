@@ -4,7 +4,7 @@
 //! driver interface. Callers operate on CPU frequency policies, which map to
 //! firmware performance domains shared by one or more CPUs.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use spin::Mutex;
 
@@ -154,6 +154,7 @@ struct CpuFrequencyPolicy {
     last_governor_update_ns: u64,
     last_target_change_ns: u64,
     last_util: u32,
+    request_generation: u64,
 }
 
 impl CpuFrequencyPolicy {
@@ -173,7 +174,13 @@ impl CpuFrequencyPolicy {
             last_governor_update_ns: 0,
             last_target_change_ns: 0,
             last_util: 0,
+            request_generation: 0,
         }
+    }
+
+    fn invalidate_deferred_requests(&mut self) -> u64 {
+        self.request_generation = self.request_generation.wrapping_add(1);
+        self.request_generation
     }
 
     fn info(&self) -> CpuFrequencyPolicyInfo {
@@ -221,6 +228,11 @@ static CPUFREQ_BACKENDS: Mutex<[Option<CpuFrequencyBackend>; MAX_CPUFREQ_BACKEND
     Mutex::new([None; MAX_CPUFREQ_BACKENDS]);
 static CPUFREQ_POLICIES: Mutex<[CpuFrequencyPolicy; MAX_CPUFREQ_POLICIES]> =
     Mutex::new([CpuFrequencyPolicy::empty(); MAX_CPUFREQ_POLICIES]);
+static CPUFREQ_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
+static CPUFREQ_PENDING_REQUESTS: Mutex<PendingRequests> = Mutex::new(PendingRequests::empty());
+static CPUFREQ_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static CPUFREQ_WORKER_WAKER: crate::sync::Waker =
+    crate::sync::Waker::new_uninterruptible("cpufreq-worker");
 
 /// Register the firmware performance domain associated with a CPU.
 ///
@@ -293,6 +305,8 @@ pub fn register_backend(backend: CpuFrequencyBackend) -> Result<(), &'static str
 /// # Returns
 ///
 /// `Ok(())` on success, or an error if the policy is invalid or the registry is full.
+///
+/// Policies must be registered from boot initcalls before late initcalls run.
 pub fn register_policy(
     registration: CpuFrequencyPolicyRegistration<'_>,
 ) -> Result<(), &'static str> {
@@ -303,6 +317,7 @@ pub fn register_policy(
         return Err("cpufreq: policy has no operating points");
     }
 
+    let _transition = CPUFREQ_TRANSITION_LOCK.lock();
     let mut policies = CPUFREQ_POLICIES.lock();
     let slot_index = policies
         .iter()
@@ -314,6 +329,7 @@ pub fn register_policy(
         .or_else(|| policies.iter().position(|policy| !policy.valid))
         .ok_or("cpufreq: policy registry full")?;
     let slot = &mut policies[slot_index];
+    let request_generation = slot.invalidate_deferred_requests();
 
     let mut opps = [CpuFrequencyOpp::empty(); MAX_CPUFREQ_OPPS];
     let opp_count = core::cmp::min(registration.opps.len(), MAX_CPUFREQ_OPPS);
@@ -348,6 +364,7 @@ pub fn register_policy(
         last_governor_update_ns: 0,
         last_target_change_ns: 0,
         last_util: 0,
+        request_generation,
     };
 
     Ok(())
@@ -394,16 +411,20 @@ pub fn cpu_frequency_policy_info_by_domain(domain: u32) -> Option<CpuFrequencyPo
 /// # Returns
 ///
 /// `Ok(())` on success, or an error if the policy does not exist.
+///
+/// This function must be called from task context.
 pub fn set_domain_governor(
     domain: u32,
     governor: CpuFrequencyGovernor,
 ) -> Result<(), &'static str> {
+    let _transition = CPUFREQ_TRANSITION_LOCK.lock();
     let mut policies = CPUFREQ_POLICIES.lock();
     let policy = policies
         .iter_mut()
         .find(|policy| policy.valid && policy.domain == domain)
         .ok_or("cpufreq: policy not found")?;
     policy.governor = governor;
+    policy.invalidate_deferred_requests();
     Ok(())
 }
 
@@ -417,15 +438,19 @@ pub fn set_domain_governor(
 /// # Returns
 ///
 /// The selected operating point on success, or an error from the backend.
+///
+/// This synchronous function may wait for platform MMIO and must be called
+/// from task context, never from an IRQ or FIQ handler.
 pub fn set_domain_target_frequency(
     domain: u32,
     target_freq_khz: u64,
 ) -> Result<CpuFrequencyOpp, &'static str> {
-    let Some(request) = target_request_for_domain(domain, target_freq_khz) else {
+    let _transition = CPUFREQ_TRANSITION_LOCK.lock();
+    let Some(request) = explicit_target_request_for_domain(domain, target_freq_khz) else {
         return Err("cpufreq: policy not found");
     };
 
-    apply_target_request(request)?;
+    apply_target_request_locked(request)?;
     Ok(request.opp)
 }
 
@@ -450,7 +475,9 @@ pub fn cpu_frequency_info(cpu_id: usize) -> Option<CpuFrequencyInfo> {
 /// Update the governor for the performance domain containing a CPU.
 ///
 /// Scheduler code calls this from the timer tick after refreshing CPU
-/// utilization. Governors are rate-limited internally.
+/// utilization. Governors are rate-limited internally, and hardware updates
+/// are deferred to a kernel worker so timer IRQ/FIQ context never performs
+/// slow or allocating backend operations.
 ///
 /// # Arguments
 ///
@@ -463,7 +490,7 @@ pub fn on_scheduler_tick(cpu_id: usize) {
         return;
     };
 
-    let _ = apply_target_request(request);
+    let _ = queue_deferred_request(request);
 }
 
 #[derive(Clone, Copy)]
@@ -471,7 +498,111 @@ struct TargetRequest {
     backend_name: &'static str,
     domain: u32,
     opp: CpuFrequencyOpp,
+    generation: u64,
 }
+
+struct PendingRequests {
+    requests: [Option<TargetRequest>; MAX_CPUFREQ_POLICIES],
+}
+
+impl PendingRequests {
+    const fn empty() -> Self {
+        Self {
+            requests: [None; MAX_CPUFREQ_POLICIES],
+        }
+    }
+
+    fn queue(&mut self, request: TargetRequest) -> Result<bool, &'static str> {
+        let was_empty = self.requests.iter().all(Option::is_none);
+
+        if let Some(slot) = self.requests.iter_mut().find(|slot| {
+            slot.map(|pending| pending.domain == request.domain)
+                .unwrap_or(false)
+        }) {
+            *slot = Some(request);
+            return Ok(false);
+        }
+
+        let Some(slot) = self.requests.iter_mut().find(|slot| slot.is_none()) else {
+            return Err("cpufreq: pending request queue full");
+        };
+        *slot = Some(request);
+        Ok(was_empty)
+    }
+
+    fn take(&mut self) -> Option<TargetRequest> {
+        self.requests.iter_mut().find_map(Option::take)
+    }
+}
+
+fn take_pending_request() -> Option<TargetRequest> {
+    CPUFREQ_PENDING_REQUESTS.lock().take()
+}
+
+fn queue_deferred_request(request: TargetRequest) -> Result<(), &'static str> {
+    let added = CPUFREQ_PENDING_REQUESTS.lock().queue(request)?;
+    if added {
+        CPUFREQ_WORKER_WAKER.wake_one();
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetRequestOutcome {
+    Applied,
+    Superseded,
+}
+
+fn apply_deferred_target_request(
+    request: TargetRequest,
+) -> Result<TargetRequestOutcome, &'static str> {
+    let _transition = CPUFREQ_TRANSITION_LOCK.lock();
+    if !target_request_is_current(request) {
+        return Ok(TargetRequestOutcome::Superseded);
+    }
+
+    apply_target_request_locked(request)?;
+    Ok(TargetRequestOutcome::Applied)
+}
+
+fn process_pending_request() -> bool {
+    let Some(request) = take_pending_request() else {
+        return false;
+    };
+    let _ = apply_deferred_target_request(request);
+    true
+}
+
+fn cpufreq_worker_entry() {
+    loop {
+        while process_pending_request() {}
+
+        let Some(task) = crate::task::mytask() else {
+            crate::arch::instruction::idle();
+        };
+        CPUFREQ_WORKER_WAKER.wait(task.get_id(), task.get_trapframe());
+    }
+}
+
+fn start_cpufreq_worker() {
+    if !CPUFREQ_POLICIES.lock().iter().any(|policy| policy.valid)
+        || CPUFREQ_WORKER_STARTED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+
+    let task = crate::task::new_kernel_task(
+        alloc::string::String::from("cpufreq-worker"),
+        1,
+        cpufreq_worker_entry,
+    );
+    task.init();
+    crate::sched::scheduler::add_task(task, 0);
+}
+
+crate::late_initcall!(start_cpufreq_worker);
 
 fn target_request_for_domain(domain: u32, target_freq_khz: u64) -> Option<TargetRequest> {
     let policies = CPUFREQ_POLICIES.lock();
@@ -485,6 +616,24 @@ fn target_request_for_domain(domain: u32, target_freq_khz: u64) -> Option<Target
         backend_name,
         domain,
         opp,
+        generation: policy.request_generation,
+    })
+}
+
+fn explicit_target_request_for_domain(domain: u32, target_freq_khz: u64) -> Option<TargetRequest> {
+    let mut policies = CPUFREQ_POLICIES.lock();
+    let policy = policies
+        .iter_mut()
+        .find(|policy| policy.valid && policy.domain == domain)?;
+    let backend_name = policy.backend_name?;
+    let opp = policy.resolve_target(target_freq_khz)?;
+    let generation = policy.invalidate_deferred_requests();
+
+    Some(TargetRequest {
+        backend_name,
+        domain,
+        opp,
+        generation,
     })
 }
 
@@ -528,18 +677,31 @@ fn governor_request_for_domain(domain: u32) -> Option<TargetRequest> {
         backend_name,
         domain: policy.domain,
         opp,
+        generation: policy.request_generation,
     })
 }
 
-fn apply_target_request(request: TargetRequest) -> Result<(), &'static str> {
+fn target_request_is_current(request: TargetRequest) -> bool {
+    let policies = CPUFREQ_POLICIES.lock();
+    policies.iter().any(|policy| {
+        policy.valid
+            && policy.domain == request.domain
+            && policy.backend_name == Some(request.backend_name)
+            && policy.request_generation == request.generation
+    })
+}
+
+fn apply_target_request_locked(request: TargetRequest) -> Result<(), &'static str> {
     set_backend_pstate(request.backend_name, request.domain, request.opp.pstate)?;
 
     let now_ns = crate::timer::get_time_ns();
     let mut policies = CPUFREQ_POLICIES.lock();
-    if let Some(policy) = policies
-        .iter_mut()
-        .find(|policy| policy.valid && policy.domain == request.domain)
-    {
+    if let Some(policy) = policies.iter_mut().find(|policy| {
+        policy.valid
+            && policy.domain == request.domain
+            && policy.backend_name == Some(request.backend_name)
+            && policy.request_generation == request.generation
+    }) {
         policy.target_freq_khz = request.opp.freq_khz;
         policy.last_target_change_ns = now_ns;
     }
@@ -618,5 +780,127 @@ fn cpu_bit(cpu_id: usize) -> u64 {
         1u64 << cpu_id
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TEST_SET_PSTATE_CALLS: AtomicU32 = AtomicU32::new(0);
+
+    fn test_snapshot(_cpu_id: usize) -> Option<CpuFrequencyInfo> {
+        None
+    }
+
+    fn test_set_pstate(_domain: u32, _pstate: u32) -> Result<(), &'static str> {
+        TEST_SET_PSTATE_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn request(domain: u32, pstate: u32, freq_khz: u64) -> TargetRequest {
+        TargetRequest {
+            backend_name: "test-cpufreq",
+            domain,
+            opp: CpuFrequencyOpp { pstate, freq_khz },
+            generation: 0,
+        }
+    }
+
+    #[test_case]
+    fn pending_requests_coalesce_latest_target_per_domain() {
+        let mut pending = PendingRequests::empty();
+
+        assert!(
+            pending
+                .queue(request(1, 3, 1_200_000))
+                .expect("first domain request should queue")
+        );
+        assert!(
+            !pending
+                .queue(request(2, 4, 1_800_000))
+                .expect("second domain request should queue without another wake")
+        );
+        assert!(
+            !pending
+                .queue(request(1, 5, 2_100_000))
+                .expect("newer request for the same domain should replace it")
+        );
+
+        let first = pending.take().expect("first request should remain queued");
+        let second = pending.take().expect("second request should remain queued");
+
+        assert_eq!(first.domain, 1);
+        assert_eq!(first.opp.pstate, 5);
+        assert_eq!(first.opp.freq_khz, 2_100_000);
+        assert_eq!(second.domain, 2);
+        assert_eq!(second.opp.pstate, 4);
+        assert!(pending.take().is_none());
+    }
+
+    #[test_case]
+    fn deferred_request_is_superseded_by_explicit_policy_changes() {
+        const DOMAIN: u32 = u32::MAX - 1;
+        const OPPS: [CpuFrequencyOpp; 3] = [
+            CpuFrequencyOpp {
+                pstate: 1,
+                freq_khz: 100_000,
+            },
+            CpuFrequencyOpp {
+                pstate: 2,
+                freq_khz: 200_000,
+            },
+            CpuFrequencyOpp {
+                pstate: 3,
+                freq_khz: 300_000,
+            },
+        ];
+
+        register_backend(CpuFrequencyBackend {
+            name: "test-deferred-cpufreq",
+            snapshot: test_snapshot,
+            set_pstate: Some(test_set_pstate),
+        })
+        .expect("test backend should register");
+        register_policy(CpuFrequencyPolicyRegistration {
+            backend_name: "test-deferred-cpufreq",
+            domain: DOMAIN,
+            opps: &OPPS,
+            governor: CpuFrequencyGovernor::Schedutil,
+            transition_latency_ns: 0,
+        })
+        .expect("test policy should register");
+        TEST_SET_PSTATE_CALLS.store(0, Ordering::SeqCst);
+
+        let deferred_target =
+            target_request_for_domain(DOMAIN, 100_000).expect("test target request should resolve");
+        assert!(queue_deferred_request(deferred_target).is_ok());
+        assert_eq!(TEST_SET_PSTATE_CALLS.load(Ordering::SeqCst), 0);
+        assert!(process_pending_request());
+        assert_eq!(TEST_SET_PSTATE_CALLS.load(Ordering::SeqCst), 1);
+
+        let stale_target = target_request_for_domain(DOMAIN, 300_000)
+            .expect("stale test target request should resolve");
+        assert!(queue_deferred_request(stale_target).is_ok());
+
+        set_domain_target_frequency(DOMAIN, 200_000)
+            .expect("explicit target should be applied synchronously");
+        assert_eq!(TEST_SET_PSTATE_CALLS.load(Ordering::SeqCst), 2);
+        assert!(process_pending_request());
+        assert_eq!(TEST_SET_PSTATE_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            cpu_frequency_policy_info_by_domain(DOMAIN)
+                .expect("test policy should remain registered")
+                .target_freq_khz,
+            200_000
+        );
+
+        let stale_governor = target_request_for_domain(DOMAIN, 100_000)
+            .expect("second test target request should resolve");
+        assert!(queue_deferred_request(stale_governor).is_ok());
+        set_domain_governor(DOMAIN, CpuFrequencyGovernor::Userspace)
+            .expect("governor change should succeed");
+        assert!(process_pending_request());
+        assert_eq!(TEST_SET_PSTATE_CALLS.load(Ordering::SeqCst), 2);
     }
 }
