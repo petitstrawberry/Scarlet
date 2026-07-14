@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use crate::device::platform::resource::{PlatformDeviceResource, PlatformDeviceResourceType};
 use crate::interrupt::InterruptError;
 
-use super::{CpuId, Hwirq, InterruptId, InterruptResult, Priority, Virq};
+use super::{CpuId, Hwirq, InterruptClaim, InterruptId, InterruptResult, Priority, Virq};
 
 pub use super::msi::{
     MsiAllocation, MsiMessage, MsiRequest, MsiRequestFlags, MsiRequester, MsiVector,
@@ -471,6 +471,20 @@ pub trait ExternalInterruptController: Send + Sync {
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
         let _ = (target_cpu_id, ipi_type);
         Err(InterruptError::NotSupported)
+    }
+
+    /// Claim and clear a CPU fast interrupt source owned by this controller.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU that received the fast interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `Handled` when the controller cleared a source, or `NotMine` when it did
+    /// not own the asserted fast interrupt.
+    fn claim_fast_interrupt(&self, _cpu_id: CpuId) -> InterruptResult<InterruptClaim> {
+        Ok(InterruptClaim::NotMine)
     }
 
     /// Initialize external interrupt state for a CPU.

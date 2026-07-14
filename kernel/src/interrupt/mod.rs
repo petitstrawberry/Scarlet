@@ -117,6 +117,8 @@ pub type LocalInterruptHandler =
 pub enum InterruptClaim {
     /// The source owned and cleared this interrupt.
     Handled,
+    /// The source cleared a scheduler reschedule interrupt.
+    Reschedule,
     /// The source did not assert this shared interrupt line.
     NotMine,
 }
@@ -128,7 +130,7 @@ impl InterruptClaim {
     ///
     /// `true` when the interrupt source claimed and cleared the interrupt.
     pub const fn is_handled(self) -> bool {
-        matches!(self, Self::Handled)
+        matches!(self, Self::Handled | Self::Reschedule)
     }
 }
 
@@ -897,6 +899,25 @@ impl InterruptManager {
         let controllers = self.controllers().lock();
         if let Some(controller) = controllers.external_controller() {
             controller.send_ipi(target_cpu_id, ipi_type)
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
+    /// Ask the active external controller to claim a CPU fast interrupt.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - CPU that received the fast interrupt.
+    ///
+    /// # Returns
+    ///
+    /// `Handled` when the controller cleared a source, `NotMine` when it did
+    /// not own the source, or an interrupt error on failure.
+    pub fn claim_fast_interrupt(&self, cpu_id: CpuId) -> InterruptResult<InterruptClaim> {
+        let controllers = self.controllers().lock();
+        if let Some(controller) = controllers.external_controller() {
+            controller.claim_fast_interrupt(cpu_id)
         } else {
             Err(InterruptError::ControllerNotFound)
         }

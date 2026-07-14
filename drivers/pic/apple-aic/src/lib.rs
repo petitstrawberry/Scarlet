@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+mod fiq;
+
 use alloc::boxed::Box;
 use scarlet::{
     arch::mmio,
@@ -14,7 +16,7 @@ use scarlet::{
     },
     early_initcall,
     interrupt::{
-        CpuId, InterruptError, InterruptId, InterruptResult, Priority,
+        CpuId, InterruptClaim, InterruptError, InterruptId, InterruptResult, Priority,
         controllers::{
             ExternalInterruptController, IrqFlow, IrqMapping, LocalInterruptType, PendingIrq,
             RESCHEDULE_IPI_VIRQ, SOFTWARE_IPI_HWIRQ,
@@ -117,6 +119,7 @@ pub struct Aic {
     num_irqs: InterruptId,
     /// Maximum number of CPUs supported
     max_cpus: CpuId,
+    fast_ipi: bool,
 }
 
 impl Aic {
@@ -128,26 +131,29 @@ impl Aic {
     ///
     /// * `base_addr` - Virtual address of the AIC MMIO region
     /// * `max_cpus` - Maximum number of CPUs to support
+    /// * `fast_ipi` - Whether the platform uses Apple fast IPIs
     ///
     /// # Returns
     ///
     /// A new `Aic` instance with `num_irqs` populated from hardware.
-    pub fn new(base_addr: usize, max_cpus: CpuId) -> Self {
+    pub fn new(base_addr: usize, max_cpus: CpuId, fast_ipi: bool) -> Self {
         // Read AIC_INFO to get number of hardware IRQs
         let info = unsafe { mmio::read32(base_addr + AIC_INFO) };
         let num_irqs = info & 0xFFFF; // bits [15:0] = NR_HW
 
         scarlet::early_println!(
-            "[AIC] new: base_addr={:#x}, num_irqs={}, max_cpus={}",
+            "[AIC] new: base_addr={:#x}, num_irqs={}, max_cpus={}, fast_ipi={}",
             base_addr,
             num_irqs,
-            max_cpus
+            max_cpus,
+            fast_ipi
         );
 
         Self {
             base_addr,
             num_irqs,
             max_cpus: max_cpus.min(AIC_MAX_CPUS),
+            fast_ipi,
         }
     }
 
@@ -235,21 +241,44 @@ impl Aic {
     /// # Arguments
     ///
     /// * `target_cpu` - CPU ID to send the IPI to.
-    pub fn send_ipi_to_cpu(&self, target_cpu: CpuId) {
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the IPI was sent, or an interrupt error when the target
+    /// CPU is unavailable.
+    pub fn send_ipi_to_cpu(&self, target_cpu: CpuId) -> InterruptResult<()> {
         if target_cpu >= self.max_cpus {
-            return;
+            return Err(InterruptError::InvalidCpuId);
+        }
+        if self.fast_ipi {
+            return fiq::send_fast_ipi(target_cpu)
+                .then_some(())
+                .ok_or(InterruptError::HardwareError);
         }
         let bit = aic_ipi_send_cpu(target_cpu);
+        // SAFETY: The legacy path is selected only for AIC implementations
+        // that expose the documented MMIO IPI send register.
         unsafe {
             mmio::write32(self.reg_addr(AIC_IPI_SEND), bit);
         }
+        Ok(())
     }
 
     /// Send a self IPI to the current CPU.
-    pub fn send_ipi_self(&self) {
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the IPI was sent.
+    pub fn send_ipi_self(&self) -> InterruptResult<()> {
+        if self.fast_ipi {
+            return self.send_ipi_to_cpu(self.whoami());
+        }
+        // SAFETY: The legacy path is selected only for AIC implementations
+        // that expose the documented MMIO self-IPI bit.
         unsafe {
             mmio::write32(self.reg_addr(AIC_IPI_SEND), AIC_IPI_SELF);
         }
+        Ok(())
     }
 
     /// Acknowledge pending IPIs.
@@ -307,10 +336,12 @@ impl Aic {
         }
 
         match event_type {
-            AIC_EVENT_TYPE_HW => Ok(Some(PendingIrq {
-                mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
-                cpu_id,
-            })),
+            AIC_EVENT_TYPE_HW => {
+                Ok(Some(PendingIrq {
+                    mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
+                    cpu_id,
+                }))
+            }
             AIC_EVENT_TYPE_IPI => {
                 match event_num {
                     AIC_EVENT_IPI_OTHER | AIC_EVENT_IPI_SELF => unsafe {
@@ -360,17 +391,29 @@ impl ExternalInterruptController for Aic {
         let cpu_id = self.whoami();
         scarlet::early_println!("[AIC] init: WHOAMI={}", cpu_id);
 
-        // Unmask IPIs for the current CPU so they can be delivered
-        self.unmask_ipis();
-        scarlet::early_println!("[AIC] init: IPIs unmasked for CPU {}", cpu_id);
+        if self.fast_ipi {
+            self.mask_ipis();
+        } else {
+            self.unmask_ipis();
+        }
+        scarlet::early_println!(
+            "[AIC] init: CPU {} IPI transport={}",
+            cpu_id,
+            if self.fast_ipi { "fast-fiq" } else { "mmio" }
+        );
 
         Ok(())
     }
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
+        fiq::prepare_cpu(cpu_id);
         self.ack_ipi();
-        self.unmask_ipis();
+        if self.fast_ipi {
+            self.mask_ipis();
+        } else {
+            self.unmask_ipis();
+        }
         Ok(())
     }
 
@@ -466,6 +509,11 @@ impl ExternalInterruptController for Aic {
         self.claim_event(cpu_id)
     }
 
+    fn claim_fast_interrupt(&self, cpu_id: CpuId) -> InterruptResult<InterruptClaim> {
+        self.validate_cpu_id(cpu_id)?;
+        Ok(fiq::claim_pending(cpu_id))
+    }
+
     fn eoi_irq(&self, irq: &PendingIrq) -> InterruptResult<()> {
         if irq.mapping.hwirq == SOFTWARE_IPI_HWIRQ {
             return Ok(());
@@ -480,8 +528,7 @@ impl ExternalInterruptController for Aic {
         }
 
         self.validate_cpu_id(target_cpu_id)?;
-        self.send_ipi_to_cpu(target_cpu_id);
-        Ok(())
+        self.send_ipi_to_cpu(target_cpu_id)
     }
 
     /// Complete an interrupt (signal that handling is finished).
@@ -576,7 +623,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     scarlet::early_println!("[AIC] probe: max_cpus={}", max_cpus);
 
-    let aic = Box::new(Aic::new(base_addr, max_cpus));
+    let fast_ipi = device.compatible().contains(&"apple,t8103-aic");
+    let aic = Box::new(Aic::new(base_addr, max_cpus, fast_ipi));
 
     // Register with interrupt manager
     match scarlet::interrupt::InterruptManager::global()
