@@ -69,6 +69,20 @@ pub fn _print(args: fmt::Arguments) {
     let mut log = LogWriter;
     let _ = log.write_fmt(args);
 
+    if crate::earlyfb::is_initialized() {
+        struct EarlyFramebufferWriter;
+
+        impl fmt::Write for EarlyFramebufferWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                crate::earlyfb::write_str(s);
+                Ok(())
+            }
+        }
+
+        let mut early_framebuffer = EarlyFramebufferWriter;
+        let _ = early_framebuffer.write_fmt(args);
+    }
+
     let manager = DeviceManager::get_manager();
 
     // Helper: write to a specific CharDevice implementation
@@ -119,6 +133,8 @@ pub fn _print(args: fmt::Arguments) {
     // Final fallback: write directly to the early console while still holding
     // the global print guard. Calling early_println! here would re-enter the
     // same print lock and deadlock.
-    let mut early = crate::earlycon::EarlyConsole::new();
-    let _ = early.write_fmt(args);
+    if !crate::earlyfb::is_initialized() {
+        let mut early = crate::earlycon::EarlyConsole::new();
+        let _ = early.write_fmt(args);
+    }
 }

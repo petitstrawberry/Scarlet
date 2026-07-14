@@ -231,6 +231,7 @@ static CPUFREQ_POLICIES: Mutex<[CpuFrequencyPolicy; MAX_CPUFREQ_POLICIES]> =
 static CPUFREQ_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
 static CPUFREQ_PENDING_REQUESTS: Mutex<PendingRequests> = Mutex::new(PendingRequests::empty());
 static CPUFREQ_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static CPUFREQ_FIRST_WORKER_REQUEST: AtomicBool = AtomicBool::new(true);
 static CPUFREQ_WORKER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("cpufreq-worker");
 
@@ -569,7 +570,31 @@ fn process_pending_request() -> bool {
     let Some(request) = take_pending_request() else {
         return false;
     };
-    let _ = apply_deferred_target_request(request);
+    let first = CPUFREQ_FIRST_WORKER_REQUEST.swap(false, Ordering::SeqCst);
+    if first {
+        crate::early_println!(
+            "[cpufreq] deferred transition begin domain={:#x} pstate={} freq_khz={}",
+            request.domain,
+            request.opp.pstate,
+            request.opp.freq_khz,
+        );
+    }
+
+    match apply_deferred_target_request(request) {
+        Ok(TargetRequestOutcome::Applied) if first => {
+            crate::early_println!("[cpufreq] deferred transition complete")
+        }
+        Ok(TargetRequestOutcome::Superseded) if first => {
+            crate::early_println!("[cpufreq] deferred transition superseded")
+        }
+        Err(err) => crate::early_println!(
+            "[cpufreq] deferred transition failed domain={:#x} pstate={}: {}",
+            request.domain,
+            request.opp.pstate,
+            err,
+        ),
+        Ok(_) => {}
+    }
     true
 }
 

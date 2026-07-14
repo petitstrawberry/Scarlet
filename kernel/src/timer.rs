@@ -80,6 +80,7 @@ impl KernelTimer {
 
 // Last architected-counter tick processed by the global timekeeper.
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 
 #[inline]
 fn current_counter_tick() -> u64 {
@@ -117,6 +118,16 @@ pub fn tick(trapframe: &mut Trapframe) {
 /// returns to user mode or blocks explicitly.
 pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
+    let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
+    let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
+    if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
+        crate::early_println!(
+            "[timer] irq heartbeat cpu={} count={} scheduler={}",
+            cpu_id,
+            irq_count,
+            run_scheduler
+        );
+    }
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);

@@ -2069,14 +2069,30 @@ pub fn spawn_idle_task(cpu_id: usize) -> usize {
 }
 
 pub fn start_scheduler() -> Option<usize> {
+    crate::println!("[sched] entry");
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
+    crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
     let timer = get_kernel_timer();
+    crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
+    crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
     timer.stop(cpu_id);
+    crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
+    crate::println!("[sched] cpu={} timer interval setup begin", cpu_id);
     timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
+    crate::println!("[sched] cpu={} timer interval setup complete", cpu_id);
+    crate::println!("[sched] cpu={} timer.start begin", cpu_id);
     timer.start(cpu_id);
+    crate::println!("[sched] cpu={} timer.start complete", cpu_id);
 
+    crate::println!("[sched] cpu={} pick_next begin", cpu_id);
     let (_current_task_id, next_task_id) = pick_next(cpu);
+    crate::println!(
+        "[sched] cpu={} pick_next complete current={:?} next={:?}",
+        cpu_id,
+        _current_task_id,
+        next_task_id
+    );
     next_task_id
 }
 

@@ -25,6 +25,10 @@ pub(super) struct LocalState {
     pub(super) pmcr0: u64,
     pub(super) upmcr0: u64,
     pub(super) upmsr: u64,
+    pub(super) isr: u64,
+    pub(super) daif: u64,
+    pub(super) elr: u64,
+    pub(super) spsr: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -32,7 +36,10 @@ pub(super) struct El2State {
     pub(super) guest_cntp_ctl: u64,
     pub(super) guest_cntv_ctl: u64,
     pub(super) vm_timer_enable: u64,
+    pub(super) hcr: u64,
+    pub(super) cnthctl: u64,
     pub(super) vgic_hcr: u64,
+    pub(super) vgic_misr: u64,
 }
 
 pub(super) fn read_local() -> LocalState {
@@ -42,6 +49,10 @@ pub(super) fn read_local() -> LocalState {
     let pmcr0: u64;
     let upmcr0: u64;
     let upmsr: u64;
+    let isr: u64;
+    let daif: u64;
+    let elr: u64;
+    let spsr: u64;
 
     // SAFETY: AIC initialization restricts these CPU-local reads to supported Apple SoCs.
     unsafe {
@@ -52,12 +63,20 @@ pub(super) fn read_local() -> LocalState {
             "mrs {pmcr0}, S3_1_C15_C0_0",
             "mrs {upmcr0}, S3_7_C15_C0_4",
             "mrs {upmsr}, S3_7_C15_C6_4",
+            "mrs {isr}, isr_el1",
+            "mrs {daif}, daif",
+            "mrs {elr}, elr_el1",
+            "mrs {spsr}, spsr_el1",
             cntp_ctl = out(reg) cntp_ctl,
             cntv_ctl = out(reg) cntv_ctl,
             fast_ipi_status = out(reg) fast_ipi_status,
             pmcr0 = out(reg) pmcr0,
             upmcr0 = out(reg) upmcr0,
             upmsr = out(reg) upmsr,
+            isr = out(reg) isr,
+            daif = out(reg) daif,
+            elr = out(reg) elr,
+            spsr = out(reg) spsr,
             options(nomem, nostack, preserves_flags)
         );
     }
@@ -69,6 +88,10 @@ pub(super) fn read_local() -> LocalState {
         pmcr0,
         upmcr0,
         upmsr,
+        isr,
+        daif,
+        elr,
+        spsr,
     }
 }
 
@@ -76,7 +99,10 @@ pub(super) fn read_el2() -> El2State {
     let guest_cntp_ctl: u64;
     let guest_cntv_ctl: u64;
     let vm_timer_enable: u64;
+    let hcr: u64;
+    let cnthctl: u64;
     let vgic_hcr: u64;
+    let vgic_misr: u64;
 
     // SAFETY: the caller checks VHE before accessing the EL2 and guest timer banks.
     unsafe {
@@ -84,11 +110,17 @@ pub(super) fn read_el2() -> El2State {
             "mrs {guest_cntp_ctl}, S3_5_C14_C2_1",
             "mrs {guest_cntv_ctl}, S3_5_C14_C3_1",
             "mrs {vm_timer_enable}, S3_5_C15_C1_3",
+            "mrs {hcr}, hcr_el2",
+            "mrs {cnthctl}, cnthctl_el2",
             "mrs {vgic_hcr}, ich_hcr_el2",
+            "mrs {vgic_misr}, ich_misr_el2",
             guest_cntp_ctl = out(reg) guest_cntp_ctl,
             guest_cntv_ctl = out(reg) guest_cntv_ctl,
             vm_timer_enable = out(reg) vm_timer_enable,
+            hcr = out(reg) hcr,
+            cnthctl = out(reg) cnthctl,
             vgic_hcr = out(reg) vgic_hcr,
+            vgic_misr = out(reg) vgic_misr,
             options(nomem, nostack, preserves_flags)
         );
     }
@@ -97,7 +129,10 @@ pub(super) fn read_el2() -> El2State {
         guest_cntp_ctl,
         guest_cntv_ctl,
         vm_timer_enable,
+        hcr,
+        cnthctl,
         vgic_hcr,
+        vgic_misr,
     }
 }
 

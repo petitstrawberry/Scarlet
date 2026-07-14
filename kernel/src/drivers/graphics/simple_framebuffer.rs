@@ -264,10 +264,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     crate::device::graphics::manager::GraphicsManager::get_manager()
         .register_framebuffer_from_device(device_id, graphics_device)?;
 
-    if crate::earlyfb::is_initialized() {
-        crate::earlyfb::deactivate();
-    }
-
     Ok(())
 }
 

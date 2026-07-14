@@ -113,6 +113,27 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         _ => "UnknownKind",
     };
 
+    if trap_kind == 3 {
+        super::apple_serror::print_error_status();
+        print_trap_info(trapframe, esr);
+        crate::println!(
+            "[trap] asynchronous SError: ESR={:#x} ELR={:#x} CurrentEL=EL{} SPSR={:#x} DAIF={:#x} HCR_EL2={:#x}",
+            esr,
+            trapframe.elr,
+            current_el_number(),
+            trapframe.spsr,
+            get_daif(),
+            get_hcr_el2(),
+        );
+        crate::println!(
+            "[trap] FAR_EL1 and the interrupted PC are not attributed to an asynchronous SError"
+        );
+        loop {
+            // SAFETY: This CPU cannot safely resume after an uncorrected SError.
+            unsafe { asm!("wfi") }
+        }
+    }
+
     match ec {
         // User tried to execute FP/SIMD while EL0 access is trapped.
         // Enable access for this task and restore its context, then retry.

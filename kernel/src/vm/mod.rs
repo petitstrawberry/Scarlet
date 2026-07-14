@@ -63,7 +63,17 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
 }
 
 static KERNEL_AREA: Once<MemoryArea> = Once::new();
-/* Initialize MMU and enable paging */
+/// Initialize the kernel virtual memory layout and enable its runtime page table.
+///
+/// # Arguments
+///
+/// * `direct_map_paddr` - Physical span represented by the kernel HHDM
+/// * `initramfs_paddr` - Optional physical range occupied by the initramfs
+/// * `heap_paddr` - Physical range backing the kernel heap
+///
+/// # Returns
+///
+/// This function returns after the runtime kernel page table is active.
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(
     direct_map_paddr: MemoryArea,

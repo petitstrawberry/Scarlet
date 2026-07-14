@@ -60,7 +60,14 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
 }
 
 fn ap_entry_wait(cpu_id: usize) -> ! {
-    configure_vhe_host_interrupt_routing();
+    if let Some((old_hcr, new_hcr)) = configure_vhe_host_interrupt_routing() {
+        early_println!(
+            "[aarch64] CPU {}: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
+            cpu_id,
+            old_hcr,
+            new_hcr
+        );
+    }
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -330,9 +337,9 @@ fn detect_el() -> (u64, bool) {
 }
 
 #[inline(always)]
-fn configure_vhe_host_interrupt_routing() {
+fn configure_vhe_host_interrupt_routing() -> Option<(u64, u64)> {
     if current_el() != 2 {
-        return;
+        return None;
     }
 
     let old_hcr: u64;
@@ -343,7 +350,7 @@ fn configure_vhe_host_interrupt_routing() {
         asm!("mrs {0}, hcr_el2", out(reg) old_hcr, options(nostack));
     }
     if old_hcr & HCR_EL2_E2H == 0 {
-        return;
+        return None;
     }
 
     let new_hcr = old_hcr | HCR_EL2_HOST_INTERRUPT_ROUTING;
@@ -356,6 +363,8 @@ fn configure_vhe_host_interrupt_routing() {
             options(nostack)
         );
     }
+
+    Some((old_hcr, new_hcr))
 }
 
 #[unsafe(link_section = ".init")]
@@ -370,7 +379,7 @@ pub extern "C" fn limine_entry() -> ! {
         HV_AVAILABLE = vhe;
     }
 
-    configure_vhe_host_interrupt_routing();
+    let hcr_transition = configure_vhe_host_interrupt_routing();
 
     prepare_el1_runtime();
 
@@ -395,6 +404,14 @@ pub extern "C" fn limine_entry() -> ! {
         kernel_end - kernel_start,
     );
     crate::arch::aarch64::early_console_init();
+
+    if let Some((old_hcr, new_hcr)) = hcr_transition {
+        early_println!(
+            "[aarch64] BSP: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
+            old_hcr,
+            new_hcr
+        );
+    }
 
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 

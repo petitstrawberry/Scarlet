@@ -5,6 +5,7 @@ extern crate alloc;
 mod fiq;
 
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicU64, Ordering};
 use scarlet::{
     arch::mmio,
     device::{
@@ -86,6 +87,9 @@ const AIC_IPI_SELF: u32 = 1 << 31;
 
 /// Maximum number of CPUs supported by AIC (31 bits in IPI SEND, bit 31 is self)
 const AIC_MAX_CPUS: CpuId = 31;
+
+static HARDWARE_IRQ_CLAIMS: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_IRQ_EOIS: AtomicU64 = AtomicU64::new(0);
 
 // =============================================================================
 // Helper Functions
@@ -337,6 +341,16 @@ impl Aic {
 
         match event_type {
             AIC_EVENT_TYPE_HW => {
+                let claims = HARDWARE_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
+                if claims <= 8 || claims.is_power_of_two() {
+                    scarlet::early_println!(
+                        "[AIC][IRQ] claim={} eoi={} cpu={} hwirq={}",
+                        claims,
+                        HARDWARE_IRQ_EOIS.load(Ordering::Relaxed),
+                        cpu_id,
+                        event_num
+                    );
+                }
                 Ok(Some(PendingIrq {
                     mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
                     cpu_id,
@@ -519,7 +533,18 @@ impl ExternalInterruptController for Aic {
             return Ok(());
         }
 
-        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)
+        self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)?;
+        let eois = HARDWARE_IRQ_EOIS.fetch_add(1, Ordering::Relaxed) + 1;
+        if eois <= 8 || eois.is_power_of_two() {
+            scarlet::early_println!(
+                "[AIC][IRQ] eoi={} claim={} cpu={} hwirq={}",
+                eois,
+                HARDWARE_IRQ_CLAIMS.load(Ordering::Relaxed),
+                irq.cpu_id,
+                irq.mapping.hwirq
+            );
+        }
+        Ok(())
     }
 
     fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {

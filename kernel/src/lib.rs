@@ -783,6 +783,24 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     call_initcalls();
     println!("[boot] leaving initcalls");
 
+    let device_manager = DeviceManager::get_manager();
+    println!(
+        "[boot] pre-init devices: count={} tty0={}",
+        device_manager.get_devices_count(),
+        device_manager.get_device_by_name("tty0").is_some()
+    );
+    for id in 1..=device_manager.get_devices_count() {
+        if let Some(device) = device_manager.get_device(id) {
+            println!(
+                "[boot] pre-init device: id={} name={} type={:?} capabilities={:?}",
+                id,
+                device.name(),
+                device.device_type(),
+                device.capabilities()
+            );
+        }
+    }
+
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
     /* Enable CPU interrupt reception (stage 2) */
@@ -916,17 +934,28 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[Scarlet Kernel] Calling start_scheduler()...");
 
     let next_task_id = start_scheduler();
+    println!(
+        "[boot] start_scheduler returned next={:?}",
+        next_task_id
+    );
     // Keep APs behind the release barrier until the BSP has claimed the
     // first runnable task. Otherwise a fast AP can steal the init task from
     // the BSP's ready queue before the boot CPU enters it, which makes early
     // userspace startup nondeterministic on SMP systems. The BSP is not
     // assumed to have CPU ID 0.
     if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        println!("[boot] releasing secondary CPUs");
         hook();
         fence(Ordering::SeqCst);
+        println!("[boot] secondary CPUs released");
     }
     if let Some(next_task_id) = next_task_id {
         let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
+        println!(
+            "[boot] first switch: task={} type={:?}",
+            next_task_id,
+            next_task.task_type
+        );
         if next_task.task_type == crate::task::TaskType::Kernel {
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
         } else {

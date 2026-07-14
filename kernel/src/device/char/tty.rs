@@ -1640,6 +1640,12 @@ impl CharDevice for TtyDevice {
 
         let _lock = self.write_lock.lock();
 
+        if crate::earlyfb::is_initialized()
+            && let Ok(text) = core::str::from_utf8(buffer)
+        {
+            crate::earlyfb::write_str(text);
+        }
+
         if self.output_postprocess_enabled.load(Ordering::Relaxed) {
             let mut output = alloc::vec::Vec::with_capacity(buffer.len());
             for &byte in buffer {

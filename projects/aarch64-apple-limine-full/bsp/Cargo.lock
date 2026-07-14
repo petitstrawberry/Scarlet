@@ -265,18 +265,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scarlet-driver-dcp"
-version = "0.1.0"
-dependencies = [
- "scarlet",
- "scarlet-driver-apple-afk",
- "scarlet-driver-apple-asc",
- "scarlet-driver-apple-dart",
- "scarlet-driver-apple-epic",
- "scarlet-driver-apple-rtkit",
-]
-
-[[package]]
 name = "scarlet-driver-dcpext"
 version = "0.1.0"
 dependencies = [
@@ -346,7 +334,6 @@ dependencies = [
  "scarlet-driver-apple-spmi",
  "scarlet-driver-apple-wdt",
  "scarlet-driver-cs42l83",
- "scarlet-driver-dcp",
  "scarlet-driver-dcpext",
  "scarlet-driver-dpxbar",
  "scarlet-driver-s5l-uart",

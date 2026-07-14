@@ -27,6 +27,7 @@ const SOURCE_CORE_PMU: u32 = 1 << 5;
 const SOURCE_UNCORE_PMU: u32 = 1 << 6;
 const MAX_FAST_IPI_CPUS: usize = 32;
 
+static REPORTED_CPUS: AtomicU64 = AtomicU64::new(0);
 static CPU_MPIDRS: [AtomicU64; MAX_FAST_IPI_CPUS] =
     [const { AtomicU64::new(0) }; MAX_FAST_IPI_CPUS];
 static CPU_MPIDR_VALID: AtomicU64 = AtomicU64::new(0);
@@ -113,6 +114,7 @@ pub(super) fn prepare_cpu(cpu_id: u32) {
     }
 
     registers::synchronize();
+    report_prepared(cpu_id, &state);
 }
 
 pub(super) fn send_fast_ipi(target_cpu: u32) -> bool {
@@ -161,6 +163,7 @@ pub(super) fn claim_pending(cpu_id: u32) -> InterruptClaim {
         registers::synchronize();
     }
 
+    report_once(cpu_id, sources, &state);
     if sources & SOURCE_FAST_IPI != 0 {
         InterruptClaim::Reschedule
     } else if sources != 0 {
@@ -168,6 +171,64 @@ pub(super) fn claim_pending(cpu_id: u32) -> InterruptClaim {
     } else {
         InterruptClaim::NotMine
     }
+}
+
+fn report_prepared(cpu_id: u32, state: &FiqState) {
+    let el2 = state.el2.unwrap_or_default();
+    scarlet::early_println!(
+        "[AIC][FIQ] cpu={} prepared cntp={:#x} cntv={:#x} gpt={:#x} gvt={:#x} gate={:#x}",
+        cpu_id,
+        state.local.cntp_ctl,
+        state.local.cntv_ctl,
+        el2.guest_cntp_ctl,
+        el2.guest_cntv_ctl,
+        el2.vm_timer_enable
+    );
+    scarlet::early_println!(
+        "[AIC][FIQ] cpu={} pre ipi={:#x} pmcr0={:#x} upmcr0={:#x} upmsr={:#x} hcr={:#x} cnthctl={:#x} ich_hcr={:#x} ich_misr={:#x}",
+        cpu_id,
+        state.local.fast_ipi_status,
+        state.local.pmcr0,
+        state.local.upmcr0,
+        state.local.upmsr,
+        el2.hcr,
+        el2.cnthctl,
+        el2.vgic_hcr,
+        el2.vgic_misr
+    );
+}
+
+fn report_once(cpu_id: u32, sources: u32, state: &FiqState) {
+    if cpu_id >= u64::BITS {
+        return;
+    }
+    let cpu_bit = 1u64 << cpu_id;
+    if REPORTED_CPUS.fetch_or(cpu_bit, Ordering::Relaxed) & cpu_bit != 0 {
+        return;
+    }
+
+    let el2 = state.el2.unwrap_or_default();
+    scarlet::early_println!(
+        "[AIC][FIQ] first cpu={} sources={:#x} elr={:#x} spsr={:#x} daif={:#x} isr={:#x}",
+        cpu_id,
+        sources,
+        state.local.elr,
+        state.local.spsr,
+        state.local.daif,
+        state.local.isr
+    );
+    scarlet::early_println!(
+        "[AIC][FIQ] first cntp={:#x} cntv={:#x} gpt={:#x} gvt={:#x} gate={:#x} ipi={:#x} pmcr0={:#x} upmcr0={:#x} upmsr={:#x}",
+        state.local.cntp_ctl,
+        state.local.cntv_ctl,
+        el2.guest_cntp_ctl,
+        el2.guest_cntv_ctl,
+        el2.vm_timer_enable,
+        state.local.fast_ipi_status,
+        state.local.pmcr0,
+        state.local.upmcr0,
+        state.local.upmsr
+    );
 }
 
 #[cfg(test)]

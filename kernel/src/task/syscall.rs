@@ -176,12 +176,26 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
     let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)
     let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
+    let is_process_fork = !clone_flags.is_set(CloneFlagsDef::Vm)
+        && !clone_flags.is_set(CloneFlagsDef::Thread);
+
+    if is_process_fork {
+        crate::early_println!(
+            "[fork-trace] enter parent={} cpu={} flags={:#x}",
+            parent_task.get_id(),
+            crate::arch::get_cpu().get_cpuid(),
+            clone_flags.get_raw()
+        );
+    }
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
         Ok(child_task) => {
+            if is_process_fork {
+                crate::early_println!("[fork-trace] address-space clone complete");
+            }
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.lock().iregs.set_return_value(0); /* Set the return value to 0 in the child task */
@@ -222,6 +236,13 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // start the child immediately from the reschedule IPI.
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let child_id = register_task(child_task);
+            if is_process_fork {
+                crate::early_println!(
+                    "[fork-trace] child={} registered target_cpu={}",
+                    child_id,
+                    cpu_id
+                );
+            }
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
             // Establish parent-child relationship now that both have valid IDs
@@ -237,7 +258,13 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 .map(|t| t.get_namespace_id())
                 .unwrap_or(0);
 
+            if is_process_fork {
+                crate::early_println!("[fork-trace] enqueue child={}", child_id);
+            }
             enqueue_task(child_id, cpu_id);
+            if is_process_fork {
+                crate::early_println!("[fork-trace] return child_pid={}", child_ns_pid);
+            }
 
             /* Return the child task PID (namespace-local) to the parent task */
             child_ns_pid
