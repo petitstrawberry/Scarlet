@@ -9,7 +9,8 @@ package = "scarlet"
 
 [bsp.kernel]
 source = { path = "../../kernel" }
-features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
+# Currently, the hypervisor feature is disabled for Apple Silicon
+features = { network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = true }
 
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
