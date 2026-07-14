@@ -295,6 +295,41 @@ pub enum Shareability {
     InnerShareable = 0b11,
 }
 
+#[inline(always)]
+fn invalidate_stage1_translations_inner_shareable() {
+    // SAFETY: The barriers and broadcast TLBI form the architected completion
+    // sequence for publishing stage-1 translation-table changes to all PEs in
+    // the inner-shareable domain.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack),
+        );
+    }
+}
+
+#[inline(always)]
+fn publish_page_table_entry(pte: &PageTableEntry) {
+    crate::arch::aarch64::clean_dcache_to_poc_range(
+        (pte as *const PageTableEntry) as usize,
+        core::mem::size_of::<PageTableEntry>(),
+    );
+}
+
+#[inline(always)]
+fn replacement_requires_break_before_make(old_entry: u64, new_entry: u64) -> bool {
+    old_entry & 1 != 0 && old_entry != new_entry
+}
+
+fn break_before_make(pte: &mut PageTableEntry) {
+    pte.clear_all();
+    publish_page_table_entry(pte);
+    invalidate_stage1_translations_inner_shareable();
+}
+
 /// Page table structure aligned to 4KB
 #[repr(align(4096))]
 #[derive(Debug)]
@@ -457,7 +492,7 @@ impl PageTable {
         }
 
         // Publish new mappings to all PEs that may run this address space.
-        unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
+        invalidate_stage1_translations_inner_shareable();
 
         Ok(())
     }
@@ -495,7 +530,7 @@ impl PageTable {
         .expect("map: couldn't install a 4 KiB leaf mapping");
 
         // Publish new mappings to all PEs that may run this address space.
-        unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
+        invalidate_stage1_translations_inner_shareable();
     }
 
     /// Attempts to install a leaf mapping at the specified logical level.
@@ -532,13 +567,16 @@ impl PageTable {
             level,
             attrs.memory_attribute,
         );
+        if pte.entry == entry {
+            return Ok(());
+        }
+        if replacement_requires_break_before_make(pte.entry, entry) {
+            break_before_make(pte);
+        }
         pte.set_entry(entry);
 
         // Ensure the updated PTE is visible to the hardware table walker.
-        crate::arch::aarch64::clean_dcache_to_poc_range(
-            (pte as *const PageTableEntry) as usize,
-            core::mem::size_of::<PageTableEntry>(),
-        );
+        publish_page_table_entry(pte);
 
         // TLB invalidation is deferred to the caller for batching.
         Ok(())
@@ -751,7 +789,7 @@ impl PageTable {
                 (pte as *const PageTableEntry) as usize,
                 core::mem::size_of::<PageTableEntry>(),
             );
-            unsafe { asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb") };
+            invalidate_stage1_translations_inner_shareable();
         }
     }
 
@@ -835,14 +873,10 @@ impl PageTable {
                 crate::environment::PAGE_SIZE,
             );
 
-            pte.clear_all();
+            break_before_make(pte);
             pte.set_ppn(virt_to_phys(child_table as usize) >> 12);
             pte.set_table();
-            crate::arch::aarch64::clean_dcache_to_poc_range(
-                (pte as *const PageTableEntry) as usize,
-                core::mem::size_of::<PageTableEntry>(),
-            );
-            asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb");
+            publish_page_table_entry(pte);
         }
 
         Ok(())
@@ -853,7 +887,11 @@ impl PageTable {
         for entry in &mut self.entries {
             entry.clear_all();
         }
-        unsafe { asm!("dsb ish", "tlbi vmalle1is", "dsb ish", "isb") };
+        crate::arch::aarch64::clean_dcache_to_poc_range(
+            self as *const PageTable as usize,
+            crate::environment::PAGE_SIZE,
+        );
+        invalidate_stage1_translations_inner_shareable();
     }
 }
 
@@ -1036,6 +1074,44 @@ mod tests {
             MemoryAttribute::Device,
         );
         assert_eq!((device_entry >> 2) & 0b111, 0);
+    }
+
+    #[test_case]
+    fn test_valid_translation_change_requires_break_before_make() {
+        let old_entry = PageTable::make_leaf_entry(
+            0x4100_0000,
+            0x8100_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Normal,
+        );
+        let new_address_entry = PageTable::make_leaf_entry(
+            0x4100_0000,
+            0x8200_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Normal,
+        );
+        let new_attribute_entry = PageTable::make_leaf_entry(
+            0x4100_0000,
+            0x8100_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::NonCacheable,
+        );
+
+        assert!(!replacement_requires_break_before_make(0, old_entry));
+        assert!(!replacement_requires_break_before_make(
+            old_entry, old_entry
+        ));
+        assert!(replacement_requires_break_before_make(
+            old_entry,
+            new_address_entry
+        ));
+        assert!(replacement_requires_break_before_make(
+            old_entry,
+            new_attribute_entry
+        ));
     }
 
     #[test_case]
