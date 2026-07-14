@@ -20,6 +20,12 @@ static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
 
+const HCR_EL2_FMO: u64 = 1 << 3;
+const HCR_EL2_IMO: u64 = 1 << 4;
+const HCR_EL2_AMO: u64 = 1 << 5;
+const HCR_EL2_E2H: u64 = 1 << 34;
+const HCR_EL2_HOST_INTERRUPT_ROUTING: u64 = HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
+
 pub fn is_vhe_enabled() -> bool {
     unsafe { VHE_ENABLED }
 }
@@ -54,6 +60,7 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
 }
 
 fn ap_entry_wait(cpu_id: usize) -> ! {
+    configure_vhe_host_interrupt_routing();
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -322,6 +329,35 @@ fn detect_el() -> (u64, bool) {
     (el, vhe)
 }
 
+#[inline(always)]
+fn configure_vhe_host_interrupt_routing() {
+    if current_el() != 2 {
+        return;
+    }
+
+    let old_hcr: u64;
+    // SAFETY: CurrentEL is EL2. The read confirms that VHE is enabled before
+    // updating only the architected physical exception routing bits, and the
+    // ISB makes the new routing effective before exceptions are unmasked.
+    unsafe {
+        asm!("mrs {0}, hcr_el2", out(reg) old_hcr, options(nostack));
+    }
+    if old_hcr & HCR_EL2_E2H == 0 {
+        return;
+    }
+
+    let new_hcr = old_hcr | HCR_EL2_HOST_INTERRUPT_ROUTING;
+    // SAFETY: The CPU is still at EL2 and exceptions are masked during boot.
+    unsafe {
+        asm!(
+            "msr hcr_el2, {0}",
+            "isb",
+            in(reg) new_hcr,
+            options(nostack)
+        );
+    }
+}
+
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn limine_entry() -> ! {
@@ -333,6 +369,8 @@ pub extern "C" fn limine_entry() -> ! {
         VHE_ENABLED = vhe;
         HV_AVAILABLE = vhe;
     }
+
+    configure_vhe_host_interrupt_routing();
 
     prepare_el1_runtime();
 
