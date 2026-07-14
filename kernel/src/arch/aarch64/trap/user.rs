@@ -259,6 +259,13 @@ pub extern "C" fn _switch_to_user(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_switch_to_user")]
 pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SWITCH_TO_USER,
+        crate::sched::scheduler::current_task_id(crate::arch::get_cpu().get_cpuid())
+            .map(|t| t as u64)
+            .unwrap_or(0),
+        trapframe.elr,
+    );
     let addr = trapframe as *mut Trapframe as usize;
 
     crate::arch::configure_user_entry(
@@ -299,6 +306,7 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
 // TrapKindを引数で受け取るように変更
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) -> ! {
+    crate::breadcrumb::drop(crate::breadcrumb::USER_TRAP_ENTER, trap_kind as u64, trapframe.elr);
     // We are now executing in EL1; switch VBAR_EL1 to the kernel vector so that
     // any exceptions/IRQs that occur while in kernel mode are handled by the
     // simple kernel trap routine.

@@ -1903,6 +1903,11 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::CLONE_ENTER,
+            self.get_id() as u64,
+            flags.get_raw() as u64,
+        );
         // Create a new task in the same namespace as the parent
         let mut child = Task::new_with_namespace(
             self.name.read().clone(),
@@ -2240,6 +2245,7 @@ impl Task {
         if child.get_kernel_stack_window_base().is_none() {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_KSTACK_DONE, 0, 0);
         // Cloned task starts as Ready regardless of parent's current state
         child.state.store(TaskState::Ready, Ordering::SeqCst);
 
@@ -2259,6 +2265,7 @@ impl Task {
             child.thread_group_id = 0;
         }
 
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_RETURN, 0, 0);
         Ok(child)
     }
 

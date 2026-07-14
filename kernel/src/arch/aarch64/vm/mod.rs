@@ -152,6 +152,13 @@ pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
 }
 
 pub fn alloc_virtual_address_space() -> u16 {
+    // Allocate the root page table before taking any registry lock, so PMM
+    // contention cannot stall asid_table/PAGE_TABLES readers (same discipline
+    // as free_virtual_address_space).
+    let root_pagetable_ptr = new_pagetable();
+    if root_pagetable_ptr.is_null() {
+        panic!("Failed to allocate a new root page table");
+    }
     let mut asid_table = get_asid_tables().write();
     for word_idx in 0..(NUM_OF_ASID / 64) {
         let word = asid_table[word_idx];
@@ -159,38 +166,38 @@ pub fn alloc_virtual_address_space() -> u16 {
             let bit_pos = (!word).trailing_zeros() as usize;
             asid_table[word_idx] |= 1 << bit_pos;
             let asid = (word_idx * 64 + bit_pos) as u16;
-            let root_pagetable_ptr = new_pagetable();
             let mut page_tables = get_page_tables().write();
             page_tables.insert(asid, vec![root_pagetable_ptr as usize]);
-
-            if root_pagetable_ptr.is_null() {
-                panic!("Failed to allocate a new root page table");
-            }
-
             return asid;
         }
     }
+    // No free ASID: reclaim the wasted page table.
+    free_pagetable(root_pagetable_ptr);
     panic!("No available root page table");
 }
 
 pub fn free_virtual_address_space(asid: u16) {
     let asid = asid as usize;
-    if asid < NUM_OF_ASID {
-        let bit_pos = asid % 64;
-        let word_idx = asid / 64;
+    if asid >= NUM_OF_ASID {
+        panic!("Invalid ASID: {}", asid);
+    }
+    let bit_pos = asid % 64;
+    let word_idx = asid / 64;
+    // PMM frees must happen AFTER dropping PAGE_TABLES/asid_table locks:
+    // holding PAGE_TABLES.write() across free_pagetable()->PMM blocks every
+    // get_root_pagetable() reader (setup_task_cpu_state) when PMM is contended.
+    let tables_to_free: Vec<usize> = {
         let mut asid_table = get_asid_tables().write();
         if asid_table[word_idx] & (1 << bit_pos) == 0 {
             panic!("ASID {} is already free", asid);
         }
         let mut page_tables = get_page_tables().write();
-        if let Some(tables) = page_tables.remove(&(asid as u16)) {
-            for addr in tables {
-                free_pagetable(addr as *mut PageTable);
-            }
-        }
+        let tables = page_tables.remove(&(asid as u16)).unwrap_or_default();
         asid_table[word_idx] &= !(1 << bit_pos);
-    } else {
-        panic!("Invalid ASID: {}", asid);
+        tables
+    };
+    for addr in tables_to_free {
+        free_pagetable(addr as *mut PageTable);
     }
 }
 

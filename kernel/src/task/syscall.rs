@@ -266,6 +266,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 crate::early_println!("[fork-trace] return child_pid={}", child_ns_pid);
             }
 
+            crate::breadcrumb::drop(
+                crate::breadcrumb::FORK_RETURN,
+                child_id as u64,
+                crate::arch::get_cpu().get_cpuid() as u64,
+            );
+
             /* Return the child task PID (namespace-local) to the parent task */
             child_ns_pid
         }

@@ -689,37 +689,89 @@ impl PageTable {
                 let index = (vaddr >> (12 + 9 * level)) & 0x1ff;
                 let pte = &mut (*pagetable).entries[index];
 
-                if pte.is_valid() {
-                    // Must be a table descriptor at intermediate levels
-                    if !pte.is_table() {
-                        return None;
-                    }
-                    pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
-                } else {
-                    if !alloc {
-                        return None;
-                    }
-                    // Allocate new page table
-                    let new_table = new_raw_pagetable(asid);
-                    if new_table.is_null() {
-                        return None;
-                    }
-                    pte.clear_all();
-                    pte.set_ppn(virt_to_phys(new_table as usize) >> 12);
-                    pte.set_table();
-
-                    // Ensure the parent table PTE update is visible to the walker.
-                    crate::arch::aarch64::clean_dcache_to_poc_range(
-                        (pte as *const PageTableEntry) as usize,
-                        core::mem::size_of::<PageTableEntry>(),
-                    );
-
-                    pagetable = new_table;
-                }
+                // Publish intermediate table descriptors atomically. The
+                // shared kernel page table is mutated concurrently (fork,
+                // wake, ioremap), so two walkers mapping adjacent VAs share
+                // this parent PTE. A non-atomic clear/set sequence lets the
+                // loser clobber the winner's child table, orphaning its leaf
+                // mappings and corrupting translation for every CPU.
+                pagetable = Self::publish_or_descend_intermediate(pte, alloc, asid)?;
             }
 
             let index = (vaddr >> (12 + 9 * target_level)) & 0x1ff;
             Some(&mut (*pagetable).entries[index])
+        }
+    }
+
+    /// Atomically publish a child page-table descriptor in an intermediate
+    /// PTE, or descend into a table already published by another CPU.
+    ///
+    /// The shared kernel page table is mutated concurrently by multiple CPUs
+    /// (fork, wake, ioremap, trampoline setup). Two walkers targeting adjacent
+    /// virtual addresses share the same parent PTE at intermediate levels. A
+    /// non-atomic "clear -> set ppn -> set table" sequence lets the loser
+    /// overwrite the winner's published child table, orphaning every leaf the
+    /// loser installs and corrupting translation for every CPU.
+    ///
+    /// This performs the invalid -> table-descriptor transition with a
+    /// compare-exchange on the full 64-bit descriptor. Losers reuse the
+    /// winner's table and continue the walk, so both mappings land in the same
+    /// live table.
+    ///
+    /// On a lost race the locally-allocated table is intentionally leaked: it
+    /// is never linked into the live page table, but remains recorded per-ASID
+    /// and is reclaimed when the address space is torn down. Leaking one zeroed
+    /// page on a rare race is strictly safer than clobbering a peer's table.
+    fn publish_or_descend_intermediate(
+        pte: &mut PageTableEntry,
+        alloc: bool,
+        asid: u16,
+    ) -> Option<*mut PageTable> {
+        use core::sync::atomic::{AtomicU64, Ordering};
+
+        // SAFETY: `PageTableEntry` is `#[repr(align(8))]` wrapping a single
+        // `u64`, so the entry pointer is 8-byte aligned and valid for atomic
+        // compare-exchange. The caller operates in the page-table walker's
+        // unsafe context on live `PageTable` memory.
+        let atomic = unsafe { &*(pte as *mut PageTableEntry as *const AtomicU64) };
+
+        let observed = atomic.load(Ordering::SeqCst);
+        if observed & 1 != 0 {
+            let existing = PageTableEntry { entry: observed };
+            // Intermediate descriptors must be table descriptors.
+            if !existing.is_table() {
+                return None;
+            }
+            return Some(phys_to_virt(existing.get_ppn() << 12) as *mut PageTable);
+        }
+
+        if !alloc {
+            return None;
+        }
+
+        let new_table = unsafe { new_raw_pagetable(asid) };
+        if new_table.is_null() {
+            return None;
+        }
+
+        let mut desc = PageTableEntry::new();
+        desc.set_ppn(virt_to_phys(new_table as usize) >> 12);
+        desc.set_table();
+
+        match atomic.compare_exchange(observed, desc.entry, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => {
+                publish_page_table_entry(pte);
+                Some(new_table)
+            }
+            Err(actual) => {
+                // Lost the publication race. Descend into the winner's table.
+                // The freshly-allocated table is leaked (reclaimed at teardown).
+                let winner = PageTableEntry { entry: actual };
+                if !winner.is_table() {
+                    return None;
+                }
+                Some(phys_to_virt(winner.get_ppn() << 12) as *mut PageTable)
+            }
         }
     }
 

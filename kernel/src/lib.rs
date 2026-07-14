@@ -253,6 +253,7 @@
 pub mod abi;
 pub mod arch;
 pub mod boot;
+pub mod breadcrumb;
 pub mod device;
 pub mod drivers;
 pub mod earlycon;

@@ -54,34 +54,47 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
-    let _guard = crate::log::PrintGuard::acquire();
+    // Serialize formatting only for the lock-free log ring buffer and the
+    // early framebuffer. Both sinks are non-blocking, so holding PrintGuard
+    // (which masks interrupts to prevent same-CPU FIQ re-entrancy) across
+    // them is safe.
+    {
+        let _guard = crate::log::PrintGuard::acquire();
 
-    struct LogWriter;
+        struct LogWriter;
 
-    impl fmt::Write for LogWriter {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            for &b in s.as_bytes() {
-                crate::log::write_byte(b);
-            }
-            Ok(())
-        }
-    }
-    let mut log = LogWriter;
-    let _ = log.write_fmt(args);
-
-    if crate::earlyfb::is_initialized() {
-        struct EarlyFramebufferWriter;
-
-        impl fmt::Write for EarlyFramebufferWriter {
+        impl fmt::Write for LogWriter {
             fn write_str(&mut self, s: &str) -> fmt::Result {
-                crate::earlyfb::write_str(s);
+                for &b in s.as_bytes() {
+                    crate::log::write_byte(b);
+                }
                 Ok(())
             }
         }
+        let mut log = LogWriter;
+        let _ = log.write_fmt(args);
 
-        let mut early_framebuffer = EarlyFramebufferWriter;
-        let _ = early_framebuffer.write_fmt(args);
+        if crate::earlyfb::is_initialized() {
+            struct EarlyFramebufferWriter;
+
+            impl fmt::Write for EarlyFramebufferWriter {
+                fn write_str(&mut self, s: &str) -> fmt::Result {
+                    crate::earlyfb::write_str(s);
+                    Ok(())
+                }
+            }
+
+            let mut early_framebuffer = EarlyFramebufferWriter;
+            let _ = early_framebuffer.write_fmt(args);
+        }
     }
+    // PrintGuard and its interrupt mask are released here. Char-device
+    // emission runs with interrupts enabled and without the global print
+    // lock: a slow or interrupt-driven device (e.g. a UART blocking on a
+    // TX-ready FIQ) must never hold PrintGuard or mask FIQ, otherwise every
+    // other CPU that prints spins forever with FIQ masked. This also makes
+    // re-entrant print! from a driver's write callback safe instead of a
+    // non-reentrant self-deadlock. Devices own their concurrency safety.
 
     let manager = DeviceManager::get_manager();
 
@@ -130,9 +143,8 @@ pub fn _print(args: fmt::Arguments) {
         }
     }
 
-    // Final fallback: write directly to the early console while still holding
-    // the global print guard. Calling early_println! here would re-enter the
-    // same print lock and deadlock.
+    // Final fallback: write directly to the early console. PrintGuard has
+    // already been released above, so this runs without the global print lock.
     if !crate::earlyfb::is_initialized() {
         let mut early = crate::earlycon::EarlyConsole::new();
         let _ = early.write_fmt(args);

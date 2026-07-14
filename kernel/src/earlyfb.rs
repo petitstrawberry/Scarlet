@@ -204,6 +204,19 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// Write a whole string while holding the console lock once.
+///
+/// Unlike `write_str` (which acquires the lock per byte and therefore
+/// interleaves with concurrent writers), this holds `EARLY_CONSOLE` across
+/// the entire string so the output is atomic w.r.t. other CPUs. Use for
+/// diagnostic dumps that must remain readable under SMP contention.
+pub fn write_raw(s: &str) {
+    let mut console = EARLY_CONSOLE.lock();
+    for byte in s.bytes() {
+        console.write_byte(byte);
+    }
+}
+
 pub fn is_initialized() -> bool {
     EARLY_CONSOLE.lock().initialized
 }

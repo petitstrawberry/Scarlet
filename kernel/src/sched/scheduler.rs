@@ -1718,6 +1718,7 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
 }
 
 fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
+    crate::breadcrumb::drop(crate::breadcrumb::PICK_NEXT_ENTER, cpu.get_cpuid() as u64, 0);
     let _irq_guard = IrqGuard::new();
     let cpu_id = cpu.get_cpuid();
     release_deferred_prev(cpu_id);
@@ -1983,6 +1984,7 @@ pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
 
 /// Schedule tasks on the CPU with kernel context switching.
 pub fn schedule(trapframe: &mut Trapframe) {
+    crate::breadcrumb::drop(crate::breadcrumb::SCHED_ENTER, get_cpu().get_cpuid() as u64, 0);
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
     let (current_task_id, next_task_id) = pick_next(cpu);
@@ -2286,6 +2288,11 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
 /// Perform kernel context switch between tasks.
 fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) {
     if from_task_id != to_task_id {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::KCTX_ENTER,
+            from_task_id as u64,
+            to_task_id as u64,
+        );
         if DEBUG_SMP_TASK_FLOW {
             let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
             if expected_task.is_some() {
@@ -2356,10 +2363,12 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                         );
                     }
                 }
+                crate::breadcrumb::drop(crate::breadcrumb::KCTX_SWITCH_TO, from_task_id as u64, to_task_id as u64);
                 crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
             }
 
             let resumed_cpu_id = get_cpu().get_cpuid();
+            crate::breadcrumb::drop(crate::breadcrumb::KCTX_RESUME, resumed_cpu_id as u64, from_task_id as u64);
 
             if DEBUG_SMP_TASK_FLOW {
                 let (expected_task, _from_cpu, seq) = debug_remote_enqueue_snapshot(resumed_cpu_id);
@@ -2382,6 +2391,7 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             // CPU we are actually running on now, not for the CPU that saved
             // this stack frame before the switch.
             release_deferred_prev(resumed_cpu_id);
+            crate::breadcrumb::drop(crate::breadcrumb::REL_PREV_DONE, resumed_cpu_id as u64, from_task_id as u64);
 
             #[cfg(feature = "hypervisor")]
             {
@@ -2390,7 +2400,9 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             }
 
             if let Some(from_task) = TaskPool::get_task(from_task_id) {
+                crate::breadcrumb::drop(crate::breadcrumb::GETTASK_DONE, resumed_cpu_id as u64, from_task_id as u64);
                 setup_task_cpu_state(get_cpu(), from_task);
+                crate::breadcrumb::drop(crate::breadcrumb::SETUP_DONE, resumed_cpu_id as u64, from_task_id as u64);
                 set_trapvector(get_kernel_trapvector_paddr());
 
                 #[cfg(feature = "user-fpu")]
@@ -2402,15 +2414,21 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 
 /// Bind CPU-local scheduler/trampoline state to the task that is about to run.
 fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
+    let cpuid = cpu.get_cpuid();
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
         task.get_kernel_stack_bottom_paddr()
     };
 
-    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu.get_cpuid()));
+    let trampoline_arch = crate::vm::get_trampoline_arch(cpuid);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::TRAMP_GET, trampoline_arch as u64);
+    crate::arch::set_arch(trampoline_arch);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp);
     cpu.set_kernel_stack(sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp);
     cpu.set_trap_handler(get_user_trap_handler());
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
     cpu.set_next_address_space(task.vm_manager.get_asid());
 }
 

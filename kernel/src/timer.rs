@@ -120,7 +120,9 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
-    if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
+    // Stop heartbeat prints after the breadcrumb dump fires so the dump stays
+    // visible at the bottom of the framebuffer instead of scrolling away.
+    if !crate::breadcrumb::dumped() && (irq_count <= 3 || irq_count % heartbeat_ticks == 0) {
         crate::early_println!(
             "[timer] irq heartbeat cpu={} count={} scheduler={}",
             cpu_id,
@@ -128,6 +130,12 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
             run_scheduler
         );
     }
+    // Once the hang is established on the surviving idle CPUs, dump all
+    // per-CPU breadcrumbs once so the stuck CPUs' last phase is visible.
+    if irq_count == 3000 {
+        crate::breadcrumb::dump_once();
+    }
+    crate::breadcrumb::drop(crate::breadcrumb::TIMER_TICK, irq_count, run_scheduler as u64);
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);
@@ -135,6 +143,7 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     // Only the designated global timekeeper advances global time and fires
     // software timers. All other CPUs skip this block entirely.
     if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
+        crate::breadcrumb::drop(crate::breadcrumb::TIMER_SW_TIMERS, irq_count, 0);
         let now = current_counter_tick();
         TICK_COUNT.store(now, Ordering::Relaxed);
         check_software_timers(now);

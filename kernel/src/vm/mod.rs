@@ -438,9 +438,10 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
 pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'static str> {
-    // Allocate a window slot
-    let (slot_idx, base, _top) = kstack_alloc()
-        .lock()
+    // Hold this lock through the shared page-table update so concurrent slots
+    // cannot allocate competing intermediate tables for the same parent PTE.
+    let mut allocator = kstack_alloc().lock();
+    let (slot_idx, base, _top) = allocator
         .alloc_slot()
         .ok_or("No free kernel stack window slots")?;
 
@@ -487,6 +488,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
 
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
+    drop(allocator);
 
     // Update the task's kernel context SP to point into the high-VA window.
     // After boot, tasks are scheduled via `switch_to` which restores KernelContext.sp.
@@ -531,6 +533,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
 #[allow(static_mut_refs)]
 pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
     if let Some((slot_idx, base)) = task.get_kernel_stack_window_base() {
+        let mut allocator = kstack_alloc().lock();
         let vstart = base + crate::environment::PAGE_SIZE;
         let vend = vstart + TASK_KERNEL_STACK_SIZE - 1;
 
@@ -547,7 +550,7 @@ pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
             v += PAGE_SIZE;
         }
         // Free slot
-        kstack_alloc().lock().free_slot(slot_idx);
+        allocator.free_slot(slot_idx);
         task.set_kernel_stack_window_base(None);
     }
 }
@@ -601,7 +604,12 @@ pub fn setup_user_stack(task: &Task) -> (usize, usize) {
 }
 
 static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();
-static TRAMPOLINE_ARCH: Mutex<[Option<usize>; MAX_NUM_CPUS]> = Mutex::new([None; MAX_NUM_CPUS]);
+// Per-CPU trampoline Arch address. Written once at CPU bring-up and read on
+// every context switch, so it is a plain per-CPU atomic rather than a shared
+// Mutex. A shared Mutex here serialized every context switch across all CPUs
+// and could deadlock the whole machine if a holder panicked or stalled.
+static TRAMPOLINE_ARCH: [core::sync::atomic::AtomicUsize; MAX_NUM_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_NUM_CPUS];
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
     TRAMPOLINE_TRAP_VECTOR.call_once(|| trap_vector);
@@ -622,13 +630,15 @@ pub fn get_guest_trapvector_trampoline() -> usize {
 }
 
 pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
-    let mut trampolines = TRAMPOLINE_ARCH.lock();
-    trampolines[cpu_id] = Some(arch);
+    TRAMPOLINE_ARCH[cpu_id].store(arch, core::sync::atomic::Ordering::Release);
 }
 
 pub fn get_trampoline_arch(cpu_id: usize) -> usize {
-    let trampolines = TRAMPOLINE_ARCH.lock();
-    trampolines[cpu_id].expect("Trampoline is not initialized")
+    let arch = TRAMPOLINE_ARCH[cpu_id].load(core::sync::atomic::Ordering::Acquire);
+    if arch == 0 {
+        panic!("Trampoline is not initialized for cpu {}", cpu_id);
+    }
+    arch
 }
 
 pub fn switch_to_kernel_vm() {

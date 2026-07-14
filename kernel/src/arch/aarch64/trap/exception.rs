@@ -98,6 +98,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     let ec = ExceptionClass::from(trapframe.esr_el1);
     let esr = trapframe.esr_el1;
 
+    let ec_byte = ((esr >> 26) & 0x3f) as u64;
+    crate::breadcrumb::drop(0x4500 | ec_byte, trap_kind as u64, esr);
+
     // Decode useful fields for Data/Instruction aborts.
     // ISS layout differs by EC, but WnR(bit 6) and DFSC/IFSC(bits 5:0) are consistent
     // for abort classes.
@@ -220,6 +223,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Instruction abort from same EL (kernel bug)
         ExceptionClass::InstructionAbortSameEl => {
+            crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.far_el1, esr);
             let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
             crate::println!("Kernel instruction abort at FAR={:#x}", far);
@@ -230,6 +234,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Data abort from same EL (kernel bug)
         ExceptionClass::DataAbortSameEl => {
+            crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.far_el1, esr);
             let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
             crate::println!("Kernel data abort at FAR={:#x}", far);
@@ -258,6 +263,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
             print_trap_info(trapframe, esr);
 
+            crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.far_el1, esr);
             crate::println!(
                 "[trap] unhandled exception: kind={}({}) ESR={:#x} FAR={:#x} ELR={:#x} CurrentEL=EL{} SPSR={:#x} DAIF={:#x} HCR_EL2={:#x}",
                 trap_kind,
@@ -349,6 +355,11 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
 
 /// Handle data page fault (like RISC-V cause 13/15)
 fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::DATA_FAULT_ENTER,
+        vaddr as u64,
+        if is_write { 1 } else { 0 },
+    );
     let task = current_task(get_cpu().get_cpuid()).unwrap();
     let pc = trapframe.get_current_pc();
 
@@ -365,7 +376,9 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     };
 
     match task.vm_manager.lazy_map_page_with(access) {
-        Ok(_) => (),
+        Ok(_) => {
+            crate::breadcrumb::drop(crate::breadcrumb::DATA_FAULT_DONE, vaddr as u64, 0);
+        }
         Err(e) => {
             terminate_current_user_fault(trapframe, get_esr_el1(), "data", vaddr, is_write, pc, e);
         }

@@ -557,13 +557,24 @@ pub enum EventProcessOutcome {
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     // 1. Get the program counter (sepc) from trapframe
     let pc = trapframe.get_current_pc() as usize;
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_ENTER,
+        trapframe.get_syscall_number() as u64,
+        pc as u64,
+    );
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
-    task.with_resolve_abi_mut(pc, |abi_module| {
+    let res = task.with_resolve_abi_mut(pc, |abi_module| {
         // 4. Handle the system call with the resolved ABI
         abi_module.handle_syscall(trapframe)
-    })
+    });
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_EXIT,
+        trapframe.get_syscall_number() as u64,
+        0,
+    );
+    res
 }

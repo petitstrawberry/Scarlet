@@ -146,14 +146,28 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `asid` - The ASID to set
     pub fn set_asid(&self, asid: u16) {
-        let mut g = self.inner.write();
-        if g.asid == asid {
-            return;
+        // Capture the old ASID to free and update inner, then release the lock
+        // BEFORE touching PMM/page-tables. Holding inner.write() across
+        // free_virtual_address_space() forms a lock cycle with PMM and can
+        // deadlock against COW/exec paths that take PMM then inner.
+        let old_asid_to_free: Option<u16> = {
+            let mut g = self.inner.write();
+            if g.asid == asid {
+                None
+            } else {
+                let old = g.asid;
+                g.asid = asid;
+                if old != 0 && is_asid_used(old) {
+                    Some(old)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(old) = old_asid_to_free {
+            free_virtual_address_space(old);
         }
-        if g.asid != 0 && is_asid_used(g.asid) {
-            free_virtual_address_space(g.asid);
-        }
-        g.asid = asid;
     }
 
     /// Returns the ASID (Address Space ID) for the virtual memory manager.
@@ -490,22 +504,31 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The memory map containing the given virtual address, if it exists.
     pub fn search_memory_map(&self, vaddr: usize) -> Option<VirtualMemoryMap> {
-        let mut g = self.inner.write();
+        // Read lock only. This used to take inner.write() to update a last-find
+        // cache, which serialized every COW fault on the same vm_manager (e.g.
+        // stemd + its CLONE_VM IPC thread) and could re-enter the lock via
+        // owner.resolve_fault() paths (framebuffer). The cache is intentionally
+        // not updated here; the BTreeMap range lookup below stays correct.
+        let g = self.inner.read();
         if let Some((cache_start, cache_end, cache_key)) = g.last_search_cache {
             if cache_start <= vaddr && vaddr <= cache_end {
-                return g.memmap.get(&cache_key).cloned();
+                if let Some(map) = g.memmap.get(&cache_key) {
+                    if vaddr <= map.vmarea.end {
+                        return Some(map.clone());
+                    }
+                }
             }
         }
-        if let Some((_k, map)) = g.memmap.range(..=vaddr).next_back() {
-            if vaddr <= map.vmarea.end {
-                let start = map.vmarea.start;
-                let end = map.vmarea.end;
-                let out = map.clone();
-                g.last_search_cache = Some((start, end, start));
-                return Some(out);
-            }
-        }
-        None
+        g.memmap
+            .range(..=vaddr)
+            .next_back()
+            .and_then(|(_, map)| {
+                if vaddr <= map.vmarea.end {
+                    Some(map.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     /// Efficient memory map search using BTreeMap's ordered nature
@@ -587,6 +610,8 @@ impl VirtualMemoryManager {
             }
         };
 
+        crate::breadcrumb::drop(crate::breadcrumb::LAZY_FOUND, vaddr as u64, 0);
+
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
         let page_idx = (page_vaddr - memory_map.vm_start) / PAGE_SIZE;
         let mut perms = memory_map.permissions;
@@ -603,6 +628,11 @@ impl VirtualMemoryManager {
             };
             match owner.resolve_fault(&owner_access, page_idx, memory_map.vm_start) {
                 Ok(res) => {
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::LAZY_RESOLVED,
+                        res.paddr_page_base as u64,
+                        0,
+                    );
                     perms = owner.fault_page_permissions(&access, perms);
                     if res.is_tail {
                         perms &= !0x1;
@@ -617,6 +647,11 @@ impl VirtualMemoryManager {
                             let new_alloc = ContiguousPages::new(1)
                                 .ok_or("Failed to allocate page for private mapping COW")?;
                             let new_paddr = new_alloc.as_paddr();
+                            crate::breadcrumb::drop(
+                                crate::breadcrumb::PMM_ALLOC_DONE,
+                                new_paddr as u64,
+                                0,
+                            );
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     crate::vm::addr::phys_to_virt(res.paddr_page_base) as *const u8,
@@ -653,6 +688,7 @@ impl VirtualMemoryManager {
                                 }
                             }
                             self.track_private_page_allocation(new_alloc);
+                            crate::breadcrumb::drop(crate::breadcrumb::LAZY_COWDONE, page_vaddr as u64, new_paddr as u64);
                             Self::sync_executable_page_for_mapping(perms, new_paddr);
                             root_pagetable.map(
                                 self.get_asid(),
