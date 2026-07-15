@@ -120,22 +120,20 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
     let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
-    // Stop heartbeat prints after the breadcrumb dump fires so the dump stays
-    // visible at the bottom of the framebuffer instead of scrolling away.
-    if !crate::breadcrumb::dumped() && (irq_count <= 3 || irq_count % heartbeat_ticks == 0) {
+    if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
         crate::early_println!(
             "[timer] irq heartbeat cpu={} count={} scheduler={}",
             cpu_id,
             irq_count,
             run_scheduler
         );
+        crate::breadcrumb::dump_all();
     }
-    // Once the hang is established on the surviving idle CPUs, dump all
-    // per-CPU breadcrumbs once so the stuck CPUs' last phase is visible.
-    if irq_count == 3000 {
-        crate::breadcrumb::dump_once();
-    }
-    crate::breadcrumb::drop(crate::breadcrumb::TIMER_TICK, irq_count, run_scheduler as u64);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::TIMER_TICK,
+        irq_count,
+        run_scheduler as u64,
+    );
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
     timer.start(cpu_id);
@@ -233,10 +231,13 @@ pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) 
         active: true,
     };
 
-    // Mark as active in the flags map
+    // Keep the global software-timer lock order consistent with
+    // check_software_timers(): heap first, then active flags. Taking these in
+    // the opposite order can deadlock the timekeeper FIQ against a CPU adding
+    // a timer.
+    let mut heap = SOFTWARE_TIMER_HEAP.lock();
     TIMER_ACTIVE_FLAGS.write().insert(id, true);
-
-    SOFTWARE_TIMER_HEAP.lock().push(timer);
+    heap.push(timer);
     id
 }
 

@@ -7,6 +7,20 @@ const VM_TIMER_ENABLE_MASK: u64 = 0b11;
 const VGIC_ENABLE: u64 = 1;
 const MPIDR_AFFINITY_MASK: u64 = 0xff;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostTimerBank {
+    Physical,
+    Virtual,
+}
+
+const fn host_timer_bank(vhe: bool) -> HostTimerBank {
+    if vhe {
+        HostTimerBank::Physical
+    } else {
+        HostTimerBank::Virtual
+    }
+}
+
 const fn fast_ipi_request(current_mpidr: u64, target_mpidr: u64) -> (bool, u64) {
     let current_cluster = (current_mpidr >> 8) & MPIDR_AFFINITY_MASK;
     let target_cluster = (target_mpidr >> 8) & MPIDR_AFFINITY_MASK;
@@ -42,44 +56,11 @@ pub(super) struct El2State {
     pub(super) vgic_misr: u64,
 }
 
-pub(super) fn read_local() -> LocalState {
-    let cntp_ctl: u64;
-    let cntv_ctl: u64;
-    let fast_ipi_status: u64;
-    let pmcr0: u64;
-    let upmcr0: u64;
-    let upmsr: u64;
-    let isr: u64;
-    let daif: u64;
-    let elr: u64;
-    let spsr: u64;
-
-    // SAFETY: AIC initialization restricts these CPU-local reads to supported Apple SoCs.
-    unsafe {
-        asm!(
-            "mrs {cntp_ctl}, cntp_ctl_el0",
-            "mrs {cntv_ctl}, cntv_ctl_el0",
-            "mrs {fast_ipi_status}, S3_5_C15_C1_1",
-            "mrs {pmcr0}, S3_1_C15_C0_0",
-            "mrs {upmcr0}, S3_7_C15_C0_4",
-            "mrs {upmsr}, S3_7_C15_C6_4",
-            "mrs {isr}, isr_el1",
-            "mrs {daif}, daif",
-            "mrs {elr}, elr_el1",
-            "mrs {spsr}, spsr_el1",
-            cntp_ctl = out(reg) cntp_ctl,
-            cntv_ctl = out(reg) cntv_ctl,
-            fast_ipi_status = out(reg) fast_ipi_status,
-            pmcr0 = out(reg) pmcr0,
-            upmcr0 = out(reg) upmcr0,
-            upmsr = out(reg) upmsr,
-            isr = out(reg) isr,
-            daif = out(reg) daif,
-            elr = out(reg) elr,
-            spsr = out(reg) spsr,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
+pub(super) fn read_local(vhe: bool) -> LocalState {
+    let (cntp_ctl, cntv_ctl) = read_timer_state(vhe);
+    let fast_ipi_status = read_fast_ipi_status();
+    let (pmcr0, upmcr0, upmsr) = read_pmu_state();
+    let (isr, daif, elr, spsr) = read_exception_state();
 
     LocalState {
         cntp_ctl,
@@ -93,6 +74,127 @@ pub(super) fn read_local() -> LocalState {
         elr,
         spsr,
     }
+}
+
+pub(super) fn read_local_traced(cpu_id: u32, vhe: bool) -> LocalState {
+    scarlet::early_println!(
+        "[AIC] CPU {}: reading {} host timer state",
+        cpu_id,
+        if vhe { "physical" } else { "virtual" }
+    );
+    let (cntp_ctl, cntv_ctl) = read_timer_state(vhe);
+    scarlet::early_println!(
+        "[AIC] CPU {}: {} host timer state read",
+        cpu_id,
+        if vhe { "physical" } else { "virtual" }
+    );
+
+    scarlet::early_println!("[AIC] CPU {}: reading fast IPI state", cpu_id);
+    let fast_ipi_status = read_fast_ipi_status();
+    scarlet::early_println!("[AIC] CPU {}: fast IPI state read", cpu_id);
+
+    scarlet::early_println!("[AIC] CPU {}: reading PMU FIQ state", cpu_id);
+    let (pmcr0, upmcr0, upmsr) = read_pmu_state();
+    scarlet::early_println!("[AIC] CPU {}: PMU FIQ state read", cpu_id);
+
+    scarlet::early_println!("[AIC] CPU {}: reading exception state", cpu_id);
+    let (isr, daif, elr, spsr) = read_exception_state();
+    scarlet::early_println!("[AIC] CPU {}: exception state read", cpu_id);
+
+    LocalState {
+        cntp_ctl,
+        cntv_ctl,
+        fast_ipi_status,
+        pmcr0,
+        upmcr0,
+        upmsr,
+        isr,
+        daif,
+        elr,
+        spsr,
+    }
+}
+
+fn read_timer_state(vhe: bool) -> (u64, u64) {
+    if host_timer_bank(vhe) == HostTimerBank::Physical {
+        let cntp_ctl: u64;
+        // SAFETY: Scarlet's VHE host timer uses the physical timer bank.
+        unsafe {
+            asm!(
+                "mrs {cntp_ctl}, cntp_ctl_el0",
+                cntp_ctl = out(reg) cntp_ctl,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        (cntp_ctl, 0)
+    } else {
+        let cntv_ctl: u64;
+        // SAFETY: Scarlet's EL1 timer uses the virtual timer bank, which is
+        // directly accessible from privileged EL1.
+        unsafe {
+            asm!(
+                "mrs {cntv_ctl}, cntv_ctl_el0",
+                cntv_ctl = out(reg) cntv_ctl,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+        (0, cntv_ctl)
+    }
+}
+
+fn read_fast_ipi_status() -> u64 {
+    let value: u64;
+    // SAFETY: The AIC driver is instantiated only for supported Apple SoCs.
+    unsafe {
+        asm!(
+            "mrs {value}, S3_5_C15_C1_1",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    value
+}
+
+fn read_pmu_state() -> (u64, u64, u64) {
+    let pmcr0: u64;
+    let upmcr0: u64;
+    let upmsr: u64;
+    // SAFETY: The AIC driver is instantiated only for supported Apple SoCs.
+    unsafe {
+        asm!(
+            "mrs {pmcr0}, S3_1_C15_C0_0",
+            "mrs {upmcr0}, S3_7_C15_C0_4",
+            "mrs {upmsr}, S3_7_C15_C6_4",
+            pmcr0 = out(reg) pmcr0,
+            upmcr0 = out(reg) upmcr0,
+            upmsr = out(reg) upmsr,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (pmcr0, upmcr0, upmsr)
+}
+
+fn read_exception_state() -> (u64, u64, u64, u64) {
+    let isr: u64;
+    let daif: u64;
+    let elr: u64;
+    let spsr: u64;
+    // SAFETY: These architectural exception registers are readable from the
+    // privileged AArch64 kernel context.
+    unsafe {
+        asm!(
+            "mrs {isr}, isr_el1",
+            "mrs {daif}, daif",
+            "mrs {elr}, elr_el1",
+            "mrs {spsr}, spsr_el1",
+            isr = out(reg) isr,
+            daif = out(reg) daif,
+            elr = out(reg) elr,
+            spsr = out(reg) spsr,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    (isr, daif, elr, spsr)
 }
 
 pub(super) fn read_el2() -> El2State {
@@ -267,7 +369,13 @@ pub(super) fn synchronize() {
 
 #[cfg(test)]
 mod tests {
-    use super::fast_ipi_request;
+    use super::{HostTimerBank, fast_ipi_request, host_timer_bank};
+
+    #[test_case]
+    fn host_timer_bank_matches_kernel_execution_level() {
+        assert_eq!(host_timer_bank(true), HostTimerBank::Physical);
+        assert_eq!(host_timer_bank(false), HostTimerBank::Virtual);
+    }
 
     #[test_case]
     fn fast_ipi_request_uses_local_register_within_cluster() {

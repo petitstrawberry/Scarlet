@@ -40,7 +40,7 @@ const GPIO_PULL_MASK: u32 = 0b11 << GPIO_PULL_SHIFT;
 const GPIO_INPUT_ENABLE: u32 = 1 << 9;
 const GPIO_IRQ_GROUP_SHIFT: u32 = 16;
 const GPIO_IRQ_GROUP_MASK: u32 = 0b111 << GPIO_IRQ_GROUP_SHIFT;
-const LOG_PENDING_IRQS: bool = false;
+const LOG_PENDING_IRQS: bool = true;
 const IRQ_LOG_LIMIT: u32 = 24;
 const PINMUX_LOG_LIMIT: u32 = 24;
 const GPIO_VALUE_LOG_LIMIT: u32 = 32;
@@ -372,10 +372,6 @@ impl ApplePinctrl {
                 .map_err(|_| "apple-pinctrl: failed to register parent IRQ handler")?;
 
             pinctrl.parent_irqs.lock().push(irq_id);
-
-            InterruptManager::global()
-                .enable_external_interrupt(irq_id, 0)
-                .map_err(|_| "apple-pinctrl: failed to enable parent IRQ")?;
         }
 
         Ok(())
@@ -423,10 +419,26 @@ impl GpioController for ApplePinctrl {
 
         self.irq_handlers.lock().insert(pin, handler);
         self.enable_irq(pin, trigger);
+
+        let group = self.irq_group(pin) as usize;
+        let parent_irq = { self.parent_irqs.lock().get(group).copied() };
+        let Some(parent_irq) = parent_irq else {
+            self.disable_irq(pin);
+            self.irq_handlers.lock().remove(&pin);
+            return false;
+        };
+        if InterruptManager::global()
+            .enable_external_interrupt(parent_irq, 0)
+            .is_err()
+        {
+            self.disable_irq(pin);
+            self.irq_handlers.lock().remove(&pin);
+            return false;
+        }
+
         if IRQ_REQUEST_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
-            let group = self.irq_group(pin);
             let reg = self.read_reg(Self::pin_offset(pin));
-            let status = self.read_reg(Self::irq_group_offset(group, pin));
+            let status = self.read_reg(Self::irq_group_offset(group as u32, pin));
             scarlet::early_println!(
                 "[apple-pinctrl] request_irq base={:#x} pin={} trigger={:?} value={} group={} reg={:#x} status={:#x}",
                 self.base,

@@ -86,8 +86,6 @@ pub fn kernel_vm_init(
     early_println!("[vm] kernel_vm_init: start");
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
-    let root_page_table = get_root_pagetable(asid).unwrap();
-
     manager.set_asid(asid);
 
     unsafe extern "C" {
@@ -141,11 +139,6 @@ pub fn kernel_vm_init(
         .add_memory_map(kernel_map.clone())
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
-    /* Pre-map the kernel space */
-    root_page_table
-        .map_memory_area(asid, kernel_map, true, true)
-        .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
-        .unwrap();
 
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
@@ -160,10 +153,6 @@ pub fn kernel_vm_init(
     get_kernel_vm_manager()
         .add_memory_map(hhdm_map.clone())
         .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
-    root_page_table
-        .map_memory_area(asid, hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
         .unwrap();
 
     let heap_map = VirtualMemoryMap {
@@ -180,12 +169,8 @@ pub fn kernel_vm_init(
         .add_memory_map(heap_map.clone())
         .map_err(|e| panic!("Failed to add heap memory map: {}", e))
         .unwrap();
-    root_page_table
-        .map_memory_area(asid, heap_map, true, true)
-        .map_err(|e| panic!("Failed to map heap memory area: {}", e))
-        .unwrap();
 
-    if let Some(initramfs_paddr) = initramfs_paddr {
+    let initramfs_map = initramfs_paddr.and_then(|initramfs_paddr| {
         let initramfs_phys_area = MemoryArea {
             start: align_down(initramfs_paddr.start, PAGE_SIZE),
             end: align_up(initramfs_paddr.end + 1, PAGE_SIZE) - 1,
@@ -209,12 +194,34 @@ pub fn kernel_vm_init(
                 .add_memory_map(initramfs_map.clone())
                 .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
                 .unwrap();
-            root_page_table
-                .map_memory_area(asid, initramfs_map, true, true)
-                .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
-                .unwrap();
+            Some(initramfs_map)
+        } else {
+            None
         }
+    });
+
+    // Publish all VMM metadata before taking the per-ASID page-table lock.
+    // Other mapping paths use this same VMM -> page-table lock order.
+    let mut root_page_table = get_root_pagetable(asid).unwrap();
+    root_page_table
+        .map_memory_area(kernel_map, true, true)
+        .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
+        .unwrap();
+    root_page_table
+        .map_memory_area(hhdm_map, true, true)
+        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
+        .unwrap();
+    root_page_table
+        .map_memory_area(heap_map, true, true)
+        .map_err(|e| panic!("Failed to map heap memory area: {}", e))
+        .unwrap();
+    if let Some(initramfs_map) = initramfs_map {
+        root_page_table
+            .map_memory_area(initramfs_map, true, true)
+            .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
+            .unwrap();
     }
+    drop(root_page_table);
 
     early_println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
@@ -242,7 +249,9 @@ pub fn kernel_vm_init(
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
-    root_page_table.switch(manager.get_asid());
+    get_root_pagetable(asid)
+        .expect("Kernel root page table is not set")
+        .switch();
     crate::arch::vm::save_kernel_page_table();
 
     // Initialize the ioremap subsystem now that the kernel VM manager and heap
@@ -289,7 +298,6 @@ pub fn user_vm_init(task: &Task) {
 
 pub fn user_kernel_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
-    let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
 
     let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
@@ -324,13 +332,6 @@ pub fn user_kernel_vm_init(task: &Task) {
             panic!("Failed to add kernel memory map: {}", e);
         })
         .unwrap();
-    /* Pre-map the kernel space */
-    root_page_table
-        .map_memory_area(asid, kernel_map, true, true)
-        .map_err(|e| {
-            panic!("Failed to map kernel memory area: {}", e);
-        })
-        .unwrap();
 
     let hhdm_map = VirtualMemoryMap {
         vmarea: hhdm_area,
@@ -345,10 +346,6 @@ pub fn user_kernel_vm_init(task: &Task) {
     task.vm_manager
         .add_memory_map(hhdm_map.clone())
         .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
-    root_page_table
-        .map_memory_area(asid, hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
         .unwrap();
 
     let heap_map = VirtualMemoryMap {
@@ -365,10 +362,25 @@ pub fn user_kernel_vm_init(task: &Task) {
         .add_memory_map(heap_map.clone())
         .map_err(|e| panic!("Failed to add heap memory map: {}", e))
         .unwrap();
+
+    // Keep the global lock order consistent with lazy mapping and task setup:
+    // mutate VMM metadata first, then acquire the per-ASID page-table lock.
+    let mut root_page_table = get_root_pagetable(asid).unwrap();
     root_page_table
-        .map_memory_area(asid, heap_map, true, true)
+        .map_memory_area(kernel_map, true, true)
+        .map_err(|e| {
+            panic!("Failed to map kernel memory area: {}", e);
+        })
+        .unwrap();
+    root_page_table
+        .map_memory_area(hhdm_map, true, true)
+        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
+        .unwrap();
+    root_page_table
+        .map_memory_area(heap_map, true, true)
         .map_err(|e| panic!("Failed to map heap memory area: {}", e))
         .unwrap();
+    drop(root_page_table);
     task.data_size.store(kernel_area.end + 1, Ordering::SeqCst);
 
     /* Stack page */
@@ -480,11 +492,12 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
 
     kman.add_memory_map(mmap.clone())
         .map_err(|_| "Failed to add kernel stack mmap")?;
-    let root = kman
+    let mut root = kman
         .get_root_page_table()
         .ok_or("Kernel root page table not set")?;
-    root.map_memory_area(kman.get_asid(), mmap, true, true)
+    root.map_memory_area(mmap, true, true)
         .map_err(|_| "Failed to map kernel stack window")?;
+    drop(root);
 
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
@@ -539,9 +552,8 @@ pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
 
         // Remove from kernel VM manager and unmap pages
         let kman = get_kernel_vm_manager();
-        let asid = kman.get_asid();
-        if let Some(root) = kman.get_root_page_table() {
-            root.unmap_range(asid, vstart, vend);
+        if let Some(mut root) = kman.get_root_page_table() {
+            root.unmap_range(vstart, vend);
         }
         // Best-effort remove VMA entries
         let mut v = vstart;
@@ -647,7 +659,7 @@ pub fn switch_to_kernel_vm() {
         .get_root_page_table()
         .expect("Root page table is not set");
     set_trapvector(get_kernel_trapvector_paddr());
-    root_page_table.switch(manager.get_asid());
+    root_page_table.switch();
 }
 
 pub fn switch_to_user_vm(cpu: &mut Arch) {
@@ -658,5 +670,5 @@ pub fn switch_to_user_vm(cpu: &mut Arch) {
         .get_root_page_table()
         .expect("Root page table is not set");
     set_trapvector(get_trampoline_trap_vector());
-    root_page_table.switch(manager.get_asid());
+    root_page_table.switch();
 }

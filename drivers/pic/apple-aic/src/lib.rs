@@ -87,9 +87,14 @@ const AIC_IPI_SELF: u32 = 1 << 31;
 
 /// Maximum number of CPUs supported by AIC (31 bits in IPI SEND, bit 31 is self)
 const AIC_MAX_CPUS: CpuId = 31;
+const AIC_TRACKED_IRQS: usize = 1024;
 
 static HARDWARE_IRQ_CLAIMS: AtomicU64 = AtomicU64::new(0);
 static HARDWARE_IRQ_EOIS: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_IRQ_CLAIMS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
+    [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
+static HARDWARE_IRQ_EOIS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
+    [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
 
 // =============================================================================
 // Helper Functions
@@ -342,21 +347,24 @@ impl Aic {
         match event_type {
             AIC_EVENT_TYPE_HW => {
                 let claims = HARDWARE_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
-                if claims <= 8 || claims.is_power_of_two() {
-                    scarlet::early_println!(
-                        "[AIC][IRQ] claim={} eoi={} cpu={} hwirq={}",
-                        claims,
-                        HARDWARE_IRQ_EOIS.load(Ordering::Relaxed),
-                        cpu_id,
-                        event_num
-                    );
-                }
+                let source_claims = HARDWARE_IRQ_CLAIMS_BY_ID
+                    .get(event_num as usize)
+                    .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
+                scarlet::early_println!(
+                    "[AIC][IRQ] source_claim={} total_claim={} total_eoi={} cpu={} hwirq={}",
+                    source_claims.unwrap_or(0),
+                    claims,
+                    HARDWARE_IRQ_EOIS.load(Ordering::Relaxed),
+                    cpu_id,
+                    event_num
+                );
                 Ok(Some(PendingIrq {
                     mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
                     cpu_id,
                 }))
             }
             AIC_EVENT_TYPE_IPI => {
+                scarlet::early_println!("[AIC][IPI] cpu={} event_num={}", cpu_id, event_num);
                 match event_num {
                     AIC_EVENT_IPI_OTHER | AIC_EVENT_IPI_SELF => unsafe {
                         let ack_bit = if event_num == AIC_EVENT_IPI_OTHER {
@@ -421,13 +429,17 @@ impl ExternalInterruptController for Aic {
 
     fn init_for_cpu(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
+        scarlet::early_println!("[AIC] CPU {}: FIQ prepare begin", cpu_id);
         fiq::prepare_cpu(cpu_id);
+        scarlet::early_println!("[AIC] CPU {}: FIQ prepare done", cpu_id);
         self.ack_ipi();
+        scarlet::early_println!("[AIC] CPU {}: stale IPI acknowledged", cpu_id);
         if self.fast_ipi {
             self.mask_ipis();
         } else {
             self.unmask_ipis();
         }
+        scarlet::early_println!("[AIC] CPU {}: per-CPU init done", cpu_id);
         Ok(())
     }
 
@@ -535,9 +547,13 @@ impl ExternalInterruptController for Aic {
 
         self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)?;
         let eois = HARDWARE_IRQ_EOIS.fetch_add(1, Ordering::Relaxed) + 1;
-        if eois <= 8 || eois.is_power_of_two() {
+        let source_eois = HARDWARE_IRQ_EOIS_BY_ID
+            .get(irq.mapping.hwirq as usize)
+            .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
+        if source_eois.is_some_and(|count| count <= 8 || count.is_power_of_two()) {
             scarlet::early_println!(
-                "[AIC][IRQ] eoi={} claim={} cpu={} hwirq={}",
+                "[AIC][IRQ] source_eoi={} total_eoi={} total_claim={} cpu={} hwirq={}",
+                source_eois.unwrap_or(0),
                 eois,
                 HARDWARE_IRQ_CLAIMS.load(Ordering::Relaxed),
                 irq.cpu_id,

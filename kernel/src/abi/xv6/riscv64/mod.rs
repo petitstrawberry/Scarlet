@@ -242,10 +242,10 @@ impl AbiModule for Xv6Riscv64Abi {
                         *task.name.write() =
                             argv.get(0).map_or("xv6".to_string(), |s| s.to_string());
                         // Clear page table entries
-                        let idx =
-                            arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
-                        let root_page_table = arch::vm::get_pagetable(idx).unwrap();
+                        let mut root_page_table =
+                            arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
+                        drop(root_page_table);
                         // Setup the trapframe
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         // Setup the stack

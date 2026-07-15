@@ -272,11 +272,15 @@ impl InterruptManager {
     }
 
     pub fn init_controllers_for_cpu(&self, cpu_id: CpuId) {
+        crate::early_println!("[interrupt] CPU {}: per-CPU controller init begin", cpu_id);
         disable_interrupts();
+        crate::early_println!("[interrupt] CPU {}: interrupts disabled", cpu_id);
 
         let mut controllers = self.controllers().lock();
+        crate::early_println!("[interrupt] CPU {}: controller registry locked", cpu_id);
 
         if let Some(controller) = controllers.timer_controller_mut_for_cpu(cpu_id) {
+            crate::early_println!("[interrupt] CPU {}: timer controller init begin", cpu_id);
             if let Err(e) = controller.init(cpu_id) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init timer controller: {}",
@@ -284,9 +288,14 @@ impl InterruptManager {
                     e
                 );
             }
+            crate::early_println!("[interrupt] CPU {}: timer controller init done", cpu_id);
         }
 
         if let Some(controller) = controllers.software_interrupt_controller_mut_for_cpu(cpu_id) {
+            crate::early_println!(
+                "[interrupt] CPU {}: software interrupt controller init begin",
+                cpu_id
+            );
             if let Err(e) = controller.init(cpu_id) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init software interrupt controller: {}",
@@ -294,9 +303,17 @@ impl InterruptManager {
                     e
                 );
             }
+            crate::early_println!(
+                "[interrupt] CPU {}: software interrupt controller init done",
+                cpu_id
+            );
         }
 
         if let Some(controller) = controllers.external_controller_mut() {
+            crate::early_println!(
+                "[interrupt] CPU {}: external controller per-CPU init begin",
+                cpu_id
+            );
             if let Err(e) = controller.init_for_cpu(cpu_id) {
                 crate::early_println!(
                     "[interrupt] AP {}: failed to init external controller: {}",
@@ -304,7 +321,12 @@ impl InterruptManager {
                     e
                 );
             }
+            crate::early_println!(
+                "[interrupt] CPU {}: external controller per-CPU init done",
+                cpu_id
+            );
         }
+        crate::early_println!("[interrupt] CPU {}: per-CPU controller init done", cpu_id);
     }
 
     pub fn resolve_platform_irq(
@@ -365,6 +387,7 @@ impl InterruptManager {
             .remove(&interrupt_id);
     }
 
+    #[cfg(test)]
     fn unhandled_external_interrupt_count(&self, interrupt_id: InterruptId) -> usize {
         self.unhandled_external_interrupts
             .lock()
@@ -657,7 +680,7 @@ impl InterruptManager {
         interrupt_id: InterruptId,
         handler: ExternalInterruptHandler,
     ) -> InterruptResult<()> {
-        let mut handlers = self.external_handlers.lock();
+        let handlers = self.external_handlers.lock();
         if handlers.contains_key(&interrupt_id) {
             return Err(InterruptError::HandlerAlreadyRegistered);
         }
@@ -1402,7 +1425,6 @@ mod tests {
                 )),
             )
             .expect("source should register");
-
         manager
             .handle_external_interrupt(43, 0)
             .expect("unclaimed IRQ should still finish at controller");

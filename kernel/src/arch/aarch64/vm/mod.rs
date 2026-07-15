@@ -11,8 +11,9 @@ use alloc::{boxed::Box, vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use hashbrown::HashMap;
 use mmu::PageTable;
-use spin::Once;
-use spin::RwLock;
+#[cfg(test)]
+use mmu::PageTableEntry;
+use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 
@@ -79,6 +80,105 @@ unsafe extern "C" {
 const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
 static ASID_BITMAP_TABLES: Once<RwLock<Box<[u64]>>> = Once::new();
 
+static PAGE_TABLE_LOCKS: [Mutex<()>; NUM_OF_ASID] = [const { Mutex::new(()) }; NUM_OF_ASID];
+
+/// Exclusive access to one ASID's stage-1 page-table hierarchy.
+pub struct RootPageTableGuard {
+    asid: u16,
+    table: *mut PageTable,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl RootPageTableGuard {
+    fn table(&self) -> &PageTable {
+        // SAFETY: the ASID registry owns the root while `_guard` prevents teardown.
+        unsafe { &*self.table }
+    }
+
+    fn table_mut(&mut self) -> &mut PageTable {
+        // SAFETY: `_guard` is the unique lock for this ASID's complete hierarchy.
+        unsafe { &mut *self.table }
+    }
+
+    #[cfg(test)]
+    /// Returns the root page-table address for diagnostics.
+    ///
+    /// # Returns
+    ///
+    /// The virtual address of the guarded root page table.
+    pub(crate) fn root_address(&self) -> usize {
+        self.table as usize
+    }
+
+    pub(crate) fn switch(&self) {
+        self.table().switch(self.asid);
+    }
+
+    pub(crate) fn switch_ttbr1(&self) {
+        self.table().switch_ttbr1(self.asid);
+    }
+
+    pub(crate) fn get_val_for_ttbr(&self) -> u64 {
+        self.table().get_val_for_ttbr(self.asid)
+    }
+
+    pub(crate) fn map_memory_area(
+        &mut self,
+        mmap: VirtualMemoryMap,
+        accessed: bool,
+        dirty: bool,
+    ) -> Result<(), &'static str> {
+        let asid = self.asid;
+        self.table_mut()
+            .map_memory_area(asid, mmap, accessed, dirty)
+    }
+
+    pub(crate) fn map(
+        &mut self,
+        vaddr: usize,
+        paddr: usize,
+        flags: usize,
+        user: bool,
+        write: bool,
+    ) {
+        let asid = self.asid;
+        self.table_mut()
+            .map(asid, vaddr, paddr, flags, user, write);
+    }
+
+    pub(crate) fn leaf_entry_bits(&mut self, vaddr: usize) -> Option<u64> {
+        let asid = self.asid;
+        self.table_mut()
+            .walk(vaddr, false, asid)
+            .map(|entry| entry.entry & 0xfff)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn translate(&mut self, vaddr: usize) -> Option<usize> {
+        self.table_mut().translate(vaddr)
+    }
+
+    pub(crate) fn unmap_range(&mut self, vaddr_start: usize, vaddr_end: usize) {
+        let asid = self.asid;
+        self.table_mut().unmap_range(asid, vaddr_start, vaddr_end);
+    }
+
+    pub(crate) fn unmap_all(&mut self) {
+        self.table_mut().unmap_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn walk_to_level(
+        &mut self,
+        vaddr: usize,
+        level: usize,
+        alloc: bool,
+    ) -> Option<&mut PageTableEntry> {
+        let asid = self.asid;
+        self.table_mut().walk_to_level(vaddr, level, alloc, asid)
+    }
+}
+
 fn get_asid_tables() -> &'static RwLock<Box<[u64]>> {
     ASID_BITMAP_TABLES.call_once(|| {
         // Directly allocate on heap to avoid stack overflow
@@ -92,15 +192,6 @@ static PAGE_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
 
 fn get_page_tables() -> &'static RwLock<HashMap<u16, Vec<usize>>> {
     PAGE_TABLES.call_once(|| RwLock::new(HashMap::new()))
-}
-
-pub fn get_pagetable(ptr: *mut PageTable) -> Option<&'static mut PageTable> {
-    unsafe {
-        if ptr.is_null() {
-            return None;
-        }
-        Some(&mut *ptr)
-    }
 }
 
 fn new_pagetable() -> *mut PageTable {
@@ -133,13 +224,17 @@ fn free_pagetable(ptr: *mut PageTable) {
 /// A raw pointer to the newly allocated page table.
 ///
 /// # Safety
-/// This function is unsafe because it dereferences a raw pointer, which can lead to undefined behavior
-/// if the pointer is null or invalid.
+///
+/// The caller must hold the [`RootPageTableGuard`] for `asid` until the returned
+/// table has been published into that guarded hierarchy.
 ///
 #[allow(static_mut_refs)]
-pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
+unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
+    crate::breadcrumb::drop(crate::breadcrumb::PT_ALLOC_BEGIN, asid as u64, 0);
     let ptr = new_pagetable();
+    crate::breadcrumb::drop(crate::breadcrumb::PT_ALLOC_DONE, asid as u64, ptr as u64);
 
+    crate::breadcrumb::drop(crate::breadcrumb::PT_REGISTRY_WAIT, asid as u64, ptr as u64);
     let mut page_tables = get_page_tables().write();
     match page_tables.get_mut(&asid) {
         Some(vec) => vec.push(ptr as usize),
@@ -147,6 +242,7 @@ pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
             panic!("ASID {} not found in page tables", asid);
         }
     }
+    crate::breadcrumb::drop(crate::breadcrumb::PT_REGISTRY_DONE, asid as u64, ptr as u64);
 
     ptr
 }
@@ -181,6 +277,7 @@ pub fn free_virtual_address_space(asid: u16) {
     if asid >= NUM_OF_ASID {
         panic!("Invalid ASID: {}", asid);
     }
+    let _page_table_guard = PAGE_TABLE_LOCKS[asid].lock();
     let bit_pos = asid % 64;
     let word_idx = asid / 64;
     // PMM frees must happen AFTER dropping PAGE_TABLES/asid_table locks:
@@ -213,7 +310,7 @@ pub fn is_asid_used(asid: u16) -> bool {
     }
 }
 
-pub fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
+fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
     if is_asid_used(asid) {
         let page_tables = get_page_tables().read();
         page_tables.get(&asid).map(|vec| vec[0] as *mut PageTable)
@@ -222,14 +319,17 @@ pub fn get_root_pagetable_ptr(asid: u16) -> Option<*mut PageTable> {
     }
 }
 
-pub fn get_root_pagetable(asid: u16) -> Option<&'static mut PageTable> {
+pub fn get_root_pagetable(asid: u16) -> Option<RootPageTableGuard> {
+    let guard = PAGE_TABLE_LOCKS[asid as usize].lock();
     let addr = get_root_pagetable_ptr(asid)?;
-    unsafe {
-        if addr.is_null() {
-            None
-        } else {
-            Some(&mut *addr)
-        }
+    if addr.is_null() {
+        None
+    } else {
+        Some(RootPageTableGuard {
+            asid,
+            table: addr,
+            _guard: guard,
+        })
     }
 }
 
@@ -322,7 +422,7 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
     manager
         .get_root_page_table()
         .unwrap()
-        .map_memory_area(manager.get_asid(), trampoline_map, true, true)
+        .map_memory_area(trampoline_map, true, true)
         .map_err(|e| panic!("Failed to map trampoline memory area: {}", e))
         .unwrap();
 
@@ -336,8 +436,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
         let console_vaddr = crate::earlyfb::console_lock_addr();
         let leaf = manager
             .get_root_page_table()
-            .and_then(|root| root.walk(console_vaddr, false, manager.get_asid()))
-            .map(|pte| pte.entry & 0xfff);
+            .and_then(|mut root| root.leaf_entry_bits(console_vaddr));
 
         match leaf {
             Some(bits) => crate::early_println!(
@@ -378,7 +477,7 @@ pub fn setup_trampoline_for_kernel(manager: &VirtualMemoryManager) {
     manager
         .get_root_page_table()
         .expect("Kernel root page table not set")
-        .switch_ttbr1(manager.get_asid());
+        .switch_ttbr1();
     #[cfg(any(debug_assertions, test))]
     log_early_console_pte("post-switch", manager);
     #[cfg(any(debug_assertions, test))]
@@ -412,9 +511,9 @@ mod tests {
     #[test_case]
     fn test_get_page_table() {
         let asid = alloc_virtual_address_space();
-        let ptr = unsafe { new_raw_pagetable(asid) };
-        let page_table = get_pagetable(ptr);
-        assert!(page_table.is_some());
+        let root = get_root_pagetable(asid).expect("root page table not found");
+        assert_ne!(root.root_address(), 0);
+        drop(root);
         free_virtual_address_space(asid);
     }
 
@@ -423,6 +522,8 @@ mod tests {
         let asid = alloc_virtual_address_space();
         let root_page_table_idx = get_root_pagetable(asid as u16);
         assert!(root_page_table_idx.is_some());
+        drop(root_page_table_idx);
+        free_virtual_address_space(asid);
     }
 
     #[test_case]

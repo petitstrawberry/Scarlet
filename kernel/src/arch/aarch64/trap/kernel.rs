@@ -8,6 +8,18 @@ use super::interrupt::arch_irq_handler;
 use crate::arch::Trapframe;
 use core::arch::naked_asm;
 
+fn kernel_interrupt_breadcrumb(trap_kind: usize, spsr: u64, current_is_idle: bool) -> Option<u64> {
+    if current_is_idle || !crate::arch::is_privileged_return_mode(spsr) {
+        return None;
+    }
+
+    match trap_kind {
+        1 => Some(crate::breadcrumb::KERNEL_IRQ_ENTER),
+        2 => Some(crate::breadcrumb::KERNEL_FIQ_ENTER),
+        _ => None,
+    }
+}
+
 // -------------------------------------------------------------------------
 // Kernel Trap Vector
 // -------------------------------------------------------------------------
@@ -185,6 +197,15 @@ pub extern "C" fn _kernel_trap_entry() {
 // 戻り値なし(void)にする = 普通に関数から戻る
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    if let Some(phase) = kernel_interrupt_breadcrumb(
+        trap_kind,
+        trapframe.spsr,
+        crate::sched::scheduler::current_task_is_idle(cpu_id),
+    ) {
+        crate::breadcrumb::drop(phase, trapframe.elr, trapframe.spsr);
+    }
+
     if trap_kind == 1 || trap_kind == 2 {
         arch_irq_handler(trapframe, trap_kind);
     } else {
@@ -195,6 +216,23 @@ pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind:
 
 #[cfg(test)]
 mod tests {
+    use super::kernel_interrupt_breadcrumb;
+
+    #[test_case]
+    fn kernel_interrupt_breadcrumb_records_only_busy_privileged_interrupts() {
+        assert_eq!(
+            kernel_interrupt_breadcrumb(1, 0x9, false),
+            Some(crate::breadcrumb::KERNEL_IRQ_ENTER)
+        );
+        assert_eq!(
+            kernel_interrupt_breadcrumb(2, 0x9, false),
+            Some(crate::breadcrumb::KERNEL_FIQ_ENTER)
+        );
+        assert_eq!(kernel_interrupt_breadcrumb(2, 0, false), None);
+        assert_eq!(kernel_interrupt_breadcrumb(2, 0x9, true), None);
+        assert_eq!(kernel_interrupt_breadcrumb(0, 0x9, false), None);
+    }
+
     #[test_case]
     fn kernel_trap_prologue_saves_x20_before_scratch_use() {
         let source = include_str!("kernel.rs");

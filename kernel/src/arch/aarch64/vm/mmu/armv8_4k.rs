@@ -344,14 +344,14 @@ impl PageTable {
         upper == 0 || upper == 0xffff
     }
 
-    pub fn new() -> Self {
+    pub(in crate::arch::aarch64::vm) fn new() -> Self {
         PageTable {
             entries: [PageTableEntry::new(); 512],
         }
     }
 
     /// Switch to this page table (like RISC-V's switch())
-    pub fn switch(&self, asid: u16) {
+    pub(in crate::arch::aarch64::vm) fn switch(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);
 
         unsafe {
@@ -396,7 +396,7 @@ impl PageTable {
     }
 
     /// Switch TTBR1 only (for kernel high-VA)
-    pub fn switch_ttbr1(&self, asid: u16) {
+    pub(in crate::arch::aarch64::vm) fn switch_ttbr1(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);
         unsafe {
             asm!(
@@ -424,24 +424,34 @@ impl PageTable {
                 "isb",
                 "tlbi vmalle1",
                 "dsb nsh",
+                "ic iallu",
+                "dsb sy",
+                "isb",
+                "mrs {tmp}, sctlr_el1",
+                "bic {tmp}, {tmp}, {sctlr_clear}",
+                "orr {tmp}, {tmp}, {sctlr_flags}",
+                "msr sctlr_el1, {tmp}",
                 "isb",
                 mair = in(reg) SCARLET_MAIR_EL1,
                 tcr = in(reg) SCARLET_TCR_EL1,
                 ttbr = in(reg) ttbr_val,
+                sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
+                sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
+                tmp = lateout(reg) _,
                 options(nostack),
             );
         }
     }
 
     /// Get TTBR value (like RISC-V's get_val_for_satp())
-    pub fn get_val_for_ttbr(&self, asid: u16) -> u64 {
+    pub(in crate::arch::aarch64::vm) fn get_val_for_ttbr(&self, asid: u16) -> u64 {
         let baddr = (virt_to_phys(self as *const _ as usize) as u64) & 0xffffffffffff;
         let asid_val = (asid as u64) << 48;
         baddr | asid_val
     }
 
     /// Map a memory area (like RISC-V's map_memory_area())
-    pub fn map_memory_area(
+    pub(in crate::arch::aarch64::vm) fn map_memory_area(
         &mut self,
         asid: u16,
         mmap: VirtualMemoryMap,
@@ -498,7 +508,7 @@ impl PageTable {
     }
 
     /// Map a single page (like RISC-V's map())
-    pub fn map(
+    pub(in crate::arch::aarch64::vm) fn map(
         &mut self,
         asid: u16,
         vaddr: usize,
@@ -528,9 +538,12 @@ impl PageTable {
             0,
         )
         .expect("map: couldn't install a 4 KiB leaf mapping");
+        crate::breadcrumb::drop(crate::breadcrumb::PT_LEAF_DONE, vaddr as u64, paddr as u64);
 
         // Publish new mappings to all PEs that may run this address space.
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
         invalidate_stage1_translations_inner_shareable();
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
     }
 
     /// Attempts to install a leaf mapping at the specified logical level.
@@ -660,7 +673,12 @@ impl PageTable {
     /// - L1: bits 38:30 (9 bits)
     /// - L2: bits 29:21 (9 bits)
     /// - L3: bits 20:12 (9 bits)
-    pub fn walk(&mut self, vaddr: usize, alloc: bool, asid: u16) -> Option<&mut PageTableEntry> {
+    pub(in crate::arch::aarch64::vm) fn walk(
+        &mut self,
+        vaddr: usize,
+        alloc: bool,
+        asid: u16,
+    ) -> Option<&mut PageTableEntry> {
         self.walk_to_level(vaddr, 0, alloc, asid)
     }
 
@@ -668,7 +686,7 @@ impl PageTable {
     ///
     /// Intermediate tables are allocated when `alloc` is true. Valid target
     /// levels are 0 through 3, where 0 is the final 4 KiB page level.
-    fn walk_to_level(
+    pub(in crate::arch::aarch64::vm) fn walk_to_level(
         &mut self,
         vaddr: usize,
         target_level: usize,
@@ -818,7 +836,7 @@ impl PageTable {
     /// # Returns
     ///
     /// The physical address if the mapping exists, or `None` if unmapped.
-    pub fn translate(&mut self, vaddr: usize) -> Option<usize> {
+    pub(in crate::arch::aarch64::vm) fn translate(&mut self, vaddr: usize) -> Option<usize> {
         let (pte, level) = self.walk_leaf(vaddr)?;
         let page_offset = vaddr & (page_size_for_level(level) - 1);
         Some((pte.get_ppn() << 12) | page_offset)
@@ -850,7 +868,12 @@ impl PageTable {
     /// Whole huge-page leaves are cleared directly. Partial huge-page unmaps
     /// split the leaf into the next lower level so mappings outside the
     /// requested range are preserved.
-    pub fn unmap_range(&mut self, asid: u16, vaddr_start: usize, vaddr_end: usize) {
+    pub(in crate::arch::aarch64::vm) fn unmap_range(
+        &mut self,
+        asid: u16,
+        vaddr_start: usize,
+        vaddr_end: usize,
+    ) {
         if vaddr_start > vaddr_end {
             return;
         }
@@ -935,7 +958,7 @@ impl PageTable {
     }
 
     /// Unmap all entries (like RISC-V's unmap_all())
-    pub fn unmap_all(&mut self) {
+    pub(in crate::arch::aarch64::vm) fn unmap_all(&mut self) {
         for entry in &mut self.entries {
             entry.clear_all();
         }
@@ -990,7 +1013,13 @@ pub fn sync_el1_translation_registers_if_needed() {
 
         let alignment_check_enabled = (sctlr & SCTLR_EL1_DISABLE_MASK) != 0;
 
-        if mair == SCARLET_MAIR_EL1 && tcr == SCARLET_TCR_EL1 && !alignment_check_enabled {
+        let runtime_enabled = sctlr & SCTLR_EL1_ENABLE_MASK == SCTLR_EL1_ENABLE_MASK;
+
+        if mair == SCARLET_MAIR_EL1
+            && tcr == SCARLET_TCR_EL1
+            && runtime_enabled
+            && !alignment_check_enabled
+        {
             return;
         }
 
@@ -1000,6 +1029,7 @@ pub fn sync_el1_translation_registers_if_needed() {
             "isb",
             "mrs {tmp}, sctlr_el1",
             "bic {tmp}, {tmp}, {sctlr_clear}",
+            "orr {tmp}, {tmp}, {sctlr_flags}",
             "msr sctlr_el1, {tmp}",
             "isb",
             "tlbi vmalle1",
@@ -1007,6 +1037,7 @@ pub fn sync_el1_translation_registers_if_needed() {
             "isb",
             mair = in(reg) SCARLET_MAIR_EL1,
             tcr = in(reg) SCARLET_TCR_EL1,
+            sctlr_flags = in(reg) SCTLR_EL1_ENABLE_MASK,
             sctlr_clear = in(reg) SCTLR_EL1_DISABLE_MASK,
             tmp = lateout(reg) _,
             options(nostack),
@@ -1072,7 +1103,8 @@ mod tests {
     #[test_case]
     fn test_leaf_encoding_uses_declared_memory_attribute() {
         let asid = alloc_virtual_address_space();
-        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let vaddr = 0x4100_0000;
         let paddr = 0x8100_0000;
         let mmap = VirtualMemoryMap::new(
@@ -1086,11 +1118,11 @@ mod tests {
         )
         .with_memory_attribute(crate::vm::vmem::MemoryAttribute::NonCacheable);
 
-        root.map_memory_area(asid, mmap, true, true)
+        root.map_memory_area(mmap, true, true)
             .expect("non-cacheable mapping failed");
 
         let pte = root
-            .walk_to_level(vaddr, 0, false, asid)
+            .walk_to_level(vaddr, 0, false)
             .expect("leaf PTE not found");
         assert_eq!((pte.entry >> 2) & 0b111, 2);
 
@@ -1104,6 +1136,7 @@ mod tests {
         assert_eq!((burstable_entry >> 2) & 0b111, 3);
         assert_eq!((SCARLET_MAIR_EL1 >> 24) & 0xff, 0x0c);
 
+        drop(root);
         free_virtual_address_space(asid);
     }
 
@@ -1169,7 +1202,8 @@ mod tests {
     #[test_case]
     fn test_map_memory_area_uses_2m_huge_page() {
         let asid = alloc_virtual_address_space();
-        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let page_size = page_size_for_level(1);
         let vaddr = 0x4000_0000;
         let paddr = 0x8000_0000;
@@ -1181,23 +1215,25 @@ mod tests {
             None,
         );
 
-        root.map_memory_area(asid, mmap, true, true)
+        root.map_memory_area(mmap, true, true)
             .expect("huge-page mapping failed");
 
         let pte = root
-            .walk_to_level(vaddr, 1, false, asid)
+            .walk_to_level(vaddr, 1, false)
             .expect("huge-page PTE not found");
         assert!(pte.is_leaf());
         assert!(pte.is_aligned_for_level(1));
         assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
 
+        drop(root);
         free_virtual_address_space(asid);
     }
 
     #[test_case]
     fn test_map_memory_area_uses_huge_page_with_4k_tail() {
         let asid = alloc_virtual_address_space();
-        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let huge_page_size = page_size_for_level(1);
         let map_size = huge_page_size + PAGE_SIZE;
         let vaddr = 0x4020_0000;
@@ -1210,18 +1246,18 @@ mod tests {
             None,
         );
 
-        root.map_memory_area(asid, mmap, true, true)
+        root.map_memory_area(mmap, true, true)
             .expect("mixed huge-page mapping failed");
 
         let huge_pte = root
-            .walk_to_level(vaddr, 1, false, asid)
+            .walk_to_level(vaddr, 1, false)
             .expect("huge-page PTE not found");
         assert!(huge_pte.is_leaf());
         assert!(huge_pte.is_aligned_for_level(1));
 
         let tail_vaddr = vaddr + huge_page_size;
         let tail_pte = root
-            .walk_to_level(tail_vaddr, 0, false, asid)
+            .walk_to_level(tail_vaddr, 0, false)
             .expect("tail 4 KiB PTE not found");
         assert!(tail_pte.is_leaf_for_level(0));
 
@@ -1231,13 +1267,15 @@ mod tests {
             Some(paddr + huge_page_size + 0x123)
         );
 
+        drop(root);
         free_virtual_address_space(asid);
     }
 
     #[test_case]
     fn test_unmap_range_preserves_partial_huge_page() {
         let asid = alloc_virtual_address_space();
-        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let huge_page_size = page_size_for_level(1);
         let vaddr = 0x4040_0000;
         let paddr = 0x8040_0000;
@@ -1249,15 +1287,15 @@ mod tests {
             None,
         );
 
-        root.map_memory_area(asid, mmap, true, true)
+        root.map_memory_area(mmap, true, true)
             .expect("huge-page mapping failed");
         assert!(
-            root.walk_to_level(vaddr, 1, false, asid)
+            root.walk_to_level(vaddr, 1, false)
                 .expect("huge-page PTE not found")
                 .is_leaf()
         );
 
-        root.unmap_range(asid, vaddr + PAGE_SIZE, vaddr + 2 * PAGE_SIZE - 1);
+        root.unmap_range(vaddr + PAGE_SIZE, vaddr + 2 * PAGE_SIZE - 1);
 
         assert_eq!(root.translate(vaddr), Some(paddr));
         assert_eq!(root.translate(vaddr + PAGE_SIZE), None);
@@ -1266,18 +1304,20 @@ mod tests {
             Some(paddr + 2 * PAGE_SIZE)
         );
         assert!(
-            root.walk_to_level(vaddr, 0, false, asid)
+            root.walk_to_level(vaddr, 0, false)
                 .expect("split 4 KiB PTE not found")
                 .is_leaf_for_level(0)
         );
 
+        drop(root);
         free_virtual_address_space(asid);
     }
 
     #[test_case]
     fn test_unmap_range_preserves_partial_1g_huge_page() {
         let asid = alloc_virtual_address_space();
-        let root = crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
         let huge_page_size = page_size_for_level(2);
         let vaddr = 0x8000_0000;
         let paddr = 0x1_0000_0000;
@@ -1289,16 +1329,16 @@ mod tests {
             None,
         );
 
-        root.map_memory_area(asid, mmap, true, true)
+        root.map_memory_area(mmap, true, true)
             .expect("1 GiB huge-page mapping failed");
         assert!(
-            root.walk_to_level(vaddr, 2, false, asid)
+            root.walk_to_level(vaddr, 2, false)
                 .expect("1 GiB huge-page PTE not found")
                 .is_leaf()
         );
 
         let removed_vaddr = vaddr + page_size_for_level(1);
-        root.unmap_range(asid, removed_vaddr, removed_vaddr + PAGE_SIZE - 1);
+        root.unmap_range(removed_vaddr, removed_vaddr + PAGE_SIZE - 1);
 
         assert_eq!(root.translate(vaddr), Some(paddr));
         assert_eq!(root.translate(removed_vaddr), None);
@@ -1307,11 +1347,12 @@ mod tests {
             Some(paddr + page_size_for_level(1) + PAGE_SIZE)
         );
         assert!(
-            root.walk_to_level(vaddr, 1, false, asid)
+            root.walk_to_level(vaddr, 1, false)
                 .expect("split 2 MiB PTE not found")
                 .is_leaf()
         );
 
+        drop(root);
         free_virtual_address_space(asid);
     }
 }

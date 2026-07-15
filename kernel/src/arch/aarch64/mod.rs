@@ -265,10 +265,26 @@ impl Aarch64 {
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_WAIT,
+            asid as u64,
+        );
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
-        let ttbr_val_raw = root_pagetable.get_val_for_ttbr(asid);
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_DONE,
+            asid as u64,
+        );
+        let ttbr_val_raw = root_pagetable.get_val_for_ttbr();
+        drop(root_pagetable);
         self.ttbr0 = ttbr_val_raw;
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::SETAS_ROOT_DONE,
+            asid as u64,
+        );
 
         // Clean this CPU struct from D-cache so that the trampoline assembly
         // (which may read via a different VA alias) sees the updated ttbr0.

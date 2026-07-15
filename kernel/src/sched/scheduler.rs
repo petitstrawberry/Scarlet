@@ -33,7 +33,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
 
@@ -398,6 +398,8 @@ static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static PENDING_RESCHEDULE: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
@@ -548,6 +550,30 @@ pub fn take_idle_to_user_handoff(cpu_id: usize, current_task_id: usize) -> bool 
     PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id]
         .compare_exchange(current_task_id, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
+}
+
+/// Defer a reschedule request until the current CPU reaches a safe scheduling point.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU that consumed the reschedule interrupt.
+pub fn defer_reschedule(cpu_id: usize) {
+    if cpu_id < MAX_NUM_CPUS {
+        PENDING_RESCHEDULE[cpu_id].store(true, Ordering::Release);
+    }
+}
+
+/// Take a deferred reschedule request for a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU about to reach a safe scheduling point.
+///
+/// # Returns
+///
+/// `true` when a deferred request was pending.
+pub fn take_deferred_reschedule(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS && PENDING_RESCHEDULE[cpu_id].swap(false, Ordering::AcqRel)
 }
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
@@ -1718,17 +1744,33 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
 }
 
 fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
-    crate::breadcrumb::drop(crate::breadcrumb::PICK_NEXT_ENTER, cpu.get_cpuid() as u64, 0);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::PICK_NEXT_ENTER,
+        cpu.get_cpuid() as u64,
+        0,
+    );
     let _irq_guard = IrqGuard::new();
     let cpu_id = cpu.get_cpuid();
+    crate::breadcrumb::drop(crate::breadcrumb::PICK_GUARD_DONE, cpu_id as u64, 0);
     release_deferred_prev(cpu_id);
+    crate::breadcrumb::drop(crate::breadcrumb::PICK_RELEASE_DONE, cpu_id as u64, 0);
 
     let old_id = current_task_id(cpu_id);
     let old_task = old_id.and_then(TaskPool::get_task);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::PICK_OLD_DONE,
+        cpu_id as u64,
+        old_id.unwrap_or(0) as u64,
+    );
 
     let mut next_id: Option<usize> = None;
     'outer: loop {
         let candidate = { ready_queue(cpu_id).lock().pop_front() };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::PICK_QUEUE_DONE,
+            cpu_id as u64,
+            candidate.unwrap_or(0) as u64,
+        );
         match candidate {
             Some(task_id) => {
                 let Some(task) = TaskPool::get_task(task_id) else {
@@ -1793,7 +1835,13 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
             .map(|task_id| idle_id != 0 && task_id == idle_id)
             .unwrap_or(true);
         if current_is_idle {
+            crate::breadcrumb::drop(crate::breadcrumb::PICK_STEAL_BEGIN, cpu_id as u64, 0);
             next_id = steal_ready_task_for_cpu(cpu_id, get_time_ns());
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PICK_STEAL_DONE,
+                cpu_id as u64,
+                next_id.unwrap_or(0) as u64,
+            );
         }
     }
 
@@ -2406,7 +2454,19 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                 set_trapvector(get_kernel_trapvector_paddr());
 
                 #[cfg(feature = "user-fpu")]
-                crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
+                {
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::VCPU_LOCK_BEGIN,
+                        resumed_cpu_id as u64,
+                        from_task_id as u64,
+                    );
+                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::VCPU_LOCK_DONE,
+                        resumed_cpu_id as u64,
+                        from_task_id as u64,
+                    );
+                }
             }
         }
     }
@@ -2429,7 +2489,9 @@ fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp);
     cpu.set_trap_handler(get_user_trap_handler());
     crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
-    cpu.set_next_address_space(task.vm_manager.get_asid());
+    let asid = task.vm_manager.get_asid();
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETAS_ASID_DONE, asid as u64);
+    cpu.set_next_address_space(asid);
 }
 
 /// Setup task execution by configuring hardware and user context.
@@ -2471,6 +2533,7 @@ pub fn reset() {
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
+        PENDING_RESCHEDULE[cpu_id].store(false, Ordering::SeqCst);
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
@@ -2569,6 +2632,17 @@ mod tests {
     use crate::task::{TaskCorePreference, TaskType};
 
     use super::*;
+
+    #[test_case]
+    fn test_deferred_reschedule_round_trip() {
+        reset();
+        assert!(!take_deferred_reschedule(0));
+        defer_reschedule(0);
+        assert!(take_deferred_reschedule(0));
+        assert!(!take_deferred_reschedule(0));
+        defer_reschedule(MAX_NUM_CPUS);
+        assert!(!take_deferred_reschedule(MAX_NUM_CPUS));
+    }
 
     #[test_case]
     fn test_add_task() {

@@ -104,7 +104,10 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                         can_schedule,
                     );
                     if can_schedule {
+                        let _ = crate::sched::scheduler::take_deferred_reschedule(cpu_id as usize);
                         crate::sched::scheduler::schedule(trapframe);
+                    } else {
+                        crate::sched::scheduler::defer_reschedule(cpu_id as usize);
                     }
                 }
                 Ok(_) => {}
@@ -129,8 +132,11 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                     can_schedule,
                 );
                 if can_schedule {
+                    let _ = crate::sched::scheduler::take_deferred_reschedule(cpu_id as usize);
                     crate::sched::scheduler::schedule(trapframe);
                     ran_scheduler = true;
+                } else {
+                    crate::sched::scheduler::defer_reschedule(cpu_id as usize);
                 }
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
                 crate::timer::tick_with_scheduler(trapframe, can_schedule);

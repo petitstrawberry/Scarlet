@@ -3672,7 +3672,18 @@ pub fn sys_epoll_create1(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
 
     let id = NEXT_EPOLL_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
     let handle = EPOLL_HANDLE_BASE | (id & 0x0fff_ffff);
-    match abi.allocate_fd(handle) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::EPOLL_ALLOC_BEGIN,
+        task.get_id() as u64,
+        handle as u64,
+    );
+    let result = abi.allocate_fd(handle);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::EPOLL_ALLOC_DONE,
+        task.get_id() as u64,
+        handle as u64,
+    );
+    match result {
         Ok(fd) => fd,
         Err(_) => errno::to_result(errno::EMFILE),
     }

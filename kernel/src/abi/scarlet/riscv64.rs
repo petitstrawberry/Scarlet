@@ -824,9 +824,10 @@ impl AbiModule for ScarletAbi {
                             .map_or("Unnamed Task".to_string(), |s| s.to_string());
 
                         // Clear old page table entries
-                        let root_page_table =
+                        let mut root_page_table =
                             vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
+                        drop(root_page_table);
 
                         // Setup the new memory environment
                         vm::setup_trampoline_for_user(&task.vm_manager);

@@ -13,18 +13,28 @@ use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
-use core::sync::atomic::compiler_fence;
+use core::sync::atomic::{AtomicU64, Ordering, compiler_fence};
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
+static APPLE_HACR_EL2_BEFORE_DROP: AtomicU64 = AtomicU64::new(u64::MAX);
+static APPLE_HACR_EL2_AFTER_CLEAR: AtomicU64 = AtomicU64::new(u64::MAX);
 
 const HCR_EL2_FMO: u64 = 1 << 3;
 const HCR_EL2_IMO: u64 = 1 << 4;
 const HCR_EL2_AMO: u64 = 1 << 5;
+const HCR_EL2_RW: u64 = 1 << 31;
 const HCR_EL2_E2H: u64 = 1 << 34;
 const HCR_EL2_HOST_INTERRUPT_ROUTING: u64 = HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
+const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
+const APPLE_MIDR_IMPLEMENTER: u64 = 0x61;
+const MIDR_IMPLEMENTER_SHIFT: u32 = 24;
+const ACTLR_EN_MDSB: u64 = 1 << 12;
+const SCTLR_M: u64 = 1;
+const SCTLR_C: u64 = 1 << 2;
+const SCTLR_I: u64 = 1 << 12;
 
 pub fn is_vhe_enabled() -> bool {
     unsafe { VHE_ENABLED }
@@ -32,6 +42,214 @@ pub fn is_vhe_enabled() -> bool {
 
 pub fn is_hv_available() -> bool {
     unsafe { HV_AVAILABLE }
+}
+
+#[inline(always)]
+fn read_midr() -> u64 {
+    let midr: u64;
+    unsafe {
+        asm!("mrs {}, midr_el1", out(reg) midr, options(nostack));
+    }
+    midr
+}
+
+const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, hypervisor_enabled: bool) -> bool {
+    el == 2 && (!hypervisor_enabled || hcr_el2 & HCR_EL2_E2H == 0)
+}
+
+fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
+    if current_el() != 2 {
+        return;
+    }
+
+    let hcr_el2: u64;
+    unsafe {
+        asm!("mrs {}, hcr_el2", out(reg) hcr_el2, options(nostack));
+    }
+    if !should_drop_el2_to_el1(2, hcr_el2, cfg!(feature = "hypervisor")) {
+        return;
+    }
+
+    disable_apple_el2_sysreg_traps();
+
+    unsafe {
+        drop_el2_to_el1(continuation, arg0);
+    }
+}
+
+#[inline(always)]
+fn read_active_sctlr() -> u64 {
+    let sctlr: u64;
+    unsafe {
+        asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
+    }
+    sctlr
+}
+
+fn disable_apple_el2_sysreg_traps() {
+    if read_midr() >> MIDR_IMPLEMENTER_SHIFT != APPLE_MIDR_IMPLEMENTER {
+        return;
+    }
+
+    // m1n1's hypervisor uses HACR_EL2 to trap and emulate Apple CPU-local
+    // registers including fast IPI and PMU state. A direct EL2-to-EL1 handoff
+    // has no EL2 trap handler, so inherited trap bits would make those EL1
+    // accesses disappear into the previous firmware's EL2 vector.
+    // SAFETY: This executes only after confirming an Apple CPU at EL2, with
+    // exceptions masked, and clears trap controls before entering EL1.
+    let before: u64;
+    let after: u64;
+    unsafe {
+        asm!(
+            ".arch armv8.1-a",
+            "mrs {before}, hacr_el2",
+            "msr hacr_el2, xzr",
+            "isb",
+            "mrs {after}, hacr_el2",
+            before = out(reg) before,
+            after = out(reg) after,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    APPLE_HACR_EL2_BEFORE_DROP.store(before, Ordering::Relaxed);
+    APPLE_HACR_EL2_AFTER_CLEAR.store(after, Ordering::Relaxed);
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
+    naked_asm!(
+        ".arch armv8.1-a",
+        // Preserve the continuation, its argument, and the active EL2 stack.
+        "mov x16, x0",
+        "mov x17, x1",
+        "mov x18, sp",
+        "mrs x15, hcr_el2",
+        "tbz x15, #34, 1f",
+        // In VHE host mode these EL1 names access the active EL2 host bank.
+        "mrs x3, ttbr0_el1",
+        "mrs x4, ttbr1_el1",
+        "mrs x5, tcr_el1",
+        "mrs x6, mair_el1",
+        "mrs x7, vbar_el1",
+        "mrs x8, sctlr_el1",
+        "b 2f",
+        // Without VHE, capture the active EL2 translation regime. EL2 has no
+        // TTBR1 regime, and TCR_EL2.PS must be moved to TCR_EL1.IPS.
+        "1:",
+        "mrs x3, ttbr0_el2",
+        "mov x4, xzr",
+        "mrs x5, tcr_el2",
+        "and x9, x5, #0xffff",
+        "ubfx x10, x5, #16, #3",
+        "lsl x10, x10, #32",
+        "orr x9, x9, x10",
+        // Disable the unused TTBR1 walk regime.
+        "orr x9, x9, #0x800000",
+        // TCR_EL2.TBI becomes TCR_EL1.TBI0.
+        "tbz x5, #20, 7f",
+        "mov x10, #1",
+        "lsl x10, x10, #37",
+        "orr x9, x9, x10",
+        "7:",
+        "mov x5, x9",
+        "mrs x6, mair_el2",
+        "mrs x7, vbar_el2",
+        "mrs x8, sctlr_el2",
+        "2:",
+        "mov x14, x8",
+        // Keep Limine's live translation regime, but do not inherit an
+        // uncached execution state. APs spin on the release barrier before
+        // Scarlet installs its own page tables, so leaving C clear here would
+        // turn every waiter into uncached memory traffic.
+        "bic x8, x8, #2",
+        "orr x8, x8, #1",
+        "orr x8, x8, #4",
+        "orr x8, x8, #0x1000",
+        "msr sp_el1, x18",
+        "tbz x15, #34, 3f",
+        // Program the real EL1 bank through the EL12 aliases while E2H is
+        // still active. EL1 starts with its MMU disabled until all state is set.
+        "bic x9, x8, #1",
+        "msr sctlr_el12, x9",
+        "isb",
+        "msr ttbr0_el12, x3",
+        "msr ttbr1_el12, x4",
+        "msr tcr_el12, x5",
+        "msr mair_el12, x6",
+        "msr vbar_el12, x7",
+        // Keep FP/SIMD available while Rust continues at EL1. Normal per-CPU
+        // initialization applies the final user-access policy later.
+        "movz x9, #0x30, lsl #16",
+        "msr cpacr_el12, x9",
+        "msr cntkctl_el12, xzr",
+        "b 4f",
+        // In conventional EL2 mode, the ordinary EL1 names address the real
+        // EL1 bank directly.
+        "3:",
+        "bic x9, x8, #1",
+        "msr sctlr_el1, x9",
+        "isb",
+        "msr ttbr0_el1, x3",
+        "msr ttbr1_el1, x4",
+        "msr tcr_el1, x5",
+        "msr mair_el1, x6",
+        "msr vbar_el1, x7",
+        "movz x9, #0x30, lsl #16",
+        "msr cpacr_el1, x9",
+        "msr cntkctl_el1, xzr",
+        "4:",
+        // CPTR_EL2 has different layouts under VHE and non-VHE. Zero would
+        // select FPEN=0b00 while E2H is set and leave FP/SIMD trapped at EL2.
+        // This bridge value enables VHE FPEN while keeping non-VHE TFP clear.
+        "tbz x15, #34, 8f",
+        "mov x9, {cptr_vhe_fpen_full}",
+        "msr cptr_el2, x9",
+        "b 9f",
+        "8:",
+        "msr cptr_el2, xzr",
+        "9:",
+        "isb",
+        "msr hstr_el2, xzr",
+        "msr mdcr_el2, xzr",
+        // Scarlet uses CNTV after entering EL1. Quarantine any physical timer
+        // left enabled by firmware before EL1 loses direct ownership of it.
+        "mrs x9, cntp_ctl_el0",
+        "orr x9, x9, #2",
+        "msr cntp_ctl_el0, x9",
+        // Install a known non-trapping EL1 timer policy instead of preserving
+        // firmware trap controls. Scarlet uses CNTV after detecting EL1.
+        "mov x9, #3",
+        "msr cnthctl_el2, x9",
+        "msr cntvoff_el2, xzr",
+        // Invalidate stale entries from any earlier use of the real EL1&0
+        // translation regime before enabling the copied tables.
+        "dsb ishst",
+        "tlbi alle1is",
+        "dsb ish",
+        "ic iallu",
+        "dsb sy",
+        "isb",
+        "tbz x15, #34, 5f",
+        "msr sctlr_el12, x8",
+        "b 6f",
+        "5:",
+        "msr sctlr_el1, x8",
+        "6:",
+        "isb",
+        // Return to EL1h with every exception class masked. HCR_EL2.RW is the
+        // only required bit; clearing E2H/TGE/FMO/IMO/AMO routes exceptions to
+        // EL1. Do not execute anything between the HCR write and ERET.
+        "msr elr_el2, x16",
+        "mov x9, #0x3c5",
+        "msr spsr_el2, x9",
+        "mov x0, x17",
+        "mov x1, x14",
+        "mov x9, {hcr_rw}",
+        "msr hcr_el2, x9",
+        "eret",
+        hcr_rw = const HCR_EL2_RW,
+        cptr_vhe_fpen_full = const CPTR_EL2_VHE_FPEN_FULL,
+    );
 }
 
 #[unsafe(naked)]
@@ -60,6 +278,11 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
 }
 
 fn ap_entry_wait(cpu_id: usize) -> ! {
+    maybe_drop_el2_to_el1(ap_entry_wait_after_el_drop as *const () as usize, cpu_id);
+    ap_entry_wait_after_el_drop(cpu_id, read_active_sctlr())
+}
+
+extern "C" fn ap_entry_wait_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
     if let Some((old_hcr, new_hcr)) = configure_vhe_host_interrupt_routing() {
         early_println!(
             "[aarch64] CPU {}: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
@@ -68,6 +291,15 @@ fn ap_entry_wait(cpu_id: usize) -> ! {
             new_hcr
         );
     }
+    if let Some((old_actlr, new_actlr)) = enable_apple_mdsb() {
+        early_println!(
+            "[aarch64] CPU {}: effective ACTLR EnMDSB {:#x} -> {:#x}",
+            cpu_id,
+            old_actlr,
+            new_actlr
+        );
+    }
+    log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -322,6 +554,41 @@ fn current_el() -> u64 {
     (el >> 2) & 0x3
 }
 
+#[inline(always)]
+fn read_effective_actlr() -> u64 {
+    let actlr: u64;
+    // SAFETY: Reading ACTLR_EL1 has no memory side effects. Limine enters
+    // Scarlet at EL1 or at EL2 with VHE enabled, where this register name
+    // addresses the control register effective for the current host regime.
+    unsafe {
+        asm!("mrs {}, actlr_el1", out(reg) actlr, options(nostack));
+    }
+    actlr
+}
+
+#[inline(always)]
+fn enable_apple_mdsb() -> Option<(u64, u64)> {
+    let midr = read_midr();
+    if ((midr >> MIDR_IMPLEMENTER_SHIFT) & 0xff) != APPLE_MIDR_IMPLEMENTER {
+        return None;
+    }
+
+    let old_actlr = read_effective_actlr();
+    let new_actlr = old_actlr | ACTLR_EN_MDSB;
+    // SAFETY: The Apple MIDR check above restricts the implementation-defined
+    // ACTLR field to Apple CPUs. Each CPU updates its own effective ACTLR bank
+    // during one-time early boot, before entering the scheduler.
+    unsafe {
+        asm!(
+            "msr actlr_el1, {actlr}",
+            "isb",
+            actlr = in(reg) new_actlr,
+            options(nostack)
+        );
+    }
+    Some((old_actlr, read_effective_actlr()))
+}
+
 fn detect_el() -> (u64, bool) {
     let el = current_el();
     let vhe = if el == 2 {
@@ -373,6 +640,11 @@ pub extern "C" fn limine_entry() -> ! {
     init_bss();
     mask_exceptions();
 
+    maybe_drop_el2_to_el1(limine_entry_after_el_drop as *const () as usize, 0);
+    limine_entry_after_el_drop(0, read_active_sctlr())
+}
+
+extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> ! {
     let (_el, vhe) = detect_el();
     unsafe {
         VHE_ENABLED = vhe;
@@ -405,6 +677,15 @@ pub extern "C" fn limine_entry() -> ! {
     );
     crate::arch::aarch64::early_console_init();
 
+    let hacr_after = APPLE_HACR_EL2_AFTER_CLEAR.load(Ordering::Relaxed);
+    if hacr_after != u64::MAX {
+        early_println!(
+            "[aarch64] BSP: HACR_EL2 before={:#x} after={:#x}",
+            APPLE_HACR_EL2_BEFORE_DROP.load(Ordering::Relaxed),
+            hacr_after
+        );
+    }
+
     if let Some((old_hcr, new_hcr)) = hcr_transition {
         early_println!(
             "[aarch64] BSP: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
@@ -412,6 +693,14 @@ pub extern "C" fn limine_entry() -> ! {
             new_hcr
         );
     }
+    if let Some((old_actlr, new_actlr)) = enable_apple_mdsb() {
+        early_println!(
+            "[aarch64] BSP: effective ACTLR EnMDSB {:#x} -> {:#x}",
+            old_actlr,
+            new_actlr
+        );
+    }
+    log_el1_memory_state("handoff", _arg0, inherited_sctlr);
 
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -490,6 +779,20 @@ pub extern "C" fn limine_entry() -> ! {
     }
 }
 
+#[cfg(test)]
+mod el_drop_tests {
+    use super::*;
+
+    #[test_case]
+    fn el2_without_usable_hypervisor_requires_el1_drop() {
+        assert!(should_drop_el2_to_el1(2, HCR_EL2_E2H, false));
+        assert!(should_drop_el2_to_el1(2, 0, false));
+        assert!(should_drop_el2_to_el1(2, 0, true));
+        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, true));
+        assert!(!should_drop_el2_to_el1(1, HCR_EL2_E2H, false));
+    }
+}
+
 fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
     if let Some(mp_resp) = MP_REQUEST.response() {
         for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
@@ -509,6 +812,35 @@ fn current_mpidr() -> u64 {
         asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack));
     }
     mpidr
+}
+
+fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
+    let sctlr: u64;
+    let tcr: u64;
+    let mair: u64;
+    unsafe {
+        asm!(
+            "mrs {sctlr}, sctlr_el1",
+            "mrs {tcr}, tcr_el1",
+            "mrs {mair}, mair_el1",
+            sctlr = out(reg) sctlr,
+            tcr = out(reg) tcr,
+            mair = out(reg) mair,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    early_println!(
+        "[aarch64] CPU {} {} memory state: inherited_SCTLR={:#x} SCTLR={:#x} M={} C={} I={} TCR={:#x} MAIR={:#x}",
+        cpu_id,
+        stage,
+        inherited_sctlr,
+        sctlr,
+        usize::from(sctlr & SCTLR_M != 0),
+        usize::from(sctlr & SCTLR_C != 0),
+        usize::from(sctlr & SCTLR_I != 0),
+        tcr,
+        mair,
+    );
 }
 
 #[inline(always)]

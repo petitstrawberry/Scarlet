@@ -13,7 +13,7 @@ use core::arch::{asm, naked_asm};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
-use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_trapvector};
+use crate::arch::{Trapframe, get_cpu, get_kernel_trapvector_paddr, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
@@ -317,6 +317,11 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         arch_irq_handler(trapframe, trap_kind);
     } else {
         arch_exception_handler(trapframe, trap_kind);
+    }
+
+    let cpu_id = get_cpu().get_cpuid();
+    if crate::sched::scheduler::take_deferred_reschedule(cpu_id) {
+        crate::sched::scheduler::schedule(trapframe);
     }
 
     arch_switch_to_user(trapframe);

@@ -486,11 +486,10 @@ impl FramebufferCharDevice {
             let Some(task) = get_task_by_id(mapping.task_id) else {
                 continue;
             };
-            let Some(root_pagetable) = task.vm_manager.get_root_page_table() else {
+            let Some(mut root_pagetable) = task.vm_manager.get_root_page_table() else {
                 continue;
             };
 
-            let asid = task.vm_manager.get_asid();
             let mut page_offset = 0usize;
             while page_offset < mapping.length {
                 let object_offset = mapping.offset.saturating_add(page_offset);
@@ -499,7 +498,6 @@ impl FramebufferCharDevice {
                 }
 
                 root_pagetable.map(
-                    asid,
                     mapping.vaddr.saturating_add(page_offset),
                     info.physical_addr.saturating_add(object_offset),
                     0x1 | 0x08,

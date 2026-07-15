@@ -1514,12 +1514,11 @@ impl Task {
             }
         }
         /* Unmap pages */
-        let asid = self.vm_manager.get_asid();
-        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
+        let mut root_pagetable = self.vm_manager.get_root_page_table().unwrap();
         if num_of_pages > 0 {
             let vaddr_start = page * PAGE_SIZE;
             let vaddr_end = vaddr_start + num_of_pages * PAGE_SIZE - 1;
-            root_pagetable.unmap_range(asid, vaddr_start, vaddr_end);
+            root_pagetable.unmap_range(vaddr_start, vaddr_end);
         }
     }
 
@@ -1974,14 +1973,9 @@ impl Task {
 
                     // Pre-map trampoline page if applicable
                     if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                        if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
+                        if let Some(mut root_pagetable) = child.vm_manager.get_root_page_table() {
                             root_pagetable
-                                .map_memory_area(
-                                    child.vm_manager.get_asid(),
-                                    shared_mmap,
-                                    true,
-                                    true,
-                                )
+                                .map_memory_area(shared_mmap, true, true)
                                 .map_err(|_| "Failed to map trampoline page")?;
                         }
                     }

@@ -40,9 +40,18 @@ struct FiqState {
 
 impl FiqState {
     fn capture() -> Self {
+        let vhe = scarlet::arch::is_vhe_enabled();
         Self {
-            local: registers::read_local(),
-            el2: scarlet::arch::is_vhe_enabled().then(registers::read_el2),
+            local: registers::read_local(vhe),
+            el2: vhe.then(registers::read_el2),
+        }
+    }
+
+    fn capture_traced(cpu_id: u32) -> Self {
+        let vhe = scarlet::arch::is_vhe_enabled();
+        Self {
+            local: registers::read_local_traced(cpu_id, vhe),
+            el2: vhe.then(registers::read_el2),
         }
     }
 
@@ -84,26 +93,36 @@ const fn timer_is_firing(control: u64) -> bool {
 
 fn host_timer_sources(vhe: bool, physical: u64, virtual_: u64) -> u32 {
     match vhe {
-        true if timer_is_firing(virtual_) => SOURCE_VIRTUAL_TIMER,
-        false if timer_is_firing(physical) => SOURCE_PHYSICAL_TIMER,
+        true if timer_is_firing(physical) => SOURCE_PHYSICAL_TIMER,
+        false if timer_is_firing(virtual_) => SOURCE_VIRTUAL_TIMER,
         _ => 0,
     }
 }
 
 pub(super) fn prepare_cpu(cpu_id: u32) {
+    scarlet::early_println!("[AIC] CPU {}: reading MPIDR", cpu_id);
     let cpu_index = cpu_id as usize;
     if cpu_index < MAX_FAST_IPI_CPUS {
         CPU_MPIDRS[cpu_index].store(registers::read_mpidr(), Ordering::Relaxed);
         CPU_MPIDR_VALID.fetch_or(1 << cpu_index, Ordering::Release);
     }
 
-    let state = FiqState::capture();
+    scarlet::early_println!("[AIC] CPU {}: reading local FIQ state", cpu_id);
+    let state = FiqState::capture_traced(cpu_id);
+    scarlet::early_println!("[AIC] CPU {}: local FIQ state captured", cpu_id);
 
-    registers::mask_physical_timer(state.local.cntp_ctl | TIMER_IMASK);
-    registers::mask_virtual_timer(state.local.cntv_ctl | TIMER_IMASK);
+    if state.el2.is_some() {
+        registers::mask_physical_timer(state.local.cntp_ctl | TIMER_IMASK);
+        scarlet::early_println!("[AIC] CPU {}: physical host timer masked", cpu_id);
+    } else {
+        registers::mask_virtual_timer(state.local.cntv_ctl | TIMER_IMASK);
+        scarlet::early_println!("[AIC] CPU {}: virtual host timer masked", cpu_id);
+    }
     registers::clear_fast_ipi();
+    scarlet::early_println!("[AIC] CPU {}: fast IPI cleared", cpu_id);
     registers::write_pmcr0(state.local.pmcr0 & !(PMCR0_IMODE_MASK | PMCR0_IACT));
     registers::write_upmcr0(state.local.upmcr0 & !UPMCR0_IMODE_MASK);
+    scarlet::early_println!("[AIC] CPU {}: PMU FIQ sources disabled", cpu_id);
 
     if let Some(el2) = state.el2 {
         registers::mask_guest_timers(
@@ -114,6 +133,7 @@ pub(super) fn prepare_cpu(cpu_id: u32) {
     }
 
     registers::synchronize();
+    scarlet::early_println!("[AIC] CPU {}: FIQ state synchronized", cpu_id);
     report_prepared(cpu_id, &state);
 }
 
@@ -122,26 +142,42 @@ pub(super) fn send_fast_ipi(target_cpu: u32) -> bool {
     if cpu_index >= MAX_FAST_IPI_CPUS
         || CPU_MPIDR_VALID.load(Ordering::Acquire) & (1 << cpu_index) == 0
     {
+        scarlet::early_println!(
+            "[AIC][IPI-SEND] rejected source_cpu={} target_cpu={} valid_mask={:#x}",
+            scarlet::arch::get_cpu().get_cpuid(),
+            target_cpu,
+            CPU_MPIDR_VALID.load(Ordering::Relaxed)
+        );
         return false;
     }
 
-    registers::send_fast_ipi(
-        registers::read_mpidr(),
-        CPU_MPIDRS[cpu_index].load(Ordering::Relaxed),
+    let source_mpidr = registers::read_mpidr();
+    let target_mpidr = CPU_MPIDRS[cpu_index].load(Ordering::Relaxed);
+    scarlet::early_println!(
+        "[AIC][IPI-SEND] source_cpu={} source_mpidr={:#x} target_cpu={} target_mpidr={:#x}",
+        scarlet::arch::get_cpu().get_cpuid(),
+        source_mpidr,
+        target_cpu,
+        target_mpidr
     );
+    registers::send_fast_ipi(source_mpidr, target_mpidr);
     true
 }
 
 pub(super) fn claim_pending(cpu_id: u32) -> InterruptClaim {
     let state = FiqState::capture();
     let sources = state.pending_sources();
+    scarlet::early_println!(
+        "[AIC][FIQ] non-timer claim cpu={} sources={:#x}",
+        cpu_id,
+        sources
+    );
 
-    if sources & SOURCE_PHYSICAL_TIMER != 0 {
-        registers::mask_physical_timer(state.local.cntp_ctl | TIMER_IMASK);
-    }
-    if sources & SOURCE_VIRTUAL_TIMER != 0 {
-        registers::mask_virtual_timer(state.local.cntv_ctl | TIMER_IMASK);
-    }
+    // Host timers are handled before this claim in the architecture trap
+    // handler. If one becomes pending between that check and this snapshot,
+    // leave the level asserted so the FIQ retriggers and the timer path can
+    // rearm it. Masking it here would swallow the tick when an IPI is also
+    // pending because InterruptClaim can report only the reschedule request.
     if sources & (SOURCE_GUEST_PHYSICAL_TIMER | SOURCE_GUEST_VIRTUAL_TIMER) != 0
         && let Some(el2) = state.el2
     {
@@ -244,14 +280,16 @@ mod tests {
     }
 
     #[test_case]
-    fn host_sources_exclude_the_selected_timer() {
+    fn host_sources_select_the_timer_used_by_the_kernel() {
         assert_eq!(
             host_timer_sources(true, TIMER_FIRING, TIMER_FIRING),
-            SOURCE_VIRTUAL_TIMER
+            SOURCE_PHYSICAL_TIMER
         );
         assert_eq!(
             host_timer_sources(false, TIMER_FIRING, TIMER_FIRING),
-            SOURCE_PHYSICAL_TIMER
+            SOURCE_VIRTUAL_TIMER
         );
+        assert_eq!(host_timer_sources(true, 0, TIMER_FIRING), 0);
+        assert_eq!(host_timer_sources(false, TIMER_FIRING, 0), 0);
     }
 }

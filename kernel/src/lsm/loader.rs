@@ -347,7 +347,6 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
     }
 
     let kernel_vm = get_kernel_vm_manager();
-    let kernel_asid = kernel_vm.get_asid();
 
     let mut section_bases: Vec<(usize, usize)> = Vec::new();
     let mut mapped_ranges: Vec<(usize, usize)> = Vec::new();
@@ -421,7 +420,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
             return Err(LsmError::NoMemory);
         }
 
-        let root_page_table = match kernel_vm.get_root_page_table() {
+        let mut root_page_table = match kernel_vm.get_root_page_table() {
             Some(pt) => pt,
             None => {
                 let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
@@ -430,14 +429,14 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                 return Err(LsmError::NoMemory);
             }
         };
-        root_page_table
-            .map_memory_area(kernel_asid, memory_map, true, true)
-            .map_err(|_| {
-                let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
-                free_raw_pages(pages_ptr, num_pages);
-                rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
-                LsmError::NoMemory
-            })?;
+        let map_result = root_page_table.map_memory_area(memory_map, true, true);
+        drop(root_page_table);
+        if map_result.is_err() {
+            let _ = kernel_vm.remove_memory_map_by_addr(base_vaddr);
+            free_raw_pages(pages_ptr, num_pages);
+            rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
+            return Err(LsmError::NoMemory);
+        }
 
         let section_dst = base_vaddr as *mut u8;
         match section.sh_type {
@@ -496,7 +495,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
     flush_icache_all(&mapped_ranges);
 
     {
-        let root_page_table = kernel_vm.get_root_page_table().ok_or_else(|| {
+        let mut root_page_table = kernel_vm.get_root_page_table().ok_or_else(|| {
             rollback_mappings_and_pages(&mapped_ranges, &pages_ptrs, &pages_counts);
             LsmError::NoMemory
         })?;
@@ -516,7 +515,6 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                 let page_vaddr = *base_vaddr + page_index * PAGE_SIZE;
                 let page_paddr = virt_to_phys(pages_ptr as usize + page_index * PAGE_SIZE);
                 root_page_table.map(
-                    kernel_asid,
                     page_vaddr,
                     page_paddr,
                     permissions,

@@ -232,10 +232,10 @@ impl AbiModule for LinuxRiscv64Abi {
                         *task.name.write() =
                             argv.get(0).map_or("linux".to_string(), |s| s.to_string());
 
-                        let idx =
-                            arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
-                        let root_page_table = arch::vm::get_pagetable(idx).unwrap();
+                        let mut root_page_table =
+                            arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
+                        drop(root_page_table);
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         let (_, stack_top) = setup_user_stack(task);
                         let mut sp = stack_top as usize;

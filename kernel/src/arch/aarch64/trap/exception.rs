@@ -141,14 +141,51 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         // User tried to execute FP/SIMD while EL0 access is trapped.
         // Enable access for this task and restore its context, then retry.
         ExceptionClass::FpSimdAccess => {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::FP_TRAP_ENTER,
+                trapframe.elr,
+                trapframe.spsr,
+            );
+            if !trap_from_user(trapframe) {
+                crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.elr, esr);
+                print_trap_info(trapframe, esr);
+                crate::println!(
+                    "[trap] FP/SIMD access trapped in privileged context at ELR={:#x}",
+                    trapframe.elr
+                );
+                loop {
+                    unsafe { asm!("wfi") }
+                }
+            }
+
             if crate::arch::user_fpu_enabled() {
                 let cpu_id = get_cpu().get_cpuid();
+                crate::breadcrumb::drop(crate::breadcrumb::FP_TASK_LOOKUP, cpu_id as u64, 0);
                 let task = current_task(cpu_id).unwrap();
-                task.vcpu.lock().fpu_used = true;
+                let task_id = task.get_id() as u64;
+                crate::breadcrumb::drop(crate::breadcrumb::FP_TASK_FOUND, task_id, 0);
+
+                let mut vcpu = task.vcpu.lock();
+                vcpu.fpu_used = true;
+                crate::breadcrumb::drop(crate::breadcrumb::FP_VCPU_LOCKED, task_id, 0);
+
                 crate::arch::fpu::set_user_fpu_enabled(true);
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::FP_ACCESS_ENABLED,
+                    task_id,
+                    crate::arch::fpu::is_fpu_enabled() as u64,
+                );
+                crate::breadcrumb::drop(crate::breadcrumb::FP_RESTORE_BEGIN, task_id, 0);
                 unsafe {
-                    task.vcpu.lock().fpu.restore();
+                    vcpu.fpu.restore_control();
                 }
+                crate::breadcrumb::drop(crate::breadcrumb::FP_CONTROL_DONE, task_id, 0);
+                crate::breadcrumb::drop(crate::breadcrumb::FP_VECTOR_BEGIN, task_id, 0);
+                unsafe {
+                    vcpu.fpu.restore_vectors();
+                }
+                crate::breadcrumb::drop(crate::breadcrumb::FP_VECTOR_DONE, task_id, 0);
+                crate::breadcrumb::drop(crate::breadcrumb::FP_RESTORE_DONE, task_id, 0);
                 return;
             }
 

@@ -380,7 +380,7 @@ impl Riscv64 {
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
 
-        let satp = root_pagetable.get_val_for_satp(asid);
+        let satp = root_pagetable.get_val_for_satp();
         self.satp = satp as u64;
     }
 

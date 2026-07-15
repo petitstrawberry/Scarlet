@@ -24,7 +24,7 @@ fn log_fatal_page_fault_context(
     task_name: &str,
     asid: u16,
 ) {
-    use crate::arch::vm::{get_root_pagetable_ptr, is_asid_used};
+    use crate::arch::vm::{get_root_pagetable, is_asid_used};
 
     let cpu_id = get_cpu().get_cpuid();
     let epc = trapframe.epc as usize;
@@ -34,10 +34,12 @@ fn log_fatal_page_fault_context(
     let fp = trapframe.regs.reg[8] as usize;
 
     let asid_used = is_asid_used(asid);
-    let root_pt = get_root_pagetable_ptr(asid).unwrap_or(core::ptr::null_mut());
+    let root_pt = get_root_pagetable(asid)
+        .map(|root| root.root_address())
+        .unwrap_or(0);
 
     println!(
-        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:p}",
+        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:#x}",
         cpu_id, cause, task_id, task_name, asid, asid_used, root_pt
     );
     println!(

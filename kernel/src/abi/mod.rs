@@ -565,6 +565,11 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_TASK_DONE,
+        task.get_id() as u64,
+        pc as u64,
+    );
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
     let res = task.with_resolve_abi_mut(pc, |abi_module| {

@@ -175,9 +175,10 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
     }
 
     // Install the mapping into the kernel page tables.
-    let asid = km.get_asid();
-    if let Some(pt) = km.get_root_page_table() {
-        if let Err(e) = pt.map_memory_area(asid, vmmap, true, true) {
+    if let Some(mut pt) = km.get_root_page_table() {
+        let map_result = pt.map_memory_area(vmmap, true, true);
+        drop(pt);
+        if let Err(e) = map_result {
             km.remove_memory_map_by_addr(alloc_va);
             alloc_guard.lock().free(alloc_va, aligned_size);
             return Err(e);
