@@ -28,7 +28,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if read fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -85,7 +85,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -102,7 +102,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
     // Copy from user space before writing so buffers crossing page boundaries
     // are handled correctly.
     let mut buffer = alloc::vec![0u8; count];
-    if copy_from_user(task, buf_vaddr, &mut buffer).is_err() {
+    if copy_from_user(&task, buf_vaddr, &mut buffer).is_err() {
         return usize::MAX;
     }
 

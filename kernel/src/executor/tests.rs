@@ -22,7 +22,7 @@ fn test_exec_backup_restore() {
     task.init();
 
     let task_id = add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Record original state
@@ -41,7 +41,7 @@ fn test_exec_backup_restore() {
         "/nonexistent/binary",
         &["arg1", "arg2"],
         &["ENV=test"],
-        &mut task,
+        &task,
         &mut trapframe,
         true,
     );
@@ -96,7 +96,7 @@ fn test_exec_parameter_validation() {
     task.init();
 
     let task_id = add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with empty arguments
@@ -104,7 +104,7 @@ fn test_exec_parameter_validation() {
         "/nonexistent/binary",
         &[],
         &[],
-        &mut task,
+        &task,
         &mut trapframe,
         true,
     );
@@ -120,7 +120,7 @@ fn test_exec_parameter_validation() {
         "/nonexistent/binary",
         &["program", "arg1", "arg2", "arg with spaces"],
         &["PATH=/bin:/usr/bin", "HOME=/root", "VAR=value"],
-        &mut task,
+        &task,
         &mut trapframe,
         true,
     );
@@ -143,7 +143,7 @@ fn test_argv_array_handling() {
     task.init();
 
     let task_id = add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with different argument patterns
@@ -160,7 +160,7 @@ fn test_argv_array_handling() {
             "/nonexistent/binary",
             &arg_refs,
             &["TEST=1"],
-            &mut task,
+            &task,
             &mut trapframe,
             true,
         );
@@ -185,7 +185,7 @@ fn test_envp_array_handling() {
     task.init();
 
     let task_id = add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
     let mut trapframe = Trapframe::new();
 
     // Test with different environment variable patterns
@@ -204,7 +204,7 @@ fn test_envp_array_handling() {
             "/nonexistent/binary",
             &["program"],
             &envp,
-            &mut task,
+            &task,
             &mut trapframe,
             true,
         );

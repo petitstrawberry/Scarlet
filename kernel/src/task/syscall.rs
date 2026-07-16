@@ -30,7 +30,7 @@ use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
 use crate::sched::scheduler::{
     cleanup_zombie, cpu_usage_snapshot, enqueue_task, get_all_task_ids, get_task_by_id,
-    register_task, remove_task_from_queues, schedule,
+    remove_task_from_queues, schedule,
 };
 use crate::task::{
     CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE, TaskState, WaitError, get_parent_waitpid_waker,
@@ -48,7 +48,7 @@ use super::mytask;
 pub fn sys_brk(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let brk = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     match task.set_brk(brk) {
         Ok(_) => task.get_brk(),
         Err(_) => usize::MAX, /* -1 */
@@ -59,7 +59,7 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
@@ -69,7 +69,7 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
 pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     let c = trapframe.get_arg(0) as u32;
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     if let Some(ch) = char::from_u32(c) {
         let manager = DeviceManager::get_manager();
         if let Some(device) = manager.get_device_by_name("tty0")
@@ -94,7 +94,7 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Find TTY device for blocking input
     let manager = DeviceManager::get_manager();
@@ -168,7 +168,7 @@ pub fn sys_thread_exit_cleanup(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
-    trapframe.increment_pc_next(parent_task); /* Increment the program counter */
+    trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.lock().store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
@@ -235,7 +235,19 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // On SMP, enqueueing before the metadata is complete lets a remote CPU
             // start the child immediately from the reschedule IPI.
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
-            let child_id = register_task(child_task);
+            let child_id = match crate::sched::scheduler::try_register_task(child_task) {
+                Ok(child_id) => child_id,
+                Err(err) => {
+                    crate::println!(
+                        "[clone] registration failed: parent={} name={} flags={:#x} reason={}",
+                        parent_id,
+                        parent_task.name.read().as_str(),
+                        clone_flags.get_raw(),
+                        err
+                    );
+                    return usize::MAX;
+                }
+            };
             if is_process_fork {
                 crate::early_println!(
                     "[fork-trace] child={} registered target_cpu={}",
@@ -304,7 +316,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 pub fn sys_thread_detach(trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let local_thread_id = trapframe.get_arg(0);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let target_id = match caller.get_namespace().resolve_global_id(local_thread_id) {
         Some(id) => id,
@@ -378,7 +390,7 @@ pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     // save area is updated from the trapframe only when the scheduler stores it.
     trapframe.set_tls_pointer(tls_ptr);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     0 // Success
 }
 
@@ -396,7 +408,7 @@ pub fn sys_get_tls(trapframe: &mut Trapframe) -> usize {
             .unwrap_or(0)
     };
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     tls_ptr // Return TLS pointer
 }
 
@@ -413,7 +425,7 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
         }
     }
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     task.get_namespace_id() // Return current TID (Linux-compatible)
 }
 
@@ -423,7 +435,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // crate::println!("[EXECVE] Task {} starting execve", task.get_id());
 
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
@@ -432,7 +444,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(3); // New flags argument
 
     // Parse path
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => {
             // crate::println!("[EXECVE] Task {}: Executing path: {}", task.get_id(), path);
             path
@@ -445,7 +457,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
     // Parse argv and envp
     let argv_strings =
-        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(args) => {
                 // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
                 args
@@ -457,7 +469,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         };
 
     let envp_strings =
-        match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(env) => {
                 // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
                 env
@@ -482,7 +494,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         &path_str,
         &argv_refs,
         &envp_refs,
-        task,
+        &task,
         trapframe,
         force_abi_rebuild,
     ) {
@@ -511,7 +523,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
@@ -521,29 +533,29 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(4); // New flags argument
 
     // Parse path
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => path,
         Err(_) => return usize::MAX, // Path parsing error
     };
 
     // Parse ABI string
-    let abi_str = match parse_c_string_from_userspace(task, abi_str_ptr, MAX_ABI_LENGTH) {
+    let abi_str = match parse_c_string_from_userspace(&task, abi_str_ptr, MAX_ABI_LENGTH) {
         Ok(abi) => abi,
         Err(_) => return usize::MAX, // ABI parsing error
     };
 
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH)
-    {
-        Ok(args) => args,
-        Err(_) => return usize::MAX, // argv parsing error
-    };
+    let argv_strings =
+        match parse_string_array_from_userspace(&task, argv_ptr, 256, MAX_PATH_LENGTH) {
+            Ok(args) => args,
+            Err(_) => return usize::MAX, // argv parsing error
+        };
 
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH)
-    {
-        Ok(env) => env,
-        Err(_) => return usize::MAX, // envp parsing error
-    };
+    let envp_strings =
+        match parse_string_array_from_userspace(&task, envp_ptr, 256, MAX_PATH_LENGTH) {
+            Ok(env) => env,
+            Err(_) => return usize::MAX, // envp parsing error
+        };
 
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
@@ -558,7 +570,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
         &argv_refs,
         &envp_refs,
         &abi_str,
-        task,
+        &task,
         trapframe,
         force_abi_rebuild,
     ) {
@@ -601,16 +613,16 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 {
                     if status_addr != 0
                         && copy_to_user(
-                            task,
+                            &task,
                             status_addr,
                             &PROCESS_CONTROL_STOP_STATUS.to_ne_bytes(),
                         )
                         .is_err()
                     {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return usize::MAX;
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
                         return local;
                     }
@@ -621,12 +633,12 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     Ok(status) => {
                         // Child has exited, return the status
                         if status_addr != 0
-                            && copy_to_user(task, status_addr, &status.to_ne_bytes()).is_err()
+                            && copy_to_user(&task, status_addr, &status.to_ne_bytes()).is_err()
                         {
-                            trapframe.increment_pc_next(task);
+                            trapframe.increment_pc_next(&task);
                             return usize::MAX;
                         }
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         // Return child's PID in caller's namespace (if visible)
                         if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
                             return local;
@@ -637,7 +649,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     Err(error) => match error {
                         WaitError::ChildNotExited(_) => continue,
                         _ => {
-                            trapframe.increment_pc_next(task);
+                            trapframe.increment_pc_next(&task);
                             return usize::MAX;
                         }
                     },
@@ -647,27 +659,27 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             // No child has exited yet
             if wnohang {
                 // WNOHANG: Return immediately without blocking
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return 0; // Return 0 to indicate no child has exited
             }
 
             // Block until a child exits
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait(task.get_id(), trapframe);
+            parent_waker.wait_owned(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
             continue;
         }
 
         // Wait for specific child process
         if pid <= 0 {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX;
         }
 
         let target_global = match task.get_namespace().resolve_global_id(pid as usize) {
             Some(g) => g,
             None => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return usize::MAX;
             }
         };
@@ -680,16 +692,16 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         {
             if status_addr != 0
                 && copy_to_user(
-                    task,
+                    &task,
                     status_addr,
                     &PROCESS_CONTROL_STOP_STATUS.to_ne_bytes(),
                 )
                 .is_err()
             {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return usize::MAX;
             }
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return pid as usize;
         }
 
@@ -697,22 +709,22 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             Ok(status) => {
                 // Child has exited, return the status
                 if status_addr != 0
-                    && copy_to_user(task, status_addr, &status.to_ne_bytes()).is_err()
+                    && copy_to_user(&task, status_addr, &status.to_ne_bytes()).is_err()
                 {
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return usize::MAX;
                 }
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return pid as usize;
             }
             Err(error) => {
                 match error {
                     WaitError::NoSuchChild(_) => {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return usize::MAX;
                     }
                     WaitError::ChildTaskNotFound(_) => {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         crate::print!("Child task with PID {} not found", pid);
                         return usize::MAX;
                     }
@@ -720,13 +732,13 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         // Child has not exited yet
                         if wnohang {
                             // WNOHANG: Return immediately without blocking
-                            trapframe.increment_pc_next(task);
+                            trapframe.increment_pc_next(&task);
                             return 0; // Return 0 to indicate child has not exited
                         }
 
                         // Block until child exits
                         let child_waker = get_waitpid_waker(target_global);
-                        child_waker.wait(task.get_id(), trapframe);
+                        child_waker.wait_owned(task.get_id(), trapframe);
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
@@ -739,7 +751,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     // Expose namespace-local task ID to user space.
     // This allows task namespaces (PID namespaces) to provide independent PID spaces.
     task.get_namespace_id() as usize
@@ -747,7 +759,7 @@ pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     // Return parent's PID as seen from the caller's namespace.
     // If the parent is not mapped/visible in this namespace, return 0.
     match task.get_parent_id() {
@@ -770,7 +782,7 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
 /// Namespace-local session ID on success, or `usize::MAX` on failure.
 pub fn sys_create_session(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     match task.create_session() {
         Ok(session_id) => task
@@ -793,7 +805,7 @@ pub fn sys_create_session(trapframe: &mut Trapframe) -> usize {
 pub fn sys_get_session_id(trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -826,7 +838,7 @@ pub fn sys_get_session_id(trapframe: &mut Trapframe) -> usize {
 pub fn sys_get_process_group_id(trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -862,7 +874,7 @@ pub fn sys_set_process_group(trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
     let pgid = trapframe.get_arg(1);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -922,7 +934,7 @@ pub fn sys_set_process_group(trapframe: &mut Trapframe) -> usize {
 pub fn sys_set_task_util_min(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let util_min = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if util_min > SCHED_UTIL_SCALE as usize {
         return usize::MAX;
@@ -943,7 +955,7 @@ pub fn sys_set_task_util_min(trapframe: &mut Trapframe) -> usize {
 /// Current minimum utilization in scheduler capacity units.
 pub fn sys_get_task_util_min(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     task.sched_util_min() as usize
 }
 
@@ -954,7 +966,7 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     let ticks = ns_to_ticks(nanosecs);
 
     // Increment PC before sleeping to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Call the blocking sleep method - this will return when sleep completes
     task.sleep(trapframe, ticks);
@@ -974,7 +986,7 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
 /// Current monotonic time in nanoseconds since boot.
 pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     crate::time::current_time_ns() as usize
 }
 
@@ -988,7 +1000,7 @@ pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
 /// Wall-clock nanoseconds since the Unix epoch, or `usize::MAX` if unavailable.
 pub fn sys_system_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     match crate::time::system_time_ns() {
         Some(ns) => ns as usize,
         None => usize::MAX,
@@ -1007,7 +1019,7 @@ pub fn sys_get_cpu_usage_info(trapframe: &mut Trapframe) -> usize {
     use crate::task::CpuUsageInfo;
 
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let snapshot = cpu_usage_snapshot();
     let total_time_ns = snapshot.busy_time_ns.saturating_add(snapshot.idle_time_ns);
@@ -1031,7 +1043,7 @@ pub fn sys_get_cpu_usage_info(trapframe: &mut Trapframe) -> usize {
             core::mem::size_of::<CpuUsageInfo>(),
         )
     };
-    match copy_to_user(task, trapframe.get_arg(0), info_bytes) {
+    match copy_to_user(&task, trapframe.get_arg(0), info_bytes) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -1048,7 +1060,7 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC before yielding to avoid re-executing the syscall on resume
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Yield CPU to scheduler - returns when this task is scheduled again
     schedule(trapframe);
@@ -1097,10 +1109,10 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     let len = trapframe.get_arg(1);
     let abi_name_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse the ABI name from user space
-    let abi_name = match parse_c_string_from_userspace(task, abi_name_ptr, MAX_ABI_LENGTH) {
+    let abi_name = match parse_c_string_from_userspace(&task, abi_name_ptr, MAX_ABI_LENGTH) {
         Ok(name) => name,
         Err(_) => {
             crate::println!("[syscall] Failed to parse ABI name from user space");
@@ -1152,7 +1164,7 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let start = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     crate::println!("[syscall] Unregistering ABI zone at start={:#x}", start);
 
@@ -1203,13 +1215,13 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(0);
     let name_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse namespace name (optional)
     let name = if name_ptr == 0 {
         alloc::format!("ns_{}", task.get_id())
     } else {
-        match parse_c_string_from_userspace(task, name_ptr, 64) {
+        match parse_c_string_from_userspace(&task, name_ptr, 64) {
             Ok(s) => s,
             Err(_) => {
                 crate::println!("[syscall] Failed to parse namespace name");
@@ -1292,7 +1304,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     use crate::arch::shutdown;
 
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Authorization: Only the init thread group id = 1 can shutdown
     // This allows any thread in the init process (including IPC threads) to shutdown
@@ -1319,21 +1331,19 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     //
     // Current implementation: Force kill all tasks immediately (simpler fallback)
 
-    // Step 1: Terminate all tasks except the current one
-    // We iterate through all possible task IDs and terminate those that are running
+    // Step 1: Terminate all tasks except the current one.
     crate::println!("[SHUTDOWN] Step 1: Terminating all tasks...");
 
     let current_task_id = task.get_id();
 
-    crate::println!("[SHUTDOWN] Dropping all tasks...");
-    for task_id in 1..crate::sched::scheduler::MAX_TASKS {
+    crate::println!("[SHUTDOWN] Retiring all tasks...");
+    for task_id in crate::sched::scheduler::get_task_pool().task_ids_snapshot() {
         if task_id == current_task_id {
             continue;
         }
         remove_task_from_queues(task_id);
-        if let Some(task) = crate::sched::scheduler::get_task_pool().remove_task(task_id) {
-            drop(task);
-        }
+        let task_pool = crate::sched::scheduler::get_task_pool();
+        let _ = task_pool.remove_task(task_id);
     }
 
     crate::println!("[SHUTDOWN] Step 2: Enumerating mounted filesystems (no sync support yet)...");
@@ -1403,7 +1413,7 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
 /// The number of tasks in the system.
 pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     get_all_task_ids().len()
 }
 
@@ -1424,7 +1434,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     use core::sync::atomic::Ordering;
 
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let buf_ptr = trapframe.get_arg(0);
     let capacity = trapframe.get_arg(1);
@@ -1486,7 +1496,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             sched_util_avg: target.sched_util_avg_snapshot(now_ns),
             sched_util_min: target.sched_util_min(),
             sched_required_capacity: crate::sched::scheduler::task_required_capacity_snapshot(
-                target, now_ns,
+                &target, now_ns,
             ),
             core_preference: target.core_preference().to_u8(),
             _reserved2: [0; 3],
@@ -1501,7 +1511,7 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         };
         let dest = buf_ptr + written * core::mem::size_of::<TaskInfo>();
         // Best-effort: skip on copy error.
-        if copy_to_user(task, dest, info_bytes).is_ok() {
+        if copy_to_user(&task, dest, info_bytes).is_ok() {
             written += 1;
         }
     }

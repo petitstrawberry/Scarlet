@@ -10,6 +10,7 @@ use crate::arch::Trapframe;
 use crate::sched::scheduler::{get_task_by_id, schedule, unmark_blocked, wake_task};
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
@@ -120,6 +121,26 @@ impl Waker {
     /// 1. Set task state to Blocked BEFORE adding to queue
     /// 2. This ensures wake_task() can safely operate even if called immediately
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
+        if self.prepare_wait(task_id) {
+            schedule(trapframe);
+        }
+    }
+
+    /// Block using an owned waker handle without retaining it on a suspended stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - ID of the current task to block
+    /// * `trapframe` - Current task's saved execution state
+    pub fn wait_owned(self: Arc<Self>, task_id: usize, trapframe: &mut Trapframe) {
+        let should_schedule = self.prepare_wait(task_id);
+        drop(self);
+        if should_schedule {
+            schedule(trapframe);
+        }
+    }
+
+    fn prepare_wait(&self, task_id: usize) -> bool {
         // Consume a pending wake that arrived before we enqueued ourselves.
         // This closes the lost-wake window on SMP: if wake_one()/wake_all()
         // fired while the queue was empty (between the caller's condition check
@@ -131,14 +152,32 @@ impl Waker {
             })
             .is_ok()
         {
-            return;
+            return false;
         }
 
-        if let Some(task) = get_task_by_id(task_id) {
-            task.set_state(TaskState::Blocked(self.block_type));
-        } else {
-            panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+        let task = get_task_by_id(task_id)
+            .unwrap_or_else(|| panic!("[WAKER] Task ID {} not found in scheduler", task_id));
+        let blocked_state = TaskState::Blocked(self.block_type);
+        if let Err(actual) = task.state.compare_exchange(
+            TaskState::Running,
+            blocked_state,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            drop(task);
+            match actual {
+                TaskState::Zombie | TaskState::Terminated | TaskState::Ready => {
+                    return true;
+                }
+                TaskState::NotInitialized | TaskState::Running | TaskState::Blocked(_) => {
+                    panic!(
+                        "[WAKER] Task {} cannot enter wait from state {:?}",
+                        task_id, actual
+                    );
+                }
+            }
         }
+        drop(task);
 
         crate::sched::scheduler::mark_blocked(task_id);
 
@@ -158,6 +197,20 @@ impl Waker {
                 .is_ok()
         };
 
+        let terminated_while_enqueuing = get_task_by_id(task_id).is_some_and(|task| {
+            matches!(task.get_state(), TaskState::Zombie | TaskState::Terminated)
+        });
+        if terminated_while_enqueuing {
+            {
+                let mut queue = self.wait_queue.lock();
+                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
+                    queue.remove(pos);
+                }
+            }
+            unmark_blocked(task_id);
+            return true;
+        }
+
         if late_wake {
             {
                 let mut queue = self.wait_queue.lock();
@@ -166,13 +219,32 @@ impl Waker {
                 }
             }
             unmark_blocked(task_id);
-            if let Some(task) = get_task_by_id(task_id) {
-                task.set_state(TaskState::Running);
+            if let Some(task) = get_task_by_id(task_id)
+                && let Err(actual) = task.state.compare_exchange(
+                    blocked_state,
+                    TaskState::Running,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+            {
+                drop(task);
+                match actual {
+                    TaskState::Zombie | TaskState::Terminated | TaskState::Ready => {
+                        return true;
+                    }
+                    TaskState::Running => return false,
+                    TaskState::NotInitialized | TaskState::Blocked(_) => {
+                        panic!(
+                            "[WAKER] Task {} cannot leave wait from state {:?}",
+                            task_id, actual
+                        );
+                    }
+                }
             }
-            return;
+            return false;
         }
 
-        schedule(trapframe);
+        true
     }
 
     /// Block the task until woken or the timeout elapses.
@@ -534,6 +606,11 @@ impl Waker {
         let count = queue.len();
         queue.clear();
         count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_wake_count_for_test(&self) -> usize {
+        self.pending_wakes.load(Ordering::SeqCst)
     }
 }
 

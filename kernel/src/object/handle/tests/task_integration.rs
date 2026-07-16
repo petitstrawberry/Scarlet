@@ -173,7 +173,7 @@ fn test_task_handle_table_clone_behavior() {
     parent_task.init();
 
     let parent_id = crate::sched::scheduler::add_task(parent_task, 0);
-    let mut parent_task = get_task_by_id(parent_id).unwrap();
+    let parent_task = get_task_by_id(parent_id).unwrap();
 
     // Open some files in parent
     let mock_file1 = Arc::new(MockTaskFileObject::new(b"parent_file_1".to_vec()));
@@ -253,7 +253,7 @@ fn test_task_handle_table_memory_efficiency() {
     task.init();
 
     let task_id = crate::sched::scheduler::add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
 
     // Test that repeated allocation/deallocation doesn't cause memory leaks
     for iteration in 0..50 {
@@ -297,7 +297,7 @@ fn test_task_handle_table_capability_access() {
     task.init();
 
     let task_id = crate::sched::scheduler::add_task(task, 0);
-    let mut task = get_task_by_id(task_id).unwrap();
+    let task = get_task_by_id(task_id).unwrap();
 
     // Test accessing different capabilities through handles
     let mock_file = Arc::new(MockTaskFileObject::new(b"capability_test_data".to_vec()));

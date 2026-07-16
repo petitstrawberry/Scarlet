@@ -30,7 +30,7 @@ pub fn sys_file_seek(trapframe: &mut Trapframe) -> usize {
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if seek fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -78,7 +78,7 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1) as u64;
 
     // Increment PC to avoid infinite loop if truncate fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -120,7 +120,7 @@ pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
     let metadata_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop if metadata fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
@@ -148,7 +148,7 @@ pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
         )
     };
 
-    match copy_to_user(task, metadata_ptr, bytes) {
+    match copy_to_user(&task, metadata_ptr, bytes) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }

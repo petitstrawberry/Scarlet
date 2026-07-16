@@ -128,7 +128,7 @@ mod macros;
 #[cfg(feature = "profiler")]
 fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(mytask().unwrap());
+    tf.increment_pc_next(&mytask().unwrap());
     crate::profiler::print_profiling_results();
     0
 }
@@ -137,7 +137,7 @@ fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
 #[cfg(not(feature = "profiler"))]
 fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(mytask().unwrap());
+    tf.increment_pc_next(&mytask().unwrap());
     crate::println!("[Profiler] Not available (feature disabled)");
     0
 }
@@ -148,21 +148,21 @@ use crate::hypervisor::syscall::{sys_shv_vcpu_create, sys_shv_vcpu_run, sys_shv_
 #[cfg(not(feature = "hypervisor"))]
 fn sys_shv_vm_create(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(mytask().unwrap());
+    tf.increment_pc_next(&mytask().unwrap());
     usize::MAX
 }
 
 #[cfg(not(feature = "hypervisor"))]
 fn sys_shv_vcpu_create(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(mytask().unwrap());
+    tf.increment_pc_next(&mytask().unwrap());
     usize::MAX
 }
 
 #[cfg(not(feature = "hypervisor"))]
 fn sys_shv_vcpu_run(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(mytask().unwrap());
+    tf.increment_pc_next(&mytask().unwrap());
     usize::MAX
 }
 

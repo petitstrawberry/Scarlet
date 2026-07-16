@@ -954,13 +954,19 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
         println!(
             "[boot] first switch: task={} type={:?}",
-            next_task_id,
-            next_task.task_type
+            next_task_id, next_task.task_type
         );
         if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
         } else {
-            crate::arch::first_switch_to_user(next_task);
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
         }
     }
 
@@ -1012,9 +1018,16 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
         let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
             .expect("AP: first runnable task must exist");
         if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
         } else {
-            crate::arch::first_switch_to_user(next_task);
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
         }
     }
 

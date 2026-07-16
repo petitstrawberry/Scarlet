@@ -312,7 +312,7 @@ impl VcpuObject for Riscv64VcpuObject {
         self.sync_interrupts();
         self.inject_pending_interrupts();
 
-        self.setup_for_guest(task, &mut vcpu.guest, &vm);
+        self.setup_for_guest(&task, &mut vcpu.guest, &vm);
         // SAFETY: arch_run_guest_loop switches to guest mode and back;
         // it restores host state before returning. guest_tf is a stack-
         // allocated Trapframe that survives the guest entry/exit cycle.
@@ -327,12 +327,12 @@ impl VcpuObject for Riscv64VcpuObject {
 
             match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
                 Some(exit) => {
-                    self.prepare_normal_task_and_save_guest(task, &mut vcpu.guest, &mut guest_tf);
+                    self.prepare_normal_task_and_save_guest(&task, &mut vcpu.guest, &mut guest_tf);
                     return Ok(exit);
                 }
                 None => {
                     vcpu.guest.save(&guest_tf);
-                    self.setup_for_guest(task, &mut vcpu.guest, &vm);
+                    self.setup_for_guest(&task, &mut vcpu.guest, &vm);
                     // SAFETY: same as the initial arch_run_guest_loop call above.
                     unsafe { arch_run_guest_loop(&mut guest_tf, &vcpu.guest, arch) };
                 }

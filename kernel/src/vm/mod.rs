@@ -457,47 +457,66 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
         .alloc_slot()
         .ok_or("No free kernel stack window slots")?;
 
-    // Physical (identity) address range of the task's kernel stack
-    let km_area = task.get_kernel_stack_memory_area_paddr();
-    let paddr_start = km_area.start;
-    let paddr_end = km_area.end;
-
-    // Ensure page alignment
-    if paddr_start % PAGE_SIZE != 0 || (paddr_end + 1 - paddr_start) % PAGE_SIZE != 0 {
-        return Err("Kernel stack memory area is not page-aligned");
-    }
-
     // Virtual window (skip guard page at the bottom)
     let vaddr_start = base + crate::environment::PAGE_SIZE;
     let vaddr_end = vaddr_start + TASK_KERNEL_STACK_SIZE - 1;
 
-    // Map into shared kernel PT
-    let kman = get_kernel_vm_manager();
-    let mmap = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: vaddr_start,
-            end: vaddr_end,
-        },
-        pmarea: MemoryArea {
-            start: paddr_start,
-            end: paddr_end,
-        },
-        vm_start: vaddr_start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
+    let result = (|| {
+        // Physical (identity) address range of the task's kernel stack.
+        let km_area = task.get_kernel_stack_memory_area_paddr();
+        let paddr_start = km_area.start;
+        let paddr_end = km_area.end;
+        let stack_size = paddr_end
+            .checked_add(1)
+            .and_then(|end| end.checked_sub(paddr_start))
+            .ok_or("Kernel stack memory area is invalid")?;
+        if paddr_start % PAGE_SIZE != 0 || stack_size % PAGE_SIZE != 0 {
+            return Err("Kernel stack memory area is not page-aligned");
+        }
 
-    kman.add_memory_map(mmap.clone())
-        .map_err(|_| "Failed to add kernel stack mmap")?;
-    let mut root = kman
-        .get_root_page_table()
-        .ok_or("Kernel root page table not set")?;
-    root.map_memory_area(mmap, true, true)
-        .map_err(|_| "Failed to map kernel stack window")?;
-    drop(root);
+        let mmap = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: vaddr_start,
+                end: vaddr_end,
+            },
+            pmarea: MemoryArea {
+                start: paddr_start,
+                end: paddr_end,
+            },
+            vm_start: vaddr_start,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: None,
+        };
+
+        let kman = get_kernel_vm_manager();
+        kman.add_memory_map(mmap.clone())
+            .map_err(|_| "Failed to add kernel stack mmap")?;
+        let mut root = kman
+            .get_root_page_table()
+            .ok_or("Kernel root page table not set")?;
+        root.map_memory_area(mmap, true, true)
+            .map_err(|_| "Failed to map kernel stack window")
+    })();
+
+    if let Err(error) = result {
+        // Every fallible step after allocation rolls back both VMA/MMU state
+        // and the allocator slot. The best-effort cleanup also covers a page
+        // table mapper that made a partial mapping before returning an error.
+        let kman = get_kernel_vm_manager();
+        if let Some(mut root) = kman.get_root_page_table() {
+            root.unmap_range(vaddr_start, vaddr_end);
+        }
+        let mut vaddr = vaddr_start;
+        while vaddr <= vaddr_end {
+            let _ = kman.remove_memory_map_by_addr(vaddr);
+            vaddr += PAGE_SIZE;
+        }
+        allocator.free_slot(slot_idx);
+        return Err(error);
+    }
 
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));

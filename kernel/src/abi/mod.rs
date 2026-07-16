@@ -380,7 +380,7 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// # Arguments
     /// * `event` - The event to be delivered
-    /// * `target_task_id` - ID of the task that should receive the event
+    /// * `target_task_id` - Global kernel ID of the task that should receive the event
     ///
     /// # Returns
     /// * `Ok(outcome)` describing how event processing should proceed
@@ -388,7 +388,7 @@ pub trait AbiModule: Send + Sync + 'static {
     fn handle_event(
         &mut self,
         _event: crate::ipc::Event,
-        _target_task_id: u32,
+        _target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         // Default implementation: ignore events
         Ok(EventProcessOutcome::Continue)
@@ -550,8 +550,8 @@ pub enum EventProcessOutcome {
     UserHandlerArmed,
     /// The task state changed so the scheduler must pick another task.
     NeedReschedule,
-    /// The task exited and must not be returned to userspace.
-    Exited,
+    /// The task must exit with this status after the ABI mutable borrow is released.
+    Exited(i32),
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {

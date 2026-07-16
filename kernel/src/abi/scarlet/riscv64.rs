@@ -322,8 +322,7 @@ impl ScarletAbi {
                     ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
-                task.exit_group(exit_code);
-                Ok(EventProcessOutcome::Exited)
+                Ok(EventProcessOutcome::Exited(exit_code))
             }
             ProcessControlType::Stop
             | ProcessControlType::TerminalStop
@@ -370,8 +369,7 @@ impl ScarletAbi {
                     )
                 } else {
                     // Default: terminate with SIGINT-like exit code
-                    task.exit_group(128 + 2);
-                    Ok(EventProcessOutcome::Exited)
+                    Ok(EventProcessOutcome::Exited(128 + 2))
                 }
             }
             _ => {
@@ -604,7 +602,7 @@ impl ScarletAbi {
                 EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
                 EventProcessOutcome::UserHandlerArmed
                 | EventProcessOutcome::NeedReschedule
-                | EventProcessOutcome::Exited => {
+                | EventProcessOutcome::Exited(_) => {
                     self.pending_events.extend(pending_iter);
                     return Ok(outcome);
                 }
@@ -1181,11 +1179,11 @@ impl AbiModule for ScarletAbi {
     fn handle_event(
         &mut self,
         event: crate::ipc::Event,
-        _target_task_id: u32,
+        _target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         // Get the current task to process the event
         if let Some(task) = crate::task::mytask() {
-            self.handle_incoming_event(event, task)
+            self.handle_incoming_event(event, &task)
         } else {
             Err("No current task to handle event")
         }

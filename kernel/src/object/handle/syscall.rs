@@ -33,7 +33,7 @@ pub fn sys_handle_query(trapframe: &mut Trapframe) -> usize {
     let info_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Translate the pointer to get access to the info structure
     let info_vaddr = match task.vm_manager.translate_to_kva(info_ptr) {
@@ -74,7 +74,7 @@ pub fn sys_handle_set_role(trapframe: &mut Trapframe) -> usize {
     let new_role_raw = trapframe.get_arg(1);
     let _flags = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Decode new role from raw value
     let new_role = match decode_handle_type(new_role_raw) {
@@ -120,7 +120,7 @@ pub fn sys_handle_close(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if task.handle_table.remove(handle).is_some() {
         0 // Success
@@ -147,7 +147,7 @@ pub fn sys_handle_duplicate(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Duplicate using object-specific dup semantics where available.
     if let Some(kernel_obj) = task.handle_table.clone_for_dup(handle) {
@@ -211,7 +211,7 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
     let arg = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the kernel object from the handle table (without clone)
     let kernel_object = match task.handle_table.get(handle) {

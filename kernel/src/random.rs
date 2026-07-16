@@ -277,7 +277,7 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
     let buffer_len = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if flags != 0 {
         return usize::MAX;
@@ -295,7 +295,7 @@ pub fn sys_get_random(trapframe: &mut crate::arch::Trapframe) -> usize {
             fill_fallback_random(&mut chunk[bytes_read..chunk_len]);
         }
 
-        if copy_to_user(task, buffer_ptr + total_written, &chunk[..chunk_len]).is_err() {
+        if copy_to_user(&task, buffer_ptr + total_written, &chunk[..chunk_len]).is_err() {
             return usize::MAX;
         }
         total_written += chunk_len;

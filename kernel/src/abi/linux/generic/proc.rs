@@ -1,3 +1,5 @@
+use alloc::sync::Arc;
+
 use crate::{
     abi::linux::generic::{LinuxAbi, errno},
     arch::Trapframe,
@@ -66,7 +68,7 @@ pub fn sys_set_tid_address(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     let tid_opt = (tid_ptr != 0).then_some(tid_ptr);
     abi.thread_state_mut().clear_child_tid_ptr = tid_opt;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Return current task namespace ID (Linux TID visible to user space)
     task.get_namespace_id()
@@ -101,7 +103,7 @@ pub fn sys_set_robust_list(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     state.robust_list_head = head_opt;
     state.robust_list_len = len as usize;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0
 }
@@ -110,7 +112,7 @@ pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let flags = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     crate::println!("[linux] unshare: flags={:#x} (stub)", flags);
     0
@@ -122,7 +124,7 @@ pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     let cpusetsize = trapframe.get_arg(1);
     let mask_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if cpusetsize == 0 {
         return errno::to_result(errno::EINVAL);
@@ -154,7 +156,7 @@ pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) ->
     let task = mytask().unwrap();
     let _pid = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0 // SCHED_OTHER
 }
@@ -164,7 +166,7 @@ pub fn sys_sched_getparam(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     let _pid = trapframe.get_arg(0);
     let param_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if param_ptr == 0 {
         return errno::to_result(errno::EFAULT);
@@ -187,7 +189,7 @@ pub fn sys_sched_getparam(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
 pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     schedule(trapframe);
 
     0
@@ -196,7 +198,7 @@ pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 pub fn sys_pidfd_open(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     errno::to_result(errno::ENOSYS)
 }
@@ -257,7 +259,7 @@ fn waitable_children_for_thread_group(task: &crate::task::Task) -> alloc::vec::V
 fn wait_owner_for_child(
     task: &crate::task::Task,
     child_pid: usize,
-) -> Option<&'static crate::task::Task> {
+) -> Option<Arc<crate::task::Task>> {
     let child = get_task_by_id(child_pid)?;
     let parent_id = child.get_parent_id()?;
     let parent = get_task_by_id(parent_id)?;
@@ -276,7 +278,7 @@ pub fn sys_sbrk(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0) as isize; // Treat as signed increment
     let current_brk = task.get_brk();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Handle increment of 0 (query current brk)
     if increment == 0 {
@@ -316,7 +318,7 @@ pub fn sys_sbrk(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_brk(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let new_brk = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // If new_brk is 0, just return current brk (query current brk)
     if new_brk == 0 {
@@ -375,13 +377,13 @@ pub fn sys_getpid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     // Return TGID for Linux semantics; fallback to Task ID if unset
     let tgid = _abi.thread_state().tgid;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     if tgid != 0 { tgid } else { task.get_id() }
 }
 
 pub fn sys_getppid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     task.get_parent_id().unwrap_or(1) // Return parent PID or 1 if none
 }
 
@@ -389,7 +391,7 @@ pub fn sys_getppid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns the calling thread ID (TID). For now, this equals Scarlet Task ID.
 pub fn sys_gettid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     task.get_id()
 }
 
@@ -413,7 +415,7 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _arg4 = trapframe.get_arg(3);
     let _arg5 = trapframe.get_arg(4);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     crate::println!(
         "[stub] sys_prctl: option={}, arg2={:#x}, arg3={:#x}, arg4={:#x}, arg5={:#x}",
@@ -434,7 +436,7 @@ pub fn sys_setpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
     let pgid = trapframe.get_arg(1);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -486,7 +488,7 @@ pub fn sys_setpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_getpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -510,7 +512,7 @@ pub fn sys_getpgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_getsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let caller = mytask().unwrap();
     let pid = trapframe.get_arg(0);
-    trapframe.increment_pc_next(caller);
+    trapframe.increment_pc_next(&caller);
 
     let namespace = caller.get_namespace();
     let target_global_id = if pid == 0 {
@@ -533,7 +535,7 @@ pub fn sys_getsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_setsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     match task.create_session() {
         Ok(session_id) => task
@@ -551,7 +553,7 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _new_rlim_ptr = trapframe.get_arg(2);
     let old_rlim_ptr = trapframe.get_arg(3);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // If old_rlim is requested, write some reasonable default values
     if old_rlim_ptr != 0 {
@@ -594,7 +596,7 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let info_ptr = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if info_ptr == 0 {
         return errno::to_result(errno::EFAULT);
@@ -631,14 +633,14 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0 // Return 0 for the root user (UID 0)
 }
 
 pub fn sys_geteuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0 // Return 0 for the root user (EUID 0)
 }
@@ -649,7 +651,7 @@ pub fn sys_getresuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let euid_ptr = trapframe.get_arg(1);
     let suid_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     for ptr in [ruid_ptr, euid_ptr, suid_ptr] {
         if ptr == 0 {
@@ -669,7 +671,7 @@ pub fn sys_getresuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0 // Return 0 for the root group (GID 0)
 }
@@ -680,7 +682,7 @@ pub fn sys_getresgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let egid_ptr = trapframe.get_arg(1);
     let sgid_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     for ptr in [rgid_ptr, egid_ptr, sgid_ptr] {
         if ptr == 0 {
@@ -700,7 +702,7 @@ pub fn sys_getresgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getegid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0 // Return 0 for the root group (EGID 0)
 }
@@ -786,7 +788,7 @@ pub fn sys_uname(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let buf_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Translate user space pointer
     let buf_vaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
@@ -871,7 +873,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         state.pending_clone_is_thread = (flags & CLONE_THREAD) != 0;
     }
 
-    trapframe.increment_pc_next(parent_task);
+    trapframe.increment_pc_next(&parent_task);
     parent_task.vcpu.lock().store(trapframe);
 
     // Map Linux clone flags to Scarlet CloneFlags
@@ -911,7 +913,19 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             // Register first, complete clone metadata/TID writes, then enqueue.
             // A remote CPU may run the child immediately after enqueue via IPI.
-            let child_id = crate::sched::scheduler::register_task(child_task);
+            let child_id = match crate::sched::scheduler::try_register_task(child_task) {
+                Ok(child_id) => child_id,
+                Err(error) => {
+                    crate::println!(
+                        "[linux clone] registration failed: parent={} flags={:#x} reason={}",
+                        parent_id,
+                        flags,
+                        error
+                    );
+                    abi.thread_state_mut().pending_clone_is_thread = false;
+                    return usize::MAX;
+                }
+            };
 
             // Establish parent-child relationship now that both have valid IDs
             if let Some(child) = get_task_by_id(child_id) {
@@ -955,7 +969,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             crate::sched::scheduler::enqueue_task(child_id, cpu_id);
 
             if let Some(waker) = vfork_waker {
-                waker.wait(parent_id, trapframe);
+                waker.wait_owned(parent_id, trapframe);
             }
 
             child_id
@@ -986,7 +1000,7 @@ pub fn sys_setgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _gid = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Always succeed - group ID is ignored in this stub
     0
@@ -1010,7 +1024,7 @@ pub fn sys_setuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _uid = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Always succeed - user ID is ignored in this stub
     0
@@ -1058,9 +1072,9 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
 
     // Linux lets any thread in a thread group wait for children of the process.
-    let waitable_children = waitable_children_for_thread_group(task);
+    let waitable_children = waitable_children_for_thread_group(&task);
     if waitable_children.is_empty() {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return usize::MAX - 9; // -ECHILD (no child processes)
     }
 
@@ -1070,8 +1084,8 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     loop {
         if pid == -1 {
             // Wait for any child process
-            for child_pid in waitable_children_for_thread_group(task) {
-                let Some(owner) = wait_owner_for_child(task, child_pid) else {
+            for child_pid in waitable_children_for_thread_group(&task) {
+                let Some(owner) = wait_owner_for_child(&task, child_pid) else {
                     continue;
                 };
                 match owner.wait(child_pid) {
@@ -1087,12 +1101,12 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                                 }
                                 None => {
                                     // Invalid address, return EFAULT
-                                    trapframe.increment_pc_next(task);
+                                    trapframe.increment_pc_next(&task);
                                     return usize::MAX - 13; // -EFAULT
                                 }
                             }
                         }
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return child_pid;
                     }
                     Err(error) => {
@@ -1117,7 +1131,7 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait(task.get_id(), trapframe);
+            parent_waker.wait_owned(task.get_id(), trapframe);
             // Woken by child exit; re-check children.
             // Continue the loop to re-check after waking up
             continue;
@@ -1126,8 +1140,8 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let child_pid = pid as usize;
 
             // Check if this is actually our child
-            let Some(owner) = wait_owner_for_child(task, child_pid) else {
-                trapframe.increment_pc_next(task);
+            let Some(owner) = wait_owner_for_child(&task, child_pid) else {
+                trapframe.increment_pc_next(&task);
                 return usize::MAX - 9; // -ECHILD (not our child)
             };
 
@@ -1144,29 +1158,29 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             }
                             None => {
                                 // Invalid address, return EFAULT
-                                trapframe.increment_pc_next(task);
+                                trapframe.increment_pc_next(&task);
                                 return usize::MAX - 13; // -EFAULT
                             }
                         }
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return child_pid;
                 }
                 Err(error) => {
                     match error {
                         WaitError::NoSuchChild(_) => {
-                            trapframe.increment_pc_next(task);
+                            trapframe.increment_pc_next(&task);
                             return usize::MAX - 9; // -ECHILD
                         }
                         WaitError::ChildTaskNotFound(_) => {
-                            trapframe.increment_pc_next(task);
+                            trapframe.increment_pc_next(&task);
                             return usize::MAX - 9; // -ECHILD
                         }
                         WaitError::ChildNotExited(_) => {
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
-                            child_waker.wait(task.get_id(), trapframe);
+                            child_waker.wait_owned(task.get_id(), trapframe);
                             // Woken by specific child exit; re-check.
                             // Continue the loop to re-check after waking up
                             continue;
@@ -1176,7 +1190,7 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         } else {
             // pid <= 0 && pid != -1: wait for process group (not implemented)
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX - 37; // -ENOSYS (function not implemented)
         }
     }
@@ -1251,7 +1265,7 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _rusage = trapframe.get_arg(4);
 
     if options & WEXITED == 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EINVAL);
     }
 
@@ -1261,9 +1275,9 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     loop {
         match idtype {
             P_ALL => {
-                let children = waitable_children_for_thread_group(task);
+                let children = waitable_children_for_thread_group(&task);
                 if children.is_empty() {
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::ECHILD);
                 }
 
@@ -1276,68 +1290,68 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
 
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(task, infop, child_pid, status) {
-                        trapframe.increment_pc_next(task);
+                    if let Err(err) = write_waitid_siginfo(&task, infop, child_pid, status) {
+                        trapframe.increment_pc_next(&task);
                         return err;
                     }
                     if !nowait {
-                        if let Some(owner) = wait_owner_for_child(task, child_pid) {
+                        if let Some(owner) = wait_owner_for_child(&task, child_pid) {
                             let _ = owner.wait(child_pid);
                         }
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return 0;
                 }
 
                 if nohang {
-                    if let Err(err) = clear_waitid_siginfo(task, infop) {
-                        trapframe.increment_pc_next(task);
+                    if let Err(err) = clear_waitid_siginfo(&task, infop) {
+                        trapframe.increment_pc_next(&task);
                         return err;
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return 0;
                 }
 
-                get_parent_waitpid_waker(task.get_id()).wait(task.get_id(), trapframe);
+                get_parent_waitpid_waker(task.get_id()).wait_owned(task.get_id(), trapframe);
             }
             P_PID => {
                 let child_pid = id;
-                let Some(owner) = wait_owner_for_child(task, child_pid) else {
-                    trapframe.increment_pc_next(task);
+                let Some(owner) = wait_owner_for_child(&task, child_pid) else {
+                    trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::ECHILD);
                 };
 
                 let Some(child_task) = get_task_by_id(child_pid) else {
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::ECHILD);
                 };
 
                 if child_task.get_state() == TaskState::Zombie {
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(task, infop, child_pid, status) {
-                        trapframe.increment_pc_next(task);
+                    if let Err(err) = write_waitid_siginfo(&task, infop, child_pid, status) {
+                        trapframe.increment_pc_next(&task);
                         return err;
                     }
                     if !nowait {
                         let _ = owner.wait(child_pid);
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return 0;
                 }
 
                 if nohang {
-                    if let Err(err) = clear_waitid_siginfo(task, infop) {
-                        trapframe.increment_pc_next(task);
+                    if let Err(err) = clear_waitid_siginfo(&task, infop) {
+                        trapframe.increment_pc_next(&task);
                         return err;
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return 0;
                 }
 
-                get_waitpid_waker(child_pid).wait(task.get_id(), trapframe);
+                get_waitpid_waker(child_pid).wait_owned(task.get_id(), trapframe);
             }
             _ => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return errno::to_result(errno::ENOSYS);
             }
         }
@@ -1374,7 +1388,7 @@ pub fn sys_membarrier(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _cpu_id = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Issue a memory fence to ensure all memory operations are visible
     // This is a basic implementation - real membarrier has multiple modes
@@ -1411,7 +1425,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     let flags = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse flags (Linux memfd_create flags)
     const MFD_CLOEXEC: u32 = 0x0001;

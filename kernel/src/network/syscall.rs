@@ -124,7 +124,7 @@ fn read_user_string(ptr: usize, len: usize) -> Option<String> {
     }
     let mut bytes = Vec::with_capacity(len);
     bytes.resize(len, 0);
-    if copy_from_user(task, ptr, &mut bytes).is_err() {
+    if copy_from_user(&task, ptr, &mut bytes).is_err() {
         return None;
     }
     String::from_utf8(bytes).ok()
@@ -133,7 +133,7 @@ fn read_user_string(ptr: usize, len: usize) -> Option<String> {
 fn read_user_ipv4(ptr: usize) -> Option<Ipv4Address> {
     let task = mytask()?;
     let mut bytes = [0u8; 4];
-    if copy_from_user(task, ptr, &mut bytes).is_err() {
+    if copy_from_user(&task, ptr, &mut bytes).is_err() {
         None
     } else {
         Some(Ipv4Address::from_bytes(bytes))
@@ -145,11 +145,11 @@ pub fn sys_network_set_ipv4(tf: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let req_ptr = tf.get_arg(0);
     let mut req_bytes = [0u8; core::mem::size_of::<NetworkSetIpv4Request>()];
-    if copy_from_user(task, req_ptr, &mut req_bytes).is_err() {
+    if copy_from_user(&task, req_ptr, &mut req_bytes).is_err() {
         return usize::MAX;
     }
     let req =
@@ -178,7 +178,7 @@ pub fn sys_network_set_gateway(tf: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let addr_ptr = tf.get_arg(0);
     let gateway = match read_user_ipv4(addr_ptr) {
@@ -194,7 +194,7 @@ pub fn sys_network_set_netmask(tf: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let addr_ptr = tf.get_arg(0);
     let mask = match read_user_ipv4(addr_ptr) {
@@ -213,7 +213,7 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let status_ptr = tf.get_arg(0);
     let interfaces_ptr = tf.get_arg(1);
@@ -267,7 +267,7 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
             core::mem::size_of::<NetworkStatus>(),
         )
     };
-    if copy_to_user(task, status_ptr, status_bytes).is_err() {
+    if copy_to_user(&task, status_ptr, status_bytes).is_err() {
         return usize::MAX;
     }
 
@@ -280,7 +280,7 @@ pub fn sys_network_list_interfaces(tf: &mut Trapframe) -> usize {
                     item_size,
                 )
             };
-            if copy_to_user(task, interfaces_ptr + idx * item_size, info_bytes).is_err() {
+            if copy_to_user(&task, interfaces_ptr + idx * item_size, info_bytes).is_err() {
                 return usize::MAX;
             }
         }
@@ -314,7 +314,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let domain = tf.get_arg(0) as u32;
     let socket_type = tf.get_arg(1) as u32;
@@ -448,7 +448,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let path_ptr = tf.get_arg(1);
@@ -462,7 +462,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
 
     if path_len == core::mem::size_of::<Inet4SocketAddress>() {
         let mut addr_bytes = [0u8; core::mem::size_of::<Inet4SocketAddress>()];
-        if copy_from_user(task, path_ptr, &mut addr_bytes).is_err() {
+        if copy_from_user(&task, path_ptr, &mut addr_bytes).is_err() {
             return usize::MAX;
         }
         let addr =
@@ -474,7 +474,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     }
 
     let mut path_bytes = vec![0u8; path_len.min(108)];
-    if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
+    if copy_from_user(&task, path_ptr, &mut path_bytes).is_err() {
         return usize::MAX;
     }
     let (local_addr, registry_name, is_abstract) =
@@ -568,7 +568,7 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let backlog = tf.get_arg(1);
@@ -626,7 +626,7 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let path_ptr = tf.get_arg(1);
@@ -644,7 +644,7 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
 
     if path_len == core::mem::size_of::<Inet4SocketAddress>() {
         let mut addr_bytes = [0u8; core::mem::size_of::<Inet4SocketAddress>()];
-        if copy_from_user(task, path_ptr, &mut addr_bytes).is_err() {
+        if copy_from_user(&task, path_ptr, &mut addr_bytes).is_err() {
             return usize::MAX;
         }
         let addr =
@@ -656,7 +656,7 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
     }
 
     let mut path_bytes = vec![0u8; path_len.min(108)];
-    if copy_from_user(task, path_ptr, &mut path_bytes).is_err() {
+    if copy_from_user(&task, path_ptr, &mut path_bytes).is_err() {
         return usize::MAX;
     }
     let (peer_addr, _, _) = match local_socket_address_from_user_bytes(&path_bytes) {
@@ -699,7 +699,7 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
 
@@ -780,7 +780,7 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let array_ptr = tf.get_arg(0);
 
@@ -824,7 +824,7 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
     let second = handle2.to_le_bytes();
     out[..core::mem::size_of::<usize>()].copy_from_slice(&first);
     out[core::mem::size_of::<usize>()..].copy_from_slice(&second);
-    if copy_to_user(task, array_ptr, &out).is_err() {
+    if copy_to_user(&task, array_ptr, &out).is_err() {
         let _ = task.handle_table.remove(handle1 as u32);
         let _ = task.handle_table.remove(handle2 as u32);
         return usize::MAX;
@@ -858,7 +858,7 @@ pub fn sys_socket_shutdown(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let how_value = tf.get_arg(1);
@@ -917,7 +917,7 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let buf_ptr = tf.get_arg(1);
@@ -940,7 +940,7 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
     // Receive datagram
     match socket.recvfrom(&mut temp_buf, 0) {
         Ok((len, addr)) => {
-            if copy_to_user(task, buf_ptr, &temp_buf[..len]).is_err() {
+            if copy_to_user(&task, buf_ptr, &temp_buf[..len]).is_err() {
                 return usize::MAX;
             }
 
@@ -959,7 +959,7 @@ pub fn sys_socket_recvfrom(tf: &mut Trapframe) -> usize {
                             port_bytes[0],
                             port_bytes[1],
                         ];
-                        if copy_to_user(task, addr_ptr, &sockaddr).is_err() {
+                        if copy_to_user(&task, addr_ptr, &sockaddr).is_err() {
                             return usize::MAX;
                         }
                     }
@@ -1003,7 +1003,7 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    tf.increment_pc_next(task);
+    tf.increment_pc_next(&task);
 
     let handle_id = tf.get_arg(0) as u32;
     let buf_ptr = tf.get_arg(1);
@@ -1011,7 +1011,7 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     let addr_ptr = tf.get_arg(3);
 
     let mut data = vec![0u8; buf_len];
-    if copy_from_user(task, buf_ptr, &mut data).is_err() {
+    if copy_from_user(&task, buf_ptr, &mut data).is_err() {
         return usize::MAX;
     }
 
@@ -1028,7 +1028,7 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
     // Parse destination address
     let addr = if addr_ptr != 0 {
         let mut sockaddr = [0u8; 8];
-        if copy_from_user(task, addr_ptr, &mut sockaddr).is_err() {
+        if copy_from_user(&task, addr_ptr, &mut sockaddr).is_err() {
             return usize::MAX;
         }
         match sockaddr[0] {

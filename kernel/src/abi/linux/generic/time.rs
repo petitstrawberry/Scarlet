@@ -848,7 +848,7 @@ pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     let res_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // If res pointer is provided, write resolution
     if res_ptr != 0 {

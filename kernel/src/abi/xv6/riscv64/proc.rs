@@ -32,7 +32,7 @@ pub fn sys_fork(
 ) -> usize {
     let parent_task = mytask().unwrap();
 
-    trapframe.increment_pc_next(parent_task); /* Increment the program counter */
+    trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.lock().store(trapframe);
@@ -108,13 +108,13 @@ pub fn sys_wait(
                             *status_ptr = status;
                         }
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return child_pid;
                 }
                 Err(error) => match error {
                     WaitError::ChildNotExited(_) => continue,
                     _ => {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return usize::MAX;
                     }
                 },
@@ -123,7 +123,7 @@ pub fn sys_wait(
 
         // No child has exited yet, block until one does
         let parent_waker = get_parent_waitpid_waker(task.get_id());
-        parent_waker.wait(task.get_id(), trapframe);
+        parent_waker.wait_owned(task.get_id(), trapframe);
         // Continue the loop to re-check after waking up
         continue;
     }
@@ -137,7 +137,7 @@ pub fn sys_kill(
     let pid = trapframe.get_arg(0) as usize;
     let signal = trapframe.get_arg(1) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // For xv6 compatibility, only signal 9 (SIGKILL) is implemented for now
     if signal != 9 {
@@ -161,7 +161,7 @@ pub fn sys_sbrk(
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
@@ -173,7 +173,7 @@ pub fn sys_chdir(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -215,7 +215,7 @@ pub fn sys_getpid(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     // Return namespace-local ID (this is the PID visible to xv6 programs)
     task.get_namespace_id()
 }
@@ -228,7 +228,7 @@ pub fn sys_sleep(
     let task = mytask().unwrap();
 
     // Increment PC before sleeping to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Call the blocking sleep method - this will return when sleep completes
     task.sleep(trapframe, ticks);

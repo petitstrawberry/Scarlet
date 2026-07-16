@@ -107,8 +107,25 @@ impl TaskNamespace {
 
     /// Register an existing namespace-local ID mapping for a global task ID.
     pub fn register_mapping(&self, local_id: usize, global_task_id: usize) {
-        self.local_to_global.lock().insert(local_id, global_task_id);
-        self.global_to_local.lock().insert(global_task_id, local_id);
+        // Keep the two maps consistent under a single, documented lock order.
+        let mut local_to_global = self.local_to_global.lock();
+        let mut global_to_local = self.global_to_local.lock();
+        local_to_global.insert(local_id, global_task_id);
+        global_to_local.insert(global_task_id, local_id);
+    }
+
+    /// Remove the namespace-local and global mappings for a task.
+    ///
+    /// # Arguments
+    ///
+    /// * `global_task_id` - The global task identity to unregister.
+    pub fn unregister_mapping_for_global(&self, global_task_id: usize) {
+        // Match `register_mapping`'s local-to-global then global-to-local order.
+        let mut local_to_global = self.local_to_global.lock();
+        let mut global_to_local = self.global_to_local.lock();
+        if let Some(local_id) = global_to_local.remove(&global_task_id) {
+            local_to_global.remove(&local_id);
+        }
     }
 
     /// Resolve a namespace-local task ID to a global task ID.
@@ -214,5 +231,16 @@ mod tests {
 
         // Should return the same instance
         assert_eq!(Arc::as_ptr(root1), Arc::as_ptr(root2));
+    }
+
+    #[test_case]
+    fn test_unregister_mapping_removes_both_directions() {
+        let ns = TaskNamespace::new_root("test".to_string());
+        ns.register_mapping(7, 42);
+
+        ns.unregister_mapping_for_global(42);
+
+        assert_eq!(ns.resolve_global_id(7), None);
+        assert_eq!(ns.resolve_local_id(42), None);
     }
 }

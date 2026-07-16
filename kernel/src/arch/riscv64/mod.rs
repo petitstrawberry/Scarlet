@@ -181,34 +181,20 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // When an illegal-instruction trap is raised by a FP/Vector instruction,
     // the trap handler will mark the task as used and re-enable the extension.
     let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let (current_task_ptr, current_task_id, owner_task_ptr, owner_id, owner_dirty) = {
-        let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
-            return;
-        };
-        let Some(current_task_ptr) = get_task_by_id(current_task_id).map(|t| t as *const Task)
-        else {
-            return;
-        };
-
-        let owner_id = get_vector_owner(cpu_id);
-        let owner_dirty = get_vector_owner_dirty(cpu_id);
-        let owner_task_ptr =
-            if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-                get_task_by_id(owner_id).map(|t| t as *const Task)
-            } else {
-                None
-            };
-
-        (
-            current_task_ptr,
-            current_task_id,
-            owner_task_ptr,
-            owner_id,
-            owner_dirty,
-        )
+    let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
+        return;
+    };
+    let Some(task) = get_task_by_id(current_task_id) else {
+        return;
     };
 
-    let task = unsafe { &*current_task_ptr };
+    let owner_id = get_vector_owner(cpu_id);
+    let owner_dirty = get_vector_owner_dirty(cpu_id);
+    let owner_task = if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
+        get_task_by_id(owner_id)
+    } else {
+        None
+    };
 
     if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
@@ -229,8 +215,7 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // If another task currently owns the live vregs and its live state hasn't
     // been saved, save it now before we clobber vregs with our restore.
     if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-        if let Some(owner_ptr) = owner_task_ptr {
-            let owner_task = unsafe { &*owner_ptr };
+        if let Some(owner_task) = owner_task {
             if owner_task.vcpu.lock().vector.is_none() {
                 owner_task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
                     crate::arch::riscv64::fpu::VectorContext::new(),

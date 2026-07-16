@@ -369,7 +369,7 @@ impl DisplayCharDevice {
                     core::mem::size_of::<DisplayPresentBuffer>(),
                 )
             };
-            copy_from_user(task, arg, bytes)
+            copy_from_user(&task, arg, bytes)
                 .map_err(|_| "Failed to copy display present from user")?;
             // SAFETY: copy_from_user initialized every byte of the request.
             unsafe { request.assume_init() }
@@ -397,7 +397,7 @@ impl DisplayCharDevice {
         let mut damage_bytes = vec![0u8; damage_bytes_len];
         if damage_count != 0 {
             let task = crate::task::mytask().ok_or("Display present has no current task")?;
-            copy_from_user(task, request.damage_ptr, &mut damage_bytes)
+            copy_from_user(&task, request.damage_ptr, &mut damage_bytes)
                 .map_err(|_| "Failed to copy display damage from user")?;
         }
 

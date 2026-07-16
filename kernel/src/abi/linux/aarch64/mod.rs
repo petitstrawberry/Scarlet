@@ -115,7 +115,7 @@ impl AbiModule for LinuxAarch64Abi {
     fn handle_event(
         &mut self,
         event: crate::ipc::Event,
-        target_task_id: u32,
+        target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         generic::signal::handle_event_for_task(
             &self.0,

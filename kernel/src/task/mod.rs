@@ -14,7 +14,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{cell::UnsafeCell, sync::atomic};
+use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic};
 use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
@@ -40,8 +40,9 @@ use crate::{
         handle::HandleTable,
     },
     sched::scheduler::{
-        cleanup_zombie, current_task, finalize_zombie, get_all_task_ids, get_task_by_id,
-        remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
+        cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
+        get_all_task_ids, get_task_by_id, remove_from_ready_queues, schedule, setup_task_execution,
+        unmark_blocked,
     },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
@@ -152,22 +153,22 @@ pub struct CpuUsageInfo {
 }
 
 /// Global registry of task-specific wakers for waitpid
-static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Note: task ID counters live in `TaskPool` for better ID management,
-/// including recycling of freed task IDs.
+/// with stable, never-reused global task IDs.
 ///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Initialize the waitpid wakers registry
-fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
     Mutex::new(BTreeMap::new())
 }
 
 /// Initialize the parent waitpid waker registry
-fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
     Mutex::new(BTreeMap::new())
 }
 
@@ -183,22 +184,15 @@ fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 ///
 /// # Returns
 ///
-/// A reference to the waker for the specified task
-pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
+/// An owned reference to the waker for the specified task
+pub fn get_waitpid_waker(task_id: usize) -> Arc<Waker> {
     let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
-    if !wakers.contains_key(&task_id) {
-        let waker_name = alloc::format!("task_{}", task_id);
-        // We need to create a static string for the waker name
-        let static_name = Box::leak(waker_name.into_boxed_str());
-        wakers.insert(task_id, Waker::new_interruptible(static_name));
-    }
-    // This is safe because we know the waker exists and won't be removed
-    // until the task is cleaned up
-    unsafe {
-        let waker_ptr = wakers.get(&task_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+    Arc::clone(
+        wakers
+            .entry(task_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-task"))),
+    )
 }
 
 // pub fn get_select_waker(...) was removed; use object-level Selectable::wait_until_ready
@@ -215,25 +209,15 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
 ///
 /// # Returns
 ///
-/// A reference to the parent waker
-pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
+/// An owned reference to the parent waker
+pub fn get_parent_waitpid_waker(parent_id: usize) -> Arc<Waker> {
     let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
-
-    // Create a new waker if it doesn't exist
-    if !wakers.contains_key(&parent_id) {
-        let waker_name = alloc::format!("parent_waker_{}", parent_id);
-        // We need to leak the string to make it 'static
-        let static_name = alloc::boxed::Box::leak(waker_name.into_boxed_str());
-        wakers.insert(parent_id, Waker::new_interruptible(static_name));
-    }
-
-    // Return a reference to the waker
-    // This is safe because the BTreeMap is never dropped and the Waker is never moved
-    unsafe {
-        let waker_ptr = wakers.get(&parent_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+    Arc::clone(
+        wakers
+            .entry(parent_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-parent"))),
+    )
 }
 
 /// Wake up any processes waiting for a specific task
@@ -245,11 +229,7 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
 ///
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&task_id) {
-        waker.wake_all();
-    }
+    get_waitpid_waker(task_id).wake_all();
 }
 
 /// Wake up a parent process waiting for any child (waitpid(-1))
@@ -260,11 +240,7 @@ pub fn wake_task_waiters(task_id: usize) {
 ///
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&parent_id) {
-        waker.wake_all();
-    }
+    get_parent_waitpid_waker(parent_id).wake_all();
 }
 
 /// Clean up the waker for a specific task
@@ -618,6 +594,64 @@ pub struct Task {
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag
     pub events_enabled: Mutex<bool>,
+}
+
+/// A non-owning reference to the task executing on the current CPU.
+///
+/// Unlike an [`Arc<Task>`], this guard does not increase the task's strong
+/// count. It is therefore safe to leave on a suspended kernel stack: when an
+/// exiting task never resumes that stack, the guard cannot keep the task or its
+/// kernel stack window alive.
+///
+/// The scheduler constructs this guard only for the CPU executing the task and
+/// only after checking that `Task::running_cpu` belongs to that CPU. A task
+/// with a running-CPU owner cannot be removed from `TaskPool`; removal requires
+/// both `TaskState::Terminated` and `running_cpu == NO_CPU`. Consequently the
+/// pool's registered owner keeps the pointed-to `Task` alive while this CPU is
+/// executing it. The guard is deliberately neither `Clone` nor `Copy`, and is
+/// not `Send` or `Sync`, so it cannot be promoted into a general-purpose task
+/// handle. Use `get_task_by_id()` for an owned handle to an arbitrary task.
+#[must_use = "current-task guards must be kept while accessing the current task"]
+pub struct CurrentTaskRef {
+    task: NonNull<Task>,
+    _not_send_or_sync: PhantomData<*mut ()>,
+}
+
+impl CurrentTaskRef {
+    /// Create a current-task guard after the scheduler has checked local CPU
+    /// ownership.
+    pub(crate) fn from_running_task(task: &Task, cpu_id: usize) -> Option<Self> {
+        if get_cpu().get_cpuid() != cpu_id || task.running_cpu.load(Ordering::SeqCst) != cpu_id {
+            return None;
+        }
+
+        Some(Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_mock_task(task: &Task) -> Self {
+        Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl Deref for CurrentTaskRef {
+    type Target = Task;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The scheduler creates this guard only for the task owned by
+        // the executing CPU. Its `running_cpu` token prevents TaskPool removal,
+        // which additionally requires `Terminated && running_cpu == NO_CPU`.
+        // Test guards point into MOCK_CURRENT_TASK, which keeps an owning Arc
+        // alive for the guard's use. The raw pointer is private and the guard
+        // cannot be cloned or sent to another CPU.
+        unsafe { self.task.as_ref() }
+    }
 }
 
 pub enum CloneFlagsDef {
@@ -1249,12 +1283,15 @@ impl Task {
     /// # Arguments
     /// * `ns` - New namespace for the task
     pub fn set_namespace(&self, ns: Arc<namespace::TaskNamespace>) {
-        *self.namespace.write() = ns;
-        // Allocate a new namespace-local ID (and register translation mapping)
-        self.namespace_id.store(
-            self.namespace.write().allocate_task_id_for(self.id),
-            atomic::Ordering::SeqCst,
-        );
+        let previous_namespace = {
+            let mut namespace = self.namespace.write();
+            core::mem::replace(&mut *namespace, ns.clone())
+        };
+        if self.id != 0 {
+            previous_namespace.unregister_mapping_for_global(self.id);
+            self.namespace_id
+                .store(ns.allocate_task_id_for(self.id), atomic::Ordering::SeqCst);
+        }
     }
 
     /// Get the Thread Group ID (TGID)
@@ -1714,7 +1751,7 @@ impl Task {
         self.parent_id.store(0, Ordering::SeqCst);
     }
 
-    fn orphan_reaper(&self) -> Option<&'static Task> {
+    fn orphan_reaper(&self) -> Option<Arc<Task>> {
         if self.thread_group_id != self.id
             && let Some(leader) = get_task_by_id(self.thread_group_id)
             && !matches!(
@@ -1753,7 +1790,7 @@ impl Task {
                 continue;
             }
 
-            if let Some(reaper) = reaper {
+            if let Some(reaper) = &reaper {
                 child.set_parent_id(reaper.get_id());
                 reaper.add_child(child_id);
                 if child.get_state() == TaskState::Zombie {
@@ -2342,6 +2379,24 @@ impl Task {
         }
     }
 
+    fn exit_non_current_thread_group_member(&self, status: i32, waitable: bool) {
+        self.handle_table.close_all();
+        self.clear_process_control_stopped();
+        self.reparent_children();
+        self.set_exit_status(status);
+
+        let has_parent = self
+            .get_parent_id()
+            .is_some_and(|parent_id| get_task_by_id(parent_id).is_some());
+        let state = if waitable && has_parent {
+            TaskState::Zombie
+        } else {
+            TaskState::Terminated
+        };
+        self.state.store(state, Ordering::SeqCst);
+        complete_non_current_task_exit(self.id);
+    }
+
     /// Exit all tasks in the thread group
     ///
     /// This terminates all tasks with the same TGID (thread group).
@@ -2358,6 +2413,7 @@ impl Task {
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
         let leader_id = thread_group_id;
+        let is_current = mytask().is_some_and(|task| task.get_id() == my_id);
 
         // The process is exiting, so shared file tables must be closed even
         // while sibling Task objects still hold HandleTable Arc references.
@@ -2378,13 +2434,10 @@ impl Task {
                 if task.get_thread_group_id() == thread_group_id {
                     if task_id == leader_id {
                         leader_finalized = true;
-                        remove_from_ready_queues(task_id);
-                        unmark_blocked(task_id);
-                        task.exit(status);
+                        task.exit_non_current_thread_group_member(status, true);
                         continue;
                     }
 
-                    task.reparent_children();
                     if LOG_EXIT_GROUP_SIBLINGS {
                         crate::println!(
                             "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
@@ -2393,26 +2446,17 @@ impl Task {
                             thread_group_id
                         );
                     }
-                    // Set state to Terminated directly (bypass normal exit)
-                    // Use unsafe to modify state through immutable reference
-                    // This is safe because we are in a termination context
-                    let task_ptr = task as *const Task as *mut Task;
-                    unsafe {
-                        (*task_ptr)
-                            .state
-                            .store(TaskState::Terminated, Ordering::SeqCst);
-                        (*task_ptr).exit_status.store(status, Ordering::SeqCst);
-                        // Close handles to prevent resource leaks
-                        (*task_ptr).handle_table.close_all();
-                    }
-                    remove_from_ready_queues(task_id);
-                    unmark_blocked(task_id);
+                    task.exit_non_current_thread_group_member(status, false);
                 }
             }
         }
 
         if my_id == leader_id {
-            self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
+            if is_current {
+                self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
+            } else {
+                self.exit_non_current_thread_group_member(status, true);
+            }
             return;
         }
 
@@ -2424,9 +2468,12 @@ impl Task {
                 TaskState::Zombie | TaskState::Terminated
             )
         {
-            remove_from_ready_queues(leader_id);
-            unmark_blocked(leader_id);
-            leader.exit(status);
+            leader.exit_non_current_thread_group_member(status, true);
+        }
+
+        if !is_current {
+            self.exit_non_current_thread_group_member(status, false);
+            return;
         }
 
         self.clear_process_control_stopped();
@@ -2438,10 +2485,8 @@ impl Task {
         remove_from_ready_queues(my_id);
         unmark_blocked(my_id);
 
-        if mytask().is_some_and(|task| task.get_id() == self.id) {
-            if let Some(current_task) = mytask() {
-                schedule(current_task.get_trapframe());
-            }
+        if let Some(current_task) = mytask() {
+            schedule(current_task.get_trapframe());
         }
     }
 
@@ -2573,7 +2618,7 @@ impl Task {
         }
 
         // Delegate to ABI module for event processing
-        self.with_default_abi_mut(|abi, _| {
+        let outcome = self.with_default_abi_mut(|abi, _| {
             const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
             let mut processed_count = 0;
 
@@ -2592,12 +2637,12 @@ impl Task {
                         let is_critical = self.is_critical_event(&event);
 
                         // Let ABI handle the event
-                        let outcome = abi.handle_event(event, self.id as u32)?;
+                        let outcome = abi.handle_event(event, self.id)?;
                         match outcome {
                             EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
                             EventProcessOutcome::UserHandlerArmed
                             | EventProcessOutcome::NeedReschedule
-                            | EventProcessOutcome::Exited => return Ok(outcome),
+                            | EventProcessOutcome::Exited(_) => return Ok(outcome),
                         }
 
                         // Check if events were disabled during handling
@@ -2627,7 +2672,15 @@ impl Task {
             }
 
             Ok(EventProcessOutcome::Continue)
-        })
+        })?;
+
+        if let EventProcessOutcome::Exited(status) = outcome {
+            // `with_default_abi_mut` has returned, so `exit_group` can safely
+            // re-enter ABI exit hooks without recursive mutable borrowing.
+            self.exit_group(status);
+        }
+
+        Ok(outcome)
     }
 
     /// Check if an event is critical and should be processed immediately
@@ -2776,7 +2829,7 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
 }
 
 #[cfg(test)]
-static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+static MOCK_CURRENT_TASK: Mutex<Option<Arc<Task>>> = Mutex::new(None);
 
 #[cfg(test)]
 /// Set a mock current task for testing purposes
@@ -2787,38 +2840,31 @@ static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
 /// # Arguments
 /// * `task` - The task to return from mytask()
 ///
-/// # Safety
-/// The caller must ensure the task pointer remains valid for the duration
-/// of the test and that clear_mock_current_task() is called when done.
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn set_mock_current_task(task: &'static mut Task) {
-    unsafe {
-        MOCK_CURRENT_TASK = Some(task as *mut Task);
-    }
+pub fn set_mock_current_task(task: Arc<Task>) {
+    *MOCK_CURRENT_TASK.lock() = Some(task);
 }
 
 #[cfg(test)]
 /// Clear the mock current task, reverting to normal scheduler behavior
 ///
-/// # Safety
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn clear_mock_current_task() {
-    unsafe {
-        MOCK_CURRENT_TASK = None;
-    }
+pub fn clear_mock_current_task() {
+    *MOCK_CURRENT_TASK.lock() = None;
 }
 
-/// Get the current task.
+/// Get a non-owning guard for the current task.
 ///
 /// # Returns
 /// The current task if it exists.
-pub fn mytask() -> Option<&'static Task> {
+pub fn mytask() -> Option<CurrentTaskRef> {
     #[cfg(test)]
     {
-        unsafe {
-            if let Some(task_ptr) = MOCK_CURRENT_TASK {
-                return Some(&*task_ptr);
-            }
+        if let Some(task) = MOCK_CURRENT_TASK.lock().as_ref() {
+            // MOCK_CURRENT_TASK retains the owning Arc for the entire guard
+            // lifetime in tests, matching the scheduler pool ownership used in
+            // normal kernel execution without cloning the Arc here.
+            return Some(CurrentTaskRef::from_mock_task(task));
         }
     }
 
@@ -2898,7 +2944,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
                 current_task.name.read().as_str(),
             );
         }
-        setup_task_execution(cpu, current_task);
+        setup_task_execution(cpu, &current_task);
         arch_switch_to_user(current_task.get_trapframe());
     }
 
@@ -2913,7 +2959,9 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::INIT_TASK_ID;
+    use super::{
+        INIT_TASK_ID, Task, TaskType, clear_mock_current_task, mytask, set_mock_current_task,
+    };
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
     };
@@ -2941,6 +2989,55 @@ mod tests {
         fn on_unmapped(&self, _vaddr: usize, _length: usize) {
             self.mappings.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    #[test_case]
+    fn test_mytask_guard_does_not_clone_mock_arc() {
+        clear_mock_current_task();
+        let task = Arc::new(Task::new(
+            "CurrentTaskRefMock".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        set_mock_current_task(task.clone());
+        let strong_count = Arc::strong_count(&task);
+
+        let current_task = mytask().expect("mock current task must be available");
+        assert_eq!(current_task.get_id(), task.get_id());
+        assert_eq!(Arc::strong_count(&task), strong_count);
+
+        drop(current_task);
+        assert_eq!(Arc::strong_count(&task), strong_count);
+        clear_mock_current_task();
+        assert_eq!(Arc::strong_count(&task), 1);
+    }
+
+    #[test_case]
+    fn test_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let task_id = usize::MAX - 1024;
+        super::cleanup_task_waker(task_id);
+
+        super::wake_task_waiters(task_id);
+        let waker = super::get_waitpid_waker(task_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_task_waker(task_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
+    }
+
+    #[test_case]
+    fn test_parent_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let parent_id = usize::MAX - 1025;
+        super::cleanup_parent_waker(parent_id);
+
+        super::wake_parent_waiters(parent_id);
+        let waker = super::get_parent_waitpid_waker(parent_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_parent_waker(parent_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
     }
 
     #[test_case]
@@ -3205,6 +3302,7 @@ mod tests {
         let leader = get_task_by_id(leader_id).unwrap();
         assert_eq!(leader.get_state(), TaskState::Zombie);
         assert_eq!(worker.get_state(), TaskState::Terminated);
+        assert!(get_task_by_id(worker_id).is_none());
 
         match parent.wait(leader_id) {
             Ok(status) => assert_eq!(status, 130),

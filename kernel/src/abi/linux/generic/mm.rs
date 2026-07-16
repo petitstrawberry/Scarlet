@@ -37,7 +37,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(4) as isize;
     let offset = trapframe.get_arg(5);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Input validation
     if length == 0 {
@@ -53,7 +53,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if fd != -1 {
             return to_result(errno::EINVAL);
         }
-        let result = handle_anonymous_mapping(task, addr, aligned_length, num_pages, prot, flags);
+        let result = handle_anonymous_mapping(&task, addr, aligned_length, num_pages, prot, flags);
         return result;
     }
 
@@ -81,7 +81,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // compat layer instead.
     #[cfg(feature = "hypervisor")]
     if let Some(vcpu) = kernel_obj.as_hypervisor_vcpu() {
-        return handle_kvm_vcpu_mmap(task, vcpu, addr, aligned_length, prot, flags);
+        return handle_kvm_vcpu_mmap(&task, vcpu, addr, aligned_length, prot, flags);
     }
 
     // Check if object supports MemoryMappingOps
@@ -201,7 +201,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
         for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(task, &removed_map);
+            reclaim_private_removed_mapping(&task, &removed_map);
         }
 
         memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
@@ -278,7 +278,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             if let Some(removed_mappings) = removed_mappings_opt {
                 for removed_map in removed_mappings {
-                    reclaim_private_removed_mapping(task, &removed_map);
+                    reclaim_private_removed_mapping(&task, &removed_map);
                 }
             }
 
@@ -405,7 +405,7 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1);
     let prot = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Input validation
     if length == 0 || addr % PAGE_SIZE != 0 {
@@ -483,7 +483,7 @@ pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _length = trapframe.get_arg(1);
     let _advice = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0
 }
@@ -529,9 +529,9 @@ pub fn sys_msync(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1);
     let _flags = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    if length != 0 && !user_range_is_mapped(task, addr, length) {
+    if length != 0 && !user_range_is_mapped(&task, addr, length) {
         return to_result(errno::ENOMEM);
     }
 
@@ -552,9 +552,9 @@ pub fn sys_mlock(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    if length != 0 && !user_range_is_mapped(task, addr, length) {
+    if length != 0 && !user_range_is_mapped(&task, addr, length) {
         return to_result(errno::ENOMEM);
     }
 
@@ -574,9 +574,9 @@ pub fn sys_munlock(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    if length != 0 && !user_range_is_mapped(task, addr, length) {
+    if length != 0 && !user_range_is_mapped(&task, addr, length) {
         return to_result(errno::ENOMEM);
     }
 
@@ -596,7 +596,7 @@ pub fn sys_mlockall(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let _flags = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0
 }
@@ -608,7 +608,7 @@ pub fn sys_munlockall(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     0
 }
@@ -627,7 +627,7 @@ pub fn sys_mincore(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1);
     let vec_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if addr % PAGE_SIZE != 0 {
         return to_result(errno::EINVAL);
@@ -635,7 +635,7 @@ pub fn sys_mincore(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if length == 0 {
         return 0;
     }
-    if !user_range_is_mapped(task, addr, length) {
+    if !user_range_is_mapped(&task, addr, length) {
         return to_result(errno::ENOMEM);
     }
 
@@ -672,7 +672,7 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let vaddr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Input validation
     if length == 0 || vaddr % PAGE_SIZE != 0 {
@@ -696,7 +696,7 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
 
-        reclaim_private_removed_mapping(task, removed_map);
+        reclaim_private_removed_mapping(&task, removed_map);
     }
 
     0
@@ -708,7 +708,7 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     to_result(errno::ENOSYS)
 }

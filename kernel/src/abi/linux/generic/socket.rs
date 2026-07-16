@@ -281,7 +281,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let set_cloexec = (socket_flags & SOCK_CLOEXEC) != 0;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
@@ -446,7 +446,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addrlen = trapframe.get_arg(2) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the file descriptor handle
     let handle_id = match abi.get_handle(sockfd as usize) {
@@ -606,7 +606,7 @@ pub fn sys_listen(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let backlog = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
@@ -661,7 +661,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
     let addrlen_ptr = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
@@ -707,7 +707,7 @@ fn accept_with_flags(abi: &mut LinuxAbi, trapframe: &mut Trapframe, flags: i32) 
         .unwrap_or(crate::network::SocketAddress::Local(
             crate::network::LocalSocketAddress::unnamed(),
         ));
-    if let Err(errno) = write_socket_address_to_user(task, addr_ptr, addrlen_ptr, peer_addr) {
+    if let Err(errno) = write_socket_address_to_user(&task, addr_ptr, addrlen_ptr, peer_addr) {
         return errno::to_result(errno);
     }
 
@@ -747,7 +747,7 @@ pub fn sys_accept4(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let supported = SOCK_CLOEXEC | SOCK_NONBLOCK;
     if (flags & !supported) != 0 {
         if let Some(task) = mytask() {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
         }
         return errno::to_result(errno::EINVAL);
     }
@@ -780,7 +780,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addrlen = trapframe.get_arg(2) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
@@ -881,7 +881,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addrlen_ptr = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
@@ -922,7 +922,7 @@ pub fn sys_getsockname(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    match write_socket_address_to_user(task, addr_ptr, addrlen_ptr, socket_addr) {
+    match write_socket_address_to_user(&task, addr_ptr, addrlen_ptr, socket_addr) {
         Ok(()) => 0,
         Err(errno) => errno::to_result(errno),
     }
@@ -951,7 +951,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let addrlen_ptr = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle_id = match abi.get_handle(sockfd as usize) {
         Some(h) => h,
@@ -992,7 +992,7 @@ pub fn sys_getpeername(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    match write_socket_address_to_user(task, addr_ptr, addrlen_ptr, socket_addr) {
+    match write_socket_address_to_user(&task, addr_ptr, addrlen_ptr, socket_addr) {
         Ok(()) => 0,
         Err(errno) => errno::to_result(errno),
     }
@@ -1028,7 +1028,7 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let optlen_ptr = trapframe.get_arg(4);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let (Some(optval_paddr), Some(optlen_paddr)) = (
         task.vm_manager.translate_to_kva(optval_ptr),
@@ -1056,7 +1056,7 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             uid: 0,
             gid: 0,
         };
-        if copy_to_user(task, optval_ptr, unsafe {
+        if copy_to_user(&task, optval_ptr, unsafe {
             core::slice::from_raw_parts(
                 (&cred as *const LinuxUcred).cast::<u8>(),
                 size_of::<LinuxUcred>(),
@@ -1112,7 +1112,7 @@ pub fn sys_setsockopt(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _optlen = trapframe.get_arg(4) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Mock implementation - always succeed
     0
@@ -1129,7 +1129,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let msg_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
@@ -1299,7 +1299,7 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         let mut buffer = Vec::new();
         buffer.resize(iovec.iov_len, 0);
-        if copy_from_user(task, iovec.iov_base as usize, &mut buffer).is_err() {
+        if copy_from_user(&task, iovec.iov_base as usize, &mut buffer).is_err() {
             crate::early_println!(
                 "[linux socket] sendmsg bad buf ptr {:x}",
                 iovec.iov_base as usize
@@ -1353,7 +1353,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     //     flags
     // );
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
@@ -1526,7 +1526,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let remaining = data.len() - data_offset;
             let to_copy = remaining.min(iovec.iov_len);
             if copy_to_user(
-                task,
+                &task,
                 iovec.iov_base as usize,
                 &data[data_offset..data_offset + to_copy],
             )
@@ -1549,7 +1549,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             match stream.read(&mut buffer) {
                 Ok(n) => {
-                    if copy_to_user(task, iovec.iov_base as usize, &buffer[..n]).is_err() {
+                    if copy_to_user(&task, iovec.iov_base as usize, &buffer[..n]).is_err() {
                         return errno::to_result(errno::EFAULT);
                     }
                     total_read = total_read.saturating_add(n);
@@ -1630,7 +1630,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let dest_addr_ptr = trapframe.get_arg(4);
     let addrlen = trapframe.get_arg(5) as u32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get socket handle
     let handle = match abi.get_handle(sockfd) {
@@ -1730,7 +1730,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let src_addr_ptr = trapframe.get_arg(4);
     let addrlen_ptr = trapframe.get_arg(5);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get socket handle
     let handle = match abi.get_handle(sockfd) {
@@ -1860,7 +1860,7 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _protocol = trapframe.get_arg(2) as i32;
     let sv_ptr = trapframe.get_arg(3);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate domain - socketpair only supports AF_UNIX
     if domain != AF_UNIX {
@@ -1975,7 +1975,7 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let sockfd = trapframe.get_arg(0);
     let how = trapframe.get_arg(1) as u32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get socket handle
     let handle = match abi.get_handle(sockfd) {

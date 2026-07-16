@@ -207,7 +207,7 @@ impl ScarletAbi {
     pub fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Linux-compatible behavior: write 0 to clear_child_tid and futex wake
         if let Some(ptr) = self.clear_child_tid_ptr {
-            let _ = copy_to_user(task, ptr, &0i32.to_ne_bytes());
+            let _ = copy_to_user(&task, ptr, &0i32.to_ne_bytes());
             // Note: Futex wake for clear_child_tid is handled by the Linux ABI's
             // on_task_exit implementation. For Scarlet Native, we just clear the value.
         }
@@ -323,8 +323,7 @@ impl ScarletAbi {
                     ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
-                task.exit_group(exit_code);
-                Ok(EventProcessOutcome::Exited)
+                Ok(EventProcessOutcome::Exited(exit_code))
             }
             ProcessControlType::Stop
             | ProcessControlType::TerminalStop
@@ -371,8 +370,7 @@ impl ScarletAbi {
                     )
                 } else {
                     // Default: terminate with SIGINT-like exit code
-                    task.exit_group(128 + 2);
-                    Ok(EventProcessOutcome::Exited)
+                    Ok(EventProcessOutcome::Exited(128 + 2))
                 }
             }
             _ => {
@@ -507,7 +505,7 @@ impl ScarletAbi {
         }
         frame[272..280].copy_from_slice(&trapframe.elr.to_ne_bytes());
         frame[280..288].copy_from_slice(&trapframe.sp.to_ne_bytes());
-        if copy_to_user(task, frame_base, &frame).is_err() {
+        if copy_to_user(&task, frame_base, &frame).is_err() {
             return Err("Failed to write signal frame");
         }
 
@@ -541,7 +539,7 @@ impl ScarletAbi {
         let frame_base = trapframe.sp as usize; // SP points to signal frame
 
         let mut frame = [0u8; SIGNAL_FRAME_SIZE];
-        copy_from_user(task, frame_base, &mut frame).map_err(|_| "Failed to read signal frame")?;
+        copy_from_user(&task, frame_base, &mut frame).map_err(|_| "Failed to read signal frame")?;
 
         for i in 0..31 {
             let offset = 24 + i * 8;
@@ -582,7 +580,7 @@ impl ScarletAbi {
                 EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
                 EventProcessOutcome::UserHandlerArmed
                 | EventProcessOutcome::NeedReschedule
-                | EventProcessOutcome::Exited => {
+                | EventProcessOutcome::Exited(_) => {
                     self.pending_events.extend(pending_iter);
                     return Ok(outcome);
                 }
@@ -618,7 +616,7 @@ fn write_event_info(
         event_info[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
     }
 
-    if copy_to_user(task, event_info_addr, &event_info).is_err() {
+    if copy_to_user(&task, event_info_addr, &event_info).is_err() {
         return Err("Failed to write event info");
     }
 
@@ -1126,11 +1124,11 @@ impl AbiModule for ScarletAbi {
     fn handle_event(
         &mut self,
         event: crate::ipc::Event,
-        _target_task_id: u32,
+        _target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         // Get the current task to process the event
         if let Some(task) = crate::task::mytask() {
-            self.handle_incoming_event(event, task)
+            self.handle_incoming_event(event, &task)
         } else {
             Err("No current task to handle event")
         }
@@ -1267,7 +1265,7 @@ impl ScarletAbi {
                 crate::environment::PAGE_SIZE - page_off,
             );
 
-            match copy_to_user(task, current_vaddr, &data[written..written + chunk_len]) {
+            match copy_to_user(&task, current_vaddr, &data[written..written + chunk_len]) {
                 Ok(()) => {
                     written += chunk_len;
                 }

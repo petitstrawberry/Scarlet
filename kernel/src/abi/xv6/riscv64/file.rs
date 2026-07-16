@@ -59,14 +59,14 @@ pub fn sys_exec(
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
 
     // Parse path
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => match to_absolute_path_v2(&task, &path) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX, // Path error
@@ -76,7 +76,7 @@ pub fn sys_exec(
 
     // Parse argv and envp
     let argv_strings =
-        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(args) => args,
             Err(_) => return usize::MAX, // argv parsing error
         };
@@ -85,7 +85,7 @@ pub fn sys_exec(
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
 
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], &task, trapframe, false) {
         Ok(_) => {
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
@@ -121,7 +121,7 @@ pub fn sys_open(
     let mode = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop if open fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Convert path bytes to string
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
@@ -188,7 +188,7 @@ pub fn sys_dup(
 ) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from XV6 fd
     if let Some(old_handle) = abi.get_handle(fd) {
@@ -218,7 +218,7 @@ pub fn sys_close(
 ) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from XV6 fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
@@ -248,7 +248,7 @@ pub fn sys_read(
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX; // Invalid file descriptor
         }
     };
@@ -256,7 +256,7 @@ pub fn sys_read(
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX; // Invalid file descriptor
         }
     };
@@ -275,7 +275,7 @@ pub fn sys_read(
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX; // Not a stream object
         }
     };
@@ -287,7 +287,7 @@ pub fn sys_read(
 
         match stream.read(&mut temp_buffer) {
             Ok(n) => {
-                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                trapframe.increment_pc_next(&task); // Increment PC to avoid infinite loop
                 if n > 0 && n >= directory_entry_size {
                     // Convert DirectoryEntry to xv6 Dirent
                     let converted_bytes =
@@ -306,7 +306,7 @@ pub fn sys_read(
 
         match stream.read(&mut buffer) {
             Ok(n) => {
-                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                trapframe.increment_pc_next(&task); // Increment PC to avoid infinite loop
                 n
             } // Return original read size for regular files
             Err(_) => usize::MAX, // Read error
@@ -327,7 +327,7 @@ pub fn sys_write(
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from XV6 fd
     let handle = match abi.get_handle(fd) {
@@ -363,7 +363,7 @@ pub fn sys_lseek(
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if lseek fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from XV6 fd
     let handle = match abi.get_handle(fd) {
@@ -400,7 +400,7 @@ pub fn sys_mknod(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     let name_ptr = task
         .vm_manager
         .translate_to_kva(trapframe.get_arg(0))
@@ -440,7 +440,7 @@ pub fn sys_fstat(
     let fd = trapframe.get_arg(0) as usize;
 
     let task = mytask().expect("sys_fstat: No current task found");
-    trapframe.increment_pc_next(task); // Increment the program counter
+    trapframe.increment_pc_next(&task); // Increment the program counter
 
     let stat_ptr = task
         .vm_manager
@@ -495,7 +495,7 @@ pub fn sys_mkdir(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -519,7 +519,7 @@ pub fn sys_unlink(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -543,7 +543,7 @@ pub fn sys_link(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let src_path_ptr = task
         .vm_manager
