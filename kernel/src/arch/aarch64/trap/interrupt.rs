@@ -84,7 +84,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     let can_schedule = can_schedule_from_interrupt(
         trapframe.spsr,
         crate::sched::scheduler::current_task_is_idle(cpu_id as usize),
-    );
+    ) && crate::sched::scheduler::may_schedule_from_interrupt(cpu_id as usize);
     let mut ran_scheduler = false;
 
     if trap_kind == 2 {
@@ -159,6 +159,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
     let cpu_id = cpu_id as usize;
     if !ran_scheduler
+        && crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
         && crate::sched::scheduler::current_task_is_idle(cpu_id)
         && crate::sched::scheduler::has_ready_tasks(cpu_id)
     {

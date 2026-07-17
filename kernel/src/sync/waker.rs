@@ -7,13 +7,17 @@
 extern crate alloc;
 
 use crate::arch::Trapframe;
-use crate::sched::scheduler::{get_task_by_id, schedule, unmark_blocked, wake_task};
+use crate::sched::scheduler::{
+    get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task, wake_task_on,
+};
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+
+const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 
 /// A synchronization primitive that manages waiting and waking of tasks
 ///
@@ -47,6 +51,14 @@ pub struct Waker {
 }
 
 impl Waker {
+    fn wake_waiting_task(&self, task_id: usize) -> bool {
+        if DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU && self.name.starts_with("event_") {
+            wake_task_on(task_id, crate::arch::get_cpu().get_cpuid())
+        } else {
+            wake_task(task_id)
+        }
+    }
+
     /// Create a new interruptible waker
     ///
     /// Interruptible wakers allow waiting tasks to be interrupted by signals
@@ -201,50 +213,88 @@ impl Waker {
             matches!(task.get_state(), TaskState::Zombie | TaskState::Terminated)
         });
         if terminated_while_enqueuing {
-            {
-                let mut queue = self.wait_queue.lock();
-                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
-                    queue.remove(pos);
-                }
-            }
-            unmark_blocked(task_id);
+            let _cancelled = self.cancel_prepared_wait(task_id);
             return true;
         }
 
         if late_wake {
-            {
-                let mut queue = self.wait_queue.lock();
-                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
-                    queue.remove(pos);
-                }
-            }
-            unmark_blocked(task_id);
-            if let Some(task) = get_task_by_id(task_id)
-                && let Err(actual) = task.state.compare_exchange(
-                    blocked_state,
-                    TaskState::Running,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-            {
-                drop(task);
-                match actual {
-                    TaskState::Zombie | TaskState::Terminated | TaskState::Ready => {
-                        return true;
-                    }
-                    TaskState::Running => return false,
-                    TaskState::NotInitialized | TaskState::Blocked(_) => {
-                        panic!(
-                            "[WAKER] Task {} cannot leave wait from state {:?}",
-                            task_id, actual
-                        );
-                    }
-                }
+            // If ownership was lost, leave the ready task untouched and let the
+            // scheduler observe it rather than consuming a wake on another CPU.
+            return !self.cancel_prepared_wait(task_id);
+        }
+
+        true
+    }
+
+    /// Roll back a prepared wait only while this CPU still owns the task.
+    ///
+    /// # Returns
+    ///
+    /// `true` if queue bookkeeping was repaired, or `false` if the task is
+    /// missing or is no longer the current locally-owned task.
+    fn cancel_prepared_wait(&self, task_id: usize) -> bool {
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        let Some(task) = get_task_by_id(task_id) else {
+            return false;
+        };
+        if crate::sched::scheduler::current_task_id(local_cpu) != Some(task_id)
+            || task.running_cpu.load(Ordering::SeqCst) != local_cpu
+        {
+            if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
+                crate::println!(
+                    "[SMPDBG waker-cancel-rejected] waker={} cpu={} task={} running_cpu={}",
+                    self.name,
+                    local_cpu,
+                    task_id,
+                    task.running_cpu.load(Ordering::SeqCst),
+                );
             }
             return false;
         }
 
-        true
+        {
+            let mut queue = self.wait_queue.lock();
+            queue.retain(|&id| id != task_id);
+        }
+        unmark_blocked(task_id);
+        remove_from_ready_queues(task_id);
+
+        let blocked_state = TaskState::Blocked(self.block_type);
+        let mut state = task.state.load(Ordering::SeqCst);
+        loop {
+            match state {
+                current_state if current_state == blocked_state => {
+                    match task.state.compare_exchange(
+                        blocked_state,
+                        TaskState::Running,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => return true,
+                        Err(actual) => state = actual,
+                    }
+                }
+                TaskState::Ready => {
+                    // A timeout can wake this current task after preparation but
+                    // before schedule. Its ready-queue entry was removed above,
+                    // so make the still-executing task running again.
+                    match task.state.compare_exchange(
+                        TaskState::Ready,
+                        TaskState::Running,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => return true,
+                        Err(actual) => state = actual,
+                    }
+                }
+                TaskState::NotInitialized
+                | TaskState::Running
+                | TaskState::Blocked(_)
+                | TaskState::Zombie
+                | TaskState::Terminated => return true,
+            }
+        }
     }
 
     /// Block the task until woken or the timeout elapses.
@@ -284,16 +334,21 @@ impl Waker {
             let handler_ref: Arc<dyn TimerHandler> = handler.clone();
             let id = add_timer(get_tick().saturating_add(ticks), &handler_ref, 0);
 
-            self.wait(task_id, trapframe);
+            let should_schedule = self.prepare_wait(task_id);
+            if handler.timed_out.load(Ordering::SeqCst) {
+                let _cancelled = self.cancel_prepared_wait(task_id);
+                cancel_timer(id);
+                return false;
+            }
+            if should_schedule {
+                schedule(trapframe);
+            }
 
             cancel_timer(id);
 
             let timed_out = handler.timed_out.load(Ordering::SeqCst);
             if timed_out {
-                let mut queue = self.wait_queue.lock();
-                if let Some(pos) = queue.iter().position(|&id| id == task_id) {
-                    queue.remove(pos);
-                }
+                let _cancelled = self.cancel_prepared_wait(task_id);
             }
 
             !timed_out
@@ -342,10 +397,22 @@ impl Waker {
             0,
         );
 
-        self.wait(task_id, trapframe);
+        let should_schedule = self.prepare_wait(task_id);
+        if min_handler.fired.load(Ordering::SeqCst) {
+            let _cancelled = self.cancel_prepared_wait(task_id);
+        } else if should_schedule {
+            schedule(trapframe);
+        }
 
         while !min_handler.fired.load(Ordering::SeqCst) {
-            self.wait(task_id, trapframe);
+            let should_schedule = self.prepare_wait(task_id);
+            if min_handler.fired.load(Ordering::SeqCst) {
+                let _cancelled = self.cancel_prepared_wait(task_id);
+                break;
+            }
+            if should_schedule {
+                schedule(trapframe);
+            }
         }
 
         cancel_timer(min_timer_id);
@@ -409,13 +476,11 @@ impl Waker {
     /// }
     /// ```
     pub fn wake_one(&self) -> bool {
-        let task_id = {
+        while let Some(task_id) = {
             let mut queue = self.wait_queue.lock();
             queue.pop_front()
-        };
-
-        if let Some(task_id) = task_id {
-            let woke = wake_task(task_id);
+        } {
+            let woke = self.wake_waiting_task(task_id);
             if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
                 crate::println!(
                     "[SMPDBG waker-wake-one] waker={} cpu={} task={} woke={}",
@@ -425,11 +490,13 @@ impl Waker {
                     woke,
                 );
             }
-            woke
-        } else {
-            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
-            false
+            if woke {
+                return true;
+            }
         }
+
+        self.pending_wakes.fetch_add(1, Ordering::SeqCst);
+        false
     }
 
     /// Wake up all waiting tasks
@@ -462,7 +529,7 @@ impl Waker {
 
         let mut woken_count = 0;
         for task_id in task_ids {
-            let woke = wake_task(task_id);
+            let woke = self.wake_waiting_task(task_id);
             if woke {
                 woken_count += 1;
             }
@@ -475,6 +542,10 @@ impl Waker {
                     woke,
                 );
             }
+        }
+
+        if woken_count == 0 {
+            self.pending_wakes.fetch_add(1, Ordering::SeqCst);
         }
 
         woken_count
@@ -646,6 +717,11 @@ pub struct WakerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sched::scheduler::{
+        add_task, get_task_by_id, mark_blocked, reset, set_current_task_for_test,
+    };
+    use crate::task::{Task, TaskType};
+    use alloc::string::ToString;
 
     #[test_case]
     fn test_waker_creation() {
@@ -668,6 +744,113 @@ mod tests {
         let waker = Waker::new_interruptible("empty_test");
         assert_eq!(waker.wake_one(), false);
         assert_eq!(waker.wake_all(), 0);
+    }
+
+    #[test_case]
+    fn test_wake_one_skips_stale_waiter_before_live_waiter() {
+        reset();
+        let waker = Waker::new_interruptible("stale-before-live");
+        let task_id = add_task(Task::new("live-waiter".to_string(), 1, TaskType::Kernel), 0);
+        let task = get_task_by_id(task_id).expect("live waiter must be registered");
+        task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        mark_blocked(task_id);
+        waker.wait_queue.lock().extend([usize::MAX, task_id]);
+
+        assert!(waker.wake_one());
+        assert_eq!(task.get_state(), TaskState::Ready);
+        assert_eq!(waker.waiting_count(), 0);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn test_wake_all_latches_pending_wake_when_all_waiters_are_stale() {
+        let waker = Waker::new_interruptible("all-stale");
+        waker.wait_queue.lock().extend([usize::MAX, usize::MAX - 1]);
+
+        assert_eq!(waker.wake_all(), 0);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+    }
+
+    #[test_case]
+    fn test_timeout_already_fired_cancels_prepared_wait() {
+        reset();
+        let waker = Waker::new_interruptible("timeout-cancel");
+        let task_id = add_task(
+            Task::new("timeout-waiter".to_string(), 1, TaskType::Kernel),
+            0,
+        );
+        let task = get_task_by_id(task_id).expect("timeout waiter must be registered");
+        task.set_state(TaskState::Running);
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+
+        assert!(waker.prepare_wait(task_id));
+        assert_eq!(
+            task.get_state(),
+            TaskState::Blocked(BlockedType::Interruptible)
+        );
+        assert!(wake_task(task_id));
+        assert_eq!(task.get_state(), TaskState::Ready);
+
+        assert!(waker.cancel_prepared_wait(task_id));
+        assert_eq!(task.get_state(), TaskState::Running);
+        assert_eq!(waker.waiting_count(), 0);
+        assert!(!wake_task(task_id));
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn test_cancel_prepared_wait_rolls_back_locally_owned_blocked_task() {
+        reset();
+        let waker = Waker::new_interruptible("local-cancel");
+        let task_id = add_task(
+            Task::new("local-waiter".to_string(), 1, TaskType::Kernel),
+            0,
+        );
+        let task = get_task_by_id(task_id).expect("local waiter must be registered");
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(local_cpu, Ordering::SeqCst);
+        set_current_task_for_test(local_cpu, Some(task_id));
+
+        assert!(waker.prepare_wait(task_id));
+        assert!(waker.cancel_prepared_wait(task_id));
+        assert_eq!(task.get_state(), TaskState::Running);
+        assert_eq!(waker.waiting_count(), 0);
+
+        set_current_task_for_test(local_cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn test_cancel_prepared_wait_leaves_foreign_task_untouched() {
+        reset();
+        let waker = Waker::new_interruptible("foreign-cancel");
+        let task_id = add_task(
+            Task::new("foreign-waiter".to_string(), 1, TaskType::Kernel),
+            0,
+        );
+        let task = get_task_by_id(task_id).expect("foreign waiter must be registered");
+        task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        mark_blocked(task_id);
+        waker.wait_queue.lock().push_back(task_id);
+
+        assert!(!waker.cancel_prepared_wait(task_id));
+        assert_eq!(
+            task.get_state(),
+            TaskState::Blocked(BlockedType::Interruptible)
+        );
+        assert_eq!(waker.waiting_count(), 1);
+
+        drop(task);
+        reset();
     }
 
     #[test_case]

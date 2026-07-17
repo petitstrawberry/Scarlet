@@ -34,7 +34,7 @@ extern crate alloc;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{
-    collections::{BTreeMap, vec_deque::VecDeque},
+    collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
     string::ToString,
     sync::Arc,
     vec::Vec,
@@ -71,10 +71,20 @@ static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
+static FORK_TRACE_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+static FORK_TRACE_PICKED_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
 
 /// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
     TASK_POOL.call_once(|| TaskPool::new())
+}
+
+fn fork_trace_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
+    FORK_TRACE_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+}
+
+fn fork_trace_picked_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
+    FORK_TRACE_PICKED_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
 }
 
 struct TaskEntry {
@@ -333,6 +343,7 @@ impl TaskPool {
                 .unregister_mapping_for_global(task_id);
             crate::task::cleanup_task_waker(task_id);
             crate::task::cleanup_parent_waker(task_id);
+            clear_fork_trace_task(task_id);
             drop(retired_task);
         }
         reclaimed
@@ -433,6 +444,9 @@ crate::late_initcall!(start_task_reaper_worker);
 
 static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
+static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
 static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
     [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
@@ -461,6 +475,20 @@ const SCHED_DEMOTION_MARGIN: u32 = 128;
 const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 const SCHED_LATERAL_BALANCE_MARGIN: u64 = TASK_LOAD_SCALE / 4;
+
+// DIAGNOSTIC: Set these constants to false after the Apple SMP fork/migration
+// experiment. The normal placement and work-stealing code remains below.
+const DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU: bool = false;
+const DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP: bool = false;
+const DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING: bool = false;
+const DIAGNOSTIC_DISABLE_TASK_MIGRATION: bool = false;
+const DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP: bool = false;
+// Route selected user task classes to the BSP while leaving the normal
+// placement code available for the complementary class.
+const DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP: bool = false;
+const DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP: bool = false;
+const DIAGNOSTIC_RUN_USER_THREADS_ON_BSP: bool = false;
+const DIAGNOSTIC_RETAIN_TERMINATED_TASKS: bool = false;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
@@ -618,6 +646,72 @@ pub fn defer_reschedule(cpu_id: usize) {
 pub fn take_deferred_reschedule(cpu_id: usize) -> bool {
     cpu_id < MAX_NUM_CPUS && PENDING_RESCHEDULE[cpu_id].swap(false, Ordering::AcqRel)
 }
+
+/// Return whether a CPU has completed its initial scheduler task publication.
+///
+/// A CPU becomes ready only after `start_scheduler()` returns from its first
+/// `pick_next()`, which publishes that CPU's current-task state. Interrupt
+/// handlers must not enter scheduling before then.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// `true` when interrupt-originated scheduling is safe on `cpu_id`.
+pub fn scheduler_ready(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS && SCHEDULER_READY[cpu_id].load(Ordering::Acquire)
+}
+
+/// Return whether an interrupt handler may enter the scheduler on a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID handling the interrupt.
+///
+/// # Returns
+///
+/// `true` after the CPU has published its initial current task.
+pub fn may_schedule_from_interrupt(cpu_id: usize) -> bool {
+    scheduler_ready(cpu_id)
+}
+
+#[inline]
+fn set_scheduler_ready(cpu_id: usize, ready: bool) {
+    assert_valid_cpu_id(cpu_id);
+    SCHEDULER_READY[cpu_id].store(ready, Ordering::Release);
+}
+
+/// Apply the temporary fork-child affinity used by the SMP diagnostic mode.
+///
+/// # Arguments
+///
+/// * `child` - Fully initialized child task that has not been published yet.
+/// * `parent_cpu` - CPU currently executing the parent task.
+pub fn apply_fork_child_diagnostic_affinity(child: &mut Task, parent_cpu: usize) {
+    if DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP {
+        child.pinned_cpu = Some(BOOT_CPU_ID.load(Ordering::Acquire));
+    } else if DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU {
+        child.pinned_cpu = Some(parent_cpu);
+    }
+}
+
+fn diagnostic_run_task_on_bsp(task: &Task) -> bool {
+    if task.task_type != crate::task::TaskType::User {
+        return false;
+    }
+    if DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP {
+        return true;
+    }
+
+    task.registered_id().is_some_and(|task_id| {
+        let is_process_leader = task_id == task.get_thread_group_id();
+        (DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP && is_process_leader)
+            || (DIAGNOSTIC_RUN_USER_THREADS_ON_BSP && !is_process_leader)
+    })
+}
+
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
@@ -1219,6 +1313,13 @@ fn cpu_better_for_preference(
 }
 
 fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
+    if task.is_some_and(diagnostic_run_task_on_bsp) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP && task.is_none_or(|task| task.pinned_cpu.is_none()) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
+
     let cpus = ONLINE_CPUS.lock();
     if cpus.is_empty() {
         return 0;
@@ -1271,8 +1372,14 @@ fn select_target_cpu(task: Option<&Task>) -> usize {
 }
 
 fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -> usize {
+    if diagnostic_run_task_on_bsp(task) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
     if let Some(pinned_cpu) = task.pinned_cpu {
         return pinned_cpu;
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
     }
 
     let selected = select_target_cpu_at(Some(task), now_ns);
@@ -1288,6 +1395,9 @@ fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -
 }
 
 fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
+    if diagnostic_run_task_on_bsp(task) && cpu_id != BOOT_CPU_ID.load(Ordering::Acquire) {
+        return false;
+    }
     if task
         .pinned_cpu
         .is_some_and(|pinned_cpu| pinned_cpu != cpu_id)
@@ -1408,8 +1518,14 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
 }
 
 fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
+    if diagnostic_run_task_on_bsp(task) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
     if let Some(pinned_cpu) = task.pinned_cpu {
         return pinned_cpu;
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
     }
 
     let min_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
@@ -1432,6 +1548,19 @@ fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
             selected
         }
     }
+}
+
+/// Normalize an explicit wake target against the same placement policy used by
+/// regular wakeups. Explicit callers must not enqueue a task on an offline CPU
+/// or override affinity and diagnostic placement constraints.
+fn normalize_wake_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -> Option<usize> {
+    if is_cpu_online(requested_cpu) && task_can_run_on_cpu(task, requested_cpu, now_ns) {
+        return Some(requested_cpu);
+    }
+
+    let fallback_cpu = select_wake_cpu_for_task(task, now_ns);
+    (is_cpu_online(fallback_cpu) && task_can_run_on_cpu(task, fallback_cpu, now_ns))
+        .then_some(fallback_cpu)
 }
 
 fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32) -> Option<usize> {
@@ -1547,6 +1676,9 @@ fn migration_target_for_task(
     now_ns: u64,
     record_skip: bool,
 ) -> Option<usize> {
+    if DIAGNOSTIC_DISABLE_TASK_MIGRATION {
+        return None;
+    }
     if task.pinned_cpu.is_some() || !is_cpu_online(current_cpu) {
         return None;
     }
@@ -1653,6 +1785,16 @@ pub fn num_online_cpus() -> usize {
     ONLINE_CPUS.lock().len()
 }
 
+/// Register the logical CPU that entered the architecture-independent kernel.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical scheduler CPU ID supplied in [`crate::BootInfo`].
+pub fn register_boot_cpu(cpu_id: usize) {
+    debug_assert!(cpu_id < MAX_NUM_CPUS);
+    BOOT_CPU_ID.store(cpu_id, Ordering::Release);
+}
+
 /// Select a target CPU for a new task.
 ///
 /// This uses registered CPU capacity and the task's heterogeneous scheduling
@@ -1724,10 +1866,56 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 
 #[inline]
 pub fn push_ready_task(cpu_id: usize, task_id: usize) {
+    let cpu_id =
+        if TaskPool::get_task(task_id).is_some_and(|task| diagnostic_run_task_on_bsp(&task)) {
+            BOOT_CPU_ID.load(Ordering::Acquire)
+        } else {
+            cpu_id
+        };
     let mut queue = ready_queue(cpu_id).lock();
     if !queue.contains(&task_id) {
         queue.push_back(task_id);
     }
+}
+
+/// Mark a process-fork child for focused first-run tracing.
+///
+/// # Arguments
+///
+/// * `task_id` - Global task ID assigned to the child.
+pub fn mark_fork_trace_task(task_id: usize) {
+    let mut traced = fork_trace_tasks().lock();
+    let mut picked = fork_trace_picked_tasks().lock();
+    picked.remove(&task_id);
+    traced.insert(task_id);
+}
+
+/// Check whether a task is a process-fork child being traced.
+///
+/// # Arguments
+///
+/// * `task_id` - Global task ID to check.
+///
+/// # Returns
+///
+/// `true` when focused fork tracing is enabled for the task.
+pub fn is_fork_trace_task(task_id: usize) -> bool {
+    fork_trace_tasks().lock().contains(&task_id)
+}
+
+fn take_fork_trace_first_pick(task_id: usize) -> bool {
+    let traced = fork_trace_tasks().lock();
+    if !traced.contains(&task_id) {
+        return false;
+    }
+    fork_trace_picked_tasks().lock().insert(task_id)
+}
+
+fn clear_fork_trace_task(task_id: usize) {
+    let mut traced = fork_trace_tasks().lock();
+    let mut picked = fork_trace_picked_tasks().lock();
+    traced.remove(&task_id);
+    picked.remove(&task_id);
 }
 
 pub fn mark_blocked(task_id: usize) {
@@ -1754,8 +1942,10 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
     wake_task_waiters(task_id);
     if let Some(parent_id) = parent_id {
         wake_parent_waiters(parent_id);
-        if let Some(parent) = get_task_by_id(parent_id) {
-            let parent_thread_group = parent.get_thread_group_id();
+        let parent_thread_group = get_task_by_id(parent_id)
+            .map(|parent| parent.get_thread_group_id())
+            .or_else(|| get_task_by_id(task_id).and_then(|task| task.get_parent_thread_group_id()));
+        if let Some(parent_thread_group) = parent_thread_group {
             for thread_id in get_all_task_ids() {
                 if thread_id == parent_id {
                     continue;
@@ -1827,6 +2017,13 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                             continue;
                         }
                         if try_claim_ready_task(&task, cpu_id) {
+                            if take_fork_trace_first_pick(task_id) {
+                                crate::early_println!(
+                                    "[fork-trace] child_task_id={} picked cpu={}",
+                                    task_id,
+                                    cpu_id
+                                );
+                            }
                             if DEBUG_SMP_TASK_FLOW {
                                 let (expected_task, _from_cpu, seq) =
                                     debug_remote_enqueue_snapshot(cpu_id);
@@ -1861,7 +2058,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let current_is_idle = old_id
             .map(|task_id| idle_id != 0 && task_id == idle_id)
             .unwrap_or(true);
-        if current_is_idle {
+        if current_is_idle && !DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING {
             crate::breadcrumb::drop(crate::breadcrumb::PICK_STEAL_BEGIN, cpu_id as u64, 0);
             next_id = steal_ready_task_for_cpu(cpu_id, get_time_ns());
             crate::breadcrumb::drop(
@@ -1924,6 +2121,11 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
 
     if let (Some(oid), Some(ot), Some(nid)) = (old_id, old_task.as_deref(), Some(next_id)) {
         if oid != nid {
+            // Publish every real switch-out before state-specific handling.
+            // `release_deferred_prev()` runs only after the low-level context
+            // switch and releases the ownership token for blocked, zombie, and
+            // terminated tasks as well as runnable tasks.
+            SCHEDULE_PREV_TASK[cpu_id].store(oid, Ordering::SeqCst);
             match ot.state.load(Ordering::SeqCst) {
                 TaskState::Running | TaskState::Ready => {
                     let _ = ot.state.compare_exchange(
@@ -1936,7 +2138,6 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                 TaskState::Zombie => finalize_zombie(oid, ot.get_parent_id()),
                 TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
             }
-            SCHEDULE_PREV_TASK[cpu_id].store(oid, Ordering::SeqCst);
         }
     }
 
@@ -2045,6 +2246,10 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
 /// Called every timer tick. Decrements the current task's time_slice.
 /// If time_slice reaches 0, triggers a reschedule.
 pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
+    if !may_schedule_from_interrupt(cpu_id) {
+        return;
+    }
+
     let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
     update_cpu_util_avg(cpu_id);
     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
@@ -2206,6 +2411,32 @@ pub fn start_scheduler() -> Option<usize> {
     crate::println!("[sched] entry");
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
+    set_scheduler_ready(cpu_id, false);
+    if cpu_id == 0
+        && (DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU
+            || DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP
+            || DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING
+            || DIAGNOSTIC_DISABLE_TASK_MIGRATION
+            || DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP
+            || DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP
+            || DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP
+            || DIAGNOSTIC_RUN_USER_THREADS_ON_BSP
+            || DIAGNOSTIC_RETAIN_TERMINATED_TASKS)
+    {
+        crate::println!(
+            "[sched] diagnostic: pin_fork_child={} pin_fork_child_bsp={} disable_idle_work_stealing={} disable_task_migration={} unpinned_tasks_on_bsp={} all_user_tasks_on_bsp={} user_process_leaders_on_bsp={} user_threads_on_bsp={} retain_terminated_tasks={} bsp_cpu={}",
+            DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU,
+            DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP,
+            DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING,
+            DIAGNOSTIC_DISABLE_TASK_MIGRATION,
+            DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP,
+            DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP,
+            DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP,
+            DIAGNOSTIC_RUN_USER_THREADS_ON_BSP,
+            DIAGNOSTIC_RETAIN_TERMINATED_TASKS,
+            BOOT_CPU_ID.load(Ordering::Acquire)
+        );
+    }
     crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
     let timer = get_kernel_timer();
     crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
@@ -2227,6 +2458,7 @@ pub fn start_scheduler() -> Option<usize> {
         _current_task_id,
         next_task_id
     );
+    set_scheduler_ready(cpu_id, true);
     next_task_id
 }
 
@@ -2326,6 +2558,9 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
+    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, target_cpu, get_time_ns()) else {
+        return false;
+    };
 
     let mut state = task.state.load(Ordering::SeqCst);
     loop {
@@ -2387,6 +2622,10 @@ pub fn cleanup_zombie(task_id: usize) {
         if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
             zombie_queue.remove(pos);
         }
+    }
+
+    if DIAGNOSTIC_RETAIN_TERMINATED_TASKS {
+        return;
     }
 
     let _ = get_task_pool().remove_task(task_id);
@@ -2701,6 +2940,7 @@ pub fn reset() {
     for cpu_id in 0..MAX_NUM_CPUS {
         ready_queue(cpu_id).lock().clear();
         set_current_task_id(cpu_id, None);
+        set_scheduler_ready(cpu_id, false);
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
@@ -2726,6 +2966,11 @@ pub fn reset() {
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
     get_task_pool().reset();
+}
+
+#[cfg(test)]
+pub(crate) fn set_current_task_for_test(cpu_id: usize, task_id: Option<usize>) {
+    set_current_task_id(cpu_id, task_id);
 }
 
 pub fn make_test_tasks() {
@@ -2800,7 +3045,9 @@ pub fn make_test_tasks() {
 
 #[cfg(test)]
 mod tests {
-    use crate::task::{TaskCorePreference, TaskType};
+    use crate::task::{
+        TaskCorePreference, TaskType, cleanup_parent_waker, get_parent_waitpid_waker,
+    };
 
     use super::*;
 
@@ -2816,11 +3063,59 @@ mod tests {
     }
 
     #[test_case]
+    fn test_scheduler_ready_gate_is_per_cpu_and_resettable() {
+        reset();
+        assert!(!scheduler_ready(0));
+        assert!(!may_schedule_from_interrupt(0));
+        assert!(!scheduler_ready(MAX_NUM_CPUS));
+        assert!(!may_schedule_from_interrupt(MAX_NUM_CPUS));
+
+        set_scheduler_ready(0, true);
+        assert!(scheduler_ready(0));
+        assert!(may_schedule_from_interrupt(0));
+
+        if MAX_NUM_CPUS > 1 {
+            assert!(!scheduler_ready(1));
+            assert!(!may_schedule_from_interrupt(1));
+        }
+
+        reset();
+        assert!(!scheduler_ready(0));
+        assert!(!may_schedule_from_interrupt(0));
+    }
+
+    #[test_case]
     fn test_add_task() {
         reset();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         add_task(task, 0);
         assert_eq!(READY_QUEUES[0].lock().len(), 1);
+    }
+
+    #[test_case]
+    fn test_finalize_zombie_wakes_parent_thread_when_parent_is_missing() {
+        reset();
+
+        let parent_id = register_task(Task::new("Parent".to_string(), 1, TaskType::Kernel));
+        let mut sibling = Task::new("ParentSibling".to_string(), 1, TaskType::Kernel);
+        sibling.set_thread_group_id(parent_id);
+        let sibling_id = register_task(sibling);
+        let child_id = register_task(Task::new("Child".to_string(), 1, TaskType::Kernel));
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.adopt_registered_child(&child));
+        assert_eq!(child.get_parent_thread_group_id(), Some(parent_id));
+
+        cleanup_parent_waker(sibling_id);
+        let sibling_waker = get_parent_waitpid_waker(sibling_id);
+        cleanup_zombie(parent_id);
+        assert!(get_task_by_id(parent_id).is_none());
+
+        finalize_zombie(child_id, Some(parent_id));
+
+        assert_eq!(sibling_waker.pending_wake_count_for_test(), 1);
+        cleanup_parent_waker(sibling_id);
     }
 
     #[test_case]
@@ -2983,6 +3278,68 @@ mod tests {
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 0);
         assert_eq!(stats.work_steals, 1);
+    }
+
+    #[test_case]
+    fn test_pinned_task_cannot_migrate_or_be_stolen() {
+        if MAX_NUM_CPUS < 2 {
+            return;
+        }
+
+        reset();
+        let source_cpu = 0;
+        let target_cpu = 1;
+        register_online_cpu(source_cpu);
+        register_online_cpu(target_cpu);
+        register_cpu_topology(source_cpu, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(target_cpu, CpuCoreClass::Balanced, 0).unwrap();
+
+        let mut task = Task::new("PinnedTask".to_string(), 1, TaskType::Kernel);
+        task.pinned_cpu = Some(source_cpu);
+        let task_id = register_task(task);
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task(source_cpu, task_id);
+
+        assert_eq!(
+            normalize_wake_cpu_for_task(&task, target_cpu, 20_000_000),
+            Some(source_cpu)
+        );
+        assert_eq!(
+            migration_target_for_task(&task, source_cpu, 20_000_000, false),
+            None
+        );
+        assert_eq!(steal_ready_task_for_cpu(target_cpu, 20_000_000), None);
+        assert!(ready_queue(source_cpu).lock().contains(&task_id));
+    }
+
+    #[test_case]
+    fn test_wake_target_normalizes_offline_request() {
+        reset();
+        let local_cpu = get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+
+        let task_id = register_task(Task::new("WakeTargetTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        mark_blocked(task_id);
+
+        assert_eq!(
+            normalize_wake_cpu_for_task(&task, MAX_NUM_CPUS, 20_000_000),
+            Some(local_cpu)
+        );
+        assert!(wake_task_on(task_id, MAX_NUM_CPUS));
+        assert_eq!(task.state.load(Ordering::SeqCst), TaskState::Ready);
+        assert!(ready_queue(local_cpu).lock().contains(&task_id));
+    }
+
+    #[test_case]
+    fn test_work_stealing_and_migration_are_enabled() {
+        assert!(!DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING);
+        assert!(!DIAGNOSTIC_DISABLE_TASK_MIGRATION);
     }
 
     #[test_case]
@@ -3203,6 +3560,62 @@ mod tests {
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 1);
         assert_eq!(stats.promotions, 1);
+    }
+
+    #[test_case]
+    fn test_blocked_switch_out_releases_ownership_before_wake_and_reclaim() {
+        reset();
+        let cpu_id = get_cpu().get_cpuid();
+        register_online_cpu(cpu_id);
+
+        let blocked_id = register_task(Task::new(
+            "BlockedSwitchOutTask".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let blocked = TaskPool::get_task(blocked_id).unwrap();
+        blocked.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        blocked.running_cpu.store(cpu_id, Ordering::SeqCst);
+        set_current_task_id(cpu_id, Some(blocked_id));
+
+        let next_id = register_task(Task::new(
+            "BlockedSwitchOutNext".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let next = TaskPool::get_task(next_id).unwrap();
+        next.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task(cpu_id, next_id);
+
+        assert_eq!(pick_next(get_cpu()), (Some(blocked_id), Some(next_id)));
+        assert_eq!(
+            SCHEDULE_PREV_TASK[cpu_id].load(Ordering::SeqCst),
+            blocked_id
+        );
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), cpu_id);
+
+        release_deferred_prev(cpu_id);
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), NO_CPU);
+        assert_eq!(
+            blocked.state.load(Ordering::SeqCst),
+            TaskState::Blocked(crate::task::BlockedType::Interruptible)
+        );
+        assert!(!ready_queue(cpu_id).lock().contains(&blocked_id));
+
+        assert!(wake_task(blocked_id));
+        assert!(remove_ready_task_from_cpu(cpu_id, blocked_id));
+        assert!(try_claim_ready_task(&blocked, cpu_id));
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), cpu_id);
+
+        set_current_task_id(cpu_id, None);
+        blocked.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        next.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        drop(blocked);
+        drop(next);
+        reset();
     }
 
     #[test_case]
