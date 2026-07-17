@@ -2,13 +2,13 @@ use limine::mp::MpInfo;
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
-    MP_REQUEST, boot_cmdline, ensure_base_revision_supported, hhdm_physical_span, module_area,
-    reserve_front, response, select_usable_region,
+    MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound, ensure_base_revision_supported,
+    module_area, reserve_front, response, runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
+use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
@@ -97,14 +97,15 @@ pub fn limine_entry() -> ! {
     init_fdt(dtb.dtb_ptr as usize);
 
     let usable_region = select_usable_region(memmap.entries());
-    let hhdm_phys_span = hhdm_physical_span(memmap.entries());
-    init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
+    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
+    init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
     let hhdm_offset = hhdm.offset as usize;
+    let direct_map_regions = runtime_direct_map_regions(memmap.entries(), None)
+        .unwrap_or_else(|error| panic!("failed to build runtime direct map: {}", error));
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
-    let direct_map_paddr = hhdm_phys_span;
     let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
@@ -119,7 +120,7 @@ pub fn limine_entry() -> ! {
         bsp.bsp_hartid as usize,
         cpu_count,
         usable_memory_paddr,
-        direct_map_paddr,
+        direct_map_regions,
         initramfs_paddr,
         hhdm_offset,
         cmdline,

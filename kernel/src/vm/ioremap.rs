@@ -35,6 +35,7 @@ use alloc::collections::BTreeMap;
 use spin::{Mutex, Once};
 
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
+use crate::vm::addr::validate_direct_map_alias;
 use crate::vm::get_kernel_vm_manager;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -148,7 +149,19 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
     // Align physical address down to a page boundary.
     let offset = paddr & (PAGE_SIZE - 1);
     let aligned_paddr = paddr - offset;
-    let aligned_size = align_up(size + offset, PAGE_SIZE);
+    let aligned_size = checked_align_up(
+        size.checked_add(offset)
+            .ok_or("ioremap: physical range size overflows")?,
+        PAGE_SIZE,
+    )?;
+    let aligned_end = aligned_paddr
+        .checked_add(aligned_size)
+        .and_then(|end| end.checked_sub(1))
+        .ok_or("ioremap: physical range overflows")?;
+    let physical_area = MemoryArea::new(aligned_paddr, aligned_end);
+
+    // Reject incompatible aliases before consuming IOREMAP virtual address space.
+    validate_direct_map_alias(physical_area, MemoryAttribute::Device)?;
 
     // Reserve virtual address space.
     let alloc_va = alloc_guard
@@ -158,7 +171,7 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
 
     // Build the VirtualMemoryMap descriptor.
     let vmmap = VirtualMemoryMap::new(
-        MemoryArea::new(aligned_paddr, aligned_paddr + aligned_size - 1),
+        physical_area,
         MemoryArea::new(alloc_va, alloc_va + aligned_size - 1),
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
         true, // shared: accessible from any address space using the kernel PT
@@ -222,9 +235,10 @@ pub fn iounmap(vaddr: usize) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[inline(always)]
-fn align_up(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
+fn checked_align_up(val: usize, align: usize) -> Result<usize, &'static str> {
+    val.checked_add(align - 1)
+        .map(|value| value & !(align - 1))
+        .ok_or("ioremap: range alignment overflows")
 }
 
 // ---------------------------------------------------------------------------
@@ -237,17 +251,20 @@ mod tests {
 
     #[test_case]
     fn test_align_up_zero() {
-        assert_eq!(align_up(0, PAGE_SIZE), 0);
+        assert_eq!(checked_align_up(0, PAGE_SIZE).unwrap(), 0);
     }
 
     #[test_case]
     fn test_align_up_already_aligned() {
-        assert_eq!(align_up(PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+        assert_eq!(checked_align_up(PAGE_SIZE, PAGE_SIZE).unwrap(), PAGE_SIZE);
     }
 
     #[test_case]
     fn test_align_up_one_byte_over() {
-        assert_eq!(align_up(PAGE_SIZE + 1, PAGE_SIZE), 2 * PAGE_SIZE);
+        assert_eq!(
+            checked_align_up(PAGE_SIZE + 1, PAGE_SIZE).unwrap(),
+            2 * PAGE_SIZE
+        );
     }
 
     #[test_case]

@@ -5,13 +5,14 @@ use limine::mp::MpInfo;
 
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
-    MODULE_REQUEST, MP_REQUEST, boot_cmdline, ensure_base_revision_supported, framebuffer_area,
-    hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
+    MODULE_REQUEST, MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound,
+    ensure_base_revision_supported, framebuffer_area, module_area, reserve_front, response,
+    runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
+use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use core::sync::atomic::{AtomicU64, Ordering, compiler_fence};
 
@@ -32,9 +33,14 @@ const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
 const APPLE_MIDR_IMPLEMENTER: u64 = 0x61;
 const MIDR_IMPLEMENTER_SHIFT: u32 = 24;
 const ACTLR_EN_MDSB: u64 = 1 << 12;
+#[allow(dead_code)]
 const SCTLR_M: u64 = 1;
+#[allow(dead_code)]
 const SCTLR_C: u64 = 1 << 2;
+#[allow(dead_code)]
 const SCTLR_I: u64 = 1 << 12;
+#[allow(dead_code)]
+const LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK: u64 = 0xff;
 
 pub fn is_vhe_enabled() -> bool {
     unsafe { VHE_ENABLED }
@@ -268,21 +274,35 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
         "msr spsel, #1",
         "mov sp, x9",
         "isb",
-        // x0 = cpu_id, jump to ap_entry_wait
+        // x0 = cpu_id, jump to secondary_cpu_entry
         "mov x0, x8",
         "b {ap_wait}",
         kernel_stack = sym KERNEL_STACK,
         stack_size = const STACK_SIZE,
-        ap_wait = sym ap_entry_wait,
+        ap_wait = sym secondary_cpu_entry,
     );
 }
 
-fn ap_entry_wait(cpu_id: usize) -> ! {
-    maybe_drop_el2_to_el1(ap_entry_wait_after_el_drop as *const () as usize, cpu_id);
-    ap_entry_wait_after_el_drop(cpu_id, read_active_sctlr())
+/// Prepare a secondary CPU's exception level and enter the common AP startup.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the platform boot code.
+///
+/// # Returns
+///
+/// This function does not return.
+pub extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
+    mask_exceptions();
+    maybe_drop_el2_to_el1(
+        secondary_cpu_entry_after_el_drop as *const () as usize,
+        cpu_id,
+    );
+    secondary_cpu_entry_after_el_drop(cpu_id, read_active_sctlr())
 }
 
-extern "C" fn ap_entry_wait_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+    prepare_el1_runtime();
     if let Some((old_hcr, new_hcr)) = configure_vhe_host_interrupt_routing() {
         early_println!(
             "[aarch64] CPU {}: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
@@ -299,7 +319,7 @@ extern "C" fn ap_entry_wait_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -
             new_actlr
         );
     }
-    log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
+    // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -700,7 +720,8 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
             new_actlr
         );
     }
-    log_el1_memory_state("handoff", _arg0, inherited_sctlr);
+    // log_el1_memory_state("handoff", _arg0, inherited_sctlr);
+    // diagnose_limine_mair_compatibility();
 
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -715,14 +736,16 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
-    let hhdm_phys_span = hhdm_physical_span(memmap.entries());
-    init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
+    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
+    init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
     let hhdm_offset = hhdm.offset as usize;
+    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
+    let direct_map_regions = runtime_direct_map_regions(memmap.entries(), framebuffer_paddr)
+        .unwrap_or_else(|error| panic!("failed to build runtime direct map: {}", error));
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
-    let direct_map_paddr = hhdm_phys_span;
     let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
@@ -731,7 +754,6 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         .and_then(|fdt| fdt.chosen().bootargs());
     let cmdline = boot_cmdline(fdt_cmdline);
     let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
-    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
     // Cache the wall-clock epoch now; the Limine response pointer is invalid
     // after the page-table switch in start_kernel.
@@ -744,7 +766,7 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         cpu_id,
         cpu_count,
         usable_memory_paddr,
-        direct_map_paddr,
+        direct_map_regions,
         initramfs_paddr,
         hhdm_offset,
         cmdline,
@@ -814,6 +836,7 @@ fn current_mpidr() -> u64 {
     mpidr
 }
 
+#[allow(dead_code)]
 fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
     let sctlr: u64;
     let tcr: u64;
@@ -830,9 +853,10 @@ fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
         );
     }
     early_println!(
-        "[aarch64] CPU {} {} memory state: inherited_SCTLR={:#x} SCTLR={:#x} M={} C={} I={} TCR={:#x} MAIR={:#x}",
+        "[aarch64] CPU {} {} memory state: EL={} inherited_SCTLR={:#x} SCTLR={:#x} M={} C={} I={} TCR={:#x} MAIR={:#x}",
         cpu_id,
         stage,
+        current_el(),
         inherited_sctlr,
         sctlr,
         usize::from(sctlr & SCTLR_M != 0),
@@ -841,6 +865,33 @@ fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
         tcr,
         mair,
     );
+}
+
+/// Diagnoses whether Limine's live AttrIndx 0 preserves the Normal WB contract.
+///
+/// The diagnostic only reads MAIR_EL1. Scarlet later installs the same Normal
+/// WB encoding at AttrIndx 0 before replacing Limine's page tables, preventing
+/// an attribute reinterpretation while those old TTBRs remain live.
+#[allow(dead_code)]
+fn diagnose_limine_mair_compatibility() {
+    let mair: u64;
+    unsafe {
+        asm!("mrs {mair}, mair_el1", mair = out(reg) mair, options(nostack));
+    }
+
+    let attr_index_zero = mair & 0xff;
+    if attr_index_zero == LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK {
+        early_println!(
+            "[aarch64] Limine MAIR AttrIndx0={:#x} Normal WB; Scarlet preserves it during TTBR handoff",
+            attr_index_zero,
+        );
+    } else {
+        early_println!(
+            "[aarch64] WARNING: Limine MAIR AttrIndx0={:#x}, expected Normal WB {:#x}; Scarlet will preserve AttrIndx0 as Normal WB before replacing TTBRs",
+            attr_index_zero,
+            LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK,
+        );
+    }
 }
 
 #[inline(always)]

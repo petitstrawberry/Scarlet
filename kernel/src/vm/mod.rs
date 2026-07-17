@@ -5,6 +5,7 @@
 
 pub mod addr;
 pub mod boot;
+pub mod direct_map;
 pub mod ioremap;
 pub mod manager;
 pub mod vmem;
@@ -16,10 +17,9 @@ pub use addr::{
 };
 pub use ioremap::{ioremap, iounmap};
 
+use direct_map::DirectMapRegions;
 use manager::VirtualMemoryManager;
-use vmem::MemoryArea;
-use vmem::VirtualMemoryMap;
-use vmem::VirtualMemoryPermission;
+use vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 use crate::arch::Arch;
 use crate::arch::get_kernel_trapvector_paddr;
@@ -45,9 +45,7 @@ use spin::{Mutex, Once};
 extern crate alloc;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
-static HHDM_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
-static HHDM_PHYS_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
 
 fn align_down(addr: usize, align: usize) -> usize {
@@ -67,7 +65,7 @@ static KERNEL_AREA: Once<MemoryArea> = Once::new();
 ///
 /// # Arguments
 ///
-/// * `direct_map_paddr` - Physical span represented by the kernel HHDM
+/// * `direct_map_regions` - Sparse physical regions represented by the kernel HHDM
 /// * `initramfs_paddr` - Optional physical range occupied by the initramfs
 /// * `heap_paddr` - Physical range backing the kernel heap
 ///
@@ -76,7 +74,7 @@ static KERNEL_AREA: Once<MemoryArea> = Once::new();
 /// This function returns after the runtime kernel page table is active.
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(
-    direct_map_paddr: MemoryArea,
+    direct_map_regions: DirectMapRegions,
     initramfs_paddr: Option<MemoryArea>,
     heap_paddr: MemoryArea,
 ) {
@@ -101,14 +99,6 @@ pub fn kernel_vm_init(
         start: addr::kernel_virt_to_phys(kernel_area.start),
         end: addr::kernel_virt_to_phys(kernel_area.end),
     };
-    let direct_map_phys_area = MemoryArea {
-        start: align_down(direct_map_paddr.start, PAGE_SIZE),
-        end: align_up(direct_map_paddr.end + 1, PAGE_SIZE) - 1,
-    };
-    let hhdm_area = MemoryArea {
-        start: SCARLET_HHDM_BASE + direct_map_phys_area.start,
-        end: SCARLET_HHDM_BASE + direct_map_phys_area.end,
-    };
     let heap_phys_area = MemoryArea {
         start: align_down(heap_paddr.start, PAGE_SIZE),
         end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
@@ -119,9 +109,7 @@ pub fn kernel_vm_init(
     };
 
     KERNEL_AREA.call_once(|| kernel_area);
-    HHDM_AREA.call_once(|| hhdm_area);
     KERNEL_HEAP_AREA.call_once(|| kernel_heap_area);
-    HHDM_PHYS_AREA.call_once(|| direct_map_phys_area);
     KERNEL_HEAP_PHYS_AREA.call_once(|| heap_phys_area);
 
     let kernel_map = VirtualMemoryMap {
@@ -140,20 +128,33 @@ pub fn kernel_vm_init(
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
 
-    let hhdm_map = VirtualMemoryMap {
-        vmarea: hhdm_area,
-        pmarea: direct_map_phys_area,
-        vm_start: hhdm_area.start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
-    get_kernel_vm_manager()
-        .add_memory_map(hhdm_map.clone())
-        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        let hhdm_map = VirtualMemoryMap {
+            vmarea: hhdm_area,
+            pmarea: physical_area,
+            vm_start: hhdm_area.start,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            memory_attribute: region.memory_attribute(),
+            owner: None,
+        };
+        manager
+            .add_memory_map(hhdm_map)
+            .unwrap_or_else(|error| panic!("Failed to add HHDM memory map: {}", error));
+    }
 
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
@@ -176,8 +177,12 @@ pub fn kernel_vm_init(
             end: align_up(initramfs_paddr.end + 1, PAGE_SIZE) - 1,
         };
         let initramfs_hhdm_area = MemoryArea {
-            start: phys_to_virt(initramfs_phys_area.start),
-            end: phys_to_virt(initramfs_phys_area.end),
+            start: SCARLET_HHDM_BASE
+                .checked_add(initramfs_phys_area.start)
+                .expect("initramfs HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(initramfs_phys_area.end)
+                .expect("initramfs HHDM virtual end overflows"),
         };
         let initramfs_map = VirtualMemoryMap {
             vmarea: initramfs_hhdm_area,
@@ -186,10 +191,12 @@ pub fn kernel_vm_init(
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
-            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            memory_attribute: MemoryAttribute::Normal,
             owner: None,
         };
-        if initramfs_hhdm_area.start < hhdm_area.start || initramfs_hhdm_area.end > hhdm_area.end {
+        if !direct_map_regions
+            .contains_area_with_attribute(initramfs_phys_area, MemoryAttribute::Normal)
+        {
             get_kernel_vm_manager()
                 .add_memory_map(initramfs_map.clone())
                 .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
@@ -207,10 +214,36 @@ pub fn kernel_vm_init(
         .map_memory_area(kernel_map, true, true)
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
-    root_page_table
-        .map_memory_area(hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        root_page_table
+            .map_memory_area(
+                VirtualMemoryMap {
+                    vmarea: hhdm_area,
+                    pmarea: physical_area,
+                    vm_start: hhdm_area.start,
+                    permissions: VirtualMemoryPermission::Read as usize
+                        | VirtualMemoryPermission::Write as usize,
+                    is_shared: true,
+                    memory_attribute: region.memory_attribute(),
+                    owner: None,
+                },
+                true,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
+    }
     root_page_table
         .map_memory_area(heap_map, true, true)
         .map_err(|e| panic!("Failed to map heap memory area: {}", e))
@@ -228,11 +261,18 @@ pub fn kernel_vm_init(
         kernel_area.start,
         kernel_area.end
     );
-    early_println!(
-        "HHDM mapped               : {:#018x} - {:#018x}",
-        hhdm_area.start,
-        hhdm_area.end
-    );
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let area = region.area();
+        early_println!(
+            "HHDM mapped               : {:#018x} - {:#018x} ({:?})",
+            SCARLET_HHDM_BASE + area.start,
+            SCARLET_HHDM_BASE + area.end,
+            region.memory_attribute(),
+        );
+    }
     early_println!(
         "Kernel heap mapped        : {:#018x} - {:#018x}",
         kernel_heap_area.start,
@@ -301,13 +341,11 @@ pub fn user_kernel_vm_init(task: &Task) {
     task.vm_manager.set_asid(asid);
 
     let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
-    let hhdm_area = *HHDM_AREA.get().expect("HHDM_AREA not initialized");
+    let direct_map_regions =
+        *addr::runtime_direct_map_regions().expect("runtime direct-map regions not initialized");
     let kernel_heap_area = *KERNEL_HEAP_AREA
         .get()
         .expect("KERNEL_HEAP_AREA not initialized");
-    let hhdm_phys_area = *HHDM_PHYS_AREA
-        .get()
-        .expect("HHDM_PHYS_AREA not initialized");
     let kernel_heap_phys_area = *KERNEL_HEAP_PHYS_AREA
         .get()
         .expect("KERNEL_HEAP_PHYS_AREA not initialized");
@@ -333,20 +371,32 @@ pub fn user_kernel_vm_init(task: &Task) {
         })
         .unwrap();
 
-    let hhdm_map = VirtualMemoryMap {
-        vmarea: hhdm_area,
-        pmarea: hhdm_phys_area,
-        vm_start: hhdm_area.start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
-    task.vm_manager
-        .add_memory_map(hhdm_map.clone())
-        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        task.vm_manager
+            .add_memory_map(VirtualMemoryMap {
+                vmarea: hhdm_area,
+                pmarea: physical_area,
+                vm_start: hhdm_area.start,
+                permissions: VirtualMemoryPermission::Read as usize
+                    | VirtualMemoryPermission::Write as usize,
+                is_shared: true,
+                memory_attribute: region.memory_attribute(),
+                owner: None,
+            })
+            .unwrap_or_else(|error| panic!("Failed to add HHDM memory map: {}", error));
+    }
 
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
@@ -372,10 +422,36 @@ pub fn user_kernel_vm_init(task: &Task) {
             panic!("Failed to map kernel memory area: {}", e);
         })
         .unwrap();
-    root_page_table
-        .map_memory_area(hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        root_page_table
+            .map_memory_area(
+                VirtualMemoryMap {
+                    vmarea: hhdm_area,
+                    pmarea: physical_area,
+                    vm_start: hhdm_area.start,
+                    permissions: VirtualMemoryPermission::Read as usize
+                        | VirtualMemoryPermission::Write as usize,
+                    is_shared: true,
+                    memory_attribute: region.memory_attribute(),
+                    owner: None,
+                },
+                true,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
+    }
     root_page_table
         .map_memory_area(heap_map, true, true)
         .map_err(|e| panic!("Failed to map heap memory area: {}", e))

@@ -48,7 +48,7 @@ use crate::{
     environment::PAGE_SIZE,
 };
 
-use super::addr::phys_to_virt;
+use super::addr::{phys_to_virt, validate_direct_map_alias};
 use super::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
 const WRITE_SITE_OWNER_TASK: u64 = 0x4f54;
@@ -107,6 +107,14 @@ impl VirtualMemoryManager {
             start: existing_map.pmarea.start + pm_offset,
             end: existing_map.pmarea.start + pm_offset + (sub_end - sub_start),
         }
+    }
+
+    fn validate_mapping_direct_map_alias(map: &VirtualMemoryMap) -> Result<(), &'static str> {
+        if map.pmarea.start == 0 && map.pmarea.end == 0 {
+            return Ok(());
+        }
+
+        validate_direct_map_alias(map.pmarea, map.memory_attribute)
     }
 
     /// Creates a new virtual memory manager.
@@ -313,6 +321,7 @@ impl VirtualMemoryManager {
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
+        Self::validate_mapping_direct_map_alias(&map)?;
 
         let mut g = self.inner.write();
         self.record_inner_writer(WRITE_SITE_ADD_MAP);
@@ -511,10 +520,14 @@ impl VirtualMemoryManager {
     /// # Note
     /// This method returns an iterator instead of a cloned Vec for efficiency.
     pub fn remove_all_memory_maps(&self) -> impl Iterator<Item = VirtualMemoryMap> {
-        let mut g = self.inner.write();
-        self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
-        g.last_search_cache = None;
-        let memmap = core::mem::take(&mut g.memmap);
+        let memmap = {
+            let mut g = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
+            g.last_search_cache = None;
+            core::mem::take(&mut g.memmap)
+        };
+
+        self.unmap_all_from_mmu();
         memmap.into_values()
     }
 
@@ -1040,9 +1053,33 @@ impl VirtualMemoryManager {
     /// * `vaddr_start` - Start of virtual address range
     /// * `vaddr_end` - End of virtual address range (inclusive)
     pub fn unmap_range_from_mmu(&self, vaddr_start: usize, vaddr_end: usize) {
-        if let Some(mut root_pagetable) = self.get_root_page_table() {
-            root_pagetable.unmap_range(vaddr_start, vaddr_end);
+        let asid = self.get_asid();
+        if asid == 0 || !is_asid_used(asid) {
+            return;
         }
+
+        let Some(mut root_pagetable) = self.get_root_page_table() else {
+            panic!(
+                "Cannot unmap {:#x}-{:#x}: live ASID {} has no root page table",
+                vaddr_start, vaddr_end, asid
+            );
+        };
+        root_pagetable.unmap_range(vaddr_start, vaddr_end);
+    }
+
+    fn unmap_all_from_mmu(&self) {
+        let asid = self.get_asid();
+        if asid == 0 || !is_asid_used(asid) {
+            return;
+        }
+
+        let Some(mut root_pagetable) = self.get_root_page_table() else {
+            panic!(
+                "Cannot unmap all mappings: live ASID {} has no root page table",
+                asid
+            );
+        };
+        root_pagetable.unmap_all();
     }
 
     pub fn translate_to_kva(&self, vaddr: usize) -> Option<usize> {
@@ -1245,6 +1282,7 @@ impl VirtualMemoryManager {
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
+        Self::validate_mapping_direct_map_alias(&map)?;
 
         let new_start = map.vmarea.start;
         let new_end = map.vmarea.end;

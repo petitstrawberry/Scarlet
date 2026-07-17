@@ -2,6 +2,7 @@ use crate::arch::vm::mmu::{PageTable as ArchPageTable, PageTableEntry as ArchPag
 use crate::environment::{KERNEL_HEAP_BASE, PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::mem::pmm;
 use crate::vm::addr::{boot_phys_to_virt, kernel_virt_to_phys};
+use crate::vm::direct_map::DirectMapRegions;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryPermission};
 
 const BOOT_ASID: u16 = 0;
@@ -14,8 +15,15 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-fn is_in_area(area: MemoryArea, paddr: usize) -> bool {
-    area.start <= paddr && paddr <= area.end
+fn direct_map_virtual_area(physical_area: MemoryArea) -> MemoryArea {
+    MemoryArea {
+        start: SCARLET_HHDM_BASE
+            .checked_add(physical_area.start)
+            .expect("direct-map virtual start overflows"),
+        end: SCARLET_HHDM_BASE
+            .checked_add(physical_area.end)
+            .expect("direct-map virtual end overflows"),
+    }
 }
 
 fn alloc_boot_pagetable() -> (usize, *mut ArchPageTable) {
@@ -212,10 +220,9 @@ fn boot_map_range(
 
 #[allow(static_mut_refs)]
 pub fn switch_to_boot_page_table(
-    direct_map_paddr: MemoryArea,
+    direct_map_regions: DirectMapRegions,
     initramfs_paddr: Option<MemoryArea>,
     heap_paddr: MemoryArea,
-    framebuffer_paddr: Option<MemoryArea>,
 ) {
     unsafe extern "C" {
         static __KERNEL_SPACE_START: usize;
@@ -239,15 +246,6 @@ pub fn switch_to_boot_page_table(
         end: align_up(kernel_virt_to_phys(kernel_area.end) + 1, PAGE_SIZE) - 1,
     };
 
-    let direct_map_phys_area = MemoryArea {
-        start: align_down(direct_map_paddr.start, PAGE_SIZE),
-        end: align_up(direct_map_paddr.end + 1, PAGE_SIZE) - 1,
-    };
-    let direct_map_area = MemoryArea {
-        start: SCARLET_HHDM_BASE + direct_map_phys_area.start,
-        end: SCARLET_HHDM_BASE + direct_map_phys_area.end,
-    };
-
     let heap_phys_area = MemoryArea {
         start: align_down(heap_paddr.start, PAGE_SIZE),
         end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
@@ -266,13 +264,19 @@ pub fn switch_to_boot_page_table(
             | VirtualMemoryPermission::Execute as usize,
         MemoryAttribute::Normal,
     );
-    boot_map_range(
-        root,
-        direct_map_area,
-        direct_map_phys_area,
-        VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-        MemoryAttribute::Normal,
-    );
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        boot_map_range(
+            root,
+            direct_map_virtual_area(physical_area),
+            physical_area,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            region.memory_attribute(),
+        );
+    }
     boot_map_range(
         root,
         heap_area,
@@ -286,41 +290,20 @@ pub fn switch_to_boot_page_table(
             start: align_down(initramfs.start, PAGE_SIZE),
             end: align_up(initramfs.end + 1, PAGE_SIZE) - 1,
         };
-        if !is_in_area(direct_map_phys_area, initramfs_phys_area.start)
-            || !is_in_area(direct_map_phys_area, initramfs_phys_area.end)
+        if !direct_map_regions
+            .contains_area_with_attribute(initramfs_phys_area, MemoryAttribute::Normal)
         {
-            let initramfs_area = MemoryArea {
-                start: SCARLET_HHDM_BASE + initramfs_phys_area.start,
-                end: SCARLET_HHDM_BASE + initramfs_phys_area.end,
-            };
+            direct_map_regions
+                .validate_alias(initramfs_phys_area, MemoryAttribute::Normal)
+                .unwrap_or_else(|error| {
+                    panic!("initramfs conflicts with direct-map attribute: {}", error)
+                });
             boot_map_range(
                 root,
-                initramfs_area,
+                direct_map_virtual_area(initramfs_phys_area),
                 initramfs_phys_area,
                 VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
                 MemoryAttribute::Normal,
-            );
-        }
-    }
-
-    if let Some(fb) = framebuffer_paddr {
-        let fb_phys_area = MemoryArea {
-            start: align_down(fb.start, PAGE_SIZE),
-            end: align_up(fb.end + 1, PAGE_SIZE) - 1,
-        };
-        if !is_in_area(direct_map_phys_area, fb_phys_area.start)
-            || !is_in_area(direct_map_phys_area, fb_phys_area.end)
-        {
-            let fb_area = MemoryArea {
-                start: SCARLET_HHDM_BASE + fb_phys_area.start,
-                end: SCARLET_HHDM_BASE + fb_phys_area.end,
-            };
-            boot_map_range(
-                root,
-                fb_area,
-                fb_phys_area,
-                VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-                MemoryAttribute::DeviceBurstable,
             );
         }
     }
