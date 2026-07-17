@@ -21,10 +21,11 @@ const MAIR_DEVICE_NGNRNE: u64 = 0x00;
 const MAIR_NORMAL_WRITE_BACK: u64 = 0xff;
 const MAIR_NORMAL_NON_CACHEABLE: u64 = 0x44;
 const MAIR_DEVICE_GRE: u64 = 0x0c;
-const SCARLET_MAIR_EL1: u64 = MAIR_DEVICE_NGNRNE
+const SCARLET_MAIR_EL1: u64 = MAIR_NORMAL_WRITE_BACK
     | (MAIR_NORMAL_WRITE_BACK << 8)
     | (MAIR_NORMAL_NON_CACHEABLE << 16)
-    | (MAIR_DEVICE_GRE << 24);
+    | (MAIR_DEVICE_GRE << 24)
+    | (MAIR_DEVICE_NGNRNE << 32);
 // TCR_EL1.IPS=0b010 selects a 40-bit PA range; QEMU virt can place PCI ECAM above 36 bits.
 const SCARLET_TCR_EL1: u64 = 0x2_B510_3510;
 const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12);
@@ -262,16 +263,16 @@ impl PageTableEntry {
         (self.entry >> 6) & 1 == 1
     }
     pub fn set_memory_type_device(&mut self) {
-        self.set_memory_attr(0);
+        self.set_memory_attr(4);
     }
     pub fn is_device_memory(&self) -> bool {
-        (self.entry >> 2) & 0x7 == 0
+        (self.entry >> 2) & 0x7 == 4
     }
     pub fn set_memory_type_normal_cacheable(&mut self) {
-        self.set_memory_attr(1);
+        self.set_memory_attr(0);
     }
     pub fn is_normal_cacheable_memory(&self) -> bool {
-        (self.entry >> 2) & 0x7 == 1
+        (self.entry >> 2) & 0x7 == 0
     }
     pub fn set_outer_shareable(&mut self) {
         self.set_shareability(0b10);
@@ -296,7 +297,7 @@ pub enum Shareability {
 }
 
 #[inline(always)]
-fn invalidate_stage1_translations_inner_shareable() {
+pub(in crate::arch::aarch64::vm) fn invalidate_stage1_translations_inner_shareable() {
     // SAFETY: The barriers and broadcast TLBI form the architected completion
     // sequence for publishing stage-1 translation-table changes to all PEs in
     // the inner-shareable domain.
@@ -609,10 +610,12 @@ impl PageTable {
     ) -> u64 {
         let is_user = VirtualMemoryPermission::User.contained_in(permissions);
         let memory_attr = match memory_attribute {
-            MemoryAttribute::Normal => 1,
+            // AttrIndx 0 stays Limine-compatible Normal WB while Limine's
+            // inherited TTBRs remain active during the boot-table handoff.
+            MemoryAttribute::Normal => 0,
             MemoryAttribute::NonCacheable => 2,
             MemoryAttribute::DeviceBurstable => 3,
-            MemoryAttribute::Device => 0,
+            MemoryAttribute::Device => 4,
         };
         let shareability = match memory_attribute {
             MemoryAttribute::Device | MemoryAttribute::DeviceBurstable => {
@@ -1097,7 +1100,7 @@ mod tests {
             true,
         );
         let pte = page_table.walk(0xffff_ffff_8000_0000, false, 1).unwrap();
-        assert_eq!(pte.entry & 0xfff, 0x707);
+        assert_eq!(pte.entry & 0xfff, 0x703);
     }
 
     #[test_case]
@@ -1149,7 +1152,7 @@ mod tests {
             0,
             MemoryAttribute::Normal,
         );
-        assert_eq!((normal_entry >> 2) & 0b111, 1);
+        assert_eq!((normal_entry >> 2) & 0b111, 0);
 
         let device_entry = PageTable::make_leaf_entry(
             0x4200_0000,
@@ -1158,7 +1161,50 @@ mod tests {
             0,
             MemoryAttribute::Device,
         );
-        assert_eq!((device_entry >> 2) & 0b111, 0);
+        assert_eq!((device_entry >> 2) & 0b111, 4);
+    }
+
+    #[test_case]
+    fn test_mair_attr_index_mappings() {
+        assert_eq!(SCARLET_MAIR_EL1 & 0xff, MAIR_NORMAL_WRITE_BACK);
+        assert_eq!((SCARLET_MAIR_EL1 >> 8) & 0xff, MAIR_NORMAL_WRITE_BACK);
+        assert_eq!((SCARLET_MAIR_EL1 >> 16) & 0xff, MAIR_NORMAL_NON_CACHEABLE);
+        assert_eq!((SCARLET_MAIR_EL1 >> 24) & 0xff, MAIR_DEVICE_GRE);
+        assert_eq!((SCARLET_MAIR_EL1 >> 32) & 0xff, MAIR_DEVICE_NGNRNE);
+
+        let normal = PageTable::make_leaf_entry(
+            0x4100_0000,
+            0x8100_0000,
+            VirtualMemoryPermission::Read as usize,
+            0,
+            MemoryAttribute::Normal,
+        );
+        let non_cacheable = PageTable::make_leaf_entry(
+            0x4200_0000,
+            0x8200_0000,
+            VirtualMemoryPermission::Read as usize,
+            0,
+            MemoryAttribute::NonCacheable,
+        );
+        let burstable = PageTable::make_leaf_entry(
+            0x4300_0000,
+            0x8300_0000,
+            VirtualMemoryPermission::Read as usize,
+            0,
+            MemoryAttribute::DeviceBurstable,
+        );
+        let device = PageTable::make_leaf_entry(
+            0x4400_0000,
+            0x8400_0000,
+            VirtualMemoryPermission::Read as usize,
+            0,
+            MemoryAttribute::Device,
+        );
+
+        assert_eq!((normal >> 2) & 0b111, 0);
+        assert_eq!((non_cacheable >> 2) & 0b111, 2);
+        assert_eq!((burstable >> 2) & 0b111, 3);
+        assert_eq!((device >> 2) & 0b111, 4);
     }
 
     #[test_case]
