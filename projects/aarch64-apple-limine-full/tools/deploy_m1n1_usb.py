@@ -21,6 +21,7 @@ TOOLS_DIR = PROXYCLIENT_DIR / "tools"
 DEFAULT_IMAGE_ADDR = 0x900000000
 DEFAULT_IMAGE_MAP_SIZE = 0x40000000
 DEFAULT_ENTRY_POINT = 0x800
+SERIAL_CONSOLE_DEVICE = "/dev/cu.debug-console"
 
 sys.path.append(str(PROXYCLIENT_DIR))
 
@@ -202,6 +203,38 @@ class UartRouter:
                 log.close()
 
 
+def find_macvdmtool():
+    return shutil.which("macvdmtool")
+
+
+def reboot_target(timeout):
+    tool = find_macvdmtool()
+    if not tool:
+        print("macvdmtool not found in PATH, skipping reboot.")
+        return
+    cmd = [tool, "reboot"]
+    if os.geteuid() != 0:
+        cmd.insert(0, "sudo")
+    print("Rebooting target via macvdmtool...")
+    run_checked(cmd)
+
+
+def enter_serial_mode(timeout):
+    tool = find_macvdmtool()
+    if not tool:
+        raise FileNotFoundError(
+            "macvdmtool not found in PATH.  Build it from "
+            "https://github.com/AsahiLinux/macvdmtool and install it."
+        )
+    cmd = [tool, "reboot", "serial"]
+    if os.geteuid() != 0:
+        cmd.insert(0, "sudo")
+    print("Entering serial mode via macvdmtool (target will reboot)...")
+    run_checked(cmd)
+    wait_for_device(SERIAL_CONSOLE_DEVICE, timeout)
+    print(f"Serial console available at {SERIAL_CONSOLE_DEVICE}")
+
+
 def build_image(args):
     cmd = ["cargo", "scarlet", "image", "--project", args.project]
     if args.release:
@@ -278,6 +311,11 @@ def runner_command_args(args):
         cmd.append("--no-build")
     if args.skip_chainload:
         cmd.append("--skip-chainload")
+    if args.bare:
+        cmd.append("--bare")
+    if args.serial:
+        cmd.append("--serial")
+    cmd.append("--no-reboot")
     if args.connect_timeout is not None:
         cmd.extend(["--connect-timeout", str(args.connect_timeout)])
     if args.avd_info_json:
@@ -423,6 +461,8 @@ def launch_tmux(args):
 def should_launch_tmux(args):
     if args.no_tmux or os.environ.get("SCARLET_M1N1_IN_TMUX"):
         return False
+    if args.bare and args.serial:
+        return False
     env = env_flag("SCARLET_M1N1_TMUX")
     if env is not None:
         return env
@@ -522,6 +562,7 @@ def patch_avd_guest_payload(args, hv, payload):
 
 
 def start_guest(args):
+    """Boot Scarlet under m1n1 hypervisor (EL1 guest with stage-2 translation)."""
     from m1n1.proxyutils import ProxyUtils
     from m1n1.hv import HV
     from m1n1.hw.pmu import PMU
@@ -565,6 +606,92 @@ def start_guest(args):
     hv.start()
 
 
+def start_guest_bare(args):
+    """Boot Scarlet at EL2 without m1n1 hypervisor (no stage-2 translation).
+
+    Pushes the Scarlet Limine image to RAM via proxy, then chainloads the
+    U-Boot payload (boot-j293.bin) at EL2.  The inner m1n1 in the payload
+    runs at EL2, boots U-Boot at EL2, which in turn boots Scarlet at EL2.
+
+    Unlike HV mode, there is no stage-2 translation to catch invalid physical
+    accesses — the kernel talks directly to hardware.
+    """
+    print("=== BARE MODE: booting at EL2 without m1n1 hypervisor ===")
+    from m1n1.proxyutils import ProxyUtils
+    from m1n1.hw.pmu import PMU
+
+    iface, p = open_proxy(args, timeout=args.connect_timeout)
+    u = ProxyUtils(p, heap_size=128 * 1024 * 1024)
+
+    image = args.image.read_bytes()
+    if len(image) > args.image_map_size:
+        raise ValueError(
+            f"Scarlet image is {len(image)} bytes, larger than U-Boot blkmap window "
+            f"0x{args.image_map_size:x} bytes"
+        )
+
+    mem_top = u.ba.phys_base + u.ba.mem_size
+    if args.image_addr + len(image) > mem_top:
+        raise ValueError(
+            f"Image load range 0x{args.image_addr:x}..0x{args.image_addr + len(image):x} "
+            f"exceeds physical memory top 0x{mem_top:x}"
+        )
+
+    enable_avd_pmgr(args, p)
+
+    print(
+        f"Pushing Scarlet Limine image {args.image} ({len(image)} bytes) "
+        f"to 0x{args.image_addr:x}"
+    )
+    iface.writemem(args.image_addr, image, True)
+    p.dc_cvau(args.image_addr, len(image))
+
+    PMU(u).reset_panic_counter()
+
+    # Close the proxy connection so chainload.py can reopen the USB device.
+    del u
+    del p
+    iface.dev.close()
+    del iface
+
+    time.sleep(1.0)
+
+    print("Chainloading U-Boot payload at EL2 (no HV)...")
+    env = os.environ.copy()
+    env["M1N1DEVICE"] = args.proxy_device
+    cmd = [sys.executable, TOOLS_DIR / "chainload.py", "-r", str(args.payload)]
+    deadline = timeout_deadline(args.connect_timeout)
+    attempt = 1
+    while True:
+        try:
+            result = run_checked_capture(cmd, cwd=REPO_ROOT, env=env, echo=False)
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            return
+        except subprocess.CalledProcessError as exc:
+            chainload_output = (exc.stdout or "") + (exc.stderr or "")
+            if "Reloading into stub" in chainload_output:
+                if exc.stdout:
+                    print(exc.stdout, end="")
+                if exc.stderr:
+                    print(exc.stderr, end="", file=sys.stderr)
+                print("Chainload completed (target left proxy mode after reload).")
+                return
+            remaining = timeout_remaining(deadline)
+            if remaining is not None and remaining <= 0:
+                raise
+            suffix = "" if remaining is None else f" ({remaining:.0f}s left)"
+            print(
+                f"chainload not ready on attempt {attempt}: "
+                f"{summarize_failure(exc)}; retrying{suffix}",
+                file=sys.stderr,
+            )
+            attempt += 1
+            retry_sleep(deadline)
+
+
 def existing_path(path):
     path = pathlib.Path(path)
     if not path.exists():
@@ -574,7 +701,7 @@ def existing_path(path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build Scarlet, push its Limine UEFI image to Apple Silicon RAM, and boot it via m1n1 HV."
+        description="Build Scarlet, push its Limine UEFI image to Apple Silicon RAM, and boot it via m1n1."
     )
     parser.add_argument("--project", default=str(PROJECT_DIR), help="Scarlet project directory")
     parser.add_argument(
@@ -584,6 +711,7 @@ def main():
         help="Build the Scarlet image in release mode",
     )
     parser.add_argument("--no-build", action="store_true", help="Use the existing Scarlet image")
+    parser.add_argument("--no-reboot", action="store_true", help="Skip target reboot via macvdmtool before boot")
     parser.add_argument("--skip-chainload", action="store_true", help="Do not chainload fresh m1n1 before starting HV")
     parser.add_argument("--proxy-device", default=None, help="Primary m1n1 proxy UART device (auto-detected if omitted)")
     parser.add_argument("--secondary-device", default=None, help="Secondary HV virtual UART device (auto-detected if omitted)")
@@ -618,6 +746,22 @@ def main():
     )
     parser.add_argument("--avd-info-json", type=pathlib.Path, help="Use a saved Apple AVD DTB patch JSON instead of live ADT extraction")
     parser.add_argument("--avd-soc", help="Override Apple SoC name for generated AVD compatibles, e.g. t8103")
+    parser.add_argument(
+        "--bare",
+        action="store_true",
+        default=env_flag("SCARLET_M1N1_BARE") is True,
+        help="Boot at EL2 without m1n1 hypervisor (no stage-2 translation). "
+        "Default is HV mode (EL1 guest with stage-2).",
+    )
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        default=env_flag("SCARLET_M1N1_SERIAL") is True,
+        help="Enter serial mode via macvdmtool before boot. "
+        "Uses /dev/cu.debug-console for both proxy and UART. "
+        "Required for UART capture in bare mode. "
+        "Needs macvdmtool in PATH.",
+    )
     args = parser.parse_args()
 
     args.project = str(pathlib.Path(args.project).resolve())
@@ -638,6 +782,12 @@ def main():
             print(f"timeout: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    if args.serial:
+        enter_serial_mode(args.connect_timeout)
+        wait_for_device(SERIAL_CONSOLE_DEVICE, args.connect_timeout)
+    elif not args.no_reboot:
+        reboot_target(args.connect_timeout)
+
     if should_launch_tmux(args):
         try:
             launch_tmux(args)
@@ -650,6 +800,12 @@ def main():
 
     ensure_usb_devices(args)
 
+    if args.serial:
+        args.secondary_device = pathlib.Path(SERIAL_CONSOLE_DEVICE)
+        print(f"Proxy:     {args.proxy_device}")
+        print(f"Serial:    {SERIAL_CONSOLE_DEVICE}")
+
+    serial_uart_keepalive = args.bare and args.serial
     uart = None
     try:
         if not args.no_uart:
@@ -664,7 +820,24 @@ def main():
         if not args.skip_chainload:
             chainload(args)
 
-        start_guest(args)
+        if args.bare:
+            start_guest_bare(args)
+        else:
+            start_guest(args)
+
+        if serial_uart_keepalive:
+            print(f"\n=== UART capture on {SERIAL_CONSOLE_DEVICE} (Ctrl+C to stop) ===")
+            uart = UartRouter(
+                pathlib.Path(SERIAL_CONSOLE_DEVICE),
+                args.uart_log,
+                args.uart_baudrate,
+            )
+            uart.start()
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nInterrupted, closing UART capture.")
     except subprocess.CalledProcessError as exc:
         print(
             f"command failed with exit status {exc.returncode}: "
