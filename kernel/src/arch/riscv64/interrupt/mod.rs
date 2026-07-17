@@ -21,6 +21,36 @@ pub fn disable_interrupts() {
     }
 }
 
+/// Save the global interrupt-enable state and disable interrupts.
+///
+/// # Returns
+///
+/// The saved SIE bit to pass to [`restore_interrupts`].
+pub fn save_and_disable_interrupts() -> usize {
+    let saved: usize;
+    unsafe {
+        core::arch::asm!(
+            "csrrc {saved}, sstatus, {mask}",
+            saved = out(reg) saved,
+            mask = in(reg) 1 << 1,
+        );
+    }
+    saved & (1 << 1)
+}
+
+/// Restore an interrupt state returned by [`save_and_disable_interrupts`].
+///
+/// # Arguments
+///
+/// * `saved` - Saved SIE bit to restore.
+pub fn restore_interrupts(saved: usize) {
+    if saved & (1 << 1) != 0 {
+        enable_interrupts();
+    } else {
+        disable_interrupts();
+    }
+}
+
 /// Check if interrupts are currently enabled on RISC-V
 ///
 /// Returns true if the SIE bit is set in the sstatus register.
@@ -40,12 +70,9 @@ pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let old_state = are_interrupts_enabled();
-    disable_interrupts();
+    let saved = save_and_disable_interrupts();
     let result = f();
-    if old_state {
-        enable_interrupts();
-    }
+    restore_interrupts(saved);
     result
 }
 
