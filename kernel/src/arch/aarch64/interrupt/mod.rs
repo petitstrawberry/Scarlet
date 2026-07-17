@@ -118,16 +118,12 @@ pub fn restore_interrupts(saved: usize) {
     }
 }
 
-/// Enable external interrupts (IRQ) at CPU level.
+/// Enable external interrupt reception sources without changing DAIF.
 ///
-/// This only unmasks the IRQ bit (DAIF.I). Source-level enables (e.g. GIC
-/// enable of a specific interrupt ID) are handled separately.
-pub fn enable_external_interrupts() {
-    // SAFETY: DAIFClr updates only the current CPU's architectural IRQ mask.
-    unsafe {
-        asm!("msr daifclr, #0x2", options(nostack));
-    }
-}
+/// Source and controller enables, such as GIC interrupt-line configuration,
+/// are performed separately. Kernel bootstrap must remain non-preemptible, so
+/// unmasking DAIF.I is restricted to the controlled idle and user-return paths.
+pub fn enable_external_interrupts() {}
 
 /// Enable software interrupt reception at CPU level.
 ///
@@ -136,13 +132,12 @@ pub fn enable_external_interrupts() {
 /// the GIC driver, so there is no separate architectural CPU bit to set here.
 pub fn enable_software_interrupts() {}
 
-/// Disable external interrupts (IRQ) at CPU level.
-pub fn disable_external_interrupts() {
-    // SAFETY: DAIFSet updates only the current CPU's architectural IRQ mask.
-    unsafe {
-        asm!("msr daifset, #0x2", options(nostack));
-    }
-}
+/// Disable external interrupt reception sources without changing DAIF.
+///
+/// Source and controller disables are performed separately. This intentionally
+/// leaves DAIF.I alone so it remains owned by the controlled idle and
+/// user-return paths, and by save/restore users such as [`crate::sync::IrqGuard`].
+pub fn disable_external_interrupts() {}
 
 /// Enable a core-local interrupt source via the InterruptManager.
 ///
