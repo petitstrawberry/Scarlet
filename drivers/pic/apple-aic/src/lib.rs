@@ -5,7 +5,7 @@ extern crate alloc;
 mod fiq;
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU64, Ordering};
+// use core::sync::atomic::{AtomicU64, Ordering};
 use scarlet::{
     arch::mmio,
     device::{
@@ -87,14 +87,21 @@ const AIC_IPI_SELF: u32 = 1 << 31;
 
 /// Maximum number of CPUs supported by AIC (31 bits in IPI SEND, bit 31 is self)
 const AIC_MAX_CPUS: CpuId = 31;
-const AIC_TRACKED_IRQS: usize = 1024;
+// const AIC_TRACKED_IRQS: usize = 1024;
 
-static HARDWARE_IRQ_CLAIMS: AtomicU64 = AtomicU64::new(0);
-static HARDWARE_IRQ_EOIS: AtomicU64 = AtomicU64::new(0);
-static HARDWARE_IRQ_CLAIMS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
-    [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
-static HARDWARE_IRQ_EOIS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
-    [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
+/// Suppress scheduler IPI hardware kicks while preserving remote ready queues.
+///
+/// This is a diagnostic mode for comparing Apple SMP scheduling with periodic
+/// timer polling. Remote CPUs still reconsider their ready queues on timer
+/// ticks, but they are not interrupted immediately when work is enqueued.
+const SUPPRESS_SCHEDULER_IPI_KICKS: bool = false;
+
+// static HARDWARE_IRQ_CLAIMS: AtomicU64 = AtomicU64::new(0);
+// static HARDWARE_IRQ_EOIS: AtomicU64 = AtomicU64::new(0);
+// static HARDWARE_IRQ_CLAIMS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
+//     [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
+// static HARDWARE_IRQ_EOIS_BY_ID: [AtomicU64; AIC_TRACKED_IRQS] =
+//     [const { AtomicU64::new(0) }; AIC_TRACKED_IRQS];
 
 // =============================================================================
 // Helper Functions
@@ -346,18 +353,18 @@ impl Aic {
 
         match event_type {
             AIC_EVENT_TYPE_HW => {
-                let claims = HARDWARE_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
-                let source_claims = HARDWARE_IRQ_CLAIMS_BY_ID
-                    .get(event_num as usize)
-                    .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
-                scarlet::early_println!(
-                    "[AIC][IRQ] source_claim={} total_claim={} total_eoi={} cpu={} hwirq={}",
-                    source_claims.unwrap_or(0),
-                    claims,
-                    HARDWARE_IRQ_EOIS.load(Ordering::Relaxed),
-                    cpu_id,
-                    event_num
-                );
+                // let claims = HARDWARE_IRQ_CLAIMS.fetch_add(1, Ordering::Relaxed) + 1;
+                // let source_claims = HARDWARE_IRQ_CLAIMS_BY_ID
+                //     .get(event_num as usize)
+                //     .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
+                // scarlet::early_println!(
+                //     "[AIC][IRQ] source_claim={} total_claim={} total_eoi={} cpu={} hwirq={}",
+                //     source_claims.unwrap_or(0),
+                //     claims,
+                //     HARDWARE_IRQ_EOIS.load(Ordering::Relaxed),
+                //     cpu_id,
+                //     event_num
+                // );
                 Ok(Some(PendingIrq {
                     mapping: IrqMapping::legacy(event_num, IrqFlow::Level),
                     cpu_id,
@@ -546,20 +553,20 @@ impl ExternalInterruptController for Aic {
         }
 
         self.complete_interrupt(irq.cpu_id, irq.mapping.hwirq)?;
-        let eois = HARDWARE_IRQ_EOIS.fetch_add(1, Ordering::Relaxed) + 1;
-        let source_eois = HARDWARE_IRQ_EOIS_BY_ID
-            .get(irq.mapping.hwirq as usize)
-            .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
-        if source_eois.is_some_and(|count| count <= 8 || count.is_power_of_two()) {
-            scarlet::early_println!(
-                "[AIC][IRQ] source_eoi={} total_eoi={} total_claim={} cpu={} hwirq={}",
-                source_eois.unwrap_or(0),
-                eois,
-                HARDWARE_IRQ_CLAIMS.load(Ordering::Relaxed),
-                irq.cpu_id,
-                irq.mapping.hwirq
-            );
-        }
+        // let eois = HARDWARE_IRQ_EOIS.fetch_add(1, Ordering::Relaxed) + 1;
+        // let source_eois = HARDWARE_IRQ_EOIS_BY_ID
+        //     .get(irq.mapping.hwirq as usize)
+        //     .map(|count| count.fetch_add(1, Ordering::Relaxed) + 1);
+        // if source_eois.is_some_and(|count| count <= 8 || count.is_power_of_two()) {
+        //     scarlet::early_println!(
+        //         "[AIC][IRQ] source_eoi={} total_eoi={} total_claim={} cpu={} hwirq={}",
+        //         source_eois.unwrap_or(0),
+        //         eois,
+        //         HARDWARE_IRQ_CLAIMS.load(Ordering::Relaxed),
+        //         irq.cpu_id,
+        //         irq.mapping.hwirq
+        //     );
+        // }
         Ok(())
     }
 
@@ -569,6 +576,9 @@ impl ExternalInterruptController for Aic {
         }
 
         self.validate_cpu_id(target_cpu_id)?;
+        if SUPPRESS_SCHEDULER_IPI_KICKS {
+            return Ok(());
+        }
         self.send_ipi_to_cpu(target_cpu_id)
     }
 
@@ -665,6 +675,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     scarlet::early_println!("[AIC] probe: max_cpus={}", max_cpus);
 
     let fast_ipi = device.compatible().contains(&"apple,t8103-aic");
+    // if SUPPRESS_SCHEDULER_IPI_KICKS {
+    //     scarlet::early_println!(
+    //         "[AIC] diagnostic: scheduler IPI kicks suppressed; using timer polling"
+    //     );
+    // }
     let aic = Box::new(Aic::new(base_addr, max_cpus, fast_ipi));
 
     // Register with interrupt manager

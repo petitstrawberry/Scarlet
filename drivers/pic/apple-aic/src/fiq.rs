@@ -167,11 +167,11 @@ pub(super) fn send_fast_ipi(target_cpu: u32) -> bool {
 pub(super) fn claim_pending(cpu_id: u32) -> InterruptClaim {
     let state = FiqState::capture();
     let sources = state.pending_sources();
-    scarlet::early_println!(
-        "[AIC][FIQ] non-timer claim cpu={} sources={:#x}",
-        cpu_id,
-        sources
-    );
+    // scarlet::early_println!(
+    //     "[AIC][FIQ] non-timer claim cpu={} sources={:#x}",
+    //     cpu_id,
+    //     sources
+    // );
 
     // Host timers are handled before this claim in the architecture trap
     // handler. If one becomes pending between that check and this snapshot,
