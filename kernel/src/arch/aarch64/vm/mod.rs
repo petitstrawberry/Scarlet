@@ -142,8 +142,7 @@ impl RootPageTableGuard {
         write: bool,
     ) {
         let asid = self.asid;
-        self.table_mut()
-            .map(asid, vaddr, paddr, flags, user, write);
+        self.table_mut().map(asid, vaddr, paddr, flags, user, write);
     }
 
     pub(crate) fn leaf_entry_bits(&mut self, vaddr: usize) -> Option<u64> {
@@ -280,6 +279,10 @@ pub fn free_virtual_address_space(asid: u16) {
     let _page_table_guard = PAGE_TABLE_LOCKS[asid].lock();
     let bit_pos = asid % 64;
     let word_idx = asid / 64;
+    // Invalidate stale translations on every PE before this ASID can return to
+    // the allocator. A local `vmalle1` during a later context switch cannot
+    // remove entries cached by other CPUs under the recycled ASID.
+    mmu::invalidate_stage1_translations_inner_shareable();
     // PMM frees must happen AFTER dropping PAGE_TABLES/asid_table locks:
     // holding PAGE_TABLES.write() across free_pagetable()->PMM blocks every
     // get_root_pagetable() reader (setup_task_cpu_state) when PMM is contended.
