@@ -24,6 +24,7 @@ use crate::mem::page::{Page, allocate_raw_pages, allocate_raw_pages_aligned, fre
 use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
+use crate::arch::riscv64::instruction::sbi::remote_sfence_vma_asid_all_harts;
 use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::addr::kernel_virt_to_phys;
@@ -31,6 +32,40 @@ use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
 static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
+
+/// Invalidates one address space's translations locally and on every remote hart.
+///
+/// Mutators hold the per-ASID page-table lock while calling this function. SBI's
+/// all-harts sentinel is deliberate: scheduler CPU IDs need not be hardware hart
+/// IDs, while SBI itself knows the complete supervisor-available hart set.
+///
+/// # Arguments
+///
+/// * `asid` - Address-space identifier whose translations were changed.
+pub(in crate::arch::riscv64::vm) fn synchronize_tlb(asid: u16) {
+    // SAFETY: the caller has completed page-table writes while holding the
+    // corresponding page-table lock. The fence publishes those writes before
+    // local translation-cache invalidation.
+    unsafe {
+        core::arch::asm!(
+            "fence rw, rw",
+            "sfence.vma zero, {asid}",
+            asid = in(reg) asid as usize,
+            options(nostack),
+        );
+    }
+
+    if crate::sched::scheduler::num_online_cpus() <= 1 {
+        return;
+    }
+
+    remote_sfence_vma_asid_all_harts(0, 0, asid as usize).unwrap_or_else(|error| {
+        panic!(
+            "SBI RFENCE failed for ASID {} after page-table mutation: {:?}; refusing stale TLB use",
+            asid, error
+        )
+    });
+}
 
 pub fn save_kernel_page_table() {
     let satp: u64;
@@ -59,8 +94,7 @@ unsafe extern "C" {
 
 const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
 static ASID_BITMAP_TABLES: Once<RwLock<Box<[u64]>>> = Once::new();
-static PAGE_TABLE_LOCKS: [Mutex<()>; NUM_OF_ASID] =
-    [const { Mutex::new(()) }; NUM_OF_ASID];
+static PAGE_TABLE_LOCKS: [Mutex<()>; NUM_OF_ASID] = [const { Mutex::new(()) }; NUM_OF_ASID];
 
 /// Exclusive access to one ASID's stage-1 page-table hierarchy.
 pub struct RootPageTableGuard {
@@ -117,8 +151,7 @@ impl RootPageTableGuard {
         write: bool,
     ) {
         let asid = self.asid;
-        self.table_mut()
-            .map(asid, vaddr, paddr, flags, user, write);
+        self.table_mut().map(asid, vaddr, paddr, flags, user, write);
     }
 
     #[cfg(test)]
@@ -132,7 +165,8 @@ impl RootPageTableGuard {
     }
 
     pub(crate) fn unmap_all(&mut self) {
-        self.table_mut().unmap_all();
+        let asid = self.asid;
+        self.table_mut().unmap_all(asid);
     }
 
     #[cfg(test)]
@@ -260,6 +294,7 @@ pub fn free_virtual_address_space(asid: u16) {
         if asid_table[word_idx] & (1 << bit_pos) == 0 {
             panic!("ASID {} is already free", asid);
         }
+        synchronize_tlb(asid as u16);
         let mut page_tables = get_page_tables().write();
         if let Some(tables) = page_tables.remove(&(asid as u16)) {
             for addr in tables {

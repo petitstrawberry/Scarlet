@@ -1,6 +1,7 @@
 use core::arch::asm;
 use core::result::Result;
 
+use crate::arch::riscv64::vm::synchronize_tlb;
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{kernel_virt_to_phys, phys_to_virt};
@@ -238,21 +239,34 @@ impl PageTable {
         };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
+        let mut changed = false;
         while vaddr <= mmap.vmarea.end {
             // MemoryArea uses an inclusive end. Overflow here means the range
             // would require more than usize::MAX bytes and cannot be mapped.
-            let remaining = mmap
+            let Some(remaining) = mmap
                 .vmarea
                 .end
                 .checked_sub(vaddr)
                 .and_then(|remaining| remaining.checked_add(1))
-                .ok_or("Address range overflow")?;
+            else {
+                if changed {
+                    synchronize_tlb(asid);
+                }
+                return Err("Address range overflow");
+            };
             let mut level = best_page_level(vaddr, paddr, remaining);
-            while self
-                .try_map_at_level(asid, vaddr, paddr, attrs, level)
-                .is_err()
-            {
+            loop {
+                if self
+                    .try_map_at_level(asid, vaddr, paddr, attrs, level)
+                    .is_ok()
+                {
+                    changed = true;
+                    break;
+                }
                 if level == 0 {
+                    if changed {
+                        synchronize_tlb(asid);
+                    }
                     return Err("Failed to map memory area");
                 }
                 level -= 1;
@@ -269,7 +283,9 @@ impl PageTable {
             }
         }
 
-        unsafe { asm!("sfence.vma zero,zero") };
+        if changed {
+            synchronize_tlb(asid);
+        }
 
         Ok(())
     }
@@ -297,7 +313,7 @@ impl PageTable {
         };
         self.try_map_at_level(asid, vaddr, paddr, attrs, 0)
             .expect("map: couldn't install a 4 KiB leaf mapping");
-        unsafe { asm!("sfence.vma zero,zero") };
+        synchronize_tlb(asid);
     }
 
     /// Attempts to install a leaf mapping at the specified page-table level.
@@ -510,13 +526,12 @@ impl PageTable {
             pte.clear_all();
             pte.set_ppn(kernel_virt_to_phys(child_table as usize) >> 12);
             pte.validate();
-            asm!("sfence.vma zero,zero");
         }
 
         Ok(())
     }
 
-    fn unmap(&mut self, vaddr: usize) {
+    fn unmap(&mut self, vaddr: usize) -> bool {
         // Check if the virtual address is properly canonicalized for Sv48
         assert_canonical_sv48(vaddr);
 
@@ -524,7 +539,9 @@ impl PageTable {
 
         if let Some((pte, _)) = self.walk_leaf(vaddr) {
             pte.clear_all();
-            unsafe { asm!("sfence.vma zero,zero") };
+            true
+        } else {
+            false
         }
     }
 
@@ -547,6 +564,7 @@ impl PageTable {
         assert_canonical_sv48(vaddr_end);
 
         let mut vaddr = vaddr_start & !(PAGE_SIZE - 1);
+        let mut changed = false;
         while vaddr <= vaddr_end {
             let Some((_, level)) = self.walk_leaf(vaddr) else {
                 match vaddr.checked_add(PAGE_SIZE) {
@@ -561,13 +579,13 @@ impl PageTable {
             let leaf_end = leaf_start + leaf_size - 1;
 
             if vaddr_start <= leaf_start && leaf_end <= vaddr_end {
-                self.unmap(leaf_start);
+                changed |= self.unmap(leaf_start);
                 match leaf_end.checked_add(1) {
                     Some(next) => vaddr = next,
                     None => break,
                 }
             } else if level == 0 {
-                self.unmap(vaddr);
+                changed |= self.unmap(vaddr);
                 match vaddr.checked_add(PAGE_SIZE) {
                     Some(next) => vaddr = next,
                     None => break,
@@ -575,17 +593,20 @@ impl PageTable {
             } else {
                 self.split_leaf(asid, vaddr, level)
                     .expect("unmap_range: failed to split huge-page leaf");
+                changed = true;
             }
+        }
+        if changed {
+            synchronize_tlb(asid);
         }
     }
 
-    pub(in crate::arch::riscv64::vm) fn unmap_all(&mut self) {
+    pub(in crate::arch::riscv64::vm) fn unmap_all(&mut self, asid: u16) {
         for i in 0..512 {
             let entry = &mut self.entries[i];
             entry.clear_all();
         }
-        // Ensure the TLB flush instruction is not optimized away.
-        unsafe { asm!("sfence.vma zero,zero") };
+        synchronize_tlb(asid);
     }
 }
 
