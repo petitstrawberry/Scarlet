@@ -93,21 +93,40 @@ pub fn disable_interrupts() {
     }
 }
 
+/// Save the current DAIF state and mask every interrupt class.
+///
+/// # Returns
+///
+/// The complete DAIF value to pass to [`restore_interrupts`].
+pub fn save_and_disable_interrupts() -> usize {
+    let saved: usize;
+    unsafe {
+        asm!("mrs {0}, daif", out(reg) saved, options(nostack));
+        asm!("msr daifset, #0xf", options(nostack));
+    }
+    saved
+}
+
+/// Restore a DAIF state returned by [`save_and_disable_interrupts`].
+///
+/// # Arguments
+///
+/// * `saved` - Complete DAIF value to restore.
+pub fn restore_interrupts(saved: usize) {
+    unsafe {
+        asm!("msr daif, {0}", in(reg) saved, options(nostack));
+    }
+}
+
 /// Enable external interrupts (IRQ) at CPU level.
 ///
 /// This only unmasks the IRQ bit (DAIF.I). Source-level enables (e.g. GIC
 /// enable of a specific interrupt ID) are handled separately.
 pub fn enable_external_interrupts() {
-    // // External interrupts arrive as IRQ.
-    // if !crate::arch::aarch64::interrupts_allowed() {
-    //     unsafe {
-    //         asm!("msr daifset, #0xf", options(nostack));
-    //     }
-    //     return;
-    // }
-    // unsafe {
-    //     asm!("msr daifclr, #0x2", options(nostack));
-    // }
+    // SAFETY: DAIFClr updates only the current CPU's architectural IRQ mask.
+    unsafe {
+        asm!("msr daifclr, #0x2", options(nostack));
+    }
 }
 
 /// Enable software interrupt reception at CPU level.
@@ -119,9 +138,10 @@ pub fn enable_software_interrupts() {}
 
 /// Disable external interrupts (IRQ) at CPU level.
 pub fn disable_external_interrupts() {
-    // unsafe {
-    //     asm!("msr daifset, #0x2", options(nostack));
-    // }
+    // SAFETY: DAIFSet updates only the current CPU's architectural IRQ mask.
+    unsafe {
+        asm!("msr daifset, #0x2", options(nostack));
+    }
 }
 
 /// Enable a core-local interrupt source via the InterruptManager.
@@ -276,15 +296,9 @@ pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let saved: u64;
-    unsafe {
-        asm!("mrs {0}, daif", out(reg) saved, options(nostack));
-        asm!("msr daifset, #0xf", options(nostack));
-    }
+    let saved = save_and_disable_interrupts();
     let ret = f();
-    unsafe {
-        asm!("msr daif, {0}", in(reg) saved, options(nostack));
-    }
+    restore_interrupts(saved);
     ret
 }
 
