@@ -306,7 +306,11 @@ pub fn arch_switch_to_user(trapframe: &mut Trapframe) -> ! {
 // TrapKindを引数で受け取るように変更
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) -> ! {
-    crate::breadcrumb::drop(crate::breadcrumb::USER_TRAP_ENTER, trap_kind as u64, trapframe.elr);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::USER_TRAP_ENTER,
+        trap_kind as u64,
+        trapframe.elr,
+    );
     // We are now executing in EL1; switch VBAR_EL1 to the kernel vector so that
     // any exceptions/IRQs that occur while in kernel mode are handled by the
     // simple kernel trap routine.
@@ -320,7 +324,9 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     }
 
     let cpu_id = get_cpu().get_cpuid();
-    if crate::sched::scheduler::take_deferred_reschedule(cpu_id) {
+    if crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
+        && crate::sched::scheduler::take_deferred_reschedule(cpu_id)
+    {
         crate::sched::scheduler::schedule(trapframe);
     }
 
