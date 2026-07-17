@@ -191,15 +191,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // This avoids panicking if stval is 0 or if we cannot classify the instruction.
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off && is_vector_insn {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
@@ -225,15 +231,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
 
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
