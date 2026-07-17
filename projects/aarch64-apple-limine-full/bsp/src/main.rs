@@ -3,7 +3,8 @@
 
 use core::arch::naked_asm;
 
-use scarlet_modules::scarlet::{environment::STACK_SIZE, start_ap};
+use scarlet_modules::scarlet::arch::aarch64::boot::limine::secondary_cpu_entry;
+use scarlet_modules::scarlet::environment::STACK_SIZE;
 
 extern crate scarlet_modules;
 
@@ -28,14 +29,15 @@ pub extern "C" fn _entry_ap() {
             "add x5, x4, #1",
             "mul x5, x5, x2",
             "add x5, x3, x5",
+            "msr spsel, #1",
             "and sp, x5, #~0xF",
             "mov x0, x4",
-            "bl {start_ap}",
+            "bl {secondary_cpu_entry}",
             "1:",
             "wfi",
             "b 1b",
             stack_size = const STACK_SIZE,
-            start_ap = sym start_ap,
+            secondary_cpu_entry = sym secondary_cpu_entry,
         );
     }
 }
