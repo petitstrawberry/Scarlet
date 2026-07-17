@@ -16,11 +16,11 @@ use alloc::{
 use core::sync::atomic::Ordering;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use hashbrown::HashMap;
-use proc::{sys_exit, sys_fork, sys_getpid, sys_sleep, sys_wait};
+use proc::{sys_exit, sys_fork, sys_getpid, sys_kill, sys_sleep, sys_wait};
 
 use crate::{
     abi::{
-        AbiModule,
+        AbiModule, EventProcessOutcome,
         xv6::riscv64::{
             file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink},
             pipe::sys_pipe,
@@ -31,6 +31,7 @@ use crate::{
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
+    ipc::{Event, EventContent, event::ProcessControlType},
     late_initcall, register_abi,
     task::elf_loader::load_elf_into_task,
     vm::setup_user_stack,
@@ -435,6 +436,26 @@ impl AbiModule for Xv6Riscv64Abi {
         self.namespace.clone()
     }
 
+    fn handle_event(
+        &mut self,
+        event: Event,
+        _target_task_id: usize,
+    ) -> Result<EventProcessOutcome, &'static str> {
+        let outcome = match event.content {
+            EventContent::ProcessControl(ProcessControlType::Kill) => {
+                EventProcessOutcome::Exited(9)
+            }
+            EventContent::ProcessControl(ProcessControlType::Terminate) => {
+                EventProcessOutcome::Exited(15)
+            }
+            EventContent::ProcessControl(ProcessControlType::Quit) => {
+                EventProcessOutcome::Exited(3)
+            }
+            _ => EventProcessOutcome::Continue,
+        };
+        Ok(outcome)
+    }
+
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -453,7 +474,7 @@ syscall_table! {
     Wait = 3 => sys_wait,
     Pipe = 4 => sys_pipe,
     Read = 5 => sys_read,
-    //    Kill = 6 => sys_kill,
+    Kill = 6 => sys_kill,
     Exec = 7 => sys_exec,
     Fstat = 8 => sys_fstat,
     Chdir = 9 => sys_chdir,
