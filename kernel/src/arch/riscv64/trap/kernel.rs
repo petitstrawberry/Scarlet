@@ -140,13 +140,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 Some(mmap) => match manager.get_root_page_table() {
                     Some(mut root_page_table) => {
                         let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
-                        root_page_table.map(
-                            vaddr,
-                            paddr,
-                            mmap.permissions,
-                            true,
-                            false,
-                        );
+                        root_page_table.map(vaddr, paddr, mmap.permissions, true, false);
                     }
                     None => panic!("Root page table is not found"),
                 },
