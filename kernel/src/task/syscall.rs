@@ -239,7 +239,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 }
             };
             if is_process_fork {
-                crate::sched::scheduler::mark_fork_trace_task(child_id);
+                // crate::sched::scheduler::mark_fork_trace_task(child_id);
                 // crate::early_println!(
                 //     "[fork-trace] child_task_id={} registered target_cpu={}",
                 //     child_id,
