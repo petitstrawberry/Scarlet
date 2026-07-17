@@ -135,6 +135,11 @@ impl AbiModule for LinuxAarch64Abi {
             self.0.unshare_fd_table();
         }
 
+        let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
+            self.0.thread_state.clear_child_tid_ptr
+        } else {
+            None
+        };
         let mut ts = self.0.thread_state.clone();
         let parent_tgid = ts.tgid;
         let is_thread = ts.pending_clone_is_thread;
@@ -151,18 +156,12 @@ impl AbiModule for LinuxAarch64Abi {
 
         ts.pending_clone_is_thread = false;
         self.0.thread_state = ts;
+        _child_task.set_linux_clear_child_tid(clear_child_tid);
         Ok(())
     }
 
     fn on_task_exit(&mut self, task: &crate::task::Task) {
-        if let Some(ptr) = self.0.thread_state.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
-                unsafe {
-                    *(paddr as *mut i32) = 0;
-                }
-                let _ = generic::futex::wake_address(ptr, 1);
-            }
-        }
+        task.clear_linux_child_tid_on_exit();
     }
 
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {

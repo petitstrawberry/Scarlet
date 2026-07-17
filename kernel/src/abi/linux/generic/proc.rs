@@ -67,6 +67,7 @@ pub fn sys_set_tid_address(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
 
     let tid_opt = (tid_ptr != 0).then_some(tid_ptr);
     abi.thread_state_mut().clear_child_tid_ptr = tid_opt;
+    task.set_linux_clear_child_tid(tid_opt);
 
     trapframe.increment_pc_next(&task);
 
@@ -79,8 +80,7 @@ pub fn sys_exit(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
 
-    task.exit(exit_code);
-    schedule(trapframe);
+    task.request_deferred_exit(exit_code);
     usize::MAX
 }
 
@@ -88,8 +88,7 @@ pub fn sys_exit_group(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit_group(exit_code);
-    schedule(trapframe);
+    task.request_deferred_exit_group(exit_code);
     usize::MAX
 }
 
@@ -834,6 +833,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let parent_tid_opt = (!parent_tid_ptr.is_null()).then_some(parent_tid_ptr as usize);
     let child_tid_opt = (!child_tid_ptr.is_null()).then_some(child_tid_ptr as usize);
+    let previous_clear_child_tid = abi.thread_state().clear_child_tid_ptr;
     {
         let state = abi.thread_state_mut();
         state.parent_tid_ptr = parent_tid_opt;
@@ -893,9 +893,12 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if (flags & CLONE_THREAD) != 0 {
         cflags.set(crate::task::CloneFlagsDef::Thread);
     }
+    if (flags & CLONE_CHILD_CLEARTID) != 0 {
+        cflags.set(crate::task::CloneFlagsDef::ClearChildTid);
+    }
 
     let ret = match parent_task.clone_task(cflags) {
-        Ok(child_task) => {
+        Ok(mut child_task) => {
             child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
@@ -906,6 +909,15 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             const CLONE_SETTLS: usize = 0x00080000;
             if (flags & CLONE_SETTLS) != 0 {
                 child_task.vcpu.lock().set_tls_pointer(tls);
+            }
+
+            let is_process_fork = !cflags.is_set(crate::task::CloneFlagsDef::Vm)
+                && !cflags.is_set(crate::task::CloneFlagsDef::Thread);
+            if is_process_fork {
+                crate::sched::scheduler::apply_fork_child_diagnostic_affinity(
+                    &mut child_task,
+                    crate::arch::get_cpu().get_cpuid(),
+                );
             }
 
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
@@ -923,16 +935,15 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         error
                     );
                     abi.thread_state_mut().pending_clone_is_thread = false;
+                    abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
                     return usize::MAX;
                 }
             };
 
-            // Establish parent-child relationship now that both have valid IDs
+            // Establish parent-child ownership before enqueueing. The adoption
+            // protocol rejects an exiting parent and retries init atomically.
             if let Some(child) = get_task_by_id(child_id) {
-                child.set_parent_id(parent_id);
-            }
-            if let Some(parent) = get_task_by_id(parent_id) {
-                parent.add_child(child_id);
+                let _ = parent_task.adopt_registered_child(&child);
             }
 
             // Do not modify user pthread list; musl manages linkage. No safety-net writes.
@@ -979,6 +990,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Clear pending flag in parent after clone completes
     abi.thread_state_mut().pending_clone_is_thread = false;
+    abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
     ret
 }
 
