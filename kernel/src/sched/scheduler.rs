@@ -1903,6 +1903,7 @@ pub fn is_fork_trace_task(task_id: usize) -> bool {
     fork_trace_tasks().lock().contains(&task_id)
 }
 
+#[allow(dead_code)]
 fn take_fork_trace_first_pick(task_id: usize) -> bool {
     let traced = fork_trace_tasks().lock();
     if !traced.contains(&task_id) {
@@ -2017,13 +2018,13 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                             continue;
                         }
                         if try_claim_ready_task(&task, cpu_id) {
-                            if take_fork_trace_first_pick(task_id) {
-                                crate::early_println!(
-                                    "[fork-trace] child_task_id={} picked cpu={}",
-                                    task_id,
-                                    cpu_id
-                                );
-                            }
+                            // if take_fork_trace_first_pick(task_id) {
+                            //     crate::early_println!(
+                            //         "[fork-trace] child_task_id={} picked cpu={}",
+                            //         task_id,
+                            //         cpu_id
+                            //     );
+                            // }
                             if DEBUG_SMP_TASK_FLOW {
                                 let (expected_task, _from_cpu, seq) =
                                     debug_remote_enqueue_snapshot(cpu_id);
@@ -2408,56 +2409,56 @@ pub fn spawn_idle_task(cpu_id: usize) -> usize {
 }
 
 pub fn start_scheduler() -> Option<usize> {
-    crate::println!("[sched] entry");
+    // crate::println!("[sched] entry");
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
     set_scheduler_ready(cpu_id, false);
-    if cpu_id == 0
-        && (DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU
-            || DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP
-            || DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING
-            || DIAGNOSTIC_DISABLE_TASK_MIGRATION
-            || DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP
-            || DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP
-            || DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP
-            || DIAGNOSTIC_RUN_USER_THREADS_ON_BSP
-            || DIAGNOSTIC_RETAIN_TERMINATED_TASKS)
-    {
-        crate::println!(
-            "[sched] diagnostic: pin_fork_child={} pin_fork_child_bsp={} disable_idle_work_stealing={} disable_task_migration={} unpinned_tasks_on_bsp={} all_user_tasks_on_bsp={} user_process_leaders_on_bsp={} user_threads_on_bsp={} retain_terminated_tasks={} bsp_cpu={}",
-            DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU,
-            DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP,
-            DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING,
-            DIAGNOSTIC_DISABLE_TASK_MIGRATION,
-            DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP,
-            DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP,
-            DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP,
-            DIAGNOSTIC_RUN_USER_THREADS_ON_BSP,
-            DIAGNOSTIC_RETAIN_TERMINATED_TASKS,
-            BOOT_CPU_ID.load(Ordering::Acquire)
-        );
-    }
-    crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
+    // if cpu_id == 0
+    //     && (DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU
+    //         || DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP
+    //         || DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING
+    //         || DIAGNOSTIC_DISABLE_TASK_MIGRATION
+    //         || DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP
+    //         || DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP
+    //         || DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP
+    //         || DIAGNOSTIC_RUN_USER_THREADS_ON_BSP
+    //         || DIAGNOSTIC_RETAIN_TERMINATED_TASKS)
+    // {
+    //     crate::println!(
+    //         "[sched] diagnostic: pin_fork_child={} pin_fork_child_bsp={} disable_idle_work_stealing={} disable_task_migration={} unpinned_tasks_on_bsp={} all_user_tasks_on_bsp={} user_process_leaders_on_bsp={} user_threads_on_bsp={} retain_terminated_tasks={} bsp_cpu={}",
+    //         DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU,
+    //         DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP,
+    //         DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING,
+    //         DIAGNOSTIC_DISABLE_TASK_MIGRATION,
+    //         DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP,
+    //         DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP,
+    //         DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP,
+    //         DIAGNOSTIC_RUN_USER_THREADS_ON_BSP,
+    //         DIAGNOSTIC_RETAIN_TERMINATED_TASKS,
+    //         BOOT_CPU_ID.load(Ordering::Acquire)
+    //     );
+    // }
+    // crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
     let timer = get_kernel_timer();
-    crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
-    crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
+    // crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
     timer.stop(cpu_id);
-    crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
-    crate::println!("[sched] cpu={} timer interval setup begin", cpu_id);
+    // crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer interval setup begin", cpu_id);
     timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
-    crate::println!("[sched] cpu={} timer interval setup complete", cpu_id);
-    crate::println!("[sched] cpu={} timer.start begin", cpu_id);
+    // crate::println!("[sched] cpu={} timer interval setup complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer.start begin", cpu_id);
     timer.start(cpu_id);
-    crate::println!("[sched] cpu={} timer.start complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer.start complete", cpu_id);
 
-    crate::println!("[sched] cpu={} pick_next begin", cpu_id);
+    // crate::println!("[sched] cpu={} pick_next begin", cpu_id);
     let (_current_task_id, next_task_id) = pick_next(cpu);
-    crate::println!(
-        "[sched] cpu={} pick_next complete current={:?} next={:?}",
-        cpu_id,
-        _current_task_id,
-        next_task_id
-    );
+    // crate::println!(
+    //     "[sched] cpu={} pick_next complete current={:?} next={:?}",
+    //     cpu_id,
+    //     _current_task_id,
+    //     next_task_id
+    // );
     set_scheduler_ready(cpu_id, true);
     next_task_id
 }

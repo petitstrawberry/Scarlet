@@ -3090,13 +3090,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
-        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
-            crate::early_println!(
-                "[fork-trace] child_task_id={} kernel-entry cpu={}",
-                current_task.get_id(),
-                cpu.get_cpuid()
-            );
-        }
+        // if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+        //     crate::early_println!(
+        //         "[fork-trace] child_task_id={} kernel-entry cpu={}",
+        //         current_task.get_id(),
+        //         cpu.get_cpuid()
+        //     );
+        // }
         if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
             let vcpu = current_task.vcpu.lock();
             crate::println!(
@@ -3141,13 +3141,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             );
         }
         setup_task_execution(cpu, &current_task);
-        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
-            crate::early_println!(
-                "[fork-trace] child_task_id={} user-return cpu={}",
-                current_task.get_id(),
-                cpu.get_cpuid()
-            );
-        }
+        // if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+        //     crate::early_println!(
+        //         "[fork-trace] child_task_id={} user-return cpu={}",
+        //         current_task.get_id(),
+        //         cpu.get_cpuid()
+        //     );
+        // }
         arch_switch_to_user(current_task.get_trapframe());
     }
 
