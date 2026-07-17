@@ -328,17 +328,24 @@ impl ScarletAbi {
             | ProcessControlType::TerminalStop
             | ProcessControlType::TerminalInput
             | ProcessControlType::TerminalOutput => {
-                task.mark_process_control_stopped();
-                task.set_state(crate::task::TaskState::Blocked(
-                    crate::task::BlockedType::Interruptible,
-                ));
-                crate::sched::scheduler::mark_blocked(task.get_id());
-                crate::sched::scheduler::remove_from_ready_queues(task.get_id());
-                crate::task::wake_task_waiters(task.get_id());
-                if let Some(parent_id) = task.get_parent_id() {
-                    crate::task::wake_parent_waiters(parent_id);
+                let event_queue = task.event_queue.lock();
+                if event_queue.has_pending_continue() {
+                    drop(event_queue);
+                    Ok(EventProcessOutcome::Continue)
+                } else {
+                    task.mark_process_control_stopped();
+                    task.set_state(crate::task::TaskState::Blocked(
+                        crate::task::BlockedType::Interruptible,
+                    ));
+                    crate::sched::scheduler::mark_blocked(task.get_id());
+                    crate::sched::scheduler::remove_from_ready_queues(task.get_id());
+                    drop(event_queue);
+                    crate::task::wake_task_waiters(task.get_id());
+                    if let Some(parent_id) = task.get_parent_id() {
+                        crate::task::wake_parent_waiters(parent_id);
+                    }
+                    Ok(EventProcessOutcome::NeedReschedule)
                 }
-                Ok(EventProcessOutcome::NeedReschedule)
             }
             ProcessControlType::Continue => {
                 task.clear_process_control_stopped();

@@ -156,7 +156,8 @@ impl LinuxSignal {
     /// Get default action for this signal
     pub fn default_action(&self) -> SignalAction {
         match self {
-            Self::SIGKILL | Self::SIGSTOP => SignalAction::ForceTerminate,
+            Self::SIGKILL => SignalAction::ForceTerminate,
+            Self::SIGSTOP => SignalAction::Stop,
             Self::SIGCHLD | Self::SIGURG | Self::SIGWINCH => SignalAction::Ignore,
             Self::SIGCONT => SignalAction::Continue,
             Self::SIGTSTP | Self::SIGTTIN | Self::SIGTTOU => SignalAction::Stop,
@@ -598,6 +599,10 @@ pub fn handle_event_for_task(
     let Some(signal) = handle_event_to_signal(event) else {
         return Ok(EventProcessOutcome::Continue);
     };
+    let is_stop_class = matches!(
+        &event.content,
+        EventContent::ProcessControl(control_type) if control_type.is_stop_class()
+    );
 
     let action = {
         let signal_state = abi.signal_state.lock();
@@ -622,12 +627,19 @@ pub fn handle_event_for_task(
             EventProcessOutcome::Exited(exit_code)
         }
         SignalAction::Stop => {
-            target_task.set_state(crate::task::TaskState::Blocked(
-                crate::task::BlockedType::Interruptible,
-            ));
-            crate::sched::scheduler::mark_blocked(target_task.get_id());
-            crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
-            EventProcessOutcome::NeedReschedule
+            let event_queue = target_task.event_queue.lock();
+            if is_stop_class && event_queue.has_pending_continue() {
+                drop(event_queue);
+                EventProcessOutcome::Continue
+            } else {
+                target_task.set_state(crate::task::TaskState::Blocked(
+                    crate::task::BlockedType::Interruptible,
+                ));
+                crate::sched::scheduler::mark_blocked(target_task.get_id());
+                crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
+                drop(event_queue);
+                EventProcessOutcome::NeedReschedule
+            }
         }
         SignalAction::Continue => {
             let current_state = target_task.get_state();
@@ -742,6 +754,28 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
         signal,
         LinuxSignal::SIGKILL | LinuxSignal::SIGTERM | LinuxSignal::SIGINT
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_sigstop_default_action_stops() {
+        assert_eq!(LinuxSignal::SIGSTOP.default_action(), SignalAction::Stop);
+    }
+
+    #[test_case]
+    fn test_process_control_job_control_signal_mapping() {
+        assert_eq!(
+            process_control_to_signal(ProcessControlType::Stop),
+            Some(LinuxSignal::SIGSTOP)
+        );
+        assert_eq!(
+            process_control_to_signal(ProcessControlType::Continue),
+            Some(LinuxSignal::SIGCONT)
+        );
+    }
 }
 
 /// Linux sys_tkill - Send a signal to a specific thread
