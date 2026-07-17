@@ -61,6 +61,9 @@ use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
+// Copy private page allocations eagerly to isolate fork COW ownership and
+// parent page-table invalidation from the Apple SMP hang.
+const DIAGNOSTIC_DISABLE_FORK_COW: bool = false;
 /// Scheduler utilization scale used for task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
 const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
@@ -397,6 +400,27 @@ pub struct AbiZone {
     pub abi: Box<dyn AbiModule + Send + Sync>,
 }
 
+/// Exit work requested by an ABI syscall while its ABI state is mutably borrowed.
+///
+/// The request stays owned by the task until the syscall dispatcher releases the
+/// ABI borrow, at which point task exit may safely invoke ABI exit hooks again.
+#[derive(Debug)]
+enum DeferredExitRequest {
+    Exit {
+        status: i32,
+    },
+    ThreadExitCleanup {
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    },
+    ExitGroup {
+        status: i32,
+    },
+}
+
 /// A cell type for task-local data that is only accessed by the hart currently
 /// executing the task.
 ///
@@ -464,6 +488,11 @@ pub struct Task {
     pub task_type: TaskType,
     pub entry: usize,
     parent_id: AtomicUsize,
+    /// Thread group of the task that most recently adopted this task.
+    ///
+    /// This survives direct-parent removal so zombie finalization can wake a
+    /// waitpid sibling in the same process.
+    parent_thread_group_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
     /// Legacy task group ID mirror.
@@ -526,6 +555,8 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Published before an exit snapshots `children`.
+    exiting: AtomicBool,
     /// Set when a process-control stop should be observable by waitpid.
     process_control_stopped: AtomicBool,
     /// Set after the current process-control stop has been reported once.
@@ -576,6 +607,10 @@ pub struct Task {
     pub default_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
     /// ABI zones map (task-local: only accessed by the executing hart)
     pub abi_zones: TaskLocal<BTreeMap<usize, AbiZone>>,
+    /// Exit request deferred until the active ABI mutable borrow is released.
+    deferred_exit_request: Mutex<Option<DeferredExitRequest>>,
+    /// Linux CLONE_CHILD_CLEARTID state kept outside task-local ABI storage.
+    clear_child_tid: Mutex<Option<usize>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
     /// Waker for sleep operations (already thread-safe internally)
@@ -655,11 +690,12 @@ impl Deref for CurrentTaskRef {
 }
 
 pub enum CloneFlagsDef {
-    Vm = 0b00000001,      // Clone the VM
-    Fs = 0b00000010,      // Clone the filesystem
-    Files = 0b00000100,   // Clone the file descriptors
-    Thread = 0b00001000,  // Join thread group (share TGID) - Linux CLONE_THREAD semantics
-    SetTls = 0b000010000, // Set TLS pointer for cloned task
+    Vm = 0b00000001,             // Clone the VM
+    Fs = 0b00000010,             // Clone the filesystem
+    Files = 0b00000100,          // Clone the file descriptors
+    Thread = 0b00001000,         // Join thread group (share TGID) - Linux CLONE_THREAD semantics
+    SetTls = 0b000010000,        // Set TLS pointer for cloned task
+    ClearChildTid = 0b000100000, // Clear and futex-wake child TID on exit
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -743,6 +779,7 @@ impl Task {
             task_type,
             entry: 0,
             parent_id: AtomicUsize::new(0),
+            parent_thread_group_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
             session_id: AtomicUsize::new(0),
@@ -772,6 +809,7 @@ impl Task {
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            exiting: AtomicBool::new(false),
             process_control_stopped: AtomicBool::new(false),
             process_control_stop_reported: AtomicBool::new(false),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
@@ -791,6 +829,8 @@ impl Task {
             vm_manager: VirtualMemoryManager::new(),
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
+            deferred_exit_request: Mutex::new(None),
+            clear_child_tid: Mutex::new(None),
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: Mutex::new(None),
@@ -1489,73 +1529,19 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     pub fn free_pages(&self, vaddr: usize, num_of_pages: usize) {
-        let page = vaddr / PAGE_SIZE;
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
-                Some(mmap) => {
-                    if p == 0 && mmap.vmarea.start < vaddr {
-                        /* Re add the first part of the memory map */
-                        let size = vaddr - mmap.vmarea.start;
-                        let paddr = mmap.pmarea.start;
-                        let mmap1 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: mmap.vmarea.start,
-                                end: vaddr - 1,
-                            },
-                            vm_start: mmap.vm_start,
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            memory_attribute: mmap.memory_attribute,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap1)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
-                    }
-                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
-                        /* Re add the second part of the memory map */
-                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
-                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
-                        let mmap2 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr + PAGE_SIZE,
-                                end: mmap.vmarea.end,
-                            },
-                            vm_start: mmap.vm_start,
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            memory_attribute: mmap.memory_attribute,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap2)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
-                    }
-                }
-                None => {}
-            }
+        let Some(length) = num_of_pages.checked_mul(PAGE_SIZE) else {
+            return;
+        };
+        if length == 0 || vaddr.checked_add(length).is_none() {
+            return;
         }
-        /* Unmap pages */
-        let mut root_pagetable = self.vm_manager.get_root_page_table().unwrap();
-        if num_of_pages > 0 {
-            let vaddr_start = page * PAGE_SIZE;
-            let vaddr_end = vaddr_start + num_of_pages * PAGE_SIZE - 1;
-            root_pagetable.unmap_range(vaddr_start, vaddr_end);
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
         }
     }
 
@@ -1734,14 +1720,6 @@ impl Task {
         }
     }
 
-    /// Set the parent task
-    ///
-    /// # Arguments
-    /// * `parent_id` - The ID of the parent task
-    pub fn set_parent_id(&self, parent_id: usize) {
-        self.parent_id.store(parent_id, Ordering::SeqCst);
-    }
-
     /// Clear the parent task relationship.
     ///
     /// # Returns
@@ -1749,6 +1727,58 @@ impl Task {
     /// This function does not return a value.
     pub fn clear_parent_id(&self) {
         self.parent_id.store(0, Ordering::SeqCst);
+        self.parent_thread_group_id.store(0, Ordering::SeqCst);
+    }
+
+    /// Return the thread group which owns this task's parent relationship.
+    ///
+    /// # Returns
+    ///
+    /// The parent thread-group ID, or `None` when this task has no parent.
+    pub(crate) fn get_parent_thread_group_id(&self) -> Option<usize> {
+        match self.parent_thread_group_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    fn begin_exit(&self) {
+        let _children = self.children.write();
+        self.exiting.store(true, Ordering::Release);
+    }
+
+    fn try_adopt_child(&self, child: &Task, expected_parent_id: Option<usize>) -> bool {
+        let mut children = self.children.write();
+        if self.exiting.load(Ordering::Acquire) || child.get_parent_id() != expected_parent_id {
+            return false;
+        }
+
+        if !children.contains(&child.id) {
+            children.push(child.id);
+        }
+        child
+            .parent_thread_group_id
+            .store(self.thread_group_id, Ordering::SeqCst);
+        child.parent_id.store(self.id, Ordering::SeqCst);
+        true
+    }
+
+    /// Adopt a registered child or leave it parentless if no stable reaper exists.
+    ///
+    /// The preferred parent is checked under its child-list lock. If it has
+    /// begun exit, init is tried under the same protocol instead.
+    pub(crate) fn adopt_registered_child(&self, child: &Task) -> bool {
+        if self.try_adopt_child(child, None) {
+            return true;
+        }
+
+        if self.id != INIT_TASK_ID
+            && let Some(init) = get_task_by_id(INIT_TASK_ID)
+        {
+            return init.try_adopt_child(child, None);
+        }
+
+        false
     }
 
     fn orphan_reaper(&self) -> Option<Arc<Task>> {
@@ -1758,6 +1788,7 @@ impl Task {
                 leader.get_state(),
                 TaskState::Zombie | TaskState::Terminated
             )
+            && !leader.exiting.load(Ordering::Acquire)
         {
             return Some(leader);
         }
@@ -1772,12 +1803,8 @@ impl Task {
     fn reparent_children(&self) {
         let child_ids = {
             let mut children = self.children.write();
-            if children.is_empty() {
-                return;
-            }
-            let child_ids = children.clone();
-            children.clear();
-            child_ids
+            self.exiting.store(true, Ordering::Release);
+            core::mem::take(&mut *children)
         };
 
         let reaper = self.orphan_reaper();
@@ -1790,30 +1817,35 @@ impl Task {
                 continue;
             }
 
-            if let Some(reaper) = &reaper {
-                child.set_parent_id(reaper.get_id());
-                reaper.add_child(child_id);
+            let mut new_parent_id = None;
+            if let Some(reaper) = &reaper
+                && reaper.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(reaper.get_id());
+            }
+
+            if new_parent_id.is_none()
+                && self.id != INIT_TASK_ID
+                && reaper
+                    .as_ref()
+                    .is_none_or(|reaper| reaper.id != INIT_TASK_ID)
+                && let Some(init) = get_task_by_id(INIT_TASK_ID)
+                && init.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(INIT_TASK_ID);
+            }
+
+            if let Some(reaper_id) = new_parent_id {
                 if child.get_state() == TaskState::Zombie {
-                    finalize_zombie(child_id, Some(reaper.get_id()));
+                    finalize_zombie(child_id, Some(reaper_id));
                 }
-            } else {
+            } else if child.get_parent_id() == Some(self.id) {
                 child.clear_parent_id();
                 if child.get_state() == TaskState::Zombie {
                     child.set_state(TaskState::Terminated);
                     cleanup_zombie(child_id);
                 }
             }
-        }
-    }
-
-    /// Add a child task
-    ///
-    /// # Arguments
-    /// * `child_id` - The ID of the child task
-    pub fn add_child(&self, child_id: usize) {
-        let mut children = self.children.write();
-        if !children.contains(&child_id) {
-            children.push(child_id);
         }
     }
 
@@ -1860,6 +1892,132 @@ impl Task {
             None
         } else {
             Some(status)
+        }
+    }
+
+    /// Request exit after the current ABI mutable borrow has been released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this task.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::Exit { status });
+    }
+
+    /// Request thread exit with user stack and TLS mapping cleanup after the ABI borrow.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this thread.
+    /// * `stack_mapping_base` - Base address of the thread stack mapping.
+    /// * `stack_mapping_len` - Length of the thread stack mapping in bytes.
+    /// * `tls_mapping_base` - Base address of the thread TLS mapping.
+    /// * `tls_mapping_len` - Length of the thread TLS mapping in bytes.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher releases the
+    /// active ABI borrow before performing the requested cleanup and exit.
+    pub(crate) fn request_deferred_thread_exit_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ThreadExitCleanup {
+            status,
+            stack_mapping_base,
+            stack_mapping_len,
+            tls_mapping_base,
+            tls_mapping_len,
+        });
+    }
+
+    /// Request thread-group exit after the current ABI mutable borrow is released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to apply to the thread group.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit_group(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ExitGroup { status });
+    }
+
+    /// Record the Linux clear-child-tid address for one exit cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - The optional user address to clear and wake during exit.
+    pub(crate) fn set_linux_clear_child_tid(&self, ptr: Option<usize>) {
+        *self.clear_child_tid.lock() = ptr;
+    }
+
+    fn take_linux_clear_child_tid(&self) -> Option<usize> {
+        self.clear_child_tid.lock().take()
+    }
+
+    /// Perform Linux clear-child-tid cleanup without touching task-local ABI state.
+    ///
+    /// The address is consumed before access, so both a current-task ABI hook
+    /// and a remote exit-group path can invoke this safely without double wakeups.
+    pub(crate) fn clear_linux_child_tid_on_exit(&self) {
+        let Some(ptr) = self.take_linux_clear_child_tid() else {
+            return;
+        };
+        let Some(paddr) = self.vm_manager.translate_to_kva(ptr) else {
+            return;
+        };
+
+        // SAFETY: `translate_to_kva` validated this user address in this task's
+        // address space; exit owns the one-time clear-child-tid transition.
+        unsafe {
+            core::ptr::write_volatile(paddr as *mut i32, 0);
+        }
+        let _ = crate::abi::linux::generic::futex::wake_address(ptr, 1);
+    }
+
+    fn take_deferred_exit_request(&self) -> Option<DeferredExitRequest> {
+        self.deferred_exit_request.lock().take()
+    }
+
+    /// Perform one deferred ABI exit request after its ABI mutable borrow has ended.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. It does nothing when no deferred exit
+    /// request is pending.
+    pub(crate) fn process_deferred_exit_request(&self) {
+        let Some(request) = self.take_deferred_exit_request() else {
+            return;
+        };
+
+        match request {
+            DeferredExitRequest::Exit { status } => self.exit(status),
+            DeferredExitRequest::ThreadExitCleanup {
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            } => self.exit_with_thread_cleanup(
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            ),
+            DeferredExitRequest::ExitGroup { status } => self.exit_group(status),
         }
     }
 
@@ -2087,8 +2245,9 @@ impl Task {
                         }
                     }
                 } else if mmap.pmarea.start != 0 {
-                    if let Some(page_alloc) =
-                        self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
+                    if !DIAGNOSTIC_DISABLE_FORK_COW
+                        && let Some(page_alloc) =
+                            self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
                     {
                         let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
                         let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
@@ -2280,11 +2439,9 @@ impl Task {
         // Cloned task starts as Ready regardless of parent's current state
         child.state.store(TaskState::Ready, Ordering::SeqCst);
 
-        // NOTE: Parent-child relationship will be established AFTER add_task()
-        // when the child has a valid ID. The caller is responsible for calling:
-        //   child.set_parent_id(self.id);
-        //   self.add_child(child.get_id());
-        // after adding the child to the scheduler.
+        // NOTE: Parent-child relationship is established after registration,
+        // once the child has a valid ID. Callers must use
+        // `parent.adopt_registered_child(&child)` before enqueueing it.
 
         // Set TGID: if CLONE_THREAD, share parent's TGID (join thread group)
         // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
@@ -2309,6 +2466,34 @@ impl Task {
         self.exit_with_cleanup(status, |_| {});
     }
 
+    fn unmap_thread_cleanup_range(&self, vaddr: usize, length: usize) {
+        if length == 0 || vaddr % PAGE_SIZE != 0 {
+            return;
+        }
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
+        }
+    }
+
+    fn exit_with_thread_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        self.exit_with_cleanup(status, |task| {
+            task.unmap_thread_cleanup_range(stack_mapping_base, stack_mapping_len);
+            task.unmap_thread_cleanup_range(tls_mapping_base, tls_mapping_len);
+        });
+    }
+
     fn release_all_memory_maps_for_exit(&self) {
         let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
         for removed_map in &removed_maps {
@@ -2323,6 +2508,7 @@ impl Task {
     where
         F: FnOnce(&Task),
     {
+        self.begin_exit();
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -2380,8 +2566,10 @@ impl Task {
     }
 
     fn exit_non_current_thread_group_member(&self, status: i32, waitable: bool) {
+        self.begin_exit();
         self.handle_table.close_all();
         self.clear_process_control_stopped();
+        self.clear_linux_child_tid_on_exit();
         self.reparent_children();
         self.set_exit_status(status);
 
@@ -2410,6 +2598,7 @@ impl Task {
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
+        self.begin_exit();
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
         let leader_id = thread_group_id;
@@ -2901,6 +3090,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} kernel-entry cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
             let vcpu = current_task.vcpu.lock();
             crate::println!(
@@ -2945,6 +3141,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             );
         }
         setup_task_execution(cpu, &current_task);
+        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} user-return cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         arch_switch_to_user(current_task.get_trapframe());
     }
 
@@ -2960,7 +3163,8 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        INIT_TASK_ID, Task, TaskType, clear_mock_current_task, mytask, set_mock_current_task,
+        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task, mytask,
+        set_mock_current_task,
     };
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
@@ -3010,6 +3214,91 @@ mod tests {
         assert_eq!(Arc::strong_count(&task), strong_count);
         clear_mock_current_task();
         assert_eq!(Arc::strong_count(&task), 1);
+    }
+
+    #[test_case]
+    fn test_deferred_exit_request_is_consumed_once() {
+        let task = Task::new("DeferredExit".to_string(), 1, TaskType::Kernel);
+
+        task.request_deferred_thread_exit_cleanup(7, 0x1000, 0x2000, 0x4000, 0x1000);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ThreadExitCleanup {
+                status: 7,
+                stack_mapping_base: 0x1000,
+                stack_mapping_len: 0x2000,
+                tls_mapping_base: 0x4000,
+                tls_mapping_len: 0x1000,
+            })
+        ));
+        assert!(task.take_deferred_exit_request().is_none());
+
+        task.request_deferred_exit(3);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::Exit { status: 3 })
+        ));
+
+        task.request_deferred_exit_group(11);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ExitGroup { status: 11 })
+        ));
+    }
+
+    #[test_case]
+    fn test_linux_clear_child_tid_record_is_consumed_once() {
+        let task = Task::new("ClearChildTid".to_string(), 1, TaskType::Kernel);
+
+        task.set_linux_clear_child_tid(Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), None);
+    }
+
+    #[test_case]
+    fn test_free_pages_reclaims_full_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("FullPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x40_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_data_pages(vaddr, 2);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            !task
+                .page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr)
+        );
+    }
+
+    #[test_case]
+    fn test_free_pages_retains_partially_unmapped_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("PartialPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x50_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_pages(vaddr, 1);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            task.vm_manager
+                .search_memory_map(vaddr + crate::environment::PAGE_SIZE)
+                .is_some()
+        );
+        assert!(
+            task.page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr && allocation.len() == 2)
+        );
     }
 
     #[test_case]
@@ -3102,16 +3391,10 @@ mod tests {
         let parent_id = add_task(parent_task, 0);
         let child_id = add_task(child_task, 0);
 
-        // Set parent-child relationship using allocated IDs
-        // We need to do this sequentially due to borrow checker
-        {
-            let child_task = get_task_by_id(child_id).unwrap();
-            child_task.set_parent_id(parent_id);
-        }
-        {
-            let parent_task = get_task_by_id(parent_id).unwrap();
-            parent_task.add_child(child_id);
-        }
+        // Adoption updates the child and the parent's list under one protocol.
+        let child_task = get_task_by_id(child_id).unwrap();
+        let parent_task = get_task_by_id(parent_id).unwrap();
+        assert!(parent_task.try_adopt_child(&child_task, None));
 
         // Verify parent-child relationship
         {
@@ -3150,8 +3433,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let child = get_task_by_id(child_id).unwrap();
-        child.set_parent_id(parent_id);
-        parent.add_child(child_id);
+        assert!(parent.try_adopt_child(&child, None));
 
         parent.exit(0);
 
@@ -3160,6 +3442,77 @@ mod tests {
         assert_eq!(child.get_parent_id(), Some(init_id));
         assert!(init.get_children().contains(&child_id));
         assert!(!parent.get_children().contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_exit_snapshot_rejects_late_child_adoption() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ExitingParent".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut existing_child = super::new_user_task("ExistingChild".to_string(), 0);
+        existing_child.init();
+        let existing_child_id = add_task(existing_child, 0);
+
+        let mut late_child = super::new_user_task("LateChild".to_string(), 0);
+        late_child.init();
+        let late_child_id = add_task(late_child, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let existing_child = get_task_by_id(existing_child_id).unwrap();
+        let late_child = get_task_by_id(late_child_id).unwrap();
+        assert!(parent.try_adopt_child(&existing_child, None));
+
+        parent.reparent_children();
+
+        assert_eq!(existing_child.get_parent_id(), Some(init_id));
+        assert!(!parent.try_adopt_child(&late_child, None));
+        assert_eq!(late_child.get_parent_id(), None);
+        assert!(!parent.get_children().contains(&late_child_id));
+    }
+
+    #[test_case]
+    fn test_reparent_retries_init_when_thread_group_leader_is_exiting() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+
+        let mut leader_task = super::new_user_task("Leader".to_string(), 0);
+        leader_task.init();
+        let leader_id = add_task(leader_task, 0);
+
+        let mut worker_task = super::new_user_task("Worker".to_string(), 0);
+        worker_task.init();
+        worker_task.set_thread_group_id(leader_id);
+        let worker_id = add_task(worker_task, 0);
+
+        let mut child_task = super::new_user_task("Orphan".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let leader = get_task_by_id(leader_id).unwrap();
+        let worker = get_task_by_id(worker_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(worker.try_adopt_child(&child, None));
+
+        leader.reparent_children();
+        assert!(!leader.try_adopt_child(&child, Some(worker_id)));
+
+        worker.reparent_children();
+
+        let init = get_task_by_id(init_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert!(init.get_children().contains(&child_id));
+        assert!(!leader.get_children().contains(&child_id));
     }
 
     #[test_case]
@@ -3181,8 +3534,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let child = get_task_by_id(child_id).unwrap();
-        child.set_parent_id(parent_id);
-        parent.add_child(child_id);
+        assert!(parent.try_adopt_child(&child, None));
         child.set_exit_status(7);
         child.set_state(TaskState::Zombie);
         finalize_zombie(child_id, Some(parent_id));
@@ -3288,8 +3640,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let leader = get_task_by_id(leader_id).unwrap();
-        leader.set_parent_id(parent_id);
-        parent.add_child(leader_id);
+        assert!(parent.try_adopt_child(&leader, None));
 
         let mut flags = CloneFlags::default();
         flags.set(CloneFlagsDef::Thread);
@@ -3421,15 +3772,10 @@ mod tests {
         let parent_id = add_task(parent_task, 0);
         let child_id = add_task(child_task, 0);
 
-        // Establish parent-child relationship
-        {
-            let child = get_task_by_id(child_id).unwrap();
-            child.set_parent_id(parent_id);
-        }
-        {
-            let parent = get_task_by_id(parent_id).unwrap();
-            parent.add_child(child_id);
-        }
+        // Establish parent-child relationship through the synchronized protocol.
+        let child = get_task_by_id(child_id).unwrap();
+        let parent = get_task_by_id(parent_id).unwrap();
+        assert!(parent.try_adopt_child(&child, None));
 
         // Verify parent-child relationship was established (in separate scopes)
         {

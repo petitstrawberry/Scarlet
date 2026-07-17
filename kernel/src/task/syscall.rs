@@ -17,6 +17,7 @@ use core::usize;
 use alloc::vec::Vec;
 
 use crate::abi::MAX_ABI_LENGTH;
+use crate::arch::Trapframe;
 use crate::device::manager::DeviceManager;
 use crate::executor::executor::TransparentExecutor;
 use crate::fs::MAX_PATH_LENGTH;
@@ -24,10 +25,6 @@ use crate::library::std::string::{
     parse_c_string_from_userspace, parse_string_array_from_userspace,
 };
 use crate::library::std::usercopy::copy_to_user;
-use crate::object::capability::memory_mapping::syscall::reclaim_private_removed_mapping;
-
-use crate::arch::Trapframe;
-use crate::environment::PAGE_SIZE;
 use crate::sched::scheduler::{
     cleanup_zombie, cpu_usage_snapshot, enqueue_task, get_all_task_ids, get_task_by_id,
     remove_task_from_queues, schedule,
@@ -114,22 +111,8 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit(exit_code);
+    task.request_deferred_exit(exit_code);
     usize::MAX // -1 (If exit is successful, this will not be reached)
-}
-
-fn unmap_thread_cleanup_range(task: &crate::task::Task, vaddr: usize, length: usize) {
-    if length == 0 || vaddr % PAGE_SIZE != 0 {
-        return;
-    }
-
-    let removed_maps = task.vm_manager.remove_memory_map_range(vaddr, length);
-    for removed_map in &removed_maps {
-        if let Some(owner) = &removed_map.owner {
-            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
-        }
-        reclaim_private_removed_mapping(task, removed_map);
-    }
 }
 
 /// Exit the current thread and release libc-owned thread mappings.
@@ -159,10 +142,13 @@ pub fn sys_thread_exit_cleanup(trapframe: &mut Trapframe) -> usize {
     let tls_mapping_base = trapframe.get_arg(3);
     let tls_mapping_len = trapframe.get_arg(4);
 
-    task.exit_with_cleanup(exit_code, |task| {
-        unmap_thread_cleanup_range(task, stack_mapping_base, stack_mapping_len);
-        unmap_thread_cleanup_range(task, tls_mapping_base, tls_mapping_len);
-    });
+    task.request_deferred_thread_exit_cleanup(
+        exit_code,
+        stack_mapping_base,
+        stack_mapping_len,
+        tls_mapping_base,
+        tls_mapping_len,
+    );
     usize::MAX
 }
 
@@ -176,12 +162,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let child_fn = trapframe.get_arg(2); // Third argument: function pointer (trampoline)
     let child_arg = trapframe.get_arg(3); // Fourth argument: argument to pass to function (closure pointer)
     let tls_ptr = trapframe.get_arg(4); // Fifth argument: TLS pointer
-    let is_process_fork = !clone_flags.is_set(CloneFlagsDef::Vm)
-        && !clone_flags.is_set(CloneFlagsDef::Thread);
+    let is_process_fork =
+        !clone_flags.is_set(CloneFlagsDef::Vm) && !clone_flags.is_set(CloneFlagsDef::Thread);
 
     if is_process_fork {
         crate::early_println!(
-            "[fork-trace] enter parent={} cpu={} flags={:#x}",
+            "[fork-trace] enter parent_task_id={} cpu={} flags={:#x}",
             parent_task.get_id(),
             crate::arch::get_cpu().get_cpuid(),
             clone_flags.get_raw()
@@ -192,9 +178,13 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
-        Ok(child_task) => {
+        Ok(mut child_task) => {
             if is_process_fork {
                 crate::early_println!("[fork-trace] address-space clone complete");
+                crate::sched::scheduler::apply_fork_child_diagnostic_affinity(
+                    &mut child_task,
+                    crate::arch::get_cpu().get_cpuid(),
+                );
             }
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
@@ -249,20 +239,20 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 }
             };
             if is_process_fork {
+                crate::sched::scheduler::mark_fork_trace_task(child_id);
                 crate::early_println!(
-                    "[fork-trace] child={} registered target_cpu={}",
+                    "[fork-trace] child_task_id={} registered target_cpu={}",
                     child_id,
                     cpu_id
                 );
             }
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
 
-            // Establish parent-child relationship now that both have valid IDs
+            // Establish parent-child ownership before enqueueing. The adoption
+            // protocol rejects a parent that has already begun exit and retries
+            // init without exposing a half-updated parent_id.
             if let Some(child) = get_task_by_id(child_id) {
-                child.set_parent_id(parent_id);
-            }
-            if let Some(parent) = get_task_by_id(parent_id) {
-                parent.add_child(child_id);
+                let _ = parent_task.adopt_registered_child(&child);
             }
 
             // Get the child's namespace-local PID (after add_task has set the IDs)
@@ -271,11 +261,11 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 .unwrap_or(0);
 
             if is_process_fork {
-                crate::early_println!("[fork-trace] enqueue child={}", child_id);
+                crate::early_println!("[fork-trace] enqueue child_task_id={}", child_id);
             }
             enqueue_task(child_id, cpu_id);
             if is_process_fork {
-                crate::early_println!("[fork-trace] return child_pid={}", child_ns_pid);
+                crate::early_println!("[fork-trace] return child_ns_pid={}", child_ns_pid);
             }
 
             crate::breadcrumb::drop(
@@ -424,7 +414,6 @@ pub fn sys_set_tid_address(trapframe: &mut Trapframe) -> usize {
             abi.set_clear_child_tid(tid_ptr);
         }
     }
-
     trapframe.increment_pc_next(&task);
     task.get_namespace_id() // Return current TID (Linux-compatible)
 }
@@ -1089,7 +1078,7 @@ pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit_group(exit_code);
+    task.request_deferred_exit_group(exit_code);
     usize::MAX // -1 (If exit_group is successful, this will not be reached)
 }
 

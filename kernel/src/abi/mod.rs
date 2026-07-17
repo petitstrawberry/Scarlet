@@ -576,6 +576,7 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
         // 4. Handle the system call with the resolved ABI
         abi_module.handle_syscall(trapframe)
     });
+    task.process_deferred_exit_request();
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_EXIT,
         trapframe.get_syscall_number() as u64,
