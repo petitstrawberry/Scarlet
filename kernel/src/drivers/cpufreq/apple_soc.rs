@@ -14,7 +14,7 @@ use crate::{
         cpufreq::{
             CpuFrequencyBackend, CpuFrequencyGovernor, CpuFrequencyInfo, CpuFrequencyOpp,
             CpuFrequencyPolicyRegistration, MAX_CPUFREQ_OPPS, cpu_performance_domain,
-            register_backend, register_policy,
+            register_backend, register_policy, set_domain_target_frequency,
         },
         fdt::FdtManager,
     },
@@ -37,6 +37,10 @@ const APPLE_DVFS_POLL_INTERVAL_US: u64 = 2;
 const MIN_MMIO_SIZE: usize = 0x1000;
 const MAX_CPUFREQ_DOMAINS: usize = 8;
 const INVALID_PHANDLE: u32 = 0;
+const T8103_ECPU_DVFS_PADDR: usize = 0x210e20000;
+const T8103_PCPU_DVFS_PADDR: usize = 0x211e20000;
+const T8103_ECPU_BOOT_PSTATE: u32 = 5;
+const T8103_PCPU_BOOT_PSTATE: u32 = 7;
 
 static SCANNED_FDT: AtomicBool = AtomicBool::new(false);
 static CPUFREQ_DOMAINS: Mutex<[AppleCpuFreqDomain; MAX_CPUFREQ_DOMAINS]> =
@@ -154,6 +158,22 @@ impl AppleCpuFreqDomain {
             .map(|opp| opp.freq_khz)
             .max()
     }
+
+    fn opp_for_pstate(&self, pstate: u32) -> Option<CpuFrequencyOpp> {
+        self.opps[..self.opp_count]
+            .iter()
+            .copied()
+            .find(|opp| opp.pstate == pstate)
+    }
+
+    fn boot_opp(&self) -> Option<CpuFrequencyOpp> {
+        let pstate = match (self.encoding, self.paddr) {
+            (PstateEncoding::T8103, T8103_ECPU_DVFS_PADDR) => T8103_ECPU_BOOT_PSTATE,
+            (PstateEncoding::T8103, T8103_PCPU_DVFS_PADDR) => T8103_PCPU_BOOT_PSTATE,
+            _ => return None,
+        };
+        self.opp_for_pstate(pstate)
+    }
 }
 
 fn cpu_frequency_info(cpu_id: usize) -> Option<CpuFrequencyInfo> {
@@ -256,6 +276,77 @@ fn ensure_mapped(domain: &mut AppleCpuFreqDomain) -> Option<usize> {
     }
 }
 
+fn boot_target_for_domain(index: usize) -> Option<(u32, CpuFrequencyOpp)> {
+    let domains = CPUFREQ_DOMAINS.lock();
+    let domain = domains.get(index)?;
+    if !domain.valid {
+        return None;
+    }
+    Some((domain.phandle, domain.boot_opp()?))
+}
+
+#[allow(dead_code)]
+fn read_domain_status(domain_phandle: u32) -> Result<u32, &'static str> {
+    let mut domains = CPUFREQ_DOMAINS.lock();
+    let domain = domains
+        .iter_mut()
+        .find(|domain| domain.valid && domain.phandle == domain_phandle)
+        .ok_or("apple-cpufreq: domain not found")?;
+    let vaddr = ensure_mapped(domain).ok_or("apple-cpufreq: failed to map domain")?;
+
+    // SAFETY: `vaddr` is an ioremap'd Apple cluster-cpufreq MMIO base.
+    Ok(unsafe { mmio::read32(vaddr + APPLE_DVFS_STATUS) })
+}
+
+fn wait_domain_ready(domain_phandle: u32) -> Result<(), &'static str> {
+    let mut domains = CPUFREQ_DOMAINS.lock();
+    let domain = domains
+        .iter_mut()
+        .find(|domain| domain.valid && domain.phandle == domain_phandle)
+        .ok_or("apple-cpufreq: domain not found")?;
+    let vaddr = ensure_mapped(domain).ok_or("apple-cpufreq: failed to map domain")?;
+    wait_command_ready(vaddr)
+}
+
+fn initialize_apple_soc_cpufreq_at_boot() {
+    ensure_fdt_scanned();
+
+    for index in 0..MAX_CPUFREQ_DOMAINS {
+        let Some((domain, opp)) = boot_target_for_domain(index) else {
+            continue;
+        };
+        // let before = read_domain_status(domain).unwrap_or(u32::MAX);
+        // crate::early_println!(
+        //     "[apple-cpufreq] boot pstate begin domain={:#x} pstate={} freq_khz={} status_before={:#x}",
+        //     domain,
+        //     opp.pstate,
+        //     opp.freq_khz,
+        //     before,
+        // );
+
+        match set_domain_target_frequency(domain, opp.freq_khz)
+            .and_then(|_| wait_domain_ready(domain))
+        {
+            Ok(()) => {
+                // let after = read_domain_status(domain).unwrap_or(u32::MAX);
+                // crate::early_println!(
+                //     "[apple-cpufreq] boot pstate complete domain={:#x} status_after={:#x}",
+                //     domain,
+                //     after,
+                // );
+            }
+            Err(_err) => {
+                // crate::early_println!(
+                //     "[apple-cpufreq] boot pstate failed domain={:#x} pstate={}: {}",
+                //     domain,
+                //     opp.pstate,
+                //     _err,
+                // );
+            }
+        }
+    }
+}
+
 fn ensure_fdt_scanned() {
     if SCANNED_FDT.load(Ordering::Acquire) {
         return;
@@ -340,6 +431,9 @@ fn load_domain_opps(fdt: &fdt::Fdt<'_>, domain_phandle: u32, domain: &mut AppleC
     for opp_node in opp_table.children() {
         if domain.opp_count >= MAX_CPUFREQ_OPPS {
             break;
+        }
+        if opp_node.property("turbo-mode").is_some() {
+            continue;
         }
 
         let Some(pstate) = read_u32_prop(&opp_node, "opp-level") else {
@@ -455,3 +549,51 @@ fn register_apple_soc_cpufreq_backend() {
 }
 
 driver_initcall!(register_apple_soc_cpufreq_backend);
+crate::late_initcall!(initialize_apple_soc_cpufreq_at_boot);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn boot_opp_matches_m1n1_t8103_defaults() {
+        let mut domain = AppleCpuFreqDomain::empty();
+        domain.valid = true;
+        domain.encoding = PstateEncoding::T8103;
+        domain.opp_count = 4;
+        domain.opps[0] = CpuFrequencyOpp {
+            pstate: 5,
+            freq_khz: 2_064_000,
+        };
+        domain.opps[1] = CpuFrequencyOpp {
+            pstate: 7,
+            freq_khz: 1_956_000,
+        };
+        domain.opps[2] = CpuFrequencyOpp {
+            pstate: 12,
+            freq_khz: 2_988_000,
+        };
+        domain.opps[3] = CpuFrequencyOpp {
+            pstate: 15,
+            freq_khz: 3_204_000,
+        };
+
+        domain.paddr = T8103_ECPU_DVFS_PADDR;
+        assert_eq!(
+            domain.boot_opp(),
+            Some(CpuFrequencyOpp {
+                pstate: 5,
+                freq_khz: 2_064_000,
+            })
+        );
+
+        domain.paddr = T8103_PCPU_DVFS_PADDR;
+        assert_eq!(
+            domain.boot_opp(),
+            Some(CpuFrequencyOpp {
+                pstate: 7,
+                freq_khz: 1_956_000,
+            })
+        );
+    }
+}

@@ -103,7 +103,7 @@ pub struct CpuFrequencyPolicyInfo {
     pub min_freq_khz: u64,
     /// Maximum policy frequency in kHz.
     pub max_freq_khz: u64,
-    /// Last successfully requested target frequency in kHz, or zero before the first request.
+    /// Last successfully requested target frequency in kHz.
     pub target_freq_khz: u64,
     /// Last sampled scheduler utilization in [`SCHED_UTIL_SCALE`] units.
     pub last_util: u32,
@@ -359,7 +359,7 @@ pub fn register_policy(
         opps,
         min_freq_khz,
         max_freq_khz,
-        target_freq_khz: 0,
+        target_freq_khz: max_freq_khz,
         governor: registration.governor,
         transition_latency_ns: registration.transition_latency_ns,
         last_governor_update_ns: 0,
@@ -441,7 +441,7 @@ pub fn set_domain_governor(
 /// The selected operating point on success, or an error from the backend.
 ///
 /// This synchronous function may wait for platform MMIO and must be called
-/// from task context, never from an IRQ or FIQ handler.
+/// from task or boot initcall context, never from an IRQ or FIQ handler.
 pub fn set_domain_target_frequency(
     domain: u32,
     target_freq_khz: u64,
@@ -895,12 +895,6 @@ mod tests {
             transition_latency_ns: 0,
         })
         .expect("test policy should register");
-        assert_eq!(
-            cpu_frequency_policy_info_by_domain(DOMAIN)
-                .expect("test policy should be registered")
-                .target_freq_khz,
-            0
-        );
         TEST_SET_PSTATE_CALLS.store(0, Ordering::SeqCst);
 
         let deferred_target =
