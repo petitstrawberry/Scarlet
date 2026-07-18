@@ -15,6 +15,8 @@ use alloc::collections::BinaryHeap;
 use alloc::sync::{Arc, Weak};
 use core::cmp::Ordering as CmpOrdering;
 
+const DEBUG_TIMER_STALL_LOGGING: bool = false;
+
 pub struct KernelTimer {
     // SAFETY: Each CPU only accesses its own timer via cpu_id index.
     // UnsafeCell allows per-CPU mutable access without data races.
@@ -218,17 +220,19 @@ pub fn tick(trapframe: &mut Trapframe) {
 pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let irq_count = TIMER_IRQ_COUNTS[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
-    let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
-    if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
-        crate::early_println!(
-            "[timer] irq heartbeat cpu={} count={} scheduler={}",
-            cpu_id,
-            irq_count,
-            run_scheduler
-        );
-    }
-    if irq_count % heartbeat_ticks == 0 {
-        sample_cpu_stalls(cpu_id);
+    if DEBUG_TIMER_STALL_LOGGING {
+        let heartbeat_ticks = 5_000_000 / TICK_INTERVAL_US;
+        if irq_count <= 3 || irq_count % heartbeat_ticks == 0 {
+            crate::early_println!(
+                "[timer] irq heartbeat cpu={} count={} scheduler={}",
+                cpu_id,
+                irq_count,
+                run_scheduler
+            );
+        }
+        if irq_count % heartbeat_ticks == 0 {
+            sample_cpu_stalls(cpu_id);
+        }
     }
     crate::breadcrumb::drop(
         crate::breadcrumb::TIMER_TICK,
