@@ -2428,7 +2428,7 @@ pub fn register_task(task: Task) -> usize {
 
 /// Make a registered task runnable on the specified CPU.
 pub fn enqueue_task(task_id: usize, cpu_id: usize) {
-    let _irq_guard = IrqGuard::new();
+    let irq_guard = IrqGuard::new();
     let current_cpu = get_cpu().get_cpuid();
     let target_cpu = TaskPool::get_task(task_id)
         .map(|task| select_enqueue_cpu_for_task(&task, cpu_id, get_time_ns()))
@@ -2450,7 +2450,8 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
             ready_queue(target_cpu).lock().len(),
         );
     }
-    if is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid() {
+    let remote = is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid();
+    if remote {
         DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
             .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(current_cpu, Ordering::SeqCst);
@@ -2467,6 +2468,14 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
             );
         }
         request_remote_reschedule(target_cpu);
+    }
+    drop(irq_guard);
+    if remote {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::ENQUEUE_IRQ_RESTORED,
+            task_id as u64,
+            target_cpu as u64,
+        );
     }
 }
 

@@ -97,6 +97,7 @@ pub const FP_RESTORE_DONE: u64 = 0x4644; // 'FD' FP context restore completed (a
 pub const FP_VECTOR_BEGIN: u64 = 0x5642; // 'VB' vector-register restore about to begin (aux=task id)
 pub const FP_VECTOR_DONE: u64 = 0x5646; // 'VF' vector-register restore completed (aux=task id)
 pub const IPI_SEND_DONE: u64 = 0x4944; // 'ID' send_ipi controller returned (aux=target CPU, aux2=status)
+pub const ENQUEUE_IRQ_RESTORED: u64 = 0x4552; // 'ER' enqueue IrqGuard restored DAIF (aux=task, aux2=target CPU)
 pub const FAST_CLAIM_DONE: u64 = 0x4653; // 'FS' claim_fast_interrupt controller returned (aux=CPU, aux2=status)
 pub const EXIT_ENTER: u64 = 0x5845; // 'XE' task exit entered (aux=task id, aux2=status)
 pub const EXIT_HANDLES_DONE: u64 = 0x5848; // 'XH' exit handle cleanup completed (aux=task id)
