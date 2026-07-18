@@ -42,6 +42,7 @@ impl Write for EarlyConsole {
 }
 
 pub fn print(args: core::fmt::Arguments) {
+    let _guard = crate::log::PrintGuard::acquire();
     let mut writer = EarlyConsole {};
     let _ = writer.write_fmt(args);
 }

@@ -7,7 +7,10 @@ use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::current_task;
-use crate::vm::{get_kernel_vm_manager, vmem::VirtualMemoryPermission};
+use crate::vm::{
+    get_kernel_vm_manager,
+    vmem::{MemoryAttribute, VirtualMemoryPermission},
+};
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
@@ -140,7 +143,14 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 Some(mmap) => match manager.get_root_page_table() {
                     Some(mut root_page_table) => {
                         let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
-                        root_page_table.map(vaddr, paddr, mmap.permissions, true, false);
+                        root_page_table.map(
+                            vaddr,
+                            paddr,
+                            mmap.permissions,
+                            mmap.memory_attribute,
+                            true,
+                            false,
+                        );
                     }
                     None => panic!("Root page table is not found"),
                 },
@@ -185,6 +195,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                                 page_paddr,
                                 VirtualMemoryPermission::Read as usize
                                     | VirtualMemoryPermission::Write as usize,
+                                MemoryAttribute::Normal,
                                 true,
                                 false,
                             );

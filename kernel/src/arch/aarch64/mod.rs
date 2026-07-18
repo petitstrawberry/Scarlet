@@ -564,10 +564,20 @@ pub fn disable_interrupt() {
     }
 }
 
-pub fn send_reschedule_ipi(target_cpu: usize) {
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
     use crate::interrupt::controllers::LocalInterruptType;
-    let _ = crate::interrupt::InterruptManager::global()
-        .send_ipi(target_cpu as u32, LocalInterruptType::Software);
+    crate::interrupt::InterruptManager::global()
+        .send_ipi(target_cpu as u32, LocalInterruptType::Software)
+        .is_ok()
 }
 
 pub fn get_cpu() -> &'static mut Aarch64 {

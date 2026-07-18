@@ -5,6 +5,7 @@ use crate::arch::riscv64::vm::synchronize_tlb;
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{kernel_virt_to_phys, phys_to_virt};
+use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
 
@@ -290,13 +291,24 @@ impl PageTable {
         Ok(())
     }
 
-    /* Only for root page table */
+    /// Maps a single 4 KiB page in the root page table.
+    ///
+    /// # Arguments
+    ///
+    /// * `asid` - Address-space identifier for the page-table hierarchy.
+    /// * `vaddr` - Virtual address to map.
+    /// * `paddr` - Physical address to map.
+    /// * `permissions` - Requested virtual-memory permissions.
+    /// * `_memory_attribute` - Requested cacheability or device attribute; Sv48 does not encode it.
+    /// * `accessed` - Whether to set the accessed bit.
+    /// * `dirty` - Whether to set the dirty bit.
     pub(in crate::arch::riscv64::vm) fn map(
         &mut self,
         asid: u16,
         vaddr: usize,
         paddr: usize,
         permissions: usize,
+        _memory_attribute: MemoryAttribute,
         accessed: bool,
         dirty: bool,
     ) {

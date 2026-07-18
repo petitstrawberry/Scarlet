@@ -557,9 +557,10 @@ pub enum EventProcessOutcome {
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     // 1. Get the program counter (sepc) from trapframe
     let pc = trapframe.get_current_pc() as usize;
+    let syscall_number = trapframe.get_syscall_number();
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_ENTER,
-        trapframe.get_syscall_number() as u64,
+        syscall_number as u64,
         pc as u64,
     );
 
@@ -568,7 +569,7 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_TASK_DONE,
         task.get_id() as u64,
-        pc as u64,
+        syscall_number as u64,
     );
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
@@ -576,11 +577,12 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
         // 4. Handle the system call with the resolved ABI
         abi_module.handle_syscall(trapframe)
     });
-    task.process_deferred_exit_request();
     crate::breadcrumb::drop(
-        crate::breadcrumb::SYSCALL_EXIT,
-        trapframe.get_syscall_number() as u64,
-        0,
+        crate::breadcrumb::SYSCALL_ABI_DONE,
+        task.get_id() as u64,
+        syscall_number as u64,
     );
+    task.process_deferred_exit_request();
+    crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);
     res
 }

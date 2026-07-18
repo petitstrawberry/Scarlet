@@ -49,7 +49,7 @@ use crate::{
 };
 
 use super::addr::{phys_to_virt, validate_direct_map_alias};
-use super::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use super::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 const WRITE_SITE_OWNER_TASK: u64 = 0x4f54;
 const WRITE_SITE_PRIVATE_PAGES: u64 = 0x5050;
@@ -871,6 +871,7 @@ impl VirtualMemoryManager {
                             page_vaddr,
                             new_paddr,
                             perms,
+                            memory_map.memory_attribute,
                             true,
                             access.op == AccessOp::Store,
                         );
@@ -918,6 +919,7 @@ impl VirtualMemoryManager {
                 page_vaddr,
                 page_paddr,
                 perms,
+                memory_map.memory_attribute,
                 true,
                 access.op == AccessOp::Store,
             );
@@ -943,8 +945,8 @@ impl VirtualMemoryManager {
         let vaddr = access.vaddr;
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
 
-        // Result of successful extend: (paddr_page_base, permissions)
-        let extend_result: Option<(usize, usize)>;
+        // Result of successful extend: (paddr_page_base, permissions, memory_attribute)
+        let extend_result: Option<(usize, usize, MemoryAttribute)>;
 
         {
             // Lock scope
@@ -956,7 +958,7 @@ impl VirtualMemoryManager {
             let mut found = None;
             let candidate_keys: Vec<usize> = g.memmap.keys().copied().collect();
             for key in candidate_keys {
-                let Some((old_end, vm_start, map_permissions, owner)) =
+                let Some((old_end, vm_start, map_permissions, memory_attribute, owner)) =
                     g.memmap.get(&key).and_then(|map| {
                         if map.vmarea.end >= vaddr {
                             return None;
@@ -967,7 +969,13 @@ impl VirtualMemoryManager {
                             return None;
                         }
 
-                        Some((map.vmarea.end, map.vm_start, map.permissions, owner.clone()))
+                        Some((
+                            map.vmarea.end,
+                            map.vm_start,
+                            map.permissions,
+                            map.memory_attribute,
+                            owner.clone(),
+                        ))
                     })
                 else {
                     continue;
@@ -1014,7 +1022,7 @@ impl VirtualMemoryManager {
                             g.last_search_cache = None;
                         }
 
-                        found = Some((res.paddr_page_base, permissions));
+                        found = Some((res.paddr_page_base, permissions, memory_attribute));
                         break;
                     }
                     Err(_) => {
@@ -1026,12 +1034,13 @@ impl VirtualMemoryManager {
         } // Lock released here
 
         // Now map the page outside the lock
-        if let Some((paddr_page_base, permissions)) = extend_result {
+        if let Some((paddr_page_base, permissions, memory_attribute)) = extend_result {
             if let Some(mut root_pagetable) = self.get_root_page_table() {
                 root_pagetable.map(
                     page_vaddr,
                     paddr_page_base,
                     permissions,
+                    memory_attribute,
                     true,
                     access.op == AccessOp::Store,
                 );
@@ -1516,6 +1525,9 @@ impl Drop for VirtualMemoryManager {
             return;
         }
 
+        let asid = self.get_asid();
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_ENTER, asid as u64, 0);
+
         let memmap = {
             let mut inner = self.inner.write();
             self.record_inner_writer(WRITE_SITE_DROP);
@@ -1526,11 +1538,13 @@ impl Drop for VirtualMemoryManager {
                 owner.on_unmapped(map.vmarea.start, map.vmarea.size());
             }
         }
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_MAPS_DONE, asid as u64, 0);
 
-        let asid = self.get_asid();
         if asid != 0 && is_asid_used(asid) {
+            crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_ASID_BEGIN, asid as u64, 0);
             free_virtual_address_space(asid);
         }
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_DONE, asid as u64, 0);
     }
 }
 

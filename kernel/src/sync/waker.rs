@@ -718,7 +718,8 @@ pub struct WakerStats {
 mod tests {
     use super::*;
     use crate::sched::scheduler::{
-        add_task, get_task_by_id, mark_blocked, reset, set_current_task_for_test,
+        add_task, get_task_by_id, has_ready_tasks, mark_blocked, register_online_cpu, reset,
+        set_current_task_for_test,
     };
     use crate::task::{Task, TaskType};
     use alloc::string::ToString;
@@ -749,6 +750,7 @@ mod tests {
     #[test_case]
     fn test_wake_one_skips_stale_waiter_before_live_waiter() {
         reset();
+        register_online_cpu(crate::arch::get_cpu().get_cpuid());
         let waker = Waker::new_interruptible("stale-before-live");
         let task_id = add_task(Task::new("live-waiter".to_string(), 1, TaskType::Kernel), 0);
         let task = get_task_by_id(task_id).expect("live waiter must be registered");
@@ -775,16 +777,18 @@ mod tests {
     #[test_case]
     fn test_timeout_already_fired_cancels_prepared_wait() {
         reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
         let waker = Waker::new_interruptible("timeout-cancel");
         let task_id = add_task(
             Task::new("timeout-waiter".to_string(), 1, TaskType::Kernel),
-            0,
+            local_cpu,
         );
         let task = get_task_by_id(task_id).expect("timeout waiter must be registered");
         task.set_state(TaskState::Running);
-        let local_cpu = crate::arch::get_cpu().get_cpuid();
         task.running_cpu.store(local_cpu, Ordering::SeqCst);
         set_current_task_for_test(local_cpu, Some(task_id));
+        remove_from_ready_queues(task_id);
 
         assert!(waker.prepare_wait(task_id));
         assert_eq!(
@@ -793,10 +797,12 @@ mod tests {
         );
         assert!(wake_task(task_id));
         assert_eq!(task.get_state(), TaskState::Ready);
+        assert!(has_ready_tasks(local_cpu));
 
         assert!(waker.cancel_prepared_wait(task_id));
         assert_eq!(task.get_state(), TaskState::Running);
         assert_eq!(waker.waiting_count(), 0);
+        assert!(!has_ready_tasks(local_cpu));
         assert!(!wake_task(task_id));
         set_current_task_for_test(local_cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);
@@ -807,16 +813,18 @@ mod tests {
     #[test_case]
     fn test_cancel_prepared_wait_rolls_back_locally_owned_blocked_task() {
         reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
         let waker = Waker::new_interruptible("local-cancel");
         let task_id = add_task(
             Task::new("local-waiter".to_string(), 1, TaskType::Kernel),
-            0,
+            local_cpu,
         );
         let task = get_task_by_id(task_id).expect("local waiter must be registered");
-        let local_cpu = crate::arch::get_cpu().get_cpuid();
         task.set_state(TaskState::Running);
         task.running_cpu.store(local_cpu, Ordering::SeqCst);
         set_current_task_for_test(local_cpu, Some(task_id));
+        remove_from_ready_queues(task_id);
 
         assert!(waker.prepare_wait(task_id));
         assert!(waker.cancel_prepared_wait(task_id));

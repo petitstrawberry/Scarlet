@@ -2099,7 +2099,7 @@ impl Task {
     pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
         crate::breadcrumb::drop(
             crate::breadcrumb::CLONE_ENTER,
-            self.get_id() as u64,
+            self.registered_id().unwrap_or(0) as u64,
             flags.get_raw() as u64,
         );
         // Create a new task in the same namespace as the parent
@@ -2495,12 +2495,39 @@ impl Task {
     }
 
     fn release_all_memory_maps_for_exit(&self) {
+        let map_count = self.vm_manager.memmap_len();
+        self.trace_fork_exit_phase("exit-vm-begin", map_count);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_BEGIN,
+            self.id as u64,
+            map_count as u64,
+        );
         let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
+        self.trace_fork_exit_phase("exit-vm-unmapped", removed_maps.len());
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_UNMAPPED,
+            self.id as u64,
+            removed_maps.len() as u64,
+        );
         for removed_map in &removed_maps {
             if let Some(owner) = &removed_map.owner {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
             reclaim_private_removed_mapping(self, removed_map);
+        }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_VM_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-vm-done", removed_maps.len());
+    }
+
+    fn trace_fork_exit_phase(&self, phase: &'static str, detail: usize) {
+        if crate::sched::scheduler::is_fork_trace_task(self.id) {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} {} cpu={} detail={}",
+                self.id,
+                phase,
+                get_cpu().get_cpuid(),
+                detail,
+            );
         }
     }
 
@@ -2508,6 +2535,12 @@ impl Task {
     where
         F: FnOnce(&Task),
     {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_ENTER,
+            self.id as u64,
+            status as u32 as u64,
+        );
+        self.trace_fork_exit_phase("exit-enter", status as u32 as usize);
         self.begin_exit();
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
@@ -2516,26 +2549,36 @@ impl Task {
         if self.handle_table.is_sole_owner() {
             self.handle_table.close_all();
         }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_HANDLES_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-handles-done", 0);
         self.clear_process_control_stopped();
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_ABI_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-abi-done", 0);
         if self.vm_manager.is_sole_owner() {
             self.release_all_memory_maps_for_exit();
         }
         cleanup(self);
         self.reparent_children();
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_REPARENT_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-reparent-done", 0);
 
         match self.get_parent_id() {
             Some(parent_id) => {
                 if get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state.store(TaskState::Terminated, Ordering::SeqCst);
-                    return;
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                    self.trace_fork_exit_phase("exit-state", 6);
+                } else {
+                    /* Set the exit status */
+                    self.set_exit_status(status);
+                    self.state.store(TaskState::Zombie, Ordering::SeqCst);
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 5);
+                    self.trace_fork_exit_phase("exit-state", 5);
                 }
-                /* Set the exit status */
-                self.set_exit_status(status);
-                self.state.store(TaskState::Zombie, Ordering::SeqCst);
 
                 // TODO: Notify parent via ABI-specific mechanism
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
@@ -2544,23 +2587,25 @@ impl Task {
                 /* If the task has no parent, it is terminated */
                 // crate::println!("Task {}: No parent, terminating", self.id);
                 self.state.store(TaskState::Terminated, Ordering::SeqCst);
+                crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                self.trace_fork_exit_phase("exit-state", 6);
             }
         }
 
         // Task cleanup completed - ABI module handles event cleanup
 
-        if mytask().is_none() || mytask().unwrap().get_id() != self.id {
-            // Non-current task: finalize zombie state manually
-            // (current task path goes through schedule() -> pick_next -> finalize_zombie)
-            if matches!(self.state.load(Ordering::SeqCst), TaskState::Zombie) {
-                unmark_blocked(self.id);
-                finalize_zombie(self.id, self.get_parent_id());
-            }
+        if !mytask().is_some_and(|task| task.get_id() == self.id) {
+            // A non-current task can publish either Zombie or Terminated when
+            // its parent disappears during exit. Complete both states through
+            // the scheduler's running-CPU ownership protocol.
+            complete_non_current_task_exit(self.id);
             return;
         }
 
         // The scheduler will handle saving the current task state internally
         if let Some(current_task) = mytask() {
+            crate::breadcrumb::drop(crate::breadcrumb::EXIT_SCHEDULE, self.id as u64, 0);
+            self.trace_fork_exit_phase("exit-schedule", 0);
             schedule(current_task.get_trapframe());
         }
     }
@@ -3090,13 +3135,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
-        // if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
-        //     crate::early_println!(
-        //         "[fork-trace] child_task_id={} kernel-entry cpu={}",
-        //         current_task.get_id(),
-        //         cpu.get_cpuid()
-        //     );
-        // }
+        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} kernel-entry cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
             let vcpu = current_task.vcpu.lock();
             crate::println!(
@@ -3141,13 +3186,13 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             );
         }
         setup_task_execution(cpu, &current_task);
-        // if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
-        //     crate::early_println!(
-        //         "[fork-trace] child_task_id={} user-return cpu={}",
-        //         current_task.get_id(),
-        //         cpu.get_cpuid()
-        //     );
-        // }
+        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} user-return cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         arch_switch_to_user(current_task.get_trapframe());
     }
 
@@ -3207,7 +3252,7 @@ mod tests {
         let strong_count = Arc::strong_count(&task);
 
         let current_task = mytask().expect("mock current task must be available");
-        assert_eq!(current_task.get_id(), task.get_id());
+        assert!(core::ptr::eq::<Task>(&*current_task, &*task));
         assert_eq!(Arc::strong_count(&task), strong_count);
 
         drop(current_task);
@@ -3741,8 +3786,10 @@ mod tests {
         // Get parent memory map count before cloning
         let parent_memmap_count = parent_task.vm_manager.memmap_len();
 
-        // Clone the parent task
+        // Cloning an unpublished task must not require a scheduler ID.
+        assert_eq!(parent_task.registered_id(), None);
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child_task.registered_id(), None);
 
         // For fork-like clones (no CLONE_VM), brk must NOT be shared.
         assert!(

@@ -2,11 +2,12 @@
 //!
 //! When a CPU hangs with FIQ masked it cannot print. Each CPU therefore records
 //! its last execution phase in a lock-free atomic. Surviving CPUs periodically
-//! dump all breadcrumbs alongside their timer heartbeat, revealing exactly
-//! where each stuck CPU stopped and whether the state is still changing.
+//! sample a stopped CPU's latest breadcrumb from a timer heartbeat, revealing
+//! where that CPU stopped and whether the state is still changing.
 //!
-//! Context fields use relaxed atomic stores and the phase is release-published
-//! last. The path uses no locks or formatting, so it remains safe from FIQ
+//! Each record is enclosed by an odd/even sequence generation. Readers accept
+//! the phase and context fields only when the generation remains unchanged and
+//! even. The path uses no locks or formatting, so it remains safe from FIQ
 //! handlers and trap-vector prologues reached after `daifset`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -37,7 +38,8 @@ pub const CLONE_ENTER: u64 = 0x434c; // 'CL' clone_task entered
 pub const CLONE_KSTACK_DONE: u64 = 0x434b; // 'CK' child kstack window mapped
 pub const CLONE_RETURN: u64 = 0x4352; // 'CR' clone_task returning
 pub const SYSCALL_ENTER: u64 = 0x5359; // 'SY' syscall_dispatcher entered (aux=num)
-pub const SYSCALL_TASK_DONE: u64 = 0x5354; // 'ST' mytask returned (aux=task id, aux2=PC)
+pub const SYSCALL_TASK_DONE: u64 = 0x5354; // 'ST' entering ABI syscall (aux=task id, aux2=syscall)
+pub const SYSCALL_ABI_DONE: u64 = 0x534f; // 'SO' ABI syscall returned (aux=task id, aux2=syscall)
 pub const SYSCALL_EXIT: u64 = 0x5358; // 'SX' syscall_dispatcher returned
 pub const EPOLL_ALLOC_BEGIN: u64 = 0x4542; // 'EB' epoll_create1 about to allocate an fd
 pub const EPOLL_ALLOC_DONE: u64 = 0x4544; // 'ED' epoll_create1 fd allocation returned
@@ -61,6 +63,14 @@ pub const SETAS_ASID_DONE: u64 = 0x4144; // 'AD' vm_manager.get_asid returned (a
 pub const SETAS_ROOT_DONE: u64 = 0x4152; // 'AR' root page-table lookup done; cache clean next
 pub const PT_LOCK_WAIT: u64 = 0x4c57; // 'LW' waiting for the ASID page-table lock
 pub const PT_LOCK_DONE: u64 = 0x4c44; // 'LD' acquired the ASID page-table lock
+pub const PT_LOCK_RELEASED: u64 = 0x4c52; // 'LR' released the ASID page-table lock
+pub const PT_ASID_READ_WAIT: u64 = 0x4157; // 'AW' waiting for ASID bitmap read access
+pub const PT_ASID_READ_DONE: u64 = 0x4145; // 'AE' ASID bitmap read completed
+pub const PT_ASID_WRITE_WAIT: u64 = 0x5957; // 'YW' waiting for ASID bitmap write access
+pub const PT_ASID_WRITE_HELD: u64 = 0x5948; // 'YH' acquired ASID bitmap write access
+pub const PT_ASID_WRITE_RELEASED: u64 = 0x5958; // 'YX' released ASID bitmap write access
+pub const PT_REGISTRY_READ_WAIT: u64 = 0x5157; // 'QW' waiting for PAGE_TABLES read access
+pub const PT_REGISTRY_READ_DONE: u64 = 0x5144; // 'QD' PAGE_TABLES read completed
 pub const PT_MAP_BEGIN: u64 = 0x4d42; // 'MB' entering single-page map
 pub const PT_LEAF_DONE: u64 = 0x4d4c; // 'ML' leaf PTE installed and published
 pub const PT_TLBI_BEGIN: u64 = 0x5442; // 'TB' broadcast stage-1 TLBI about to begin
@@ -69,7 +79,9 @@ pub const PT_MAP_DONE: u64 = 0x4d44; // 'MD' single-page map returned
 pub const PT_ALLOC_BEGIN: u64 = 0x4142; // 'AB' child page-table allocation about to begin
 pub const PT_ALLOC_DONE: u64 = 0x4143; // 'AC' child page-table allocation completed
 pub const PT_REGISTRY_WAIT: u64 = 0x5257; // 'RW' waiting for PAGE_TABLES registry write lock
+pub const PT_REGISTRY_HELD: u64 = 0x5248; // 'RH' acquired PAGE_TABLES registry write lock
 pub const PT_REGISTRY_DONE: u64 = 0x5244; // 'RD' child page table recorded in registry
+pub const PT_REGISTRY_RELEASED: u64 = 0x5258; // 'RX' released PAGE_TABLES registry write lock
 pub const VMM_READ_WAIT: u64 = 0x5652; // 'VR' get_asid blocked by an active inner writer (aux=writer count, aux2=lock address)
 pub const VMM_WRITE_HELD: u64 = 0x5657; // 'VW' inner write lock acquired (aux=site code, aux2=lock address)
 pub const KERNEL_IRQ_ENTER: u64 = 0x4951; // 'IQ' IRQ interrupted non-idle privileged code (aux=ELR, aux2=SPSR)
@@ -84,24 +96,142 @@ pub const FP_CONTROL_DONE: u64 = 0x4643; // 'FC' FPCR/FPSR restore completed (au
 pub const FP_RESTORE_DONE: u64 = 0x4644; // 'FD' FP context restore completed (aux=task id)
 pub const FP_VECTOR_BEGIN: u64 = 0x5642; // 'VB' vector-register restore about to begin (aux=task id)
 pub const FP_VECTOR_DONE: u64 = 0x5646; // 'VF' vector-register restore completed (aux=task id)
+pub const IPI_SEND_DONE: u64 = 0x4944; // 'ID' send_ipi controller returned (aux=target CPU, aux2=status)
+pub const FAST_CLAIM_DONE: u64 = 0x4653; // 'FS' claim_fast_interrupt controller returned (aux=CPU, aux2=status)
+pub const EXIT_ENTER: u64 = 0x5845; // 'XE' task exit entered (aux=task id, aux2=status)
+pub const EXIT_HANDLES_DONE: u64 = 0x5848; // 'XH' exit handle cleanup completed (aux=task id)
+pub const EXIT_ABI_DONE: u64 = 0x5841; // 'XA' ABI exit hook completed (aux=task id)
+pub const EXIT_VM_BEGIN: u64 = 0x5842; // 'XB' exit VM teardown entered (aux=task id, aux2=map count)
+pub const EXIT_VM_UNMAPPED: u64 = 0x5855; // 'XU' exit page table unmap completed (aux=task id, aux2=map count)
+pub const EXIT_VM_DONE: u64 = 0x5844; // 'XD' exit VM backing reclaim completed (aux=task id)
+pub const EXIT_REPARENT_DONE: u64 = 0x5852; // 'XR' child reparenting completed (aux=task id)
+pub const EXIT_STATE_DONE: u64 = 0x5853; // 'XS' terminal task state published (aux=task id, aux2=state code)
+pub const EXIT_SCHEDULE: u64 = 0x5843; // 'XC' exiting current task about to schedule (aux=task id)
+pub const RELEASE_PREV_ENTER: u64 = 0x5245; // 'RE' deferred previous-task release entered (aux=task id, aux2=CPU)
+pub const RELEASE_PREV_DONE: u64 = 0x5259; // 'RY' deferred previous-task release completed (aux=task id, aux2=state code)
+pub const ZOMBIE_FINALIZE: u64 = 0x5a46; // 'ZF' zombie finalization entered (aux=task id, aux2=parent id)
+pub const ZOMBIE_CLEANUP: u64 = 0x5a43; // 'ZC' terminated-task cleanup entered (aux=task id)
+pub const REAPER_DROP_BEGIN: u64 = 0x5242; // 'RB' reaper about to drop a retired task (aux=task id)
+pub const REAPER_DROP_DONE: u64 = 0x5252; // 'RR' retired task drop completed (aux=task id)
+pub const VMM_DROP_ENTER: u64 = 0x5645; // 'VE' sole-owner VMM drop entered (aux=ASID)
+pub const VMM_DROP_MAPS_DONE: u64 = 0x564d; // 'VM' VMM mapping-owner cleanup completed (aux=ASID)
+pub const VMM_DROP_ASID_BEGIN: u64 = 0x5658; // 'VX' VMM ASID teardown entered (aux=ASID)
+pub const VMM_DROP_DONE: u64 = 0x565a; // 'VZ' VMM drop completed (aux=ASID)
+pub const PUBLICATION_IN_PROGRESS: u64 = 0x4259; // 'BY' bounded snapshot found an in-flight writer
 
-static PHASE: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(NONE) }; MAX_NUM_CPUS];
-static AUX: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
-static AUX2: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+const SNAPSHOT_RETRY_LIMIT: usize = 4;
+
+struct BreadcrumbSlot {
+    sequence: AtomicU64,
+    phase: AtomicU64,
+    aux: AtomicU64,
+    aux2: AtomicU64,
+}
+
+impl BreadcrumbSlot {
+    const fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            phase: AtomicU64::new(NONE),
+            aux: AtomicU64::new(0),
+            aux2: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn record(&self, phase: u64, aux: u64, aux2: u64) {
+        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        self.sequence.store(odd_sequence, Ordering::SeqCst);
+        self.phase.store(phase, Ordering::SeqCst);
+        self.aux.store(aux, Ordering::SeqCst);
+        self.aux2.store(aux2, Ordering::SeqCst);
+        self.sequence
+            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+    }
+
+    #[inline(always)]
+    fn snapshot(&self) -> BreadcrumbSnapshot {
+        self.snapshot_with_probe(|| {})
+            .unwrap_or_else(|| BreadcrumbSnapshot {
+                phase: PUBLICATION_IN_PROGRESS,
+                aux: self.sequence.load(Ordering::SeqCst),
+                aux2: 0,
+            })
+    }
+
+    #[inline(always)]
+    fn snapshot_with_probe(&self, mut after_aux: impl FnMut()) -> Option<BreadcrumbSnapshot> {
+        for _ in 0..SNAPSHOT_RETRY_LIMIT {
+            let sequence_before = self.sequence.load(Ordering::SeqCst);
+            if sequence_before & 1 != 0 {
+                continue;
+            }
+
+            let phase = self.phase.load(Ordering::SeqCst);
+            let aux = self.aux.load(Ordering::SeqCst);
+            after_aux();
+            let aux2 = self.aux2.load(Ordering::SeqCst);
+            let sequence_after = self.sequence.load(Ordering::SeqCst);
+            if sequence_before == sequence_after {
+                return Some(BreadcrumbSnapshot { phase, aux, aux2 });
+            }
+        }
+
+        None
+    }
+}
+
+static BREADCRUMBS: [BreadcrumbSlot; MAX_NUM_CPUS] =
+    [const { BreadcrumbSlot::new() }; MAX_NUM_CPUS];
+
+/// Lock-free breadcrumb state sampled from one CPU.
+#[derive(Clone, Copy, Debug)]
+pub struct BreadcrumbSnapshot {
+    /// Execution phase from one committed generation, or an in-progress marker.
+    pub phase: u64,
+    /// First numeric context field recorded with the phase.
+    pub aux: u64,
+    /// Second numeric context field recorded with the phase.
+    pub aux2: u64,
+}
+
+/// Return a lock-free snapshot of a CPU's last breadcrumb.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU whose breadcrumb should be sampled.
+///
+/// # Returns
+///
+/// The sampled phase and context fields, or `None` when `cpu_id` is outside
+/// the supported CPU range. If all bounded attempts overlap a publication,
+/// the returned phase is [`PUBLICATION_IN_PROGRESS`] and `aux` is the observed
+/// sequence value instead of an inconsistent payload tuple.
+///
+/// The sequence is sampled before and after the context fields. A sample is
+/// returned only when both sequence reads match and are even, so a following
+/// writer cannot mix a previous phase with new context. Sampling is bounded;
+/// a CPU stopped during publication cannot spin the observing CPU forever.
+#[inline(always)]
+pub fn snapshot(cpu_id: usize) -> Option<BreadcrumbSnapshot> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+
+    Some(BREADCRUMBS[cpu_id].snapshot())
+}
 
 /// Record the current execution phase for the running CPU.
 ///
-/// Lock-free and FIQ-safe: only atomic stores, no allocation, no formatting.
-/// `aux`/`aux2` carry context such as FAR, task id, or exception class. The
-/// phase is release-published last so a dump that observes it also observes
-/// the matching context fields.
+/// Lock-free and FIQ-safe: only atomic operations, no allocation or formatting.
+/// `aux`/`aux2` carry context such as FAR, task id, or exception class. An
+/// odd/even sequence brackets the fields so readers can reject a concurrent
+/// publication, including consecutive records that use the same phase code.
 #[inline(always)]
 pub fn drop(phase: u64, aux: u64, aux2: u64) {
     let cpu = get_cpu().get_cpuid();
     if cpu < MAX_NUM_CPUS {
-        AUX[cpu].store(aux, Ordering::Relaxed);
-        AUX2[cpu].store(aux2, Ordering::Relaxed);
-        PHASE[cpu].store(phase, Ordering::Release);
+        BREADCRUMBS[cpu].record(phase, aux, aux2);
     }
 }
 
@@ -109,12 +239,12 @@ pub fn drop(phase: u64, aux: u64, aux2: u64) {
 ///
 /// Use this after `set_arch()` has repointed `TPIDR_EL1` at the trampoline
 /// Arch, where `get_cpu().get_cpuid()` may read an unexpected struct.
+/// The caller must name the currently executing CPU. The odd/even protocol has
+/// exactly one writer per slot and does not support remote concurrent writers.
 #[inline(always)]
 pub fn drop_cpu(cpu_id: usize, phase: u64, aux: u64) {
     if cpu_id < MAX_NUM_CPUS {
-        AUX[cpu_id].store(aux, Ordering::Relaxed);
-        AUX2[cpu_id].store(0, Ordering::Relaxed);
-        PHASE[cpu_id].store(phase, Ordering::Release);
+        BREADCRUMBS[cpu_id].record(phase, aux, 0);
     }
 }
 
@@ -154,22 +284,24 @@ pub fn dump_all() {
             pos: 0,
         };
         for cpu in 0..MAX_NUM_CPUS {
-            let phase = PHASE[cpu].load(Ordering::Acquire);
-            if phase == NONE {
+            let snapshot = BREADCRUMBS[cpu].snapshot();
+            if snapshot.phase == NONE {
                 continue;
             }
             let _ = write!(
                 w,
                 "[crumb] cpu={} phase={:#06x} aux={:#x} aux2={:#x}\n",
-                cpu,
-                phase,
-                AUX[cpu].load(Ordering::Relaxed),
-                AUX2[cpu].load(Ordering::Relaxed),
+                cpu, snapshot.phase, snapshot.aux, snapshot.aux2,
             );
         }
         len = w.pos;
     }
 
     let s = core::str::from_utf8(&buf[..len]).unwrap_or("");
-    crate::earlyfb::write_raw(s);
+    if crate::earlyfb::is_redirection_enabled() {
+        crate::earlyfb::write_raw(s);
+    }
 }
+
+#[cfg(test)]
+mod tests;

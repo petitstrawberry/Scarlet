@@ -53,6 +53,27 @@ struct MapAttrs {
     memory_attribute: MemoryAttribute,
 }
 
+/// Describes how a leaf PTE changed during a mapping attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageTableMutation {
+    NoChange,
+    InvalidToValid,
+    ValidReplacementBbm,
+}
+
+impl PageTableMutation {
+    #[inline(always)]
+    fn aggregate(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::ValidReplacementBbm, _) | (_, Self::ValidReplacementBbm) => {
+                Self::ValidReplacementBbm
+            }
+            (Self::InvalidToValid, _) | (_, Self::InvalidToValid) => Self::InvalidToValid,
+            (Self::NoChange, Self::NoChange) => Self::NoChange,
+        }
+    }
+}
+
 /// Returns the page size represented by a logical page-table level.
 ///
 /// Level 0 is a 4 KiB page, level 1 is a 2 MiB block, and level 2 is a
@@ -322,13 +343,47 @@ fn publish_page_table_entry(pte: &PageTableEntry) {
 
 #[inline(always)]
 fn replacement_requires_break_before_make(old_entry: u64, new_entry: u64) -> bool {
-    old_entry & 1 != 0 && old_entry != new_entry
+    matches!(
+        classify_page_table_mutation(old_entry, new_entry),
+        PageTableMutation::ValidReplacementBbm
+    )
 }
 
-fn break_before_make(pte: &mut PageTableEntry) {
+#[inline(always)]
+fn classify_page_table_mutation(old_entry: u64, new_entry: u64) -> PageTableMutation {
+    if old_entry == new_entry {
+        PageTableMutation::NoChange
+    } else if old_entry & 1 == 0 {
+        PageTableMutation::InvalidToValid
+    } else {
+        PageTableMutation::ValidReplacementBbm
+    }
+}
+
+/// Returns whether a mapping operation must retain its final broadcast TLBI.
+///
+/// The omission is deliberately limited to User leaves that do not replace a
+/// valid descriptor. Kernel mappings retain their existing broadcast because
+/// remote CPUs can cache an invalid translation without the EL0 trap-return
+/// recovery path.
+#[inline(always)]
+fn mapping_requires_final_broadcast_tlbi(
+    mutation: PageTableMutation,
+    is_user_mapping: bool,
+) -> bool {
+    !(is_user_mapping
+        && matches!(
+            mutation,
+            PageTableMutation::NoChange | PageTableMutation::InvalidToValid
+        ))
+}
+
+fn break_before_make(pte: &mut PageTableEntry, asid: u16, vaddr: usize) {
     pte.clear_all();
     publish_page_table_entry(pte);
+    crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
     invalidate_stage1_translations_inner_shareable();
+    crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
 }
 
 /// Page table structure aligned to 4KB
@@ -459,6 +514,7 @@ impl PageTable {
         _accessed: bool,
         _dirty: bool,
     ) -> Result<(), &'static str> {
+        let is_user_mapping = VirtualMemoryPermission::User.contained_in(mmap.permissions);
         if mmap.vmarea.start % PAGE_SIZE != 0
             || mmap.pmarea.start % PAGE_SIZE != 0
             || mmap.vmarea.size() % PAGE_SIZE != 0
@@ -473,6 +529,7 @@ impl PageTable {
         };
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
+        let mut mutation = PageTableMutation::NoChange;
         while vaddr <= mmap.vmarea.end {
             let remaining = mmap
                 .vmarea
@@ -481,15 +538,16 @@ impl PageTable {
                 .and_then(|remaining| remaining.checked_add(1))
                 .ok_or("Address range overflow")?;
             let mut level = best_page_level(vaddr, paddr, remaining);
-            while self
-                .try_map_at_level(asid, vaddr, paddr, attrs, level)
-                .is_err()
-            {
-                if level == 0 {
-                    return Err("Failed to map memory area");
+            let leaf_mutation = loop {
+                match self.try_map_at_level(asid, vaddr, paddr, attrs, level) {
+                    Ok(leaf_mutation) => break leaf_mutation,
+                    Err(_) if level == 0 => return Err("Failed to map memory area"),
+                    Err(_) => {
+                        level -= 1;
+                    }
                 }
-                level -= 1;
-            }
+            };
+            mutation = mutation.aggregate(leaf_mutation);
 
             let page_size = page_size_for_level(level);
             match vaddr.checked_add(page_size) {
@@ -502,19 +560,41 @@ impl PageTable {
             }
         }
 
-        // Publish new mappings to all PEs that may run this address space.
-        invalidate_stage1_translations_inner_shareable();
+        if mapping_requires_final_broadcast_tlbi(mutation, is_user_mapping) {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_BEGIN,
+                mmap.vmarea.start as u64,
+                asid as u64,
+            );
+            invalidate_stage1_translations_inner_shareable();
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_DONE,
+                mmap.vmarea.start as u64,
+                asid as u64,
+            );
+        }
 
         Ok(())
     }
 
-    /// Map a single page (like RISC-V's map())
+    /// Maps a single 4 KiB page.
+    ///
+    /// # Arguments
+    ///
+    /// * `asid` - Address-space identifier for the page-table hierarchy.
+    /// * `vaddr` - Virtual address to map.
+    /// * `paddr` - Physical address to map.
+    /// * `permissions` - Requested virtual-memory permissions.
+    /// * `memory_attribute` - Cacheability or device attribute for the leaf descriptor.
+    /// * `_accessed` - Retained API compatibility parameter for the access flag.
+    /// * `_dirty` - Retained API compatibility parameter for the dirty flag.
     pub(in crate::arch::aarch64::vm) fn map(
         &mut self,
         asid: u16,
         vaddr: usize,
         paddr: usize,
         permissions: usize,
+        memory_attribute: MemoryAttribute,
         _accessed: bool,
         _dirty: bool,
     ) {
@@ -527,24 +607,29 @@ impl PageTable {
 
         let vaddr = vaddr & !0xfff;
         let paddr = paddr & !0xfff;
+        let is_user_mapping = VirtualMemoryPermission::User.contained_in(permissions);
 
-        self.try_map_at_level(
-            asid,
-            vaddr,
-            paddr,
-            MapAttrs {
-                permissions,
-                memory_attribute: MemoryAttribute::Normal,
-            },
-            0,
-        )
-        .expect("map: couldn't install a 4 KiB leaf mapping");
-        crate::breadcrumb::drop(crate::breadcrumb::PT_LEAF_DONE, vaddr as u64, paddr as u64);
+        let mutation = self
+            .try_map_at_level(
+                asid,
+                vaddr,
+                paddr,
+                MapAttrs {
+                    permissions,
+                    memory_attribute,
+                },
+                0,
+            )
+            .expect("map: couldn't install a 4 KiB leaf mapping");
 
-        // Publish new mappings to all PEs that may run this address space.
-        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
-        invalidate_stage1_translations_inner_shareable();
-        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
+        if mutation != PageTableMutation::NoChange {
+            crate::breadcrumb::drop(crate::breadcrumb::PT_LEAF_DONE, vaddr as u64, paddr as u64);
+        }
+        if mapping_requires_final_broadcast_tlbi(mutation, is_user_mapping) {
+            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
+            invalidate_stage1_translations_inner_shareable();
+            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
+        }
     }
 
     /// Attempts to install a leaf mapping at the specified logical level.
@@ -558,7 +643,7 @@ impl PageTable {
         paddr: usize,
         attrs: MapAttrs,
         level: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<PageTableMutation, &'static str> {
         let page_size = page_size_for_level(level);
         if level > MAX_BLOCK_LEVEL
             || !vaddr.is_multiple_of(page_size)
@@ -581,19 +666,21 @@ impl PageTable {
             level,
             attrs.memory_attribute,
         );
-        if pte.entry == entry {
-            return Ok(());
+        let mutation = classify_page_table_mutation(pte.entry, entry);
+        if mutation == PageTableMutation::NoChange {
+            return Ok(mutation);
         }
         if replacement_requires_break_before_make(pte.entry, entry) {
-            break_before_make(pte);
+            break_before_make(pte, asid, vaddr);
         }
         pte.set_entry(entry);
 
         // Ensure the updated PTE is visible to the hardware table walker.
         publish_page_table_entry(pte);
 
-        // TLB invalidation is deferred to the caller for batching.
-        Ok(())
+        // The caller batches any final invalidation. Valid replacements have
+        // already performed their required break-before-make invalidation.
+        Ok(mutation)
     }
 
     /// Builds an AArch64 page or block descriptor for a leaf mapping.
@@ -846,7 +933,7 @@ impl PageTable {
     }
 
     /// Unmap a single page (like RISC-V's unmap())
-    fn unmap(&mut self, vaddr: usize) {
+    fn unmap(&mut self, asid: u16, vaddr: usize) {
         if !Self::is_canonical_48(vaddr) {
             panic!(
                 "Virtual address {:#x} is not canonical for 48-bit VA",
@@ -862,7 +949,9 @@ impl PageTable {
                 (pte as *const PageTableEntry) as usize,
                 core::mem::size_of::<PageTableEntry>(),
             );
+            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
             invalidate_stage1_translations_inner_shareable();
+            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
         }
     }
 
@@ -896,13 +985,13 @@ impl PageTable {
             let leaf_end = leaf_start + leaf_size - 1;
 
             if vaddr_start <= leaf_start && leaf_end <= vaddr_end {
-                self.unmap(leaf_start);
+                self.unmap(asid, leaf_start);
                 match leaf_end.checked_add(1) {
                     Some(next) => vaddr = next,
                     None => break,
                 }
             } else if level == 0 {
-                self.unmap(vaddr);
+                self.unmap(asid, vaddr);
                 match vaddr.checked_add(PAGE_SIZE) {
                     Some(next) => vaddr = next,
                     None => break,
@@ -951,7 +1040,7 @@ impl PageTable {
                 crate::environment::PAGE_SIZE,
             );
 
-            break_before_make(pte);
+            break_before_make(pte, asid, vaddr);
             pte.set_ppn(virt_to_phys(child_table as usize) >> 12);
             pte.set_table();
             publish_page_table_entry(pte);
@@ -961,7 +1050,7 @@ impl PageTable {
     }
 
     /// Unmap all entries (like RISC-V's unmap_all())
-    pub(in crate::arch::aarch64::vm) fn unmap_all(&mut self) {
+    pub(in crate::arch::aarch64::vm) fn unmap_all(&mut self, asid: u16) {
         for entry in &mut self.entries {
             entry.clear_all();
         }
@@ -969,7 +1058,9 @@ impl PageTable {
             self as *const PageTable as usize,
             crate::environment::PAGE_SIZE,
         );
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, 0, asid as u64);
         invalidate_stage1_translations_inner_shareable();
+        crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, 0, asid as u64);
     }
 }
 
@@ -1096,11 +1187,62 @@ mod tests {
             0xffff_ffff_8000_0000,
             0x8000_0000,
             0x01 | 0x02 | 0x04,
+            MemoryAttribute::Normal,
             true,
             true,
         );
         let pte = page_table.walk(0xffff_ffff_8000_0000, false, 1).unwrap();
         assert_eq!(pte.entry & 0xfff, 0x703);
+    }
+
+    #[test_case]
+    fn test_single_page_map_uses_declared_memory_attribute() {
+        let mut page_table = PageTable::new();
+        let vaddr = 0xffff_ffff_8000_1000;
+        page_table.map(
+            1,
+            vaddr,
+            0x8000_1000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            MemoryAttribute::DeviceBurstable,
+            true,
+            true,
+        );
+
+        let pte = page_table.walk(vaddr, false, 1).unwrap();
+        assert_eq!((pte.entry >> 2) & 0b111, 3);
+    }
+
+    #[test_case]
+    fn test_lazy_single_page_map_preserves_vma_memory_attribute() {
+        let manager = crate::vm::manager::VirtualMemoryManager::new();
+        let asid = alloc_virtual_address_space();
+        manager.set_asid(asid);
+
+        let vaddr = 0x4100_0000;
+        let mmap = VirtualMemoryMap::new(
+            MemoryArea::new(0, 0),
+            MemoryArea::new(vaddr, vaddr + PAGE_SIZE - 1),
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize,
+            true,
+            None,
+        )
+        .with_memory_attribute(MemoryAttribute::DeviceBurstable);
+        manager
+            .add_memory_map(mmap)
+            .expect("failed to add lazy VMA");
+        manager.lazy_map_page(vaddr).expect("lazy mapping failed");
+
+        let mut root = manager
+            .get_root_page_table()
+            .expect("root page table not found");
+        let pte = root
+            .walk_to_level(vaddr, 0, false)
+            .expect("lazy leaf PTE not found");
+        assert_eq!((pte.entry >> 2) & 0b111, 3);
+
+        drop(root);
+        drop(manager);
     }
 
     #[test_case]
@@ -1242,6 +1384,69 @@ mod tests {
         assert!(replacement_requires_break_before_make(
             old_entry,
             new_attribute_entry
+        ));
+    }
+
+    #[test_case]
+    fn test_page_table_mutation_classifies_leaf_updates() {
+        let entry = PageTable::make_leaf_entry(
+            0x4100_0000,
+            0x8100_0000,
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            0,
+            MemoryAttribute::Normal,
+        );
+
+        assert_eq!(
+            classify_page_table_mutation(0, entry),
+            PageTableMutation::InvalidToValid
+        );
+        assert_eq!(
+            classify_page_table_mutation(entry, entry),
+            PageTableMutation::NoChange
+        );
+        assert_eq!(
+            classify_page_table_mutation(entry, entry ^ (1 << 12)),
+            PageTableMutation::ValidReplacementBbm
+        );
+    }
+
+    #[test_case]
+    fn test_page_table_mutation_aggregation_preserves_valid_replacements() {
+        let pure_new_mappings = PageTableMutation::NoChange
+            .aggregate(PageTableMutation::InvalidToValid)
+            .aggregate(PageTableMutation::NoChange);
+        assert_eq!(pure_new_mappings, PageTableMutation::InvalidToValid);
+
+        let replacement_batch = pure_new_mappings.aggregate(PageTableMutation::ValidReplacementBbm);
+        assert_eq!(replacement_batch, PageTableMutation::ValidReplacementBbm);
+    }
+
+    #[test_case]
+    fn test_final_broadcast_tlbi_policy_skips_unchanged_and_new_user_mappings() {
+        assert!(!mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::InvalidToValid,
+            true,
+        ));
+        assert!(!mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::NoChange,
+            true,
+        ));
+        assert!(mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::InvalidToValid,
+            false,
+        ));
+        assert!(mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::NoChange,
+            false,
+        ));
+        assert!(mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::ValidReplacementBbm,
+            true,
+        ));
+        assert!(mapping_requires_final_broadcast_tlbi(
+            PageTableMutation::ValidReplacementBbm,
+            false,
         ));
     }
 

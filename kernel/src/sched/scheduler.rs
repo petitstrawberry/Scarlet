@@ -73,6 +73,11 @@ static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
 static FORK_TRACE_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
 static FORK_TRACE_PICKED_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
+static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
+static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicU64; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicU64::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
 
 /// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
@@ -337,6 +342,7 @@ impl TaskPool {
         let reclaimed = reclaimable.len();
         for retired_task in reclaimable {
             let task_id = retired_task.task_id;
+            let trace_fork_exit = is_fork_trace_task(task_id);
             retired_task
                 .task
                 .get_namespace()
@@ -344,7 +350,23 @@ impl TaskPool {
             crate::task::cleanup_task_waker(task_id);
             crate::task::cleanup_parent_waker(task_id);
             clear_fork_trace_task(task_id);
+            crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_BEGIN, task_id as u64, 0);
+            if trace_fork_exit {
+                crate::early_println!(
+                    "[fork-trace] child_task_id={} reaper-drop-enter cpu={}",
+                    task_id,
+                    get_cpu().get_cpuid(),
+                );
+            }
             drop(retired_task);
+            crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_DONE, task_id as u64, 0);
+            if trace_fork_exit {
+                crate::early_println!(
+                    "[fork-trace] child_task_id={} reaper-drop-done cpu={}",
+                    task_id,
+                    get_cpu().get_cpuid(),
+                );
+            }
         }
         reclaimed
     }
@@ -456,6 +478,10 @@ static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0)
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_RESCHEDULE: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
+// Tracks an outstanding hardware reschedule kick. This is deliberately
+// separate from PENDING_RESCHEDULE, which records deferred scheduler work.
+static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
@@ -647,6 +673,47 @@ pub fn take_deferred_reschedule(cpu_id: usize) -> bool {
     cpu_id < MAX_NUM_CPUS && PENDING_RESCHEDULE[cpu_id].swap(false, Ordering::AcqRel)
 }
 
+fn reserve_reschedule_ipi(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS
+        && PENDING_RESCHEDULE_IPI[cpu_id]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+/// Acknowledge a consumed hardware reschedule IPI on its target CPU.
+///
+/// The architecture interrupt handler must call this only after it has
+/// acknowledged the hardware IPI source and before it processes or defers the
+/// reschedule request. A request that races before this clear is covered by the
+/// current handler; one that races after it sends a fresh hardware IPI.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Target CPU that consumed the reschedule IPI.
+pub fn acknowledge_reschedule_ipi(cpu_id: usize) {
+    if cpu_id < MAX_NUM_CPUS {
+        PENDING_RESCHEDULE_IPI[cpu_id].swap(false, Ordering::AcqRel);
+    }
+}
+
+fn request_remote_reschedule(target_cpu: usize) {
+    let source_cpu = get_cpu().get_cpuid();
+    if target_cpu >= MAX_NUM_CPUS
+        || !is_cpu_online(target_cpu)
+        || target_cpu == source_cpu
+        || !reserve_reschedule_ipi(target_cpu)
+    {
+        return;
+    }
+
+    if !crate::arch::send_reschedule_ipi(target_cpu) {
+        panic!(
+            "online CPU must accept reschedule IPI: source_cpu={} target_cpu={}",
+            source_cpu, target_cpu
+        );
+    }
+}
+
 /// Return whether a CPU has completed its initial scheduler task publication.
 ///
 /// A CPU becomes ready only after `start_scheduler()` returns from its first
@@ -730,6 +797,17 @@ const NO_CPU: usize = usize::MAX;
 static SCHEDULE_PREV_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 
+/// Lock-free scheduler state sampled for a single CPU.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedulerDiagnosticSnapshot {
+    /// Current task ID, or zero when no task is published.
+    pub current_task_id: usize,
+    /// Whether the published current task is the CPU's idle task.
+    pub is_idle: bool,
+    /// Whether the CPU has a deferred reschedule request.
+    pub pending_reschedule: bool,
+}
+
 fn debug_remote_enqueue_snapshot(cpu_id: usize) -> (Option<usize>, usize, usize) {
     let task_id = decode_task_id(DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].load(Ordering::SeqCst));
     let from_cpu = DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].load(Ordering::SeqCst);
@@ -770,6 +848,20 @@ fn release_deferred_prev(cpu_id: usize) {
     let Some(prev_id) = decode_task_id(prev_id) else {
         return;
     };
+    crate::breadcrumb::drop(
+        crate::breadcrumb::RELEASE_PREV_ENTER,
+        prev_id as u64,
+        cpu_id as u64,
+    );
+    // The lock-free breadcrumb above retains release diagnostics without
+    // serializing every traced task switch through the early-console lock.
+    // if is_fork_trace_task(prev_id) {
+    //     crate::early_println!(
+    //         "[fork-trace] child_task_id={} release-prev-enter cpu={}",
+    //         prev_id,
+    //         cpu_id,
+    //     );
+    // }
     let Some(task) = TaskPool::get_task(prev_id) else {
         return;
     };
@@ -785,7 +877,8 @@ fn release_deferred_prev(cpu_id: usize) {
             task.state.store(TaskState::Ready, Ordering::SeqCst);
             return;
         }
-        match task.state.load(Ordering::SeqCst) {
+        let state = task.state.load(Ordering::SeqCst);
+        match state {
             // Requeue the previous task after its context has been saved. At
             // this point `running_cpu` has been released, so another CPU may
             // safely claim the saved kernel context from its ready queue.
@@ -809,6 +902,26 @@ fn release_deferred_prev(cpu_id: usize) {
             }
             TaskState::Running | TaskState::Blocked(_) | TaskState::NotInitialized => {}
         }
+        crate::breadcrumb::drop(
+            crate::breadcrumb::RELEASE_PREV_DONE,
+            prev_id as u64,
+            match state {
+                TaskState::NotInitialized => 0,
+                TaskState::Ready => 1,
+                TaskState::Running => 2,
+                TaskState::Blocked(_) => 3,
+                TaskState::Zombie => 5,
+                TaskState::Terminated => 6,
+            },
+        );
+        // if is_fork_trace_task(prev_id) {
+        //     crate::early_println!(
+        //         "[fork-trace] child_task_id={} release-prev-done cpu={} state={:?}",
+        //         prev_id,
+        //         cpu_id,
+        //         state,
+        //     );
+        // }
     }
 }
 
@@ -1012,6 +1125,19 @@ fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
     true
 }
 
+/// Register a CPU as available to the scheduler.
+///
+/// Architecture boot code must initialize the CPU's local interrupt controller
+/// and reschedule-IPI transport before calling this function. Once registered,
+/// remote scheduler operations may immediately send an IPI to the CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU that has completed per-CPU interrupt setup.
+///
+/// # Returns
+///
+/// This function returns no value.
 pub fn register_online_cpu(cpu_id: usize) {
     let mut cpus = ONLINE_CPUS.lock();
     if !cpus.contains(&cpu_id) {
@@ -1771,7 +1897,7 @@ fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static s
             ready_queue(target_cpu).lock().len(),
         );
     }
-    crate::arch::send_reschedule_ipi(target_cpu);
+    request_remote_reschedule(target_cpu);
 }
 
 pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
@@ -1852,6 +1978,33 @@ fn decode_task_id(task_id: usize) -> Option<usize> {
     if task_id == 0 { None } else { Some(task_id) }
 }
 
+/// Return a lock-free diagnostic snapshot for a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU whose atomic state should be sampled.
+///
+/// # Returns
+///
+/// The published current task, idle state, and pending-reschedule state, or
+/// `None` when `cpu_id` is outside the supported CPU range.
+///
+/// This accessor takes no scheduler locks and performs no task lookup, so it
+/// may be used by interrupt-context diagnostics.
+pub fn diagnostic_snapshot(cpu_id: usize) -> Option<SchedulerDiagnosticSnapshot> {
+    if cpu_id >= MAX_NUM_CPUS {
+        return None;
+    }
+
+    let current_task_id = CURRENT_TASK_IDS[cpu_id].load(Ordering::Relaxed);
+    let idle_task_id = IDLE_TASK_IDS[cpu_id].load(Ordering::Relaxed);
+    Some(SchedulerDiagnosticSnapshot {
+        current_task_id,
+        is_idle: idle_task_id != 0 && current_task_id == idle_task_id,
+        pending_reschedule: PENDING_RESCHEDULE[cpu_id].load(Ordering::Relaxed),
+    })
+}
+
 #[inline]
 fn ready_queue(cpu_id: usize) -> &'static spin::Mutex<VecDeque<usize>> {
     assert_valid_cpu_id(cpu_id);
@@ -1884,6 +2037,22 @@ pub fn push_ready_task(cpu_id: usize, task_id: usize) {
 ///
 /// * `task_id` - Global task ID assigned to the child.
 pub fn mark_fork_trace_task(task_id: usize) {
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        let registered = FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire);
+        if registered == task_id {
+            break;
+        }
+        if registered == 0
+            && FORK_TRACE_ATOMIC_TASKS[slot]
+                .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            break;
+        }
+    }
+
     let mut traced = fork_trace_tasks().lock();
     let mut picked = fork_trace_picked_tasks().lock();
     picked.remove(&task_id);
@@ -1903,6 +2072,41 @@ pub fn is_fork_trace_task(task_id: usize) -> bool {
     fork_trace_tasks().lock().contains(&task_id)
 }
 
+/// Return whether this is the first observed user trap for a traced fork child
+/// on the executing CPU.
+///
+/// The fixed atomic table suppresses duplicate output without allocation or
+/// lock acquisition. A child that migrates before another trap may be logged
+/// once on each CPU, which is useful diagnostic information.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU handling the user trap.
+/// * `task_id` - Current task ID.
+///
+/// # Returns
+///
+/// `true` when the caller should emit the first-trap diagnostic.
+pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
+    if cpu_id >= MAX_NUM_CPUS || cpu_id >= u64::BITS as usize {
+        return false;
+    }
+
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        if FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire) != task_id {
+            continue;
+        }
+
+        let cpu_bit = 1u64 << cpu_id;
+        return FORK_TRACE_ATOMIC_CPU_MASKS[slot].fetch_or(cpu_bit, Ordering::AcqRel) & cpu_bit
+            == 0;
+    }
+
+    false
+}
+
 #[allow(dead_code)]
 fn take_fork_trace_first_pick(task_id: usize) -> bool {
     let traced = fork_trace_tasks().lock();
@@ -1913,6 +2117,23 @@ fn take_fork_trace_first_pick(task_id: usize) -> bool {
 }
 
 fn clear_fork_trace_task(task_id: usize) {
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        if FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire) != task_id {
+            continue;
+        }
+
+        FORK_TRACE_ATOMIC_CPU_MASKS[slot].store(0, Ordering::Release);
+        let _ = FORK_TRACE_ATOMIC_TASKS[slot].compare_exchange(
+            task_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        break;
+    }
+
     let mut traced = fork_trace_tasks().lock();
     let mut picked = fork_trace_picked_tasks().lock();
     traced.remove(&task_id);
@@ -1934,6 +2155,11 @@ pub fn unmark_blocked(task_id: usize) {
 }
 
 pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::ZOMBIE_FINALIZE,
+        task_id as u64,
+        parent_id.unwrap_or(0) as u64,
+    );
     {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if !zombie_queue.contains(&task_id) {
@@ -2240,13 +2466,37 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
                 ready_queue(target_cpu).lock().len(),
             );
         }
-        crate::arch::send_reschedule_ipi(target_cpu);
+        request_remote_reschedule(target_cpu);
     }
 }
 
 /// Called every timer tick. Decrements the current task's time_slice.
 /// If time_slice reaches 0, triggers a reschedule.
 pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
+    sched_on_tick_with_reschedule(cpu_id, trapframe, false);
+}
+
+/// Account a timer tick and optionally force a reschedule.
+///
+/// This is used when a timer and reschedule IPI share one interrupt entry. It
+/// preserves normal tick accounting while ensuring the co-pending IPI causes
+/// exactly one scheduler invocation.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU handling the timer tick.
+/// * `trapframe` - Interrupted task context to save if scheduling occurs.
+/// * `force_reschedule` - Whether a co-pending reschedule IPI requires an
+///   immediate scheduler invocation regardless of the remaining time slice.
+///
+/// # Returns
+///
+/// This function returns no value.
+pub fn sched_on_tick_with_reschedule(
+    cpu_id: usize,
+    trapframe: &mut Trapframe,
+    force_reschedule: bool,
+) {
     if !may_schedule_from_interrupt(cpu_id) {
         return;
     }
@@ -2273,7 +2523,7 @@ pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
         task.time_slice.load(Ordering::SeqCst) == 0
     });
 
-    if should_schedule || current_task_id(cpu_id).is_none() {
+    if force_reschedule || should_schedule || current_task_id(cpu_id).is_none() {
         schedule(trapframe);
     }
 }
@@ -2611,13 +2861,14 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
                 ready_queue(target_cpu).lock().len(),
             );
         }
-        crate::arch::send_reschedule_ipi(target_cpu);
+        request_remote_reschedule(target_cpu);
     }
 
     true
 }
 
 pub fn cleanup_zombie(task_id: usize) {
+    crate::breadcrumb::drop(crate::breadcrumb::ZOMBIE_CLEANUP, task_id as u64, 0);
     {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
@@ -2659,7 +2910,7 @@ pub fn complete_non_current_task_exit(task_id: usize) {
             | TaskState::NotInitialized => {}
         }
     } else if is_cpu_online(running_cpu) {
-        crate::arch::send_reschedule_ipi(running_cpu);
+        request_remote_reschedule(running_cpu);
     }
 }
 
@@ -2946,6 +3197,7 @@ pub fn reset() {
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
         PENDING_RESCHEDULE[cpu_id].store(false, Ordering::SeqCst);
+        PENDING_RESCHEDULE_IPI[cpu_id].store(false, Ordering::SeqCst);
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
@@ -2966,6 +3218,12 @@ pub fn reset() {
     ONLINE_CPUS.lock().clear();
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
+    fork_trace_tasks().lock().clear();
+    fork_trace_picked_tasks().lock().clear();
+    for slot in 0..FORK_TRACE_ATOMIC_SLOTS {
+        FORK_TRACE_ATOMIC_CPU_MASKS[slot].store(0, Ordering::Relaxed);
+        FORK_TRACE_ATOMIC_TASKS[slot].store(0, Ordering::Relaxed);
+    }
     get_task_pool().reset();
 }
 
@@ -3047,7 +3305,8 @@ pub fn make_test_tasks() {
 #[cfg(test)]
 mod tests {
     use crate::task::{
-        TaskCorePreference, TaskType, cleanup_parent_waker, get_parent_waitpid_waker,
+        TaskCorePreference, TaskType, cleanup_parent_waker, cleanup_task_waker,
+        get_parent_waitpid_waker,
     };
 
     use super::*;
@@ -3061,6 +3320,42 @@ mod tests {
         assert!(!take_deferred_reschedule(0));
         defer_reschedule(MAX_NUM_CPUS);
         assert!(!take_deferred_reschedule(MAX_NUM_CPUS));
+    }
+
+    #[test_case]
+    fn test_reschedule_ipi_reservation_coalesces_until_acknowledged() {
+        reset();
+
+        assert!(reserve_reschedule_ipi(0));
+        assert!(!reserve_reschedule_ipi(0));
+        acknowledge_reschedule_ipi(0);
+        assert!(reserve_reschedule_ipi(0));
+        acknowledge_reschedule_ipi(0);
+    }
+
+    #[test_case]
+    fn test_fork_trace_first_user_trap_is_tracked_per_task_and_cpu() {
+        reset();
+        let first_task = 100;
+        let colliding_task = first_task + FORK_TRACE_ATOMIC_SLOTS;
+
+        mark_fork_trace_task(first_task);
+        mark_fork_trace_task(colliding_task);
+
+        assert!(take_fork_trace_first_user_trap(0, first_task));
+        assert!(!take_fork_trace_first_user_trap(0, first_task));
+        assert!(take_fork_trace_first_user_trap(0, colliding_task));
+        assert!(!take_fork_trace_first_user_trap(0, colliding_task));
+
+        if MAX_NUM_CPUS > 1 {
+            assert!(take_fork_trace_first_user_trap(1, first_task));
+            assert!(!take_fork_trace_first_user_trap(1, first_task));
+        }
+
+        clear_fork_trace_task(first_task);
+        clear_fork_trace_task(colliding_task);
+        assert!(!take_fork_trace_first_user_trap(0, first_task));
+        assert!(!take_fork_trace_first_user_trap(0, colliding_task));
     }
 
     #[test_case]
@@ -3104,18 +3399,33 @@ mod tests {
         let child_id = register_task(Task::new("Child".to_string(), 1, TaskType::Kernel));
 
         let parent = get_task_by_id(parent_id).unwrap();
+        let sibling = get_task_by_id(sibling_id).unwrap();
         let child = get_task_by_id(child_id).unwrap();
         assert!(parent.adopt_registered_child(&child));
         assert_eq!(child.get_parent_thread_group_id(), Some(parent_id));
 
+        sibling.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        mark_blocked(sibling_id);
+        assert!(get_all_task_ids().contains(&sibling_id));
+
         cleanup_parent_waker(sibling_id);
         let sibling_waker = get_parent_waitpid_waker(sibling_id);
-        cleanup_zombie(parent_id);
+        assert_eq!(sibling_waker.pending_wake_count_for_test(), 0);
+
+        parent.state.store(TaskState::Terminated, Ordering::SeqCst);
+        drop(parent);
+        complete_non_current_task_exit(parent_id);
         assert!(get_task_by_id(parent_id).is_none());
+        assert_eq!(child.get_parent_thread_group_id(), Some(parent_id));
 
         finalize_zombie(child_id, Some(parent_id));
 
         assert_eq!(sibling_waker.pending_wake_count_for_test(), 1);
+        cleanup_task_waker(child_id);
+        cleanup_parent_waker(parent_id);
         cleanup_parent_waker(sibling_id);
     }
 

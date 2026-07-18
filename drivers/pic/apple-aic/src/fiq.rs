@@ -26,6 +26,7 @@ const SOURCE_FAST_IPI: u32 = 1 << 4;
 const SOURCE_CORE_PMU: u32 = 1 << 5;
 const SOURCE_UNCORE_PMU: u32 = 1 << 6;
 const MAX_FAST_IPI_CPUS: usize = 32;
+const DIAGNOSTIC_LOG_SUCCESSFUL_FAST_IPI_SENDS: bool = false;
 
 static REPORTED_CPUS: AtomicU64 = AtomicU64::new(0);
 static CPU_MPIDRS: [AtomicU64; MAX_FAST_IPI_CPUS] =
@@ -153,13 +154,15 @@ pub(super) fn send_fast_ipi(target_cpu: u32) -> bool {
 
     let source_mpidr = registers::read_mpidr();
     let target_mpidr = CPU_MPIDRS[cpu_index].load(Ordering::Relaxed);
-    scarlet::early_println!(
-        "[AIC][IPI-SEND] source_cpu={} source_mpidr={:#x} target_cpu={} target_mpidr={:#x}",
-        scarlet::arch::get_cpu().get_cpuid(),
-        source_mpidr,
-        target_cpu,
-        target_mpidr
-    );
+    if DIAGNOSTIC_LOG_SUCCESSFUL_FAST_IPI_SENDS {
+        scarlet::early_println!(
+            "[AIC][IPI-SEND] source_cpu={} source_mpidr={:#x} target_cpu={} target_mpidr={:#x}",
+            scarlet::arch::get_cpu().get_cpuid(),
+            source_mpidr,
+            target_cpu,
+            target_mpidr
+        );
+    }
     registers::send_fast_ipi(source_mpidr, target_mpidr);
     true
 }

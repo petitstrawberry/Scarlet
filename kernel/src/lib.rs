@@ -374,7 +374,7 @@ pub enum DeviceSource {
     /// Used by RISC-V, ARM, and other architectures that support device trees
     Fdt(usize),
     /// Unified Extensible Firmware Interface (UEFI) source
-    /// Modern firmware interface providing comprehensive hardware information  
+    /// Modern firmware interface providing comprehensive hardware information
     Uefi,
     /// Advanced Configuration and Power Interface (ACPI) source
     /// x86/x86_64 standard for hardware configuration and power management

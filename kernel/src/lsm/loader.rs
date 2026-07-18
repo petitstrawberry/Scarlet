@@ -14,7 +14,7 @@ use crate::lsm::symbol;
 use crate::mem::page::{Page, allocate_raw_pages, free_raw_pages};
 use crate::vm::addr::virt_to_phys;
 use crate::vm::get_kernel_vm_manager;
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 #[derive(Debug)]
 pub enum LsmError {
@@ -518,6 +518,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                     page_vaddr,
                     page_paddr,
                     permissions,
+                    MemoryAttribute::Normal,
                     true,
                     VirtualMemoryPermission::Write.contained_in(permissions),
                 );

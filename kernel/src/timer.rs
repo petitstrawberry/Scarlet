@@ -9,7 +9,7 @@ use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
 use crate::sched::scheduler::sched_on_tick;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 extern crate alloc;
 use alloc::collections::BinaryHeap;
 use alloc::sync::{Arc, Weak};
@@ -81,6 +81,105 @@ impl KernelTimer {
 // Last architected-counter tick processed by the global timekeeper.
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 static TIMER_IRQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
+const STALL_REPORT_AFTER_SAMPLES: u64 = 2;
+const STALL_REPEAT_SAMPLES: u64 = 6;
+const STALL_SAMPLE_SLOTS: usize = MAX_NUM_CPUS * MAX_NUM_CPUS;
+static STALL_SAMPLE_INITIALIZED: [AtomicBool; STALL_SAMPLE_SLOTS] =
+    [const { AtomicBool::new(false) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_TIMER_COUNT: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_PHASE: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_AUX: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_LAST_AUX2: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
+    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
+
+/// Return a CPU's local timer IRQ count without taking a lock.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU whose timer IRQ count should be sampled.
+///
+/// # Returns
+///
+/// The current count, or `None` when `cpu_id` is outside the supported CPU
+/// range. The count is sampled relaxed and is safe to read in interrupt
+/// context without allocation.
+#[inline(always)]
+pub fn timer_irq_count(cpu_id: usize) -> Option<u64> {
+    (cpu_id < MAX_NUM_CPUS).then(|| TIMER_IRQ_COUNTS[cpu_id].load(Ordering::Relaxed))
+}
+
+#[inline]
+fn sample_cpu_stalls(observer_cpu: usize) {
+    if observer_cpu >= MAX_NUM_CPUS {
+        return;
+    }
+
+    for target_cpu in 0..MAX_NUM_CPUS {
+        if target_cpu == observer_cpu {
+            continue;
+        }
+
+        let Some(timer_count) = timer_irq_count(target_cpu) else {
+            continue;
+        };
+        let Some(breadcrumb) = crate::breadcrumb::snapshot(target_cpu) else {
+            continue;
+        };
+        let Some(scheduler) = crate::sched::scheduler::diagnostic_snapshot(target_cpu) else {
+            continue;
+        };
+        if timer_count == 0
+            && breadcrumb.phase == crate::breadcrumb::NONE
+            && scheduler.current_task_id == 0
+        {
+            continue;
+        }
+
+        let slot = observer_cpu * MAX_NUM_CPUS + target_cpu;
+        let changed = !STALL_SAMPLE_INITIALIZED[slot].swap(true, Ordering::Relaxed)
+            || STALL_LAST_TIMER_COUNT[slot].load(Ordering::Relaxed) != timer_count
+            || STALL_LAST_PHASE[slot].load(Ordering::Relaxed) != breadcrumb.phase
+            || STALL_LAST_AUX[slot].load(Ordering::Relaxed) != breadcrumb.aux
+            || STALL_LAST_AUX2[slot].load(Ordering::Relaxed) != breadcrumb.aux2;
+        if changed {
+            STALL_LAST_TIMER_COUNT[slot].store(timer_count, Ordering::Relaxed);
+            STALL_LAST_PHASE[slot].store(breadcrumb.phase, Ordering::Relaxed);
+            STALL_LAST_AUX[slot].store(breadcrumb.aux, Ordering::Relaxed);
+            STALL_LAST_AUX2[slot].store(breadcrumb.aux2, Ordering::Relaxed);
+            STALL_STALE_SAMPLES[slot].store(0, Ordering::Relaxed);
+            continue;
+        }
+
+        let stale_samples = STALL_STALE_SAMPLES[slot]
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        STALL_STALE_SAMPLES[slot].store(stale_samples, Ordering::Relaxed);
+        let should_report = stale_samples == STALL_REPORT_AFTER_SAMPLES
+            || (stale_samples > STALL_REPORT_AFTER_SAMPLES
+                && (stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0);
+        if !should_report {
+            continue;
+        }
+
+        crate::early_println!(
+            "[timer] stall observer={} cpu={} count={} phase={:#06x} aux={:#x} aux2={:#x} task={} idle={} pending_reschedule={}",
+            observer_cpu,
+            target_cpu,
+            timer_count,
+            breadcrumb.phase,
+            breadcrumb.aux,
+            breadcrumb.aux2,
+            scheduler.current_task_id,
+            scheduler.is_idle,
+            scheduler.pending_reschedule,
+        );
+    }
+}
 
 #[inline]
 fn current_counter_tick() -> u64 {
@@ -127,7 +226,9 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
             irq_count,
             run_scheduler
         );
-        crate::breadcrumb::dump_all();
+    }
+    if irq_count % heartbeat_ticks == 0 {
+        sample_cpu_stalls(cpu_id);
     }
     crate::breadcrumb::drop(
         crate::breadcrumb::TIMER_TICK,

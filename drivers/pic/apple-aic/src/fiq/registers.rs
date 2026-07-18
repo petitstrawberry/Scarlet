@@ -319,8 +319,11 @@ pub(super) fn send_fast_ipi(current_mpidr: u64, target_mpidr: u64) {
     let (local, request) = fast_ipi_request(current_mpidr, target_mpidr);
 
     // SAFETY: These implementation-defined registers are used only by the
-    // Apple AIC driver on SoCs advertising the t8103 fast-IPI interface.
+    // Apple AIC driver on SoCs advertising the t8103 fast-IPI interface. The
+    // system-scope DSB is part of Apple's recommended fast-IPI sequence and
+    // publishes scheduler state before the target can observe the interrupt.
     unsafe {
+        asm!("dsb sy", options(nostack, preserves_flags));
         if local {
             asm!(
                 "msr S3_5_C15_C0_0, {request}",
