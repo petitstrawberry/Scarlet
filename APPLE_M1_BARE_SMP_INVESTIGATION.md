@@ -117,6 +117,30 @@ There is no confirmed static VMM/TaskPool/page-table lock cycle. A stranded or
 corrupted lock remains possible as a consequence of another CPU stopping, but
 it is not established as the initiating cause.
 
+### PAGE_TABLES writer release does not complete
+
+A later stable snapshot connected the fork-child first-fault path to a concrete
+page-table lock convoy:
+
+- CPUs 0, 1, and 2 stopped at `PT_LOCK_WAIT`, waiting for per-ASID page-table
+  locks.
+- CPUs 4 and 7 stopped at `PT_REGISTRY_READ_WAIT` while holding those per-ASID
+  locks and observing one active `PAGE_TABLES` writer.
+- CPU 3/task 19 stopped at `PT_REGISTRY_DONE`, after inserting a child or root
+  page table while still holding the `PAGE_TABLES` write guard.
+- CPUs 5 and 6 continued idle timer heartbeats for thousands of ticks.
+
+The source immediately following `PT_REGISTRY_DONE` drops the registry write
+guard and then records `PT_REGISTRY_RELEASED`; there is no intervening lock
+acquisition and the release breadcrumb never appeared. Static lock-order audit
+found a one-way dependency chain, not a reverse edge or software deadlock cycle.
+
+Scarlet uses `spin 0.10`. Its write-guard drop performs a release `fetch_and()`.
+The AArch64 target previously omitted LSE, so LLVM lowered that operation to an
+LL/SC retry loop rather than a single LSE atomic operation. This provides a
+direct explanation for CPU 3 failing to progress under contention while also
+explaining why the other page-table operations converge behind it.
+
 ## Tested and rejected hypotheses
 
 | Hypothesis or experiment | Hardware result | Status | Notes |
@@ -144,6 +168,7 @@ it is not established as the initiating cause.
 | Move ASID into `Arc<AtomicU16>` | No hardware improvement | Rejected | Unnecessary design and not a root fix |
 | `KernelContext::get_trapframe()` offset corrupts the active stack | Active code uses `Task::get_trapframe()` with the correct high-VA offset | Refuted for runtime path | The unused method can be cleaned separately |
 | Generic lazy-map or local-TLBI failure | Same path works under HV and QEMU | Refuted as a sufficient environment explanation | A bare-only hardware/state difference is required |
+| Static PAGE_TABLES/per-ASID lock cycle | Audit found only per-ASID lock -> registry lock ordering; the registry writer takes no reverse lock after `PT_REGISTRY_DONE` | Refuted for the captured stall | The observed state is a convoy behind a non-completing writer release |
 
 ## Correctness fixes that are not established root causes
 
@@ -160,10 +185,10 @@ it is not established as the initiating cause.
 
 | Priority | Hypothesis | Why it fits | Counter-evidence | Decisive test | State |
 |---:|---|---|---|---|---|
-| 1 | A pending physical FIQ interacts with remote fork-child enqueueing when CPU 0 restores DAIF | CPU 0's stable final phase was `IPI_SEND_DONE`; the controller call and lock release completed, and the next fork-path boundary is `enqueue_task()` dropping `IrqGuard`; direct uses physical FIQ while m1n1 HV masks/coalesces and injects virtual FIQ | A breadcrumb records the last completed checkpoint, not the exact stalled instruction; timer mask ordering improved performance but did not eliminate the hang | Record immediately before and after the enqueue guard restores DAIF, plus the first vector-entry checkpoint; retain `IPI_SEND_DONE` aux fields | Open; strongest current boundary |
-| 2 | Direct AP boot-stack/cache handoff leaves latent corruption | m1n1 HV explicitly reinitializes secondary MMU/stack state with barriers and cache maintenance; direct chainload follows a different path | APs reach idle, scheduler, user entry, and first trap; current task stacks are separate high-VA windows | A/B explicit AP boot-stack clean/invalidate only, using identical image/runtime settings | Open, low confidence |
-| 3 | A physical FIQ or nested exception stops a CPU while it owns a lock, causing later `RF/AD/VR` convergence | Explains apparently unrelated waiters after one CPU disappears; physical FIQ differs from HV injection | Kernel code masks all exception classes; no initiating FIQ breadcrumb has yet proved this sequence | Lock-free vector-entry and source/ack breadcrumbs correlated with the first stopped CPU | Open |
-| 4 | A lock word or task/page-table structure is corrupted by an unidentified bare-SMP event | Explains a writer bit with no live holder and broad secondary stalls | No corruption source is identified; static lock audit found no cycle | Consistent lock address/generation with no holder, plus a preceding hardware event | Open |
+| 1 | LL/SC livelock in `spin::RwLock` writer release | CPU 3 stops immediately before write-guard drop; no post-release breadcrumb; readers continuously contend; target omitted LSE | Exact generated retry PC was not captured | Enable LSE without changing lock code or timing diagnostics | Hardware A/B ready |
+| 2 | Direct-mode coherency/exclusive-monitor setup makes LL/SC progress pathological | Explains direct-only behavior and why m1n1 HV/QEMU work; ordinary lock memory is Normal Inner Shareable | Required memory attributes appear correct; no missing mandatory Apple coherency bit is yet identified | If LSE fixes the hang, distinguish generic LL/SC contention from direct monitor/coherency state only if further root detail is needed | Open |
+| 3 | A pending physical FIQ interacts with remote fork-child enqueueing when CPU 0 restores DAIF | CPU 0 previously stopped at `IPI_SEND_DONE`; direct uses physical FIQ; timer ordering improved performance | The later snapshot identifies a concrete page-table writer-release boundary; timer fix did not remove the hang | Retain the enqueue post-restore breadcrumb during the LSE A/B | Open, reduced priority |
+| 4 | Direct AP boot-stack/cache handoff leaves latent corruption | m1n1 HV explicitly reinitializes secondary MMU/stack state with barriers and cache maintenance; direct chainload follows a different path | APs reach idle, scheduler, user entry, and first trap; current task stacks are separate high-VA windows | A/B explicit AP boot-stack clean/invalidate only, using identical image/runtime settings | Open, low confidence |
 | 5 | Available evidence is still insufficient | Many source-level candidates also fail the environment matrix | A narrow hardware A/B may still isolate the difference | Record one-variable runs with exact image hash and complete per-CPU tail | Always possible |
 
 ## FIQ-specific questions to answer
@@ -336,6 +361,8 @@ Add every hardware run here. One row must represent one changed variable.
 |---|---|---|---|---|---|---|
 | 2026-07-18 | Historical run; exact image hash retained in prior session | Baseline with first-user-trap diagnostics | Child on CPU 3 | Hang | Child 16 reached `first-user-trap-done`, ASID 17, matching TTBR | Failure is after successful first fault handling |
 | 2026-07-18 | Current test image; SHA-256 not recorded yet | Mask direct-VHE timer before FIQ claim/scheduling | Normal SMP placement | User reports visibly improved performance; hang persists | CPU 0 final phase `0x4944` (`IPI_SEND_DONE`); aux fields not yet recorded | Confirms excess physical-FIQ handling overhead and narrows the hang to the remote-enqueue/DAIF-restore boundary |
+| 2026-07-18 | Current test image; SHA-256 not recorded yet | Baseline without AArch64 LSE | Normal SMP placement | Hang | CPU 3 at `PT_REGISTRY_DONE`; CPUs 4/7 observe registry writer; CPUs 0/1/2 wait downstream; CPUs 5/6 remain alive | Registry writer unlock fails to complete; static lock cycle refuted |
+| 2026-07-18 | Current test image; SHA-256 not recorded yet | Enable AArch64 LSE atomics in the common kernel target | Normal SMP placement | Appears stable in initial observation; repetition pending | System progresses beyond the previous writer-release convoy | Strong preliminary support for LL/SC unlock livelock; not yet confirmed by repeated runs |
 | TBD | TBD | Disable AP architectural timers only | Normal SMP placement | TBD | TBD | TBD |
 | TBD | TBD | AP boot-stack cache maintenance only | Normal SMP placement | TBD | TBD | TBD |
 
@@ -350,14 +377,16 @@ Add every hardware run here. One row must represent one changed variable.
 - `kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs` — PTE publication and TLBI sequences.
 - `kernel/src/vm/mod.rs` — trampoline and per-task kernel-stack windows.
 - `kernel/src/arch/aarch64/boot/limine.rs` — direct BSP/AP EL2/VHE handoff.
+- `kernel/targets/aarch64-unknown-none-elf.json` — common AArch64 ISA features, including LSE atomics.
 
 ## Current conclusion
 
-The root cause is not established. Conventional timer masking improved direct
-hardware performance but did not eliminate the hang. This confirms that FIQ
-handling matters while narrowing the remaining problem to an interaction with
-remote fork-child enqueueing and DAIF restore, another FIQ source, or a separate
-initiating fault. CPU 0's `IPI_SEND_DONE` breadcrumb proves that AIC submission
-and its controller lock completed; the next discriminator is the interrupt
-restore and earliest vector-entry boundary. No change should be promoted as the
-hang fix until a one-variable hardware A/B changes the failure rate.
+The root cause is not yet hardware-confirmed, but the strongest boundary is now
+the `PAGE_TABLES` write-guard release. Static lock-order audit found no cycle,
+and the non-LSE target lowered the release atomic to an LL/SC retry loop. The
+common AArch64 target now enables LSE without changing the lock algorithm. The
+initial hardware observation appears stable and progresses beyond the previous
+writer-release convoy. Repeated identical fork workloads are still required
+before promoting LL/SC unlock livelock from the leading hypothesis to the
+confirmed root cause. Timer masking remains a valid performance/correctness fix
+but is not the hang fix.
