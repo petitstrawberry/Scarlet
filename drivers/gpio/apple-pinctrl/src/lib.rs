@@ -154,17 +154,17 @@ impl ApplePinctrl {
             GPIO_PERIPH_MASK | GPIO_MODE_MASK | GPIO_DATA,
             set,
         );
-        if GPIO_VALUE_LOGS.fetch_add(1, Ordering::Relaxed) < GPIO_VALUE_LOG_LIMIT {
-            let after = self.read_reg(Self::pin_offset(pin));
-            scarlet::early_println!(
-                "[apple-pinctrl] direction_output base={:#x} pin={} value={} before={:#x} after={:#x}",
-                self.base,
-                pin,
-                value,
-                before,
-                after
-            );
-        }
+        // if GPIO_VALUE_LOGS.fetch_add(1, Ordering::Relaxed) < GPIO_VALUE_LOG_LIMIT {
+        //     let after = self.read_reg(Self::pin_offset(pin));
+        //     scarlet::early_println!(
+        //         "[apple-pinctrl] direction_output base={:#x} pin={} value={} before={:#x} after={:#x}",
+        //         self.base,
+        //         pin,
+        //         value,
+        //         before,
+        //         after
+        //     );
+        // }
     }
 
     pub fn set_direction_input(&self, pin: u32) {
@@ -190,16 +190,16 @@ impl ApplePinctrl {
             GPIO_DATA,
             if value { GPIO_DATA } else { 0 },
         );
-        if GPIO_VALUE_LOGS.fetch_add(1, Ordering::Relaxed) < GPIO_VALUE_LOG_LIMIT {
-            let after = self.read_reg(Self::pin_offset(pin));
-            scarlet::early_println!(
-                "[apple-pinctrl] set_value base={:#x} pin={} value={} before={:#x} after={:#x}",
-                self.base,
-                pin,
-                value,
-                before,
-                after
-            );
+        // if GPIO_VALUE_LOGS.fetch_add(1, Ordering::Relaxed) < GPIO_VALUE_LOG_LIMIT {
+        //     let after = self.read_reg(Self::pin_offset(pin));
+        //     scarlet::early_println!(
+        //         "[apple-pinctrl] set_value base={:#x} pin={} value={} before={:#x} after={:#x}",
+        //         self.base,
+        //         pin,
+        //         value,
+        //         before,
+        //         after
+        //     );
         }
     }
 
@@ -240,17 +240,17 @@ impl ApplePinctrl {
             GPIO_DATA | GPIO_MODE_MASK | GPIO_PERIPH_MASK | GPIO_INPUT_ENABLE,
             Self::periph_bits(func) | GPIO_INPUT_ENABLE,
         );
-        if PINMUX_LOGS.fetch_add(1, Ordering::Relaxed) < PINMUX_LOG_LIMIT {
-            let after = self.read_reg(Self::pin_offset(pin));
-            scarlet::early_println!(
-                "[apple-pinctrl] set_function base={:#x} pin={} func={} before={:#x} after={:#x}",
-                self.base,
-                pin,
-                func,
-                before,
-                after
-            );
-        }
+        // if PINMUX_LOGS.fetch_add(1, Ordering::Relaxed) < PINMUX_LOG_LIMIT {
+        //     let after = self.read_reg(Self::pin_offset(pin));
+        //     scarlet::early_println!(
+        //         "[apple-pinctrl] set_function base={:#x} pin={} func={} before={:#x} after={:#x}",
+        //         self.base,
+        //         pin,
+        //         func,
+        //         before,
+        //         after
+        //     );
+        // }
     }
 
     pub fn enable_irq(&self, pin: u32, trigger: GpioIrqTrigger) {
@@ -316,19 +316,19 @@ impl ApplePinctrl {
 
                     if pin < self.npins {
                         let handler = self.irq_handlers.lock().get(&pin).cloned();
-                        if LOG_PENDING_IRQS
-                            && IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT
-                        {
-                            scarlet::early_println!(
-                                "[apple-pinctrl] pending base={:#x} group={} word={} pin={} pending={:#x} handler={}",
-                                self.base,
-                                group,
-                                word,
-                                pin,
-                                pending,
-                                handler.is_some()
-                            );
-                        }
+                        // if LOG_PENDING_IRQS
+                        //     && IRQ_PENDING_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT
+                        // {
+                        //     scarlet::early_println!(
+                        //         "[apple-pinctrl] pending base={:#x} group={} word={} pin={} pending={:#x} handler={}",
+                        //         self.base,
+                        //         group,
+                        //         word,
+                        //         pin,
+                        //         pending,
+                        //         handler.is_some()
+                        //     );
+                        // }
                         if let Some(handler) = handler {
                             let _ = handler.handle_interrupt();
                         }
@@ -436,20 +436,20 @@ impl GpioController for ApplePinctrl {
             return false;
         }
 
-        if IRQ_REQUEST_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
-            let reg = self.read_reg(Self::pin_offset(pin));
-            let status = self.read_reg(Self::irq_group_offset(group as u32, pin));
-            scarlet::early_println!(
-                "[apple-pinctrl] request_irq base={:#x} pin={} trigger={:?} value={} group={} reg={:#x} status={:#x}",
-                self.base,
-                pin,
-                trigger,
-                self.get_value(pin),
-                group,
-                reg,
-                status
-            );
-        }
+        // if IRQ_REQUEST_LOGS.fetch_add(1, Ordering::Relaxed) < IRQ_LOG_LIMIT {
+        //     let reg = self.read_reg(Self::pin_offset(pin));
+        //     let status = self.read_reg(Self::irq_group_offset(group as u32, pin));
+        //     scarlet::early_println!(
+        //         "[apple-pinctrl] request_irq base={:#x} pin={} trigger={:?} value={} group={} reg={:#x} status={:#x}",
+        //         self.base,
+        //         pin,
+        //         trigger,
+        //         self.get_value(pin),
+        //         group,
+        //         reg,
+        //         status
+        //     );
+        // }
         true
     }
 
@@ -514,13 +514,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("apple-pinctrl: no phandle")?;
 
     let pinctrl: Arc<ApplePinctrl> = Arc::new(ApplePinctrl::new(base, npins));
-    scarlet::early_println!(
-        "[apple-pinctrl] registered phandle={:#x} paddr={:#x} base={:#x} npins={}",
-        phandle,
-        paddr,
-        base,
-        npins
-    );
+    // scarlet::early_println!(
+    //     "[apple-pinctrl] registered phandle={:#x} paddr={:#x} base={:#x} npins={}",
+    //     phandle,
+    //     paddr,
+    //     base,
+    //     npins
+    // );
 
     ApplePinctrl::register_parent_irqs(&pinctrl, device)?;
 
