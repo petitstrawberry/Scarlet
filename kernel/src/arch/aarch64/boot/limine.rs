@@ -1,8 +1,10 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
+use core::sync::atomic::compiler_fence;
 
 use limine::mp::MpInfo;
 
+use super::platform;
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
     MODULE_REQUEST, MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound,
@@ -14,14 +16,11 @@ use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
-use core::sync::atomic::{AtomicU64, Ordering, compiler_fence};
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
-static APPLE_HACR_EL2_BEFORE_DROP: AtomicU64 = AtomicU64::new(u64::MAX);
-static APPLE_HACR_EL2_AFTER_CLEAR: AtomicU64 = AtomicU64::new(u64::MAX);
 
 const HCR_EL2_FMO: u64 = 1 << 3;
 const HCR_EL2_IMO: u64 = 1 << 4;
@@ -30,11 +29,6 @@ const HCR_EL2_RW: u64 = 1 << 31;
 const HCR_EL2_E2H: u64 = 1 << 34;
 const HCR_EL2_HOST_INTERRUPT_ROUTING: u64 = HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
 const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
-const APPLE_MIDR_IMPLEMENTER: u64 = 0x61;
-const MIDR_IMPLEMENTER_SHIFT: u32 = 24;
-const ACTLR_EN_MDSB: u64 = 1 << 12;
-const APPLE_VM_TIMER_FIQ_ENABLE_VIRTUAL: u64 = 1;
-const APPLE_VM_TIMER_FIQ_ENABLE_PHYSICAL: u64 = 1 << 1;
 #[allow(dead_code)]
 const SCTLR_M: u64 = 1;
 #[allow(dead_code)]
@@ -50,15 +44,6 @@ pub fn is_vhe_enabled() -> bool {
 
 pub fn is_hv_available() -> bool {
     unsafe { HV_AVAILABLE }
-}
-
-#[inline(always)]
-fn read_midr() -> u64 {
-    let midr: u64;
-    unsafe {
-        asm!("mrs {}, midr_el1", out(reg) midr, options(nostack));
-    }
-    midr
 }
 
 const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, _hypervisor_enabled: bool) -> bool {
@@ -78,8 +63,10 @@ fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
         return;
     }
 
-    disable_apple_el2_sysreg_traps();
+    platform::prepare_el2_drop();
 
+    // SAFETY: The EL2 and non-VHE checks above establish that this one-way
+    // transition is required before continuing in the real EL1 register bank.
     unsafe {
         drop_el2_to_el1(continuation, arg0);
     }
@@ -92,35 +79,6 @@ fn read_active_sctlr() -> u64 {
         asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
     }
     sctlr
-}
-
-fn disable_apple_el2_sysreg_traps() {
-    if read_midr() >> MIDR_IMPLEMENTER_SHIFT != APPLE_MIDR_IMPLEMENTER {
-        return;
-    }
-
-    // m1n1's hypervisor uses HACR_EL2 to trap and emulate Apple CPU-local
-    // registers including fast IPI and PMU state. A direct EL2-to-EL1 handoff
-    // has no EL2 trap handler, so inherited trap bits would make those EL1
-    // accesses disappear into the previous firmware's EL2 vector.
-    // SAFETY: This executes only after confirming an Apple CPU at EL2, with
-    // exceptions masked, and clears trap controls before entering EL1.
-    let before: u64;
-    let after: u64;
-    unsafe {
-        asm!(
-            ".arch armv8.1-a",
-            "mrs {before}, hacr_el2",
-            "msr hacr_el2, xzr",
-            "isb",
-            "mrs {after}, hacr_el2",
-            before = out(reg) before,
-            after = out(reg) after,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    APPLE_HACR_EL2_BEFORE_DROP.store(before, Ordering::Relaxed);
-    APPLE_HACR_EL2_AFTER_CLEAR.store(after, Ordering::Relaxed);
 }
 
 #[unsafe(naked)]
@@ -240,20 +198,6 @@ unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
         "orr x9, x9, #2",
         "msr cntv_ctl_el02, x9",
         "10:",
-        // Apple routes the EL1 timer banks onto FIQ through a private EL2
-        // gate. Scarlet uses only the virtual timer after the drop, so prevent
-        // the unused physical bank from asserting while leaving CNTV delivery
-        // available once the EL1 timer driver unmasks it.
-        "mrs x9, midr_el1",
-        "lsr x9, x9, #24",
-        "and x9, x9, #0xff",
-        "cmp x9, {apple_implementer}",
-        "b.ne 11f",
-        "mrs x9, S3_5_C15_C1_3",
-        "bic x9, x9, {physical_timer_gate}",
-        "orr x9, x9, {virtual_timer_gate}",
-        "msr S3_5_C15_C1_3, x9",
-        "11:",
         "dsb sy",
         "isb",
         // Install a known non-trapping EL1 timer policy instead of preserving
@@ -287,9 +231,6 @@ unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
         "mov x9, {hcr_rw}",
         "msr hcr_el2, x9",
         "eret",
-        apple_implementer = const APPLE_MIDR_IMPLEMENTER,
-        physical_timer_gate = const APPLE_VM_TIMER_FIQ_ENABLE_PHYSICAL,
-        virtual_timer_gate = const APPLE_VM_TIMER_FIQ_ENABLE_VIRTUAL,
         hcr_rw = const HCR_EL2_RW,
         cptr_vhe_fpen_full = const CPTR_EL2_VHE_FPEN_FULL,
     );
@@ -348,9 +289,9 @@ extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: 
             new_hcr
         );
     }
-    if let Some((old_actlr, new_actlr)) = enable_apple_mdsb() {
+    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
         early_println!(
-            "[aarch64] CPU {}: effective ACTLR EnMDSB {:#x} -> {:#x}",
+            "[aarch64] CPU {}: platform CPU control {:#x} -> {:#x}",
             cpu_id,
             old_actlr,
             new_actlr
@@ -511,20 +452,8 @@ fn classify_cpu_node(
 ) -> crate::sched::scheduler::CpuCoreClass {
     use crate::sched::scheduler::CpuCoreClass;
 
-    if compatible_contains_any(cpu, &[b"icestorm", b"blizzard", b"efficiency", b"e-core"]) {
-        return CpuCoreClass::Efficiency;
-    }
-    if compatible_contains_any(
-        cpu,
-        &[
-            b"firestorm",
-            b"avalanche",
-            b"everest",
-            b"performance",
-            b"p-core",
-        ],
-    ) {
-        return CpuCoreClass::Performance;
+    if let Some(core_class) = platform::classify_cpu_node(cpu) {
+        return core_class;
     }
 
     if min_capacity != u32::MAX
@@ -540,29 +469,6 @@ fn classify_cpu_node(
     }
 
     CpuCoreClass::Balanced
-}
-
-fn compatible_contains_any(cpu: &fdt::node::FdtNode, needles: &[&[u8]]) -> bool {
-    let Some(prop) = cpu.property("compatible") else {
-        return false;
-    };
-
-    needles
-        .iter()
-        .any(|needle| bytes_contains_ascii_case_insensitive(prop.value, needle))
-}
-
-fn bytes_contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return false;
-    }
-
-    haystack.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle.iter())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-    })
 }
 
 fn cpu_logical_id_from_fdt(cpu: &fdt::node::FdtNode, fallback_cpu_id: usize) -> usize {
@@ -609,41 +515,6 @@ fn current_el() -> u64 {
         asm!("mrs {}, CurrentEL", out(reg) el, options(nostack));
     }
     (el >> 2) & 0x3
-}
-
-#[inline(always)]
-fn read_effective_actlr() -> u64 {
-    let actlr: u64;
-    // SAFETY: Reading ACTLR_EL1 has no memory side effects. Limine enters
-    // Scarlet at EL1 or at EL2 with VHE enabled, where this register name
-    // addresses the control register effective for the current host regime.
-    unsafe {
-        asm!("mrs {}, actlr_el1", out(reg) actlr, options(nostack));
-    }
-    actlr
-}
-
-#[inline(always)]
-fn enable_apple_mdsb() -> Option<(u64, u64)> {
-    let midr = read_midr();
-    if ((midr >> MIDR_IMPLEMENTER_SHIFT) & 0xff) != APPLE_MIDR_IMPLEMENTER {
-        return None;
-    }
-
-    let old_actlr = read_effective_actlr();
-    let new_actlr = old_actlr | ACTLR_EN_MDSB;
-    // SAFETY: The Apple MIDR check above restricts the implementation-defined
-    // ACTLR field to Apple CPUs. Each CPU updates its own effective ACTLR bank
-    // during one-time early boot, before entering the scheduler.
-    unsafe {
-        asm!(
-            "msr actlr_el1, {actlr}",
-            "isb",
-            actlr = in(reg) new_actlr,
-            options(nostack)
-        );
-    }
-    Some((old_actlr, read_effective_actlr()))
 }
 
 fn detect_el() -> (u64, bool) {
@@ -734,12 +605,11 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     );
     crate::arch::aarch64::early_console_init();
 
-    let hacr_after = APPLE_HACR_EL2_AFTER_CLEAR.load(Ordering::Relaxed);
-    if hacr_after != u64::MAX {
+    if let Some((before, after)) = platform::el2_drop_diagnostic_transition() {
         early_println!(
-            "[aarch64] BSP: HACR_EL2 before={:#x} after={:#x}",
-            APPLE_HACR_EL2_BEFORE_DROP.load(Ordering::Relaxed),
-            hacr_after
+            "[aarch64] BSP: platform EL2 control before={:#x} after={:#x}",
+            before,
+            after
         );
     }
 
@@ -750,9 +620,9 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
             new_hcr
         );
     }
-    if let Some((old_actlr, new_actlr)) = enable_apple_mdsb() {
+    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
         early_println!(
-            "[aarch64] BSP: effective ACTLR EnMDSB {:#x} -> {:#x}",
+            "[aarch64] BSP: platform CPU control {:#x} -> {:#x}",
             old_actlr,
             new_actlr
         );
@@ -860,16 +730,25 @@ mod el_drop_tests {
         let virtual_timer_mask = source
             .find("msr cntv_ctl_el02, x9")
             .expect("EL2 drop must mask the real EL1 virtual timer bank");
-        let apple_timer_gate = source
-            .find("msr S3_5_C15_C1_3, x9")
-            .expect("Apple EL2 drop must normalize the EL1 timer FIQ gate");
         let hcr_drop = source
             .find("msr hcr_el2, x9")
             .expect("EL2 drop must install the EL1 routing policy");
 
         assert!(physical_timer_mask < hcr_drop);
         assert!(virtual_timer_mask < hcr_drop);
-        assert!(apple_timer_gate < hcr_drop);
+    }
+
+    #[test_case]
+    fn el2_drop_prepares_the_platform_before_the_transition() {
+        let source = include_str!("limine.rs");
+        let platform_prepare = source
+            .find("platform::prepare_el2_drop()")
+            .expect("EL2 drop must prepare the active boot platform");
+        let el2_drop = source
+            .find("drop_el2_to_el1(continuation, arg0)")
+            .expect("EL2 drop must enter the generic transition");
+
+        assert!(platform_prepare < el2_drop);
     }
 }
 
