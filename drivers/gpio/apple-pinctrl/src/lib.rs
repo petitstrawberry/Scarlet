@@ -14,7 +14,7 @@ use scarlet::device::{
     events::InterruptCapableDevice,
     gpio::{GpioController, GpioIrqTrigger, GpioPull},
     manager::{DeviceManager, DriverPriority},
-    platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo},
+    platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
 };
 use scarlet::interrupt::{
     InterruptClaim, InterruptId, InterruptManager, InterruptResult, InterruptSource,
