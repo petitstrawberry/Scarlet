@@ -14,7 +14,7 @@ use scarlet::device::{
     events::InterruptCapableDevice,
     gpio::{GpioController, GpioIrqTrigger, GpioPull},
     manager::{DeviceManager, DriverPriority},
-    platform::{PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType},
+    platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo},
 };
 use scarlet::interrupt::{
     InterruptClaim, InterruptId, InterruptManager, InterruptResult, InterruptSource,
@@ -200,7 +200,6 @@ impl ApplePinctrl {
         //         before,
         //         after
         //     );
-        }
     }
 
     pub fn get_value(&self, pin: u32) -> bool {
