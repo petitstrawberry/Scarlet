@@ -164,13 +164,16 @@ pub(crate) fn set_vector_owner_dirty(cpu_id: usize, dirty: bool) {
 /// A dirty vector file must belong to the outgoing task. Clean ownership still
 /// needs invalidation so a later migration cannot reuse stale hart registers.
 #[inline]
+const fn vector_switch_out_owner_is_valid(owner: usize, task_id: usize, dirty: bool) -> bool {
+    !dirty || owner == task_id
+}
+
+#[inline]
 pub(crate) fn vector_switch_out_requires_save(owner: usize, task_id: usize, dirty: bool) -> bool {
-    if dirty {
-        assert_eq!(
-            owner, task_id,
-            "dirty vector state must belong to the outgoing task"
-        );
-    }
+    assert!(
+        vector_switch_out_owner_is_valid(owner, task_id, dirty),
+        "dirty vector state must belong to the outgoing task"
+    );
     owner == task_id && dirty
 }
 
@@ -206,9 +209,10 @@ mod vector_owner_tests {
     }
 
     #[test_case]
-    #[should_panic(expected = "dirty vector state must belong to the outgoing task")]
     fn test_dirty_vector_switch_out_requires_current_owner() {
-        let _ = vector_switch_out_requires_save(7, 42, true);
+        assert!(!vector_switch_out_owner_is_valid(7, 42, true));
+        assert!(vector_switch_out_owner_is_valid(42, 42, true));
+        assert!(vector_switch_out_owner_is_valid(7, 42, false));
     }
 }
 
@@ -610,8 +614,19 @@ pub fn disable_interrupt() {
     }
 }
 
-pub fn send_reschedule_ipi(target_cpu: usize) {
-    let _ = crate::interrupt::InterruptManager::global().send_software_interrupt(target_cpu as u32);
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
+    crate::interrupt::InterruptManager::global()
+        .send_software_interrupt(target_cpu as u32)
+        .is_ok()
 }
 
 /// Full memory barrier for normal memory (RAM).

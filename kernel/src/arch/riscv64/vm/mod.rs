@@ -29,7 +29,7 @@ use crate::early_println;
 use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::addr::kernel_virt_to_phys;
 use crate::vm::manager::VirtualMemoryManager;
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
 
@@ -142,19 +142,40 @@ impl RootPageTableGuard {
             .map_memory_area(asid, mmap, accessed, dirty)
     }
 
+    /// Maps a single 4 KiB page in this address space.
+    ///
+    /// # Arguments
+    ///
+    /// * `vaddr` - Virtual address to map.
+    /// * `paddr` - Physical address to map.
+    /// * `flags` - Requested virtual-memory permissions.
+    /// * `memory_attribute` - Cacheability or device attribute requested by the mapping.
+    /// * `user` - Whether to set the accessed state for the mapping.
+    /// * `write` - Whether to set the dirty state for the mapping.
     pub(crate) fn map(
         &mut self,
         vaddr: usize,
         paddr: usize,
         flags: usize,
+        memory_attribute: MemoryAttribute,
         user: bool,
         write: bool,
     ) {
         let asid = self.asid;
-        self.table_mut().map(asid, vaddr, paddr, flags, user, write);
+        self.table_mut()
+            .map(asid, vaddr, paddr, flags, memory_attribute, user, write);
     }
 
-    #[cfg(test)]
+    /// Translates a virtual address through this guarded page-table hierarchy.
+    ///
+    /// # Arguments
+    ///
+    /// * `vaddr` - Virtual address to translate.
+    ///
+    /// # Returns
+    ///
+    /// The physical address when a valid leaf translation exists, or `None` when
+    /// the address is unmapped.
     pub(crate) fn translate(&mut self, vaddr: usize) -> Option<usize> {
         self.table_mut().translate(vaddr)
     }

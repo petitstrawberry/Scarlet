@@ -123,6 +123,41 @@ pub enum InterruptClaim {
     NotMine,
 }
 
+const BREADCRUMB_STATUS_OK: u64 = 1;
+const BREADCRUMB_STATUS_HANDLED: u64 = 1;
+const BREADCRUMB_STATUS_RESCHEDULE: u64 = 2;
+const BREADCRUMB_STATUS_NOT_MINE: u64 = 3;
+
+fn breadcrumb_error_status(error: InterruptError) -> u64 {
+    match error {
+        InterruptError::InvalidInterruptId => 0x101,
+        InterruptError::InvalidCpuId => 0x102,
+        InterruptError::ControllerNotFound => 0x103,
+        InterruptError::HandlerAlreadyRegistered => 0x104,
+        InterruptError::HandlerNotFound => 0x105,
+        InterruptError::InvalidPriority => 0x106,
+        InterruptError::NotSupported => 0x107,
+        InterruptError::HardwareError => 0x108,
+        InterruptError::InvalidOperation => 0x109,
+    }
+}
+
+fn send_ipi_breadcrumb_status(result: &InterruptResult<()>) -> u64 {
+    match result {
+        Ok(()) => BREADCRUMB_STATUS_OK,
+        Err(error) => breadcrumb_error_status(*error),
+    }
+}
+
+fn fast_claim_breadcrumb_status(result: &InterruptResult<InterruptClaim>) -> u64 {
+    match result {
+        Ok(InterruptClaim::Handled) => BREADCRUMB_STATUS_HANDLED,
+        Ok(InterruptClaim::Reschedule) => BREADCRUMB_STATUS_RESCHEDULE,
+        Ok(InterruptClaim::NotMine) => BREADCRUMB_STATUS_NOT_MINE,
+        Err(error) => breadcrumb_error_status(*error),
+    }
+}
+
 impl InterruptClaim {
     /// Check whether this claim handled the interrupt.
     ///
@@ -919,12 +954,20 @@ impl InterruptManager {
         target_cpu_id: CpuId,
         ipi_type: controllers::LocalInterruptType,
     ) -> InterruptResult<()> {
-        let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.external_controller() {
-            controller.send_ipi(target_cpu_id, ipi_type)
-        } else {
-            Err(InterruptError::ControllerNotFound)
-        }
+        let result = {
+            let controllers = self.controllers().lock();
+            if let Some(controller) = controllers.external_controller() {
+                controller.send_ipi(target_cpu_id, ipi_type)
+            } else {
+                Err(InterruptError::ControllerNotFound)
+            }
+        };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::IPI_SEND_DONE,
+            target_cpu_id as u64,
+            send_ipi_breadcrumb_status(&result),
+        );
+        result
     }
 
     /// Ask the active external controller to claim a CPU fast interrupt.
@@ -938,12 +981,20 @@ impl InterruptManager {
     /// `Handled` when the controller cleared a source, `NotMine` when it did
     /// not own the source, or an interrupt error on failure.
     pub fn claim_fast_interrupt(&self, cpu_id: CpuId) -> InterruptResult<InterruptClaim> {
-        let controllers = self.controllers().lock();
-        if let Some(controller) = controllers.external_controller() {
-            controller.claim_fast_interrupt(cpu_id)
-        } else {
-            Err(InterruptError::ControllerNotFound)
-        }
+        let result = {
+            let controllers = self.controllers().lock();
+            if let Some(controller) = controllers.external_controller() {
+                controller.claim_fast_interrupt(cpu_id)
+            } else {
+                Err(InterruptError::ControllerNotFound)
+            }
+        };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::FAST_CLAIM_DONE,
+            cpu_id as u64,
+            fast_claim_breadcrumb_status(&result),
+        );
+        result
     }
 }
 

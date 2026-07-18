@@ -33,6 +33,8 @@ const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
 const APPLE_MIDR_IMPLEMENTER: u64 = 0x61;
 const MIDR_IMPLEMENTER_SHIFT: u32 = 24;
 const ACTLR_EN_MDSB: u64 = 1 << 12;
+const APPLE_VM_TIMER_FIQ_ENABLE_VIRTUAL: u64 = 1;
+const APPLE_VM_TIMER_FIQ_ENABLE_PHYSICAL: u64 = 1 << 1;
 #[allow(dead_code)]
 const SCTLR_M: u64 = 1;
 #[allow(dead_code)]
@@ -59,8 +61,8 @@ fn read_midr() -> u64 {
     midr
 }
 
-const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, hypervisor_enabled: bool) -> bool {
-    el == 2 && (!hypervisor_enabled || hcr_el2 & HCR_EL2_E2H == 0)
+const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, _hypervisor_enabled: bool) -> bool {
+    el == 2 && hcr_el2 & HCR_EL2_E2H == 0
 }
 
 fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
@@ -217,11 +219,43 @@ unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
         "isb",
         "msr hstr_el2, xzr",
         "msr mdcr_el2, xzr",
-        // Scarlet uses CNTV after entering EL1. Quarantine any physical timer
-        // left enabled by firmware before EL1 loses direct ownership of it.
+        // Quarantine both timer banks visible through the current EL2 regime.
+        // With VHE active these are the EL2 host banks; without VHE they are
+        // the real EL1 banks.
         "mrs x9, cntp_ctl_el0",
         "orr x9, x9, #2",
         "msr cntp_ctl_el0, x9",
+        "mrs x9, cntv_ctl_el0",
+        "orr x9, x9, #2",
+        "msr cntv_ctl_el0, x9",
+        // In VHE host mode the real EL1 timer banks are exposed through the
+        // EL02 aliases. Mask them before clearing E2H, otherwise an inherited
+        // EL1 physical timer can become an unhandled FIQ immediately after
+        // ERET. Scarlet initializes and unmasks CNTV later at EL1.
+        "tbz x15, #34, 10f",
+        "mrs x9, cntp_ctl_el02",
+        "orr x9, x9, #2",
+        "msr cntp_ctl_el02, x9",
+        "mrs x9, cntv_ctl_el02",
+        "orr x9, x9, #2",
+        "msr cntv_ctl_el02, x9",
+        "10:",
+        // Apple routes the EL1 timer banks onto FIQ through a private EL2
+        // gate. Scarlet uses only the virtual timer after the drop, so prevent
+        // the unused physical bank from asserting while leaving CNTV delivery
+        // available once the EL1 timer driver unmasks it.
+        "mrs x9, midr_el1",
+        "lsr x9, x9, #24",
+        "and x9, x9, #0xff",
+        "cmp x9, {apple_implementer}",
+        "b.ne 11f",
+        "mrs x9, S3_5_C15_C1_3",
+        "bic x9, x9, {physical_timer_gate}",
+        "orr x9, x9, {virtual_timer_gate}",
+        "msr S3_5_C15_C1_3, x9",
+        "11:",
+        "dsb sy",
+        "isb",
         // Install a known non-trapping EL1 timer policy instead of preserving
         // firmware trap controls. Scarlet uses CNTV after detecting EL1.
         "mov x9, #3",
@@ -253,6 +287,9 @@ unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
         "mov x9, {hcr_rw}",
         "msr hcr_el2, x9",
         "eret",
+        apple_implementer = const APPLE_MIDR_IMPLEMENTER,
+        physical_timer_gate = const APPLE_VM_TIMER_FIQ_ENABLE_PHYSICAL,
+        virtual_timer_gate = const APPLE_VM_TIMER_FIQ_ENABLE_VIRTUAL,
         hcr_rw = const HCR_EL2_RW,
         cptr_vhe_fpen_full = const CPTR_EL2_VHE_FPEN_FULL,
     );
@@ -806,12 +843,33 @@ mod el_drop_tests {
     use super::*;
 
     #[test_case]
-    fn el2_without_usable_hypervisor_requires_el1_drop() {
-        assert!(should_drop_el2_to_el1(2, HCR_EL2_E2H, false));
+    fn el2_vhe_remains_at_el2_without_hypervisor_feature() {
+        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, false));
         assert!(should_drop_el2_to_el1(2, 0, false));
         assert!(should_drop_el2_to_el1(2, 0, true));
         assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, true));
         assert!(!should_drop_el2_to_el1(1, HCR_EL2_E2H, false));
+    }
+
+    #[test_case]
+    fn el2_drop_quarantines_el1_timer_banks_before_eret() {
+        let source = include_str!("limine.rs");
+        let physical_timer_mask = source
+            .find("msr cntp_ctl_el02, x9")
+            .expect("EL2 drop must mask the real EL1 physical timer bank");
+        let virtual_timer_mask = source
+            .find("msr cntv_ctl_el02, x9")
+            .expect("EL2 drop must mask the real EL1 virtual timer bank");
+        let apple_timer_gate = source
+            .find("msr S3_5_C15_C1_3, x9")
+            .expect("Apple EL2 drop must normalize the EL1 timer FIQ gate");
+        let hcr_drop = source
+            .find("msr hcr_el2, x9")
+            .expect("EL2 drop must install the EL1 routing policy");
+
+        assert!(physical_timer_mask < hcr_drop);
+        assert!(virtual_timer_mask < hcr_drop);
+        assert!(apple_timer_gate < hcr_drop);
     }
 }
 

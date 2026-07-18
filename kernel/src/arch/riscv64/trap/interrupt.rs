@@ -36,12 +36,16 @@ fn handle_software_interrupt(trapframe: &mut Trapframe, from_kernel: bool) {
     }
 
     let cpu_id = get_cpu().get_cpuid();
+    crate::sched::scheduler::acknowledge_reschedule_ipi(cpu_id);
     let can_schedule = can_schedule_from_interrupt(from_kernel)
         && crate::sched::scheduler::may_schedule_from_interrupt(cpu_id);
     crate::sched::scheduler::debug_log_reschedule_ipi(cpu_id, from_kernel, can_schedule);
 
     if can_schedule {
+        let _ = crate::sched::scheduler::take_deferred_reschedule(cpu_id);
         crate::sched::scheduler::schedule(trapframe);
+    } else {
+        crate::sched::scheduler::defer_reschedule(cpu_id);
     }
 }
 

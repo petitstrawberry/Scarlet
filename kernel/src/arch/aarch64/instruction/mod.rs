@@ -25,8 +25,10 @@ impl Instruction {
 pub fn idle() -> ! {
     loop {
         crate::arch::interrupt::enable_interrupts();
+        // SAFETY: These privileged instructions do not access Rust-managed
+        // memory. The DSB completes prior memory accesses before entering WFI.
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            core::arch::asm!("dsb sy", "wfi", options(nostack, preserves_flags));
         }
     }
 }

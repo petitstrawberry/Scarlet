@@ -1640,7 +1640,8 @@ impl CharDevice for TtyDevice {
 
         let _lock = self.write_lock.lock();
 
-        if crate::earlyfb::is_initialized()
+        if crate::earlyfb::is_redirection_enabled()
+            && crate::earlyfb::is_initialized()
             && let Ok(text) = core::str::from_utf8(buffer)
         {
             crate::earlyfb::write_str(text);
