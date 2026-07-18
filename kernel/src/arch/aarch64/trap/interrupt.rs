@@ -8,6 +8,7 @@ use crate::environment::MAX_NUM_CPUS;
 
 const IRQ_PENDING_BIT: u64 = 1 << 7;
 const IRQ_LIVENESS_INTERVAL: u64 = 500;
+const DEBUG_IRQ_LIVENESS_LOGGING: bool = false;
 
 static TIMER_FIQ_COUNTS: [AtomicU64; MAX_NUM_CPUS] = [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 static POST_CLAIM_TIMER_COUNTS: [AtomicU64; MAX_NUM_CPUS] =
@@ -122,12 +123,14 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             if timer_pending_after {
                 crate::arch::interrupt::disable_timer_source_interrupt();
             }
-            if timer_pending_after && !timer_pending_before {
+            if DEBUG_IRQ_LIVENESS_LOGGING && timer_pending_after && !timer_pending_before {
                 report_post_claim_timer(cpu_id as usize);
             }
             let timer_pending = fast_timer_pending(timer_pending_before, timer_pending_after);
             if timer_pending {
-                report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
+                if DEBUG_IRQ_LIVENESS_LOGGING {
+                    report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
+                }
                 crate::timer::tick_with_scheduler(trapframe, false);
             }
 
@@ -171,7 +174,9 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         let timer_pending = timer_pending_before;
         if timer_pending {
-            report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
+            if DEBUG_IRQ_LIVENESS_LOGGING {
+                report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
+            }
             crate::timer::tick_with_scheduler(trapframe, can_schedule);
             return;
         }
