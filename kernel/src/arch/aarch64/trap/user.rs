@@ -316,6 +316,31 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     // simple kernel trap routine.
     set_trapvector(get_kernel_trapvector_paddr());
 
+    let cpu_id = get_cpu().get_cpuid();
+    let first_traced_user_trap = if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING {
+        crate::sched::scheduler::current_task_id(cpu_id).filter(|&task_id| {
+            crate::sched::scheduler::take_fork_trace_first_user_trap(cpu_id, task_id)
+        })
+    } else {
+        None
+    };
+    if let Some(task_id) = first_traced_user_trap {
+        let task_asid = crate::sched::scheduler::get_task_by_id(task_id)
+            .map(|task| task.vm_manager.get_asid())
+            .unwrap_or(0);
+        crate::early_println!(
+            "[fork-trace] child_task_id={} first-user-trap cpu={} kind={} elr={:#x} esr={:#x} far={:#x} task_asid={} user_ttbr={:#x}",
+            task_id,
+            cpu_id,
+            trap_kind,
+            trapframe.elr,
+            trapframe.esr_el1,
+            trapframe.far_el1,
+            task_asid,
+            get_cpu().get_ttbr0(),
+        );
+    }
+
     // trap_kind is now passed in x1 (argument 2), so no need to read from memory!
     if trap_kind == 1 || trap_kind == 2 {
         arch_irq_handler(trapframe, trap_kind);
@@ -323,7 +348,17 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
         arch_exception_handler(trapframe, trap_kind);
     }
 
-    let cpu_id = get_cpu().get_cpuid();
+    if let Some(task_id) = first_traced_user_trap {
+        crate::early_println!(
+            "[fork-trace] child_task_id={} first-user-trap-done cpu={} current={:?} elr={:#x} user_ttbr={:#x}",
+            task_id,
+            cpu_id,
+            crate::sched::scheduler::current_task_id(cpu_id),
+            trapframe.elr,
+            get_cpu().get_ttbr0(),
+        );
+    }
+
     if crate::sched::scheduler::may_schedule_from_interrupt(cpu_id)
         && crate::sched::scheduler::take_deferred_reschedule(cpu_id)
     {

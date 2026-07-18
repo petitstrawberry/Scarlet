@@ -2520,7 +2520,9 @@ impl Task {
     }
 
     fn trace_fork_exit_phase(&self, phase: &'static str, detail: usize) {
-        if crate::sched::scheduler::is_fork_trace_task(self.id) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(self.id)
+        {
             crate::early_println!(
                 "[fork-trace] child_task_id={} {} cpu={} detail={}",
                 self.id,
@@ -3135,7 +3137,9 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
-        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
             crate::early_println!(
                 "[fork-trace] child_task_id={} kernel-entry cpu={}",
                 current_task.get_id(),
@@ -3186,7 +3190,9 @@ pub fn task_initial_kernel_entrypoint() -> ! {
             );
         }
         setup_task_execution(cpu, &current_task);
-        if crate::sched::scheduler::is_fork_trace_task(current_task.get_id()) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
             crate::early_println!(
                 "[fork-trace] child_task_id={} user-return cpu={}",
                 current_task.get_id(),

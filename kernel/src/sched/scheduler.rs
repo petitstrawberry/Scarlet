@@ -342,14 +342,16 @@ impl TaskPool {
         let reclaimed = reclaimable.len();
         for retired_task in reclaimable {
             let task_id = retired_task.task_id;
-            let trace_fork_exit = is_fork_trace_task(task_id);
+            let trace_fork_exit = DEBUG_FORK_TRACE_LOGGING && is_fork_trace_task(task_id);
             retired_task
                 .task
                 .get_namespace()
                 .unregister_mapping_for_global(task_id);
             crate::task::cleanup_task_waker(task_id);
             crate::task::cleanup_parent_waker(task_id);
-            clear_fork_trace_task(task_id);
+            if DEBUG_FORK_TRACE_LOGGING {
+                clear_fork_trace_task(task_id);
+            }
             crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_BEGIN, task_id as u64, 0);
             if trace_fork_exit {
                 crate::early_println!(
@@ -783,6 +785,8 @@ static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
 pub const DEBUG_SMP_TASK_FLOW: bool = false;
+/// Enable focused fork-child lifecycle logging and bookkeeping.
+pub const DEBUG_FORK_TRACE_LOGGING: bool = false;
 
 static DEBUG_ENQUEUE_SEQ: AtomicUsize = AtomicUsize::new(0);
 static DEBUG_REMOTE_ENQUEUE_TASK: [AtomicUsize; MAX_NUM_CPUS] =
