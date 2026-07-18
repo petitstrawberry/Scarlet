@@ -66,6 +66,7 @@ const WRITE_SITE_MMAP_BASE: u64 = 0x424d;
 const WRITE_SITE_ADD_FIXED: u64 = 0x4146;
 const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
+const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
@@ -1012,12 +1013,14 @@ impl VirtualMemoryManager {
                         let permissions =
                             owner.fault_page_permissions(&test_access, map_permissions);
                         if let Some(map) = g.memmap.get_mut(&key) {
-                            crate::println!(
-                                "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
-                                old_end,
-                                new_end,
-                                owner.mmap_owner_name()
-                            );
+                            if DEBUG_VM_MAPPING_EXTEND_LOGGING {
+                                crate::println!(
+                                    "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
+                                    old_end,
+                                    new_end,
+                                    owner.mmap_owner_name()
+                                );
+                            }
                             map.vmarea.end = new_end;
                             g.last_search_cache = None;
                         }
