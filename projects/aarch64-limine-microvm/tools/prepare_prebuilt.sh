@@ -39,7 +39,7 @@ find_guest_bin_dir() {
 guest_bin_dir="$(find_guest_bin_dir || true)"
 if [ -z "$guest_bin_dir" ]; then
     echo "AArch64 guest kernel artifacts were not found." >&2
-    echo "Run ARCH=aarch64 tools/linux/build_buildroot.sh and ARCH=aarch64 tools/linux/build_guest_image.sh," >&2
+    echo "Run ARCH=aarch64 bundles/linux/tools/build_buildroot.sh and ARCH=aarch64 bundles/linux/tools/build_guest_image.sh," >&2
     echo "or set SCARLET_MICROVM_GUEST_BIN_DIR to a directory containing guest-Image and guest-initramfs.cpio.gz." >&2
     exit 1
 fi

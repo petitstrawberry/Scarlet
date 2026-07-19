@@ -5,7 +5,7 @@ artifacts into the Scarlet workspace.
 
 ## Overview
 
-`tools/linux/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
+`bundles/linux/tools/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
 additional prebuilt programs into `bundles/linux/rootfs/linux-$ARCH`, which is the
 tree included in the final Scarlet disk image.
 
@@ -27,8 +27,8 @@ export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
 export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
 export WORKDIR="$PWD/.scarlet/cache"
 
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
-ARCH=aarch64 bash tools/linux/build_user_programs.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
 ```
 
 The deployment script expects:
@@ -42,7 +42,7 @@ The deployment script expects:
 For RISC-V 64:
 
 ```bash
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 For AArch64:
@@ -50,7 +50,7 @@ For AArch64:
 ```bash
 ARCH=aarch64 \
 PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 The script extracts to `bundles/linux/rootfs/linux-$ARCH`, then copies staged
@@ -69,7 +69,7 @@ TARGET_UID="$(id -u)" \
 TARGET_GID="$(id -g)" \
 ARCH=aarch64 \
 PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 ## Final Image

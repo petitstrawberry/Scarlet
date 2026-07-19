@@ -55,11 +55,11 @@ ARCH=aarch64 \
 BUILDROOT_DIR=/opt/buildroot-aarch64 \
 PREBUILT_DIR=/opt/prebuilt \
 WORKDIR="$PWD/.scarlet/cache" \
-bash tools/linux/build_mozc_server.sh
+bash bundles/linux/tools/build_mozc_server.sh
 
 ARCH=aarch64 \
 PREBUILT_DIR=/opt/prebuilt \
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 When using the existing Scarlet devcontainer, use `BUILDROOT_DIR=/opt/buildroot-aarch64`

@@ -24,13 +24,13 @@ can be injected:
 For RISC-V 64:
 
 ```bash
-bash tools/linux/build_buildroot.sh
+bash bundles/linux/tools/build_buildroot.sh
 ```
 
 For AArch64:
 
 ```bash
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ```
 
 Repository-local paths are useful outside the Docker image:
@@ -38,7 +38,7 @@ Repository-local paths are useful outside the Docker image:
 ```bash
 BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
 PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ```
 
 The resulting tarball is staged as
@@ -58,7 +58,7 @@ ARCH=aarch64 \
 BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
 PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
 WORKDIR="$PWD/.scarlet/cache" \
-bash tools/linux/build_user_programs.sh
+bash bundles/linux/tools/build_user_programs.sh
 ```
 
 This script:
@@ -81,7 +81,7 @@ built-in hypervisor:
 ARCH=aarch64 \
 BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
 PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
-bash tools/linux/build_guest_image.sh
+bash bundles/linux/tools/build_guest_image.sh
 ```
 
 This cross-compiles a minimal Linux guest kernel, creates a compressed cpio
@@ -97,13 +97,13 @@ export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
 export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
 export WORKDIR="$PWD/.scarlet/cache"
 
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
-ARCH=aarch64 bash tools/linux/build_user_programs.sh
-ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
+ARCH=aarch64 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 For RISC-V 64, use `buildroot-riscv64` as the local Buildroot directory and run
-`ARCH=riscv64 bash tools/linux/build_buildroot.sh` or omit `ARCH`.
+`ARCH=riscv64 bash bundles/linux/tools/build_buildroot.sh` or omit `ARCH`.
 
 ## Deployment
 

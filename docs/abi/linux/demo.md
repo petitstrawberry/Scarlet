@@ -24,10 +24,10 @@ commands on Linux:
 
 ```bash
 # Build the Buildroot rootfs
-bash tools/linux/build_buildroot.sh
+bash bundles/linux/tools/build_buildroot.sh
 
 # Build demo programs (zathura, green, fbdoom, kvmtool)
-bash tools/linux/build_user_programs.sh
+bash bundles/linux/tools/build_user_programs.sh
 ```
 
 These scripts place the necessary files in `/opt/prebuilt` by default. See
@@ -39,7 +39,7 @@ repository-local path examples.
 To run a Linux guest inside Scarlet using the built-in hypervisor, build the guest kernel and initramfs:
 
 ```bash
-bash tools/linux/build_guest_image.sh
+bash bundles/linux/tools/build_guest_image.sh
 ```
 
 This produces `guest-Image` and `guest-initramfs.cpio.gz` under
@@ -52,7 +52,7 @@ For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
 
 ```bash
 # Deploy the Linux rootfs and binaries to bundles/linux/rootfs/linux-riscv64
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 ### 4. Build and Run Scarlet

@@ -154,7 +154,7 @@ While basic file operations work, the current implementation has significant dev
 
 ## What Works Today
 
-- Buildroot root filesystem generation (via `tools/linux/build_buildroot.sh`)
+- Buildroot root filesystem generation (via `bundles/linux/tools/build_buildroot.sh`)
 - Toolchain exports from Buildroot for building userspace
 - Demo binaries `green`, `fbdoom`, and the Linux zathura PDF viewer built with
   the Buildroot toolchain

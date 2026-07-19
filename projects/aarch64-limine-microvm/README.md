@@ -21,8 +21,8 @@ export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
 export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
 export WORKDIR="$PWD/.scarlet/cache"
 
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
-ARCH=aarch64 bash tools/linux/build_guest_image.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_guest_image.sh
 projects/aarch64-limine-microvm/tools/prepare_prebuilt.sh
 
 (cd user/lib && cargo make build-userlib-release-aarch64)
@@ -36,7 +36,7 @@ SCARLET_QEMU_SMP=1 \
 cargo scarlet run --project projects/aarch64-limine-microvm --release
 ```
 
-`ARCH=aarch64 bash tools/linux/build_buildroot.sh` builds the AArch64 Buildroot
+`ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh` builds the AArch64 Buildroot
 toolchain and rootfs tarball under `$BUILDROOT_DIR` and
 `$PREBUILT_DIR/aarch64`.
 

@@ -65,10 +65,10 @@ Target specifications are in `user/targets/`:
 
 ```bash
 # RISC-V (uses buildroot-riscv64 config)
-bash tools/linux/build_buildroot.sh
+bash bundles/linux/tools/build_buildroot.sh
 
 # AArch64 (uses buildroot-aarch64 config)
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
+ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ```
 
 Buildroot/userland artifact generation runs on Linux hosts. This can be
@@ -82,10 +82,10 @@ Linux:
 
 ```bash
 # RISC-V
-bash tools/linux/build_user_programs.sh
+bash bundles/linux/tools/build_user_programs.sh
 
 # AArch64
-ARCH=aarch64 bash tools/linux/build_user_programs.sh
+ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
 ```
 
 This uses the appropriate toolchain:
@@ -96,10 +96,10 @@ This uses the appropriate toolchain:
 
 ```bash
 # Deploy RISC-V rootfs
-bash tools/linux/deploy_rootfs.sh
+bash bundles/linux/tools/deploy_rootfs.sh
 
 # Deploy AArch64 rootfs
-ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
+ARCH=aarch64 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
 After deployment, rootfs is organized by architecture:

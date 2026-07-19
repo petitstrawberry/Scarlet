@@ -9,7 +9,7 @@ image builder. Keeping these files here avoids depending on transient files in
 - `system/linux-aarch64/usr/bin/guest-initramfs.cpio.gz`: AArch64 guest initramfs.
 
 Refresh `guest-Image` and `guest-initramfs.cpio.gz` from
-`tools/linux/build_guest_image.sh` output when the guest payload changes.
+`bundles/linux/tools/build_guest_image.sh` output when the guest payload changes.
 
 Run `../tools/prepare_prebuilt.sh` from this project, or
 `projects/aarch64-limine-microvm/tools/prepare_prebuilt.sh` from the repository
