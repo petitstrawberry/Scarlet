@@ -85,7 +85,7 @@ pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _val3 = trapframe.get_arg(5) as u32; // e.g., bitset for *_BITSET ops
 
     // Always advance PC to avoid re-executing syscall on resume
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if uaddr & 0x3 != 0 {
         return super::errno::to_result(super::errno::EINVAL);

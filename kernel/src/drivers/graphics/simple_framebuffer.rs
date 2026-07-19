@@ -95,6 +95,10 @@ impl Selectable for SimpleFramebufferDevice {
 }
 
 impl GraphicsDevice for SimpleFramebufferDevice {
+    fn is_boot_framebuffer(&self) -> bool {
+        true
+    }
+
     fn get_display_name(&self) -> &'static str {
         self.display_name
     }
@@ -263,10 +267,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     crate::device::graphics::manager::GraphicsManager::get_manager()
         .register_framebuffer_from_device(device_id, graphics_device)?;
-
-    if crate::earlyfb::is_initialized() {
-        crate::earlyfb::deactivate();
-    }
 
     Ok(())
 }

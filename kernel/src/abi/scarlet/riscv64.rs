@@ -322,24 +322,30 @@ impl ScarletAbi {
                     ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
-                task.exit_group(exit_code);
-                Ok(EventProcessOutcome::Exited)
+                Ok(EventProcessOutcome::Exited(exit_code))
             }
             ProcessControlType::Stop
             | ProcessControlType::TerminalStop
             | ProcessControlType::TerminalInput
             | ProcessControlType::TerminalOutput => {
-                task.mark_process_control_stopped();
-                task.set_state(crate::task::TaskState::Blocked(
-                    crate::task::BlockedType::Interruptible,
-                ));
-                crate::sched::scheduler::mark_blocked(task.get_id());
-                crate::sched::scheduler::remove_from_ready_queues(task.get_id());
-                crate::task::wake_task_waiters(task.get_id());
-                if let Some(parent_id) = task.get_parent_id() {
-                    crate::task::wake_parent_waiters(parent_id);
+                let event_queue = task.event_queue.lock();
+                if event_queue.has_pending_continue() {
+                    drop(event_queue);
+                    Ok(EventProcessOutcome::Continue)
+                } else {
+                    task.mark_process_control_stopped();
+                    task.set_state(crate::task::TaskState::Blocked(
+                        crate::task::BlockedType::Interruptible,
+                    ));
+                    crate::sched::scheduler::mark_blocked(task.get_id());
+                    crate::sched::scheduler::remove_from_ready_queues(task.get_id());
+                    drop(event_queue);
+                    crate::task::wake_task_waiters(task.get_id());
+                    if let Some(parent_id) = task.get_parent_id() {
+                        crate::task::wake_parent_waiters(parent_id);
+                    }
+                    Ok(EventProcessOutcome::NeedReschedule)
                 }
-                Ok(EventProcessOutcome::NeedReschedule)
             }
             ProcessControlType::Continue => {
                 task.clear_process_control_stopped();
@@ -370,8 +376,7 @@ impl ScarletAbi {
                     )
                 } else {
                     // Default: terminate with SIGINT-like exit code
-                    task.exit_group(128 + 2);
-                    Ok(EventProcessOutcome::Exited)
+                    Ok(EventProcessOutcome::Exited(128 + 2))
                 }
             }
             _ => {
@@ -604,7 +609,7 @@ impl ScarletAbi {
                 EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
                 EventProcessOutcome::UserHandlerArmed
                 | EventProcessOutcome::NeedReschedule
-                | EventProcessOutcome::Exited => {
+                | EventProcessOutcome::Exited(_) => {
                     self.pending_events.extend(pending_iter);
                     return Ok(outcome);
                 }
@@ -824,9 +829,10 @@ impl AbiModule for ScarletAbi {
                             .map_or("Unnamed Task".to_string(), |s| s.to_string());
 
                         // Clear old page table entries
-                        let root_page_table =
+                        let mut root_page_table =
                             vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
+                        drop(root_page_table);
 
                         // Setup the new memory environment
                         vm::setup_trampoline_for_user(&task.vm_manager);
@@ -1180,11 +1186,11 @@ impl AbiModule for ScarletAbi {
     fn handle_event(
         &mut self,
         event: crate::ipc::Event,
-        _target_task_id: u32,
+        _target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         // Get the current task to process the event
         if let Some(task) = crate::task::mytask() {
-            self.handle_incoming_event(event, task)
+            self.handle_incoming_event(event, &task)
         } else {
             Err("No current task to handle event")
         }

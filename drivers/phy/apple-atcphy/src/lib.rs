@@ -51,6 +51,23 @@ const ACIOPHY_SLEEP_CTRL_TX_BIG_OV: u32 = 0x3 << 2;
 const ACIOPHY_SLEEP_CTRL_TX_SMALL_OV: u32 = 0x3 << 6;
 const ACIOPHY_SLEEP_CTRL_TX_CLAMP_OV: u32 = 0x3 << 10;
 
+const ACIOPHY_TOP_BIST_CIOPHY_CFG1: usize = 0x84;
+const ACIOPHY_TOP_BIST_CIOPHY_CFG1_CLK_EN: u32 = 1 << 27;
+const ACIOPHY_TOP_BIST_CIOPHY_CFG1_BIST_EN: u32 = 1 << 28;
+const ACIOPHY_TOP_BIST_OV_CFG: usize = 0x8c;
+const ACIOPHY_TOP_BIST_OV_CFG_LN0_RESET_N_OV: u32 = 1 << 13;
+const ACIOPHY_TOP_BIST_OV_CFG_LN0_PWR_DOWN_OV: u32 = 1 << 25;
+const ACIOPHY_TOP_BIST_READ_CTRL: usize = 0x90;
+const ACIOPHY_TOP_BIST_READ_CTRL_LN0_PHY_STATUS_RE: u32 = 1 << 2;
+const ACIOPHY_TOP_PHY_STAT: usize = 0x9c;
+const ACIOPHY_TOP_PHY_STAT_LN0_READY: u32 = 1 << 0;
+const ACIOPHY_TOP_PHY_STAT_LN0_BUSY: u32 = 1 << 23;
+const ACIOPHY_TOP_BIST_PHY_CFG0: usize = 0xa8;
+const ACIOPHY_TOP_BIST_PHY_CFG0_LN0_RESET_N: u32 = 1 << 0;
+const ACIOPHY_TOP_BIST_PHY_CFG1: usize = 0xac;
+const ACIOPHY_TOP_BIST_PHY_CFG1_LN0_PWR_DOWN_MASK: u32 = 0xf << 10;
+const ACIOPHY_TOP_BIST_PHY_CFG1_LN0_PWR_DOWN_ON: u32 = 3 << 10;
+
 const AUSPLL_FSM_CTRL: usize = 0x1014;
 const AUSPLL_APB_CMD_OVERRIDE: usize = 0x2000;
 const AUSPLL_APB_CMD_OVERRIDE_UNK28: u32 = 1 << 28;
@@ -124,6 +141,8 @@ const PIPEHANDLER_MUX_CTRL_DATA_USB3: u32 = 0;
 const PIPEHANDLER_MUX_CTRL_DATA_DUMMY: u32 = 2;
 
 const PIPEHANDLER_LOCK_EN: u32 = 1 << 0;
+const PIPEHANDLER_LOCK_ACK_TIMEOUT_US: u64 = 1_000;
+const ACIOPHY_STATUS_TIMEOUT_US: u64 = 10_000;
 
 const PIPEHANDLER_AON_GEN: usize = 0x1c;
 const PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN: u32 = 1 << 4;
@@ -283,12 +302,6 @@ impl AppleAtcPhy {
         }
     }
 
-    fn small_delay(&self) {
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
-    }
-
     fn core_read32(&self, offset: usize) -> u32 {
         unsafe { mmio::read32(self.core_base + offset) }
     }
@@ -369,16 +382,73 @@ impl AppleAtcPhy {
         mask: u32,
         domain: &'static str,
     ) -> Result<(), &'static str> {
-        let mut timeout = 10000;
-        while timeout != 0 {
+        let mut remaining_us = 100_000;
+        while remaining_us != 0 {
             if self.core_read32(offset) & mask == mask {
                 return Ok(());
             }
-            self.small_delay();
-            timeout -= 1;
+            scarlet::time::udelay(100);
+            remaining_us -= 100;
         }
         early_println!("[apple-atcphy] timeout waiting for {} power domain", domain);
         Err("apple-atcphy: core power domain timeout")
+    }
+
+    fn poll_core_bit(&self, offset: usize, bit: u32, set: bool, timeout_us: u64) -> bool {
+        let mut remaining = timeout_us;
+        while remaining != 0 {
+            if (self.core_read32(offset) & bit != 0) == set {
+                return true;
+            }
+            scarlet::time::udelay(10);
+            remaining = remaining.saturating_sub(10);
+        }
+        false
+    }
+
+    fn pipehandler_lock(&self) -> Result<(), &'static str> {
+        if self.ph_read32(PIPEHANDLER_LOCK_REQ) & PIPEHANDLER_LOCK_EN != 0 {
+            early_println!("[apple-atcphy] warning: pipehandler already locked");
+            return Ok(());
+        }
+
+        self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        let mut remaining = PIPEHANDLER_LOCK_ACK_TIMEOUT_US;
+        while remaining != 0 {
+            if self.ph_read32(PIPEHANDLER_LOCK_ACK) & PIPEHANDLER_LOCK_EN != 0 {
+                return Ok(());
+            }
+            scarlet::time::udelay(10);
+            remaining = remaining.saturating_sub(10);
+        }
+
+        self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        early_println!("[apple-atcphy] warning: pipehandler lock not acknowledged");
+        Err("apple-atcphy: pipehandler lock not acknowledged")
+    }
+
+    fn pipehandler_unlock(&self) -> Result<(), &'static str> {
+        self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        let mut remaining = PIPEHANDLER_LOCK_ACK_TIMEOUT_US;
+        while remaining != 0 {
+            if self.ph_read32(PIPEHANDLER_LOCK_ACK) & PIPEHANDLER_LOCK_EN == 0 {
+                return Ok(());
+            }
+            scarlet::time::udelay(10);
+            remaining = remaining.saturating_sub(10);
+        }
+
+        early_println!("[apple-atcphy] warning: pipehandler unlock not acknowledged");
+        Err("apple-atcphy: pipehandler unlock not acknowledged")
+    }
+
+    fn pipehandler_check(&self) -> Result<(), &'static str> {
+        if self.ph_read32(PIPEHANDLER_LOCK_ACK) & PIPEHANDLER_LOCK_EN == 0 {
+            return Ok(());
+        }
+
+        early_println!("[apple-atcphy] warning: pipehandler is locked; releasing it");
+        self.pipehandler_unlock()
     }
 
     fn usb2_power_on(&self) {
@@ -388,17 +458,17 @@ impl AppleAtcPhy {
             | USB2PHY_SIG_VBUSVLDEXT_FORCE_EN;
         let host = self.usb2phy_read32(USB2PHY_SIG) & USB2PHY_SIG_HOST;
         self.usb2phy_write32(USB2PHY_SIG, sig | host);
-        self.small_delay();
+        scarlet::time::udelay(10);
 
         self.usb2phy_clear32(USB2PHY_CTL, USB2PHY_CTL_SIDDQ);
-        self.small_delay();
+        scarlet::time::udelay(10);
 
         self.usb2phy_clear32(USB2PHY_CTL, USB2PHY_CTL_RESET);
-        self.small_delay();
+        scarlet::time::udelay(10);
         self.usb2phy_clear32(USB2PHY_CTL, USB2PHY_CTL_PORT_RESET);
-        self.small_delay();
+        scarlet::time::udelay(10);
         self.usb2phy_set32(USB2PHY_CTL, USB2PHY_CTL_APB_RESET_N);
-        self.small_delay();
+        scarlet::time::udelay(10);
 
         self.usb2phy_clear32(USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_APBCLK_GATE_OFF);
         self.usb2phy_clear32(USB2PHY_MISCTUNE, USB2PHY_MISCTUNE_REFCLK_GATE_OFF);
@@ -455,6 +525,34 @@ impl AppleAtcPhy {
         Ok(())
     }
 
+    fn core_power_off(&self) -> Result<(), &'static str> {
+        self.core_clear32(ATCPHY_POWER_CTRL, ATCPHY_POWER_PHY_RESET_N);
+        self.core_set32(ATCPHY_POWER_CTRL, ATCPHY_POWER_CLAMP_EN);
+        self.core_clear32(ATCPHY_MISC, ATCPHY_MISC_RESET_N | ATCPHY_MISC_LANE_SWAP);
+        self.core_clear32(ATCPHY_POWER_CTRL, ATCPHY_POWER_APB_RESET_N);
+
+        self.core_clear32(ATCPHY_POWER_CTRL, ATCPHY_POWER_SLEEP_BIG);
+        if !self.poll_core_bit(ATCPHY_POWER_STAT, ATCPHY_POWER_SLEEP_BIG, false, 1_000) {
+            return Err("apple-atcphy: failed to sleep big power domain");
+        }
+
+        self.core_clear32(ATCPHY_POWER_CTRL, ATCPHY_POWER_SLEEP_SMALL);
+        if !self.poll_core_bit(ATCPHY_POWER_STAT, ATCPHY_POWER_SLEEP_SMALL, false, 1_000) {
+            return Err("apple-atcphy: failed to sleep small power domain");
+        }
+        Ok(())
+    }
+
+    fn prepare_bootloader_state(&mut self) -> Result<(), &'static str> {
+        self.dwc3_reset_assert_raw();
+        self.usb2_power_off();
+        self.core_power_off()?;
+        self.setup_pipehandler();
+        self.pipehandler_up = false;
+        early_println!("[apple-atcphy] bootloader state cleared; PIPE set to dummy");
+        Ok(())
+    }
+
     fn configure_crossbar(&self) {
         let (lane0_mode, lane1_mode, protocol, set_swap) = if self.swap_lanes {
             (
@@ -493,20 +591,83 @@ impl AppleAtcPhy {
         self.core_write32(ACIOPHY_LANE_MODE, lane_mode);
     }
 
-    fn configure_pipehandler_usb3(&mut self, host: bool) {
+    fn configure_pipehandler_usb3(&mut self, host: bool) -> Result<(), &'static str> {
         if self.pipehandler_up {
-            return;
+            return Ok(());
         }
 
-        self.ph_clear32(
-            PIPEHANDLER_OVERRIDE_VALUES,
-            PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1,
-        );
+        self.pipehandler_check()?;
 
         if host {
+            self.ph_clear32(
+                PIPEHANDLER_OVERRIDE_VALUES,
+                PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1,
+            );
             self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
             self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
-            self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+
+            self.pipehandler_lock()?;
+
+            self.core_set32(
+                ACIOPHY_TOP_BIST_PHY_CFG0,
+                ACIOPHY_TOP_BIST_PHY_CFG0_LN0_RESET_N,
+            );
+            self.core_set32(
+                ACIOPHY_TOP_BIST_OV_CFG,
+                ACIOPHY_TOP_BIST_OV_CFG_LN0_RESET_N_OV,
+            );
+            if !self.poll_core_bit(
+                ACIOPHY_TOP_PHY_STAT,
+                ACIOPHY_TOP_PHY_STAT_LN0_BUSY,
+                false,
+                ACIOPHY_STATUS_TIMEOUT_US,
+            ) {
+                early_println!("[apple-atcphy] warning: lane 0 remained busy before BIST");
+            }
+
+            self.core_set32(
+                ACIOPHY_TOP_BIST_READ_CTRL,
+                ACIOPHY_TOP_BIST_READ_CTRL_LN0_PHY_STATUS_RE,
+            );
+            self.core_clear32(
+                ACIOPHY_TOP_BIST_READ_CTRL,
+                ACIOPHY_TOP_BIST_READ_CTRL_LN0_PHY_STATUS_RE,
+            );
+            self.core_mask32(
+                ACIOPHY_TOP_BIST_PHY_CFG1,
+                ACIOPHY_TOP_BIST_PHY_CFG1_LN0_PWR_DOWN_MASK,
+                ACIOPHY_TOP_BIST_PHY_CFG1_LN0_PWR_DOWN_ON,
+            );
+            self.core_set32(
+                ACIOPHY_TOP_BIST_OV_CFG,
+                ACIOPHY_TOP_BIST_OV_CFG_LN0_PWR_DOWN_OV,
+            );
+            self.core_set32(
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1,
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1_CLK_EN,
+            );
+            self.core_set32(
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1,
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1_BIST_EN,
+            );
+            self.core_write32(ACIOPHY_TOP_BIST_CIOPHY_CFG1, 0);
+
+            if !self.poll_core_bit(
+                ACIOPHY_TOP_PHY_STAT,
+                ACIOPHY_TOP_PHY_STAT_LN0_READY,
+                true,
+                ACIOPHY_STATUS_TIMEOUT_US,
+            ) {
+                early_println!("[apple-atcphy] warning: lane 0 did not become ready during BIST");
+            }
+            if !self.poll_core_bit(
+                ACIOPHY_TOP_PHY_STAT,
+                ACIOPHY_TOP_PHY_STAT_LN0_BUSY,
+                false,
+                ACIOPHY_STATUS_TIMEOUT_US,
+            ) {
+                early_println!("[apple-atcphy] warning: lane 0 remained busy after BIST");
+            }
 
             let nonselected = self.ph_read32(PIPEHANDLER_NONSELECTED_OVERRIDE);
             self.ph_write32(
@@ -514,38 +675,61 @@ impl AppleAtcPhy {
                 (nonselected & !PIPEHANDLER_NATIVE_POWER_DOWN_MASK) | 3,
             );
             self.ph_clear32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
+
+            self.core_write32(ACIOPHY_TOP_BIST_OV_CFG, 0);
+            self.core_set32(
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1,
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1_CLK_EN,
+            );
+            self.core_set32(
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1,
+                ACIOPHY_TOP_BIST_CIOPHY_CFG1_BIST_EN,
+            );
         }
 
-        let mut mux = self.ph_read32(PIPEHANDLER_MUX_CTRL);
-        mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_OFF << 3);
-        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
-
-        mux = (mux & !PIPEHANDLER_MUX_CTRL_DATA_MASK) | PIPEHANDLER_MUX_CTRL_DATA_USB3;
-        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
-
-        mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_USB3 << 3);
-        self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_OFF << 3,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_DATA_MASK,
+            PIPEHANDLER_MUX_CTRL_DATA_USB3,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_USB3 << 3,
+        );
+        scarlet::time::udelay(10);
 
         self.ph_clear32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
         self.ph_clear32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
 
         if host {
-            self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+            if self.pipehandler_unlock().is_err() {
+                early_println!("[apple-atcphy] warning: failed to unlock USB3 pipehandler");
+            }
         }
         self.pipehandler_up = true;
+        early_println!("[apple-atcphy] USB3 pipehandler configured (host={})", host);
+        Ok(())
     }
 
-    fn configure_pipehandler_dummy(&mut self) {
+    fn configure_pipehandler_dummy(&mut self) -> Result<(), &'static str> {
+        self.pipehandler_check()?;
         self.ph_clear32(
             PIPEHANDLER_OVERRIDE_VALUES,
             PIPEHANDLER_OVERRIDE_VAL_RXDETECT0 | PIPEHANDLER_OVERRIDE_VAL_RXDETECT1,
         );
         self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXVALID);
         self.ph_set32(PIPEHANDLER_OVERRIDE, PIPEHANDLER_OVERRIDE_RXDETECT);
-        self.ph_set32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        if self.pipehandler_lock().is_err() {
+            early_println!("[apple-atcphy] warning: failed to lock dummy pipehandler");
+        }
 
         self.ph_mask32(
             PIPEHANDLER_MUX_CTRL,
@@ -566,7 +750,9 @@ impl AppleAtcPhy {
         );
         scarlet::time::udelay(10);
 
-        self.ph_clear32(PIPEHANDLER_LOCK_REQ, PIPEHANDLER_LOCK_EN);
+        if self.pipehandler_unlock().is_err() {
+            early_println!("[apple-atcphy] warning: failed to unlock dummy pipehandler");
+        }
         self.ph_mask32(
             PIPEHANDLER_NONSELECTED_OVERRIDE,
             PIPEHANDLER_NATIVE_POWER_DOWN_MASK,
@@ -574,15 +760,43 @@ impl AppleAtcPhy {
         );
         self.ph_set32(PIPEHANDLER_NONSELECTED_OVERRIDE, PIPEHANDLER_NATIVE_RESET);
         self.pipehandler_up = false;
+        Ok(())
+    }
+
+    fn setup_pipehandler(&self) {
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_OFF << 3,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_DATA_MASK,
+            PIPEHANDLER_MUX_CTRL_DATA_DUMMY,
+        );
+        scarlet::time::udelay(10);
+        self.ph_mask32(
+            PIPEHANDLER_MUX_CTRL,
+            PIPEHANDLER_MUX_CTRL_CLK_MASK,
+            PIPEHANDLER_MUX_CTRL_CLK_DUMMY << 3,
+        );
+        scarlet::time::udelay(10);
+    }
+
+    fn dwc3_reset_assert_raw(&self) {
+        self.ph_clear32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
+        self.ph_set32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
     }
 
     fn dwc3_reset_assert(&mut self) {
         early_println!("[apple-atcphy] dwc3 reset assert");
-        self.ph_clear32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_RESET_N);
-        self.ph_set32(PIPEHANDLER_AON_GEN, PIPEHANDLER_AON_GEN_DWC3_FORCE_CLAMP_EN);
+        self.dwc3_reset_assert_raw();
 
         if self.pipehandler_up {
-            self.configure_pipehandler_dummy();
+            if self.configure_pipehandler_dummy().is_err() {
+                early_println!("[apple-atcphy] warning: failed to switch PIPE to dummy");
+            }
         }
         self.usb2_power_off();
     }
@@ -609,15 +823,15 @@ impl AppleAtcPhy {
 
         mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_OFF << 3);
         self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
+        scarlet::time::udelay(10);
 
         mux = (mux & !PIPEHANDLER_MUX_CTRL_DATA_MASK) | PIPEHANDLER_MUX_CTRL_DATA_DP;
         self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
+        scarlet::time::udelay(10);
 
         mux = (mux & !PIPEHANDLER_MUX_CTRL_CLK_MASK) | (PIPEHANDLER_MUX_CTRL_CLK_DP << 3);
         self.ph_write32(PIPEHANDLER_MUX_CTRL, mux);
-        self.small_delay();
+        scarlet::time::udelay(10);
     }
 
     fn apply_mode_tunables(&self, mode: AtcPhyMode, swap_lanes: bool) {
@@ -741,14 +955,14 @@ impl AppleAtcPhy {
 
         match mode {
             AtcPhyMode::Usb3Dp => {
-                self.configure_pipehandler_usb3(true);
+                self.configure_pipehandler_usb3(true)?;
                 self.configure_pipehandler_dp(self.swap_lanes);
             }
             AtcPhyMode::DisplayPort => {
                 self.configure_pipehandler_dp(self.swap_lanes);
             }
             _ => {
-                self.configure_pipehandler_usb3(true);
+                self.configure_pipehandler_usb3(true)?;
             }
         }
 
@@ -905,7 +1119,21 @@ impl Phy for AppleAtcPhyLane {
     }
 
     fn power_off(&self) -> Result<(), PhyError> {
-        Ok(())
+        let mut phy = self.phy.lock();
+        match self.lane {
+            PHY_TYPE_USB2 => {
+                phy.usb2_power_off();
+                Ok(())
+            }
+            PHY_TYPE_USB3 => {
+                if phy.configure_pipehandler_dummy().is_err() {
+                    early_println!("[apple-atcphy] warning: failed to switch PIPE to dummy");
+                }
+                phy.pipehandler_up = false;
+                phy.core_power_off().map_err(|_| PhyError::PowerOffFailed)
+            }
+            _ => Err(PhyError::PowerOffFailed),
+        }
     }
 
     fn reset(&self) -> Result<(), PhyError> {
@@ -929,10 +1157,16 @@ impl Phy for AppleAtcPhyLane {
                 } else if self.lane == PHY_TYPE_USB3 {
                     match mode {
                         PhyMode::UsbHost | PhyMode::UsbOtg | PhyMode::Other(0) => {
-                            self.phy.lock().configure_pipehandler_usb3(true);
+                            self.phy
+                                .lock()
+                                .configure_pipehandler_usb3(true)
+                                .map_err(|_| PhyError::HardwareError)?;
                         }
                         PhyMode::UsbDevice => {
-                            self.phy.lock().configure_pipehandler_usb3(false);
+                            self.phy
+                                .lock()
+                                .configure_pipehandler_usb3(false)
+                                .map_err(|_| PhyError::HardwareError)?;
                         }
                         _ => {}
                     }
@@ -1121,7 +1355,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         );
     }
 
-    phy.init()?;
+    phy.prepare_bootloader_state()?;
 
     let phandle = device
         .property("phandle")

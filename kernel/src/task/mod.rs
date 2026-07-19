@@ -14,7 +14,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{cell::UnsafeCell, sync::atomic};
+use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic};
 use spin::mutex::SpinMutex;
 use spin::{Mutex, RwLock};
 
@@ -40,8 +40,9 @@ use crate::{
         handle::HandleTable,
     },
     sched::scheduler::{
-        cleanup_zombie, current_task, finalize_zombie, get_all_task_ids, get_task_by_id,
-        remove_from_ready_queues, schedule, setup_task_execution, unmark_blocked,
+        cleanup_zombie, complete_non_current_task_exit, current_task, finalize_zombie,
+        get_all_task_ids, get_task_by_id, remove_from_ready_queues, schedule, setup_task_execution,
+        unmark_blocked,
     },
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
@@ -60,6 +61,9 @@ use spin::Once;
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
+// Copy private page allocations eagerly to isolate fork COW ownership and
+// parent page-table invalidation from the Apple SMP hang.
+const DIAGNOSTIC_DISABLE_FORK_COW: bool = false;
 /// Scheduler utilization scale used for task placement hints.
 pub const SCHED_UTIL_SCALE: u32 = 1024;
 const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
@@ -152,22 +156,22 @@ pub struct CpuUsageInfo {
 }
 
 /// Global registry of task-specific wakers for waitpid
-static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Note: task ID counters live in `TaskPool` for better ID management,
-/// including recycling of freed task IDs.
+/// with stable, never-reused global task IDs.
 ///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Initialize the waitpid wakers registry
-fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
     Mutex::new(BTreeMap::new())
 }
 
 /// Initialize the parent waitpid waker registry
-fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
     Mutex::new(BTreeMap::new())
 }
 
@@ -183,22 +187,15 @@ fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 ///
 /// # Returns
 ///
-/// A reference to the waker for the specified task
-pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
+/// An owned reference to the waker for the specified task
+pub fn get_waitpid_waker(task_id: usize) -> Arc<Waker> {
     let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
-    if !wakers.contains_key(&task_id) {
-        let waker_name = alloc::format!("task_{}", task_id);
-        // We need to create a static string for the waker name
-        let static_name = Box::leak(waker_name.into_boxed_str());
-        wakers.insert(task_id, Waker::new_interruptible(static_name));
-    }
-    // This is safe because we know the waker exists and won't be removed
-    // until the task is cleaned up
-    unsafe {
-        let waker_ptr = wakers.get(&task_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+    Arc::clone(
+        wakers
+            .entry(task_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-task"))),
+    )
 }
 
 // pub fn get_select_waker(...) was removed; use object-level Selectable::wait_until_ready
@@ -215,25 +212,15 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
 ///
 /// # Returns
 ///
-/// A reference to the parent waker
-pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
+/// An owned reference to the parent waker
+pub fn get_parent_waitpid_waker(parent_id: usize) -> Arc<Waker> {
     let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
-
-    // Create a new waker if it doesn't exist
-    if !wakers.contains_key(&parent_id) {
-        let waker_name = alloc::format!("parent_waker_{}", parent_id);
-        // We need to leak the string to make it 'static
-        let static_name = alloc::boxed::Box::leak(waker_name.into_boxed_str());
-        wakers.insert(parent_id, Waker::new_interruptible(static_name));
-    }
-
-    // Return a reference to the waker
-    // This is safe because the BTreeMap is never dropped and the Waker is never moved
-    unsafe {
-        let waker_ptr = wakers.get(&parent_id).unwrap() as *const Waker;
-        &*waker_ptr
-    }
+    Arc::clone(
+        wakers
+            .entry(parent_id)
+            .or_insert_with(|| Arc::new(Waker::new_interruptible("waitpid-parent"))),
+    )
 }
 
 /// Wake up any processes waiting for a specific task
@@ -245,11 +232,7 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
 ///
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&task_id) {
-        waker.wake_all();
-    }
+    get_waitpid_waker(task_id).wake_all();
 }
 
 /// Wake up a parent process waiting for any child (waitpid(-1))
@@ -260,11 +243,7 @@ pub fn wake_task_waiters(task_id: usize) {
 ///
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
-    let wakers = wakers_mutex.lock();
-    if let Some(waker) = wakers.get(&parent_id) {
-        waker.wake_all();
-    }
+    get_parent_waitpid_waker(parent_id).wake_all();
 }
 
 /// Clean up the waker for a specific task
@@ -421,6 +400,27 @@ pub struct AbiZone {
     pub abi: Box<dyn AbiModule + Send + Sync>,
 }
 
+/// Exit work requested by an ABI syscall while its ABI state is mutably borrowed.
+///
+/// The request stays owned by the task until the syscall dispatcher releases the
+/// ABI borrow, at which point task exit may safely invoke ABI exit hooks again.
+#[derive(Debug)]
+enum DeferredExitRequest {
+    Exit {
+        status: i32,
+    },
+    ThreadExitCleanup {
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    },
+    ExitGroup {
+        status: i32,
+    },
+}
+
 /// A cell type for task-local data that is only accessed by the hart currently
 /// executing the task.
 ///
@@ -488,6 +488,11 @@ pub struct Task {
     pub task_type: TaskType,
     pub entry: usize,
     parent_id: AtomicUsize,
+    /// Thread group of the task that most recently adopted this task.
+    ///
+    /// This survives direct-parent removal so zombie finalization can wake a
+    /// waitpid sibling in the same process.
+    parent_thread_group_id: AtomicUsize,
     /// Thread Group ID (TGID) - identifies tasks in the same thread group
     thread_group_id: usize,
     /// Legacy task group ID mirror.
@@ -550,6 +555,8 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Published before an exit snapshots `children`.
+    exiting: AtomicBool,
     /// Set when a process-control stop should be observable by waitpid.
     process_control_stopped: AtomicBool,
     /// Set after the current process-control stop has been reported once.
@@ -600,6 +607,10 @@ pub struct Task {
     pub default_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
     /// ABI zones map (task-local: only accessed by the executing hart)
     pub abi_zones: TaskLocal<BTreeMap<usize, AbiZone>>,
+    /// Exit request deferred until the active ABI mutable borrow is released.
+    deferred_exit_request: Mutex<Option<DeferredExitRequest>>,
+    /// Linux CLONE_CHILD_CLEARTID state kept outside task-local ABI storage.
+    clear_child_tid: Mutex<Option<usize>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
     /// Waker for sleep operations (already thread-safe internally)
@@ -620,12 +631,71 @@ pub struct Task {
     pub events_enabled: Mutex<bool>,
 }
 
+/// A non-owning reference to the task executing on the current CPU.
+///
+/// Unlike an [`Arc<Task>`], this guard does not increase the task's strong
+/// count. It is therefore safe to leave on a suspended kernel stack: when an
+/// exiting task never resumes that stack, the guard cannot keep the task or its
+/// kernel stack window alive.
+///
+/// The scheduler constructs this guard only for the CPU executing the task and
+/// only after checking that `Task::running_cpu` belongs to that CPU. A task
+/// with a running-CPU owner cannot be removed from `TaskPool`; removal requires
+/// both `TaskState::Terminated` and `running_cpu == NO_CPU`. Consequently the
+/// pool's registered owner keeps the pointed-to `Task` alive while this CPU is
+/// executing it. The guard is deliberately neither `Clone` nor `Copy`, and is
+/// not `Send` or `Sync`, so it cannot be promoted into a general-purpose task
+/// handle. Use `get_task_by_id()` for an owned handle to an arbitrary task.
+#[must_use = "current-task guards must be kept while accessing the current task"]
+pub struct CurrentTaskRef {
+    task: NonNull<Task>,
+    _not_send_or_sync: PhantomData<*mut ()>,
+}
+
+impl CurrentTaskRef {
+    /// Create a current-task guard after the scheduler has checked local CPU
+    /// ownership.
+    pub(crate) fn from_running_task(task: &Task, cpu_id: usize) -> Option<Self> {
+        if get_cpu().get_cpuid() != cpu_id || task.running_cpu.load(Ordering::SeqCst) != cpu_id {
+            return None;
+        }
+
+        Some(Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_mock_task(task: &Task) -> Self {
+        Self {
+            task: NonNull::from(task),
+            _not_send_or_sync: PhantomData,
+        }
+    }
+}
+
+impl Deref for CurrentTaskRef {
+    type Target = Task;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The scheduler creates this guard only for the task owned by
+        // the executing CPU. Its `running_cpu` token prevents TaskPool removal,
+        // which additionally requires `Terminated && running_cpu == NO_CPU`.
+        // Test guards point into MOCK_CURRENT_TASK, which keeps an owning Arc
+        // alive for the guard's use. The raw pointer is private and the guard
+        // cannot be cloned or sent to another CPU.
+        unsafe { self.task.as_ref() }
+    }
+}
+
 pub enum CloneFlagsDef {
-    Vm = 0b00000001,      // Clone the VM
-    Fs = 0b00000010,      // Clone the filesystem
-    Files = 0b00000100,   // Clone the file descriptors
-    Thread = 0b00001000,  // Join thread group (share TGID) - Linux CLONE_THREAD semantics
-    SetTls = 0b000010000, // Set TLS pointer for cloned task
+    Vm = 0b00000001,             // Clone the VM
+    Fs = 0b00000010,             // Clone the filesystem
+    Files = 0b00000100,          // Clone the file descriptors
+    Thread = 0b00001000,         // Join thread group (share TGID) - Linux CLONE_THREAD semantics
+    SetTls = 0b000010000,        // Set TLS pointer for cloned task
+    ClearChildTid = 0b000100000, // Clear and futex-wake child TID on exit
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -709,6 +779,7 @@ impl Task {
             task_type,
             entry: 0,
             parent_id: AtomicUsize::new(0),
+            parent_thread_group_id: AtomicUsize::new(0),
             thread_group_id: 0,
             task_group_id: AtomicUsize::new(0),
             session_id: AtomicUsize::new(0),
@@ -738,6 +809,7 @@ impl Task {
             data_size: AtomicUsize::new(0),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            exiting: AtomicBool::new(false),
             process_control_stopped: AtomicBool::new(false),
             process_control_stop_reported: AtomicBool::new(false),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
@@ -757,6 +829,8 @@ impl Task {
             vm_manager: VirtualMemoryManager::new(),
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
+            deferred_exit_request: Mutex::new(None),
+            clear_child_tid: Mutex::new(None),
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             kernel_stack_window_base: Mutex::new(None),
@@ -1249,12 +1323,15 @@ impl Task {
     /// # Arguments
     /// * `ns` - New namespace for the task
     pub fn set_namespace(&self, ns: Arc<namespace::TaskNamespace>) {
-        *self.namespace.write() = ns;
-        // Allocate a new namespace-local ID (and register translation mapping)
-        self.namespace_id.store(
-            self.namespace.write().allocate_task_id_for(self.id),
-            atomic::Ordering::SeqCst,
-        );
+        let previous_namespace = {
+            let mut namespace = self.namespace.write();
+            core::mem::replace(&mut *namespace, ns.clone())
+        };
+        if self.id != 0 {
+            previous_namespace.unregister_mapping_for_global(self.id);
+            self.namespace_id
+                .store(ns.allocate_task_id_for(self.id), atomic::Ordering::SeqCst);
+        }
     }
 
     /// Get the Thread Group ID (TGID)
@@ -1452,74 +1529,19 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     pub fn free_pages(&self, vaddr: usize, num_of_pages: usize) {
-        let page = vaddr / PAGE_SIZE;
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
-                Some(mmap) => {
-                    if p == 0 && mmap.vmarea.start < vaddr {
-                        /* Re add the first part of the memory map */
-                        let size = vaddr - mmap.vmarea.start;
-                        let paddr = mmap.pmarea.start;
-                        let mmap1 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: mmap.vmarea.start,
-                                end: vaddr - 1,
-                            },
-                            vm_start: mmap.vm_start,
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            memory_attribute: mmap.memory_attribute,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap1)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
-                    }
-                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
-                        /* Re add the second part of the memory map */
-                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
-                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
-                        let mmap2 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr + PAGE_SIZE,
-                                end: mmap.vmarea.end,
-                            },
-                            vm_start: mmap.vm_start,
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            memory_attribute: mmap.memory_attribute,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap2)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
-                    }
-                }
-                None => {}
-            }
+        let Some(length) = num_of_pages.checked_mul(PAGE_SIZE) else {
+            return;
+        };
+        if length == 0 || vaddr.checked_add(length).is_none() {
+            return;
         }
-        /* Unmap pages */
-        let asid = self.vm_manager.get_asid();
-        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
-        if num_of_pages > 0 {
-            let vaddr_start = page * PAGE_SIZE;
-            let vaddr_end = vaddr_start + num_of_pages * PAGE_SIZE - 1;
-            root_pagetable.unmap_range(asid, vaddr_start, vaddr_end);
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
         }
     }
 
@@ -1698,14 +1720,6 @@ impl Task {
         }
     }
 
-    /// Set the parent task
-    ///
-    /// # Arguments
-    /// * `parent_id` - The ID of the parent task
-    pub fn set_parent_id(&self, parent_id: usize) {
-        self.parent_id.store(parent_id, Ordering::SeqCst);
-    }
-
     /// Clear the parent task relationship.
     ///
     /// # Returns
@@ -1713,15 +1727,68 @@ impl Task {
     /// This function does not return a value.
     pub fn clear_parent_id(&self) {
         self.parent_id.store(0, Ordering::SeqCst);
+        self.parent_thread_group_id.store(0, Ordering::SeqCst);
     }
 
-    fn orphan_reaper(&self) -> Option<&'static Task> {
+    /// Return the thread group which owns this task's parent relationship.
+    ///
+    /// # Returns
+    ///
+    /// The parent thread-group ID, or `None` when this task has no parent.
+    pub(crate) fn get_parent_thread_group_id(&self) -> Option<usize> {
+        match self.parent_thread_group_id.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    fn begin_exit(&self) {
+        let _children = self.children.write();
+        self.exiting.store(true, Ordering::Release);
+    }
+
+    fn try_adopt_child(&self, child: &Task, expected_parent_id: Option<usize>) -> bool {
+        let mut children = self.children.write();
+        if self.exiting.load(Ordering::Acquire) || child.get_parent_id() != expected_parent_id {
+            return false;
+        }
+
+        if !children.contains(&child.id) {
+            children.push(child.id);
+        }
+        child
+            .parent_thread_group_id
+            .store(self.thread_group_id, Ordering::SeqCst);
+        child.parent_id.store(self.id, Ordering::SeqCst);
+        true
+    }
+
+    /// Adopt a registered child or leave it parentless if no stable reaper exists.
+    ///
+    /// The preferred parent is checked under its child-list lock. If it has
+    /// begun exit, init is tried under the same protocol instead.
+    pub(crate) fn adopt_registered_child(&self, child: &Task) -> bool {
+        if self.try_adopt_child(child, None) {
+            return true;
+        }
+
+        if self.id != INIT_TASK_ID
+            && let Some(init) = get_task_by_id(INIT_TASK_ID)
+        {
+            return init.try_adopt_child(child, None);
+        }
+
+        false
+    }
+
+    fn orphan_reaper(&self) -> Option<Arc<Task>> {
         if self.thread_group_id != self.id
             && let Some(leader) = get_task_by_id(self.thread_group_id)
             && !matches!(
                 leader.get_state(),
                 TaskState::Zombie | TaskState::Terminated
             )
+            && !leader.exiting.load(Ordering::Acquire)
         {
             return Some(leader);
         }
@@ -1736,12 +1803,8 @@ impl Task {
     fn reparent_children(&self) {
         let child_ids = {
             let mut children = self.children.write();
-            if children.is_empty() {
-                return;
-            }
-            let child_ids = children.clone();
-            children.clear();
-            child_ids
+            self.exiting.store(true, Ordering::Release);
+            core::mem::take(&mut *children)
         };
 
         let reaper = self.orphan_reaper();
@@ -1754,30 +1817,35 @@ impl Task {
                 continue;
             }
 
-            if let Some(reaper) = reaper {
-                child.set_parent_id(reaper.get_id());
-                reaper.add_child(child_id);
+            let mut new_parent_id = None;
+            if let Some(reaper) = &reaper
+                && reaper.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(reaper.get_id());
+            }
+
+            if new_parent_id.is_none()
+                && self.id != INIT_TASK_ID
+                && reaper
+                    .as_ref()
+                    .is_none_or(|reaper| reaper.id != INIT_TASK_ID)
+                && let Some(init) = get_task_by_id(INIT_TASK_ID)
+                && init.try_adopt_child(&child, Some(self.id))
+            {
+                new_parent_id = Some(INIT_TASK_ID);
+            }
+
+            if let Some(reaper_id) = new_parent_id {
                 if child.get_state() == TaskState::Zombie {
-                    finalize_zombie(child_id, Some(reaper.get_id()));
+                    finalize_zombie(child_id, Some(reaper_id));
                 }
-            } else {
+            } else if child.get_parent_id() == Some(self.id) {
                 child.clear_parent_id();
                 if child.get_state() == TaskState::Zombie {
                     child.set_state(TaskState::Terminated);
                     cleanup_zombie(child_id);
                 }
             }
-        }
-    }
-
-    /// Add a child task
-    ///
-    /// # Arguments
-    /// * `child_id` - The ID of the child task
-    pub fn add_child(&self, child_id: usize) {
-        let mut children = self.children.write();
-        if !children.contains(&child_id) {
-            children.push(child_id);
         }
     }
 
@@ -1824,6 +1892,132 @@ impl Task {
             None
         } else {
             Some(status)
+        }
+    }
+
+    /// Request exit after the current ABI mutable borrow has been released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this task.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::Exit { status });
+    }
+
+    /// Request thread exit with user stack and TLS mapping cleanup after the ABI borrow.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to report for this thread.
+    /// * `stack_mapping_base` - Base address of the thread stack mapping.
+    /// * `stack_mapping_len` - Length of the thread stack mapping in bytes.
+    /// * `tls_mapping_base` - Base address of the thread TLS mapping.
+    /// * `tls_mapping_len` - Length of the thread TLS mapping in bytes.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher releases the
+    /// active ABI borrow before performing the requested cleanup and exit.
+    pub(crate) fn request_deferred_thread_exit_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ThreadExitCleanup {
+            status,
+            stack_mapping_base,
+            stack_mapping_len,
+            tls_mapping_base,
+            tls_mapping_len,
+        });
+    }
+
+    /// Request thread-group exit after the current ABI mutable borrow is released.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Exit status to apply to the thread group.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. The syscall dispatcher consumes the
+    /// request after the ABI syscall handler returns.
+    pub(crate) fn request_deferred_exit_group(&self, status: i32) {
+        *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ExitGroup { status });
+    }
+
+    /// Record the Linux clear-child-tid address for one exit cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - The optional user address to clear and wake during exit.
+    pub(crate) fn set_linux_clear_child_tid(&self, ptr: Option<usize>) {
+        *self.clear_child_tid.lock() = ptr;
+    }
+
+    fn take_linux_clear_child_tid(&self) -> Option<usize> {
+        self.clear_child_tid.lock().take()
+    }
+
+    /// Perform Linux clear-child-tid cleanup without touching task-local ABI state.
+    ///
+    /// The address is consumed before access, so both a current-task ABI hook
+    /// and a remote exit-group path can invoke this safely without double wakeups.
+    pub(crate) fn clear_linux_child_tid_on_exit(&self) {
+        let Some(ptr) = self.take_linux_clear_child_tid() else {
+            return;
+        };
+        let Some(paddr) = self.vm_manager.translate_to_kva(ptr) else {
+            return;
+        };
+
+        // SAFETY: `translate_to_kva` validated this user address in this task's
+        // address space; exit owns the one-time clear-child-tid transition.
+        unsafe {
+            core::ptr::write_volatile(paddr as *mut i32, 0);
+        }
+        let _ = crate::abi::linux::generic::futex::wake_address(ptr, 1);
+    }
+
+    fn take_deferred_exit_request(&self) -> Option<DeferredExitRequest> {
+        self.deferred_exit_request.lock().take()
+    }
+
+    /// Perform one deferred ABI exit request after its ABI mutable borrow has ended.
+    ///
+    /// # Returns
+    ///
+    /// This method does not return a value. It does nothing when no deferred exit
+    /// request is pending.
+    pub(crate) fn process_deferred_exit_request(&self) {
+        let Some(request) = self.take_deferred_exit_request() else {
+            return;
+        };
+
+        match request {
+            DeferredExitRequest::Exit { status } => self.exit(status),
+            DeferredExitRequest::ThreadExitCleanup {
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            } => self.exit_with_thread_cleanup(
+                status,
+                stack_mapping_base,
+                stack_mapping_len,
+                tls_mapping_base,
+                tls_mapping_len,
+            ),
+            DeferredExitRequest::ExitGroup { status } => self.exit_group(status),
         }
     }
 
@@ -1903,6 +2097,11 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&self, flags: CloneFlags) -> Result<Task, &'static str> {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::CLONE_ENTER,
+            self.registered_id().unwrap_or(0) as u64,
+            flags.get_raw() as u64,
+        );
         // Create a new task in the same namespace as the parent
         let mut child = Task::new_with_namespace(
             self.name.read().clone(),
@@ -1969,14 +2168,9 @@ impl Task {
 
                     // Pre-map trampoline page if applicable
                     if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                        if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
+                        if let Some(mut root_pagetable) = child.vm_manager.get_root_page_table() {
                             root_pagetable
-                                .map_memory_area(
-                                    child.vm_manager.get_asid(),
-                                    shared_mmap,
-                                    true,
-                                    true,
-                                )
+                                .map_memory_area(shared_mmap, true, true)
                                 .map_err(|_| "Failed to map trampoline page")?;
                         }
                     }
@@ -2051,8 +2245,9 @@ impl Task {
                         }
                     }
                 } else if mmap.pmarea.start != 0 {
-                    if let Some(page_alloc) =
-                        self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
+                    if !DIAGNOSTIC_DISABLE_FORK_COW
+                        && let Some(page_alloc) =
+                            self.take_exact_page_allocation(mmap.pmarea.start, num_pages)
                     {
                         let base_page_idx = (mmap.vmarea.start - mmap.vm_start) / PAGE_SIZE;
                         let cow_owner = Arc::new(ForkCowPageOwner::new(base_page_idx, page_alloc));
@@ -2240,14 +2435,13 @@ impl Task {
         if child.get_kernel_stack_window_base().is_none() {
             crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
         }
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_KSTACK_DONE, 0, 0);
         // Cloned task starts as Ready regardless of parent's current state
         child.state.store(TaskState::Ready, Ordering::SeqCst);
 
-        // NOTE: Parent-child relationship will be established AFTER add_task()
-        // when the child has a valid ID. The caller is responsible for calling:
-        //   child.set_parent_id(self.id);
-        //   self.add_child(child.get_id());
-        // after adding the child to the scheduler.
+        // NOTE: Parent-child relationship is established after registration,
+        // once the child has a valid ID. Callers must use
+        // `parent.adopt_registered_child(&child)` before enqueueing it.
 
         // Set TGID: if CLONE_THREAD, share parent's TGID (join thread group)
         // Otherwise, child becomes a new thread group leader (TGID will be set to its own ID)
@@ -2259,6 +2453,7 @@ impl Task {
             child.thread_group_id = 0;
         }
 
+        crate::breadcrumb::drop(crate::breadcrumb::CLONE_RETURN, 0, 0);
         Ok(child)
     }
 
@@ -2271,8 +2466,12 @@ impl Task {
         self.exit_with_cleanup(status, |_| {});
     }
 
-    fn release_all_memory_maps_for_exit(&self) {
-        let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
+    fn unmap_thread_cleanup_range(&self, vaddr: usize, length: usize) {
+        if length == 0 || vaddr % PAGE_SIZE != 0 {
+            return;
+        }
+
+        let removed_maps = self.vm_manager.remove_memory_map_range(vaddr, length);
         for removed_map in &removed_maps {
             if let Some(owner) = &removed_map.owner {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
@@ -2281,10 +2480,70 @@ impl Task {
         }
     }
 
+    fn exit_with_thread_cleanup(
+        &self,
+        status: i32,
+        stack_mapping_base: usize,
+        stack_mapping_len: usize,
+        tls_mapping_base: usize,
+        tls_mapping_len: usize,
+    ) {
+        self.exit_with_cleanup(status, |task| {
+            task.unmap_thread_cleanup_range(stack_mapping_base, stack_mapping_len);
+            task.unmap_thread_cleanup_range(tls_mapping_base, tls_mapping_len);
+        });
+    }
+
+    fn release_all_memory_maps_for_exit(&self) {
+        let map_count = self.vm_manager.memmap_len();
+        self.trace_fork_exit_phase("exit-vm-begin", map_count);
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_BEGIN,
+            self.id as u64,
+            map_count as u64,
+        );
+        let removed_maps: Vec<_> = self.vm_manager.remove_all_memory_maps().collect();
+        self.trace_fork_exit_phase("exit-vm-unmapped", removed_maps.len());
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_VM_UNMAPPED,
+            self.id as u64,
+            removed_maps.len() as u64,
+        );
+        for removed_map in &removed_maps {
+            if let Some(owner) = &removed_map.owner {
+                owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+            }
+            reclaim_private_removed_mapping(self, removed_map);
+        }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_VM_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-vm-done", removed_maps.len());
+    }
+
+    fn trace_fork_exit_phase(&self, phase: &'static str, detail: usize) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(self.id)
+        {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} {} cpu={} detail={}",
+                self.id,
+                phase,
+                get_cpu().get_cpuid(),
+                detail,
+            );
+        }
+    }
+
     pub(crate) fn exit_with_cleanup<F>(&self, status: i32, cleanup: F)
     where
         F: FnOnce(&Task),
     {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::EXIT_ENTER,
+            self.id as u64,
+            status as u32 as u64,
+        );
+        self.trace_fork_exit_phase("exit-enter", status as u32 as usize);
+        self.begin_exit();
         // Close all open handles only if this task is the sole owner of the
         // handle table.  When CLONE_FILES is used (thread::spawn), multiple
         // tasks share the same Arc<HandleTableInner>.  Closing all handles
@@ -2292,26 +2551,36 @@ impl Task {
         if self.handle_table.is_sole_owner() {
             self.handle_table.close_all();
         }
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_HANDLES_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-handles-done", 0);
         self.clear_process_control_stopped();
         // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
         // Use take/restore to avoid aliasing &mut self and &mut field
         self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_ABI_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-abi-done", 0);
         if self.vm_manager.is_sole_owner() {
             self.release_all_memory_maps_for_exit();
         }
         cleanup(self);
         self.reparent_children();
+        crate::breadcrumb::drop(crate::breadcrumb::EXIT_REPARENT_DONE, self.id as u64, 0);
+        self.trace_fork_exit_phase("exit-reparent-done", 0);
 
         match self.get_parent_id() {
             Some(parent_id) => {
                 if get_task_by_id(parent_id).is_none() {
                     // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state.store(TaskState::Terminated, Ordering::SeqCst);
-                    return;
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                    self.trace_fork_exit_phase("exit-state", 6);
+                } else {
+                    /* Set the exit status */
+                    self.set_exit_status(status);
+                    self.state.store(TaskState::Zombie, Ordering::SeqCst);
+                    crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 5);
+                    self.trace_fork_exit_phase("exit-state", 5);
                 }
-                /* Set the exit status */
-                self.set_exit_status(status);
-                self.state.store(TaskState::Zombie, Ordering::SeqCst);
 
                 // TODO: Notify parent via ABI-specific mechanism
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
@@ -2320,25 +2589,47 @@ impl Task {
                 /* If the task has no parent, it is terminated */
                 // crate::println!("Task {}: No parent, terminating", self.id);
                 self.state.store(TaskState::Terminated, Ordering::SeqCst);
+                crate::breadcrumb::drop(crate::breadcrumb::EXIT_STATE_DONE, self.id as u64, 6);
+                self.trace_fork_exit_phase("exit-state", 6);
             }
         }
 
         // Task cleanup completed - ABI module handles event cleanup
 
-        if mytask().is_none() || mytask().unwrap().get_id() != self.id {
-            // Non-current task: finalize zombie state manually
-            // (current task path goes through schedule() -> pick_next -> finalize_zombie)
-            if matches!(self.state.load(Ordering::SeqCst), TaskState::Zombie) {
-                unmark_blocked(self.id);
-                finalize_zombie(self.id, self.get_parent_id());
-            }
+        if !mytask().is_some_and(|task| task.get_id() == self.id) {
+            // A non-current task can publish either Zombie or Terminated when
+            // its parent disappears during exit. Complete both states through
+            // the scheduler's running-CPU ownership protocol.
+            complete_non_current_task_exit(self.id);
             return;
         }
 
         // The scheduler will handle saving the current task state internally
         if let Some(current_task) = mytask() {
+            crate::breadcrumb::drop(crate::breadcrumb::EXIT_SCHEDULE, self.id as u64, 0);
+            self.trace_fork_exit_phase("exit-schedule", 0);
             schedule(current_task.get_trapframe());
         }
+    }
+
+    fn exit_non_current_thread_group_member(&self, status: i32, waitable: bool) {
+        self.begin_exit();
+        self.handle_table.close_all();
+        self.clear_process_control_stopped();
+        self.clear_linux_child_tid_on_exit();
+        self.reparent_children();
+        self.set_exit_status(status);
+
+        let has_parent = self
+            .get_parent_id()
+            .is_some_and(|parent_id| get_task_by_id(parent_id).is_some());
+        let state = if waitable && has_parent {
+            TaskState::Zombie
+        } else {
+            TaskState::Terminated
+        };
+        self.state.store(state, Ordering::SeqCst);
+        complete_non_current_task_exit(self.id);
     }
 
     /// Exit all tasks in the thread group
@@ -2354,9 +2645,11 @@ impl Task {
     /// - The calling task is set to Zombie/Terminated
     /// - Other tasks in the group are forcefully terminated
     pub fn exit_group(&self, status: i32) {
+        self.begin_exit();
         let thread_group_id = self.thread_group_id;
         let my_id = self.id;
         let leader_id = thread_group_id;
+        let is_current = mytask().is_some_and(|task| task.get_id() == my_id);
 
         // The process is exiting, so shared file tables must be closed even
         // while sibling Task objects still hold HandleTable Arc references.
@@ -2377,13 +2670,10 @@ impl Task {
                 if task.get_thread_group_id() == thread_group_id {
                     if task_id == leader_id {
                         leader_finalized = true;
-                        remove_from_ready_queues(task_id);
-                        unmark_blocked(task_id);
-                        task.exit(status);
+                        task.exit_non_current_thread_group_member(status, true);
                         continue;
                     }
 
-                    task.reparent_children();
                     if LOG_EXIT_GROUP_SIBLINGS {
                         crate::println!(
                             "[exit_group] Task {} terminating sibling task {} (thread_group_id={})",
@@ -2392,26 +2682,17 @@ impl Task {
                             thread_group_id
                         );
                     }
-                    // Set state to Terminated directly (bypass normal exit)
-                    // Use unsafe to modify state through immutable reference
-                    // This is safe because we are in a termination context
-                    let task_ptr = task as *const Task as *mut Task;
-                    unsafe {
-                        (*task_ptr)
-                            .state
-                            .store(TaskState::Terminated, Ordering::SeqCst);
-                        (*task_ptr).exit_status.store(status, Ordering::SeqCst);
-                        // Close handles to prevent resource leaks
-                        (*task_ptr).handle_table.close_all();
-                    }
-                    remove_from_ready_queues(task_id);
-                    unmark_blocked(task_id);
+                    task.exit_non_current_thread_group_member(status, false);
                 }
             }
         }
 
         if my_id == leader_id {
-            self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
+            if is_current {
+                self.exit_with_cleanup(status, |task| task.release_all_memory_maps_for_exit());
+            } else {
+                self.exit_non_current_thread_group_member(status, true);
+            }
             return;
         }
 
@@ -2423,9 +2704,12 @@ impl Task {
                 TaskState::Zombie | TaskState::Terminated
             )
         {
-            remove_from_ready_queues(leader_id);
-            unmark_blocked(leader_id);
-            leader.exit(status);
+            leader.exit_non_current_thread_group_member(status, true);
+        }
+
+        if !is_current {
+            self.exit_non_current_thread_group_member(status, false);
+            return;
         }
 
         self.clear_process_control_stopped();
@@ -2437,10 +2721,8 @@ impl Task {
         remove_from_ready_queues(my_id);
         unmark_blocked(my_id);
 
-        if mytask().is_some_and(|task| task.get_id() == self.id) {
-            if let Some(current_task) = mytask() {
-                schedule(current_task.get_trapframe());
-            }
+        if let Some(current_task) = mytask() {
+            schedule(current_task.get_trapframe());
         }
     }
 
@@ -2572,7 +2854,7 @@ impl Task {
         }
 
         // Delegate to ABI module for event processing
-        self.with_default_abi_mut(|abi, _| {
+        let outcome = self.with_default_abi_mut(|abi, _| {
             const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
             let mut processed_count = 0;
 
@@ -2591,12 +2873,12 @@ impl Task {
                         let is_critical = self.is_critical_event(&event);
 
                         // Let ABI handle the event
-                        let outcome = abi.handle_event(event, self.id as u32)?;
+                        let outcome = abi.handle_event(event, self.id)?;
                         match outcome {
                             EventProcessOutcome::Continue | EventProcessOutcome::Pending => {}
                             EventProcessOutcome::UserHandlerArmed
                             | EventProcessOutcome::NeedReschedule
-                            | EventProcessOutcome::Exited => return Ok(outcome),
+                            | EventProcessOutcome::Exited(_) => return Ok(outcome),
                         }
 
                         // Check if events were disabled during handling
@@ -2626,7 +2908,15 @@ impl Task {
             }
 
             Ok(EventProcessOutcome::Continue)
-        })
+        })?;
+
+        if let EventProcessOutcome::Exited(status) = outcome {
+            // `with_default_abi_mut` has returned, so `exit_group` can safely
+            // re-enter ABI exit hooks without recursive mutable borrowing.
+            self.exit_group(status);
+        }
+
+        Ok(outcome)
     }
 
     /// Check if an event is critical and should be processed immediately
@@ -2775,7 +3065,7 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
 }
 
 #[cfg(test)]
-static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+static MOCK_CURRENT_TASK: Mutex<Option<Arc<Task>>> = Mutex::new(None);
 
 #[cfg(test)]
 /// Set a mock current task for testing purposes
@@ -2786,38 +3076,31 @@ static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
 /// # Arguments
 /// * `task` - The task to return from mytask()
 ///
-/// # Safety
-/// The caller must ensure the task pointer remains valid for the duration
-/// of the test and that clear_mock_current_task() is called when done.
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn set_mock_current_task(task: &'static mut Task) {
-    unsafe {
-        MOCK_CURRENT_TASK = Some(task as *mut Task);
-    }
+pub fn set_mock_current_task(task: Arc<Task>) {
+    *MOCK_CURRENT_TASK.lock() = Some(task);
 }
 
 #[cfg(test)]
 /// Clear the mock current task, reverting to normal scheduler behavior
 ///
-/// # Safety
 /// This function is only safe to call in single-threaded test environments.
-pub unsafe fn clear_mock_current_task() {
-    unsafe {
-        MOCK_CURRENT_TASK = None;
-    }
+pub fn clear_mock_current_task() {
+    *MOCK_CURRENT_TASK.lock() = None;
 }
 
-/// Get the current task.
+/// Get a non-owning guard for the current task.
 ///
 /// # Returns
 /// The current task if it exists.
-pub fn mytask() -> Option<&'static Task> {
+pub fn mytask() -> Option<CurrentTaskRef> {
     #[cfg(test)]
     {
-        unsafe {
-            if let Some(task_ptr) = MOCK_CURRENT_TASK {
-                return Some(&*task_ptr);
-            }
+        if let Some(task) = MOCK_CURRENT_TASK.lock().as_ref() {
+            // MOCK_CURRENT_TASK retains the owning Arc for the entire guard
+            // lifetime in tests, matching the scheduler pool ownership used in
+            // normal kernel execution without cloning the Arc here.
+            return Some(CurrentTaskRef::from_mock_task(task));
         }
     }
 
@@ -2854,6 +3137,15 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     crate::sched::scheduler::complete_deferred_context_switch(cpu.get_cpuid());
     if let Some(current_task) = current_task(cpu.get_cpuid()) {
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} kernel-entry cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         if crate::sched::scheduler::DEBUG_SMP_TASK_FLOW {
             let vcpu = current_task.vcpu.lock();
             crate::println!(
@@ -2897,7 +3189,16 @@ pub fn task_initial_kernel_entrypoint() -> ! {
                 current_task.name.read().as_str(),
             );
         }
-        setup_task_execution(cpu, current_task);
+        setup_task_execution(cpu, &current_task);
+        if crate::sched::scheduler::DEBUG_FORK_TRACE_LOGGING
+            && crate::sched::scheduler::is_fork_trace_task(current_task.get_id())
+        {
+            crate::early_println!(
+                "[fork-trace] child_task_id={} user-return cpu={}",
+                current_task.get_id(),
+                cpu.get_cpuid()
+            );
+        }
         arch_switch_to_user(current_task.get_trapframe());
     }
 
@@ -2912,7 +3213,10 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::INIT_TASK_ID;
+    use super::{
+        DeferredExitRequest, INIT_TASK_ID, Task, TaskType, clear_mock_current_task, mytask,
+        set_mock_current_task,
+    };
     use crate::object::capability::memory_mapping::{
         AccessOp, MemoryMappingInfo, MemoryMappingOps,
     };
@@ -2940,6 +3244,140 @@ mod tests {
         fn on_unmapped(&self, _vaddr: usize, _length: usize) {
             self.mappings.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    #[test_case]
+    fn test_mytask_guard_does_not_clone_mock_arc() {
+        clear_mock_current_task();
+        let task = Arc::new(Task::new(
+            "CurrentTaskRefMock".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        set_mock_current_task(task.clone());
+        let strong_count = Arc::strong_count(&task);
+
+        let current_task = mytask().expect("mock current task must be available");
+        assert!(core::ptr::eq::<Task>(&*current_task, &*task));
+        assert_eq!(Arc::strong_count(&task), strong_count);
+
+        drop(current_task);
+        assert_eq!(Arc::strong_count(&task), strong_count);
+        clear_mock_current_task();
+        assert_eq!(Arc::strong_count(&task), 1);
+    }
+
+    #[test_case]
+    fn test_deferred_exit_request_is_consumed_once() {
+        let task = Task::new("DeferredExit".to_string(), 1, TaskType::Kernel);
+
+        task.request_deferred_thread_exit_cleanup(7, 0x1000, 0x2000, 0x4000, 0x1000);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ThreadExitCleanup {
+                status: 7,
+                stack_mapping_base: 0x1000,
+                stack_mapping_len: 0x2000,
+                tls_mapping_base: 0x4000,
+                tls_mapping_len: 0x1000,
+            })
+        ));
+        assert!(task.take_deferred_exit_request().is_none());
+
+        task.request_deferred_exit(3);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::Exit { status: 3 })
+        ));
+
+        task.request_deferred_exit_group(11);
+        assert!(matches!(
+            task.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ExitGroup { status: 11 })
+        ));
+    }
+
+    #[test_case]
+    fn test_linux_clear_child_tid_record_is_consumed_once() {
+        let task = Task::new("ClearChildTid".to_string(), 1, TaskType::Kernel);
+
+        task.set_linux_clear_child_tid(Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), Some(0x4000));
+        assert_eq!(task.take_linux_clear_child_tid(), None);
+    }
+
+    #[test_case]
+    fn test_free_pages_reclaims_full_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("FullPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x40_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_data_pages(vaddr, 2);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            !task
+                .page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr)
+        );
+    }
+
+    #[test_case]
+    fn test_free_pages_retains_partially_unmapped_contiguous_allocation() {
+        reset();
+        let task = super::new_user_task("PartialPageReclaim".to_string(), 1);
+        task.init();
+        let vaddr = 0x50_0000;
+        let mapping = task.allocate_data_pages(vaddr, 2).unwrap();
+        let paddr = mapping.pmarea.start;
+
+        task.free_pages(vaddr, 1);
+
+        assert!(task.vm_manager.search_memory_map(vaddr).is_none());
+        assert!(
+            task.vm_manager
+                .search_memory_map(vaddr + crate::environment::PAGE_SIZE)
+                .is_some()
+        );
+        assert!(
+            task.page_allocations
+                .read()
+                .iter()
+                .any(|allocation| allocation.as_paddr() == paddr && allocation.len() == 2)
+        );
+    }
+
+    #[test_case]
+    fn test_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let task_id = usize::MAX - 1024;
+        super::cleanup_task_waker(task_id);
+
+        super::wake_task_waiters(task_id);
+        let waker = super::get_waitpid_waker(task_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_task_waker(task_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
+    }
+
+    #[test_case]
+    fn test_parent_waitpid_waker_latches_early_wake_and_releases_registry_arc() {
+        let parent_id = usize::MAX - 1025;
+        super::cleanup_parent_waker(parent_id);
+
+        super::wake_parent_waiters(parent_id);
+        let waker = super::get_parent_waitpid_waker(parent_id);
+        assert_eq!(waker.pending_wake_count_for_test(), 1);
+        assert_eq!(Arc::strong_count(&waker), 2);
+
+        super::cleanup_parent_waker(parent_id);
+        assert_eq!(Arc::strong_count(&waker), 1);
     }
 
     #[test_case]
@@ -3004,16 +3442,10 @@ mod tests {
         let parent_id = add_task(parent_task, 0);
         let child_id = add_task(child_task, 0);
 
-        // Set parent-child relationship using allocated IDs
-        // We need to do this sequentially due to borrow checker
-        {
-            let child_task = get_task_by_id(child_id).unwrap();
-            child_task.set_parent_id(parent_id);
-        }
-        {
-            let parent_task = get_task_by_id(parent_id).unwrap();
-            parent_task.add_child(child_id);
-        }
+        // Adoption updates the child and the parent's list under one protocol.
+        let child_task = get_task_by_id(child_id).unwrap();
+        let parent_task = get_task_by_id(parent_id).unwrap();
+        assert!(parent_task.try_adopt_child(&child_task, None));
 
         // Verify parent-child relationship
         {
@@ -3052,8 +3484,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let child = get_task_by_id(child_id).unwrap();
-        child.set_parent_id(parent_id);
-        parent.add_child(child_id);
+        assert!(parent.try_adopt_child(&child, None));
 
         parent.exit(0);
 
@@ -3062,6 +3493,77 @@ mod tests {
         assert_eq!(child.get_parent_id(), Some(init_id));
         assert!(init.get_children().contains(&child_id));
         assert!(!parent.get_children().contains(&child_id));
+    }
+
+    #[test_case]
+    fn test_exit_snapshot_rejects_late_child_adoption() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+        assert_eq!(init_id, INIT_TASK_ID);
+
+        let mut parent_task = super::new_user_task("ExitingParent".to_string(), 0);
+        parent_task.init();
+        let parent_id = add_task(parent_task, 0);
+
+        let mut existing_child = super::new_user_task("ExistingChild".to_string(), 0);
+        existing_child.init();
+        let existing_child_id = add_task(existing_child, 0);
+
+        let mut late_child = super::new_user_task("LateChild".to_string(), 0);
+        late_child.init();
+        let late_child_id = add_task(late_child, 0);
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let existing_child = get_task_by_id(existing_child_id).unwrap();
+        let late_child = get_task_by_id(late_child_id).unwrap();
+        assert!(parent.try_adopt_child(&existing_child, None));
+
+        parent.reparent_children();
+
+        assert_eq!(existing_child.get_parent_id(), Some(init_id));
+        assert!(!parent.try_adopt_child(&late_child, None));
+        assert_eq!(late_child.get_parent_id(), None);
+        assert!(!parent.get_children().contains(&late_child_id));
+    }
+
+    #[test_case]
+    fn test_reparent_retries_init_when_thread_group_leader_is_exiting() {
+        reset();
+
+        let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+        init_task.init();
+        let init_id = add_task(init_task, 0);
+
+        let mut leader_task = super::new_user_task("Leader".to_string(), 0);
+        leader_task.init();
+        let leader_id = add_task(leader_task, 0);
+
+        let mut worker_task = super::new_user_task("Worker".to_string(), 0);
+        worker_task.init();
+        worker_task.set_thread_group_id(leader_id);
+        let worker_id = add_task(worker_task, 0);
+
+        let mut child_task = super::new_user_task("Orphan".to_string(), 0);
+        child_task.init();
+        let child_id = add_task(child_task, 0);
+
+        let leader = get_task_by_id(leader_id).unwrap();
+        let worker = get_task_by_id(worker_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(worker.try_adopt_child(&child, None));
+
+        leader.reparent_children();
+        assert!(!leader.try_adopt_child(&child, Some(worker_id)));
+
+        worker.reparent_children();
+
+        let init = get_task_by_id(init_id).unwrap();
+        assert_eq!(child.get_parent_id(), Some(init_id));
+        assert!(init.get_children().contains(&child_id));
+        assert!(!leader.get_children().contains(&child_id));
     }
 
     #[test_case]
@@ -3083,8 +3585,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let child = get_task_by_id(child_id).unwrap();
-        child.set_parent_id(parent_id);
-        parent.add_child(child_id);
+        assert!(parent.try_adopt_child(&child, None));
         child.set_exit_status(7);
         child.set_state(TaskState::Zombie);
         finalize_zombie(child_id, Some(parent_id));
@@ -3190,8 +3691,7 @@ mod tests {
 
         let parent = get_task_by_id(parent_id).unwrap();
         let leader = get_task_by_id(leader_id).unwrap();
-        leader.set_parent_id(parent_id);
-        parent.add_child(leader_id);
+        assert!(parent.try_adopt_child(&leader, None));
 
         let mut flags = CloneFlags::default();
         flags.set(CloneFlagsDef::Thread);
@@ -3204,6 +3704,7 @@ mod tests {
         let leader = get_task_by_id(leader_id).unwrap();
         assert_eq!(leader.get_state(), TaskState::Zombie);
         assert_eq!(worker.get_state(), TaskState::Terminated);
+        assert!(get_task_by_id(worker_id).is_none());
 
         match parent.wait(leader_id) {
             Ok(status) => assert_eq!(status, 130),
@@ -3291,8 +3792,10 @@ mod tests {
         // Get parent memory map count before cloning
         let parent_memmap_count = parent_task.vm_manager.memmap_len();
 
-        // Clone the parent task
+        // Cloning an unpublished task must not require a scheduler ID.
+        assert_eq!(parent_task.registered_id(), None);
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+        assert_eq!(child_task.registered_id(), None);
 
         // For fork-like clones (no CLONE_VM), brk must NOT be shared.
         assert!(
@@ -3322,15 +3825,10 @@ mod tests {
         let parent_id = add_task(parent_task, 0);
         let child_id = add_task(child_task, 0);
 
-        // Establish parent-child relationship
-        {
-            let child = get_task_by_id(child_id).unwrap();
-            child.set_parent_id(parent_id);
-        }
-        {
-            let parent = get_task_by_id(parent_id).unwrap();
-            parent.add_child(child_id);
-        }
+        // Establish parent-child relationship through the synchronized protocol.
+        let child = get_task_by_id(child_id).unwrap();
+        let parent = get_task_by_id(parent_id).unwrap();
+        assert!(parent.try_adopt_child(&child, None));
 
         // Verify parent-child relationship was established (in separate scopes)
         {

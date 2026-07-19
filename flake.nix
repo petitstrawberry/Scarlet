@@ -15,6 +15,10 @@
       url = "github:petitstrawberry/scarlet-sdk";
       flake = false;
     };
+    macvdmtool-src = {
+      url = "github:AsahiLinux/macvdmtool";
+      flake = false;
+    };
   };
 
   outputs =
@@ -23,6 +27,7 @@
       nixpkgs,
       scarlet-rust-toolchain,
       scarlet-sdk,
+      macvdmtool-src,
     }:
     let
       supportedSystems = [
@@ -92,6 +97,19 @@
             buildAndTestSubdir = "cargo-scarlet-plugin-limine";
             cargoLock.lockFile = "${scarlet-sdk}/Cargo.lock";
           };
+
+          macvdmtool =
+            if pkgs.stdenv.isDarwin then
+              pkgs.stdenv.mkDerivation {
+                pname = "macvdmtool";
+                version = "0-unstable-2024";
+                src = macvdmtool-src;
+                installPhase = ''
+                  install -Dm755 macvdmtool $out/bin/macvdmtool
+                '';
+              }
+            else
+              null;
 
           rustHostTriple =
             {
@@ -295,7 +313,7 @@
             pkgs.libffi
             pkgs.zlib
             pkgs.vim
-          ];
+          ] ++ pkgs.lib.optional pkgs.stdenv.isDarwin macvdmtool;
 
           devEnv = {
             # EFI firmware paths (consumed by run/test scripts via env vars)

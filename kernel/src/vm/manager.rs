@@ -48,8 +48,26 @@ use crate::{
     environment::PAGE_SIZE,
 };
 
-use super::addr::phys_to_virt;
-use super::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use super::addr::{phys_to_virt, validate_direct_map_alias};
+use super::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
+
+const WRITE_SITE_OWNER_TASK: u64 = 0x4f54;
+const WRITE_SITE_PRIVATE_PAGES: u64 = 0x5050;
+const WRITE_SITE_SET_ASID: u64 = 0x5341;
+const WRITE_SITE_CLONE_MEMMAP: u64 = 0x434d;
+const WRITE_SITE_ADD_MAP: u64 = 0x414d;
+const WRITE_SITE_REMOVE_MAP: u64 = 0x524d;
+const WRITE_SITE_REMOVE_RANGE: u64 = 0x5252;
+const WRITE_SITE_REMOVE_ALL: u64 = 0x5241;
+const WRITE_SITE_ADD_PAGE_TABLE: u64 = 0x4150;
+const WRITE_SITE_COW_COMMIT: u64 = 0x4357;
+const WRITE_SITE_EXTEND: u64 = 0x4558;
+const WRITE_SITE_MMAP_BASE: u64 = 0x424d;
+const WRITE_SITE_ADD_FIXED: u64 = 0x4146;
+const WRITE_SITE_COALESCE: u64 = 0x434f;
+const WRITE_SITE_DROP: u64 = 0x4452;
+const WRITE_SITE_RETAG: u64 = 0x5254;
+const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
@@ -68,6 +86,15 @@ struct InnerVmm {
 }
 
 impl VirtualMemoryManager {
+    #[inline(always)]
+    fn record_inner_writer(&self, site: u64) {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::VMM_WRITE_HELD,
+            site,
+            Arc::as_ptr(&self.inner).addr() as u64,
+        );
+    }
+
     fn subrange_pmarea(
         existing_map: &VirtualMemoryMap,
         sub_start: usize,
@@ -82,6 +109,14 @@ impl VirtualMemoryManager {
             start: existing_map.pmarea.start + pm_offset,
             end: existing_map.pmarea.start + pm_offset + (sub_end - sub_start),
         }
+    }
+
+    fn validate_mapping_direct_map_alias(map: &VirtualMemoryMap) -> Result<(), &'static str> {
+        if map.pmarea.start == 0 && map.pmarea.end == 0 {
+            return Ok(());
+        }
+
+        validate_direct_map_alias(map.pmarea, map.memory_attribute)
     }
 
     /// Creates a new virtual memory manager.
@@ -118,6 +153,7 @@ impl VirtualMemoryManager {
     /// * `task_id` - Task ID owning this virtual address space.
     pub fn set_owner_task_id_if_unset(&self, task_id: usize) {
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_OWNER_TASK);
         if g.owner_task_id.is_none() {
             g.owner_task_id = Some(task_id);
         }
@@ -132,7 +168,9 @@ impl VirtualMemoryManager {
             }
         }
 
-        self.inner.write().private_page_allocations.push(alloc);
+        let mut inner = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_PRIVATE_PAGES);
+        inner.private_page_allocations.push(alloc);
     }
 
     fn sync_executable_page_for_mapping(permissions: usize, paddr: usize) {
@@ -146,14 +184,29 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `asid` - The ASID to set
     pub fn set_asid(&self, asid: u16) {
-        let mut g = self.inner.write();
-        if g.asid == asid {
-            return;
+        // Capture the old ASID to free and update inner, then release the lock
+        // BEFORE touching PMM/page-tables. Holding inner.write() across
+        // free_virtual_address_space() forms a lock cycle with PMM and can
+        // deadlock against COW/exec paths that take PMM then inner.
+        let old_asid_to_free: Option<u16> = {
+            let mut g = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_SET_ASID);
+            if g.asid == asid {
+                None
+            } else {
+                let old = g.asid;
+                g.asid = asid;
+                if old != 0 && is_asid_used(old) {
+                    Some(old)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(old) = old_asid_to_free {
+            free_virtual_address_space(old);
         }
-        if g.asid != 0 && is_asid_used(g.asid) {
-            free_virtual_address_space(g.asid);
-        }
-        g.asid = asid;
     }
 
     /// Returns the ASID (Address Space ID) for the virtual memory manager.
@@ -161,6 +214,15 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The ASID for the virtual memory manager.
     pub fn get_asid(&self) -> u16 {
+        if let Some(inner) = self.inner.try_read() {
+            return inner.asid;
+        }
+
+        crate::breadcrumb::drop(
+            crate::breadcrumb::VMM_READ_WAIT,
+            self.inner.writer_count() as u64,
+            Arc::as_ptr(&self.inner).addr() as u64,
+        );
         self.inner.read().asid
     }
 
@@ -200,6 +262,7 @@ impl VirtualMemoryManager {
         f: impl FnOnce(&mut BTreeMap<usize, VirtualMemoryMap>) -> R,
     ) -> R {
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_CLONE_MEMMAP);
         f(&mut g.memmap)
     }
 
@@ -260,8 +323,10 @@ impl VirtualMemoryManager {
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
+        Self::validate_mapping_direct_map_alias(&map)?;
 
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_ADD_MAP);
         // 1. prev adjacency check
         if let Some((_, prev_map)) = g.memmap.range(..map.vmarea.start).next_back() {
             if prev_map.vmarea.end > map.vmarea.start {
@@ -280,6 +345,131 @@ impl VirtualMemoryManager {
         Ok(())
     }
 
+    /// Retags a fully covered range in existing VM metadata without changing page tables.
+    ///
+    /// This is internal plumbing for a serialized live direct-map retag. The
+    /// caller must update the corresponding page-table leaves before publishing
+    /// the replacement direct-map metadata, and must pass the attribute currently
+    /// recorded for every covered mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `vmarea` - Inclusive page-aligned virtual range to retag.
+    /// * `expected_attribute` - Attribute that every covered map must have.
+    /// * `memory_attribute` - Attribute to record for the covered range.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after replacing only the covered portions, or an error when the
+    /// range is invalid, has a gap, or does not have the expected attribute.
+    pub(crate) fn retag_memory_map_range(
+        &self,
+        vmarea: MemoryArea,
+        expected_attribute: MemoryAttribute,
+        memory_attribute: MemoryAttribute,
+    ) -> Result<(), &'static str> {
+        if vmarea.start > vmarea.end
+            || !vmarea.start.is_multiple_of(PAGE_SIZE)
+            || vmarea.end % PAGE_SIZE != PAGE_SIZE - 1
+        {
+            return Err("VM retag range must be page-aligned and non-empty");
+        }
+
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_RETAG);
+        let keys: Vec<usize> = g
+            .memmap
+            .iter()
+            .filter_map(|(start, map)| {
+                if map.vmarea.start <= vmarea.end && vmarea.start <= map.vmarea.end {
+                    Some(*start)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut next_covered = vmarea.start;
+        for key in &keys {
+            let map = g
+                .memmap
+                .get(key)
+                .expect("retag key must reference an existing map");
+            let overlap_start = map.vmarea.start.max(vmarea.start);
+            let overlap_end = map.vmarea.end.min(vmarea.end);
+            if overlap_start != next_covered {
+                return Err("VM retag range is not fully covered");
+            }
+            if map.memory_attribute != expected_attribute {
+                return Err("VM retag range has an unexpected memory attribute");
+            }
+            if overlap_end == vmarea.end {
+                next_covered = vmarea.end;
+                break;
+            }
+            next_covered = overlap_end
+                .checked_add(1)
+                .ok_or("VM retag range coverage overflows")?;
+        }
+
+        if keys.is_empty() || next_covered != vmarea.end {
+            return Err("VM retag range is not fully covered");
+        }
+
+        let mut replacement = Vec::new();
+        for key in keys {
+            let map = g
+                .memmap
+                .remove(&key)
+                .expect("retag key must reference an existing map");
+            let overlap_start = map.vmarea.start.max(vmarea.start);
+            let overlap_end = map.vmarea.end.min(vmarea.end);
+
+            if map.vmarea.start < overlap_start {
+                replacement.push(VirtualMemoryMap {
+                    vmarea: MemoryArea::new(map.vmarea.start, overlap_start - 1),
+                    pmarea: Self::subrange_pmarea(&map, map.vmarea.start, overlap_start - 1),
+                    vm_start: map.vm_start,
+                    permissions: map.permissions,
+                    is_shared: map.is_shared,
+                    memory_attribute: map.memory_attribute,
+                    owner: map.owner.clone(),
+                });
+            }
+
+            replacement.push(VirtualMemoryMap {
+                vmarea: MemoryArea::new(overlap_start, overlap_end),
+                pmarea: Self::subrange_pmarea(&map, overlap_start, overlap_end),
+                vm_start: map.vm_start,
+                permissions: map.permissions,
+                is_shared: map.is_shared,
+                memory_attribute,
+                owner: map.owner.clone(),
+            });
+
+            if overlap_end < map.vmarea.end {
+                let after_start = overlap_end
+                    .checked_add(1)
+                    .expect("overlap end precedes the mapped range end");
+                replacement.push(VirtualMemoryMap {
+                    vmarea: MemoryArea::new(after_start, map.vmarea.end),
+                    pmarea: Self::subrange_pmarea(&map, after_start, map.vmarea.end),
+                    vm_start: map.vm_start,
+                    permissions: map.permissions,
+                    is_shared: map.is_shared,
+                    memory_attribute: map.memory_attribute,
+                    owner: map.owner,
+                });
+            }
+        }
+
+        for map in replacement {
+            g.memmap.insert(map.vmarea.start, map);
+        }
+        g.last_search_cache = None;
+        Ok(())
+    }
+
     /// Removes the memory map containing the given virtual address.
     ///
     /// This method uses efficient search with caching to locate the target mapping.
@@ -291,6 +481,7 @@ impl VirtualMemoryManager {
     /// The removed memory map, if it exists.
     pub fn remove_memory_map_by_addr(&self, vaddr: usize) -> Option<VirtualMemoryMap> {
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_REMOVE_MAP);
         let start_addr = find_memory_map_key_with_cache_update(&mut *g, vaddr)?;
         if let Some((_, _, cache_key)) = g.last_search_cache {
             if cache_key == start_addr {
@@ -334,6 +525,7 @@ impl VirtualMemoryManager {
         let mut mappings_to_add = Vec::new();
 
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_REMOVE_RANGE);
 
         // Find all mappings that overlap with the removal range
         let overlapping_keys: alloc::vec::Vec<usize> = g
@@ -455,9 +647,14 @@ impl VirtualMemoryManager {
     /// # Note
     /// This method returns an iterator instead of a cloned Vec for efficiency.
     pub fn remove_all_memory_maps(&self) -> impl Iterator<Item = VirtualMemoryMap> {
-        let mut g = self.inner.write();
-        g.last_search_cache = None;
-        let memmap = core::mem::take(&mut g.memmap);
+        let memmap = {
+            let mut g = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
+            g.last_search_cache = None;
+            core::mem::take(&mut g.memmap)
+        };
+
+        self.unmap_all_from_mmu();
         memmap.into_values()
     }
 
@@ -490,22 +687,28 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The memory map containing the given virtual address, if it exists.
     pub fn search_memory_map(&self, vaddr: usize) -> Option<VirtualMemoryMap> {
-        let mut g = self.inner.write();
+        // Read lock only. This used to take inner.write() to update a last-find
+        // cache, which serialized every COW fault on the same vm_manager (e.g.
+        // stemd + its CLONE_VM IPC thread) and could re-enter the lock via
+        // owner.resolve_fault() paths (framebuffer). The cache is intentionally
+        // not updated here; the BTreeMap range lookup below stays correct.
+        let g = self.inner.read();
         if let Some((cache_start, cache_end, cache_key)) = g.last_search_cache {
             if cache_start <= vaddr && vaddr <= cache_end {
-                return g.memmap.get(&cache_key).cloned();
+                if let Some(map) = g.memmap.get(&cache_key) {
+                    if vaddr <= map.vmarea.end {
+                        return Some(map.clone());
+                    }
+                }
             }
         }
-        if let Some((_k, map)) = g.memmap.range(..=vaddr).next_back() {
+        g.memmap.range(..=vaddr).next_back().and_then(|(_, map)| {
             if vaddr <= map.vmarea.end {
-                let start = map.vmarea.start;
-                let end = map.vmarea.end;
-                let out = map.clone();
-                g.last_search_cache = Some((start, end, start));
-                return Some(out);
+                Some(map.clone())
+            } else {
+                None
             }
-        }
-        None
+        })
     }
 
     /// Efficient memory map search using BTreeMap's ordered nature
@@ -542,14 +745,16 @@ impl VirtualMemoryManager {
 
     /// Adds a page table to the virtual memory manager.
     pub fn add_page_table(&self, page_table: Arc<PageTable>) {
-        self.inner.write().page_tables.push(page_table);
+        let mut inner = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_ADD_PAGE_TABLE);
+        inner.page_tables.push(page_table);
     }
 
     /// Returns the root page table for the current address space.
     ///
     /// # Returns
     /// The root page table for the current address space, if it exists.
-    pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
+    pub fn get_root_page_table(&self) -> Option<crate::arch::vm::RootPageTableGuard> {
         get_root_pagetable(self.get_asid())
     }
 
@@ -574,6 +779,111 @@ impl VirtualMemoryManager {
         self.lazy_map_page_with(access)
     }
 
+    fn page_backing_at(map: &VirtualMemoryMap, page_vaddr: usize) -> Option<usize> {
+        if map.pmarea.start == 0 {
+            return Some(0);
+        }
+
+        let offset = page_vaddr.checked_sub(map.vmarea.start)?;
+        map.pmarea.start.checked_add(offset)
+    }
+
+    fn commit_private_cow_page(
+        &self,
+        expected: &VirtualMemoryMap,
+        replacement: VirtualMemoryMap,
+    ) -> Result<bool, &'static str> {
+        let page_vaddr = replacement.vmarea.start;
+        let page_end = page_vaddr
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or("COW page virtual address overflow")?;
+        if page_vaddr % PAGE_SIZE != 0 || replacement.vmarea.end != page_end {
+            return Err("COW replacement is not one aligned virtual page");
+        }
+        let physical_page_end = replacement
+            .pmarea
+            .start
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or("COW page physical address overflow")?;
+        if replacement.pmarea.start == 0
+            || replacement.pmarea.start % PAGE_SIZE != 0
+            || replacement.pmarea.end != physical_page_end
+        {
+            return Err("COW replacement is not one aligned physical page");
+        }
+
+        let expected_owner = match expected.owner.as_ref() {
+            Some(owner) => owner,
+            None => return Ok(false),
+        };
+        if expected.is_shared
+            || page_vaddr < expected.vmarea.start
+            || page_end > expected.vmarea.end
+        {
+            return Ok(false);
+        }
+
+        let mut inner = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_COW_COMMIT);
+        let current_key = match inner.memmap.range(..=page_vaddr).next_back() {
+            Some((key, current)) if page_end <= current.vmarea.end => *key,
+            _ => return Ok(false),
+        };
+        let source_matches = match inner.memmap.get(&current_key) {
+            Some(current) => {
+                let owner_matches = current
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, expected_owner));
+                owner_matches
+                    && !current.is_shared
+                    && current.vm_start == expected.vm_start
+                    && current.permissions == expected.permissions
+                    && current.memory_attribute == expected.memory_attribute
+                    && Self::page_backing_at(current, page_vaddr)
+                        == Self::page_backing_at(expected, page_vaddr)
+            }
+            None => false,
+        };
+        if !source_matches {
+            return Ok(false);
+        }
+
+        let current = inner
+            .memmap
+            .remove(&current_key)
+            .ok_or("COW source mapping disappeared during commit")?;
+        if current.vmarea.start < page_vaddr {
+            let left = VirtualMemoryMap {
+                vmarea: MemoryArea::new(current.vmarea.start, page_vaddr - 1),
+                pmarea: Self::subrange_pmarea(&current, current.vmarea.start, page_vaddr - 1),
+                vm_start: current.vm_start,
+                permissions: current.permissions,
+                is_shared: current.is_shared,
+                memory_attribute: current.memory_attribute,
+                owner: current.owner.clone(),
+            };
+            inner.memmap.insert(left.vmarea.start, left);
+        }
+        if page_end < current.vmarea.end {
+            let right = VirtualMemoryMap {
+                vmarea: MemoryArea::new(page_end + 1, current.vmarea.end),
+                pmarea: Self::subrange_pmarea(&current, page_end + 1, current.vmarea.end),
+                vm_start: current.vm_start,
+                permissions: current.permissions,
+                is_shared: current.is_shared,
+                memory_attribute: current.memory_attribute,
+                owner: current.owner.clone(),
+            };
+            inner.memmap.insert(right.vmarea.start, right);
+        }
+        inner.memmap.insert(page_vaddr, replacement);
+        inner.last_search_cache = None;
+        drop(inner);
+        drop(current);
+        Ok(true)
+    }
+
     /// Lazy map with access context (instruction/load/store and optional size)
     pub fn lazy_map_page_with(
         &self,
@@ -586,6 +896,8 @@ impl VirtualMemoryManager {
                 return self.try_extend_mapping_for_access(&access);
             }
         };
+
+        crate::breadcrumb::drop(crate::breadcrumb::LAZY_FOUND, vaddr as u64, 0);
 
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
         let page_idx = (page_vaddr - memory_map.vm_start) / PAGE_SIZE;
@@ -603,6 +915,11 @@ impl VirtualMemoryManager {
             };
             match owner.resolve_fault(&owner_access, page_idx, memory_map.vm_start) {
                 Ok(res) => {
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::LAZY_RESOLVED,
+                        res.paddr_page_base as u64,
+                        0,
+                    );
                     perms = owner.fault_page_permissions(&access, perms);
                     if res.is_tail {
                         perms &= !0x1;
@@ -613,59 +930,84 @@ impl VirtualMemoryManager {
                     // page on any resolved fault. Fork COW owners allow reads to
                     // share a read-only page and request a copy only on stores.
                     if !memory_map.is_shared && owner.private_fault_requires_copy(&access) {
-                        if let Some(root_pagetable) = self.get_root_page_table() {
-                            let new_alloc = ContiguousPages::new(1)
-                                .ok_or("Failed to allocate page for private mapping COW")?;
-                            let new_paddr = new_alloc.as_paddr();
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    crate::vm::addr::phys_to_virt(res.paddr_page_base) as *const u8,
-                                    crate::vm::addr::phys_to_virt(new_paddr) as *mut u8,
-                                    PAGE_SIZE,
-                                );
-                            }
-                            let cow_map = VirtualMemoryMap {
-                                pmarea: MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
-                                vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
-                                vm_start: memory_map.vm_start,
-                                permissions: perms,
-                                is_shared: false,
-                                memory_attribute: memory_map.memory_attribute,
-                                owner: None,
-                            };
-                            match self.add_memory_map_fixed(cow_map) {
-                                Ok(removed) => {
-                                    for rm in &removed {
-                                        if rm.pmarea.start != 0 && rm.owner.is_none() {
-                                            // SAFETY: pmarea points to a page allocated by allocate_raw_pages.
-                                            unsafe {
-                                                crate::mem::page::free_raw_pages(
-                                                    crate::vm::addr::phys_to_virt(rm.pmarea.start)
-                                                        as *mut _,
-                                                    1,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    return Err("Failed to add COW mapping to VM manager");
-                                }
-                            }
-                            self.track_private_page_allocation(new_alloc);
-                            Self::sync_executable_page_for_mapping(perms, new_paddr);
-                            root_pagetable.map(
-                                self.get_asid(),
-                                page_vaddr,
-                                new_paddr,
-                                perms,
-                                true,
-                                access.op == AccessOp::Store,
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::COW_COPY_REQUIRED,
+                            page_vaddr as u64,
+                            0,
+                        );
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PMM_ALLOC_BEGIN,
+                            page_vaddr as u64,
+                            0,
+                        );
+                        let new_alloc = ContiguousPages::new(1)
+                            .ok_or("Failed to allocate page for private mapping COW")?;
+                        let new_paddr = new_alloc.as_paddr();
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PMM_ALLOC_DONE,
+                            new_paddr as u64,
+                            0,
+                        );
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                crate::vm::addr::phys_to_virt(res.paddr_page_base) as *const u8,
+                                crate::vm::addr::phys_to_virt(new_paddr) as *mut u8,
+                                PAGE_SIZE,
                             );
-                            return Ok(());
-                        } else {
-                            return Err("No root page table available for COW mapping");
                         }
+                        let cow_map = VirtualMemoryMap {
+                            pmarea: MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+                            vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
+                            vm_start: memory_map.vm_start,
+                            permissions: perms,
+                            is_shared: false,
+                            memory_attribute: memory_map.memory_attribute,
+                            owner: None,
+                        };
+                        if !self.commit_private_cow_page(&memory_map, cow_map)? {
+                            drop(new_alloc);
+                            return self.lazy_map_page_with(access);
+                        }
+                        self.track_private_page_allocation(new_alloc);
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::LAZY_COWDONE,
+                            page_vaddr as u64,
+                            new_paddr as u64,
+                        );
+                        Self::sync_executable_page_for_mapping(perms, new_paddr);
+                        let asid = self.get_asid();
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PT_LOCK_WAIT,
+                            asid as u64,
+                            page_vaddr as u64,
+                        );
+                        let Some(mut root_pagetable) = self.get_root_page_table() else {
+                            return Err("No root page table available for COW mapping");
+                        };
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PT_LOCK_DONE,
+                            asid as u64,
+                            page_vaddr as u64,
+                        );
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PT_MAP_BEGIN,
+                            page_vaddr as u64,
+                            new_paddr as u64,
+                        );
+                        root_pagetable.map(
+                            page_vaddr,
+                            new_paddr,
+                            perms,
+                            memory_map.memory_attribute,
+                            true,
+                            access.op == AccessOp::Store,
+                        );
+                        crate::breadcrumb::drop(
+                            crate::breadcrumb::PT_MAP_DONE,
+                            page_vaddr as u64,
+                            new_paddr as u64,
+                        );
+                        return Ok(());
                     }
 
                     res.paddr_page_base
@@ -682,15 +1024,36 @@ impl VirtualMemoryManager {
             memory_map.pmarea.start + (page_vaddr - memory_map.vmarea.start)
         };
 
-        if let Some(root_pagetable) = self.get_root_page_table() {
+        let asid = self.get_asid();
+        crate::breadcrumb::drop(
+            crate::breadcrumb::PT_LOCK_WAIT,
+            asid as u64,
+            page_vaddr as u64,
+        );
+        if let Some(mut root_pagetable) = self.get_root_page_table() {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_LOCK_DONE,
+                asid as u64,
+                page_vaddr as u64,
+            );
             Self::sync_executable_page_for_mapping(perms, page_paddr);
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_MAP_BEGIN,
+                page_vaddr as u64,
+                page_paddr as u64,
+            );
             root_pagetable.map(
-                self.get_asid(),
                 page_vaddr,
                 page_paddr,
                 perms,
+                memory_map.memory_attribute,
                 true,
                 access.op == AccessOp::Store,
+            );
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_MAP_DONE,
+                page_vaddr as u64,
+                page_paddr as u64,
             );
             Ok(())
         } else {
@@ -709,19 +1072,20 @@ impl VirtualMemoryManager {
         let vaddr = access.vaddr;
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
 
-        // Result of successful extend: (paddr_page_base, permissions)
-        let extend_result: Option<(usize, usize)>;
+        // Result of successful extend: (paddr_page_base, permissions, memory_attribute)
+        let extend_result: Option<(usize, usize, MemoryAttribute)>;
 
         {
             // Lock scope
             let mut g = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_EXTEND);
 
             // Find a mapping whose vmarea.end < vaddr and whose owner explicitly
             // supports VMA growth after its backing object was resized.
             let mut found = None;
             let candidate_keys: Vec<usize> = g.memmap.keys().copied().collect();
             for key in candidate_keys {
-                let Some((old_end, vm_start, map_permissions, owner)) =
+                let Some((old_end, vm_start, map_permissions, memory_attribute, owner)) =
                     g.memmap.get(&key).and_then(|map| {
                         if map.vmarea.end >= vaddr {
                             return None;
@@ -732,7 +1096,13 @@ impl VirtualMemoryManager {
                             return None;
                         }
 
-                        Some((map.vmarea.end, map.vm_start, map.permissions, owner.clone()))
+                        Some((
+                            map.vmarea.end,
+                            map.vm_start,
+                            map.permissions,
+                            map.memory_attribute,
+                            owner.clone(),
+                        ))
                     })
                 else {
                     continue;
@@ -769,17 +1139,19 @@ impl VirtualMemoryManager {
                         let permissions =
                             owner.fault_page_permissions(&test_access, map_permissions);
                         if let Some(map) = g.memmap.get_mut(&key) {
-                            crate::println!(
-                                "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
-                                old_end,
-                                new_end,
-                                owner.mmap_owner_name()
-                            );
+                            if DEBUG_VM_MAPPING_EXTEND_LOGGING {
+                                crate::println!(
+                                    "[VmManager] Extending mapping vmarea.end from {:#x} to {:#x} for owner={}",
+                                    old_end,
+                                    new_end,
+                                    owner.mmap_owner_name()
+                                );
+                            }
                             map.vmarea.end = new_end;
                             g.last_search_cache = None;
                         }
 
-                        found = Some((res.paddr_page_base, permissions));
+                        found = Some((res.paddr_page_base, permissions, memory_attribute));
                         break;
                     }
                     Err(_) => {
@@ -791,13 +1163,13 @@ impl VirtualMemoryManager {
         } // Lock released here
 
         // Now map the page outside the lock
-        if let Some((paddr_page_base, permissions)) = extend_result {
-            if let Some(root_pagetable) = self.get_root_page_table() {
+        if let Some((paddr_page_base, permissions, memory_attribute)) = extend_result {
+            if let Some(mut root_pagetable) = self.get_root_page_table() {
                 root_pagetable.map(
-                    self.get_asid(),
                     page_vaddr,
                     paddr_page_base,
                     permissions,
+                    memory_attribute,
                     true,
                     access.op == AccessOp::Store,
                 );
@@ -819,9 +1191,33 @@ impl VirtualMemoryManager {
     /// * `vaddr_start` - Start of virtual address range
     /// * `vaddr_end` - End of virtual address range (inclusive)
     pub fn unmap_range_from_mmu(&self, vaddr_start: usize, vaddr_end: usize) {
-        if let Some(root_pagetable) = self.get_root_page_table() {
-            root_pagetable.unmap_range(self.get_asid(), vaddr_start, vaddr_end);
+        let asid = self.get_asid();
+        if asid == 0 || !is_asid_used(asid) {
+            return;
         }
+
+        let Some(mut root_pagetable) = self.get_root_page_table() else {
+            panic!(
+                "Cannot unmap {:#x}-{:#x}: live ASID {} has no root page table",
+                vaddr_start, vaddr_end, asid
+            );
+        };
+        root_pagetable.unmap_range(vaddr_start, vaddr_end);
+    }
+
+    fn unmap_all_from_mmu(&self) {
+        let asid = self.get_asid();
+        if asid == 0 || !is_asid_used(asid) {
+            return;
+        }
+
+        let Some(mut root_pagetable) = self.get_root_page_table() else {
+            panic!(
+                "Cannot unmap all mappings: live ASID {} has no root page table",
+                asid
+            );
+        };
+        root_pagetable.unmap_all();
     }
 
     pub fn translate_to_kva(&self, vaddr: usize) -> Option<usize> {
@@ -937,7 +1333,9 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `base` - New base address for mmap operations
     pub fn set_mmap_base(&self, base: usize) {
-        self.inner.write().mmap_base = base;
+        let mut inner = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_MMAP_BASE);
+        inner.mmap_base = base;
     }
 
     /// Find a suitable address for new memory mapping
@@ -1022,6 +1420,7 @@ impl VirtualMemoryManager {
         {
             return Err("pmarea is not aligned to PAGE_SIZE");
         }
+        Self::validate_mapping_direct_map_alias(&map)?;
 
         let new_start = map.vmarea.start;
         let new_end = map.vmarea.end;
@@ -1029,6 +1428,7 @@ impl VirtualMemoryManager {
         let mut mappings_to_add = Vec::new();
 
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_ADD_FIXED);
         let overlapping_keys: alloc::vec::Vec<usize> = g
             .memmap
             .range(..)
@@ -1170,6 +1570,7 @@ impl VirtualMemoryManager {
         let mut prev_start: Option<usize> = None;
         let mut prev_map: Option<VirtualMemoryMap> = None;
         let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_COALESCE);
         for (&start, memory_map) in &g.memmap {
             if let (Some(prev_s), Some(prev_memory_map)) = (prev_start, &prev_map) {
                 // Check if memory maps are adjacent and can be merged
@@ -1253,8 +1654,12 @@ impl Drop for VirtualMemoryManager {
             return;
         }
 
+        let asid = self.get_asid();
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_ENTER, asid as u64, 0);
+
         let memmap = {
             let mut inner = self.inner.write();
+            self.record_inner_writer(WRITE_SITE_DROP);
             core::mem::take(&mut inner.memmap)
         };
         for map in memmap.into_values() {
@@ -1262,11 +1667,13 @@ impl Drop for VirtualMemoryManager {
                 owner.on_unmapped(map.vmarea.start, map.vmarea.size());
             }
         }
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_MAPS_DONE, asid as u64, 0);
 
-        let asid = self.get_asid();
         if asid != 0 && is_asid_used(asid) {
+            crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_ASID_BEGIN, asid as u64, 0);
             free_virtual_address_space(asid);
         }
+        crate::breadcrumb::drop(crate::breadcrumb::VMM_DROP_DONE, asid as u64, 0);
     }
 }
 
@@ -2340,6 +2747,89 @@ mod tests {
         assert_eq!(right.vmarea.start, 0x6000);
         assert_eq!(right.vmarea.end, 0x7fff);
         assert_eq!(right.pmarea, MemoryArea { start: 0, end: 0 });
+    }
+
+    #[test_case]
+    fn test_private_cow_stale_commit_preserves_winning_page() {
+        // Given: two fault handlers captured the same owner-backed mapping.
+        let manager = VirtualMemoryManager::new();
+        let owner: Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
+            Arc::new(AnonymousPageOwner::new());
+        let source = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x4000,
+                end: 0x6fff,
+            },
+            pmarea: MemoryArea { start: 0, end: 0 },
+            vm_start: 0x4000,
+            permissions: 0o603,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: Some(Arc::clone(&owner)),
+        };
+        assert!(manager.add_memory_map(source).is_ok());
+        let first_snapshot = manager.search_memory_map(0x5000).unwrap();
+        let stale_snapshot = first_snapshot.clone();
+
+        let winning_page = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x5000,
+                end: 0x5fff,
+            },
+            pmarea: MemoryArea {
+                start: 0x8000_0000,
+                end: 0x8000_0fff,
+            },
+            vm_start: 0x4000,
+            permissions: 0o603,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: None,
+        };
+
+        // When: the first fault commits and the stale fault attempts the same page.
+        assert_eq!(
+            manager.commit_private_cow_page(&first_snapshot, winning_page),
+            Ok(true)
+        );
+        let losing_page = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: 0x5000,
+                end: 0x5fff,
+            },
+            pmarea: MemoryArea {
+                start: 0x9000_0000,
+                end: 0x9000_0fff,
+            },
+            vm_start: 0x4000,
+            permissions: 0o603,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: None,
+        };
+        assert_eq!(
+            manager.commit_private_cow_page(&stale_snapshot, losing_page),
+            Ok(false)
+        );
+
+        // Then: the winner remains installed and the source mapping stays split around it.
+        let installed = manager.search_memory_map(0x5000).unwrap();
+        assert_eq!(installed.pmarea.start, 0x8000_0000);
+        assert!(installed.owner.is_none());
+
+        let left = manager.search_memory_map(0x4000).unwrap();
+        let right = manager.search_memory_map(0x6000).unwrap();
+        assert!(
+            left.owner
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &owner))
+        );
+        assert!(
+            right
+                .owner
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &owner))
+        );
     }
 
     #[test_case]

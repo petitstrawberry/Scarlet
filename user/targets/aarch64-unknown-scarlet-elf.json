@@ -6,7 +6,7 @@
   "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
-  "features": "+neon,+fp-armv8",
+  "features": "+lse,+neon,+fp-armv8",
 
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
@@ -14,7 +14,7 @@
   "llvm-target": "aarch64",
   "max-atomic-width": 64,
   "metadata": {
-    "description": "Scarlet user program AArch64 (ARMv8-A ISA)",
+    "description": "Scarlet user program AArch64 (ARMv8-A ISA with LSE atomics)",
     "host_tools": false,
     "std": false,
     "tier": 2

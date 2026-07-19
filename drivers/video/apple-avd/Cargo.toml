@@ -11,5 +11,5 @@ path = "src/lib.rs"
 debug-device = []
 
 [dependencies]
-scarlet = { path = "../../../kernel" }
+scarlet = { path = "../../../kernel", default-features = false }
 scarlet-driver-apple-pmgr = { path = "../../soc/apple-pmgr" }

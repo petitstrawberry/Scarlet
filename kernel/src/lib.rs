@@ -253,6 +253,7 @@
 pub mod abi;
 pub mod arch;
 pub mod boot;
+pub mod breadcrumb;
 pub mod device;
 pub mod drivers;
 pub mod earlycon;
@@ -308,8 +309,8 @@ use sched::scheduler::{enqueue_task, get_task_by_id, register_task, start_schedu
 use task::new_user_task;
 use timer::get_kernel_timer;
 use vm::{
-    boot::switch_to_boot_page_table, kernel_vm_init, phys_to_virt, transition_kernel_memory_layout,
-    vmem::MemoryArea,
+    boot::switch_to_boot_page_table, direct_map::DirectMapRegions, kernel_vm_init, phys_to_virt,
+    transition_kernel_memory_layout, vmem::MemoryArea,
 };
 
 fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
@@ -373,7 +374,7 @@ pub enum DeviceSource {
     /// Used by RISC-V, ARM, and other architectures that support device trees
     Fdt(usize),
     /// Unified Extensible Firmware Interface (UEFI) source
-    /// Modern firmware interface providing comprehensive hardware information  
+    /// Modern firmware interface providing comprehensive hardware information
     Uefi,
     /// Advanced Configuration and Power Interface (ACPI) source
     /// x86/x86_64 standard for hardware configuration and power management
@@ -420,8 +421,8 @@ pub struct BootInfo {
     pub cpu_count: usize,
     /// Physical memory area available for PMM allocation (usable RAM excluding reserved regions)
     pub usable_memory_paddr: MemoryArea,
-    /// Physical memory area to be mapped into HHDM (direct map)
-    pub direct_map_paddr: MemoryArea,
+    /// Sparse physical regions mapped into Scarlet's HHDM (direct map).
+    pub direct_map_regions: DirectMapRegions,
     /// Optional initramfs physical memory area
     pub initramfs_paddr: Option<MemoryArea>,
     /// HHDM offset: hhdm_va = paddr + hhdm_offset
@@ -451,7 +452,7 @@ impl BootInfo {
     ///
     /// * `cpu_id` - ID of the boot processor/hart
     /// * `usable_memory_paddr` - Physical memory area for PMM allocation
-    /// * `direct_map_paddr` - Physical memory area to map into HHDM
+    /// * `direct_map_regions` - Sparse physical regions to map into HHDM
     /// * `initramfs_paddr` - Optional initramfs physical memory area
     /// * `hhdm_offset` - HHDM offset for VA = PA + offset
     /// * `cmdline` - Optional kernel command line parameters
@@ -465,7 +466,7 @@ impl BootInfo {
         cpu_id: usize,
         cpu_count: usize,
         usable_memory_paddr: MemoryArea,
-        direct_map_paddr: MemoryArea,
+        direct_map_regions: DirectMapRegions,
         initramfs_paddr: Option<MemoryArea>,
         hhdm_offset: usize,
         cmdline: Option<&'static str>,
@@ -477,7 +478,7 @@ impl BootInfo {
             cpu_id,
             cpu_count,
             usable_memory_paddr,
-            direct_map_paddr,
+            direct_map_regions,
             initramfs_paddr,
             hhdm_offset,
             cmdline,
@@ -505,13 +506,42 @@ impl BootInfo {
 
     /// Returns the initramfs memory area if available
     ///
+    /// Uses the sparse Normal direct map when the initramfs belongs to it. If
+    /// boot supplied an initramfs outside those regions, the boot and runtime
+    /// page-table setup install an explicit Normal fallback at the same HHDM
+    /// arithmetic address so the archive remains accessible without widening
+    /// the sparse direct-map membership set.
+    ///
+    /// # Returns
+    ///
+    /// The virtual initramfs area when one was supplied, or `None` otherwise.
     pub fn get_initramfs_vaddr(&self) -> Option<MemoryArea> {
-        self.initramfs_paddr.map(|area| {
-            MemoryArea::new(
-                crate::vm::addr::phys_to_virt(area.start),
-                crate::vm::addr::phys_to_virt(area.end),
-            )
-        })
+        self.initramfs_paddr
+            .map(|area| match crate::vm::addr::runtime_direct_map_regions() {
+                Some(regions)
+                    if regions.contains_area_with_attribute(
+                        area,
+                        crate::vm::vmem::MemoryAttribute::Normal,
+                    ) =>
+                {
+                    MemoryArea::new(
+                        crate::vm::addr::phys_to_virt(area.start),
+                        crate::vm::addr::phys_to_virt(area.end),
+                    )
+                }
+                Some(_) => MemoryArea::new(
+                    SCARLET_HHDM_BASE
+                        .checked_add(area.start)
+                        .expect("initramfs HHDM virtual start overflows"),
+                    SCARLET_HHDM_BASE
+                        .checked_add(area.end)
+                        .expect("initramfs HHDM virtual end overflows"),
+                ),
+                None => MemoryArea::new(
+                    crate::vm::addr::phys_to_virt(area.start),
+                    crate::vm::addr::phys_to_virt(area.end),
+                ),
+            })
     }
 }
 
@@ -579,22 +609,27 @@ impl BootInfo {
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let cpu_id = boot_info.cpu_id;
     let cpu_count = boot_info.cpu_count;
+    crate::sched::scheduler::register_boot_cpu(cpu_id);
 
     early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Detected {} CPU(s)", cpu_count);
     let usable_memory_paddr = boot_info.usable_memory_paddr;
-    let direct_map_paddr = boot_info.direct_map_paddr;
+    let direct_map_regions = boot_info.direct_map_regions;
     let hhdm_offset = boot_info.hhdm_offset;
     early_println!(
         "[Scarlet Kernel] Usable memory (PA) : {:#x} - {:#x}",
         usable_memory_paddr.start,
         usable_memory_paddr.end
     );
+    let direct_map_bounds = direct_map_regions
+        .bounding_area()
+        .expect("BootInfo direct-map regions must not be empty");
     early_println!(
-        "[Scarlet Kernel] Direct-map (PA)    : {:#x} - {:#x}",
-        direct_map_paddr.start,
-        direct_map_paddr.end
+        "[Scarlet Kernel] Direct-map bounds   : {:#x} - {:#x} ({} sparse regions)",
+        direct_map_bounds.start,
+        direct_map_bounds.end,
+        direct_map_regions.len(),
     );
     early_println!("[Scarlet Kernel] HHDM offset       : {:#x}", hhdm_offset);
 
@@ -627,12 +662,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     early_println!("[Scarlet Kernel] Building Scarlet boot page table...");
     // crate::earlyfb::deactivate();
-    switch_to_boot_page_table(
-        direct_map_paddr,
-        boot_info.initramfs_paddr,
-        heap_paddr,
-        boot_info.framebuffer_paddr,
-    );
+    switch_to_boot_page_table(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
 
     // Fix PMM metadata pointers immediately after page table switch
     // Must be done before any operation that might touch PMM data structures
@@ -645,8 +675,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     transition_kernel_memory_layout(
         SCARLET_HHDM_BASE,
-        direct_map_paddr.start,
-        direct_map_paddr.end,
+        direct_map_regions,
         heap_paddr.start,
         KERNEL_HEAP_BASE,
         heap_size,
@@ -682,7 +711,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     driver_initcall_call();
 
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init(direct_map_paddr, boot_info.initramfs_paddr, heap_paddr);
+    kernel_vm_init(direct_map_regions, boot_info.initramfs_paddr, heap_paddr);
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
@@ -782,6 +811,22 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     println!("[boot] entering initcalls");
     call_initcalls();
     println!("[boot] leaving initcalls");
+
+    let device_manager = DeviceManager::get_manager();
+    println!(
+        "[boot] pre-init devices: count={} tty0={}",
+        device_manager.get_devices_count(),
+        device_manager.get_device_by_name("tty0").is_some()
+    );
+    for (id, device) in device_manager.get_devices_with_ids() {
+        println!(
+            "[boot] pre-init device: id={} name={} type={:?} capabilities={:?}",
+            id,
+            device.name(),
+            device.device_type(),
+            device.capabilities()
+        );
+    }
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
@@ -904,33 +949,46 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         Err(e) => println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
 
-    println!("[Scarlet Kernel] About to fence before scheduler start...");
+    // println!("[Scarlet Kernel] About to fence before scheduler start...");
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
-    println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
+    // println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
     crate::sched::scheduler::register_online_cpu(cpu_id);
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 
-    // Use println here to avoid any potential console lock issues.
-    println!("[Scarlet Kernel] Scheduler will start...");
-    println!("[Scarlet Kernel] Calling start_scheduler()...");
+    // println!("[Scarlet Kernel] Scheduler will start...");
+    // println!("[Scarlet Kernel] Calling start_scheduler()...");
 
     let next_task_id = start_scheduler();
+    // println!("[boot] start_scheduler returned next={:?}", next_task_id);
     // Keep APs behind the release barrier until the BSP has claimed the
     // first runnable task. Otherwise a fast AP can steal the init task from
     // the BSP's ready queue before the boot CPU enters it, which makes early
     // userspace startup nondeterministic on SMP systems. The BSP is not
     // assumed to have CPU ID 0.
     if let Some(hook) = boot_info.start_secondary_cpus_hook {
+        // println!("[boot] releasing secondary CPUs");
         hook();
         fence(Ordering::SeqCst);
+        // println!("[boot] secondary CPUs released");
     }
     if let Some(next_task_id) = next_task_id {
         let next_task = get_task_by_id(next_task_id).expect("First runnable task must exist");
+        // println!(
+        //     "[boot] first switch: task={} type={:?}",
+        //     next_task_id, next_task.task_type
+        // );
         if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
         } else {
-            crate::arch::first_switch_to_user(next_task);
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
         }
     }
 
@@ -982,9 +1040,16 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
         let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
             .expect("AP: first runnable task must exist");
         if next_task.task_type == crate::task::TaskType::Kernel {
+            drop(next_task);
             crate::sched::scheduler::first_switch_to_kernel_task(next_task_id);
         } else {
-            crate::arch::first_switch_to_user(next_task);
+            let task_ptr = &*next_task as *const crate::task::Task;
+            drop(next_task);
+            // SAFETY: start_scheduler() selected and claimed this task for the
+            // current CPU. Its running_cpu token prevents TaskPool removal,
+            // which requires Terminated && running_cpu == NO_CPU, until the
+            // first user transition owns the task's execution.
+            unsafe { crate::arch::first_switch_to_user(&*task_ptr) };
         }
     }
 

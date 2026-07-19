@@ -40,7 +40,6 @@ use core::fmt::Write;
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;
 use crate::device::{DeviceCapability, DeviceType};
-use crate::early_println;
 
 #[macro_export]
 macro_rules! print {
@@ -60,8 +59,8 @@ pub fn _print(args: fmt::Arguments) {
 
     impl fmt::Write for LogWriter {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            for &b in s.as_bytes() {
-                crate::log::write_byte(b);
+            for &byte in s.as_bytes() {
+                crate::log::write_byte(byte);
             }
             Ok(())
         }
@@ -69,56 +68,63 @@ pub fn _print(args: fmt::Arguments) {
     let mut log = LogWriter;
     let _ = log.write_fmt(args);
 
+    if crate::earlyfb::is_redirection_enabled() && crate::earlyfb::is_initialized() {
+        struct EarlyFramebufferWriter;
+
+        impl fmt::Write for EarlyFramebufferWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                crate::earlyfb::write_str(s);
+                Ok(())
+            }
+        }
+
+        let mut early_framebuffer = EarlyFramebufferWriter;
+        let _ = early_framebuffer.write_fmt(args);
+    }
+
     let manager = DeviceManager::get_manager();
 
-    // Helper: write to a specific CharDevice implementation
     struct CharDeviceWriter<'a>(&'a dyn CharDevice);
+
     impl<'a> fmt::Write for CharDeviceWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            if self.0.write(s.as_bytes()).is_err() {
-                return Err(fmt::Error);
-            }
+            self.0.write(s.as_bytes()).map_err(|_| fmt::Error)?;
             Ok(())
         }
     }
 
     // 1) Prefer devices that advertise Serial capability (raw UART-like)
-    let count = manager.get_devices_count();
-    for id in 1..=count {
-        if let Some(dev) = manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char
-                && dev.capabilities().contains(&DeviceCapability::Serial)
-                && dev.name() != "null"
-            {
-                if let Some(char_dev) = dev.as_char_device() {
-                    let mut writer = CharDeviceWriter(char_dev);
-                    if writer.write_fmt(args).is_ok() {
-                        return;
-                    }
+    let devices = manager.get_devices_with_ids();
+    for (_, dev) in &devices {
+        if dev.device_type() == DeviceType::Char
+            && dev.capabilities().contains(&DeviceCapability::Serial)
+            && dev.name() != "null"
+        {
+            if let Some(char_dev) = dev.as_char_device() {
+                let mut writer = CharDeviceWriter(char_dev);
+                if writer.write_fmt(args).is_ok() {
+                    return;
                 }
             }
         }
     }
 
     // 2) Otherwise choose any Char device that is NOT TTY-capable and NOT the null sink
-    for id in 1..=count {
-        if let Some(dev) = manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char
-                && !dev.capabilities().contains(&DeviceCapability::Tty)
-            {
-                if let Some(char_dev) = dev.as_char_device() {
-                    let mut writer = CharDeviceWriter(char_dev);
-                    if writer.write_fmt(args).is_ok() {
-                        return;
-                    }
+    for (_, dev) in &devices {
+        if dev.device_type() == DeviceType::Char
+            && !dev.capabilities().contains(&DeviceCapability::Tty)
+        {
+            if let Some(char_dev) = dev.as_char_device() {
+                let mut writer = CharDeviceWriter(char_dev);
+                if writer.write_fmt(args).is_ok() {
+                    return;
                 }
             }
         }
     }
 
-    // Final fallback: write directly to the early console while still holding
-    // the global print guard. Calling early_println! here would re-enter the
-    // same print lock and deadlock.
-    let mut early = crate::earlycon::EarlyConsole::new();
-    let _ = early.write_fmt(args);
+    if !crate::earlyfb::is_initialized() {
+        let mut early = crate::earlycon::EarlyConsole::new();
+        let _ = early.write_fmt(args);
+    }
 }

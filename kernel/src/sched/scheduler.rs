@@ -11,31 +11,34 @@
 //! This separation avoids unnecessary iteration over blocked/zombie tasks
 //! during normal scheduling operations.
 //!
-//! # TaskPool Safety
+//! # TaskPool Ownership
 //!
-//! The global `TaskPool` stores tasks in a fixed-size array indexed by task_id.
-//! This design avoids HashMap-related issues and provides stable memory locations:
+//! The global `TaskPool` stores active tasks in a map keyed by stable global
+//! task IDs. User IDs increase from one while kernel IDs decrease from a
+//! disjoint high range. IDs are never recycled, so stale bare IDs cannot alias
+//! a later task.
 //!
-//! - **Fixed Array**: `tasks[task_id]` ensures stable addresses (no reallocation)
-//! - **Direct Indexing**: task_id == index for O(1) access without hash lookup
-//! - **ID Recycling**: Free list reuses task IDs to avoid exhaustion
-//!
-//! The pool provides `get_task()` which returns `&'static`
-//! references using raw pointers. This is **unsafe but practical** because:
-//!
-//! 1. Tasks are stored at fixed addresses (task_id == index)
-//! 2. The scheduler never removes running tasks
-//! 3. Single-core execution prevents concurrent access
-//! 4. Context switches never invalidate the current task's reference
+//! The pool owns one `Arc<Task>` for every registered task. Lookups clone that
+//! handle while holding the pool lock, so callers retain ownership even after a
+//! concurrent zombie cleanup removes the task from its slot. Removed handles
+//! move to retirement until no lookup owns another `Arc`; only then does the
+//! dedicated task-reaper worker drop the task. Stable IDs are never recycled.
+//! This makes task lookup safe across CPUs without extending borrowed-reference
+//! lifetimes or running `Task::drop` in a lookup context.
 //!
 //! **IMPORTANT**: Never access `TaskPool::tasks` directly. Always use the
-//! provided methods which document and enforce safety invariants.
+//! provided methods so lookups retain task ownership.
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString};
+use alloc::{
+    collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
+    string::ToString,
+    sync::Arc,
+    vec::Vec,
+};
 
 use crate::abi::EventProcessOutcome;
 use crate::arch::get_kernel_trapvector_paddr;
@@ -51,345 +54,423 @@ use crate::{
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
     task::{
-        SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
+        CurrentTaskRef, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
         wake_parent_waiters, wake_task_waiters,
     },
     timer::{get_kernel_timer, get_time_ns},
 };
 
-/// Task pool that stores tasks in fixed positions
-/// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
-/// which is very reasonable for general-purpose systems.
-/// TODO: Refactor Task struct to use fine-grained Mutex on individual fields
-///       (e.g., state: Mutex<TaskState>, time_slice: Mutex<usize>) and change
-///       TaskPool to use Arc<Task> for safe sharing across threads/contexts.
-///       This would also eliminate the fixed-size limitation.
-pub const MAX_TASKS: usize = 1024;
-const KERNEL_TASK_ID_START: usize = MAX_TASKS - 128;
+/// Maximum number of concurrently active user tasks.
+pub const MAX_ACTIVE_USER_TASKS: usize = 895;
+/// Maximum number of concurrently active kernel tasks.
+pub const MAX_ACTIVE_KERNEL_TASKS: usize = 128;
 
 /// Global task pool storing all tasks
 /// Using spin::Once with Box-ed tasks array to avoid large stack usage.
 static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
+static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
+static TASK_REAPER_WAKER: crate::sync::Waker =
+    crate::sync::Waker::new_uninterruptible("task-reaper");
+static FORK_TRACE_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+static FORK_TRACE_PICKED_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
+static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
+static FORK_TRACE_ATOMIC_CPU_MASKS: [AtomicU64; FORK_TRACE_ATOMIC_SLOTS] =
+    [const { AtomicU64::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
 
 /// Get the global task pool (lazy initialization on first call)
 pub fn get_task_pool() -> &'static TaskPool {
     TASK_POOL.call_once(|| TaskPool::new())
 }
 
-/// Global task pool storing all tasks in a Box-ed fixed-size array
+fn fork_trace_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
+    FORK_TRACE_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+}
+
+fn fork_trace_picked_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
+    FORK_TRACE_PICKED_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+}
+
+struct TaskEntry {
+    generation: usize,
+    task: Arc<Task>,
+}
+
+struct TaskPoolState {
+    tasks: BTreeMap<usize, TaskEntry>,
+    active_user_tasks: usize,
+    active_kernel_tasks: usize,
+    pending_user_tasks: usize,
+    pending_kernel_tasks: usize,
+    next_user_id: usize,
+    next_kernel_id: usize,
+}
+
+/// Global task pool storing active tasks in a map.
 ///
-/// # Safety
+/// # Ownership
 ///
-/// This struct provides unsafe access to tasks through `get_task()`
-/// which return `&'static` references without holding locks. This is safe because:
+/// Tasks are stored as `Arc<Task>` handles in a map. `get_task()` clones an
+/// entry's handle while holding the pool lock, so the returned task
+/// remains alive if another CPU concurrently removes the pool's handle during
+/// zombie cleanup. Removed entry handles enter retirement and are dropped only
+/// by the dedicated normal-context task reaper after no outstanding lookup
+/// retains the task. A task ID is never recycled.
 ///
-/// 1. **Stable Box Memory**: Tasks are stored in `Box<[Option<Task>; MAX_TASKS]>`.
-///    Box guarantees the underlying array pointer **never moves** after allocation,
-///    making `&'static` references safe in practice.
-///
-/// 2. **Direct Indexing**: `task_id == index` provides O(1) access without HashMap
-///    overhead. No rehashing or reallocation can occur.
-///
-/// 3. **Scheduler Control**: The scheduler controls all task removal and ensures
-///    that the currently running task is never removed during context switches.
-///
-/// 4. **Single-Core Execution**: Current implementation is single-core, preventing
-///    concurrent access during context switches.
-///
-/// **IMPORTANT**: Do NOT directly access the `tasks` array. Always use:
-/// - `TaskPool::get_task()` for immutable references
+/// **IMPORTANT**: Do NOT directly access the `tasks` map. Always use:
+/// - `TaskPool::get_task()` for owned task handles
 /// - `get_task_by_id()` which is the preferred public API
 ///
-/// Direct array access could violate safety assumptions and cause undefined behavior.
+/// Direct map access can bypass the ownership and synchronization guarantees.
 ///
 /// # Memory Layout
 ///
-/// The tasks array is allocated directly on heap via Vec→Box conversion:
-/// - No intermediate stack allocation (824KB never touches stack)
-/// - Box<[T]> provides stable pointer for &'static references
-/// - Array size is fixed at compile time (MAX_TASKS = 1024)
+/// The active-task map owns one `Arc<Task>` per entry:
+/// - Every active entry owns an `Arc<Task>`
+/// - Cloned handles keep the corresponding task allocation alive
+struct RetiredTask {
+    task_id: usize,
+    task: Arc<Task>,
+}
+
 pub struct TaskPool {
-    // Box-ed fixed-length array allocated on heap
-    // Pointer is stable for the lifetime of the program
+    // Each map entry owns one handle while the task is registered.
     //
     // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() methods
-    tasks: spin::Mutex<Box<[Option<Task>; MAX_TASKS]>>,
+    tasks: spin::Mutex<TaskPoolState>,
 
-    // Monotonically increasing generation for each task slot.
-    // Incremented every time a slot receives a new task so recycled IDs can
-    // be distinguished from stale deferred references.
-    slot_generations: Box<[AtomicUsize; MAX_TASKS]>,
-
-    // Free lists of recyclable task IDs. User task IDs are kept in the low range
-    // so init remains PID 1 even if kernel workers are created early.
-    free_user_ids: spin::Mutex<VecDeque<usize>>,
-    free_kernel_ids: spin::Mutex<VecDeque<usize>>,
-
-    // Next IDs to allocate when free lists are empty. Kernel workers allocate
-    // downward from the high reserved range.
-    next_user_id: core::sync::atomic::AtomicUsize,
-    next_kernel_id: core::sync::atomic::AtomicUsize,
+    // Removed slot handles remain here until no outstanding lookup owns the
+    // task. The task-reaper worker moves entries out of this lock before
+    // dropping them.
+    retired_tasks: spin::Mutex<Vec<RetiredTask>>,
 }
 
 impl TaskPool {
     fn new() -> Self {
-        // Allocate uninitialized Box array directly on heap
-        // No stack usage, no Vec overhead
-        let mut tasks: Box<[core::mem::MaybeUninit<Option<Task>>; MAX_TASKS]> =
-            unsafe { Box::new_uninit().assume_init() };
-
-        // Initialize all elements to None
-        for i in 0..MAX_TASKS {
-            tasks[i].write(None);
-        }
-
-        // Convert to initialized Box<[Option<Task>]>
-        // SAFETY: All elements have been initialized with None
-        let tasks: Box<[Option<Task>; MAX_TASKS]> = unsafe { core::mem::transmute(tasks) };
-
         TaskPool {
-            tasks: spin::Mutex::new(tasks),
-            slot_generations: Box::new([const { AtomicUsize::new(0) }; MAX_TASKS]),
-            free_user_ids: spin::Mutex::new(VecDeque::new()),
-            free_kernel_ids: spin::Mutex::new(VecDeque::new()),
-            next_user_id: core::sync::atomic::AtomicUsize::new(1), // Start from 1, ID 0 is invalid
-            next_kernel_id: core::sync::atomic::AtomicUsize::new(MAX_TASKS - 1),
+            tasks: spin::Mutex::new(TaskPoolState {
+                tasks: BTreeMap::new(),
+                active_user_tasks: 0,
+                active_kernel_tasks: 0,
+                pending_user_tasks: 0,
+                pending_kernel_tasks: 0,
+                next_user_id: 1,
+                // Zero encodes no task, and usize::MAX is intentionally never assigned.
+                next_kernel_id: usize::MAX - 1,
+            }),
+            retired_tasks: spin::Mutex::new(Vec::new()),
         }
     }
 
-    /// Allocate a new task ID
-    /// Tries to reuse freed IDs first, then allocates new ones sequentially
-    /// Uses atomic operations for lock-free allocation
-    pub fn allocate_id(&self, task_type: crate::task::TaskType) -> Option<usize> {
+    fn reserve_id(
+        state: &mut TaskPoolState,
+        task_type: crate::task::TaskType,
+    ) -> Result<usize, &'static str> {
         match task_type {
-            crate::task::TaskType::Kernel => self.allocate_kernel_id(),
-            crate::task::TaskType::User => self.allocate_user_id(),
-        }
-    }
-
-    fn allocate_user_id(&self) -> Option<usize> {
-        // Try to reuse freed IDs first
-        {
-            let mut free_user_ids = self.free_user_ids.lock();
-            if let Some(id) = free_user_ids.pop_front() {
-                return Some(id);
+            crate::task::TaskType::User => {
+                if state.active_user_tasks + state.pending_user_tasks >= MAX_ACTIVE_USER_TASKS {
+                    return Err("Maximum active user task count reached");
+                }
+                let id = state.next_user_id;
+                if id == 0 || id >= state.next_kernel_id {
+                    return Err("User task ID space exhausted");
+                }
+                state.next_user_id = id.checked_add(1).ok_or("User task ID overflow")?;
+                state.pending_user_tasks += 1;
+                Ok(id)
             }
-        }
-
-        // Allocate new ID using atomic fetch_add
-        let id = self
-            .next_user_id
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if id >= KERNEL_TASK_ID_START {
-            // Rollback on overflow
-            self.next_user_id
-                .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-            None
-        } else {
-            Some(id)
-        }
-    }
-
-    fn allocate_kernel_id(&self) -> Option<usize> {
-        {
-            let mut free_kernel_ids = self.free_kernel_ids.lock();
-            if let Some(id) = free_kernel_ids.pop_front() {
-                return Some(id);
+            crate::task::TaskType::Kernel => {
+                if state.active_kernel_tasks + state.pending_kernel_tasks >= MAX_ACTIVE_KERNEL_TASKS
+                {
+                    return Err("Maximum active kernel task count reached");
+                }
+                let id = state.next_kernel_id;
+                if id == 0 || id <= state.next_user_id {
+                    return Err("Kernel task ID space exhausted");
+                }
+                state.next_kernel_id = id.checked_sub(1).ok_or("Kernel task ID overflow")?;
+                state.pending_kernel_tasks += 1;
+                Ok(id)
             }
-        }
-
-        let id = self
-            .next_kernel_id
-            .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
-        if id < KERNEL_TASK_ID_START {
-            self.next_kernel_id
-                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            None
-        } else {
-            Some(id)
         }
     }
 
     /// Add a task to the pool
     /// Allocates an ID, sets it on the task, and returns the ID
     fn add_task(&self, mut task: Task) -> Result<usize, &'static str> {
-        // Allocate ID for this task
-        let task_id = self
-            .allocate_id(task.task_type)
-            .ok_or("Task pool exhausted")?;
+        let task_type = task.task_type;
+        let task_id = {
+            let mut tasks = self.tasks.lock();
+            Self::reserve_id(&mut tasks, task_type)?
+        };
 
-        // Add to the pool at the allocated index BEFORE registering namespace mapping
-        if task_id >= MAX_TASKS {
-            return Err("Task ID out of bounds");
-        }
-
-        let mut tasks = self.tasks.lock();
-
-        if tasks[task_id].is_some() {
-            return Err("Task ID slot already occupied");
-        }
-
-        // Allocate namespace ID AFTER checking slot availability
+        // Namespace allocation and VMM owner registration may take their own
+        // locks, so do not hold the TaskPool lock across these operations.
         let namespace_id = task.get_namespace().allocate_task_id_for(task_id);
-
-        // Set IDs on the task
         task.set_id(task_id);
         task.set_namespace_id(namespace_id);
         task.vm_manager.set_owner_task_id_if_unset(task_id);
+        let task = Arc::new(task);
 
-        let generation = self.slot_generations[task_id]
-            .fetch_add(1, Ordering::SeqCst)
-            .wrapping_add(1);
-        debug_assert_ne!(generation, 0, "task slot generation wrapped to 0");
-
-        tasks[task_id] = Some(task);
+        let mut tasks = self.tasks.lock();
+        match task_type {
+            crate::task::TaskType::User => {
+                tasks.pending_user_tasks -= 1;
+                tasks.active_user_tasks += 1;
+            }
+            crate::task::TaskType::Kernel => {
+                tasks.pending_kernel_tasks -= 1;
+                tasks.active_kernel_tasks += 1;
+            }
+        }
+        tasks.tasks.insert(
+            task_id,
+            TaskEntry {
+                generation: task_id,
+                task,
+            },
+        );
         Ok(task_id)
     }
 
     fn task_generation(&self, task_id: usize) -> Option<usize> {
-        if task_id >= MAX_TASKS {
+        let tasks = self.tasks.lock();
+        Some(tasks.tasks.get(&task_id)?.generation)
+    }
+
+    fn get_task_if_generation(&self, task_id: usize, generation: usize) -> Option<Arc<Task>> {
+        if generation == 0 {
             return None;
         }
 
         let tasks = self.tasks.lock();
-        tasks[task_id].as_ref()?;
-        Some(self.slot_generations[task_id].load(Ordering::SeqCst))
+        let entry = tasks.tasks.get(&task_id)?;
+        if entry.generation != generation {
+            return None;
+        }
+
+        Some(entry.task.clone())
     }
 
-    fn get_task_if_generation(&self, task_id: usize, generation: usize) -> Option<&'static Task> {
-        if task_id >= MAX_TASKS || generation == 0 {
-            return None;
-        }
-
-        let tasks = self.tasks.lock();
-        let task = tasks[task_id].as_ref()?;
-        if self.slot_generations[task_id].load(Ordering::SeqCst) != generation {
-            return None;
-        }
-
-        // SAFETY: The Box<[T]> ensures the array pointer is stable.
-        // Once a Box is allocated, its underlying pointer never changes.
-        let ptr = task as *const Task;
-        Some(unsafe { &*ptr })
-    }
-
-    /// Get a task reference by ID
-    /// Returns a static reference using raw pointer for lifetime extension
+    /// Get an owned task handle by ID.
     ///
-    /// # Safety
+    /// The returned `Arc<Task>` keeps the task alive even if zombie cleanup
+    /// removes the pool's handle concurrently.
     ///
-    /// This function is safe to use under the following conditions:
-    /// - The task must not be removed while the returned reference is in use
-    /// - In context switching scenarios, the currently running task is never removed
-    /// - Single-core execution ensures no concurrent removal during context switch
+    /// # Returns
     ///
-    /// The returned reference points to a fixed location in the TaskPool's
-    /// Box-ed array (task_id == index), so the address is **stable**:
-    /// - Box guarantees the underlying array never moves
-    /// - Unlike Vec or HashMap, no reallocation can occur
-    /// - The pointer remains valid for the lifetime of the program
-    ///
-    /// **Important**: Do NOT directly access `TaskPool::tasks` array.
-    /// Always use this method to ensure proper safety.
-    pub fn get_task(task_id: usize) -> Option<&'static Task> {
-        if task_id >= MAX_TASKS {
-            return None;
-        }
-
+    /// An owned handle for the task currently registered at `task_id`, or `None`.
+    pub fn get_task(task_id: usize) -> Option<Arc<Task>> {
         let pool = get_task_pool();
         let tasks = pool.tasks.lock();
 
-        // SAFETY: The Box<[T]> ensures the array pointer is stable.
-        // Once a Box is allocated, its underlying pointer never changes.
-        // Combined with scheduler guarantees (no removal of running task),
-        // this provides a de-facto &'static reference.
-        tasks[task_id].as_ref().map(|task| {
-            let ptr = task as *const Task;
-            unsafe { &*ptr }
-        })
+        tasks.tasks.get(&task_id).map(|entry| entry.task.clone())
     }
 
-    /// Remove a task from the pool
+    /// Retire a terminated task from the pool.
     ///
-    /// # Safety
+    /// This removes the pool's active entry handle and transfers it to retirement.
+    /// Any handles previously returned by `get_task()` keep the task alive
+    /// until their owners release them. The dedicated task-reaper worker drops
+    /// the task only after retirement is the sole strong
+    /// owner. The task must be terminated and not running when removed.
     ///
-    /// **CRITICAL**: This method invalidates all `&'static` references returned by
-    /// `get_task()` for this task_id. The scheduler must ensure:
+    /// # Returns
     ///
-    /// 1. The task being removed is NOT currently running on any CPU
-    /// 2. No context switch is in progress for this task
-    /// 3. No references to this task are held elsewhere
+    /// `true` when the task was retired, or `false` when it is absent, running,
+    /// or not yet terminated.
+    pub(crate) fn remove_task(&self, task_id: usize) -> bool {
+        let retired_task = {
+            let mut tasks = self.tasks.lock();
+            let Some(entry) = tasks.tasks.get(&task_id) else {
+                return false;
+            };
+            if entry.task.running_cpu.load(Ordering::SeqCst) != NO_CPU
+                || !matches!(
+                    entry.task.state.load(Ordering::SeqCst),
+                    TaskState::Terminated
+                )
+            {
+                return false;
+            }
+
+            let entry = tasks
+                .tasks
+                .remove(&task_id)
+                .expect("task entry was checked as occupied");
+            match entry.task.task_type {
+                crate::task::TaskType::User => tasks.active_user_tasks -= 1,
+                crate::task::TaskType::Kernel => tasks.active_kernel_tasks -= 1,
+            }
+            RetiredTask {
+                task_id,
+                task: entry.task,
+            }
+        };
+
+        {
+            self.retired_tasks.lock().push(retired_task);
+        }
+        TASK_REAPER_WAKER.wake_one();
+        true
+    }
+
+    /// Reap retired tasks no longer referenced by lookup owners.
     ///
-    /// The scheduler enforces this by:
-    /// - Only removing tasks from zombie_queue (already exited)
-    /// - Never removing the currently running task
-    /// - Ensuring the task is not in ready/blocked queues before removal
-    pub(crate) fn remove_task(&self, task_id: usize) -> Option<Task> {
-        if task_id >= MAX_TASKS {
-            return None;
+    /// This is called only by the dedicated task-reaper worker in normal task
+    /// context. Entries are removed from the retirement list before dropping so
+    /// `Task::drop` never executes while either task-pool lock is held.
+    ///
+    /// # Returns
+    ///
+    /// The number of retired tasks reclaimed during this call.
+    pub(crate) fn reap_retired_tasks(&self) -> usize {
+        let mut reclaimable = Vec::new();
+        {
+            let mut retired_tasks = self.retired_tasks.lock();
+            let mut index = 0;
+            while index < retired_tasks.len() {
+                if Arc::strong_count(&retired_tasks[index].task) == 1 {
+                    reclaimable.push(retired_tasks.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
         }
-        let mut tasks = self.tasks.lock();
-        let task = tasks[task_id].as_ref()?;
-        if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
-            return None;
+
+        let reclaimed = reclaimable.len();
+        for retired_task in reclaimable {
+            let task_id = retired_task.task_id;
+            let trace_fork_exit = DEBUG_FORK_TRACE_LOGGING && is_fork_trace_task(task_id);
+            retired_task
+                .task
+                .get_namespace()
+                .unregister_mapping_for_global(task_id);
+            crate::task::cleanup_task_waker(task_id);
+            crate::task::cleanup_parent_waker(task_id);
+            if DEBUG_FORK_TRACE_LOGGING {
+                clear_fork_trace_task(task_id);
+            }
+            crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_BEGIN, task_id as u64, 0);
+            if trace_fork_exit {
+                crate::early_println!(
+                    "[fork-trace] child_task_id={} reaper-drop-enter cpu={}",
+                    task_id,
+                    get_cpu().get_cpuid(),
+                );
+            }
+            drop(retired_task);
+            crate::breadcrumb::drop(crate::breadcrumb::REAPER_DROP_DONE, task_id as u64, 0);
+            if trace_fork_exit {
+                crate::early_println!(
+                    "[fork-trace] child_task_id={} reaper-drop-done cpu={}",
+                    task_id,
+                    get_cpu().get_cpuid(),
+                );
+            }
         }
-        if !matches!(task.state.load(Ordering::SeqCst), TaskState::Terminated) {
-            return None;
-        }
-        let task = tasks[task_id].take().unwrap();
-        match task.task_type {
-            crate::task::TaskType::Kernel => self.free_kernel_ids.lock().push_back(task_id),
-            crate::task::TaskType::User => self.free_user_ids.lock().push_back(task_id),
-        }
-        Some(task)
+        reclaimed
+    }
+
+    fn has_retired_tasks(&self) -> bool {
+        !self.retired_tasks.lock().is_empty()
+    }
+
+    #[cfg(test)]
+    fn reap_retired_tasks_for_test(&self) -> usize {
+        self.reap_retired_tasks()
     }
 
     #[allow(dead_code)]
     fn contains_task(&self, task_id: usize) -> bool {
-        if task_id >= MAX_TASKS {
-            return false;
-        }
-
         let tasks = self.tasks.lock();
-        tasks[task_id].is_some()
+        tasks.tasks.contains_key(&task_id)
+    }
+
+    /// Return a snapshot of active global task IDs for shutdown and diagnostics.
+    pub fn task_ids_snapshot(&self) -> Vec<usize> {
+        self.tasks.lock().tasks.keys().copied().collect()
     }
 
     /// Reset the task pool to initial state (test-only)
     ///
-    /// Clears all tasks, resets ID allocation, and clears free list.
-    /// This should ONLY be called in tests to clean up state between test cases.
-    ///
-    /// # Safety
-    ///
-    /// This function INVALIDATES all existing `&'static` references to tasks.
-    /// It must ONLY be called when:
-    /// - No tasks are currently running
-    /// - No task references are held elsewhere
-    /// - Called from test code only
+    /// Retires all tasks, reclaims them, and resets test-only ID allocation.
+    /// This should ONLY be called in tests to clean up state between test
+    /// cases when no task handles remain and no tasks are running. Test reset
+    /// invokes reaping directly because the kernel worker is not scheduled by
+    /// unit tests.
     #[cfg(test)]
     pub fn reset(&self) {
-        // Clear all task slots
-        let mut tasks = self.tasks.lock();
-        for i in 0..MAX_TASKS {
-            tasks[i] = None;
-            self.slot_generations[i].store(0, Ordering::SeqCst);
+        let mut retired_tasks = Vec::new();
+        {
+            let mut tasks = self.tasks.lock();
+            for (task_id, entry) in core::mem::take(&mut tasks.tasks) {
+                retired_tasks.push(RetiredTask {
+                    task_id,
+                    task: entry.task,
+                });
+            }
+            tasks.active_user_tasks = 0;
+            tasks.active_kernel_tasks = 0;
+            tasks.pending_user_tasks = 0;
+            tasks.pending_kernel_tasks = 0;
+            tasks.next_user_id = 1;
+            tasks.next_kernel_id = usize::MAX - 1;
         }
-        drop(tasks);
-
-        // Reset ID allocation to start from each range's beginning
-        self.next_user_id
-            .store(1, core::sync::atomic::Ordering::Relaxed);
-        self.next_kernel_id
-            .store(MAX_TASKS - 1, core::sync::atomic::Ordering::Relaxed);
-
-        // Clear free lists
-        self.free_user_ids.lock().clear();
-        self.free_kernel_ids.lock().clear();
+        {
+            self.retired_tasks.lock().append(&mut retired_tasks);
+        }
+        self.reap_retired_tasks_for_test();
+        assert!(
+            self.retired_tasks.lock().is_empty(),
+            "cannot reset task pool while task handles remain"
+        );
     }
 }
 
+const TASK_REAPER_RETRY_TICKS: u64 = 1;
+
+fn task_reaper_worker_entry() {
+    loop {
+        let task_pool = get_task_pool();
+        task_pool.reap_retired_tasks();
+
+        let Some(task) = crate::task::mytask() else {
+            crate::arch::instruction::idle();
+        };
+        if task_pool.has_retired_tasks() {
+            TASK_REAPER_WAKER.wait_with_timeout(
+                task.get_id(),
+                task.get_trapframe(),
+                Some(TASK_REAPER_RETRY_TICKS),
+            );
+        } else {
+            TASK_REAPER_WAKER.wait(task.get_id(), task.get_trapframe());
+        }
+    }
+}
+
+fn start_task_reaper_worker() {
+    if TASK_REAPER_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let task = new_kernel_task("task-reaper".to_string(), 1, task_reaper_worker_entry);
+    task.init();
+    add_task(task, 0);
+}
+
+crate::late_initcall!(start_task_reaper_worker);
+
 static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
+static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
 static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
     [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
@@ -398,6 +479,12 @@ static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+static PENDING_RESCHEDULE: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
+// Tracks an outstanding hardware reschedule kick. This is deliberately
+// separate from PENDING_RESCHEDULE, which records deferred scheduler work.
+static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static TOTAL_BUSY_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_IDLE_CPU_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static CPU_UTIL_AVG: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
@@ -416,6 +503,20 @@ const SCHED_DEMOTION_MARGIN: u32 = 128;
 const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 const SCHED_LATERAL_BALANCE_MARGIN: u64 = TASK_LOAD_SCALE / 4;
+
+// DIAGNOSTIC: Set these constants to false after the Apple SMP fork/migration
+// experiment. The normal placement and work-stealing code remains below.
+const DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU: bool = false;
+const DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP: bool = false;
+const DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING: bool = false;
+const DIAGNOSTIC_DISABLE_TASK_MIGRATION: bool = false;
+const DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP: bool = false;
+// Route selected user task classes to the BSP while leaving the normal
+// placement code available for the complementary class.
+const DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP: bool = false;
+const DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP: bool = false;
+const DIAGNOSTIC_RUN_USER_THREADS_ON_BSP: bool = false;
+const DIAGNOSTIC_RETAIN_TERMINATED_TASKS: bool = false;
 
 static CPU_CORE_CLASSES: [AtomicU8; MAX_NUM_CPUS] =
     [const { AtomicU8::new(CpuCoreClass::Balanced as u8) }; MAX_NUM_CPUS];
@@ -549,10 +650,143 @@ pub fn take_idle_to_user_handoff(cpu_id: usize, current_task_id: usize) -> bool 
         .compare_exchange(current_task_id, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
 }
+
+/// Defer a reschedule request until the current CPU reaches a safe scheduling point.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU that consumed the reschedule interrupt.
+pub fn defer_reschedule(cpu_id: usize) {
+    if cpu_id < MAX_NUM_CPUS {
+        PENDING_RESCHEDULE[cpu_id].store(true, Ordering::Release);
+    }
+}
+
+/// Take a deferred reschedule request for a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU about to reach a safe scheduling point.
+///
+/// # Returns
+///
+/// `true` when a deferred request was pending.
+pub fn take_deferred_reschedule(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS && PENDING_RESCHEDULE[cpu_id].swap(false, Ordering::AcqRel)
+}
+
+fn reserve_reschedule_ipi(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS
+        && PENDING_RESCHEDULE_IPI[cpu_id]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+/// Acknowledge a consumed hardware reschedule IPI on its target CPU.
+///
+/// The architecture interrupt handler must call this only after it has
+/// acknowledged the hardware IPI source and before it processes or defers the
+/// reschedule request. A request that races before this clear is covered by the
+/// current handler; one that races after it sends a fresh hardware IPI.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Target CPU that consumed the reschedule IPI.
+pub fn acknowledge_reschedule_ipi(cpu_id: usize) {
+    if cpu_id < MAX_NUM_CPUS {
+        PENDING_RESCHEDULE_IPI[cpu_id].swap(false, Ordering::AcqRel);
+    }
+}
+
+fn request_remote_reschedule(target_cpu: usize) {
+    let source_cpu = get_cpu().get_cpuid();
+    if target_cpu >= MAX_NUM_CPUS
+        || !is_cpu_online(target_cpu)
+        || target_cpu == source_cpu
+        || !reserve_reschedule_ipi(target_cpu)
+    {
+        return;
+    }
+
+    if !crate::arch::send_reschedule_ipi(target_cpu) {
+        panic!(
+            "online CPU must accept reschedule IPI: source_cpu={} target_cpu={}",
+            source_cpu, target_cpu
+        );
+    }
+}
+
+/// Return whether a CPU has completed its initial scheduler task publication.
+///
+/// A CPU becomes ready only after `start_scheduler()` returns from its first
+/// `pick_next()`, which publishes that CPU's current-task state. Interrupt
+/// handlers must not enter scheduling before then.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID.
+///
+/// # Returns
+///
+/// `true` when interrupt-originated scheduling is safe on `cpu_id`.
+pub fn scheduler_ready(cpu_id: usize) -> bool {
+    cpu_id < MAX_NUM_CPUS && SCHEDULER_READY[cpu_id].load(Ordering::Acquire)
+}
+
+/// Return whether an interrupt handler may enter the scheduler on a CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU ID handling the interrupt.
+///
+/// # Returns
+///
+/// `true` after the CPU has published its initial current task.
+pub fn may_schedule_from_interrupt(cpu_id: usize) -> bool {
+    scheduler_ready(cpu_id)
+}
+
+#[inline]
+fn set_scheduler_ready(cpu_id: usize, ready: bool) {
+    assert_valid_cpu_id(cpu_id);
+    SCHEDULER_READY[cpu_id].store(ready, Ordering::Release);
+}
+
+/// Apply the temporary fork-child affinity used by the SMP diagnostic mode.
+///
+/// # Arguments
+///
+/// * `child` - Fully initialized child task that has not been published yet.
+/// * `parent_cpu` - CPU currently executing the parent task.
+pub fn apply_fork_child_diagnostic_affinity(child: &mut Task, parent_cpu: usize) {
+    if DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP {
+        child.pinned_cpu = Some(BOOT_CPU_ID.load(Ordering::Acquire));
+    } else if DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU {
+        child.pinned_cpu = Some(parent_cpu);
+    }
+}
+
+fn diagnostic_run_task_on_bsp(task: &Task) -> bool {
+    if task.task_type != crate::task::TaskType::User {
+        return false;
+    }
+    if DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP {
+        return true;
+    }
+
+    task.registered_id().is_some_and(|task_id| {
+        let is_process_leader = task_id == task.get_thread_group_id();
+        (DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP && is_process_leader)
+            || (DIAGNOSTIC_RUN_USER_THREADS_ON_BSP && !is_process_leader)
+    })
+}
+
 static DEBUG_TICK: AtomicU64 = AtomicU64::new(0);
 static NEXT_CPU: AtomicUsize = AtomicUsize::new(0);
 
 pub const DEBUG_SMP_TASK_FLOW: bool = false;
+/// Enable focused fork-child lifecycle logging and bookkeeping.
+pub const DEBUG_FORK_TRACE_LOGGING: bool = false;
 
 static DEBUG_ENQUEUE_SEQ: AtomicUsize = AtomicUsize::new(0);
 static DEBUG_REMOTE_ENQUEUE_TASK: [AtomicUsize; MAX_NUM_CPUS] =
@@ -564,10 +798,19 @@ static DEBUG_REMOTE_ENQUEUE_SEQ: [AtomicUsize; MAX_NUM_CPUS] =
 
 const NO_CPU: usize = usize::MAX;
 
-const TASK_ID_MASK: usize = MAX_TASKS - 1;
-
 static SCHEDULE_PREV_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
+
+/// Lock-free scheduler state sampled for a single CPU.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedulerDiagnosticSnapshot {
+    /// Current task ID, or zero when no task is published.
+    pub current_task_id: usize,
+    /// Whether the published current task is the CPU's idle task.
+    pub is_idle: bool,
+    /// Whether the CPU has a deferred reschedule request.
+    pub pending_reschedule: bool,
+}
 
 fn debug_remote_enqueue_snapshot(cpu_id: usize) -> (Option<usize>, usize, usize) {
     let task_id = decode_task_id(DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].load(Ordering::SeqCst));
@@ -605,11 +848,25 @@ pub fn debug_log_reschedule_ipi(cpu_id: usize, from_kernel: bool, can_schedule: 
 }
 
 fn release_deferred_prev(cpu_id: usize) {
-    let prev = decode_prev_task(SCHEDULE_PREV_TASK[cpu_id].swap(0, Ordering::SeqCst));
-    let Some((prev_id, prev_generation)) = prev else {
+    let prev_id = SCHEDULE_PREV_TASK[cpu_id].swap(0, Ordering::SeqCst);
+    let Some(prev_id) = decode_task_id(prev_id) else {
         return;
     };
-    let Some(task) = get_task_pool().get_task_if_generation(prev_id, prev_generation) else {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::RELEASE_PREV_ENTER,
+        prev_id as u64,
+        cpu_id as u64,
+    );
+    // The lock-free breadcrumb above retains release diagnostics without
+    // serializing every traced task switch through the early-console lock.
+    // if is_fork_trace_task(prev_id) {
+    //     crate::early_println!(
+    //         "[fork-trace] child_task_id={} release-prev-enter cpu={}",
+    //         prev_id,
+    //         cpu_id,
+    //     );
+    // }
+    let Some(task) = TaskPool::get_task(prev_id) else {
         return;
     };
     if task
@@ -624,17 +881,18 @@ fn release_deferred_prev(cpu_id: usize) {
             task.state.store(TaskState::Ready, Ordering::SeqCst);
             return;
         }
-        match task.state.load(Ordering::SeqCst) {
+        let state = task.state.load(Ordering::SeqCst);
+        match state {
             // Requeue the previous task after its context has been saved. At
             // this point `running_cpu` has been released, so another CPU may
             // safely claim the saved kernel context from its ready queue.
             TaskState::Ready => {
                 let now_ns = get_time_ns();
-                let target_cpu = migration_target_for_task(task, cpu_id, now_ns, true)
+                let target_cpu = migration_target_for_task(&task, cpu_id, now_ns, true)
                     .filter(|&target_cpu| is_cpu_online(target_cpu))
                     .unwrap_or(cpu_id);
                 if target_cpu != cpu_id {
-                    record_scheduler_migration(task, cpu_id, target_cpu, now_ns);
+                    record_scheduler_migration(&task, cpu_id, target_cpu, now_ns);
                 }
                 task.last_cpu.store(target_cpu, Ordering::SeqCst);
                 push_ready_task(target_cpu, prev_id);
@@ -648,6 +906,26 @@ fn release_deferred_prev(cpu_id: usize) {
             }
             TaskState::Running | TaskState::Blocked(_) | TaskState::NotInitialized => {}
         }
+        crate::breadcrumb::drop(
+            crate::breadcrumb::RELEASE_PREV_DONE,
+            prev_id as u64,
+            match state {
+                TaskState::NotInitialized => 0,
+                TaskState::Ready => 1,
+                TaskState::Running => 2,
+                TaskState::Blocked(_) => 3,
+                TaskState::Zombie => 5,
+                TaskState::Terminated => 6,
+            },
+        );
+        // if is_fork_trace_task(prev_id) {
+        //     crate::early_println!(
+        //         "[fork-trace] child_task_id={} release-prev-done cpu={} state={:?}",
+        //         prev_id,
+        //         cpu_id,
+        //         state,
+        //     );
+        // }
     }
 }
 
@@ -666,7 +944,7 @@ fn charge_finished_cpu_time(cpu_id: usize, task_id: usize, delta_ns: u64) {
 
 fn task_util_min_by_id(task_id: usize) -> u32 {
     TaskPool::get_task(task_id)
-        .map(Task::sched_util_min)
+        .map(|task| task.sched_util_min())
         .unwrap_or(0)
 }
 
@@ -833,6 +1111,14 @@ fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
         .is_err()
     {
         task.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        match task.state.load(Ordering::SeqCst) {
+            TaskState::Zombie => finalize_zombie(task.get_id(), task.get_parent_id()),
+            TaskState::Terminated => cleanup_zombie(task.get_id()),
+            TaskState::Running
+            | TaskState::Ready
+            | TaskState::Blocked(_)
+            | TaskState::NotInitialized => {}
+        }
         return false;
     }
     task.last_cpu.store(cpu_id, Ordering::SeqCst);
@@ -843,6 +1129,19 @@ fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
     true
 }
 
+/// Register a CPU as available to the scheduler.
+///
+/// Architecture boot code must initialize the CPU's local interrupt controller
+/// and reschedule-IPI transport before calling this function. Once registered,
+/// remote scheduler operations may immediately send an IPI to the CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU that has completed per-CPU interrupt setup.
+///
+/// # Returns
+///
+/// This function returns no value.
 pub fn register_online_cpu(cpu_id: usize) {
     let mut cpus = ONLINE_CPUS.lock();
     if !cpus.contains(&cpu_id) {
@@ -1025,7 +1324,7 @@ fn task_load_weight(task: Option<&Task>) -> u64 {
 }
 
 fn runnable_task_weight(task_id: usize) -> u64 {
-    task_load_weight(TaskPool::get_task(task_id))
+    task_load_weight(TaskPool::get_task(task_id).as_deref())
 }
 
 fn task_load_score_on_cpu(task: &Task, cpu_id: usize) -> u64 {
@@ -1144,6 +1443,13 @@ fn cpu_better_for_preference(
 }
 
 fn select_target_cpu_at(task: Option<&Task>, now_ns: u64) -> usize {
+    if task.is_some_and(diagnostic_run_task_on_bsp) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP && task.is_none_or(|task| task.pinned_cpu.is_none()) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
+
     let cpus = ONLINE_CPUS.lock();
     if cpus.is_empty() {
         return 0;
@@ -1196,8 +1502,14 @@ fn select_target_cpu(task: Option<&Task>) -> usize {
 }
 
 fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -> usize {
+    if diagnostic_run_task_on_bsp(task) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
     if let Some(pinned_cpu) = task.pinned_cpu {
         return pinned_cpu;
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
     }
 
     let selected = select_target_cpu_at(Some(task), now_ns);
@@ -1213,6 +1525,9 @@ fn select_enqueue_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -
 }
 
 fn task_can_run_on_cpu(task: &Task, cpu_id: usize, now_ns: u64) -> bool {
+    if diagnostic_run_task_on_bsp(task) && cpu_id != BOOT_CPU_ID.load(Ordering::Acquire) {
+        return false;
+    }
     if task
         .pinned_cpu
         .is_some_and(|pinned_cpu| pinned_cpu != cpu_id)
@@ -1252,10 +1567,10 @@ fn steal_candidate_from_cpu(
         if !matches!(task.state.load(Ordering::SeqCst), TaskState::Ready) {
             continue;
         }
-        if !task_can_run_on_cpu(task, target_cpu, now_ns) {
+        if !task_can_run_on_cpu(&task, target_cpu, now_ns) {
             continue;
         }
-        if migration_cooldown_active(task, now_ns, false) {
+        if migration_cooldown_active(&task, now_ns, false) {
             continue;
         }
 
@@ -1319,7 +1634,7 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
     let Some(task) = TaskPool::get_task(task_id) else {
         return None;
     };
-    if !try_claim_ready_task(task, target_cpu) {
+    if !try_claim_ready_task(&task, target_cpu) {
         if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready)
             && task.running_cpu.load(Ordering::SeqCst) == NO_CPU
         {
@@ -1328,13 +1643,19 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
         return None;
     }
 
-    record_work_steal(task, now_ns);
+    record_work_steal(&task, now_ns);
     Some(task_id)
 }
 
 fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
+    if diagnostic_run_task_on_bsp(task) {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
+    }
     if let Some(pinned_cpu) = task.pinned_cpu {
         return pinned_cpu;
+    }
+    if DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP {
+        return BOOT_CPU_ID.load(Ordering::Acquire);
     }
 
     let min_capacity = task_min_cpu_capacity_at(Some(task), now_ns);
@@ -1357,6 +1678,19 @@ fn select_wake_cpu_for_task(task: &Task, now_ns: u64) -> usize {
             selected
         }
     }
+}
+
+/// Normalize an explicit wake target against the same placement policy used by
+/// regular wakeups. Explicit callers must not enqueue a task on an offline CPU
+/// or override affinity and diagnostic placement constraints.
+fn normalize_wake_cpu_for_task(task: &Task, requested_cpu: usize, now_ns: u64) -> Option<usize> {
+    if is_cpu_online(requested_cpu) && task_can_run_on_cpu(task, requested_cpu, now_ns) {
+        return Some(requested_cpu);
+    }
+
+    let fallback_cpu = select_wake_cpu_for_task(task, now_ns);
+    (is_cpu_online(fallback_cpu) && task_can_run_on_cpu(task, fallback_cpu, now_ns))
+        .then_some(fallback_cpu)
 }
 
 fn select_lower_capacity_cpu(task: &Task, current_cpu: usize, min_capacity: u32) -> Option<usize> {
@@ -1472,6 +1806,9 @@ fn migration_target_for_task(
     now_ns: u64,
     record_skip: bool,
 ) -> Option<usize> {
+    if DIAGNOSTIC_DISABLE_TASK_MIGRATION {
+        return None;
+    }
     if task.pinned_cpu.is_some() || !is_cpu_online(current_cpu) {
         return None;
     }
@@ -1487,7 +1824,7 @@ fn migration_target_for_task(
             && target_capacity > current_capacity
             && target_capacity >= required_capacity
         {
-            if migration_cooldown_active(task, now_ns, record_skip) {
+            if migration_cooldown_active(&task, now_ns, record_skip) {
                 return None;
             }
             return Some(target_cpu);
@@ -1498,7 +1835,7 @@ fn migration_target_for_task(
     if current_capacity > required_capacity.saturating_add(SCHED_DEMOTION_MARGIN) {
         if let Some(target_cpu) = select_lower_capacity_cpu(task, current_cpu, required_capacity) {
             if demotion_low_util_sustained(task, now_ns) {
-                if migration_cooldown_active(task, now_ns, record_skip) {
+                if migration_cooldown_active(&task, now_ns, record_skip) {
                     return None;
                 }
                 return Some(target_cpu);
@@ -1513,7 +1850,7 @@ fn migration_target_for_task(
     if let Some(target_cpu) =
         select_lateral_balance_cpu(task, current_cpu, now_ns, required_capacity)
     {
-        if migration_cooldown_active(task, now_ns, record_skip) {
+        if migration_cooldown_active(&task, now_ns, record_skip) {
             return None;
         }
         return Some(target_cpu);
@@ -1564,7 +1901,7 @@ fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static s
             ready_queue(target_cpu).lock().len(),
         );
     }
-    crate::arch::send_reschedule_ipi(target_cpu);
+    request_remote_reschedule(target_cpu);
 }
 
 pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
@@ -1576,6 +1913,16 @@ pub fn for_each_online_cpu<F: FnMut(usize)>(mut f: F) {
 
 pub fn num_online_cpus() -> usize {
     ONLINE_CPUS.lock().len()
+}
+
+/// Register the logical CPU that entered the architecture-independent kernel.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical scheduler CPU ID supplied in [`crate::BootInfo`].
+pub fn register_boot_cpu(cpu_id: usize) {
+    debug_assert!(cpu_id < MAX_NUM_CPUS);
+    BOOT_CPU_ID.store(cpu_id, Ordering::Release);
 }
 
 /// Select a target CPU for a new task.
@@ -1635,26 +1982,31 @@ fn decode_task_id(task_id: usize) -> Option<usize> {
     if task_id == 0 { None } else { Some(task_id) }
 }
 
-#[inline]
-fn encode_prev_task(task_id: usize, generation: usize) -> usize {
-    debug_assert!(task_id <= TASK_ID_MASK);
-    debug_assert_ne!(generation, 0);
-    (generation << MAX_TASKS.ilog2()) | task_id
-}
-
-#[inline]
-fn decode_prev_task(encoded: usize) -> Option<(usize, usize)> {
-    if encoded == 0 {
+/// Return a lock-free diagnostic snapshot for a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Scheduler CPU whose atomic state should be sampled.
+///
+/// # Returns
+///
+/// The published current task, idle state, and pending-reschedule state, or
+/// `None` when `cpu_id` is outside the supported CPU range.
+///
+/// This accessor takes no scheduler locks and performs no task lookup, so it
+/// may be used by interrupt-context diagnostics.
+pub fn diagnostic_snapshot(cpu_id: usize) -> Option<SchedulerDiagnosticSnapshot> {
+    if cpu_id >= MAX_NUM_CPUS {
         return None;
     }
 
-    let task_id = encoded & TASK_ID_MASK;
-    let generation = encoded >> MAX_TASKS.ilog2();
-    if task_id == 0 || generation == 0 {
-        return None;
-    }
-
-    Some((task_id, generation))
+    let current_task_id = CURRENT_TASK_IDS[cpu_id].load(Ordering::Relaxed);
+    let idle_task_id = IDLE_TASK_IDS[cpu_id].load(Ordering::Relaxed);
+    Some(SchedulerDiagnosticSnapshot {
+        current_task_id,
+        is_idle: idle_task_id != 0 && current_task_id == idle_task_id,
+        pending_reschedule: PENDING_RESCHEDULE[cpu_id].load(Ordering::Relaxed),
+    })
 }
 
 #[inline]
@@ -1671,10 +2023,125 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 
 #[inline]
 pub fn push_ready_task(cpu_id: usize, task_id: usize) {
+    let cpu_id =
+        if TaskPool::get_task(task_id).is_some_and(|task| diagnostic_run_task_on_bsp(&task)) {
+            BOOT_CPU_ID.load(Ordering::Acquire)
+        } else {
+            cpu_id
+        };
     let mut queue = ready_queue(cpu_id).lock();
     if !queue.contains(&task_id) {
         queue.push_back(task_id);
     }
+}
+
+/// Mark a process-fork child for focused first-run tracing.
+///
+/// # Arguments
+///
+/// * `task_id` - Global task ID assigned to the child.
+pub fn mark_fork_trace_task(task_id: usize) {
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        let registered = FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire);
+        if registered == task_id {
+            break;
+        }
+        if registered == 0
+            && FORK_TRACE_ATOMIC_TASKS[slot]
+                .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            break;
+        }
+    }
+
+    let mut traced = fork_trace_tasks().lock();
+    let mut picked = fork_trace_picked_tasks().lock();
+    picked.remove(&task_id);
+    traced.insert(task_id);
+}
+
+/// Check whether a task is a process-fork child being traced.
+///
+/// # Arguments
+///
+/// * `task_id` - Global task ID to check.
+///
+/// # Returns
+///
+/// `true` when focused fork tracing is enabled for the task.
+pub fn is_fork_trace_task(task_id: usize) -> bool {
+    fork_trace_tasks().lock().contains(&task_id)
+}
+
+/// Return whether this is the first observed user trap for a traced fork child
+/// on the executing CPU.
+///
+/// The fixed atomic table suppresses duplicate output without allocation or
+/// lock acquisition. A child that migrates before another trap may be logged
+/// once on each CPU, which is useful diagnostic information.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU handling the user trap.
+/// * `task_id` - Current task ID.
+///
+/// # Returns
+///
+/// `true` when the caller should emit the first-trap diagnostic.
+pub fn take_fork_trace_first_user_trap(cpu_id: usize, task_id: usize) -> bool {
+    if cpu_id >= MAX_NUM_CPUS || cpu_id >= u64::BITS as usize {
+        return false;
+    }
+
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        if FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire) != task_id {
+            continue;
+        }
+
+        let cpu_bit = 1u64 << cpu_id;
+        return FORK_TRACE_ATOMIC_CPU_MASKS[slot].fetch_or(cpu_bit, Ordering::AcqRel) & cpu_bit
+            == 0;
+    }
+
+    false
+}
+
+#[allow(dead_code)]
+fn take_fork_trace_first_pick(task_id: usize) -> bool {
+    let traced = fork_trace_tasks().lock();
+    if !traced.contains(&task_id) {
+        return false;
+    }
+    fork_trace_picked_tasks().lock().insert(task_id)
+}
+
+fn clear_fork_trace_task(task_id: usize) {
+    let start = task_id % FORK_TRACE_ATOMIC_SLOTS;
+    for offset in 0..FORK_TRACE_ATOMIC_SLOTS {
+        let slot = (start + offset) % FORK_TRACE_ATOMIC_SLOTS;
+        if FORK_TRACE_ATOMIC_TASKS[slot].load(Ordering::Acquire) != task_id {
+            continue;
+        }
+
+        FORK_TRACE_ATOMIC_CPU_MASKS[slot].store(0, Ordering::Release);
+        let _ = FORK_TRACE_ATOMIC_TASKS[slot].compare_exchange(
+            task_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        break;
+    }
+
+    let mut traced = fork_trace_tasks().lock();
+    let mut picked = fork_trace_picked_tasks().lock();
+    traced.remove(&task_id);
+    picked.remove(&task_id);
 }
 
 pub fn mark_blocked(task_id: usize) {
@@ -1692,6 +2159,11 @@ pub fn unmark_blocked(task_id: usize) {
 }
 
 pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::ZOMBIE_FINALIZE,
+        task_id as u64,
+        parent_id.unwrap_or(0) as u64,
+    );
     {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if !zombie_queue.contains(&task_id) {
@@ -1701,8 +2173,10 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
     wake_task_waiters(task_id);
     if let Some(parent_id) = parent_id {
         wake_parent_waiters(parent_id);
-        if let Some(parent) = get_task_by_id(parent_id) {
-            let parent_thread_group = parent.get_thread_group_id();
+        let parent_thread_group = get_task_by_id(parent_id)
+            .map(|parent| parent.get_thread_group_id())
+            .or_else(|| get_task_by_id(task_id).and_then(|task| task.get_parent_thread_group_id()));
+        if let Some(parent_thread_group) = parent_thread_group {
             for thread_id in get_all_task_ids() {
                 if thread_id == parent_id {
                     continue;
@@ -1718,16 +2192,33 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
 }
 
 fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::PICK_NEXT_ENTER,
+        cpu.get_cpuid() as u64,
+        0,
+    );
     let _irq_guard = IrqGuard::new();
     let cpu_id = cpu.get_cpuid();
+    crate::breadcrumb::drop(crate::breadcrumb::PICK_GUARD_DONE, cpu_id as u64, 0);
     release_deferred_prev(cpu_id);
+    crate::breadcrumb::drop(crate::breadcrumb::PICK_RELEASE_DONE, cpu_id as u64, 0);
 
     let old_id = current_task_id(cpu_id);
     let old_task = old_id.and_then(TaskPool::get_task);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::PICK_OLD_DONE,
+        cpu_id as u64,
+        old_id.unwrap_or(0) as u64,
+    );
 
     let mut next_id: Option<usize> = None;
     'outer: loop {
         let candidate = { ready_queue(cpu_id).lock().pop_front() };
+        crate::breadcrumb::drop(
+            crate::breadcrumb::PICK_QUEUE_DONE,
+            cpu_id as u64,
+            candidate.unwrap_or(0) as u64,
+        );
         match candidate {
             Some(task_id) => {
                 let Some(task) = TaskPool::get_task(task_id) else {
@@ -1756,7 +2247,14 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                         if task.running_cpu.load(Ordering::SeqCst) != NO_CPU {
                             continue;
                         }
-                        if try_claim_ready_task(task, cpu_id) {
+                        if try_claim_ready_task(&task, cpu_id) {
+                            // if take_fork_trace_first_pick(task_id) {
+                            //     crate::early_println!(
+                            //         "[fork-trace] child_task_id={} picked cpu={}",
+                            //         task_id,
+                            //         cpu_id
+                            //     );
+                            // }
                             if DEBUG_SMP_TASK_FLOW {
                                 let (expected_task, _from_cpu, seq) =
                                     debug_remote_enqueue_snapshot(cpu_id);
@@ -1791,25 +2289,31 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let current_is_idle = old_id
             .map(|task_id| idle_id != 0 && task_id == idle_id)
             .unwrap_or(true);
-        if current_is_idle {
+        if current_is_idle && !DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING {
+            crate::breadcrumb::drop(crate::breadcrumb::PICK_STEAL_BEGIN, cpu_id as u64, 0);
             next_id = steal_ready_task_for_cpu(cpu_id, get_time_ns());
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PICK_STEAL_DONE,
+                cpu_id as u64,
+                next_id.unwrap_or(0) as u64,
+            );
         }
     }
 
     if next_id.is_none() {
-        if let (Some(oid), Some(ot)) = (old_id, old_task) {
+        if let (Some(oid), Some(ot)) = (old_id, old_task.as_deref()) {
             if ot.running_cpu.load(Ordering::SeqCst) == cpu_id
                 && matches!(
                     ot.state.load(Ordering::SeqCst),
                     TaskState::Running | TaskState::Ready
                 )
             {
-                if migration_target_for_task(ot, cpu_id, get_time_ns(), false).is_some() {
+                if migration_target_for_task(&ot, cpu_id, get_time_ns(), false).is_some() {
                     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
                     if idle_id != 0
                         && oid != idle_id
                         && let Some(idle_task) = TaskPool::get_task(idle_id)
-                        && try_claim_ready_task(idle_task, cpu_id)
+                        && try_claim_ready_task(&idle_task, cpu_id)
                     {
                         next_id = Some(idle_id);
                     }
@@ -1833,7 +2337,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
         if idle_id != 0 {
             if let Some(task) = TaskPool::get_task(idle_id) {
-                if try_claim_ready_task(task, cpu_id) {
+                if try_claim_ready_task(&task, cpu_id) {
                     next_id = Some(idle_id);
                 }
             }
@@ -1846,8 +2350,13 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
         return (old_id, None);
     };
 
-    if let (Some(oid), Some(ot), Some(nid)) = (old_id, old_task, Some(next_id)) {
+    if let (Some(oid), Some(ot), Some(nid)) = (old_id, old_task.as_deref(), Some(next_id)) {
         if oid != nid {
+            // Publish every real switch-out before state-specific handling.
+            // `release_deferred_prev()` runs only after the low-level context
+            // switch and releases the ownership token for blocked, zombie, and
+            // terminated tasks as well as runnable tasks.
+            SCHEDULE_PREV_TASK[cpu_id].store(oid, Ordering::SeqCst);
             match ot.state.load(Ordering::SeqCst) {
                 TaskState::Running | TaskState::Ready => {
                     let _ = ot.state.compare_exchange(
@@ -1859,10 +2368,6 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                 }
                 TaskState::Zombie => finalize_zombie(oid, ot.get_parent_id()),
                 TaskState::Terminated | TaskState::Blocked(_) | TaskState::NotInitialized => {}
-            }
-            if let Some(generation) = get_task_pool().task_generation(oid) {
-                SCHEDULE_PREV_TASK[cpu_id]
-                    .store(encode_prev_task(oid, generation), Ordering::SeqCst);
             }
         }
     }
@@ -1900,8 +2405,25 @@ pub fn add_task(task: Task, cpu_id: usize) -> usize {
 /// finalizing parent/child relationships or ABI-specific setup.  The caller
 /// must eventually call [`enqueue_task`] to make the task visible to the
 /// scheduler.
+///
+/// # Arguments
+///
+/// * `task` - The unpublished task to register.
+///
+/// # Returns
+///
+/// The stable global task ID, or an error if active capacity or ID space is exhausted.
+pub fn try_register_task(task: Task) -> Result<usize, &'static str> {
+    get_task_pool().add_task(task)
+}
+
+/// Add a task to the global task pool without making it runnable yet.
+///
+/// This infallible wrapper is for boot and other critical callers that cannot
+/// recover from task-pool exhaustion. Recoverable userspace clone paths should
+/// use [`try_register_task`] instead.
 pub fn register_task(task: Task) -> usize {
-    let task_id = match get_task_pool().add_task(task) {
+    let task_id = match try_register_task(task) {
         Ok(id) => id,
         Err(e) => panic!("Failed to add task: {}", e),
     };
@@ -1910,10 +2432,10 @@ pub fn register_task(task: Task) -> usize {
 
 /// Make a registered task runnable on the specified CPU.
 pub fn enqueue_task(task_id: usize, cpu_id: usize) {
-    let _irq_guard = IrqGuard::new();
+    let irq_guard = IrqGuard::new();
     let current_cpu = get_cpu().get_cpuid();
     let target_cpu = TaskPool::get_task(task_id)
-        .map(|task| select_enqueue_cpu_for_task(task, cpu_id, get_time_ns()))
+        .map(|task| select_enqueue_cpu_for_task(&task, cpu_id, get_time_ns()))
         .unwrap_or(cpu_id);
     let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(task) = TaskPool::get_task(task_id) {
@@ -1932,7 +2454,8 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
             ready_queue(target_cpu).lock().len(),
         );
     }
-    if is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid() {
+    let remote = is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid();
+    if remote {
         DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
             .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(current_cpu, Ordering::SeqCst);
@@ -1948,13 +2471,49 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
                 ready_queue(target_cpu).lock().len(),
             );
         }
-        crate::arch::send_reschedule_ipi(target_cpu);
+        request_remote_reschedule(target_cpu);
+    }
+    drop(irq_guard);
+    if remote {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::ENQUEUE_IRQ_RESTORED,
+            task_id as u64,
+            target_cpu as u64,
+        );
     }
 }
 
 /// Called every timer tick. Decrements the current task's time_slice.
 /// If time_slice reaches 0, triggers a reschedule.
 pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
+    sched_on_tick_with_reschedule(cpu_id, trapframe, false);
+}
+
+/// Account a timer tick and optionally force a reschedule.
+///
+/// This is used when a timer and reschedule IPI share one interrupt entry. It
+/// preserves normal tick accounting while ensuring the co-pending IPI causes
+/// exactly one scheduler invocation.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU handling the timer tick.
+/// * `trapframe` - Interrupted task context to save if scheduling occurs.
+/// * `force_reschedule` - Whether a co-pending reschedule IPI requires an
+///   immediate scheduler invocation regardless of the remaining time slice.
+///
+/// # Returns
+///
+/// This function returns no value.
+pub fn sched_on_tick_with_reschedule(
+    cpu_id: usize,
+    trapframe: &mut Trapframe,
+    force_reschedule: bool,
+) {
+    if !may_schedule_from_interrupt(cpu_id) {
+        return;
+    }
+
     let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
     update_cpu_util_avg(cpu_id);
     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
@@ -1966,23 +2525,29 @@ pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
     }
     crate::device::cpufreq::on_scheduler_tick(cpu_id);
 
-    if let Some(task_id) = current_task_id(cpu_id) {
-        if let Some(task) = TaskPool::get_task(task_id) {
-            let current_slice = task.time_slice.load(Ordering::SeqCst);
-            if current_slice > 0 {
-                task.time_slice.store(current_slice - 1, Ordering::SeqCst);
-            }
-            if task.time_slice.load(Ordering::SeqCst) == 0 {
-                schedule(trapframe);
-            }
+    let should_schedule = current_task_id(cpu_id).is_some_and(|task_id| {
+        let Some(task) = TaskPool::get_task(task_id) else {
+            return true;
+        };
+        let current_slice = task.time_slice.load(Ordering::SeqCst);
+        if current_slice > 0 {
+            task.time_slice.store(current_slice - 1, Ordering::SeqCst);
         }
-    } else {
+        task.time_slice.load(Ordering::SeqCst) == 0
+    });
+
+    if force_reschedule || should_schedule || current_task_id(cpu_id).is_none() {
         schedule(trapframe);
     }
 }
 
 /// Schedule tasks on the CPU with kernel context switching.
 pub fn schedule(trapframe: &mut Trapframe) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SCHED_ENTER,
+        get_cpu().get_cpuid() as u64,
+        0,
+    );
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
     let (current_task_id, next_task_id) = pick_next(cpu);
@@ -1995,31 +2560,69 @@ pub fn schedule(trapframe: &mut Trapframe) {
             }
 
             if let Some(current_task_id) = current_task_id {
-                if let Some(current_task) = TaskPool::get_task(current_task_id) {
+                let current_task_generation = {
+                    let Some(current_task) = TaskPool::get_task(current_task_id) else {
+                        set_current_task_id(cpu_id, None);
+                        switch_to_user_task(cpu, next_task_id);
+                    };
                     current_task.last_cpu.store(cpu_id, Ordering::SeqCst);
                     current_task.vcpu.lock().store(trapframe);
+                    let generation = get_task_pool()
+                        .task_generation(current_task_id)
+                        .expect("current task must remain registered before a context switch");
 
-                    kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                    // Do not leave an owning Arc<Task> on the outgoing task's
+                    // kernel stack. A terminated task never resumes that stack.
+                    drop(current_task);
+                    generation
+                };
 
+                kernel_context_switch(cpu_id, current_task_id, next_task_id);
+
+                // A returning switch resumes this task after it may have been
+                // migrated. Reacquire by generation so an ID reuse cannot
+                // restore state into a different task.
+                if let Some(current_task) =
+                    get_task_pool().get_task_if_generation(current_task_id, current_task_generation)
+                {
                     current_task.vcpu.lock().switch(trapframe);
                     set_next_mode(current_task.vcpu.lock().get_mode());
-                } else {
-                    set_current_task_id(cpu_id, None);
-                    if let Some(next_task) = TaskPool::get_task(next_task_id) {
-                        setup_task_execution(get_cpu(), next_task);
-                        arch_switch_to_user(next_task.get_trapframe());
-                    }
+                    drop(current_task);
                 }
             } else {
-                if let Some(next_task) = TaskPool::get_task(next_task_id) {
-                    setup_task_execution(get_cpu(), next_task);
-                    arch_switch_to_user(next_task.get_trapframe());
-                }
+                switch_to_user_task(cpu, next_task_id);
             }
         }
     }
 
     process_pending_events_before_user_return(trapframe);
+}
+
+/// Enter userspace for a task already claimed by this CPU.
+///
+/// This path intentionally extracts the trapframe pointer while an owned pool
+/// lookup is in scope, then drops that lookup before the divergent transition.
+/// The scheduler's `running_cpu` claim keeps the pool slot alive until this CPU
+/// releases it, so the pointer remains valid without retaining an `Arc<Task>`
+/// on the task's kernel stack.
+fn switch_to_user_task(cpu: &mut Arch, task_id: usize) -> ! {
+    let cpu_id = cpu.get_cpuid();
+    let trapframe_ptr = {
+        let task = TaskPool::get_task(task_id).expect("scheduled task must remain registered");
+        assert_eq!(
+            task.running_cpu.load(Ordering::SeqCst),
+            cpu_id,
+            "scheduled task must be owned by the executing CPU"
+        );
+        setup_task_execution(cpu, &task);
+        core::ptr::from_mut(task.get_trapframe())
+    };
+
+    // SAFETY: `pick_next()` claimed `task_id` with `running_cpu == cpu_id` and
+    // published it as this CPU's current task. TaskPool removal additionally
+    // requires `Terminated && running_cpu == NO_CPU`, so the task and its
+    // trapframe remain alive after the temporary lookup Arc above is dropped.
+    unsafe { arch_switch_to_user(&mut *trapframe_ptr) }
 }
 
 /// Process events that must be delivered before returning to userspace.
@@ -2030,7 +2633,7 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
     };
 
     match current_task.process_pending_events() {
-        Ok(EventProcessOutcome::NeedReschedule | EventProcessOutcome::Exited) => {
+        Ok(EventProcessOutcome::NeedReschedule | EventProcessOutcome::Exited(_)) => {
             schedule(trapframe)
         }
         Ok(
@@ -2069,30 +2672,79 @@ pub fn spawn_idle_task(cpu_id: usize) -> usize {
 }
 
 pub fn start_scheduler() -> Option<usize> {
+    // crate::println!("[sched] entry");
     let cpu = get_cpu();
     let cpu_id = cpu.get_cpuid();
+    set_scheduler_ready(cpu_id, false);
+    // if cpu_id == 0
+    //     && (DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU
+    //         || DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP
+    //         || DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING
+    //         || DIAGNOSTIC_DISABLE_TASK_MIGRATION
+    //         || DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP
+    //         || DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP
+    //         || DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP
+    //         || DIAGNOSTIC_RUN_USER_THREADS_ON_BSP
+    //         || DIAGNOSTIC_RETAIN_TERMINATED_TASKS)
+    // {
+    //     crate::println!(
+    //         "[sched] diagnostic: pin_fork_child={} pin_fork_child_bsp={} disable_idle_work_stealing={} disable_task_migration={} unpinned_tasks_on_bsp={} all_user_tasks_on_bsp={} user_process_leaders_on_bsp={} user_threads_on_bsp={} retain_terminated_tasks={} bsp_cpu={}",
+    //         DIAGNOSTIC_PIN_FORK_CHILD_TO_PARENT_CPU,
+    //         DIAGNOSTIC_PIN_FORK_CHILD_TO_BSP,
+    //         DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING,
+    //         DIAGNOSTIC_DISABLE_TASK_MIGRATION,
+    //         DIAGNOSTIC_RUN_UNPINNED_TASKS_ON_BSP,
+    //         DIAGNOSTIC_RUN_ALL_USER_TASKS_ON_BSP,
+    //         DIAGNOSTIC_RUN_USER_PROCESS_LEADERS_ON_BSP,
+    //         DIAGNOSTIC_RUN_USER_THREADS_ON_BSP,
+    //         DIAGNOSTIC_RETAIN_TERMINATED_TASKS,
+    //         BOOT_CPU_ID.load(Ordering::Acquire)
+    //     );
+    // }
+    // crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
     let timer = get_kernel_timer();
+    // crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
     timer.stop(cpu_id);
+    // crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer interval setup begin", cpu_id);
     timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
+    // crate::println!("[sched] cpu={} timer interval setup complete", cpu_id);
+    // crate::println!("[sched] cpu={} timer.start begin", cpu_id);
     timer.start(cpu_id);
+    // crate::println!("[sched] cpu={} timer.start complete", cpu_id);
 
+    // crate::println!("[sched] cpu={} pick_next begin", cpu_id);
     let (_current_task_id, next_task_id) = pick_next(cpu);
+    // crate::println!(
+    //     "[sched] cpu={} pick_next complete current={:?} next={:?}",
+    //     cpu_id,
+    //     _current_task_id,
+    //     next_task_id
+    // );
+    set_scheduler_ready(cpu_id, true);
     next_task_id
 }
 
 pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
-    let Some(task) = TaskPool::get_task(task_id) else {
-        panic!("Kernel task {} not found", task_id);
+    let mut boot_context = crate::arch::context::KernelContext::new();
+    let cpu_id = get_cpu().get_cpuid();
+    let to_ctx_ptr = {
+        let task = TaskPool::get_task(task_id).expect("first kernel task must remain registered");
+        assert_eq!(
+            task.running_cpu.load(Ordering::SeqCst),
+            cpu_id,
+            "first kernel task must be owned by the executing CPU"
+        );
+        task.kernel_context.as_mut_ptr() as *const crate::arch::context::KernelContext
     };
 
-    let mut boot_context = crate::arch::context::KernelContext::new();
-    let to_ctx_ptr = task.kernel_context.as_mut_ptr() as *const crate::arch::context::KernelContext;
-
-    // SAFETY: `task_id` is the current runnable task selected by `start_scheduler`,
-    // and `to_ctx_ptr` points to its initialized kernel context. The scheduler
-    // has claimed this task before the first switch, so no other CPU mutates the
-    // target context concurrently. `boot_context` is a temporary save area for
-    // the boot/AP context and remains valid here.
+    // SAFETY: `task_id` is the current runnable task selected by
+    // `start_scheduler`, and `to_ctx_ptr` points to its initialized kernel
+    // context. `running_cpu == cpu_id` prevents pool removal and concurrent
+    // context mutation until this CPU releases the task, so the temporary pool
+    // Arc above can be dropped before switching. `boot_context` remains valid
+    // as the save area for the boot/AP context.
     unsafe {
         crate::arch::switch::switch_to(&mut boot_context as *mut _, to_ctx_ptr);
     }
@@ -2102,8 +2754,38 @@ pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
     }
 }
 
-pub fn current_task(cpu_id: usize) -> Option<&'static Task> {
-    current_task_id(cpu_id).and_then(TaskPool::get_task)
+/// Get a non-owning guard for the task executing on `cpu_id`.
+///
+/// Current-task guards are valid only for the CPU that is executing this code.
+/// Remote CPUs may change task state and release their `running_cpu` token, so
+/// this function rejects remote CPU IDs rather than fabricating a borrowed task
+/// reference. Use [`get_task_by_id`] for an owned handle to a remote task.
+///
+/// # Arguments
+///
+/// * `cpu_id` - The executing CPU's scheduler ID.
+///
+/// # Returns
+///
+/// A non-owning guard for the local current task, or `None` when the requested
+/// CPU is remote, has no current task, or no longer owns that task.
+pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
+    if get_cpu().get_cpuid() != cpu_id {
+        return None;
+    }
+
+    let task_id = current_task_id(cpu_id)?;
+    let task = TaskPool::get_task(task_id)?;
+    if task.get_id() != task_id {
+        return None;
+    }
+    let current_task = CurrentTaskRef::from_running_task(&task, cpu_id);
+
+    // The guard is non-owning. The TaskPool slot and running_cpu token retain
+    // the task while it executes on this CPU, so this temporary lookup Arc can
+    // and must be dropped before returning to the caller.
+    drop(task);
+    current_task
 }
 
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
@@ -2121,7 +2803,7 @@ pub fn has_ready_tasks(cpu_id: usize) -> bool {
     !READY_QUEUES[cpu_id].lock().is_empty()
 }
 
-pub fn get_task_by_id(task_id: usize) -> Option<&'static Task> {
+pub fn get_task_by_id(task_id: usize) -> Option<Arc<Task>> {
     TaskPool::get_task(task_id)
 }
 
@@ -2130,7 +2812,7 @@ pub fn wake_task(task_id: usize) -> bool {
         let Some(task) = TaskPool::get_task(task_id) else {
             return false;
         };
-        select_wake_cpu_for_task(task, get_time_ns())
+        select_wake_cpu_for_task(&task, get_time_ns())
     };
     wake_task_on(task_id, target_cpu)
 }
@@ -2138,6 +2820,9 @@ pub fn wake_task(task_id: usize) -> bool {
 pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let _irq_guard = IrqGuard::new();
     let Some(task) = TaskPool::get_task(task_id) else {
+        return false;
+    };
+    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, target_cpu, get_time_ns()) else {
         return false;
     };
 
@@ -2189,13 +2874,14 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
                 ready_queue(target_cpu).lock().len(),
             );
         }
-        crate::arch::send_reschedule_ipi(target_cpu);
+        request_remote_reschedule(target_cpu);
     }
 
     true
 }
 
 pub fn cleanup_zombie(task_id: usize) {
+    crate::breadcrumb::drop(crate::breadcrumb::ZOMBIE_CLEANUP, task_id as u64, 0);
     {
         let mut zombie_queue = ZOMBIE_QUEUE.lock();
         if let Some(pos) = zombie_queue.iter().position(|&id| id == task_id) {
@@ -2203,7 +2889,42 @@ pub fn cleanup_zombie(task_id: usize) {
         }
     }
 
+    if DIAGNOSTIC_RETAIN_TERMINATED_TASKS {
+        return;
+    }
+
     let _ = get_task_pool().remove_task(task_id);
+}
+
+/// Complete termination of a task that is not executing on the calling CPU.
+///
+/// A task with no CPU owner can be finalized immediately. A task still owned
+/// by another CPU must remain in the pool until that CPU switches away and
+/// [`release_deferred_prev`] releases its `running_cpu` claim.
+///
+/// # Arguments
+///
+/// * `task_id` - Global ID of the zombie or terminated task.
+pub fn complete_non_current_task_exit(task_id: usize) {
+    remove_from_ready_queues(task_id);
+    unmark_blocked(task_id);
+
+    let Some(task) = TaskPool::get_task(task_id) else {
+        return;
+    };
+    let running_cpu = task.running_cpu.load(Ordering::SeqCst);
+    if running_cpu == NO_CPU {
+        match task.state.load(Ordering::SeqCst) {
+            TaskState::Zombie => finalize_zombie(task_id, task.get_parent_id()),
+            TaskState::Terminated => cleanup_zombie(task_id),
+            TaskState::Running
+            | TaskState::Ready
+            | TaskState::Blocked(_)
+            | TaskState::NotInitialized => {}
+        }
+    } else if is_cpu_online(running_cpu) {
+        request_remote_reschedule(running_cpu);
+    }
 }
 
 pub fn remove_from_ready_queues(task_id: usize) {
@@ -2270,6 +2991,11 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
 /// Perform kernel context switch between tasks.
 fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) {
     if from_task_id != to_task_id {
+        crate::breadcrumb::drop(
+            crate::breadcrumb::KCTX_ENTER,
+            from_task_id as u64,
+            to_task_id as u64,
+        );
         if DEBUG_SMP_TASK_FLOW {
             let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
             if expected_task.is_some() {
@@ -2340,10 +3066,20 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
                         );
                     }
                 }
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::KCTX_SWITCH_TO,
+                    from_task_id as u64,
+                    to_task_id as u64,
+                );
                 crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
             }
 
             let resumed_cpu_id = get_cpu().get_cpuid();
+            crate::breadcrumb::drop(
+                crate::breadcrumb::KCTX_RESUME,
+                resumed_cpu_id as u64,
+                from_task_id as u64,
+            );
 
             if DEBUG_SMP_TASK_FLOW {
                 let (expected_task, _from_cpu, seq) = debug_remote_enqueue_snapshot(resumed_cpu_id);
@@ -2366,6 +3102,11 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             // CPU we are actually running on now, not for the CPU that saved
             // this stack frame before the switch.
             release_deferred_prev(resumed_cpu_id);
+            crate::breadcrumb::drop(
+                crate::breadcrumb::REL_PREV_DONE,
+                resumed_cpu_id as u64,
+                from_task_id as u64,
+            );
 
             #[cfg(feature = "hypervisor")]
             {
@@ -2374,11 +3115,33 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             }
 
             if let Some(from_task) = TaskPool::get_task(from_task_id) {
-                setup_task_cpu_state(get_cpu(), from_task);
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::GETTASK_DONE,
+                    resumed_cpu_id as u64,
+                    from_task_id as u64,
+                );
+                setup_task_cpu_state(get_cpu(), &from_task);
+                crate::breadcrumb::drop(
+                    crate::breadcrumb::SETUP_DONE,
+                    resumed_cpu_id as u64,
+                    from_task_id as u64,
+                );
                 set_trapvector(get_kernel_trapvector_paddr());
 
                 #[cfg(feature = "user-fpu")]
-                crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
+                {
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::VCPU_LOCK_BEGIN,
+                        resumed_cpu_id as u64,
+                        from_task_id as u64,
+                    );
+                    crate::arch::fpu::kernel_switch_in_user_fpu(&mut *from_task.vcpu.lock());
+                    crate::breadcrumb::drop(
+                        crate::breadcrumb::VCPU_LOCK_DONE,
+                        resumed_cpu_id as u64,
+                        from_task_id as u64,
+                    );
+                }
             }
         }
     }
@@ -2386,16 +3149,24 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
 
 /// Bind CPU-local scheduler/trampoline state to the task that is about to run.
 fn setup_task_cpu_state(cpu: &mut Arch, task: &Task) {
+    let cpuid = cpu.get_cpuid();
     let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
         task.get_kernel_stack_bottom_paddr()
     };
 
-    crate::arch::set_arch(crate::vm::get_trampoline_arch(cpu.get_cpuid()));
+    let trampoline_arch = crate::vm::get_trampoline_arch(cpuid);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::TRAMP_GET, trampoline_arch as u64);
+    crate::arch::set_arch(trampoline_arch);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SET_ARCH_DONE, sp);
     cpu.set_kernel_stack(sp);
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETSP_DONE, sp);
     cpu.set_trap_handler(get_user_trap_handler());
-    cpu.set_next_address_space(task.vm_manager.get_asid());
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETTH_DONE, 0);
+    let asid = task.vm_manager.get_asid();
+    crate::breadcrumb::drop_cpu(cpuid, crate::breadcrumb::SETAS_ASID_DONE, asid as u64);
+    cpu.set_next_address_space(asid);
 }
 
 /// Setup task execution by configuring hardware and user context.
@@ -2434,9 +3205,12 @@ pub fn reset() {
     for cpu_id in 0..MAX_NUM_CPUS {
         ready_queue(cpu_id).lock().clear();
         set_current_task_id(cpu_id, None);
+        set_scheduler_ready(cpu_id, false);
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
         IDLE_TASK_IDS[cpu_id].store(0, Ordering::SeqCst);
         PENDING_IDLE_TO_USER_TRAP_TASK[cpu_id].store(0, Ordering::SeqCst);
+        PENDING_RESCHEDULE[cpu_id].store(false, Ordering::SeqCst);
+        PENDING_RESCHEDULE_IPI[cpu_id].store(false, Ordering::SeqCst);
         CPU_CORE_CLASSES[cpu_id].store(CpuCoreClass::Balanced as u8, Ordering::SeqCst);
         CPU_CAPACITIES[cpu_id].store(DEFAULT_CPU_CAPACITY, Ordering::SeqCst);
         CPU_TOPOLOGY_DOMAINS[cpu_id].store(INVALID_CPU_TOPOLOGY_DOMAIN, Ordering::SeqCst);
@@ -2457,7 +3231,18 @@ pub fn reset() {
     ONLINE_CPUS.lock().clear();
     ZOMBIE_QUEUE.lock().clear();
     BLOCKED_QUEUE.lock().clear();
+    fork_trace_tasks().lock().clear();
+    fork_trace_picked_tasks().lock().clear();
+    for slot in 0..FORK_TRACE_ATOMIC_SLOTS {
+        FORK_TRACE_ATOMIC_CPU_MASKS[slot].store(0, Ordering::Relaxed);
+        FORK_TRACE_ATOMIC_TASKS[slot].store(0, Ordering::Relaxed);
+    }
     get_task_pool().reset();
+}
+
+#[cfg(test)]
+pub(crate) fn set_current_task_for_test(cpu_id: usize, task_id: Option<usize>) {
+    set_current_task_id(cpu_id, task_id);
 }
 
 pub fn make_test_tasks() {
@@ -2532,9 +3317,81 @@ pub fn make_test_tasks() {
 
 #[cfg(test)]
 mod tests {
-    use crate::task::{TaskCorePreference, TaskType};
+    use crate::task::{
+        TaskCorePreference, TaskType, cleanup_parent_waker, cleanup_task_waker,
+        get_parent_waitpid_waker,
+    };
 
     use super::*;
+
+    #[test_case]
+    fn test_deferred_reschedule_round_trip() {
+        reset();
+        assert!(!take_deferred_reschedule(0));
+        defer_reschedule(0);
+        assert!(take_deferred_reschedule(0));
+        assert!(!take_deferred_reschedule(0));
+        defer_reschedule(MAX_NUM_CPUS);
+        assert!(!take_deferred_reschedule(MAX_NUM_CPUS));
+    }
+
+    #[test_case]
+    fn test_reschedule_ipi_reservation_coalesces_until_acknowledged() {
+        reset();
+
+        assert!(reserve_reschedule_ipi(0));
+        assert!(!reserve_reschedule_ipi(0));
+        acknowledge_reschedule_ipi(0);
+        assert!(reserve_reschedule_ipi(0));
+        acknowledge_reschedule_ipi(0);
+    }
+
+    #[test_case]
+    fn test_fork_trace_first_user_trap_is_tracked_per_task_and_cpu() {
+        reset();
+        let first_task = 100;
+        let colliding_task = first_task + FORK_TRACE_ATOMIC_SLOTS;
+
+        mark_fork_trace_task(first_task);
+        mark_fork_trace_task(colliding_task);
+
+        assert!(take_fork_trace_first_user_trap(0, first_task));
+        assert!(!take_fork_trace_first_user_trap(0, first_task));
+        assert!(take_fork_trace_first_user_trap(0, colliding_task));
+        assert!(!take_fork_trace_first_user_trap(0, colliding_task));
+
+        if MAX_NUM_CPUS > 1 {
+            assert!(take_fork_trace_first_user_trap(1, first_task));
+            assert!(!take_fork_trace_first_user_trap(1, first_task));
+        }
+
+        clear_fork_trace_task(first_task);
+        clear_fork_trace_task(colliding_task);
+        assert!(!take_fork_trace_first_user_trap(0, first_task));
+        assert!(!take_fork_trace_first_user_trap(0, colliding_task));
+    }
+
+    #[test_case]
+    fn test_scheduler_ready_gate_is_per_cpu_and_resettable() {
+        reset();
+        assert!(!scheduler_ready(0));
+        assert!(!may_schedule_from_interrupt(0));
+        assert!(!scheduler_ready(MAX_NUM_CPUS));
+        assert!(!may_schedule_from_interrupt(MAX_NUM_CPUS));
+
+        set_scheduler_ready(0, true);
+        assert!(scheduler_ready(0));
+        assert!(may_schedule_from_interrupt(0));
+
+        if MAX_NUM_CPUS > 1 {
+            assert!(!scheduler_ready(1));
+            assert!(!may_schedule_from_interrupt(1));
+        }
+
+        reset();
+        assert!(!scheduler_ready(0));
+        assert!(!may_schedule_from_interrupt(0));
+    }
 
     #[test_case]
     fn test_add_task() {
@@ -2542,6 +3399,76 @@ mod tests {
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         add_task(task, 0);
         assert_eq!(READY_QUEUES[0].lock().len(), 1);
+    }
+
+    #[test_case]
+    fn test_finalize_zombie_wakes_parent_thread_when_parent_is_missing() {
+        reset();
+
+        let parent_id = register_task(Task::new("Parent".to_string(), 1, TaskType::Kernel));
+        let mut sibling = Task::new("ParentSibling".to_string(), 1, TaskType::Kernel);
+        sibling.set_thread_group_id(parent_id);
+        let sibling_id = register_task(sibling);
+        let child_id = register_task(Task::new("Child".to_string(), 1, TaskType::Kernel));
+
+        let parent = get_task_by_id(parent_id).unwrap();
+        let sibling = get_task_by_id(sibling_id).unwrap();
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.adopt_registered_child(&child));
+        assert_eq!(child.get_parent_thread_group_id(), Some(parent_id));
+
+        sibling.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        mark_blocked(sibling_id);
+        assert!(get_all_task_ids().contains(&sibling_id));
+
+        cleanup_parent_waker(sibling_id);
+        let sibling_waker = get_parent_waitpid_waker(sibling_id);
+        assert_eq!(sibling_waker.pending_wake_count_for_test(), 0);
+
+        parent.state.store(TaskState::Terminated, Ordering::SeqCst);
+        drop(parent);
+        complete_non_current_task_exit(parent_id);
+        assert!(get_task_by_id(parent_id).is_none());
+        assert_eq!(child.get_parent_thread_group_id(), Some(parent_id));
+
+        finalize_zombie(child_id, Some(parent_id));
+
+        assert_eq!(sibling_waker.pending_wake_count_for_test(), 1);
+        cleanup_task_waker(child_id);
+        cleanup_parent_waker(parent_id);
+        cleanup_parent_waker(sibling_id);
+    }
+
+    #[test_case]
+    fn test_current_task_guard_does_not_clone_pool_arc() {
+        reset();
+        let cpu_id = get_cpu().get_cpuid();
+        let task_id = register_task(Task::new(
+            "CurrentTaskRefPool".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Running, Ordering::SeqCst);
+        task.running_cpu.store(cpu_id, Ordering::SeqCst);
+        set_current_task_id(cpu_id, Some(task_id));
+        let strong_count = Arc::strong_count(&task);
+
+        let current_task_ref = current_task(cpu_id).expect("current task must be local");
+        assert_eq!(current_task_ref.get_id(), task_id);
+        assert_eq!(Arc::strong_count(&task), strong_count);
+        if MAX_NUM_CPUS > 1 {
+            let remote_cpu_id = (cpu_id + 1) % MAX_NUM_CPUS;
+            assert!(current_task(remote_cpu_id).is_none());
+        }
+
+        drop(current_task_ref);
+        assert_eq!(Arc::strong_count(&task), strong_count);
+        set_current_task_id(cpu_id, None);
+        task.running_cpu.store(NO_CPU, Ordering::SeqCst);
     }
 
     #[test_case]
@@ -2678,6 +3605,68 @@ mod tests {
     }
 
     #[test_case]
+    fn test_pinned_task_cannot_migrate_or_be_stolen() {
+        if MAX_NUM_CPUS < 2 {
+            return;
+        }
+
+        reset();
+        let source_cpu = 0;
+        let target_cpu = 1;
+        register_online_cpu(source_cpu);
+        register_online_cpu(target_cpu);
+        register_cpu_topology(source_cpu, CpuCoreClass::Balanced, 0).unwrap();
+        register_cpu_topology(target_cpu, CpuCoreClass::Balanced, 0).unwrap();
+
+        let mut task = Task::new("PinnedTask".to_string(), 1, TaskType::Kernel);
+        task.pinned_cpu = Some(source_cpu);
+        let task_id = register_task(task);
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task(source_cpu, task_id);
+
+        assert_eq!(
+            normalize_wake_cpu_for_task(&task, target_cpu, 20_000_000),
+            Some(source_cpu)
+        );
+        assert_eq!(
+            migration_target_for_task(&task, source_cpu, 20_000_000, false),
+            None
+        );
+        assert_eq!(steal_ready_task_for_cpu(target_cpu, 20_000_000), None);
+        assert!(ready_queue(source_cpu).lock().contains(&task_id));
+    }
+
+    #[test_case]
+    fn test_wake_target_normalizes_offline_request() {
+        reset();
+        let local_cpu = get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+
+        let task_id = register_task(Task::new("WakeTargetTask".to_string(), 1, TaskType::Kernel));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        mark_blocked(task_id);
+
+        assert_eq!(
+            normalize_wake_cpu_for_task(&task, MAX_NUM_CPUS, 20_000_000),
+            Some(local_cpu)
+        );
+        assert!(wake_task_on(task_id, MAX_NUM_CPUS));
+        assert_eq!(task.state.load(Ordering::SeqCst), TaskState::Ready);
+        assert!(ready_queue(local_cpu).lock().contains(&task_id));
+    }
+
+    #[test_case]
+    fn test_work_stealing_and_migration_are_enabled() {
+        assert!(!DIAGNOSTIC_DISABLE_IDLE_WORK_STEALING);
+        assert!(!DIAGNOSTIC_DISABLE_TASK_MIGRATION);
+    }
+
+    #[test_case]
     fn test_idle_cpu_does_not_steal_recently_migrated_task() {
         reset();
         register_online_cpu(0);
@@ -2776,7 +3765,7 @@ mod tests {
         migrating.state.store(TaskState::Ready, Ordering::SeqCst);
 
         assert_eq!(
-            migration_target_for_task(migrating, 0, 20_000_000, false),
+            migration_target_for_task(&migrating, 0, 20_000_000, false),
             Some(1)
         );
     }
@@ -2797,7 +3786,7 @@ mod tests {
         task.running_cpu.store(0, Ordering::SeqCst);
         set_current_task_id(0, Some(task_id));
 
-        assert_eq!(migration_target_for_task(task, 0, 20_000_000, false), None);
+        assert_eq!(migration_target_for_task(&task, 0, 20_000_000, false), None);
     }
 
     #[test_case]
@@ -2823,7 +3812,7 @@ mod tests {
         migrating.state.store(TaskState::Ready, Ordering::SeqCst);
 
         assert_eq!(
-            migration_target_for_task(migrating, 0, 20_000_000, false),
+            migration_target_for_task(&migrating, 0, 20_000_000, false),
             None
         );
     }
@@ -2884,8 +3873,7 @@ mod tests {
         task.set_sched_util_min(SCHED_UTIL_SCALE).unwrap();
         task.state.store(TaskState::Ready, Ordering::SeqCst);
         task.running_cpu.store(0, Ordering::SeqCst);
-        let generation = get_task_pool().task_generation(task_id).unwrap();
-        SCHEDULE_PREV_TASK[0].store(encode_prev_task(task_id, generation), Ordering::SeqCst);
+        SCHEDULE_PREV_TASK[0].store(task_id, Ordering::SeqCst);
 
         release_deferred_prev(0);
 
@@ -2899,7 +3887,63 @@ mod tests {
     }
 
     #[test_case]
-    fn test_deferred_release_cleans_terminated_task() {
+    fn test_blocked_switch_out_releases_ownership_before_wake_and_reclaim() {
+        reset();
+        let cpu_id = get_cpu().get_cpuid();
+        register_online_cpu(cpu_id);
+
+        let blocked_id = register_task(Task::new(
+            "BlockedSwitchOutTask".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let blocked = TaskPool::get_task(blocked_id).unwrap();
+        blocked.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        blocked.running_cpu.store(cpu_id, Ordering::SeqCst);
+        set_current_task_id(cpu_id, Some(blocked_id));
+
+        let next_id = register_task(Task::new(
+            "BlockedSwitchOutNext".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let next = TaskPool::get_task(next_id).unwrap();
+        next.state.store(TaskState::Ready, Ordering::SeqCst);
+        push_ready_task(cpu_id, next_id);
+
+        assert_eq!(pick_next(get_cpu()), (Some(blocked_id), Some(next_id)));
+        assert_eq!(
+            SCHEDULE_PREV_TASK[cpu_id].load(Ordering::SeqCst),
+            blocked_id
+        );
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), cpu_id);
+
+        release_deferred_prev(cpu_id);
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), NO_CPU);
+        assert_eq!(
+            blocked.state.load(Ordering::SeqCst),
+            TaskState::Blocked(crate::task::BlockedType::Interruptible)
+        );
+        assert!(!ready_queue(cpu_id).lock().contains(&blocked_id));
+
+        assert!(wake_task(blocked_id));
+        assert!(remove_ready_task_from_cpu(cpu_id, blocked_id));
+        assert!(try_claim_ready_task(&blocked, cpu_id));
+        assert_eq!(blocked.running_cpu.load(Ordering::SeqCst), cpu_id);
+
+        set_current_task_id(cpu_id, None);
+        blocked.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        next.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        drop(blocked);
+        drop(next);
+        reset();
+    }
+
+    #[test_case]
+    fn test_deferred_release_reaps_terminated_task_after_lookup_drop() {
         reset();
         register_online_cpu(0);
 
@@ -2911,11 +3955,164 @@ mod tests {
         let task = TaskPool::get_task(task_id).unwrap();
         task.state.store(TaskState::Terminated, Ordering::SeqCst);
         task.running_cpu.store(0, Ordering::SeqCst);
-        let generation = get_task_pool().task_generation(task_id).unwrap();
-        SCHEDULE_PREV_TASK[0].store(encode_prev_task(task_id, generation), Ordering::SeqCst);
+        SCHEDULE_PREV_TASK[0].store(task_id, Ordering::SeqCst);
 
         release_deferred_prev(0);
 
         assert!(TaskPool::get_task(task_id).is_none());
+        assert_eq!(get_task_pool().retired_tasks.lock().len(), 1);
+
+        drop(task);
+        assert_eq!(get_task_pool().reap_retired_tasks_for_test(), 1);
+        assert!(get_task_pool().retired_tasks.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_failed_ready_claim_retires_concurrently_terminated_task() {
+        reset();
+
+        let task_id = register_task(Task::new(
+            "ClaimExitRaceTask".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(TaskState::Terminated, Ordering::SeqCst);
+
+        assert!(!try_claim_ready_task(&task, 0));
+        assert_eq!(task.running_cpu.load(Ordering::SeqCst), NO_CPU);
+        assert!(TaskPool::get_task(task_id).is_none());
+        assert_eq!(get_task_pool().retired_tasks.lock().len(), 1);
+
+        drop(task);
+        assert_eq!(get_task_pool().reap_retired_tasks_for_test(), 1);
+        assert!(get_task_pool().retired_tasks.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_retirement_waits_for_outstanding_lookup_handle() {
+        reset();
+
+        let task_id = register_task(Task::new("RetiredTask".to_string(), 1, TaskType::Kernel));
+        let lookup_handle = TaskPool::get_task(task_id).unwrap();
+        lookup_handle
+            .state
+            .store(TaskState::Terminated, Ordering::SeqCst);
+
+        let task_pool = get_task_pool();
+        assert!(task_pool.remove_task(task_id));
+        assert!(TaskPool::get_task(task_id).is_none());
+        assert_eq!(task_pool.retired_tasks.lock().len(), 1);
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), 0);
+
+        drop(lookup_handle);
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), 1);
+        assert!(task_pool.retired_tasks.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_user_ids_remain_stable_beyond_previous_lifetime_limit() {
+        reset();
+
+        let kernel_id = register_task(Task::new(
+            "EarlyKernelTask".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        assert_eq!(kernel_id, usize::MAX - 1);
+
+        let task_pool = get_task_pool();
+        for expected_id in 1..=(MAX_ACTIVE_USER_TASKS + 1) {
+            let task_id = register_task(Task::new(
+                "SequentialUserTask".to_string(),
+                1,
+                TaskType::User,
+            ));
+            assert_eq!(task_id, expected_id);
+            let task = TaskPool::get_task(task_id).unwrap();
+            task.state.store(TaskState::Terminated, Ordering::SeqCst);
+            drop(task);
+            assert!(task_pool.remove_task(task_id));
+            assert_eq!(task_pool.reap_retired_tasks_for_test(), 1);
+        }
+
+        let kernel_task = TaskPool::get_task(kernel_id).unwrap();
+        kernel_task
+            .state
+            .store(TaskState::Terminated, Ordering::SeqCst);
+        drop(kernel_task);
+        assert!(task_pool.remove_task(kernel_id));
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), 1);
+    }
+
+    #[test_case]
+    fn test_retired_task_id_never_aliases_new_task_or_namespace_mapping() {
+        reset();
+
+        let task_pool = get_task_pool();
+        let old_id = register_task(Task::new("OldStableId".to_string(), 1, TaskType::User));
+        let old_task = TaskPool::get_task(old_id).unwrap();
+        let namespace = old_task.get_namespace();
+        let namespace_id = old_task.get_namespace_id();
+        old_task
+            .state
+            .store(TaskState::Terminated, Ordering::SeqCst);
+        drop(old_task);
+        assert!(task_pool.remove_task(old_id));
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), 1);
+
+        let new_id = register_task(Task::new("NewStableId".to_string(), 1, TaskType::User));
+        assert_ne!(old_id, new_id);
+        assert!(TaskPool::get_task(old_id).is_none());
+        assert!(TaskPool::get_task(new_id).is_some());
+        assert_eq!(namespace.resolve_global_id(namespace_id), None);
+        assert_eq!(namespace.resolve_local_id(old_id), None);
+    }
+
+    #[test_case]
+    fn test_user_active_capacity_is_reclaimed_without_reusing_ids() {
+        reset();
+
+        let task_pool = get_task_pool();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_ACTIVE_USER_TASKS {
+            ids.push(register_task(Task::new(
+                "CapacityUserTask".to_string(),
+                1,
+                TaskType::User,
+            )));
+        }
+        assert!(
+            try_register_task(Task::new("OverflowUserTask".to_string(), 1, TaskType::User))
+                .is_err()
+        );
+
+        let removed_id = ids.remove(0);
+        let removed_task = TaskPool::get_task(removed_id).unwrap();
+        removed_task
+            .state
+            .store(TaskState::Terminated, Ordering::SeqCst);
+        drop(removed_task);
+        assert!(task_pool.remove_task(removed_id));
+        assert_eq!(task_pool.reap_retired_tasks_for_test(), 1);
+
+        let replacement_id = register_task(Task::new(
+            "ReplacementUserTask".to_string(),
+            1,
+            TaskType::User,
+        ));
+        assert!(replacement_id > removed_id);
+        ids.push(replacement_id);
+
+        for task_id in ids {
+            let task = TaskPool::get_task(task_id).unwrap();
+            task.state.store(TaskState::Terminated, Ordering::SeqCst);
+            drop(task);
+            assert!(task_pool.remove_task(task_id));
+        }
+        assert_eq!(
+            task_pool.reap_retired_tasks_for_test(),
+            MAX_ACTIVE_USER_TASKS
+        );
     }
 }

@@ -140,20 +140,17 @@ impl DevFS {
         }
         root.add_child("ptmx".to_string(), ptmx_node)?;
 
-        // Get all devices that were registered with explicit names
-        let named_devices = device_manager.get_named_devices();
+        // Get coherent name, ID, and device snapshots while the manager holds
+        // all device registries. This prevents a concurrent unregister from
+        // pairing a surviving name with a stale or fabricated device ID.
+        let named_devices = device_manager.get_named_devices_with_ids();
 
-        for (device_name, device) in named_devices {
+        for (device_name, device_id, device) in named_devices {
             let device_type = device.device_type();
 
             // Only add char and block devices to devfs
             match device_type {
                 DeviceType::Char | DeviceType::Block => {
-                    // Get the actual device ID from the name
-                    let device_id = device_manager
-                        .get_device_id_by_name(&device_name)
-                        .unwrap_or(0); // fallback to 0 if not found
-
                     let device_file_info = DeviceFileInfo {
                         device_id,
                         device_type,
@@ -1424,6 +1421,51 @@ mod tests {
             truncate_result.is_err(),
             "Truncate should fail for device files"
         );
+    }
+
+    #[test_case]
+    fn test_devfs_unregistered_device_disappears_while_open_file_remains_usable() {
+        use crate::device::char::mockchar::MockCharDevice;
+
+        let device_manager = DeviceManager::new_for_test();
+        let char_device = Arc::new(MockCharDevice::new("test_unregister_devfs"));
+        let device_id = device_manager
+            .register_device_with_name("test_unregister_devfs".to_string(), char_device.clone());
+        let retained = device_manager
+            .get_device(device_id)
+            .expect("registered device should be available by ID");
+        let devfs = DevFS::new_with_device_manager(&device_manager);
+        let root = devfs.root_node();
+        let device_node = devfs
+            .lookup(&root, &"test_unregister_devfs".to_string())
+            .expect("registered device should be visible in devfs");
+        assert_eq!(device_node.id(), device_id as u64);
+        let file = devfs
+            .open(&device_node, 0)
+            .expect("registered device should open through devfs");
+
+        let removed = device_manager
+            .unregister_device(device_id)
+            .expect("registered device should be removed");
+        assert!(Arc::ptr_eq(&removed, &retained));
+        assert_eq!(retained.name(), "test_unregister_devfs");
+
+        let entries = devfs.readdir(&root).expect("devfs readdir should succeed");
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.name == "test_unregister_devfs"),
+            "unregistered device should not appear in devfs"
+        );
+        assert!(
+            devfs
+                .lookup(&root, &"test_unregister_devfs".to_string())
+                .is_err(),
+            "unregistered device lookup should fail"
+        );
+
+        assert_eq!(file.write(b"still usable").unwrap(), b"still usable".len());
+        assert_eq!(char_device.get_written_data(), b"still usable");
     }
 
     #[test_case]

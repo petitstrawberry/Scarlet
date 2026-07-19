@@ -48,7 +48,6 @@ pub struct ArchTimer {
     next_event: u64,
     running: bool,
     frequency: u64,
-    initialized: bool,
 }
 
 impl ArchTimer {
@@ -62,7 +61,6 @@ impl ArchTimer {
             next_event: 0,
             running: false,
             frequency: freq,
-            initialized: false,
         }
     }
 
@@ -101,17 +99,11 @@ impl ArchTimer {
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
 
-        // Only perform interrupt controller configuration on first start
-        if !self.initialized {
-            interrupt::disable_external_interrupts();
-
-            interrupt::enable_arch_timer_interrupt()
-                .unwrap_or_else(|e| panic!("Failed to enable timer interrupt: {e}"));
-
-            self.initialized = true;
-
-            interrupt::enable_external_interrupts();
-        }
+        // stop() disables both the local timer interrupt and its external PPI
+        // route, so every start must restore the controller state. This is
+        // intentionally idempotent for the normal per-tick rearm path.
+        interrupt::enable_arch_timer_interrupt()
+            .unwrap_or_else(|e| panic!("Failed to enable timer interrupt: {e}"));
 
         interrupt::enable_timer_source_interrupt();
     }

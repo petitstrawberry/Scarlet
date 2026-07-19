@@ -22,7 +22,7 @@ pub fn sys_pipe2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let pipefd_user = trapframe.get_arg(0);
     let flags = trapframe.get_arg(1) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate flags: Linux pipe2 only accepts O_CLOEXEC and O_NONBLOCK.
     let allowed = O_CLOEXEC | O_NONBLOCK;

@@ -69,10 +69,29 @@ pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
 #[unsafe(link_section = ".trampoline.data")]
 static mut CPUS: [Aarch64; MAX_NUM_CPUS] = [const { Aarch64::new(0) }; MAX_NUM_CPUS];
 
+/// Return the per-CPU architecture state during that CPU's one-time boot.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned exclusively to the calling CPU.
+///
+/// # Safety
+///
+/// The caller must invoke this only during the one-time initialization of
+/// `cpu_id`. No other reference to the same `CPUS[cpu_id]` entry may be active.
+unsafe fn cpu_state_for_init(cpu_id: usize) -> &'static mut Aarch64 {
+    assert!(cpu_id < MAX_NUM_CPUS, "CPU ID exceeds per-CPU state table");
+
+    // SAFETY: The caller guarantees exclusive one-time access to this array
+    // element, and the bounds check above makes the pointer addition valid.
+    unsafe { &mut *(&raw mut CPUS).cast::<Aarch64>().add(cpu_id) }
+}
+
 pub fn init_arch(cpu_id: usize) {
     early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
-    // Get raw Aarch64 struct
-    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    // SAFETY: The bootstrap CPU initializes its uniquely assigned slot once,
+    // before the slot is exposed through TPIDR_EL1.
+    let aarch64 = unsafe { cpu_state_for_init(cpu_id) };
     aarch64.cpuid = cpu_id as u64;
 
     trap_init(aarch64);
@@ -84,16 +103,21 @@ pub fn init_arch(cpu_id: usize) {
 ///
 /// * `cpu_id` - Logical CPU ID assigned by the boot protocol.
 pub fn init_ap_cpu(cpu_id: usize) {
-    // Get raw Aarch64 struct
-    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    // SAFETY: Each released secondary CPU initializes only its boot-protocol
+    // assigned slot, exactly once, before entering the scheduler.
+    let aarch64 = unsafe { cpu_state_for_init(cpu_id) };
     aarch64.cpuid = cpu_id as u64;
 
+    let kernel_ttbr0: u64;
+    // SAFETY: Secondary CPUs enter here at the privileged kernel exception
+    // level after switching to the saved kernel translation regime.
     unsafe {
         asm!(
             "mrs {0}, ttbr0_el1",
-            out(reg) aarch64.ttbr0,
+            out(reg) kernel_ttbr0,
         );
     }
+    aarch64.initialize_ttbr0_context(kernel_ttbr0);
 
     trap_init(aarch64);
 }
@@ -188,6 +212,11 @@ pub struct Aarch64 {
     trap_kind: u64,    // offset: 48
 }
 
+const _: () = {
+    assert!(core::mem::offset_of!(Aarch64, ttbr0) == 16);
+    assert!(core::mem::offset_of!(Aarch64, kernel_ttbr0) == 40);
+};
+
 impl Aarch64 {
     pub const fn new(cpu_id: usize) -> Self {
         Aarch64 {
@@ -199,6 +228,12 @@ impl Aarch64 {
             kernel_ttbr0: 0,
             trap_kind: 0,
         }
+    }
+
+    fn initialize_ttbr0_context(&mut self, kernel_ttbr0: u64) {
+        assert_ne!(kernel_ttbr0, 0, "kernel TTBR0 must be initialized");
+        self.ttbr0 = kernel_ttbr0;
+        self.kernel_ttbr0 = kernel_ttbr0;
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -230,10 +265,26 @@ impl Aarch64 {
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_WAIT,
+            asid as u64,
+        );
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
-        let ttbr_val_raw = root_pagetable.get_val_for_ttbr(asid);
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::PT_LOCK_DONE,
+            asid as u64,
+        );
+        let ttbr_val_raw = root_pagetable.get_val_for_ttbr();
+        drop(root_pagetable);
         self.ttbr0 = ttbr_val_raw;
+        crate::breadcrumb::drop_cpu(
+            self.cpuid as usize,
+            crate::breadcrumb::SETAS_ROOT_DONE,
+            asid as u64,
+        );
 
         // Clean this CPU struct from D-cache so that the trampoline assembly
         // (which may read via a different VA alias) sees the updated ttbr0.
@@ -513,10 +564,20 @@ pub fn disable_interrupt() {
     }
 }
 
-pub fn send_reschedule_ipi(target_cpu: usize) {
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
     use crate::interrupt::controllers::LocalInterruptType;
-    let _ = crate::interrupt::InterruptManager::global()
-        .send_ipi(target_cpu as u32, LocalInterruptType::Software);
+    crate::interrupt::InterruptManager::global()
+        .send_ipi(target_cpu as u32, LocalInterruptType::Software)
+        .is_ok()
 }
 
 pub fn get_cpu() -> &'static mut Aarch64 {
@@ -849,6 +910,17 @@ impl ArchCpuState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn test_initialize_ttbr0_context_sets_user_and_kernel_slots() {
+        let mut cpu = Aarch64::new(1);
+        let kernel_ttbr0 = 0x8_1234_5000;
+
+        cpu.initialize_ttbr0_context(kernel_ttbr0);
+
+        assert_eq!(cpu.get_ttbr0(), kernel_ttbr0);
+        assert_eq!(cpu.get_kernel_ttbr0(), kernel_ttbr0);
+    }
 
     /// Test architecture-specific features for AArch64
     #[test_case]

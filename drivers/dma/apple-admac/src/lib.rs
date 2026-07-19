@@ -69,8 +69,17 @@ const APPLE_ADMAC_DMA_CELLS: usize = 1;
 
 #[derive(Debug)]
 struct AppleAdmacSram {
-    size: u32,
+    size: Option<u32>,
     allocated: u32,
+}
+
+impl AppleAdmacSram {
+    const fn new() -> Self {
+        Self {
+            size: None,
+            allocated: 0,
+        }
+    }
 }
 
 struct AppleAdmacTransfer {
@@ -144,8 +153,6 @@ impl AppleAdmac {
     /// * `base` - Kernel virtual address of the ADMAC MMIO region.
     /// * `size` - Size of the mapped MMIO region in bytes.
     /// * `channel_count` - Number of channels reported by firmware.
-    /// * `tx_sram_size` - TX SRAM size reported by hardware.
-    /// * `rx_sram_size` - RX SRAM size reported by hardware.
     /// * `irq_index` - ADMAC IRQ output index used by the platform resource.
     /// * `dma_context` - DMA mapping context for this ADMAC requester.
     ///
@@ -156,8 +163,6 @@ impl AppleAdmac {
         base: usize,
         size: usize,
         channel_count: usize,
-        tx_sram_size: u32,
-        rx_sram_size: u32,
         irq_index: usize,
         dma_context: DmaContext,
     ) -> Self {
@@ -173,14 +178,8 @@ impl AppleAdmac {
                 channel_count,
                 irq_index,
                 interrupt_id: Mutex::new(None),
-                tx_sram: Mutex::new(AppleAdmacSram {
-                    size: tx_sram_size,
-                    allocated: 0,
-                }),
-                rx_sram: Mutex::new(AppleAdmacSram {
-                    size: rx_sram_size,
-                    allocated: 0,
-                }),
+                tx_sram: Mutex::new(AppleAdmacSram::new()),
+                rx_sram: Mutex::new(AppleAdmacSram::new()),
                 channels,
                 dma_context,
             }),
@@ -284,13 +283,14 @@ impl AppleAdmac {
     }
 
     fn alloc_sram_carveout(&self, direction: DmaDirection) -> Result<u32, DmaError> {
-        let sram = match direction {
-            DmaDirection::MemToDev => &self.inner.tx_sram,
-            DmaDirection::DevToMem => &self.inner.rx_sram,
+        let (sram, size_reg) = match direction {
+            DmaDirection::MemToDev => (&self.inner.tx_sram, REG_TX_SRAM_SIZE),
+            DmaDirection::DevToMem => (&self.inner.rx_sram, REG_RX_SRAM_SIZE),
             DmaDirection::MemToMem => return Err(DmaError::InvalidConfig),
         };
         let mut sram = sram.lock();
-        let block_count = ((sram.size as usize) / SRAM_BLOCK).min(u32::BITS as usize);
+        let size = *sram.size.get_or_insert_with(|| self.read_reg(size_reg));
+        let block_count = ((size as usize) / SRAM_BLOCK).min(u32::BITS as usize);
         if block_count == 0 {
             return Err(DmaError::HardwareError);
         }
@@ -314,8 +314,11 @@ impl AppleAdmac {
             DmaDirection::MemToMem => return,
         };
         let mut sram = sram.lock();
+        let Some(size) = sram.size else {
+            return;
+        };
         let base = (carveout & 0xffff) as usize;
-        if base >= sram.size as usize {
+        if base >= size as usize {
             return;
         }
         let index = base / SRAM_BLOCK;
@@ -1042,12 +1045,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         Err(e) => early_println!("[apple-admac] probe: reset unavailable: {}", e),
     }
-    // SAFETY: `base` is an ioremap'd ADMAC MMIO region and these offsets are
-    // fixed hardware register offsets.
-    let tx_sram_size = unsafe { mmio::read32(base + REG_TX_SRAM_SIZE) };
-    // SAFETY: `base` is an ioremap'd ADMAC MMIO region and these offsets are
-    // fixed hardware register offsets.
-    let rx_sram_size = unsafe { mmio::read32(base + REG_RX_SRAM_SIZE) };
     let irq_index = irq_output_index(device).unwrap_or_else(|| {
         device
             .get_resources()
@@ -1062,8 +1059,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         base,
         size,
         channel_count,
-        tx_sram_size,
-        rx_sram_size,
         irq_index,
         dma_context,
     ));
@@ -1077,14 +1072,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     DeviceManager::get_manager().register_dma_controller(phandle, controller);
 
     early_println!(
-        "[apple-admac] registered {} at paddr={:#x}, base={:#x}, channels={}, irq={}, tx-sram={}, rx-sram={}",
+        "[apple-admac] registered {} at paddr={:#x}, base={:#x}, channels={}, irq={}, sram=deferred",
         device.name(),
         paddr,
         base,
         channel_count,
-        interrupt_id,
-        tx_sram_size,
-        rx_sram_size
+        interrupt_id
     );
 
     Ok(())

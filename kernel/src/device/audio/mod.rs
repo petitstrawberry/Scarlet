@@ -1173,7 +1173,7 @@ fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     };
-    copy_from_user(task, ptr, bytes).map_err(|_| "Failed to copy audio ioctl from user")?;
+    copy_from_user(&task, ptr, bytes).map_err(|_| "Failed to copy audio ioctl from user")?;
     Ok(unsafe { value.assume_init() })
 }
 
@@ -1185,5 +1185,5 @@ fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> 
     let bytes = unsafe {
         core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
     };
-    copy_to_user(task, ptr, bytes).map_err(|_| "Failed to copy audio ioctl to user")
+    copy_to_user(&task, ptr, bytes).map_err(|_| "Failed to copy audio ioctl to user")
 }

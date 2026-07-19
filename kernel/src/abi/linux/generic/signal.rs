@@ -156,7 +156,8 @@ impl LinuxSignal {
     /// Get default action for this signal
     pub fn default_action(&self) -> SignalAction {
         match self {
-            Self::SIGKILL | Self::SIGSTOP => SignalAction::ForceTerminate,
+            Self::SIGKILL => SignalAction::ForceTerminate,
+            Self::SIGSTOP => SignalAction::Stop,
             Self::SIGCHLD | Self::SIGURG | Self::SIGWINCH => SignalAction::Ignore,
             Self::SIGCONT => SignalAction::Continue,
             Self::SIGTSTP | Self::SIGTTIN | Self::SIGTTOU => SignalAction::Stop,
@@ -334,7 +335,7 @@ pub fn sys_sigaltstack(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let new_stack_ptr = trapframe.get_arg(0);
     let old_stack_ptr = trapframe.get_arg(1);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if old_stack_ptr != 0 {
         let Some(kva) = task.vm_manager.translate_to_kva(old_stack_ptr) else {
@@ -405,7 +406,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         Some(sig) => sig,
         None => {
             trapframe.set_return_value(!0usize); // -1 (EINVAL)
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return !0usize;
         }
     };
@@ -417,7 +418,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         let Some(paddr) = task.vm_manager.translate_to_kva(oldact_ptr) else {
             // Invalid user pointer for oldact: return EFAULT
             trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return !0usize; // -EFAULT
         };
         let old_action = signal_state.get_handler(signal);
@@ -432,7 +433,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         let Some(paddr) = task.vm_manager.translate_to_kva(act_ptr) else {
             // Invalid user pointer for act: return EFAULT
             trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return !0usize; // -EFAULT
         };
         let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
@@ -441,7 +442,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     0
 }
 
@@ -493,7 +494,7 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         let Some(paddr) = task.vm_manager.translate_to_kva(oldset_ptr) else {
             // Invalid user pointer for oldset: return EFAULT
             trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return !0usize; // -EFAULT
         };
         let old_mask = signal_state.blocked.raw();
@@ -510,7 +511,7 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
             // Linux ABI has copy_from_user semantics that can distinguish short
             // reads from genuinely invalid pointers.
             trapframe.set_return_value(0);
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return 0;
         };
         let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
@@ -535,14 +536,14 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
             }
             _ => {
                 trapframe.set_return_value(!0usize); // -1 (EINVAL)
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return !0usize;
             }
         }
     }
 
     trapframe.set_return_value(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     0
 }
 
@@ -592,20 +593,27 @@ pub fn handle_event_to_signal(event: &Event) -> Option<LinuxSignal> {
 pub fn handle_event_for_task(
     abi: &LinuxAbi,
     event: &Event,
-    target_task_id: u32,
+    target_task_id: usize,
     setup_signal_handler: fn(&mut Trapframe, usize, LinuxSignal),
 ) -> Result<EventProcessOutcome, &'static str> {
     let Some(signal) = handle_event_to_signal(event) else {
         return Ok(EventProcessOutcome::Continue);
     };
-
-    let target_task = crate::sched::scheduler::get_task_by_id(target_task_id as usize)
-        .ok_or("Target task not found")?;
+    let is_stop_class = matches!(
+        &event.content,
+        EventContent::ProcessControl(control_type) if control_type.is_stop_class()
+    );
 
     let action = {
         let signal_state = abi.signal_state.lock();
         signal_state.get_handler(signal)
     };
+
+    // Preserve owned lookup semantics for nonfatal and remote targets. Fatal
+    // delivery returns an exit request; Task performs the actual exit after its
+    // ABI mutable borrow has been released.
+    let target_task =
+        crate::sched::scheduler::get_task_by_id(target_task_id).ok_or("Target task not found")?;
 
     let outcome = match action {
         SignalAction::Custom(handler_addr) => {
@@ -616,16 +624,22 @@ pub fn handle_event_for_task(
         SignalAction::Ignore => EventProcessOutcome::Continue,
         SignalAction::ForceTerminate | SignalAction::Terminate => {
             let exit_code = 128 + (signal as i32);
-            target_task.exit_group(exit_code);
-            EventProcessOutcome::Exited
+            EventProcessOutcome::Exited(exit_code)
         }
         SignalAction::Stop => {
-            target_task.set_state(crate::task::TaskState::Blocked(
-                crate::task::BlockedType::Interruptible,
-            ));
-            crate::sched::scheduler::mark_blocked(target_task.get_id());
-            crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
-            EventProcessOutcome::NeedReschedule
+            let event_queue = target_task.event_queue.lock();
+            if is_stop_class && event_queue.has_pending_continue() {
+                drop(event_queue);
+                EventProcessOutcome::Continue
+            } else {
+                target_task.set_state(crate::task::TaskState::Blocked(
+                    crate::task::BlockedType::Interruptible,
+                ));
+                crate::sched::scheduler::mark_blocked(target_task.get_id());
+                crate::sched::scheduler::remove_from_ready_queues(target_task.get_id());
+                drop(event_queue);
+                EventProcessOutcome::NeedReschedule
+            }
         }
         SignalAction::Continue => {
             let current_state = target_task.get_state();
@@ -742,6 +756,28 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_sigstop_default_action_stops() {
+        assert_eq!(LinuxSignal::SIGSTOP.default_action(), SignalAction::Stop);
+    }
+
+    #[test_case]
+    fn test_process_control_job_control_signal_mapping() {
+        assert_eq!(
+            process_control_to_signal(ProcessControlType::Stop),
+            Some(LinuxSignal::SIGSTOP)
+        );
+        assert_eq!(
+            process_control_to_signal(ProcessControlType::Continue),
+            Some(LinuxSignal::SIGCONT)
+        );
+    }
+}
+
 /// Linux sys_tkill - Send a signal to a specific thread
 ///
 /// tkill() sends a signal to a specific thread within the same thread group.
@@ -766,7 +802,7 @@ pub fn sys_tkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let sig = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // For now, just log and return success
     // A proper implementation would:
@@ -799,7 +835,7 @@ pub fn sys_tgkill(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _tid = trapframe.get_arg(1) as i32;
     let sig = trapframe.get_arg(2) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if sig < 0 {
         return errno::to_result(errno::EINVAL);

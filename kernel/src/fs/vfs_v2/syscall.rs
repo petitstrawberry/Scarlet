@@ -72,9 +72,9 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let _mode = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if open fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
@@ -158,9 +158,9 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let path_ptr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1) as u64;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str: String = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str: String = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -205,9 +205,9 @@ pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
     let path_ptr = trapframe.get_arg(0);
     let metadata_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
@@ -234,7 +234,7 @@ pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
         )
     };
 
-    match copy_to_user(task, metadata_ptr, bytes) {
+    match copy_to_user(&task, metadata_ptr, bytes) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -256,9 +256,9 @@ pub fn sys_vfs_create_hardlink(trapframe: &mut Trapframe) -> usize {
     let source_path_ptr = trapframe.get_arg(0);
     let target_path_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let source_path = match parse_c_string_from_userspace(task, source_path_ptr, MAX_PATH_LENGTH) {
+    let source_path = match parse_c_string_from_userspace(&task, source_path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
@@ -266,7 +266,7 @@ pub fn sys_vfs_create_hardlink(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let target_path = match parse_c_string_from_userspace(task, target_path_ptr, MAX_PATH_LENGTH) {
+    let target_path = match parse_c_string_from_userspace(&task, target_path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
@@ -303,9 +303,9 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
     let path_ptr = trapframe.get_arg(0);
     let _mode = trapframe.get_arg(1) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -341,9 +341,9 @@ pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = trapframe.get_arg(0);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -387,25 +387,25 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(3) as u32;
     let data_ptr = trapframe.get_arg(4);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let source_str = match parse_c_string_from_userspace(task, source_ptr, MAX_PATH_LENGTH) {
+    let source_str = match parse_c_string_from_userspace(&task, source_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
-    let target_str = match parse_c_string_from_userspace(task, target_ptr, MAX_PATH_LENGTH) {
+    let target_str = match parse_c_string_from_userspace(&task, target_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
-    let fstype_str = match parse_c_string_from_userspace(task, fstype_ptr, MAX_PATH_LENGTH) {
+    let fstype_str = match parse_c_string_from_userspace(&task, fstype_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
 
     let data_str = if data_ptr != 0 {
-        match parse_c_string_from_userspace(task, data_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, data_ptr, MAX_PATH_LENGTH) {
             Ok(s) => Some(s),
             Err(_) => return usize::MAX,
         }
@@ -502,9 +502,9 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     let target_ptr = trapframe.get_arg(0);
     let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let target_str: String = match parse_c_string_from_userspace(task, target_ptr, MAX_PATH_LENGTH)
+    let target_str: String = match parse_c_string_from_userspace(&task, target_ptr, MAX_PATH_LENGTH)
     {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
@@ -576,7 +576,7 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     let new_root_str: String =
-        match parse_c_string_from_userspace(task, new_root_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, new_root_ptr, MAX_PATH_LENGTH) {
             Ok(s) => match to_absolute_path_v2(&task, &s) {
                 Ok(abs_path) => abs_path,
                 Err(_) => return usize::MAX,
@@ -585,7 +585,7 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
         };
 
     let old_root_str: String =
-        match parse_c_string_from_userspace(task, old_root_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, old_root_ptr, MAX_PATH_LENGTH) {
             Ok(s) => match to_absolute_path_v2(&task, &s) {
                 Ok(abs_path) => abs_path,
                 Err(_) => return usize::MAX,
@@ -704,9 +704,9 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     let path_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if chdir fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(p) => p,
         Err(_) => return usize::MAX,
     };
@@ -819,9 +819,9 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     let path_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if remove fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -869,10 +869,10 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
     let symlink_path_ptr = trapframe.get_arg(0);
     let target_path_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let symlink_path_str =
-        match parse_c_string_from_userspace(task, symlink_path_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, symlink_path_ptr, MAX_PATH_LENGTH) {
             Ok(s) => match to_absolute_path_v2(&task, &s) {
                 Ok(abs_path) => abs_path,
                 Err(_) => return usize::MAX,
@@ -881,7 +881,7 @@ pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
         };
 
     let target_path_str =
-        match parse_c_string_from_userspace(task, target_path_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, target_path_ptr, MAX_PATH_LENGTH) {
             Ok(s) => s,
             Err(_) => return usize::MAX,
         };
@@ -918,10 +918,10 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     let buffer_ptr = trapframe.get_arg(1);
     let buffer_size = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let symlink_path_str =
-        match parse_c_string_from_userspace(task, symlink_path_ptr, MAX_PATH_LENGTH) {
+        match parse_c_string_from_userspace(&task, symlink_path_ptr, MAX_PATH_LENGTH) {
             Ok(s) => match to_absolute_path_v2(&task, &s) {
                 Ok(abs_path) => abs_path,
                 Err(_) => return usize::MAX,
@@ -962,7 +962,7 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     let target_bytes = target.as_bytes();
     let bytes_to_copy = core::cmp::min(target_bytes.len(), buffer_size);
 
-    if copy_to_user(task, buffer_ptr, &target_bytes[..bytes_to_copy]).is_err() {
+    if copy_to_user(&task, buffer_ptr, &target_bytes[..bytes_to_copy]).is_err() {
         return usize::MAX;
     }
 
@@ -988,7 +988,7 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
     let buffer_ptr = trapframe.get_arg(0);
     let buffer_size = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let vfs_guard = task.vfs.read();
     let vfs = match vfs_guard.as_ref() {
@@ -1000,7 +1000,7 @@ pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
     let cwd_bytes = cwd.as_bytes();
     let bytes_to_copy = core::cmp::min(cwd_bytes.len(), buffer_size);
 
-    if copy_to_user(task, buffer_ptr, &cwd_bytes[..bytes_to_copy]).is_err() {
+    if copy_to_user(&task, buffer_ptr, &cwd_bytes[..bytes_to_copy]).is_err() {
         return usize::MAX;
     }
 
@@ -1035,9 +1035,9 @@ pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
     let old_path_ptr = trapframe.get_arg(0);
     let new_path_ptr = trapframe.get_arg(1);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let old_path = match parse_c_string_from_userspace(task, old_path_ptr, MAX_PATH_LENGTH) {
+    let old_path = match parse_c_string_from_userspace(&task, old_path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,
@@ -1045,7 +1045,7 @@ pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let new_path = match parse_c_string_from_userspace(task, new_path_ptr, MAX_PATH_LENGTH) {
+    let new_path = match parse_c_string_from_userspace(&task, new_path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => match to_absolute_path_v2(&task, &s) {
             Ok(abs) => abs,
             Err(_) => return usize::MAX,

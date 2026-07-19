@@ -1,24 +1,42 @@
 use core::arch::{asm, naked_asm};
 use core::mem::MaybeUninit;
+use core::sync::atomic::compiler_fence;
 
 use limine::mp::MpInfo;
 
+use super::platform;
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
-    MODULE_REQUEST, MP_REQUEST, boot_cmdline, ensure_base_revision_supported, framebuffer_area,
-    hhdm_physical_span, module_area, reserve_front, response, select_usable_region,
+    MODULE_REQUEST, MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound,
+    ensure_base_revision_supported, framebuffer_area, module_area, reserve_front, response,
+    runtime_direct_map_regions, select_usable_region,
 };
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
 use crate::mem::{KERNEL_STACK, init_bss};
-use crate::vm::addr::{init_boot_direct_map_range, init_limine_addressing, phys_to_virt};
+use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
 use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
-use core::sync::atomic::compiler_fence;
 
 static mut EARLY_BOOTINFO: MaybeUninit<BootInfo> = MaybeUninit::uninit();
 
 static mut VHE_ENABLED: bool = false;
 static mut HV_AVAILABLE: bool = false;
+
+const HCR_EL2_FMO: u64 = 1 << 3;
+const HCR_EL2_IMO: u64 = 1 << 4;
+const HCR_EL2_AMO: u64 = 1 << 5;
+const HCR_EL2_RW: u64 = 1 << 31;
+const HCR_EL2_E2H: u64 = 1 << 34;
+const HCR_EL2_HOST_INTERRUPT_ROUTING: u64 = HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
+const CPTR_EL2_VHE_FPEN_FULL: u64 = 0b11 << 20;
+#[allow(dead_code)]
+const SCTLR_M: u64 = 1;
+#[allow(dead_code)]
+const SCTLR_C: u64 = 1 << 2;
+#[allow(dead_code)]
+const SCTLR_I: u64 = 1 << 12;
+#[allow(dead_code)]
+const LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK: u64 = 0xff;
 
 pub fn is_vhe_enabled() -> bool {
     unsafe { VHE_ENABLED }
@@ -26,6 +44,196 @@ pub fn is_vhe_enabled() -> bool {
 
 pub fn is_hv_available() -> bool {
     unsafe { HV_AVAILABLE }
+}
+
+const fn should_drop_el2_to_el1(el: u64, hcr_el2: u64, _hypervisor_enabled: bool) -> bool {
+    el == 2 && hcr_el2 & HCR_EL2_E2H == 0
+}
+
+fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
+    if current_el() != 2 {
+        return;
+    }
+
+    let hcr_el2: u64;
+    unsafe {
+        asm!("mrs {}, hcr_el2", out(reg) hcr_el2, options(nostack));
+    }
+    if !should_drop_el2_to_el1(2, hcr_el2, cfg!(feature = "hypervisor")) {
+        return;
+    }
+
+    platform::prepare_el2_drop();
+
+    // SAFETY: The EL2 and non-VHE checks above establish that this one-way
+    // transition is required before continuing in the real EL1 register bank.
+    unsafe {
+        drop_el2_to_el1(continuation, arg0);
+    }
+}
+
+#[inline(always)]
+fn read_active_sctlr() -> u64 {
+    let sctlr: u64;
+    unsafe {
+        asm!("mrs {sctlr}, sctlr_el1", sctlr = out(reg) sctlr, options(nostack));
+    }
+    sctlr
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
+    naked_asm!(
+        ".arch armv8.1-a",
+        // Preserve the continuation, its argument, and the active EL2 stack.
+        "mov x16, x0",
+        "mov x17, x1",
+        "mov x18, sp",
+        "mrs x15, hcr_el2",
+        "tbz x15, #34, 1f",
+        // In VHE host mode these EL1 names access the active EL2 host bank.
+        "mrs x3, ttbr0_el1",
+        "mrs x4, ttbr1_el1",
+        "mrs x5, tcr_el1",
+        "mrs x6, mair_el1",
+        "mrs x7, vbar_el1",
+        "mrs x8, sctlr_el1",
+        "b 2f",
+        // Without VHE, capture the active EL2 translation regime. EL2 has no
+        // TTBR1 regime, and TCR_EL2.PS must be moved to TCR_EL1.IPS.
+        "1:",
+        "mrs x3, ttbr0_el2",
+        "mov x4, xzr",
+        "mrs x5, tcr_el2",
+        "and x9, x5, #0xffff",
+        "ubfx x10, x5, #16, #3",
+        "lsl x10, x10, #32",
+        "orr x9, x9, x10",
+        // Disable the unused TTBR1 walk regime.
+        "orr x9, x9, #0x800000",
+        // TCR_EL2.TBI becomes TCR_EL1.TBI0.
+        "tbz x5, #20, 7f",
+        "mov x10, #1",
+        "lsl x10, x10, #37",
+        "orr x9, x9, x10",
+        "7:",
+        "mov x5, x9",
+        "mrs x6, mair_el2",
+        "mrs x7, vbar_el2",
+        "mrs x8, sctlr_el2",
+        "2:",
+        "mov x14, x8",
+        // Keep Limine's live translation regime, but do not inherit an
+        // uncached execution state. APs spin on the release barrier before
+        // Scarlet installs its own page tables, so leaving C clear here would
+        // turn every waiter into uncached memory traffic.
+        "bic x8, x8, #2",
+        "orr x8, x8, #1",
+        "orr x8, x8, #4",
+        "orr x8, x8, #0x1000",
+        "msr sp_el1, x18",
+        "tbz x15, #34, 3f",
+        // Program the real EL1 bank through the EL12 aliases while E2H is
+        // still active. EL1 starts with its MMU disabled until all state is set.
+        "bic x9, x8, #1",
+        "msr sctlr_el12, x9",
+        "isb",
+        "msr ttbr0_el12, x3",
+        "msr ttbr1_el12, x4",
+        "msr tcr_el12, x5",
+        "msr mair_el12, x6",
+        "msr vbar_el12, x7",
+        // Keep FP/SIMD available while Rust continues at EL1. Normal per-CPU
+        // initialization applies the final user-access policy later.
+        "movz x9, #0x30, lsl #16",
+        "msr cpacr_el12, x9",
+        "msr cntkctl_el12, xzr",
+        "b 4f",
+        // In conventional EL2 mode, the ordinary EL1 names address the real
+        // EL1 bank directly.
+        "3:",
+        "bic x9, x8, #1",
+        "msr sctlr_el1, x9",
+        "isb",
+        "msr ttbr0_el1, x3",
+        "msr ttbr1_el1, x4",
+        "msr tcr_el1, x5",
+        "msr mair_el1, x6",
+        "msr vbar_el1, x7",
+        "movz x9, #0x30, lsl #16",
+        "msr cpacr_el1, x9",
+        "msr cntkctl_el1, xzr",
+        "4:",
+        // CPTR_EL2 has different layouts under VHE and non-VHE. Zero would
+        // select FPEN=0b00 while E2H is set and leave FP/SIMD trapped at EL2.
+        // This bridge value enables VHE FPEN while keeping non-VHE TFP clear.
+        "tbz x15, #34, 8f",
+        "mov x9, {cptr_vhe_fpen_full}",
+        "msr cptr_el2, x9",
+        "b 9f",
+        "8:",
+        "msr cptr_el2, xzr",
+        "9:",
+        "isb",
+        "msr hstr_el2, xzr",
+        "msr mdcr_el2, xzr",
+        // Quarantine both timer banks visible through the current EL2 regime.
+        // With VHE active these are the EL2 host banks; without VHE they are
+        // the real EL1 banks.
+        "mrs x9, cntp_ctl_el0",
+        "orr x9, x9, #2",
+        "msr cntp_ctl_el0, x9",
+        "mrs x9, cntv_ctl_el0",
+        "orr x9, x9, #2",
+        "msr cntv_ctl_el0, x9",
+        // In VHE host mode the real EL1 timer banks are exposed through the
+        // EL02 aliases. Mask them before clearing E2H, otherwise an inherited
+        // EL1 physical timer can become an unhandled FIQ immediately after
+        // ERET. Scarlet initializes and unmasks CNTV later at EL1.
+        "tbz x15, #34, 10f",
+        "mrs x9, cntp_ctl_el02",
+        "orr x9, x9, #2",
+        "msr cntp_ctl_el02, x9",
+        "mrs x9, cntv_ctl_el02",
+        "orr x9, x9, #2",
+        "msr cntv_ctl_el02, x9",
+        "10:",
+        "dsb sy",
+        "isb",
+        // Install a known non-trapping EL1 timer policy instead of preserving
+        // firmware trap controls. Scarlet uses CNTV after detecting EL1.
+        "mov x9, #3",
+        "msr cnthctl_el2, x9",
+        "msr cntvoff_el2, xzr",
+        // Invalidate stale entries from any earlier use of the real EL1&0
+        // translation regime before enabling the copied tables.
+        "dsb ishst",
+        "tlbi alle1is",
+        "dsb ish",
+        "ic iallu",
+        "dsb sy",
+        "isb",
+        "tbz x15, #34, 5f",
+        "msr sctlr_el12, x8",
+        "b 6f",
+        "5:",
+        "msr sctlr_el1, x8",
+        "6:",
+        "isb",
+        // Return to EL1h with every exception class masked. HCR_EL2.RW is the
+        // only required bit; clearing E2H/TGE/FMO/IMO/AMO routes exceptions to
+        // EL1. Do not execute anything between the HCR write and ERET.
+        "msr elr_el2, x16",
+        "mov x9, #0x3c5",
+        "msr spsr_el2, x9",
+        "mov x0, x17",
+        "mov x1, x14",
+        "mov x9, {hcr_rw}",
+        "msr hcr_el2, x9",
+        "eret",
+        hcr_rw = const HCR_EL2_RW,
+        cptr_vhe_fpen_full = const CPTR_EL2_VHE_FPEN_FULL,
+    );
 }
 
 #[unsafe(naked)]
@@ -44,16 +252,52 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
         "msr spsel, #1",
         "mov sp, x9",
         "isb",
-        // x0 = cpu_id, jump to ap_entry_wait
+        // x0 = cpu_id, jump to secondary_cpu_entry
         "mov x0, x8",
         "b {ap_wait}",
         kernel_stack = sym KERNEL_STACK,
         stack_size = const STACK_SIZE,
-        ap_wait = sym ap_entry_wait,
+        ap_wait = sym secondary_cpu_entry,
     );
 }
 
-fn ap_entry_wait(cpu_id: usize) -> ! {
+/// Prepare a secondary CPU's exception level and enter the common AP startup.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned by the platform boot code.
+///
+/// # Returns
+///
+/// This function does not return.
+pub extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
+    mask_exceptions();
+    maybe_drop_el2_to_el1(
+        secondary_cpu_entry_after_el_drop as *const () as usize,
+        cpu_id,
+    );
+    secondary_cpu_entry_after_el_drop(cpu_id, read_active_sctlr())
+}
+
+extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+    prepare_el1_runtime();
+    if let Some((old_hcr, new_hcr)) = configure_vhe_host_interrupt_routing() {
+        early_println!(
+            "[aarch64] CPU {}: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
+            cpu_id,
+            old_hcr,
+            new_hcr
+        );
+    }
+    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
+        early_println!(
+            "[aarch64] CPU {}: platform CPU control {:#x} -> {:#x}",
+            cpu_id,
+            old_actlr,
+            new_actlr
+        );
+    }
+    // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -208,20 +452,8 @@ fn classify_cpu_node(
 ) -> crate::sched::scheduler::CpuCoreClass {
     use crate::sched::scheduler::CpuCoreClass;
 
-    if compatible_contains_any(cpu, &[b"icestorm", b"blizzard", b"efficiency", b"e-core"]) {
-        return CpuCoreClass::Efficiency;
-    }
-    if compatible_contains_any(
-        cpu,
-        &[
-            b"firestorm",
-            b"avalanche",
-            b"everest",
-            b"performance",
-            b"p-core",
-        ],
-    ) {
-        return CpuCoreClass::Performance;
+    if let Some(core_class) = platform::classify_cpu_node(cpu) {
+        return core_class;
     }
 
     if min_capacity != u32::MAX
@@ -237,29 +469,6 @@ fn classify_cpu_node(
     }
 
     CpuCoreClass::Balanced
-}
-
-fn compatible_contains_any(cpu: &fdt::node::FdtNode, needles: &[&[u8]]) -> bool {
-    let Some(prop) = cpu.property("compatible") else {
-        return false;
-    };
-
-    needles
-        .iter()
-        .any(|needle| bytes_contains_ascii_case_insensitive(prop.value, needle))
-}
-
-fn bytes_contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return false;
-    }
-
-    haystack.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle.iter())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-    })
 }
 
 fn cpu_logical_id_from_fdt(cpu: &fdt::node::FdtNode, fallback_cpu_id: usize) -> usize {
@@ -322,17 +531,55 @@ fn detect_el() -> (u64, bool) {
     (el, vhe)
 }
 
+#[inline(always)]
+fn configure_vhe_host_interrupt_routing() -> Option<(u64, u64)> {
+    if current_el() != 2 {
+        return None;
+    }
+
+    let old_hcr: u64;
+    // SAFETY: CurrentEL is EL2. The read confirms that VHE is enabled before
+    // updating only the architected physical exception routing bits, and the
+    // ISB makes the new routing effective before exceptions are unmasked.
+    unsafe {
+        asm!("mrs {0}, hcr_el2", out(reg) old_hcr, options(nostack));
+    }
+    if old_hcr & HCR_EL2_E2H == 0 {
+        return None;
+    }
+
+    let new_hcr = old_hcr | HCR_EL2_HOST_INTERRUPT_ROUTING;
+    // SAFETY: The CPU is still at EL2 and exceptions are masked during boot.
+    unsafe {
+        asm!(
+            "msr hcr_el2, {0}",
+            "isb",
+            in(reg) new_hcr,
+            options(nostack)
+        );
+    }
+
+    Some((old_hcr, new_hcr))
+}
+
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn limine_entry() -> ! {
     init_bss();
     mask_exceptions();
 
+    maybe_drop_el2_to_el1(limine_entry_after_el_drop as *const () as usize, 0);
+    limine_entry_after_el_drop(0, read_active_sctlr())
+}
+
+extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> ! {
     let (_el, vhe) = detect_el();
     unsafe {
         VHE_ENABLED = vhe;
         HV_AVAILABLE = vhe;
     }
+
+    let hcr_transition = configure_vhe_host_interrupt_routing();
 
     prepare_el1_runtime();
 
@@ -358,6 +605,31 @@ pub extern "C" fn limine_entry() -> ! {
     );
     crate::arch::aarch64::early_console_init();
 
+    if let Some((before, after)) = platform::el2_drop_diagnostic_transition() {
+        early_println!(
+            "[aarch64] BSP: platform EL2 control before={:#x} after={:#x}",
+            before,
+            after
+        );
+    }
+
+    if let Some((old_hcr, new_hcr)) = hcr_transition {
+        early_println!(
+            "[aarch64] BSP: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
+            old_hcr,
+            new_hcr
+        );
+    }
+    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
+        early_println!(
+            "[aarch64] BSP: platform CPU control {:#x} -> {:#x}",
+            old_actlr,
+            new_actlr
+        );
+    }
+    // log_el1_memory_state("handoff", _arg0, inherited_sctlr);
+    // diagnose_limine_mair_compatibility();
+
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
     if executable.virtual_base as usize != kernel_start {
@@ -371,14 +643,16 @@ pub extern "C" fn limine_entry() -> ! {
     init_fdt(dtb_ptr);
 
     let usable_region = select_usable_region(memmap.entries());
-    let hhdm_phys_span = hhdm_physical_span(memmap.entries());
-    init_boot_direct_map_range(hhdm_phys_span.start, hhdm_phys_span.end);
+    let bootloader_hhdm_bound = bootloader_hhdm_physical_bound(memmap.entries());
+    init_bootloader_direct_map_bound(bootloader_hhdm_bound.start, bootloader_hhdm_bound.end);
     let hhdm_offset = hhdm.offset as usize;
+    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
+    let direct_map_regions = runtime_direct_map_regions(memmap.entries(), framebuffer_paddr)
+        .unwrap_or_else(|error| panic!("failed to build runtime direct map: {}", error));
     let relocated_fdt = relocate_fdt(phys_to_virt(usable_region.start) as *mut u8);
     let relocated_fdt_paddr = usable_region.start;
     let reserved_bytes = relocated_fdt.size();
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
-    let direct_map_paddr = hhdm_phys_span;
     let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
     let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
@@ -387,7 +661,6 @@ pub extern "C" fn limine_entry() -> ! {
         .and_then(|fdt| fdt.chosen().bootargs());
     let cmdline = boot_cmdline(fdt_cmdline);
     let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
-    let framebuffer_paddr = framebuffer_area(FRAMEBUFFER_REQUEST.response());
 
     // Cache the wall-clock epoch now; the Limine response pointer is invalid
     // after the page-table switch in start_kernel.
@@ -400,7 +673,7 @@ pub extern "C" fn limine_entry() -> ! {
         cpu_id,
         cpu_count,
         usable_memory_paddr,
-        direct_map_paddr,
+        direct_map_regions,
         initramfs_paddr,
         hhdm_offset,
         cmdline,
@@ -435,6 +708,50 @@ pub extern "C" fn limine_entry() -> ! {
     }
 }
 
+#[cfg(test)]
+mod el_drop_tests {
+    use super::*;
+
+    #[test_case]
+    fn el2_vhe_remains_at_el2_without_hypervisor_feature() {
+        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, false));
+        assert!(should_drop_el2_to_el1(2, 0, false));
+        assert!(should_drop_el2_to_el1(2, 0, true));
+        assert!(!should_drop_el2_to_el1(2, HCR_EL2_E2H, true));
+        assert!(!should_drop_el2_to_el1(1, HCR_EL2_E2H, false));
+    }
+
+    #[test_case]
+    fn el2_drop_quarantines_el1_timer_banks_before_eret() {
+        let source = include_str!("limine.rs");
+        let physical_timer_mask = source
+            .find("msr cntp_ctl_el02, x9")
+            .expect("EL2 drop must mask the real EL1 physical timer bank");
+        let virtual_timer_mask = source
+            .find("msr cntv_ctl_el02, x9")
+            .expect("EL2 drop must mask the real EL1 virtual timer bank");
+        let hcr_drop = source
+            .find("msr hcr_el2, x9")
+            .expect("EL2 drop must install the EL1 routing policy");
+
+        assert!(physical_timer_mask < hcr_drop);
+        assert!(virtual_timer_mask < hcr_drop);
+    }
+
+    #[test_case]
+    fn el2_drop_prepares_the_platform_before_the_transition() {
+        let source = include_str!("limine.rs");
+        let platform_prepare = source
+            .find("platform::prepare_el2_drop()")
+            .expect("EL2 drop must prepare the active boot platform");
+        let el2_drop = source
+            .find("drop_el2_to_el1(continuation, arg0)")
+            .expect("EL2 drop must enter the generic transition");
+
+        assert!(platform_prepare < el2_drop);
+    }
+}
+
 fn logical_cpu_id_from_mpidr(mpidr: u64) -> usize {
     if let Some(mp_resp) = MP_REQUEST.response() {
         for (cpu_id, cpu) in mp_resp.cpus().iter().copied().enumerate() {
@@ -454,6 +771,64 @@ fn current_mpidr() -> u64 {
         asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nostack));
     }
     mpidr
+}
+
+#[allow(dead_code)]
+fn log_el1_memory_state(stage: &str, cpu_id: usize, inherited_sctlr: u64) {
+    let sctlr: u64;
+    let tcr: u64;
+    let mair: u64;
+    unsafe {
+        asm!(
+            "mrs {sctlr}, sctlr_el1",
+            "mrs {tcr}, tcr_el1",
+            "mrs {mair}, mair_el1",
+            sctlr = out(reg) sctlr,
+            tcr = out(reg) tcr,
+            mair = out(reg) mair,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    early_println!(
+        "[aarch64] CPU {} {} memory state: EL={} inherited_SCTLR={:#x} SCTLR={:#x} M={} C={} I={} TCR={:#x} MAIR={:#x}",
+        cpu_id,
+        stage,
+        current_el(),
+        inherited_sctlr,
+        sctlr,
+        usize::from(sctlr & SCTLR_M != 0),
+        usize::from(sctlr & SCTLR_C != 0),
+        usize::from(sctlr & SCTLR_I != 0),
+        tcr,
+        mair,
+    );
+}
+
+/// Diagnoses whether Limine's live AttrIndx 0 preserves the Normal WB contract.
+///
+/// The diagnostic only reads MAIR_EL1. Scarlet later installs the same Normal
+/// WB encoding at AttrIndx 0 before replacing Limine's page tables, preventing
+/// an attribute reinterpretation while those old TTBRs remain live.
+#[allow(dead_code)]
+fn diagnose_limine_mair_compatibility() {
+    let mair: u64;
+    unsafe {
+        asm!("mrs {mair}, mair_el1", mair = out(reg) mair, options(nostack));
+    }
+
+    let attr_index_zero = mair & 0xff;
+    if attr_index_zero == LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK {
+        early_println!(
+            "[aarch64] Limine MAIR AttrIndx0={:#x} Normal WB; Scarlet preserves it during TTBR handoff",
+            attr_index_zero,
+        );
+    } else {
+        early_println!(
+            "[aarch64] WARNING: Limine MAIR AttrIndx0={:#x}, expected Normal WB {:#x}; Scarlet will preserve AttrIndx0 as Normal WB before replacing TTBRs",
+            attr_index_zero,
+            LIMINE_MAIR_ATTR_INDEX_NORMAL_WRITE_BACK,
+        );
+    }
 }
 
 #[inline(always)]

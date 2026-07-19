@@ -40,7 +40,7 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
     let pipefd_ptr = trapframe.get_arg(0);
 
     // Increment PC to avoid infinite loop if pipe creation fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Create pipe pair with default buffer size (4KB)
     const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
@@ -84,7 +84,7 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
     let mut out = [0u8; core::mem::size_of::<u32>() * 2];
     out[..core::mem::size_of::<u32>()].copy_from_slice(&read_handle.to_le_bytes());
     out[core::mem::size_of::<u32>()..].copy_from_slice(&write_handle.to_le_bytes());
-    if copy_to_user(task, pipefd_ptr, &out).is_err() {
+    if copy_to_user(&task, pipefd_ptr, &out).is_err() {
         let _ = task.handle_table.remove(read_handle);
         let _ = task.handle_table.remove(write_handle);
         return usize::MAX;
@@ -121,9 +121,9 @@ pub fn sys_event_channel_create(trapframe: &mut Trapframe) -> usize {
     };
 
     let name_ptr = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let name = match parse_c_string_from_userspace(task, name_ptr, 256) {
+    let name = match parse_c_string_from_userspace(&task, name_ptr, 256) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -149,9 +149,9 @@ pub fn sys_event_subscribe(trapframe: &mut Trapframe) -> usize {
     };
 
     let name_ptr = trapframe.get_arg(0);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let name = match parse_c_string_from_userspace(task, name_ptr, 256) {
+    let name = match parse_c_string_from_userspace(&task, name_ptr, 256) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -180,7 +180,7 @@ pub fn sys_event_unsubscribe(trapframe: &mut Trapframe) -> usize {
     };
 
     let handle = trapframe.get_arg(0) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the object first to extract identifiers
     let (channel_name, subscription_id) = match task
@@ -223,7 +223,7 @@ pub fn sys_event_publish(trapframe: &mut Trapframe) -> usize {
     let channel_handle = trapframe.get_arg(0) as u32;
     let event_id = trapframe.get_arg(1) as u32;
     let payload_val = trapframe.get_arg(2) as isize as i64;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let ko = match task.handle_table.get(channel_handle) {
         Some(obj) => obj,
@@ -273,7 +273,7 @@ pub fn sys_event_handler_register(trapframe: &mut Trapframe) -> usize {
     let handler_id = trapframe.get_arg(1);
     let filter_kind = trapframe.get_arg(2) as u32;
     let param0 = trapframe.get_arg(3) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let ko = match task.handle_table.get(sub_handle) {
         Some(obj) => obj,
@@ -318,7 +318,7 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
     let kind = trapframe.get_arg(1) as u32;
     let reliable = trapframe.get_arg(2) as u32 != 0;
     let prio_raw = trapframe.get_arg(3) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let priority = match prio_raw {
         1 => EventPriority::Low,
@@ -390,7 +390,7 @@ pub fn sys_event_send_group(trapframe: &mut Trapframe) -> usize {
     let kind = trapframe.get_arg(1) as u32;
     let reliable = trapframe.get_arg(2) as u32 != 0;
     let prio_raw = trapframe.get_arg(3) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let priority = match prio_raw {
         1 => EventPriority::Low,
@@ -472,7 +472,7 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
     let permissions = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop if creation fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate size (must be non-zero and reasonable)
     if size == 0 || size > 1024 * 1024 * 1024 {
@@ -532,7 +532,7 @@ pub fn sys_shared_memory_resize(trapframe: &mut Trapframe) -> usize {
 
     crate::println!("[sys_shared_memory_resize] handle={} size={}", handle, size);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
@@ -586,7 +586,7 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     let object_handle = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
     let socket_obj = match task
@@ -638,7 +638,7 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let socket_handle = trapframe.get_arg(0) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
     let socket_obj = match task
@@ -697,7 +697,7 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let data_len = trapframe.get_arg(3);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
     let socket_obj = match task
@@ -735,7 +735,7 @@ pub fn sys_socket_send_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let data_len = data_len.min(MAX_SEND_SIZE);
 
     let mut data = vec![0u8; data_len];
-    if copy_from_user(task, data_ptr, &mut data).is_err() {
+    if copy_from_user(&task, data_ptr, &mut data).is_err() {
         return usize::MAX;
     }
 
@@ -772,7 +772,7 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
     let max_data_len = trapframe.get_arg(3);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the socket object (LocalSocket-only)
     let socket_obj = match task
@@ -808,14 +808,14 @@ pub fn sys_socket_recv_handle_and_data(trapframe: &mut Trapframe) -> usize {
 
     // Write the handle value to userspace
     if handle_ptr != 0 {
-        if copy_to_user(task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
+        if copy_to_user(&task, handle_ptr, &new_handle.to_le_bytes()).is_err() {
             return usize::MAX;
         }
     }
 
     // Write the data to userspace
     if !data.is_empty() && data_ptr != 0 {
-        if copy_to_user(task, data_ptr, &data).is_err() {
+        if copy_to_user(&task, data_ptr, &data).is_err() {
             return usize::MAX;
         }
     }
@@ -849,11 +849,11 @@ pub fn sys_event_handler_register_native(trapframe: &mut Trapframe) -> usize {
 
     // Validate content_type range (0-3) and non-null handler address
     if content_type > 3 || handler_addr == 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return usize::MAX;
     }
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Use with_default_abi_mut to access ScarletAbi
     let result = task.with_default_abi_mut(|abi, _task| {
@@ -894,7 +894,7 @@ pub fn sys_event_handler_unregister_native(trapframe: &mut Trapframe) -> usize {
     };
 
     let content_type = trapframe.get_arg(0) as u8;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let result = task.with_default_abi_mut(|abi, _task| {
         if let Some(scarlet_abi) = abi
@@ -938,7 +938,7 @@ pub fn sys_event_mask(trapframe: &mut Trapframe) -> usize {
     let operation = trapframe.get_arg(0) as u32;
     let event_kind = trapframe.get_arg(1) as u32;
     let event_subtype = trapframe.get_arg(2) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let result = task.with_default_abi_mut(|abi, _task| {
         if let Some(scarlet_abi) = abi

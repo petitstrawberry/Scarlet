@@ -200,17 +200,14 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let device_manager = DeviceManager::get_manager();
 
     // Prefer a Char device that advertises Serial capability (and is not itself a TTY)
-    let devices_count = device_manager.get_devices_count();
     let mut serial_device_id: Option<usize> = None;
-    for id in 1..=devices_count {
-        if let Some(dev) = device_manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char
-                && dev.capabilities().contains(&DeviceCapability::Serial)
-                && !dev.capabilities().contains(&DeviceCapability::Tty)
-            {
-                serial_device_id = Some(id);
-                break;
-            }
+    for (id, dev) in device_manager.get_devices_with_ids() {
+        if dev.device_type() == DeviceType::Char
+            && dev.capabilities().contains(&DeviceCapability::Serial)
+            && !dev.capabilities().contains(&DeviceCapability::Tty)
+        {
+            serial_device_id = Some(id);
+            break;
         }
     }
 
@@ -1639,6 +1636,13 @@ impl CharDevice for TtyDevice {
         }
 
         let _lock = self.write_lock.lock();
+
+        if crate::earlyfb::is_redirection_enabled()
+            && crate::earlyfb::is_initialized()
+            && let Ok(text) = core::str::from_utf8(buffer)
+        {
+            crate::earlyfb::write_str(text);
+        }
 
         if self.output_postprocess_enabled.load(Ordering::Relaxed) {
             let mut output = alloc::vec::Vec::with_capacity(buffer.len());

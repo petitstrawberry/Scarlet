@@ -7,6 +7,7 @@ use core::arch::asm;
 use crate::arch::Trapframe;
 use crate::early_println;
 
+mod apple_serror;
 pub mod exception;
 pub mod interrupt;
 pub mod kernel;

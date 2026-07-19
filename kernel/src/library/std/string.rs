@@ -57,7 +57,7 @@ pub fn parse_c_string_from_userspace(
     let mut found_nul = false;
     for i in 0..max_len {
         let mut byte = [0u8; 1];
-        copy_from_user(task, ptr + i, &mut byte)
+        copy_from_user(&task, ptr + i, &mut byte)
             .map_err(|_| StringConversionError::TranslationError)?;
         if byte[0] == 0 {
             found_nul = true;
@@ -89,7 +89,7 @@ pub fn parse_string_array_from_userspace(
     loop {
         let mut raw_ptr = [0u8; core::mem::size_of::<usize>()];
         copy_from_user(
-            task,
+            &task,
             array_ptr + i * core::mem::size_of::<usize>(),
             &mut raw_ptr,
         )
@@ -104,7 +104,7 @@ pub fn parse_string_array_from_userspace(
             return Err(StringConversionError::TooManyStrings);
         }
 
-        let string = parse_c_string_from_userspace(task, str_ptr, max_string_len)?;
+        let string = parse_c_string_from_userspace(&task, str_ptr, max_string_len)?;
         strings.push(string);
         i += 1;
     }

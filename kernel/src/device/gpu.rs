@@ -604,7 +604,7 @@ fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     };
-    copy_from_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl from user")?;
+    copy_from_user(&task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl from user")?;
 
     // SAFETY: `bytes` covers the whole `T` storage and has just been filled by
     // `copy_from_user`.
@@ -622,7 +622,7 @@ fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> 
     let bytes = unsafe {
         core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
     };
-    copy_to_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl to user")?;
+    copy_to_user(&task, ptr, bytes).map_err(|_| "Failed to copy GPU ioctl to user")?;
     Ok(())
 }
 
@@ -636,7 +636,7 @@ fn read_user_bytes(ptr: usize, len: usize) -> Result<Vec<u8>, &'static str> {
 
     let task = crate::task::mytask().ok_or("No current task for GPU user buffer")?;
     let mut bytes = alloc::vec![0u8; len];
-    copy_from_user(task, ptr, &mut bytes).map_err(|_| "Failed to copy GPU buffer from user")?;
+    copy_from_user(&task, ptr, &mut bytes).map_err(|_| "Failed to copy GPU buffer from user")?;
     Ok(bytes)
 }
 
@@ -649,7 +649,7 @@ fn write_user_bytes(ptr: usize, bytes: &[u8]) -> Result<(), &'static str> {
     }
 
     let task = crate::task::mytask().ok_or("No current task for GPU user buffer")?;
-    copy_to_user(task, ptr, bytes).map_err(|_| "Failed to copy GPU buffer to user")
+    copy_to_user(&task, ptr, bytes).map_err(|_| "Failed to copy GPU buffer to user")
 }
 
 fn user_buffer_to_memory_entries(

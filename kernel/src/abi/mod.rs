@@ -380,7 +380,7 @@ pub trait AbiModule: Send + Sync + 'static {
     ///
     /// # Arguments
     /// * `event` - The event to be delivered
-    /// * `target_task_id` - ID of the task that should receive the event
+    /// * `target_task_id` - Global kernel ID of the task that should receive the event
     ///
     /// # Returns
     /// * `Ok(outcome)` describing how event processing should proceed
@@ -388,7 +388,7 @@ pub trait AbiModule: Send + Sync + 'static {
     fn handle_event(
         &mut self,
         _event: crate::ipc::Event,
-        _target_task_id: u32,
+        _target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         // Default implementation: ignore events
         Ok(EventProcessOutcome::Continue)
@@ -550,20 +550,39 @@ pub enum EventProcessOutcome {
     UserHandlerArmed,
     /// The task state changed so the scheduler must pick another task.
     NeedReschedule,
-    /// The task exited and must not be returned to userspace.
-    Exited,
+    /// The task must exit with this status after the ABI mutable borrow is released.
+    Exited(i32),
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     // 1. Get the program counter (sepc) from trapframe
     let pc = trapframe.get_current_pc() as usize;
+    let syscall_number = trapframe.get_syscall_number();
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_ENTER,
+        syscall_number as u64,
+        pc as u64,
+    );
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_TASK_DONE,
+        task.get_id() as u64,
+        syscall_number as u64,
+    );
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
-    task.with_resolve_abi_mut(pc, |abi_module| {
+    let res = task.with_resolve_abi_mut(pc, |abi_module| {
         // 4. Handle the system call with the resolved ABI
         abi_module.handle_syscall(trapframe)
-    })
+    });
+    crate::breadcrumb::drop(
+        crate::breadcrumb::SYSCALL_ABI_DONE,
+        task.get_id() as u64,
+        syscall_number as u64,
+    );
+    task.process_deferred_exit_request();
+    crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);
+    res
 }

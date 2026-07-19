@@ -7,5 +7,5 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-scarlet = { path = "../../../kernel" }
+scarlet = { path = "../../../kernel", default-features = false }
 scarlet-driver-apple-afk = { path = "../apple-afk" }

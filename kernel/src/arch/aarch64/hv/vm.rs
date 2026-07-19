@@ -646,7 +646,7 @@ impl VcpuObject for Aarch64VcpuObject {
         let task = mytask().ok_or("No current task")?;
         let mut guest_tf = Trapframe::new();
 
-        save_host_user_fpu(task);
+        save_host_user_fpu(&task);
 
         {
             let vcpu_state = &mut *vcpu;
@@ -657,7 +657,7 @@ impl VcpuObject for Aarch64VcpuObject {
 
         {
             let vcpu_state = &mut *vcpu;
-            self.setup_for_guest(task, &mut vcpu_state.guest, &mut vcpu_state.vgic, &vm);
+            self.setup_for_guest(&task, &mut vcpu_state.guest, &mut vcpu_state.vgic, &vm);
         }
         vcpu.guest.restore_fpu();
         // SAFETY: the guest world switch restores host EL2 state before returning.
@@ -671,8 +671,8 @@ impl VcpuObject for Aarch64VcpuObject {
 
             match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
                 Some(exit) => {
-                    self.prepare_normal_task_and_save_guest(task, &mut vcpu.guest, &mut guest_tf);
-                    restore_host_user_fpu(task);
+                    self.prepare_normal_task_and_save_guest(&task, &mut vcpu.guest, &mut guest_tf);
+                    restore_host_user_fpu(&task);
                     return Ok(exit);
                 }
                 None => {
@@ -688,7 +688,7 @@ impl VcpuObject for Aarch64VcpuObject {
                         self.sync_interrupts(&vcpu_state.vgic);
                         self.inject_pending_interrupts(&mut vcpu_state.vgic);
                         self.setup_for_guest(
-                            task,
+                            &task,
                             &mut vcpu_state.guest,
                             &mut vcpu_state.vgic,
                             &vm,

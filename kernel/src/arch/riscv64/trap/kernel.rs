@@ -7,7 +7,10 @@ use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::current_task;
-use crate::vm::{get_kernel_vm_manager, vmem::VirtualMemoryPermission};
+use crate::vm::{
+    get_kernel_vm_manager,
+    vmem::{MemoryAttribute, VirtualMemoryPermission},
+};
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
@@ -138,13 +141,13 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => match manager.get_root_page_table() {
-                    Some(root_page_table) => {
+                    Some(mut root_page_table) => {
                         let paddr = mmap.pmarea.start + (vaddr - mmap.vmarea.start);
                         root_page_table.map(
-                            manager.get_asid(),
                             vaddr,
                             paddr,
                             mmap.permissions,
+                            mmap.memory_attribute,
                             true,
                             false,
                         );
@@ -181,18 +184,18 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // Also handle kernel_sp (one past end) since trap entry might touch it
                     if vaddr >= kstack_start && vaddr <= kstack_end {
                         let manager = get_kernel_vm_manager();
-                        if let Some(root_page_table) = manager.get_root_page_table() {
+                        if let Some(mut root_page_table) = manager.get_root_page_table() {
                             let kernel_stack_area = task.get_kernel_stack_memory_area_paddr();
                             let page_offset =
                                 (vaddr - kstack_start) & !(crate::environment::PAGE_SIZE - 1);
                             let page_paddr = kernel_stack_area.start + page_offset;
                             let page_vaddr = vaddr & !(crate::environment::PAGE_SIZE - 1);
                             root_page_table.map(
-                                manager.get_asid(),
                                 page_vaddr,
                                 page_paddr,
                                 VirtualMemoryPermission::Read as usize
                                     | VirtualMemoryPermission::Write as usize,
+                                MemoryAttribute::Normal,
                                 true,
                                 false,
                             );

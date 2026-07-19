@@ -35,6 +35,7 @@ use alloc::collections::BTreeMap;
 use spin::{Mutex, Once};
 
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
+use crate::vm::addr::validate_direct_map_alias;
 use crate::vm::get_kernel_vm_manager;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -137,34 +138,73 @@ pub fn ioremap_init() {
 ///   this address for MMIO register accesses.
 /// * `Err(&'static str)` – Descriptive error if mapping failed.
 pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
+    map_physical_memory(paddr, size, MemoryAttribute::Device)
+}
+
+/// Map physical RAM into the kernel virtual address space as normal memory.
+///
+/// This is intended for firmware-owned RAM that is deliberately absent from
+/// the sparse runtime direct map but still needs a narrow kernel mapping. It
+/// must not be used for MMIO registers; use [`ioremap`] for device memory.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical base address of the RAM range.
+/// * `size` - Number of bytes to map; must be greater than zero.
+///
+/// # Returns
+///
+/// A kernel virtual address with normal cacheable memory attributes, or an
+/// error when the range conflicts with the direct map or cannot be mapped.
+pub fn memremap_normal(paddr: usize, size: usize) -> Result<usize, &'static str> {
+    map_physical_memory(paddr, size, MemoryAttribute::Normal)
+}
+
+fn map_physical_memory(
+    paddr: usize,
+    size: usize,
+    memory_attribute: MemoryAttribute,
+) -> Result<usize, &'static str> {
     if size == 0 {
-        return Err("ioremap: size must be > 0");
+        return Err("physical map: size must be > 0");
     }
 
     let alloc_guard = IOREMAP_ALLOCATOR
         .get()
-        .ok_or("ioremap: subsystem not initialized (call ioremap_init first)")?;
+        .ok_or("physical map: subsystem not initialized")?;
 
     // Align physical address down to a page boundary.
     let offset = paddr & (PAGE_SIZE - 1);
     let aligned_paddr = paddr - offset;
-    let aligned_size = align_up(size + offset, PAGE_SIZE);
+    let aligned_size = checked_align_up(
+        size.checked_add(offset)
+            .ok_or("ioremap: physical range size overflows")?,
+        PAGE_SIZE,
+    )?;
+    let aligned_end = aligned_paddr
+        .checked_add(aligned_size)
+        .and_then(|end| end.checked_sub(1))
+        .ok_or("ioremap: physical range overflows")?;
+    let physical_area = MemoryArea::new(aligned_paddr, aligned_end);
+
+    // Reject incompatible aliases before consuming IOREMAP virtual address space.
+    validate_direct_map_alias(physical_area, memory_attribute)?;
 
     // Reserve virtual address space.
     let alloc_va = alloc_guard
         .lock()
         .alloc(aligned_size)
-        .ok_or("ioremap: IOREMAP virtual address space exhausted")?;
+        .ok_or("physical map: virtual address space exhausted")?;
 
     // Build the VirtualMemoryMap descriptor.
     let vmmap = VirtualMemoryMap::new(
-        MemoryArea::new(aligned_paddr, aligned_paddr + aligned_size - 1),
+        physical_area,
         MemoryArea::new(alloc_va, alloc_va + aligned_size - 1),
         VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
         true, // shared: accessible from any address space using the kernel PT
         None,
     )
-    .with_memory_attribute(MemoryAttribute::Device);
+    .with_memory_attribute(memory_attribute);
 
     let km = get_kernel_vm_manager();
 
@@ -175,9 +215,10 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
     }
 
     // Install the mapping into the kernel page tables.
-    let asid = km.get_asid();
-    if let Some(pt) = km.get_root_page_table() {
-        if let Err(e) = pt.map_memory_area(asid, vmmap, true, true) {
+    if let Some(mut pt) = km.get_root_page_table() {
+        let map_result = pt.map_memory_area(vmmap, true, true);
+        drop(pt);
+        if let Err(e) = map_result {
             km.remove_memory_map_by_addr(alloc_va);
             alloc_guard.lock().free(alloc_va, aligned_size);
             return Err(e);
@@ -221,9 +262,10 @@ pub fn iounmap(vaddr: usize) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-#[inline(always)]
-fn align_up(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
+fn checked_align_up(val: usize, align: usize) -> Result<usize, &'static str> {
+    val.checked_add(align - 1)
+        .map(|value| value & !(align - 1))
+        .ok_or("ioremap: range alignment overflows")
 }
 
 // ---------------------------------------------------------------------------
@@ -236,17 +278,20 @@ mod tests {
 
     #[test_case]
     fn test_align_up_zero() {
-        assert_eq!(align_up(0, PAGE_SIZE), 0);
+        assert_eq!(checked_align_up(0, PAGE_SIZE).unwrap(), 0);
     }
 
     #[test_case]
     fn test_align_up_already_aligned() {
-        assert_eq!(align_up(PAGE_SIZE, PAGE_SIZE), PAGE_SIZE);
+        assert_eq!(checked_align_up(PAGE_SIZE, PAGE_SIZE).unwrap(), PAGE_SIZE);
     }
 
     #[test_case]
     fn test_align_up_one_byte_over() {
-        assert_eq!(align_up(PAGE_SIZE + 1, PAGE_SIZE), 2 * PAGE_SIZE);
+        assert_eq!(
+            checked_align_up(PAGE_SIZE + 1, PAGE_SIZE).unwrap(),
+            2 * PAGE_SIZE
+        );
     }
 
     #[test_case]

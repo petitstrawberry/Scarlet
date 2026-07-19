@@ -5,6 +5,7 @@
 
 pub mod addr;
 pub mod boot;
+pub mod direct_map;
 pub mod ioremap;
 pub mod manager;
 pub mod vmem;
@@ -14,12 +15,11 @@ pub use addr::{
     get_boot_hhdm_offset, get_current_direct_map_phys_range, get_heap_phys_layout, get_hhdm_offset,
     phys_to_virt, set_hhdm_offset, transition_kernel_memory_layout, virt_to_phys,
 };
-pub use ioremap::{ioremap, iounmap};
+pub use ioremap::{ioremap, iounmap, memremap_normal};
 
+use direct_map::DirectMapRegions;
 use manager::VirtualMemoryManager;
-use vmem::MemoryArea;
-use vmem::VirtualMemoryMap;
-use vmem::VirtualMemoryPermission;
+use vmem::{MemoryArea, MemoryAttribute, VirtualMemoryMap, VirtualMemoryPermission};
 
 use crate::arch::Arch;
 use crate::arch::get_kernel_trapvector_paddr;
@@ -45,10 +45,9 @@ use spin::{Mutex, Once};
 extern crate alloc;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
-static HHDM_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
-static HHDM_PHYS_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
+static DIRECT_MAP_RETAG_LOCK: Mutex<()> = Mutex::new(());
 
 fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
@@ -62,11 +61,89 @@ pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
     KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
 }
 
+/// Retags one fully covered physical range in the live kernel direct map.
+///
+/// This is internal plumbing for PMM-owned allocations. It keeps the published
+/// sparse-region metadata, kernel VMM metadata, and active HHDM page-table
+/// leaves synchronized while serializing concurrent retag transactions. The
+/// runtime direct-map metadata lock is held only while planning and publishing
+/// the metadata change, never while acquiring the kernel page-table lock.
+pub(crate) fn retag_direct_map_memory_attribute(
+    physical_area: MemoryArea,
+    memory_attribute: MemoryAttribute,
+) -> Result<MemoryAttribute, &'static str> {
+    let _retag_guard = DIRECT_MAP_RETAG_LOCK.lock();
+
+    let (replacement_regions, original_attribute) = {
+        let regions = addr::lock_runtime_direct_map_regions()?;
+        let mut replacement_regions = *regions;
+        let original_attribute = replacement_regions.retag(physical_area, memory_attribute)?;
+        (replacement_regions, original_attribute)
+    };
+    if original_attribute == memory_attribute {
+        return Ok(original_attribute);
+    }
+
+    let hhdm_area = MemoryArea::new(
+        SCARLET_HHDM_BASE
+            .checked_add(physical_area.start)
+            .ok_or("HHDM retag virtual start overflows")?,
+        SCARLET_HHDM_BASE
+            .checked_add(physical_area.end)
+            .ok_or("HHDM retag virtual end overflows")?,
+    );
+    let hhdm_map = VirtualMemoryMap {
+        vmarea: hhdm_area,
+        pmarea: physical_area,
+        vm_start: hhdm_area.start,
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize,
+        is_shared: true,
+        memory_attribute,
+        owner: None,
+    };
+    let manager = get_kernel_vm_manager();
+    manager.retag_memory_map_range(hhdm_area, original_attribute, memory_attribute)?;
+
+    let page_table_result = manager
+        .get_root_page_table()
+        .ok_or("kernel HHDM retag has no root page table")
+        .and_then(|mut root| root.retag_memory_area(hhdm_map.clone()));
+    if let Err(error) = page_table_result {
+        if let Some(mut root) = manager.get_root_page_table() {
+            let mut rollback_map = hhdm_map;
+            rollback_map.memory_attribute = original_attribute;
+            root.retag_memory_area(rollback_map)
+                .expect("kernel HHDM page-table retag rollback failed");
+        }
+        manager
+            .retag_memory_map_range(hhdm_area, memory_attribute, original_attribute)
+            .expect("kernel HHDM metadata retag rollback failed");
+        return Err(error);
+    }
+
+    {
+        let mut regions = addr::lock_runtime_direct_map_regions()?;
+        *regions = replacement_regions;
+    }
+    Ok(original_attribute)
+}
+
 static KERNEL_AREA: Once<MemoryArea> = Once::new();
-/* Initialize MMU and enable paging */
+/// Initialize the kernel virtual memory layout and enable its runtime page table.
+///
+/// # Arguments
+///
+/// * `direct_map_regions` - Sparse physical regions represented by the kernel HHDM
+/// * `initramfs_paddr` - Optional physical range occupied by the initramfs
+/// * `heap_paddr` - Physical range backing the kernel heap
+///
+/// # Returns
+///
+/// This function returns after the runtime kernel page table is active.
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(
-    direct_map_paddr: MemoryArea,
+    direct_map_regions: DirectMapRegions,
     initramfs_paddr: Option<MemoryArea>,
     heap_paddr: MemoryArea,
 ) {
@@ -76,8 +153,6 @@ pub fn kernel_vm_init(
     early_println!("[vm] kernel_vm_init: start");
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
-    let root_page_table = get_root_pagetable(asid).unwrap();
-
     manager.set_asid(asid);
 
     unsafe extern "C" {
@@ -93,14 +168,6 @@ pub fn kernel_vm_init(
         start: addr::kernel_virt_to_phys(kernel_area.start),
         end: addr::kernel_virt_to_phys(kernel_area.end),
     };
-    let direct_map_phys_area = MemoryArea {
-        start: align_down(direct_map_paddr.start, PAGE_SIZE),
-        end: align_up(direct_map_paddr.end + 1, PAGE_SIZE) - 1,
-    };
-    let hhdm_area = MemoryArea {
-        start: SCARLET_HHDM_BASE + direct_map_phys_area.start,
-        end: SCARLET_HHDM_BASE + direct_map_phys_area.end,
-    };
     let heap_phys_area = MemoryArea {
         start: align_down(heap_paddr.start, PAGE_SIZE),
         end: align_up(heap_paddr.end + 1, PAGE_SIZE) - 1,
@@ -111,9 +178,7 @@ pub fn kernel_vm_init(
     };
 
     KERNEL_AREA.call_once(|| kernel_area);
-    HHDM_AREA.call_once(|| hhdm_area);
     KERNEL_HEAP_AREA.call_once(|| kernel_heap_area);
-    HHDM_PHYS_AREA.call_once(|| direct_map_phys_area);
     KERNEL_HEAP_PHYS_AREA.call_once(|| heap_phys_area);
 
     let kernel_map = VirtualMemoryMap {
@@ -131,30 +196,34 @@ pub fn kernel_vm_init(
         .add_memory_map(kernel_map.clone())
         .map_err(|e| panic!("Failed to add kernel memory map: {}", e))
         .unwrap();
-    /* Pre-map the kernel space */
-    root_page_table
-        .map_memory_area(asid, kernel_map, true, true)
-        .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
-        .unwrap();
 
-    let hhdm_map = VirtualMemoryMap {
-        vmarea: hhdm_area,
-        pmarea: direct_map_phys_area,
-        vm_start: hhdm_area.start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
-    get_kernel_vm_manager()
-        .add_memory_map(hhdm_map.clone())
-        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
-    root_page_table
-        .map_memory_area(asid, hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        let hhdm_map = VirtualMemoryMap {
+            vmarea: hhdm_area,
+            pmarea: physical_area,
+            vm_start: hhdm_area.start,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            memory_attribute: region.memory_attribute(),
+            owner: None,
+        };
+        manager
+            .add_memory_map(hhdm_map)
+            .unwrap_or_else(|error| panic!("Failed to add HHDM memory map: {}", error));
+    }
 
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
@@ -170,19 +239,19 @@ pub fn kernel_vm_init(
         .add_memory_map(heap_map.clone())
         .map_err(|e| panic!("Failed to add heap memory map: {}", e))
         .unwrap();
-    root_page_table
-        .map_memory_area(asid, heap_map, true, true)
-        .map_err(|e| panic!("Failed to map heap memory area: {}", e))
-        .unwrap();
 
-    if let Some(initramfs_paddr) = initramfs_paddr {
+    let initramfs_map = initramfs_paddr.and_then(|initramfs_paddr| {
         let initramfs_phys_area = MemoryArea {
             start: align_down(initramfs_paddr.start, PAGE_SIZE),
             end: align_up(initramfs_paddr.end + 1, PAGE_SIZE) - 1,
         };
         let initramfs_hhdm_area = MemoryArea {
-            start: phys_to_virt(initramfs_phys_area.start),
-            end: phys_to_virt(initramfs_phys_area.end),
+            start: SCARLET_HHDM_BASE
+                .checked_add(initramfs_phys_area.start)
+                .expect("initramfs HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(initramfs_phys_area.end)
+                .expect("initramfs HHDM virtual end overflows"),
         };
         let initramfs_map = VirtualMemoryMap {
             vmarea: initramfs_hhdm_area,
@@ -191,31 +260,88 @@ pub fn kernel_vm_init(
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
-            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            memory_attribute: MemoryAttribute::Normal,
             owner: None,
         };
-        if initramfs_hhdm_area.start < hhdm_area.start || initramfs_hhdm_area.end > hhdm_area.end {
+        if !direct_map_regions
+            .contains_area_with_attribute(initramfs_phys_area, MemoryAttribute::Normal)
+        {
             get_kernel_vm_manager()
                 .add_memory_map(initramfs_map.clone())
                 .map_err(|e| panic!("Failed to add initramfs memory map: {}", e))
                 .unwrap();
-            root_page_table
-                .map_memory_area(asid, initramfs_map, true, true)
-                .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
-                .unwrap();
+            Some(initramfs_map)
+        } else {
+            None
         }
+    });
+
+    // Publish all VMM metadata before taking the per-ASID page-table lock.
+    // Other mapping paths use this same VMM -> page-table lock order.
+    let mut root_page_table = get_root_pagetable(asid).unwrap();
+    root_page_table
+        .map_memory_area(kernel_map, true, true)
+        .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
+        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        root_page_table
+            .map_memory_area(
+                VirtualMemoryMap {
+                    vmarea: hhdm_area,
+                    pmarea: physical_area,
+                    vm_start: hhdm_area.start,
+                    permissions: VirtualMemoryPermission::Read as usize
+                        | VirtualMemoryPermission::Write as usize,
+                    is_shared: true,
+                    memory_attribute: region.memory_attribute(),
+                    owner: None,
+                },
+                true,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
     }
+    root_page_table
+        .map_memory_area(heap_map, true, true)
+        .map_err(|e| panic!("Failed to map heap memory area: {}", e))
+        .unwrap();
+    if let Some(initramfs_map) = initramfs_map {
+        root_page_table
+            .map_memory_area(initramfs_map, true, true)
+            .map_err(|e| panic!("Failed to map initramfs memory area: {}", e))
+            .unwrap();
+    }
+    drop(root_page_table);
 
     early_println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
         kernel_area.start,
         kernel_area.end
     );
-    early_println!(
-        "HHDM mapped               : {:#018x} - {:#018x}",
-        hhdm_area.start,
-        hhdm_area.end
-    );
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let area = region.area();
+        early_println!(
+            "HHDM mapped               : {:#018x} - {:#018x} ({:?})",
+            SCARLET_HHDM_BASE + area.start,
+            SCARLET_HHDM_BASE + area.end,
+            region.memory_attribute(),
+        );
+    }
     early_println!(
         "Kernel heap mapped        : {:#018x} - {:#018x}",
         kernel_heap_area.start,
@@ -232,7 +358,9 @@ pub fn kernel_vm_init(
 
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
-    root_page_table.switch(manager.get_asid());
+    get_root_pagetable(asid)
+        .expect("Kernel root page table is not set")
+        .switch();
     crate::arch::vm::save_kernel_page_table();
 
     // Initialize the ioremap subsystem now that the kernel VM manager and heap
@@ -279,17 +407,14 @@ pub fn user_vm_init(task: &Task) {
 
 pub fn user_kernel_vm_init(task: &Task) {
     let asid = alloc_virtual_address_space();
-    let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
 
     let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
-    let hhdm_area = *HHDM_AREA.get().expect("HHDM_AREA not initialized");
+    let direct_map_regions =
+        addr::runtime_direct_map_regions().expect("runtime direct-map regions not initialized");
     let kernel_heap_area = *KERNEL_HEAP_AREA
         .get()
         .expect("KERNEL_HEAP_AREA not initialized");
-    let hhdm_phys_area = *HHDM_PHYS_AREA
-        .get()
-        .expect("HHDM_PHYS_AREA not initialized");
     let kernel_heap_phys_area = *KERNEL_HEAP_PHYS_AREA
         .get()
         .expect("KERNEL_HEAP_PHYS_AREA not initialized");
@@ -314,32 +439,33 @@ pub fn user_kernel_vm_init(task: &Task) {
             panic!("Failed to add kernel memory map: {}", e);
         })
         .unwrap();
-    /* Pre-map the kernel space */
-    root_page_table
-        .map_memory_area(asid, kernel_map, true, true)
-        .map_err(|e| {
-            panic!("Failed to map kernel memory area: {}", e);
-        })
-        .unwrap();
 
-    let hhdm_map = VirtualMemoryMap {
-        vmarea: hhdm_area,
-        pmarea: hhdm_phys_area,
-        vm_start: hhdm_area.start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
-    task.vm_manager
-        .add_memory_map(hhdm_map.clone())
-        .map_err(|e| panic!("Failed to add HHDM memory map: {}", e))
-        .unwrap();
-    root_page_table
-        .map_memory_area(asid, hhdm_map, true, true)
-        .map_err(|e| panic!("Failed to map HHDM memory area: {}", e))
-        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        task.vm_manager
+            .add_memory_map(VirtualMemoryMap {
+                vmarea: hhdm_area,
+                pmarea: physical_area,
+                vm_start: hhdm_area.start,
+                permissions: VirtualMemoryPermission::Read as usize
+                    | VirtualMemoryPermission::Write as usize,
+                is_shared: true,
+                memory_attribute: region.memory_attribute(),
+                owner: None,
+            })
+            .unwrap_or_else(|error| panic!("Failed to add HHDM memory map: {}", error));
+    }
 
     let heap_map = VirtualMemoryMap {
         vmarea: kernel_heap_area,
@@ -355,10 +481,51 @@ pub fn user_kernel_vm_init(task: &Task) {
         .add_memory_map(heap_map.clone())
         .map_err(|e| panic!("Failed to add heap memory map: {}", e))
         .unwrap();
+
+    // Keep the global lock order consistent with lazy mapping and task setup:
+    // mutate VMM metadata first, then acquire the per-ASID page-table lock.
+    let mut root_page_table = get_root_pagetable(asid).unwrap();
     root_page_table
-        .map_memory_area(asid, heap_map, true, true)
+        .map_memory_area(kernel_map, true, true)
+        .map_err(|e| {
+            panic!("Failed to map kernel memory area: {}", e);
+        })
+        .unwrap();
+    for index in 0..direct_map_regions.len() {
+        let region = direct_map_regions
+            .get(index)
+            .expect("direct-map region index must be valid");
+        let physical_area = region.area();
+        let hhdm_area = MemoryArea {
+            start: SCARLET_HHDM_BASE
+                .checked_add(physical_area.start)
+                .expect("HHDM virtual start overflows"),
+            end: SCARLET_HHDM_BASE
+                .checked_add(physical_area.end)
+                .expect("HHDM virtual end overflows"),
+        };
+        root_page_table
+            .map_memory_area(
+                VirtualMemoryMap {
+                    vmarea: hhdm_area,
+                    pmarea: physical_area,
+                    vm_start: hhdm_area.start,
+                    permissions: VirtualMemoryPermission::Read as usize
+                        | VirtualMemoryPermission::Write as usize,
+                    is_shared: true,
+                    memory_attribute: region.memory_attribute(),
+                    owner: None,
+                },
+                true,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
+    }
+    root_page_table
+        .map_memory_area(heap_map, true, true)
         .map_err(|e| panic!("Failed to map heap memory area: {}", e))
         .unwrap();
+    drop(root_page_table);
     task.data_size.store(kernel_area.end + 1, Ordering::SeqCst);
 
     /* Stack page */
@@ -428,55 +595,77 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
 pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'static str> {
-    // Allocate a window slot
-    let (slot_idx, base, _top) = kstack_alloc()
-        .lock()
+    // Hold this lock through the shared page-table update so concurrent slots
+    // cannot allocate competing intermediate tables for the same parent PTE.
+    let mut allocator = kstack_alloc().lock();
+    let (slot_idx, base, _top) = allocator
         .alloc_slot()
         .ok_or("No free kernel stack window slots")?;
-
-    // Physical (identity) address range of the task's kernel stack
-    let km_area = task.get_kernel_stack_memory_area_paddr();
-    let paddr_start = km_area.start;
-    let paddr_end = km_area.end;
-
-    // Ensure page alignment
-    if paddr_start % PAGE_SIZE != 0 || (paddr_end + 1 - paddr_start) % PAGE_SIZE != 0 {
-        return Err("Kernel stack memory area is not page-aligned");
-    }
 
     // Virtual window (skip guard page at the bottom)
     let vaddr_start = base + crate::environment::PAGE_SIZE;
     let vaddr_end = vaddr_start + TASK_KERNEL_STACK_SIZE - 1;
 
-    // Map into shared kernel PT
-    let kman = get_kernel_vm_manager();
-    let mmap = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: vaddr_start,
-            end: vaddr_end,
-        },
-        pmarea: MemoryArea {
-            start: paddr_start,
-            end: paddr_end,
-        },
-        vm_start: vaddr_start,
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
+    let result = (|| {
+        // Physical (identity) address range of the task's kernel stack.
+        let km_area = task.get_kernel_stack_memory_area_paddr();
+        let paddr_start = km_area.start;
+        let paddr_end = km_area.end;
+        let stack_size = paddr_end
+            .checked_add(1)
+            .and_then(|end| end.checked_sub(paddr_start))
+            .ok_or("Kernel stack memory area is invalid")?;
+        if paddr_start % PAGE_SIZE != 0 || stack_size % PAGE_SIZE != 0 {
+            return Err("Kernel stack memory area is not page-aligned");
+        }
 
-    kman.add_memory_map(mmap.clone())
-        .map_err(|_| "Failed to add kernel stack mmap")?;
-    let root = kman
-        .get_root_page_table()
-        .ok_or("Kernel root page table not set")?;
-    root.map_memory_area(kman.get_asid(), mmap, true, true)
-        .map_err(|_| "Failed to map kernel stack window")?;
+        let mmap = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: vaddr_start,
+                end: vaddr_end,
+            },
+            pmarea: MemoryArea {
+                start: paddr_start,
+                end: paddr_end,
+            },
+            vm_start: vaddr_start,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: None,
+        };
+
+        let kman = get_kernel_vm_manager();
+        kman.add_memory_map(mmap.clone())
+            .map_err(|_| "Failed to add kernel stack mmap")?;
+        let mut root = kman
+            .get_root_page_table()
+            .ok_or("Kernel root page table not set")?;
+        root.map_memory_area(mmap, true, true)
+            .map_err(|_| "Failed to map kernel stack window")
+    })();
+
+    if let Err(error) = result {
+        // Every fallible step after allocation rolls back both VMA/MMU state
+        // and the allocator slot. The best-effort cleanup also covers a page
+        // table mapper that made a partial mapping before returning an error.
+        let kman = get_kernel_vm_manager();
+        if let Some(mut root) = kman.get_root_page_table() {
+            root.unmap_range(vaddr_start, vaddr_end);
+        }
+        let mut vaddr = vaddr_start;
+        while vaddr <= vaddr_end {
+            let _ = kman.remove_memory_map_by_addr(vaddr);
+            vaddr += PAGE_SIZE;
+        }
+        allocator.free_slot(slot_idx);
+        return Err(error);
+    }
 
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
+    drop(allocator);
 
     // Update the task's kernel context SP to point into the high-VA window.
     // After boot, tasks are scheduled via `switch_to` which restores KernelContext.sp.
@@ -521,14 +710,14 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
 #[allow(static_mut_refs)]
 pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
     if let Some((slot_idx, base)) = task.get_kernel_stack_window_base() {
+        let mut allocator = kstack_alloc().lock();
         let vstart = base + crate::environment::PAGE_SIZE;
         let vend = vstart + TASK_KERNEL_STACK_SIZE - 1;
 
         // Remove from kernel VM manager and unmap pages
         let kman = get_kernel_vm_manager();
-        let asid = kman.get_asid();
-        if let Some(root) = kman.get_root_page_table() {
-            root.unmap_range(asid, vstart, vend);
+        if let Some(mut root) = kman.get_root_page_table() {
+            root.unmap_range(vstart, vend);
         }
         // Best-effort remove VMA entries
         let mut v = vstart;
@@ -537,7 +726,7 @@ pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
             v += PAGE_SIZE;
         }
         // Free slot
-        kstack_alloc().lock().free_slot(slot_idx);
+        allocator.free_slot(slot_idx);
         task.set_kernel_stack_window_base(None);
     }
 }
@@ -591,7 +780,12 @@ pub fn setup_user_stack(task: &Task) -> (usize, usize) {
 }
 
 static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();
-static TRAMPOLINE_ARCH: Mutex<[Option<usize>; MAX_NUM_CPUS]> = Mutex::new([None; MAX_NUM_CPUS]);
+// Per-CPU trampoline Arch address. Written once at CPU bring-up and read on
+// every context switch, so it is a plain per-CPU atomic rather than a shared
+// Mutex. A shared Mutex here serialized every context switch across all CPUs
+// and could deadlock the whole machine if a holder panicked or stalled.
+static TRAMPOLINE_ARCH: [core::sync::atomic::AtomicUsize; MAX_NUM_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_NUM_CPUS];
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
     TRAMPOLINE_TRAP_VECTOR.call_once(|| trap_vector);
@@ -612,13 +806,15 @@ pub fn get_guest_trapvector_trampoline() -> usize {
 }
 
 pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
-    let mut trampolines = TRAMPOLINE_ARCH.lock();
-    trampolines[cpu_id] = Some(arch);
+    TRAMPOLINE_ARCH[cpu_id].store(arch, core::sync::atomic::Ordering::Release);
 }
 
 pub fn get_trampoline_arch(cpu_id: usize) -> usize {
-    let trampolines = TRAMPOLINE_ARCH.lock();
-    trampolines[cpu_id].expect("Trampoline is not initialized")
+    let arch = TRAMPOLINE_ARCH[cpu_id].load(core::sync::atomic::Ordering::Acquire);
+    if arch == 0 {
+        panic!("Trampoline is not initialized for cpu {}", cpu_id);
+    }
+    arch
 }
 
 pub fn switch_to_kernel_vm() {
@@ -627,7 +823,7 @@ pub fn switch_to_kernel_vm() {
         .get_root_page_table()
         .expect("Root page table is not set");
     set_trapvector(get_kernel_trapvector_paddr());
-    root_page_table.switch(manager.get_asid());
+    root_page_table.switch();
 }
 
 pub fn switch_to_user_vm(cpu: &mut Arch) {
@@ -638,5 +834,5 @@ pub fn switch_to_user_vm(cpu: &mut Arch) {
         .get_root_page_table()
         .expect("Root page table is not set");
     set_trapvector(get_trampoline_trap_vector());
-    root_page_table.switch(manager.get_asid());
+    root_page_table.switch();
 }

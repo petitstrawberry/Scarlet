@@ -6,7 +6,7 @@ use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::trap::prev_mode;
 use crate::arch::{
-    self, Mode, Trapframe, get_kernel_trapvector_paddr, get_trapvector, set_trapvector,
+    self, Mode, Trapframe, get_cpu, get_kernel_trapvector_paddr, get_trapvector, set_trapvector,
 };
 use crate::task::mytask;
 
@@ -35,7 +35,7 @@ pub extern "C" fn _user_trap_entry() {
                 sfence.vma zero, zero
                 /* Store the user memory space */
                 sd      sp, 16(a0) // Riscv64.satp = sp
-                
+
                 /* Load kernel stack pointer from Riscv64.kernel_stack */
                 ld      sp, 24(a0)
 
@@ -106,7 +106,7 @@ pub extern "C" fn _user_trap_entry() {
                 /* epc */
                 ld     t0, 256(a0)
                 csrw   sepc, t0
-                
+
                 /* Register - restore all except sp and a0 */
                 ld     x0, 0(a0)
                 ld     x1, 8(a0)
@@ -243,7 +243,7 @@ pub extern "C" fn _guest_trap_entry() {
 
                 /* Load the kernel stack pointer from Riscv64.kernel_stack */
                 ld      sp, 24(a0)
-                
+
                 /* Save a0 (trapframe ptr) on stack */
                 addi    sp, sp, -16
                 sd      t2, 0(sp)
@@ -261,7 +261,7 @@ pub extern "C" fn _guest_trap_entry() {
                 /* epc */
                 ld     t0, 256(a0)
                 csrw   sepc, t0
-                
+
                 /* Register - restore all except sp and a0 */
                 ld     x0, 0(a0)
                 ld     x1, 8(a0)
@@ -319,11 +319,11 @@ pub extern "C" fn _switch_to_user(trapframe: &mut Trapframe) -> ! {
                contains the user a0 during the first user return path. */
             csrci   sstatus, 0x2
 
-                /* Restore the context of the current hart from trapframe first */ 
+                /* Restore the context of the current hart from trapframe first */
                 /* epc */
                 ld     t0, 256(a0)
                 csrw   sepc, t0
-                
+
                 /* Register - restore all except sp and a0 */
                 ld     x0, 0(a0)
                 ld     x1, 8(a0)

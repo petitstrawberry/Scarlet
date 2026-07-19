@@ -115,7 +115,7 @@ impl AbiModule for LinuxAarch64Abi {
     fn handle_event(
         &mut self,
         event: crate::ipc::Event,
-        target_task_id: u32,
+        target_task_id: usize,
     ) -> Result<EventProcessOutcome, &'static str> {
         generic::signal::handle_event_for_task(
             &self.0,
@@ -135,6 +135,11 @@ impl AbiModule for LinuxAarch64Abi {
             self.0.unshare_fd_table();
         }
 
+        let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
+            self.0.thread_state.clear_child_tid_ptr
+        } else {
+            None
+        };
         let mut ts = self.0.thread_state.clone();
         let parent_tgid = ts.tgid;
         let is_thread = ts.pending_clone_is_thread;
@@ -151,18 +156,12 @@ impl AbiModule for LinuxAarch64Abi {
 
         ts.pending_clone_is_thread = false;
         self.0.thread_state = ts;
+        _child_task.set_linux_clear_child_tid(clear_child_tid);
         Ok(())
     }
 
     fn on_task_exit(&mut self, task: &crate::task::Task) {
-        if let Some(ptr) = self.0.thread_state.clear_child_tid_ptr {
-            if let Some(paddr) = task.vm_manager.translate_to_kva(ptr) {
-                unsafe {
-                    *(paddr as *mut i32) = 0;
-                }
-                let _ = generic::futex::wake_address(ptr, 1);
-            }
-        }
+        task.clear_linux_child_tid_on_exit();
     }
 
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
@@ -269,10 +268,10 @@ impl AbiModule for LinuxAarch64Abi {
                         *task.name.write() =
                             argv.get(0).map_or("linux".to_string(), |s| s.to_string());
 
-                        let idx =
-                            arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
-                        let root_page_table = arch::vm::get_pagetable(idx).unwrap();
+                        let mut root_page_table =
+                            arch::vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
+                        drop(root_page_table);
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
                         let (_, stack_top) = setup_user_stack(task);
                         let mut sp = stack_top as usize;

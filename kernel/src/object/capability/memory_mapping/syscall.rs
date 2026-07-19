@@ -104,7 +104,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let offset = trapframe.get_arg(5) as usize;
 
     // Increment PC to avoid infinite loop if mmap fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Input validation
     if length == 0 {
@@ -117,7 +117,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
 
     // Handle ANONYMOUS mappings specially - these are handled entirely in the syscall
     if (flags & MAP_ANONYMOUS) != 0 {
-        return handle_anonymous_mapping(task, vaddr, aligned_length, num_pages, prot, flags);
+        return handle_anonymous_mapping(&task, vaddr, aligned_length, num_pages, prot, flags);
     }
 
     // All other mappings are handled through the new MemoryMappingOps design
@@ -205,7 +205,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             }
         }
         for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(task, &removed_map);
+            reclaim_private_removed_mapping(&task, &removed_map);
         }
 
         memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
@@ -287,7 +287,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             }
 
             for removed_map in removed_mappings {
-                reclaim_private_removed_mapping(task, &removed_map);
+                reclaim_private_removed_mapping(&task, &removed_map);
             }
 
             final_vaddr
@@ -428,7 +428,7 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
     let length = trapframe.get_arg(1) as usize;
 
     // Increment PC to avoid infinite loop if munmap fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Input validation
     if length == 0 || vaddr % PAGE_SIZE != 0 {
@@ -448,7 +448,7 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
             owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
 
-        reclaim_private_removed_mapping(task, removed_map);
+        reclaim_private_removed_mapping(&task, removed_map);
     }
 
     0

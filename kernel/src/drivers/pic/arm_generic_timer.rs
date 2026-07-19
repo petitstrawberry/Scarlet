@@ -21,6 +21,13 @@ use crate::interrupt::{CpuId, InterruptResult};
 const CNTV_CTL_ENABLE: u64 = 1 << 0;
 const CNTV_CTL_IMASK: u64 = 1 << 1;
 const CNTV_CTL_ISTATUS: u64 = 1 << 2;
+const CNTV_CTL_STATE_MASK: u64 = CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS;
+const CNTV_CTL_FIRING: u64 = CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS;
+
+#[inline]
+const fn timer_control_is_firing(control: u64) -> bool {
+    control & CNTV_CTL_STATE_MASK == CNTV_CTL_FIRING
+}
 
 /// Timer PPI number.
 ///
@@ -104,7 +111,7 @@ impl ArmGenericTimer {
     }
 
     pub fn is_timer_pending() -> bool {
-        (read_timer_ctl() & CNTV_CTL_ISTATUS) != 0
+        timer_control_is_firing(read_timer_ctl())
     }
 
     fn enable_timer_interrupt() {
@@ -167,6 +174,21 @@ impl TimerController for ArmGenericTimer {
 
 unsafe impl Send for ArmGenericTimer {}
 unsafe impl Sync for ArmGenericTimer {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn timer_control_is_firing_only_when_enabled_and_unmasked() {
+        assert!(timer_control_is_firing(CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS));
+        assert!(!timer_control_is_firing(CNTV_CTL_ISTATUS));
+        assert!(!timer_control_is_firing(
+            CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS
+        ));
+        assert!(!timer_control_is_firing(CNTV_CTL_ENABLE));
+    }
+}
 
 fn register_local_timer_controller() {
     // Register for all CPUs that Scarlet is configured to support.

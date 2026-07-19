@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "macvdmtool-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773521079,
+        "narHash": "sha256-df+aK3id7bhgArwWMw26JWLwDRyIIFzKaRUqOfg6o2c=",
+        "owner": "AsahiLinux",
+        "repo": "macvdmtool",
+        "rev": "b22ae51eb43a0e1daa21d41616ac899f28e7bf8a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "AsahiLinux",
+        "repo": "macvdmtool",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1781607440,
@@ -34,6 +50,7 @@
     },
     "root": {
       "inputs": {
+        "macvdmtool-src": "macvdmtool-src",
         "nixpkgs": "nixpkgs",
         "scarlet-rust-toolchain": "scarlet-rust-toolchain",
         "scarlet-sdk": "scarlet-sdk"
@@ -82,11 +99,11 @@
     "scarlet-sdk": {
       "flake": false,
       "locked": {
-        "lastModified": 1783521528,
-        "narHash": "sha256-ASU4Lk6zGwRTs3FXoBT9m5RMOCis9qQdTjcBuYWPhpM=",
+        "lastModified": 1783928116,
+        "narHash": "sha256-Ltfq9RovLupUzOxYwrNbQk/9MRSFE13VFGYmD9WgTlA=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "1d37b7bf43ea1223444440afbf1c8d990d6ab120",
+        "rev": "1016f4ce22bf961046e7fda89ad4948c8dbbd742",
         "type": "github"
       },
       "original": {

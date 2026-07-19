@@ -9,7 +9,7 @@ package = "scarlet"
 
 [bsp.kernel]
 source = { path = "../../kernel" }
-features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
+features = { network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = true }
 
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }

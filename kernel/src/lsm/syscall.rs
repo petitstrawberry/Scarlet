@@ -43,9 +43,9 @@ pub fn sys_lsm_load(trapframe: &mut Trapframe) -> usize {
             return LsmErrorCode::PermissionDenied as usize;
         }
     };
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
-    let path_str = match parse_c_string_from_userspace(task, trapframe.get_arg(0), MAX_PATH_LENGTH)
+    let path_str = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH)
     {
         Ok(s) => s,
         Err(_) => {
@@ -128,7 +128,7 @@ pub fn sys_lsm_unload(trapframe: &mut Trapframe) -> usize {
             return LsmErrorCode::PermissionDenied as usize;
         }
     };
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let module_id = trapframe.get_arg(0) as u64;
     match unload_module(module_id) {
@@ -144,7 +144,7 @@ pub fn sys_lsm_list(trapframe: &mut Trapframe) -> usize {
             return 0;
         }
     };
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let buffer_ptr = trapframe.get_arg(0);
     let buffer_size = trapframe.get_arg(1);
@@ -167,7 +167,7 @@ pub fn sys_lsm_list(trapframe: &mut Trapframe) -> usize {
         payload.extend_from_slice(&name_bytes);
     }
 
-    if copy_to_user(task, buffer_ptr, &payload).is_err() {
+    if copy_to_user(&task, buffer_ptr, &payload).is_err() {
         return 0;
     }
 

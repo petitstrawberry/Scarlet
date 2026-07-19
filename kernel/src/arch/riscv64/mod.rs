@@ -141,6 +141,14 @@ pub(crate) fn set_vector_owner(cpu_id: usize, owner: usize) {
     VECTOR_OWNER[cpu_id].store(owner, Ordering::Relaxed)
 }
 
+/// Clear ownership of a hart's live vector register file after its owner has
+/// switched out. A later return must restore from the task-owned context.
+#[inline]
+pub(crate) fn clear_vector_owner(cpu_id: usize) {
+    set_vector_owner_dirty(cpu_id, false);
+    set_vector_owner(cpu_id, NO_VECTOR_OWNER);
+}
+
 #[inline]
 pub(crate) fn get_vector_owner_dirty(cpu_id: usize) -> bool {
     VECTOR_OWNER_DIRTY[cpu_id].load(Ordering::Relaxed)
@@ -149,6 +157,63 @@ pub(crate) fn get_vector_owner_dirty(cpu_id: usize) -> bool {
 #[inline]
 pub(crate) fn set_vector_owner_dirty(cpu_id: usize, dirty: bool) {
     VECTOR_OWNER_DIRTY[cpu_id].store(dirty, Ordering::Relaxed)
+}
+
+/// Decide whether switching out a task requires saving live vector registers.
+///
+/// A dirty vector file must belong to the outgoing task. Clean ownership still
+/// needs invalidation so a later migration cannot reuse stale hart registers.
+#[inline]
+const fn vector_switch_out_owner_is_valid(owner: usize, task_id: usize, dirty: bool) -> bool {
+    !dirty || owner == task_id
+}
+
+#[inline]
+pub(crate) fn vector_switch_out_requires_save(owner: usize, task_id: usize, dirty: bool) -> bool {
+    assert!(
+        vector_switch_out_owner_is_valid(owner, task_id, dirty),
+        "dirty vector state must belong to the outgoing task"
+    );
+    owner == task_id && dirty
+}
+
+#[cfg(test)]
+mod vector_owner_tests {
+    use super::*;
+
+    #[test_case]
+    fn test_vector_switch_out_owner_bookkeeping() {
+        let cpu_id = 0;
+        let previous_owner = get_vector_owner(cpu_id);
+        let previous_dirty = get_vector_owner_dirty(cpu_id);
+
+        // A clean owner has no live state to save, but must be invalidated so
+        // a later return restores from the task's VCPU context.
+        set_vector_owner(cpu_id, 42);
+        set_vector_owner_dirty(cpu_id, false);
+        assert!(!vector_switch_out_requires_save(42, 42, false));
+        clear_vector_owner(cpu_id);
+        assert_eq!(get_vector_owner(cpu_id), NO_VECTOR_OWNER);
+        assert!(!get_vector_owner_dirty(cpu_id));
+
+        // A dirty owner must save before the same invalidation.
+        set_vector_owner(cpu_id, 42);
+        set_vector_owner_dirty(cpu_id, true);
+        assert!(vector_switch_out_requires_save(42, 42, true));
+        clear_vector_owner(cpu_id);
+        assert_eq!(get_vector_owner(cpu_id), NO_VECTOR_OWNER);
+        assert!(!get_vector_owner_dirty(cpu_id));
+
+        set_vector_owner(cpu_id, previous_owner);
+        set_vector_owner_dirty(cpu_id, previous_dirty);
+    }
+
+    #[test_case]
+    fn test_dirty_vector_switch_out_requires_current_owner() {
+        assert!(!vector_switch_out_owner_is_valid(7, 42, true));
+        assert!(vector_switch_out_owner_is_valid(42, 42, true));
+        assert!(vector_switch_out_owner_is_valid(7, 42, false));
+    }
 }
 
 /// Apply user-entry options for the upcoming `sret`.
@@ -181,34 +246,20 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // When an illegal-instruction trap is raised by a FP/Vector instruction,
     // the trap handler will mark the task as used and re-enable the extension.
     let cpu_id = crate::arch::get_cpu().get_cpuid();
-    let (current_task_ptr, current_task_id, owner_task_ptr, owner_id, owner_dirty) = {
-        let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
-            return;
-        };
-        let Some(current_task_ptr) = get_task_by_id(current_task_id).map(|t| t as *const Task)
-        else {
-            return;
-        };
-
-        let owner_id = get_vector_owner(cpu_id);
-        let owner_dirty = get_vector_owner_dirty(cpu_id);
-        let owner_task_ptr =
-            if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-                get_task_by_id(owner_id).map(|t| t as *const Task)
-            } else {
-                None
-            };
-
-        (
-            current_task_ptr,
-            current_task_id,
-            owner_task_ptr,
-            owner_id,
-            owner_dirty,
-        )
+    let Some(current_task_id) = crate::sched::scheduler::current_task_id(cpu_id) else {
+        return;
+    };
+    let Some(task) = get_task_by_id(current_task_id) else {
+        return;
     };
 
-    let task = unsafe { &*current_task_ptr };
+    let owner_id = get_vector_owner(cpu_id);
+    let owner_dirty = get_vector_owner_dirty(cpu_id);
+    let owner_task = if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
+        get_task_by_id(owner_id)
+    } else {
+        None
+    };
 
     if !crate::arch::user_fpu_enabled() || !task.vcpu.lock().fpu_used {
         crate::arch::riscv64::fpu::disable_fpu();
@@ -219,32 +270,25 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
         return;
     }
 
-    // Ensure the task has a backing context (allocated lazily).
+    // The first-use trap allocates vector state before publishing `vector_used`.
+    // A missing context here would otherwise lose live state during a migration.
     if task.vcpu.lock().vector.is_none() {
-        task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-            crate::arch::riscv64::fpu::VectorContext::new(),
-        ));
+        panic!("vector task is marked used without a vector context");
     }
 
     // If another task currently owns the live vregs and its live state hasn't
     // been saved, save it now before we clobber vregs with our restore.
     if owner_dirty && owner_id != NO_VECTOR_OWNER && owner_id != current_task_id {
-        if let Some(owner_ptr) = owner_task_ptr {
-            let owner_task = unsafe { &*owner_ptr };
-            if owner_task.vcpu.lock().vector.is_none() {
-                owner_task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                    crate::arch::riscv64::fpu::VectorContext::new(),
-                ));
-                owner_task.vcpu.lock().vector_used = true;
-            }
-            crate::arch::riscv64::fpu::enable_vector();
-            unsafe { owner_task.vcpu.lock().vector.as_mut().unwrap().save() };
-            crate::arch::riscv64::fpu::mark_vector_clean();
-            set_vector_owner_dirty(cpu_id, false);
-        } else {
-            // Owner task disappeared; drop the dirty flag to avoid repeated work.
-            set_vector_owner_dirty(cpu_id, false);
-        }
+        let owner_task = owner_task.expect("dirty vector owner must remain registered");
+        let mut owner_vcpu = owner_task.vcpu.lock();
+        let vector = owner_vcpu
+            .vector
+            .as_mut()
+            .expect("dirty vector owner must have a vector context");
+        crate::arch::riscv64::fpu::enable_vector();
+        unsafe { vector.save() };
+        crate::arch::riscv64::fpu::mark_vector_clean();
+        set_vector_owner_dirty(cpu_id, false);
     }
 
     // Vector hot-path:
@@ -252,7 +296,14 @@ pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::Us
     // - Otherwise just re-enable access without a full restore.
     if owner_id != current_task_id {
         crate::arch::riscv64::fpu::enable_vector();
-        unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
+        unsafe {
+            task.vcpu
+                .lock()
+                .vector
+                .as_ref()
+                .expect("vector task is marked used without a vector context")
+                .restore()
+        };
         crate::arch::riscv64::fpu::mark_vector_clean();
         set_vector_owner(cpu_id, current_task_id);
         set_vector_owner_dirty(cpu_id, false);
@@ -380,7 +431,7 @@ impl Riscv64 {
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
 
-        let satp = root_pagetable.get_val_for_satp(asid);
+        let satp = root_pagetable.get_val_for_satp();
         self.satp = satp as u64;
     }
 
@@ -563,8 +614,19 @@ pub fn disable_interrupt() {
     }
 }
 
-pub fn send_reschedule_ipi(target_cpu: usize) {
-    let _ = crate::interrupt::InterruptManager::global().send_software_interrupt(target_cpu as u32);
+/// Send a hardware reschedule IPI to a scheduler CPU.
+///
+/// # Arguments
+///
+/// * `target_cpu` - Logical CPU that should receive the reschedule request.
+///
+/// # Returns
+///
+/// `true` when the interrupt controller accepted the IPI request.
+pub fn send_reschedule_ipi(target_cpu: usize) -> bool {
+    crate::interrupt::InterruptManager::global()
+        .send_software_interrupt(target_cpu as u32)
+        .is_ok()
 }
 
 /// Full memory barrier for normal memory (RAM).

@@ -5,7 +5,7 @@ pub fn sys_pipe(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let pipefd_ptr = task
         .vm_manager

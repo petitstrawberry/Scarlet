@@ -11,7 +11,8 @@ use limine::request::{
 use limine::{RequestsEndMarker, RequestsStartMarker};
 
 use crate::vm::addr::boot_virt_to_phys;
-use crate::vm::vmem::MemoryArea;
+use crate::vm::direct_map::{DirectMapRegion, DirectMapRegions};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute};
 
 #[unsafe(link_section = ".limine_requests_start")]
 #[used]
@@ -182,7 +183,20 @@ pub fn select_usable_region(memmap: &[&memmap::Entry]) -> MemoryArea {
     best.expect("no usable Limine memmap region")
 }
 
-pub fn hhdm_physical_span(memmap: &[&memmap::Entry]) -> MemoryArea {
+/// Returns Limine's broad bootloader direct-map bounds.
+///
+/// These bounds describe the page tables owned by Limine and can include
+/// reserved ranges and holes. They must only be used for bootloader-phase
+/// address translation, never for Scarlet's runtime mappings.
+///
+/// # Arguments
+///
+/// * `memmap` - Limine physical memory-map entries.
+///
+/// # Returns
+///
+/// The inclusive physical bounds covered by Limine's direct map.
+pub fn bootloader_hhdm_physical_bound(memmap: &[&memmap::Entry]) -> MemoryArea {
     let mut start = usize::MAX;
     let mut end = 0usize;
 
@@ -202,6 +216,110 @@ pub fn hhdm_physical_span(memmap: &[&memmap::Entry]) -> MemoryArea {
     }
 
     MemoryArea::new(start, end)
+}
+
+/// Builds Scarlet's sparse runtime direct-map regions from Limine's memory map.
+///
+/// Only usable RAM and executable/module memory receive Normal aliases. A
+/// framebuffer, when supplied, is carved out as explicit DeviceBurstable pages
+/// so it never overlaps a Normal direct-map alias.
+///
+/// # Arguments
+///
+/// * `memmap` - Limine physical memory-map entries.
+/// * `framebuffer` - Optional inclusive framebuffer physical range.
+///
+/// # Returns
+///
+/// A fixed-capacity sparse direct-map set, or an error for malformed Limine
+/// ranges, capacity exhaustion, or incompatible overlapping attributes.
+pub fn runtime_direct_map_regions(
+    memmap: &[&memmap::Entry],
+    framebuffer: Option<MemoryArea>,
+) -> Result<DirectMapRegions, &'static str> {
+    let framebuffer_region = framebuffer
+        .map(|area| DirectMapRegion::new(area, MemoryAttribute::DeviceBurstable))
+        .transpose()?;
+    let mut regions = DirectMapRegions::new();
+
+    if let Some(region) = framebuffer_region {
+        regions.insert(region.area(), region.memory_attribute())?;
+    }
+
+    for entry in memmap {
+        if entry.length == 0
+            || (entry.type_ != memmap::MEMMAP_USABLE
+                && entry.type_ != memmap::MEMMAP_EXECUTABLE_AND_MODULES)
+        {
+            continue;
+        }
+
+        let entry_start = usize::try_from(entry.base)
+            .map_err(|_| "Limine direct-map region start does not fit usize")?;
+        let entry_end_exclusive = entry
+            .base
+            .checked_add(entry.length)
+            .ok_or("Limine direct-map region end overflows")?;
+        let entry_end = usize::try_from(
+            entry_end_exclusive
+                .checked_sub(1)
+                .ok_or("Limine direct-map region is empty")?,
+        )
+        .map_err(|_| "Limine direct-map region end does not fit usize")?;
+        let normal_region = DirectMapRegion::new(
+            MemoryArea::new(entry_start, entry_end),
+            MemoryAttribute::Normal,
+        )?;
+
+        if let Some(framebuffer_region) = framebuffer_region {
+            insert_normal_region_excluding(
+                &mut regions,
+                normal_region.area(),
+                framebuffer_region.area(),
+            )?;
+        } else {
+            regions.insert(normal_region.area(), MemoryAttribute::Normal)?;
+        }
+    }
+
+    if regions.is_empty() {
+        return Err("Limine did not provide runtime direct-map regions");
+    }
+
+    Ok(regions)
+}
+
+fn insert_normal_region_excluding(
+    regions: &mut DirectMapRegions,
+    normal: MemoryArea,
+    excluded: MemoryArea,
+) -> Result<(), &'static str> {
+    if normal.end < excluded.start || excluded.end < normal.start {
+        return regions.insert(normal, MemoryAttribute::Normal);
+    }
+
+    if normal.start < excluded.start {
+        let before_end = excluded
+            .start
+            .checked_sub(1)
+            .ok_or("framebuffer exclusion underflows")?;
+        regions.insert(
+            MemoryArea::new(normal.start, before_end),
+            MemoryAttribute::Normal,
+        )?;
+    }
+    if excluded.end < normal.end {
+        let after_start = excluded
+            .end
+            .checked_add(1)
+            .ok_or("framebuffer exclusion overflows")?;
+        regions.insert(
+            MemoryArea::new(after_start, normal.end),
+            MemoryAttribute::Normal,
+        )?;
+    }
+
+    Ok(())
 }
 
 pub fn module_area(module_response: Option<&'static ModulesResponse>) -> Option<MemoryArea> {
@@ -241,4 +359,54 @@ pub fn framebuffer_area(fb_response: Option<&'static FramebufferResponse>) -> Op
     let start = boot_virt_to_phys(addr);
     let end = start + size - 1;
     Some(MemoryArea::new(start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn runtime_direct_map_selects_ram_and_carves_out_framebuffer() {
+        let usable = memmap::Entry {
+            base: 0x1000,
+            length: 0x4000,
+            type_: memmap::MEMMAP_USABLE,
+        };
+        let module = memmap::Entry {
+            base: 0x8000,
+            length: 0x1000,
+            type_: memmap::MEMMAP_EXECUTABLE_AND_MODULES,
+        };
+        let reserved = memmap::Entry {
+            base: 0xa000,
+            length: 0x1000,
+            type_: memmap::MEMMAP_RESERVED,
+        };
+        let entries = [&usable, &module, &reserved];
+        let framebuffer = MemoryArea::new(0x2000, 0x2fff);
+
+        let regions = runtime_direct_map_regions(&entries, Some(framebuffer)).unwrap();
+
+        assert!(regions.contains_area_with_attribute(
+            MemoryArea::new(0x1000, 0x1fff),
+            MemoryAttribute::Normal,
+        ));
+        assert!(
+            regions.contains_area_with_attribute(framebuffer, MemoryAttribute::DeviceBurstable,)
+        );
+        assert!(regions.contains_area_with_attribute(
+            MemoryArea::new(0x3000, 0x4fff),
+            MemoryAttribute::Normal,
+        ));
+        assert!(regions.contains_area_with_attribute(
+            MemoryArea::new(0x8000, 0x8fff),
+            MemoryAttribute::Normal,
+        ));
+        assert!(!regions.contains(0xa000));
+        assert!(
+            regions
+                .validate_alias(framebuffer, MemoryAttribute::Normal)
+                .is_err()
+        );
+    }
 }

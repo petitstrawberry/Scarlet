@@ -34,6 +34,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sched::scheduler::get_task_by_id;
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm::addr::phys_to_virt;
+use crate::vm::vmem::MemoryAttribute;
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications
@@ -486,11 +487,15 @@ impl FramebufferCharDevice {
             let Some(task) = get_task_by_id(mapping.task_id) else {
                 continue;
             };
-            let Some(root_pagetable) = task.vm_manager.get_root_page_table() else {
+            let Some(mut root_pagetable) = task.vm_manager.get_root_page_table() else {
                 continue;
             };
+            let memory_attribute = task
+                .vm_manager
+                .search_memory_map(mapping.vaddr)
+                .map(|memory_map| memory_map.memory_attribute)
+                .unwrap_or(MemoryAttribute::DeviceBurstable);
 
-            let asid = task.vm_manager.get_asid();
             let mut page_offset = 0usize;
             while page_offset < mapping.length {
                 let object_offset = mapping.offset.saturating_add(page_offset);
@@ -498,11 +503,17 @@ impl FramebufferCharDevice {
                     break;
                 }
 
+                let page_vaddr = mapping.vaddr.saturating_add(page_offset);
+                if root_pagetable.translate(page_vaddr).is_none() {
+                    page_offset = page_offset.saturating_add(PAGE_SIZE);
+                    continue;
+                }
+
                 root_pagetable.map(
-                    asid,
-                    mapping.vaddr.saturating_add(page_offset),
+                    page_vaddr,
                     info.physical_addr.saturating_add(object_offset),
                     0x1 | 0x08,
+                    memory_attribute,
                     true,
                     false,
                 );

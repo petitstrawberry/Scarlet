@@ -125,6 +125,23 @@ pub enum ProcessControlType {
                     // Add more as needed
 }
 
+impl ProcessControlType {
+    /// Return whether this control type stops task execution until continued.
+    ///
+    /// Stop-class controls share job-control semantics: a later Continue
+    /// cancels a pending stop, and a later stop cancels a pending Continue.
+    ///
+    /// # Returns
+    ///
+    /// `true` for Stop, TerminalStop, TerminalInput, and TerminalOutput.
+    pub const fn is_stop_class(self) -> bool {
+        matches!(
+            self,
+            Self::Stop | Self::TerminalStop | Self::TerminalInput | Self::TerminalOutput
+        )
+    }
+}
+
 /// Message categories (for structured communication)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCategory {
@@ -501,10 +518,43 @@ impl TaskEventQueue {
         }
     }
 
-    /// Add event to queue, returns true if this was the first event (0->1 transition)
+    /// Return whether adding `event` would exceed `capacity` after coalescing.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Maximum number of events permitted in the queue.
+    /// * `event` - Event that may replace conflicting job-control events.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the queue would exceed `capacity` after the event is added.
+    pub fn would_exceed_capacity(&self, capacity: usize, event: &Event) -> bool {
+        let retained_count = self.total_count - self.superseded_event_count(event);
+        retained_count.saturating_add(1) > capacity
+    }
+
+    /// Return whether a Continue event is queued for this task.
+    ///
+    /// Stop handlers hold the event-queue lock while checking this so a
+    /// concurrent Continue either cancels the stop before it blocks the task,
+    /// or observes the blocked state and wakes the task.
+    pub(crate) fn has_pending_continue(&self) -> bool {
+        self.events.values().any(|queue| {
+            queue.iter().any(|event| {
+                matches!(
+                    event.content,
+                    EventContent::ProcessControl(ProcessControlType::Continue)
+                )
+            })
+        })
+    }
+
+    /// Add event to queue, returning whether this was the first event (0->1 transition).
     pub fn enqueue(&mut self, event: Event) -> bool {
         let was_empty = self.total_count == 0;
         let priority = event.metadata.priority;
+
+        self.remove_superseded_events(&event);
 
         self.events
             .entry(priority)
@@ -549,6 +599,47 @@ impl TaskEventQueue {
     /// Get total number of queued events
     pub fn len(&self) -> usize {
         self.total_count
+    }
+
+    fn superseded_event_count(&self, incoming: &Event) -> usize {
+        self.events
+            .values()
+            .map(|queue| {
+                queue
+                    .iter()
+                    .filter(|queued| Self::is_superseded_by(incoming, queued))
+                    .count()
+            })
+            .sum()
+    }
+
+    fn remove_superseded_events(&mut self, incoming: &Event) {
+        let mut removed_count = 0;
+        self.events.retain(|_, queue| {
+            let previous_len = queue.len();
+            queue.retain(|queued| !Self::is_superseded_by(incoming, queued));
+            removed_count += previous_len - queue.len();
+            !queue.is_empty()
+        });
+        self.total_count -= removed_count;
+    }
+
+    fn is_superseded_by(incoming: &Event, queued: &Event) -> bool {
+        let (
+            EventContent::ProcessControl(incoming_type),
+            EventContent::ProcessControl(queued_type),
+        ) = (&incoming.content, &queued.content)
+        else {
+            return false;
+        };
+
+        match incoming_type {
+            ProcessControlType::Continue => queued_type.is_stop_class(),
+            control_type if control_type.is_stop_class() => {
+                *queued_type == ProcessControlType::Continue
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1119,7 +1210,7 @@ impl EventManager {
             // Enforce buffer size from the target task's config
             let cfg = self.get_task_config_or_default(task_id);
             let mut queue = task.event_queue.lock();
-            if queue.len() >= cfg.buffer_size {
+            if queue.would_exceed_capacity(cfg.buffer_size, &event) {
                 return Err(EventError::BufferFull);
             }
             // Enqueue the event since it passed filtering and buffer check
@@ -1623,6 +1714,10 @@ mod tests {
     use crate::object::capability::EventSubscriber;
     use alloc::string::ToString; // bring trait into scope
 
+    fn process_control_event(ptype: ProcessControlType, priority: EventPriority) -> Event {
+        Event::direct_process_control(123, ptype, priority, true)
+    }
+
     #[test_case]
     fn test_event_creation() {
         let event = Event::new(
@@ -1895,7 +1990,7 @@ mod tests {
 
         // Add events in non-priority order
         let low_event =
-            Event::direct_process_control(1, ProcessControlType::Stop, EventPriority::Low, true);
+            Event::direct_process_control(1, ProcessControlType::Alarm, EventPriority::Low, true);
         let critical_event = Event::direct_process_control(
             2,
             ProcessControlType::Kill,
@@ -1910,7 +2005,7 @@ mod tests {
         );
         let normal_event = Event::direct_process_control(
             4,
-            ProcessControlType::Continue,
+            ProcessControlType::WindowChange,
             EventPriority::Normal,
             true,
         );
@@ -1936,6 +2031,86 @@ mod tests {
         assert_eq!(fourth.metadata.priority, EventPriority::Low);
 
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test_case]
+    fn test_task_event_queue_continue_supersedes_pending_stop_class_events() {
+        let mut queue = TaskEventQueue::new();
+
+        for control_type in [
+            ProcessControlType::Stop,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+        ] {
+            queue.enqueue(process_control_event(control_type, EventPriority::Low));
+        }
+        queue.enqueue(process_control_event(
+            ProcessControlType::Interrupt,
+            EventPriority::Critical,
+        ));
+
+        let continue_event =
+            process_control_event(ProcessControlType::Continue, EventPriority::Normal);
+        assert!(!queue.would_exceed_capacity(2, &continue_event));
+        queue.enqueue(continue_event);
+
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Interrupt)
+        ));
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Continue)
+        ));
+    }
+
+    #[test_case]
+    fn test_task_event_queue_stop_class_supersedes_pending_continue() {
+        for control_type in [
+            ProcessControlType::Stop,
+            ProcessControlType::TerminalStop,
+            ProcessControlType::TerminalInput,
+            ProcessControlType::TerminalOutput,
+        ] {
+            let mut queue = TaskEventQueue::new();
+            queue.enqueue(process_control_event(
+                ProcessControlType::Continue,
+                EventPriority::Critical,
+            ));
+            queue.enqueue(process_control_event(control_type, EventPriority::Low));
+
+            assert_eq!(queue.len(), 1);
+            assert!(matches!(
+                queue.dequeue().unwrap().content,
+                EventContent::ProcessControl(ptype) if ptype == control_type
+            ));
+        }
+    }
+
+    #[test_case]
+    fn test_task_event_queue_latches_continue_after_stop_is_dequeued() {
+        let mut queue = TaskEventQueue::new();
+        queue.enqueue(process_control_event(
+            ProcessControlType::Stop,
+            EventPriority::High,
+        ));
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Stop)
+        ));
+
+        queue.enqueue(process_control_event(
+            ProcessControlType::Continue,
+            EventPriority::High,
+        ));
+
+        assert!(queue.has_pending_continue());
+        assert!(matches!(
+            queue.dequeue().unwrap().content,
+            EventContent::ProcessControl(ProcessControlType::Continue)
+        ));
     }
 
     #[test_case]

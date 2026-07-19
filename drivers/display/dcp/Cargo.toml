@@ -7,7 +7,7 @@ edition = "2024"
 path = "src/lib.rs"
 
 [dependencies]
-scarlet = { path = "../../../kernel" }
+scarlet = { path = "../../../kernel", default-features = false }
 scarlet-driver-apple-dart = { path = "../../iommu/apple-dart" }
 scarlet-driver-apple-asc = { path = "../../soc/apple-asc" }
 scarlet-driver-apple-rtkit = { path = "../../soc/apple-rtkit" }

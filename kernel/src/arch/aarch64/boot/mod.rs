@@ -6,6 +6,8 @@
 
 #[cfg(feature = "limine")]
 pub mod limine;
+#[cfg(feature = "limine")]
+mod platform;
 #[cfg(test)]
 pub mod test;
 

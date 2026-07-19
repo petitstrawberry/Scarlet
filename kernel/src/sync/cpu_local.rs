@@ -99,6 +99,7 @@ impl<T> CpuLocal<T> {
     /// on the same CPU. Doing so would create two `&mut T` to the same data.
     /// This is enforced by kernel code convention, not runtime checks.
     pub fn lock(&self) -> CpuLocalGuard<'_, T> {
+        let irq_guard = IrqGuard::new();
         let cpu_id = get_cpu().get_cpuid();
         // SAFETY: cpu_id is valid (0..MAX_NUM_CPUS).
         // The IrqGuard ensures interrupts are disabled, preventing
@@ -108,7 +109,7 @@ impl<T> CpuLocal<T> {
         let data = unsafe { &mut *self.data[cpu_id].get() };
         CpuLocalGuard {
             data,
-            _irq_guard: IrqGuard::new(),
+            _irq_guard: irq_guard,
         }
     }
 

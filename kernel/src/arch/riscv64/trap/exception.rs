@@ -24,7 +24,7 @@ fn log_fatal_page_fault_context(
     task_name: &str,
     asid: u16,
 ) {
-    use crate::arch::vm::{get_root_pagetable_ptr, is_asid_used};
+    use crate::arch::vm::{get_root_pagetable, is_asid_used};
 
     let cpu_id = get_cpu().get_cpuid();
     let epc = trapframe.epc as usize;
@@ -34,10 +34,12 @@ fn log_fatal_page_fault_context(
     let fp = trapframe.regs.reg[8] as usize;
 
     let asid_used = is_asid_used(asid);
-    let root_pt = get_root_pagetable_ptr(asid).unwrap_or(core::ptr::null_mut());
+    let root_pt = get_root_pagetable(asid)
+        .map(|root| root.root_address())
+        .unwrap_or(0);
 
     println!(
-        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:p}",
+        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:#x}",
         cpu_id, cause, task_id, task_name, asid, asid_used, root_pt
     );
     println!(
@@ -189,15 +191,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             // This avoids panicking if stval is 0 or if we cannot classify the instruction.
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off && is_vector_insn {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
@@ -223,15 +231,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
 
             #[cfg(feature = "user-vector")]
             if user_vec_allowed && vs_off {
-                task.vcpu.lock().vector_used = true;
-                crate::arch::riscv64::fpu::enable_vector();
-                if task.vcpu.lock().vector.is_none() {
-                    task.vcpu.lock().vector = Some(alloc::boxed::Box::new(
-                        crate::arch::riscv64::fpu::VectorContext::new(),
-                    ));
+                {
+                    let mut vcpu = task.vcpu.lock();
+                    if vcpu.vector.is_none() {
+                        vcpu.vector = Some(alloc::boxed::Box::new(
+                            crate::arch::riscv64::fpu::VectorContext::new(),
+                        ));
+                    }
+                    vcpu.vector_used = true;
                 }
+                crate::arch::riscv64::fpu::enable_vector();
                 unsafe { task.vcpu.lock().vector.as_ref().unwrap().restore() };
                 crate::arch::riscv64::fpu::mark_vector_clean();
+                let cpu_id = crate::arch::get_cpu().get_cpuid();
+                crate::arch::riscv64::set_vector_owner(cpu_id, task.get_id());
+                crate::arch::riscv64::set_vector_owner_dirty(cpu_id, false);
                 return;
             }
 
@@ -286,7 +300,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // panic!("Syscall error: {}", msg);
                     // println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
-                    trapframe.increment_pc_next(mytask().unwrap());
+                    trapframe.increment_pc_next(&mytask().unwrap());
                     crate::sched::scheduler::process_pending_events_before_user_return(trapframe);
                 }
             }

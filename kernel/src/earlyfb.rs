@@ -7,6 +7,9 @@ const FONT_HEIGHT: usize = 8;
 const FONT_SCALE: usize = 2;
 const GLYPH_WIDTH: usize = FONT_WIDTH * FONT_SCALE;
 const GLYPH_HEIGHT: usize = FONT_HEIGHT * FONT_SCALE;
+// DIAGNOSTIC: Keep early-console output on the framebuffer, but temporarily
+// stop mirroring normal kernel, TTY, and breadcrumb output into it.
+const DIAGNOSTIC_ENABLE_FBCON_REDIRECTION: bool = false;
 
 #[derive(Debug, Clone, Copy)]
 struct FramebufferConsole {
@@ -204,8 +207,25 @@ pub fn write_str(s: &str) {
     }
 }
 
+/// Write a whole string while holding the console lock once.
+///
+/// Unlike `write_str` (which acquires the lock per byte and therefore
+/// interleaves with concurrent writers), this holds `EARLY_CONSOLE` across
+/// the entire string so the output is atomic w.r.t. other CPUs. Use for
+/// diagnostic dumps that must remain readable under SMP contention.
+pub fn write_raw(s: &str) {
+    let mut console = EARLY_CONSOLE.lock();
+    for byte in s.bytes() {
+        console.write_byte(byte);
+    }
+}
+
 pub fn is_initialized() -> bool {
     EARLY_CONSOLE.lock().initialized
+}
+
+pub(crate) fn is_redirection_enabled() -> bool {
+    DIAGNOSTIC_ENABLE_FBCON_REDIRECTION
 }
 
 pub fn deactivate() {

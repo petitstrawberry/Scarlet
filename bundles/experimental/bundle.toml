@@ -8,6 +8,16 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
+source = "../../user/video_player"
+package = "video_player"
+bin = "video_player"
+default-features = false
+features = ["av1-stateful-hw", "h264-stateful-hw", "h264-stateless-hw", "mp4-aac"]
+replace = true
+to = "/system/scarlet/bin/video_player"
+
+[[layers]]
+kind = "cargo"
 source = { git = "https://github.com/petitstrawberry/yt-for-scarlet" }
 package = "yt"
 bin = "yt"

@@ -87,11 +87,11 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     let nfds = trapframe.get_arg(1) as usize;
     let options_ptr = trapframe.get_arg(2);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let mut options: PollOptions = if options_ptr != 0 {
         let mut opts_bytes = [0u8; core::mem::size_of::<PollOptions>()];
-        if copy_from_user(task, options_ptr, &mut opts_bytes).is_err() {
+        if copy_from_user(&task, options_ptr, &mut opts_bytes).is_err() {
             return usize::MAX;
         }
         unsafe { core::ptr::read(opts_bytes.as_ptr() as *const PollOptions) }
@@ -111,7 +111,7 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
 
     let fds_size = nfds * core::mem::size_of::<PollHandle>();
     let mut fds_buf = alloc::vec![0u8; fds_size];
-    if copy_from_user(task, fds_ptr, &mut fds_buf).is_err() {
+    if copy_from_user(&task, fds_ptr, &mut fds_buf).is_err() {
         return usize::MAX;
     }
     let fds: &mut [PollHandle] =
@@ -140,7 +140,7 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
     let mut selectable_count = 0usize;
 
     for (idx, pfd) in fds.iter_mut().enumerate() {
-        let (ready, selectable) = eval_poll_handle(pfd, task);
+        let (ready, selectable) = eval_poll_handle(pfd, &task);
         if ready {
             any_ready = true;
         }
@@ -170,7 +170,7 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
 
                     any_ready = false;
                     for pfd in fds.iter_mut() {
-                        let (ready, _) = eval_poll_handle(pfd, task);
+                        let (ready, _) = eval_poll_handle(pfd, &task);
                         if ready {
                             any_ready = true;
                         }
@@ -201,7 +201,7 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
                 }
 
                 for pfd in fds.iter_mut() {
-                    let _ = eval_poll_handle(pfd, task);
+                    let _ = eval_poll_handle(pfd, &task);
                 }
             }
         }

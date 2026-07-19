@@ -23,7 +23,7 @@ pub fn sys_shv_vm_create(trapframe: &mut Trapframe) -> usize {
     };
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Capture the owner address space at VM creation time.
     // VirtualMemoryManager is Arc-backed so clone() is cheap and shares
@@ -60,7 +60,7 @@ pub fn sys_shv_vcpu_create(trapframe: &mut Trapframe) -> usize {
     let vcpu_id = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get the VM object from the handle table
     let vm = match task
@@ -104,7 +104,7 @@ pub fn sys_shv_vcpu_run(trapframe: &mut Trapframe) -> usize {
     let exit_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
     let exit_size = core::mem::size_of::<VcpuExit>();

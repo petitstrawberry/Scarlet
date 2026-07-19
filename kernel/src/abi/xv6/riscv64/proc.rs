@@ -1,8 +1,12 @@
 use crate::{
     arch::Trapframe,
     fs::FileType,
+    ipc::{
+        Event, EventManager,
+        event::{EventPriority, ProcessControlType},
+    },
     library::std::string::cstring_to_string,
-    sched::scheduler::{get_task_by_id, schedule},
+    sched::scheduler::get_task_by_id,
     task::{CloneFlags, WaitError, get_parent_waitpid_waker, mytask},
 };
 use alloc::string::{String, ToString};
@@ -32,15 +36,19 @@ pub fn sys_fork(
 ) -> usize {
     let parent_task = mytask().unwrap();
 
-    trapframe.increment_pc_next(parent_task); /* Increment the program counter */
+    trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.lock().store(trapframe);
 
     /* Clone the task */
     match parent_task.clone_task(CloneFlags::default()) {
-        Ok(child_task) => {
+        Ok(mut child_task) => {
             child_task.vcpu.lock().iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
+            crate::sched::scheduler::apply_fork_child_diagnostic_affinity(
+                &mut child_task,
+                crate::arch::get_cpu().get_cpuid(),
+            );
 
             let cpu_id = crate::sched::scheduler::select_cpu_for_task(&child_task);
             let parent_id = parent_task.get_id();
@@ -49,12 +57,10 @@ pub fn sys_fork(
             // A remote CPU may run the child immediately after enqueue via IPI.
             let child_id = crate::sched::scheduler::register_task(child_task);
 
-            // Establish parent-child relationship now that both have valid IDs
+            // Establish parent-child ownership before enqueueing. The task
+            // protocol rejects an exiting parent and retries init atomically.
             if let Some(child) = get_task_by_id(child_id) {
-                child.set_parent_id(parent_id);
-            }
-            if let Some(parent) = get_task_by_id(parent_id) {
-                parent.add_child(child_id);
+                let _ = parent_task.adopt_registered_child(&child);
             }
 
             // Get namespace-local ID to return to user space (this is the PID visible to xv6 programs)
@@ -80,8 +86,7 @@ pub fn sys_exit(
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    task.exit(exit_code);
-    schedule(trapframe);
+    task.request_deferred_exit(exit_code);
     usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
@@ -108,13 +113,13 @@ pub fn sys_wait(
                             *status_ptr = status;
                         }
                     }
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return child_pid;
                 }
                 Err(error) => match error {
                     WaitError::ChildNotExited(_) => continue,
                     _ => {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return usize::MAX;
                     }
                 },
@@ -123,7 +128,7 @@ pub fn sys_wait(
 
         // No child has exited yet, block until one does
         let parent_waker = get_parent_waitpid_waker(task.get_id());
-        parent_waker.wait(task.get_id(), trapframe);
+        parent_waker.wait_owned(task.get_id(), trapframe);
         // Continue the loop to re-check after waking up
         continue;
     }
@@ -137,21 +142,35 @@ pub fn sys_kill(
     let pid = trapframe.get_arg(0) as usize;
     let signal = trapframe.get_arg(1) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // For xv6 compatibility, only signal 9 (SIGKILL) is implemented for now
     if signal != 9 {
         return usize::MAX; // -1 (unsupported signal)
     }
 
-    // Find the target task via scheduler
-    if let Some(target_task) = get_task_by_id(pid) {
-        // For xv6 compatibility, immediately terminate the target task
-        target_task.exit(9); // SIGKILL equivalent - exit with signal 9
-        0 // Success
-    } else {
-        usize::MAX // -1 (no such process)
+    let Some(target_task_id) = task.get_namespace().resolve_global_id(pid) else {
+        return usize::MAX;
+    };
+
+    if target_task_id == task.get_id() {
+        task.request_deferred_exit(9);
+        return 0;
     }
+
+    let Ok(target_task_id) = u32::try_from(target_task_id) else {
+        return usize::MAX;
+    };
+    let event = Event::direct_process_control(
+        target_task_id,
+        ProcessControlType::Kill,
+        EventPriority::High,
+        true,
+    );
+    EventManager::get_manager()
+        .send_event(event)
+        .map(|()| 0)
+        .unwrap_or(usize::MAX)
 }
 
 pub fn sys_sbrk(
@@ -161,7 +180,7 @@ pub fn sys_sbrk(
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
@@ -173,7 +192,7 @@ pub fn sys_chdir(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -215,7 +234,7 @@ pub fn sys_getpid(
     trapframe: &mut Trapframe,
 ) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     // Return namespace-local ID (this is the PID visible to xv6 programs)
     task.get_namespace_id()
 }
@@ -228,7 +247,7 @@ pub fn sys_sleep(
     let task = mytask().unwrap();
 
     // Increment PC before sleeping to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Call the blocking sleep method - this will return when sleep completes
     task.sleep(trapframe, ticks);

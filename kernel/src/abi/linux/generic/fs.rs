@@ -619,14 +619,14 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
 
     // Parse path
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => match to_absolute_path_v2(&task, &path) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX, // Path error
@@ -636,7 +636,7 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Parse argv and envp
     let argv_strings =
-        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(args) => args,
             Err(_) => return usize::MAX, // argv parsing error
         };
@@ -645,7 +645,7 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
 
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], &task, trapframe, false) {
         Ok(_) => {
             _abi.close_on_exec_fds();
             crate::task::wake_task_waiters(task.get_id());
@@ -680,7 +680,7 @@ enum OpenMode {
 /// VFS state.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     0
 }
 
@@ -708,7 +708,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if openat fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
@@ -924,7 +924,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from Linux fd
     if let Some(old_handle) = abi.get_handle(fd) {
@@ -953,7 +953,7 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let oldfd = trapframe.get_arg(0) as usize;
     let newfd = trapframe.get_arg(1) as usize;
     let flags = trapframe.get_arg(2) as u32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // dup3 does not allow oldfd and newfd to be the same
     if oldfd == newfd {
@@ -1004,7 +1004,7 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from Linux fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
@@ -1029,7 +1029,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX;
         }
     };
@@ -1037,7 +1037,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX;
         }
     };
@@ -1062,13 +1062,13 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return usize::MAX;
         }
     };
 
     if is_directory {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return usize::MAX;
     }
 
@@ -1078,18 +1078,18 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let buf_ptr = match task.vm_manager.translate_to_kva_for_write(user_buf) {
             Some(kva) => kva as *mut u8,
             None => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return usize::MAX;
             }
         };
         let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
         match stream.read(&mut buffer) {
             Ok(n) => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 n
             }
             Err(e) => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 match e {
                     StreamError::EndOfStream => 0,
                     StreamError::WouldBlock => {
@@ -1124,7 +1124,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         if total_read > 0 {
                             break;
                         }
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return errno::to_result(errno::EAGAIN);
                     } else {
                         break;
@@ -1132,7 +1132,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
                 Err(_) => {
                     if total_read == 0 {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return usize::MAX;
                     }
                     break;
@@ -1156,7 +1156,7 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         total_read
     }
 }
@@ -1167,7 +1167,7 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let user_buf = trapframe.get_arg(1);
     let count = trapframe.get_arg(2) as usize;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
@@ -1267,19 +1267,19 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let position = trapframe.get_arg(3) as i64;
 
     if position < 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EINVAL);
     }
 
     if count == 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return 0;
     }
 
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1287,7 +1287,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1295,7 +1295,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let file = match kernel_obj.as_file() {
         Some(file) => file,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             if kernel_obj.as_stream().is_some() {
                 return errno::to_result(errno::ESPIPE);
             }
@@ -1313,13 +1313,13 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let buf_ptr = match task.vm_manager.translate_to_kva_for_write(buf_addr) {
             Some(ptr) => ptr as *mut u8,
             None => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 return errno::to_result(errno::EFAULT);
             }
         };
 
         if buf_ptr.is_null() {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EFAULT);
         }
 
@@ -1327,16 +1327,16 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         match file.read_at(position as u64, &mut buffer) {
             Ok(n) => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 n
             }
             Err(StreamError::EndOfStream) => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 0
             }
             Err(StreamError::WouldBlock) => {
                 if nonblocking {
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     errno::to_result(errno::EAGAIN)
                 } else {
                     schedule(trapframe);
@@ -1344,7 +1344,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
             }
             Err(err) => {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 errno::to_result(stream_error_to_errno(err))
             }
         }
@@ -1360,7 +1360,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Some(ptr) => ptr as *mut u8,
                 None => {
                     if total_read == 0 {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return errno::to_result(errno::EFAULT);
                     }
                     break;
@@ -1369,7 +1369,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             if buf_ptr.is_null() {
                 if total_read == 0 {
-                    trapframe.increment_pc_next(task);
+                    trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::EFAULT);
                 }
                 break;
@@ -1385,7 +1385,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         if total_read > 0 {
                             break;
                         }
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return errno::to_result(errno::EAGAIN);
                     } else {
                         break;
@@ -1393,7 +1393,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
                 Err(err) => {
                     if total_read == 0 {
-                        trapframe.increment_pc_next(task);
+                        trapframe.increment_pc_next(&task);
                         return errno::to_result(stream_error_to_errno(err));
                     }
                     break;
@@ -1412,7 +1412,7 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
 
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         total_read
     }
 }
@@ -1425,32 +1425,32 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let position = trapframe.get_arg(3) as i64;
 
     if position < 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EINVAL);
     }
 
     if count == 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return 0;
     }
 
     let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
         Some(ptr) => ptr as *const u8,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EFAULT);
         }
     };
 
     if buf_ptr.is_null() {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EFAULT);
     }
 
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1458,7 +1458,7 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         }
     };
@@ -1466,7 +1466,7 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let file = match kernel_obj.as_file() {
         Some(file) => file,
         None => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             if kernel_obj.as_stream().is_some() {
                 return errno::to_result(errno::ESPIPE);
             }
@@ -1483,12 +1483,12 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match file.write_at(position as u64, buffer) {
         Ok(n) => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             n
         }
         Err(StreamError::WouldBlock) => {
             if nonblocking {
-                trapframe.increment_pc_next(task);
+                trapframe.increment_pc_next(&task);
                 errno::to_result(errno::EAGAIN)
             } else {
                 schedule(trapframe);
@@ -1496,7 +1496,7 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
         Err(err) => {
-            trapframe.increment_pc_next(task);
+            trapframe.increment_pc_next(&task);
             errno::to_result(stream_error_to_errno(err))
         }
     }
@@ -1541,7 +1541,7 @@ pub fn sys_writev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let iovcnt = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if writev fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate parameters
     if iovcnt == 0 {
@@ -1658,7 +1658,7 @@ pub fn sys_lseek(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if lseek fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from Linux fd
     let handle = match abi.get_handle(fd) {
@@ -1804,7 +1804,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(3) as i32;
 
     // Increment PC to avoid infinite loop if fstatat fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
@@ -1913,7 +1913,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if statx_ptr.is_null() {
         return errno::to_result(errno::EFAULT);
@@ -1923,7 +1923,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_EMPTY_PATH: u32 = 0x1000;
 
-    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, pathname_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
@@ -2061,7 +2061,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[allow(dead_code)]
 pub fn sys_mkdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -2083,7 +2083,7 @@ pub fn sys_mkdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[allow(dead_code)]
 pub fn sys_unlink(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = task
         .vm_manager
@@ -2105,7 +2105,7 @@ pub fn sys_unlink(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[allow(dead_code)]
 pub fn sys_link(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let src_path_ptr = task
         .vm_manager
@@ -2173,7 +2173,7 @@ pub fn sys_linkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(4) as i32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse paths from user space
     let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
@@ -2366,7 +2366,7 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let arg = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from Linux fd
     let handle = match abi.get_handle(fd) {
@@ -2498,7 +2498,7 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
@@ -2506,7 +2506,7 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let envp_ptr = trapframe.get_arg(2);
 
     // Parse path
-    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => match to_absolute_path_v2(&task, &path) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX, // Path error
@@ -2516,14 +2516,14 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Parse argv
     let argv_strings =
-        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(args) => args,
             Err(_) => return usize::MAX, // argv parsing error
         };
 
     // Parse envp (optional)
     let envp_strings =
-        match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        match parse_string_array_from_userspace(&task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
             Ok(envs) => envs,
             Err(_) => return usize::MAX, // envp parsing error
         };
@@ -2551,7 +2551,7 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Use TransparentExecutor for cross-ABI execution
     match TransparentExecutor::execute_binary(
-        &path_str, &argv_refs, &envp_refs, task, trapframe, false,
+        &path_str, &argv_refs, &envp_refs, &task, trapframe, false,
     ) {
         Ok(_) => {
             _abi.close_on_exec_fds();
@@ -2593,7 +2593,7 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let arg = trapframe.get_arg(2);
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Log the fcntl command to understand usage patterns
     match cmd {
@@ -2876,7 +2876,7 @@ pub fn sys_inotify_init1(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         None => return errno::to_result(errno::EFAULT),
     };
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     errno::to_result(errno::ENOSYS)
 }
 
@@ -2904,7 +2904,7 @@ pub fn sys_flock(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _operation = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Verify fd is valid
     if abi.get_handle(fd as usize).is_none() {
@@ -2944,7 +2944,7 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let offset = trapframe.get_arg(2) as i64;
     let len = trapframe.get_arg(3) as i64;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if offset < 0 || len <= 0 {
         return errno::to_result(errno::EINVAL);
@@ -3027,7 +3027,7 @@ pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .translate_to_kva(trapframe.get_arg(1))
         .unwrap() as *mut u8;
     let buf_size = trapframe.get_arg(2) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Get handle from Linux fd
     let handle = match abi.get_handle(fd) {
@@ -3098,7 +3098,7 @@ pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
     let iovec_ptr = trapframe.get_arg(1);
     let iovcnt = trapframe.get_arg(2) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if iovcnt == 0 {
         return 0;
@@ -3191,7 +3191,7 @@ pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_fsync(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let handle = match abi.get_handle(fd) {
         Some(handle) => handle,
@@ -3237,7 +3237,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
     let length = trapframe.get_arg(1) as i64;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if length < 0 {
         crate::println!(
@@ -3314,7 +3314,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// - 0 (success)
 pub fn sys_faccessat(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
@@ -3349,7 +3349,7 @@ pub fn sys_faccessat(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe
 /// - 0 (success)
 pub fn sys_faccessat2(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
@@ -3384,7 +3384,7 @@ pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(t) => t,
         None => return usize::MAX,
     };
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
@@ -3441,7 +3441,7 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate arguments
     if stat_ptr.is_null() {
@@ -3549,7 +3549,7 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
@@ -3664,15 +3664,26 @@ pub fn sys_epoll_create1(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     const EPOLL_CLOEXEC: i32 = 0o2000000;
     let flags = trapframe.get_arg(0) as i32;
     if flags & !EPOLL_CLOEXEC != 0 {
-        trapframe.increment_pc_next(task);
+        trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EINVAL);
     }
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let id = NEXT_EPOLL_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
     let handle = EPOLL_HANDLE_BASE | (id & 0x0fff_ffff);
-    match abi.allocate_fd(handle) {
+    crate::breadcrumb::drop(
+        crate::breadcrumb::EPOLL_ALLOC_BEGIN,
+        task.get_id() as u64,
+        handle as u64,
+    );
+    let result = abi.allocate_fd(handle);
+    crate::breadcrumb::drop(
+        crate::breadcrumb::EPOLL_ALLOC_DONE,
+        task.get_id() as u64,
+        handle as u64,
+    );
+    match result {
         Ok(fd) => fd,
         Err(_) => errno::to_result(errno::EMFILE),
     }
@@ -3689,7 +3700,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(2) as i32;
     let event_ptr = trapframe.get_arg(3);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let Some(epoll_handle) = abi.get_handle(epfd) else {
         return errno::to_result(errno::EBADF);
@@ -3700,7 +3711,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match op {
         EPOLL_CTL_ADD | EPOLL_CTL_MOD => {
-            let Some((events, data)) = read_linux_epoll_event(task, event_ptr) else {
+            let Some((events, data)) = read_linux_epoll_event(&task, event_ptr) else {
                 return errno::to_result(errno::EFAULT);
             };
             if abi.get_handle(fd as usize).is_none() {
@@ -3756,7 +3767,7 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let maxevents = trapframe.get_arg(2) as usize;
     let timeout_ms = trapframe.get_arg(3) as i32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let Some(epoll_handle) = abi.get_handle(epfd) else {
         return errno::to_result(errno::EBADF);
@@ -3785,11 +3796,11 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if ready_count >= maxevents {
                 break;
             }
-            let ready = epoll_ready_events(abi, task, interest);
+            let ready = epoll_ready_events(abi, &task, interest);
             if ready == 0 {
                 continue;
             }
-            if !write_linux_epoll_event(task, events_ptr, ready_count, ready, interest.data) {
+            if !write_linux_epoll_event(&task, events_ptr, ready_count, ready, interest.data) {
                 return errno::to_result(errno::EFAULT);
             }
             ready_count += 1;
@@ -4055,7 +4066,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         + out_write.count_ones() as usize
         + out_except.count_ones() as usize;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
     ready_count
 }
 
@@ -4098,7 +4109,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _sigmask = trapframe.get_arg(3);
     let _sigsetsize = trapframe.get_arg(4);
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if fds_ptr == 0 {
         return usize::MAX;
@@ -4365,7 +4376,7 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let _mode = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Validate the file descriptor
     let handle = match abi.get_handle(fd as usize) {
@@ -4412,7 +4423,7 @@ pub fn sys_fchmodat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let _dirfd = trapframe.get_arg(0) as i32;
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
@@ -4449,7 +4460,7 @@ pub fn sys_umask(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let mask = trapframe.get_arg(0) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // In a real implementation, we would:
     // 1. Store the current umask value to return it
@@ -4489,7 +4500,7 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let bufsiz = trapframe.get_arg(3) as usize;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Fast path: zero-sized buffer
     if bufsiz == 0 {
@@ -4497,7 +4508,7 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     // Parse the pathname
-    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, MAX_PATH_LENGTH) {
+    let path_str = match parse_c_string_from_userspace(&task, pathname_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
@@ -4590,7 +4601,7 @@ pub fn sys_getrandom(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let buflen = trapframe.get_arg(1) as usize;
     let flags = trapframe.get_arg(2) as u32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     if buflen == 0 {
         return 0;
@@ -4638,7 +4649,7 @@ pub fn sys_getcwd(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let buf_ptr = trapframe.get_arg(0);
     let size = trapframe.get_arg(1);
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Check for invalid arguments
     if buf_ptr == 0 || size == 0 {
@@ -4696,7 +4707,7 @@ pub fn sys_chdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
@@ -4800,7 +4811,7 @@ pub fn sys_renameat2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let flags = trapframe.get_arg(4) as u32;
 
     // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // Parse old path from user space
     let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
@@ -4926,7 +4937,7 @@ pub fn sys_eventfd2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let initval = trapframe.get_arg(0) as u32;
     let flags = trapframe.get_arg(1) as u32;
 
-    trapframe.increment_pc_next(task);
+    trapframe.increment_pc_next(&task);
 
     // eventfd2 flags
     const EFD_CLOEXEC: u32 = 0o02000000;
