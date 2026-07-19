@@ -291,6 +291,59 @@ impl PageTable {
         Ok(())
     }
 
+    /// Validates an existing range after a direct-map attribute change.
+    ///
+    /// Sv48 does not encode Scarlet's memory attributes in stage-1 leaves, so
+    /// the live mapping only needs to remain physically consistent and have its
+    /// translations synchronized after the metadata transition.
+    pub(in crate::arch::riscv64::vm) fn retag_memory_area(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+    ) -> Result<(), &'static str> {
+        if mmap.vmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.vmarea.size() % PAGE_SIZE != 0
+            || mmap.pmarea.size() % PAGE_SIZE != 0
+            || mmap.vmarea.size() != mmap.pmarea.size()
+        {
+            return Err("retag memory area is not page-aligned");
+        }
+
+        let mut vaddr = mmap.vmarea.start;
+        let mut paddr = mmap.pmarea.start;
+        while vaddr <= mmap.vmarea.end {
+            let (_, level) = self
+                .walk_leaf(vaddr)
+                .ok_or("retag memory area has no existing leaf mapping")?;
+            if self.translate(vaddr) != Some(paddr) {
+                return Err("retag memory area does not match the existing physical mapping");
+            }
+
+            let leaf_size = page_size_for_level(level);
+            let leaf_start = vaddr & !(leaf_size - 1);
+            let leaf_end = leaf_start
+                .checked_add(leaf_size - 1)
+                .ok_or("retag leaf range overflows")?;
+            if leaf_end >= mmap.vmarea.end {
+                break;
+            }
+            let step = leaf_end
+                .checked_sub(vaddr)
+                .and_then(|size| size.checked_add(1))
+                .ok_or("retag range step overflows")?;
+            vaddr = leaf_end
+                .checked_add(1)
+                .ok_or("retag virtual range overflows")?;
+            paddr = paddr
+                .checked_add(step)
+                .ok_or("retag physical range overflows")?;
+        }
+
+        synchronize_tlb(asid);
+        Ok(())
+    }
+
     /// Maps a single 4 KiB page in the root page table.
     ///
     /// # Arguments

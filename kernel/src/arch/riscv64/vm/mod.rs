@@ -142,6 +142,11 @@ impl RootPageTableGuard {
             .map_memory_area(asid, mmap, accessed, dirty)
     }
 
+    pub(crate) fn retag_memory_area(&mut self, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+        let asid = self.asid;
+        self.table_mut().retag_memory_area(asid, mmap)
+    }
+
     /// Maps a single 4 KiB page in this address space.
     ///
     /// # Arguments
