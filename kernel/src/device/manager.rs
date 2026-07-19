@@ -568,13 +568,22 @@ impl DeviceManager {
             return Ok(None);
         };
 
-        let Some((cell_node, parent_node)) =
-            Self::find_node_and_immediate_parent_by_phandle(fdt, phandle)
+        let Some((cell_node, parent_node, grandparent_node)) =
+            Self::find_node_and_ancestors_by_phandle(fdt, phandle)
         else {
             return Ok(None);
         };
         let Some(parent_node) = parent_node else {
             return Ok(None);
+        };
+
+        let provider_node = if Self::is_nvmem_layout_node(&parent_node) {
+            let Some(grandparent_node) = grandparent_node else {
+                return Ok(None);
+            };
+            grandparent_node
+        } else {
+            parent_node
         };
 
         let Some(reg_prop) = cell_node.property("reg") else {
@@ -585,7 +594,7 @@ impl DeviceManager {
             return Err("nvmem: truncated child reg");
         }
 
-        let provider_phandle = self.phandle_for_fdt_node(&parent_node);
+        let provider_phandle = self.phandle_for_fdt_node(&provider_node);
         if self
             .get_nvmem_provider_by_phandle(provider_phandle)
             .is_none()
@@ -879,6 +888,20 @@ impl DeviceManager {
         Self::read_be_u32(prop.value)
     }
 
+    fn is_nvmem_layout_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+        let fixed_layout_compatible = node
+            .compatible()
+            .is_some_and(|compatible| compatible.all().any(|entry| entry == "fixed-layout"));
+        Self::nvmem_layout_uses_grandparent_provider(node.name, fixed_layout_compatible)
+    }
+
+    fn nvmem_layout_uses_grandparent_provider(
+        node_name: &str,
+        fixed_layout_compatible: bool,
+    ) -> bool {
+        node_name.split('@').next() == Some("nvmem-layout") || fixed_layout_compatible
+    }
+
     fn find_node_by_phandle<'a>(
         fdt: &'a fdt::Fdt<'a>,
         phandle: u32,
@@ -1009,33 +1032,35 @@ impl DeviceManager {
         None
     }
 
-    fn find_node_and_immediate_parent_by_phandle<'a>(
+    fn find_node_and_ancestors_by_phandle<'a>(
         fdt: &'a fdt::Fdt<'a>,
         phandle: u32,
     ) -> Option<(
         fdt::node::FdtNode<'a, 'a>,
         Option<fdt::node::FdtNode<'a, 'a>>,
+        Option<fdt::node::FdtNode<'a, 'a>>,
     )> {
         let mut stack: Vec<(
             fdt::node::FdtNode<'a, 'a>,
             Option<fdt::node::FdtNode<'a, 'a>>,
+            Option<fdt::node::FdtNode<'a, 'a>>,
         )> = Vec::new();
-        stack.push((fdt.find_node("/")?, None));
+        stack.push((fdt.find_node("/")?, None, None));
 
-        while let Some((node, parent)) = stack.pop() {
+        while let Some((node, parent, grandparent)) = stack.pop() {
             if let Some(p) = Self::get_u32_prop(&node, "phandle")
                 && p == phandle
             {
-                return Some((node, parent));
+                return Some((node, parent, grandparent));
             }
             if let Some(p) = Self::get_u32_prop(&node, "linux,phandle")
                 && p == phandle
             {
-                return Some((node, parent));
+                return Some((node, parent, grandparent));
             }
 
             for child in node.children() {
-                stack.push((child, Some(node)));
+                stack.push((child, Some(node), parent));
             }
         }
 
@@ -2148,7 +2173,8 @@ impl DeviceManager {
     /// This is useful for parent drivers that discover child nodes manually
     /// instead of receiving a separate [`PlatformDeviceInfo`] for the child.
     /// The phandle must identify a cell node with a `reg = <offset size>`
-    /// property whose immediate parent is a registered NVMEM provider.
+    /// property. Legacy cells use their immediate parent as the provider;
+    /// fixed-layout cells use the parent of their `nvmem-layout` container.
     ///
     /// Missing providers return [`probe_defer`] so platform probing can retry
     /// once provider drivers register their NVMEM providers.
@@ -4391,6 +4417,25 @@ mod tests {
         let resolved = manager.get_nvmem_provider_by_phandle(0x70).unwrap();
         assert_eq!(resolved.name(), "test-nvmem");
         assert!(manager.get_nvmem_provider_by_phandle(0x71).is_none());
+    }
+
+    #[test_case]
+    fn test_nvmem_legacy_cell_uses_immediate_parent_provider() {
+        assert!(!DeviceManager::nvmem_layout_uses_grandparent_provider(
+            "rtc_nvmem@d000",
+            false,
+        ));
+    }
+
+    #[test_case]
+    fn test_nvmem_fixed_layout_cell_uses_grandparent_provider() {
+        assert!(DeviceManager::nvmem_layout_uses_grandparent_provider(
+            "nvmem-layout",
+            true,
+        ));
+        assert!(DeviceManager::nvmem_layout_uses_grandparent_provider(
+            "cells", true,
+        ));
     }
 
     #[test_case]
