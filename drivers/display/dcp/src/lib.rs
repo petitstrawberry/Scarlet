@@ -33,6 +33,7 @@ use scarlet::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, 
 use scarlet::object::capability::{ControlOps, MemoryMappingOps};
 use scarlet::println;
 use scarlet::sync::Mutex;
+use scarlet::vm::vmem::MemoryAttribute;
 use scarlet::{arch, environment, time};
 use scarlet_driver_apple_asc::get_apple_asc_by_phandle;
 use scarlet_driver_apple_dart::{DartDomain, DartInstance, DartPageTable, get_dart_by_phandle};
@@ -429,7 +430,10 @@ impl RemoteprocDmaMapper for DcpDmaMapper {
         let iova = self.iova_from_dva(dva);
         let mut table = self.table.lock();
         for page in 0..pages {
-            table.unmap_page(iova + page * self.page_size);
+            if let Err(error) = table.unmap_page(iova + page * self.page_size) {
+                println!("[apple-dcp] failed to unmap DVA {:#x}: {}", dva, error);
+                return;
+            }
         }
         drop(table);
         let _ = self.dart.sync_page_tables();
@@ -601,6 +605,11 @@ impl AppleDcpGraphics {
         scanout: &ContiguousPages,
         regions: &[DisplayRegion],
     ) -> Result<(), &'static str> {
+        if scanout.memory_attribute() != MemoryAttribute::Normal {
+            arch::io_wmb();
+            return Ok(());
+        }
+
         if regions.is_empty() {
             arch::clean_dcache_to_poc_range(scanout.as_vaddr(), self.config.size());
             return Ok(());
@@ -693,7 +702,7 @@ impl GraphicsDevice for AppleDcpGraphics {
             return Err("apple-dcp: framebuffer does not match back buffer");
         }
 
-        arch::clean_dcache_to_poc_range(self.scanout[back].as_vaddr(), self.config.size());
+        self.clean_scanout_regions(&self.scanout[back], &[])?;
         let swap_id = state.iomfb.swap_start()?;
         state.iomfb.swap_submit(
             swap_id,
@@ -954,9 +963,9 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .div_ceil(page_size)
         * page_size;
     let scanout_pages = allocation_size.div_ceil(environment::PAGE_SIZE);
-    let scanout0 = ContiguousPages::new_aligned(scanout_pages, page_size)
+    let mut scanout0 = ContiguousPages::new_aligned(scanout_pages, page_size)
         .ok_or("apple-dcp: scanout 0 allocation failed")?;
-    let scanout1 = ContiguousPages::new_aligned(scanout_pages, page_size)
+    let mut scanout1 = ContiguousPages::new_aligned(scanout_pages, page_size)
         .ok_or("apple-dcp: scanout 1 allocation failed")?;
 
     // SAFETY: both page allocations are live and cover `allocation_size` bytes.
@@ -964,8 +973,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         core::ptr::write_bytes(scanout0.as_ptr() as *mut u8, 0, allocation_size);
         core::ptr::write_bytes(scanout1.as_ptr() as *mut u8, 0, allocation_size);
     }
-    arch::clean_dcache_to_poc_range(scanout0.as_ptr() as usize, allocation_size);
-    arch::clean_dcache_to_poc_range(scanout1.as_ptr() as usize, allocation_size);
+    scanout0.retag_memory_attribute(MemoryAttribute::DeviceBurstable)?;
+    scanout1.retag_memory_attribute(MemoryAttribute::DeviceBurstable)?;
 
     let scanout_iova = [
         DCP_SCANOUT_IOVA_BASE,

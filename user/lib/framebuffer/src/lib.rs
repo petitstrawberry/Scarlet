@@ -8,7 +8,7 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::vec;
+use alloc::{format, vec};
 use std::{
     fs::File,
     handle::{
@@ -330,6 +330,8 @@ pub struct DisplaySurface {
 }
 
 impl DisplaySurface {
+    const PRIMARY_DISPLAY_SCAN_LIMIT: usize = 16;
+
     fn scale_component_to_field(value: u8, field: FbBitfield) -> u32 {
         if field.length == 0 {
             return 0;
@@ -384,7 +386,21 @@ impl DisplaySurface {
     ///
     /// Display surface instance or HandleError on failure.
     pub fn open_primary() -> HandleResult<Self> {
-        Self::open("/dev/display0")
+        let mut fallback = None;
+        for index in 0..Self::PRIMARY_DISPLAY_SCAN_LIMIT {
+            let path = format!("/dev/display{}", index);
+            let Ok(display) = Self::open(&path) else {
+                continue;
+            };
+            if display.has_swapchain() {
+                return Ok(display);
+            }
+            if fallback.is_none() {
+                fallback = Some(display);
+            }
+        }
+
+        fallback.ok_or(HandleError::NotFound)
     }
 
     /// Open a display surface.

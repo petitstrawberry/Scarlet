@@ -397,8 +397,8 @@ impl DartDomain {
 
     /// Wrap the page table already installed for a firmware-owned stream.
     ///
-    /// The existing TTBR is read from the DART and its physical root is
-    /// accessed through Scarlet's runtime direct map. The TTBR and TCR are
+    /// The existing TTBR is read from the DART and its firmware-owned table
+    /// hierarchy is mapped as normal cacheable memory. The TTBR and TCR are
     /// preserved; later mapping operations only update PTEs and invalidate
     /// cached translations, matching Asahi Linux's locked-DART path.
     ///
@@ -515,7 +515,9 @@ impl IommuDomain for DartDomain {
         let iova = (iova as usize) & DART_IAS_MASK;
 
         for page in 0..pages {
-            page_table.unmap_page(iova + page * page_size);
+            page_table
+                .unmap_page(iova + page * page_size)
+                .map_err(|_| IommuError::UnmapFailed)?;
         }
 
         drop(page_table);
@@ -551,11 +553,17 @@ pub struct DartPageTable {
     root_vaddr: usize,
     root_paddr: usize,
     tables: Vec<ContiguousPages>,
+    firmware_tables: Vec<FirmwareTableMapping>,
     page_shift: usize,
     bits_per_level: usize,
     table_levels: usize,
     pte_count: usize,
     table_size: usize,
+}
+
+struct FirmwareTableMapping {
+    paddr: usize,
+    vaddr: usize,
 }
 
 impl DartPageTable {
@@ -603,6 +611,7 @@ impl DartPageTable {
             root_vaddr,
             root_paddr,
             tables: Vec::new(),
+            firmware_tables: Vec::new(),
             page_shift,
             bits_per_level,
             table_levels,
@@ -613,9 +622,9 @@ impl DartPageTable {
 
     /// Wrap a pre-existing root page table installed by firmware.
     ///
-    /// The root table at `root_paddr` must be reachable through the kernel
-    /// runtime direct map. New leaf and intermediate entries are added
-    /// in-place, matching Asahi Linux's locked-DART page-table handling.
+    /// The firmware-owned table hierarchy is mapped as normal cacheable memory.
+    /// New leaf and intermediate entries are added in-place, matching Asahi
+    /// Linux's locked-DART page-table handling.
     ///
     /// # Arguments
     ///
@@ -643,16 +652,23 @@ impl DartPageTable {
         let iova_index_bits = DART_IAS_BITS - page_shift;
         let table_levels = core::cmp::max(2, iova_index_bits.div_ceil(bits_per_level));
 
-        Ok(Self {
-            root_vaddr: scarlet::vm::phys_to_virt(root_paddr),
+        let root_vaddr = scarlet::vm::memremap_normal(root_paddr, table_size)?;
+        let mut table = Self {
+            root_vaddr,
             root_paddr,
             tables: Vec::new(),
+            firmware_tables: alloc::vec![FirmwareTableMapping {
+                paddr: root_paddr,
+                vaddr: root_vaddr,
+            }],
             page_shift,
             bits_per_level,
             table_levels,
             pte_count,
             table_size,
-        })
+        };
+        table.map_existing_table_hierarchy(root_vaddr, table_levels)?;
+        Ok(table)
     }
 
     fn allocate_table(table_size: usize) -> Result<ContiguousPages, &'static str> {
@@ -676,6 +692,57 @@ impl DartPageTable {
 
     fn pte_to_paddr(pte: u64) -> usize {
         (pte & DART_PADDR_MASK) as usize
+    }
+
+    fn mapped_table_vaddr(&self, paddr: usize) -> Option<usize> {
+        if paddr == self.root_paddr {
+            return Some(self.root_vaddr);
+        }
+
+        self.tables
+            .iter()
+            .find(|table| table.as_paddr() == paddr)
+            .map(ContiguousPages::as_vaddr)
+            .or_else(|| {
+                self.firmware_tables
+                    .iter()
+                    .find(|mapping| mapping.paddr == paddr)
+                    .map(|mapping| mapping.vaddr)
+            })
+    }
+
+    fn map_firmware_table(&mut self, paddr: usize) -> Result<(usize, bool), &'static str> {
+        if let Some(vaddr) = self.mapped_table_vaddr(paddr) {
+            return Ok((vaddr, false));
+        }
+
+        let vaddr = scarlet::vm::memremap_normal(paddr, self.table_size)?;
+        self.firmware_tables
+            .push(FirmwareTableMapping { paddr, vaddr });
+        Ok((vaddr, true))
+    }
+
+    fn map_existing_table_hierarchy(
+        &mut self,
+        table_vaddr: usize,
+        level: usize,
+    ) -> Result<(), &'static str> {
+        if level <= 1 {
+            return Ok(());
+        }
+
+        for index in 0..self.pte_count {
+            let pte = Self::read_pte(table_vaddr, index);
+            if pte & DART_PTE_VALID == 0 {
+                continue;
+            }
+
+            let (next_vaddr, newly_mapped) = self.map_firmware_table(Self::pte_to_paddr(pte))?;
+            if newly_mapped {
+                self.map_existing_table_hierarchy(next_vaddr, level - 1)?;
+            }
+        }
+        Ok(())
     }
 
     fn table_index(&self, iova: usize, level: usize) -> usize {
@@ -713,7 +780,7 @@ impl DartPageTable {
                 table_vaddr = next_vaddr;
             } else {
                 let next_table_paddr = Self::pte_to_paddr(pte);
-                table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
+                table_vaddr = self.map_firmware_table(next_table_paddr)?.0;
             }
         }
 
@@ -728,19 +795,25 @@ impl DartPageTable {
     /// # Arguments
     ///
     /// * `iova` - I/O virtual address to unmap.
-    pub fn unmap_page(&mut self, iova: usize) {
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the mapping was absent or removed, or an error when an
+    /// existing firmware-owned page-table level could not be mapped.
+    pub fn unmap_page(&mut self, iova: usize) -> Result<(), &'static str> {
         let mut table_vaddr = self.root_vaddr;
         for level in (1..self.table_levels).rev() {
             let index = self.table_index(iova, level);
             let pte = Self::read_pte(table_vaddr, index);
             if pte & DART_PTE_VALID == 0 {
-                return;
+                return Ok(());
             }
             let next_table_paddr = Self::pte_to_paddr(pte);
-            table_vaddr = scarlet::vm::phys_to_virt(next_table_paddr);
+            table_vaddr = self.map_firmware_table(next_table_paddr)?.0;
         }
         let leaf_index = self.leaf_index(iova);
         Self::write_pte(table_vaddr, leaf_index, 0);
+        Ok(())
     }
 
     /// Resolve an IOVA through the current DART page table.
@@ -759,7 +832,7 @@ impl DartPageTable {
             if pte & DART_PTE_VALID == 0 {
                 return None;
             }
-            table_vaddr = scarlet::vm::phys_to_virt(Self::pte_to_paddr(pte));
+            table_vaddr = self.mapped_table_vaddr(Self::pte_to_paddr(pte))?;
         }
 
         let pte = Self::read_pte(table_vaddr, self.leaf_index(iova));
@@ -851,7 +924,7 @@ impl DartPageTable {
         iova_base: usize,
         imported: &mut usize,
     ) -> Result<(), &'static str> {
-        let table_vaddr = scarlet::vm::phys_to_virt(table_paddr);
+        let table_vaddr = self.map_firmware_table(table_paddr)?.0;
 
         let shift = if level <= 1 {
             self.page_shift
@@ -878,6 +951,14 @@ impl DartPageTable {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for DartPageTable {
+    fn drop(&mut self) {
+        for mapping in self.firmware_tables.drain(..) {
+            scarlet::vm::iounmap(mapping.vaddr);
+        }
     }
 }
 
