@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -536,7 +537,7 @@ def enable_avd_pmgr(args, p):
             warn_or_raise(args.avd_pmgr, f"failed to enable PMGR for {path}: {exc}", exc)
 
 
-def patch_avd_guest_payload(args, hv, payload):
+def patch_avd_guest_payload(args, adt, payload):
     if args.avd_dtb_patch == "off":
         return payload
     import apple_avd_dtb
@@ -546,7 +547,7 @@ def patch_avd_guest_payload(args, hv, payload):
             info = apple_avd_dtb.load_info_json(args.avd_info_json)
         else:
             info = apple_avd_dtb.extract_avd_info_from_adt(
-                hv.adt,
+                adt,
                 machine=args.machine,
                 soc=args.avd_soc,
             )
@@ -575,7 +576,7 @@ def start_guest(args):
     hv.init()
 
     payload = args.payload.read_bytes()
-    payload = patch_avd_guest_payload(args, hv, payload)
+    payload = patch_avd_guest_payload(args, hv.adt, payload)
     enable_avd_pmgr(args, p)
     print(f"Loading guest payload {args.payload} ({len(payload)} bytes)")
     hv.load_raw(payload, args.entry_point)
@@ -637,6 +638,16 @@ def start_guest_bare(args):
             f"exceeds physical memory top 0x{mem_top:x}"
         )
 
+    payload_path = args.payload
+    payload_tempdir = None
+    payload = args.payload.read_bytes()
+    patched_payload = patch_avd_guest_payload(args, u.adt, payload)
+    if patched_payload != payload:
+        payload_tempdir = tempfile.TemporaryDirectory(prefix="scarlet-avd-payload-")
+        payload_path = pathlib.Path(payload_tempdir.name) / args.payload.name
+        payload_path.write_bytes(patched_payload)
+        print(f"Prepared runtime-patched bare payload {payload_path}")
+
     enable_avd_pmgr(args, p)
 
     print(
@@ -659,37 +670,41 @@ def start_guest_bare(args):
     print("Chainloading U-Boot payload at EL2 (no HV)...")
     env = os.environ.copy()
     env["M1N1DEVICE"] = args.proxy_device
-    cmd = [sys.executable, TOOLS_DIR / "chainload.py", "-r", str(args.payload)]
+    cmd = [sys.executable, TOOLS_DIR / "chainload.py", "-r", str(payload_path)]
     deadline = timeout_deadline(args.connect_timeout)
     attempt = 1
-    while True:
-        try:
-            result = run_checked_capture(cmd, cwd=REPO_ROOT, env=env, echo=False)
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
-            return
-        except subprocess.CalledProcessError as exc:
-            chainload_output = (exc.stdout or "") + (exc.stderr or "")
-            if "Reloading into stub" in chainload_output:
-                if exc.stdout:
-                    print(exc.stdout, end="")
-                if exc.stderr:
-                    print(exc.stderr, end="", file=sys.stderr)
-                print("Chainload completed (target left proxy mode after reload).")
+    try:
+        while True:
+            try:
+                result = run_checked_capture(cmd, cwd=REPO_ROOT, env=env, echo=False)
+                if result.stdout:
+                    print(result.stdout, end="")
+                if result.stderr:
+                    print(result.stderr, end="", file=sys.stderr)
                 return
-            remaining = timeout_remaining(deadline)
-            if remaining is not None and remaining <= 0:
-                raise
-            suffix = "" if remaining is None else f" ({remaining:.0f}s left)"
-            print(
-                f"chainload not ready on attempt {attempt}: "
-                f"{summarize_failure(exc)}; retrying{suffix}",
-                file=sys.stderr,
-            )
-            attempt += 1
-            retry_sleep(deadline)
+            except subprocess.CalledProcessError as exc:
+                chainload_output = (exc.stdout or "") + (exc.stderr or "")
+                if "Reloading into stub" in chainload_output:
+                    if exc.stdout:
+                        print(exc.stdout, end="")
+                    if exc.stderr:
+                        print(exc.stderr, end="", file=sys.stderr)
+                    print("Chainload completed (target left proxy mode after reload).")
+                    return
+                remaining = timeout_remaining(deadline)
+                if remaining is not None and remaining <= 0:
+                    raise
+                suffix = "" if remaining is None else f" ({remaining:.0f}s left)"
+                print(
+                    f"chainload not ready on attempt {attempt}: "
+                    f"{summarize_failure(exc)}; retrying{suffix}",
+                    file=sys.stderr,
+                )
+                attempt += 1
+                retry_sleep(deadline)
+    finally:
+        if payload_tempdir is not None:
+            payload_tempdir.cleanup()
 
 
 def existing_path(path):
