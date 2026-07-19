@@ -16,7 +16,7 @@ set -euo pipefail
 : "${IMAGES_DIR:=output/images}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 require_supported_host() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
