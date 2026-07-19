@@ -30,3 +30,4 @@ target/
 .direnv/
 result
 test-media/
+.DS_Store
