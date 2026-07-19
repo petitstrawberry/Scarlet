@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use spin::Once;
+use spin::{Mutex, Once};
 
 use crate::vm::direct_map::DirectMapRegions;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute};
@@ -113,7 +113,7 @@ struct KernelMemoryLayout {
     bootloader_direct_map_phys_end: AtomicUsize,
     runtime_direct_map_phys_start: AtomicUsize,
     runtime_direct_map_phys_end: AtomicUsize,
-    runtime_direct_map_regions: Once<DirectMapRegions>,
+    runtime_direct_map_regions: Once<Mutex<DirectMapRegions>>,
     heap_phys_base: AtomicUsize,
     heap_virt_base: AtomicUsize,
     heap_size: AtomicUsize,
@@ -181,7 +181,7 @@ impl KernelMemoryLayout {
             .bounding_area()
             .expect("runtime direct-map regions are empty");
         self.runtime_direct_map_regions
-            .call_once(|| direct_map_regions);
+            .call_once(|| Mutex::new(direct_map_regions));
         self.runtime_direct_map_offset
             .store(direct_map_offset, Ordering::Release);
         self.runtime_direct_map_phys_start
@@ -265,7 +265,7 @@ impl KernelMemoryLayout {
         })
     }
 
-    fn runtime_direct_map_regions(&self) -> Option<&DirectMapRegions> {
+    fn runtime_direct_map_regions(&self) -> Option<&Mutex<DirectMapRegions>> {
         self.runtime_direct_map_regions.get()
     }
 
@@ -275,7 +275,7 @@ impl KernelMemoryLayout {
             direct_map.contains_phys(paddr)
         } else {
             self.runtime_direct_map_regions()
-                .map(|regions| regions.contains(paddr))
+                .map(|regions| regions.lock().contains(paddr))
                 .unwrap_or(false)
         };
         assert!(
@@ -306,7 +306,7 @@ impl KernelMemoryLayout {
                 direct_map.contains_phys(paddr)
             } else {
                 self.runtime_direct_map_regions()
-                    .map(|regions| regions.contains(paddr))
+                    .map(|regions| regions.lock().contains(paddr))
                     .unwrap_or(false)
             };
             if is_mapped {
@@ -454,14 +454,25 @@ pub fn get_current_direct_map_phys_range() -> (usize, usize) {
     (current.phys_start, current.phys_end)
 }
 
-/// Returns Scarlet's published sparse runtime direct-map regions.
+/// Returns a snapshot of Scarlet's published sparse runtime direct-map regions.
 ///
 /// # Returns
 ///
 /// `Some(regions)` after Scarlet has switched to its own page tables, or
 /// `None` while only Limine's bootloader mappings are active.
-pub fn runtime_direct_map_regions() -> Option<&'static DirectMapRegions> {
-    layout().runtime_direct_map_regions()
+pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
+    layout()
+        .runtime_direct_map_regions()
+        .map(|regions| *regions.lock())
+}
+
+/// Locks the published runtime direct-map metadata for an atomic internal update.
+pub(crate) fn lock_runtime_direct_map_regions()
+-> Result<spin::MutexGuard<'static, DirectMapRegions>, &'static str> {
+    layout()
+        .runtime_direct_map_regions()
+        .map(|regions| regions.lock())
+        .ok_or("runtime direct-map regions not initialized")
 }
 
 /// Validates a physical alias against the published sparse direct map.
@@ -514,7 +525,7 @@ pub fn get_heap_phys_layout() -> Option<(usize, usize, usize)> {
 ///
 /// * `new_offset` - The new HHDM offset value
 pub fn set_hhdm_offset(new_offset: usize) {
-    let direct_map_regions = *runtime_direct_map_regions()
+    let direct_map_regions = runtime_direct_map_regions()
         .expect("cannot update the HHDM offset before the runtime direct map is published");
     transition_kernel_memory_layout(
         new_offset,

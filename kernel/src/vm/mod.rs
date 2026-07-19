@@ -47,6 +47,7 @@ extern crate alloc;
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
+static DIRECT_MAP_RETAG_LOCK: Mutex<()> = Mutex::new(());
 
 fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
@@ -58,6 +59,74 @@ fn align_up(addr: usize, align: usize) -> usize {
 
 pub fn get_kernel_vm_manager() -> &'static VirtualMemoryManager {
     KERNEL_VM_MANAGER.call_once(|| VirtualMemoryManager::new())
+}
+
+/// Retags one fully covered physical range in the live kernel direct map.
+///
+/// This is internal plumbing for PMM-owned allocations. It keeps the published
+/// sparse-region metadata, kernel VMM metadata, and active HHDM page-table
+/// leaves synchronized while serializing concurrent retag transactions. The
+/// runtime direct-map metadata lock is held only while planning and publishing
+/// the metadata change, never while acquiring the kernel page-table lock.
+pub(crate) fn retag_direct_map_memory_attribute(
+    physical_area: MemoryArea,
+    memory_attribute: MemoryAttribute,
+) -> Result<MemoryAttribute, &'static str> {
+    let _retag_guard = DIRECT_MAP_RETAG_LOCK.lock();
+
+    let (replacement_regions, original_attribute) = {
+        let regions = addr::lock_runtime_direct_map_regions()?;
+        let mut replacement_regions = *regions;
+        let original_attribute = replacement_regions.retag(physical_area, memory_attribute)?;
+        (replacement_regions, original_attribute)
+    };
+    if original_attribute == memory_attribute {
+        return Ok(original_attribute);
+    }
+
+    let hhdm_area = MemoryArea::new(
+        SCARLET_HHDM_BASE
+            .checked_add(physical_area.start)
+            .ok_or("HHDM retag virtual start overflows")?,
+        SCARLET_HHDM_BASE
+            .checked_add(physical_area.end)
+            .ok_or("HHDM retag virtual end overflows")?,
+    );
+    let hhdm_map = VirtualMemoryMap {
+        vmarea: hhdm_area,
+        pmarea: physical_area,
+        vm_start: hhdm_area.start,
+        permissions: VirtualMemoryPermission::Read as usize
+            | VirtualMemoryPermission::Write as usize,
+        is_shared: true,
+        memory_attribute,
+        owner: None,
+    };
+    let manager = get_kernel_vm_manager();
+    manager.retag_memory_map_range(hhdm_area, original_attribute, memory_attribute)?;
+
+    let page_table_result = manager
+        .get_root_page_table()
+        .ok_or("kernel HHDM retag has no root page table")
+        .and_then(|mut root| root.retag_memory_area(hhdm_map.clone()));
+    if let Err(error) = page_table_result {
+        if let Some(mut root) = manager.get_root_page_table() {
+            let mut rollback_map = hhdm_map;
+            rollback_map.memory_attribute = original_attribute;
+            root.retag_memory_area(rollback_map)
+                .expect("kernel HHDM page-table retag rollback failed");
+        }
+        manager
+            .retag_memory_map_range(hhdm_area, memory_attribute, original_attribute)
+            .expect("kernel HHDM metadata retag rollback failed");
+        return Err(error);
+    }
+
+    {
+        let mut regions = addr::lock_runtime_direct_map_regions()?;
+        *regions = replacement_regions;
+    }
+    Ok(original_attribute)
 }
 
 static KERNEL_AREA: Once<MemoryArea> = Once::new();
@@ -342,7 +411,7 @@ pub fn user_kernel_vm_init(task: &Task) {
 
     let kernel_area = *KERNEL_AREA.get().expect("KERNEL_AREA not initialized");
     let direct_map_regions =
-        *addr::runtime_direct_map_regions().expect("runtime direct-map regions not initialized");
+        addr::runtime_direct_map_regions().expect("runtime direct-map regions not initialized");
     let kernel_heap_area = *KERNEL_HEAP_AREA
         .get()
         .expect("KERNEL_HEAP_AREA not initialized");

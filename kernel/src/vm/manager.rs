@@ -66,6 +66,7 @@ const WRITE_SITE_MMAP_BASE: u64 = 0x424d;
 const WRITE_SITE_ADD_FIXED: u64 = 0x4146;
 const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
+const WRITE_SITE_RETAG: u64 = 0x5254;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 
 #[derive(Debug, Clone)]
@@ -341,6 +342,131 @@ impl VirtualMemoryManager {
 
         g.last_search_cache = None;
         g.memmap.insert(map.vmarea.start, map);
+        Ok(())
+    }
+
+    /// Retags a fully covered range in existing VM metadata without changing page tables.
+    ///
+    /// This is internal plumbing for a serialized live direct-map retag. The
+    /// caller must update the corresponding page-table leaves before publishing
+    /// the replacement direct-map metadata, and must pass the attribute currently
+    /// recorded for every covered mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `vmarea` - Inclusive page-aligned virtual range to retag.
+    /// * `expected_attribute` - Attribute that every covered map must have.
+    /// * `memory_attribute` - Attribute to record for the covered range.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after replacing only the covered portions, or an error when the
+    /// range is invalid, has a gap, or does not have the expected attribute.
+    pub(crate) fn retag_memory_map_range(
+        &self,
+        vmarea: MemoryArea,
+        expected_attribute: MemoryAttribute,
+        memory_attribute: MemoryAttribute,
+    ) -> Result<(), &'static str> {
+        if vmarea.start > vmarea.end
+            || !vmarea.start.is_multiple_of(PAGE_SIZE)
+            || vmarea.end % PAGE_SIZE != PAGE_SIZE - 1
+        {
+            return Err("VM retag range must be page-aligned and non-empty");
+        }
+
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_RETAG);
+        let keys: Vec<usize> = g
+            .memmap
+            .iter()
+            .filter_map(|(start, map)| {
+                if map.vmarea.start <= vmarea.end && vmarea.start <= map.vmarea.end {
+                    Some(*start)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut next_covered = vmarea.start;
+        for key in &keys {
+            let map = g
+                .memmap
+                .get(key)
+                .expect("retag key must reference an existing map");
+            let overlap_start = map.vmarea.start.max(vmarea.start);
+            let overlap_end = map.vmarea.end.min(vmarea.end);
+            if overlap_start != next_covered {
+                return Err("VM retag range is not fully covered");
+            }
+            if map.memory_attribute != expected_attribute {
+                return Err("VM retag range has an unexpected memory attribute");
+            }
+            if overlap_end == vmarea.end {
+                next_covered = vmarea.end;
+                break;
+            }
+            next_covered = overlap_end
+                .checked_add(1)
+                .ok_or("VM retag range coverage overflows")?;
+        }
+
+        if keys.is_empty() || next_covered != vmarea.end {
+            return Err("VM retag range is not fully covered");
+        }
+
+        let mut replacement = Vec::new();
+        for key in keys {
+            let map = g
+                .memmap
+                .remove(&key)
+                .expect("retag key must reference an existing map");
+            let overlap_start = map.vmarea.start.max(vmarea.start);
+            let overlap_end = map.vmarea.end.min(vmarea.end);
+
+            if map.vmarea.start < overlap_start {
+                replacement.push(VirtualMemoryMap {
+                    vmarea: MemoryArea::new(map.vmarea.start, overlap_start - 1),
+                    pmarea: Self::subrange_pmarea(&map, map.vmarea.start, overlap_start - 1),
+                    vm_start: map.vm_start,
+                    permissions: map.permissions,
+                    is_shared: map.is_shared,
+                    memory_attribute: map.memory_attribute,
+                    owner: map.owner.clone(),
+                });
+            }
+
+            replacement.push(VirtualMemoryMap {
+                vmarea: MemoryArea::new(overlap_start, overlap_end),
+                pmarea: Self::subrange_pmarea(&map, overlap_start, overlap_end),
+                vm_start: map.vm_start,
+                permissions: map.permissions,
+                is_shared: map.is_shared,
+                memory_attribute,
+                owner: map.owner.clone(),
+            });
+
+            if overlap_end < map.vmarea.end {
+                let after_start = overlap_end
+                    .checked_add(1)
+                    .expect("overlap end precedes the mapped range end");
+                replacement.push(VirtualMemoryMap {
+                    vmarea: MemoryArea::new(after_start, map.vmarea.end),
+                    pmarea: Self::subrange_pmarea(&map, after_start, map.vmarea.end),
+                    vm_start: map.vm_start,
+                    permissions: map.permissions,
+                    is_shared: map.is_shared,
+                    memory_attribute: map.memory_attribute,
+                    owner: map.owner,
+                });
+            }
+        }
+
+        for map in replacement {
+            g.memmap.insert(map.vmarea.start, map);
+        }
+        g.last_search_cache = None;
         Ok(())
     }
 

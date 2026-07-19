@@ -150,6 +150,135 @@ impl DirectMapRegions {
         self.insert_region(region)
     }
 
+    /// Retags a fully covered, page-aligned direct-map range.
+    ///
+    /// The operation splits regions at the requested boundaries and merges
+    /// adjacent equal-attribute regions. The requested range must be fully
+    /// covered without holes and must currently have one uniform attribute.
+    /// Validation and capacity checks complete before this set is changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `area` - Inclusive, page-aligned physical range to retag.
+    /// * `memory_attribute` - Attribute for the retagged direct-map range.
+    ///
+    /// # Returns
+    ///
+    /// The original uniform attribute on success, or an error when the range
+    /// is invalid, partially covered, mixed, or cannot fit after splitting.
+    pub fn retag(
+        &mut self,
+        area: MemoryArea,
+        memory_attribute: MemoryAttribute,
+    ) -> Result<MemoryAttribute, &'static str> {
+        if area.start > area.end
+            || !area.start.is_multiple_of(PAGE_SIZE)
+            || area.end % PAGE_SIZE != PAGE_SIZE - 1
+        {
+            return Err("direct-map retag range must be page-aligned and non-empty");
+        }
+
+        let mut first = None;
+        let mut last = None;
+        let mut next_covered = area.start;
+        let mut original_attribute = None;
+
+        for (index, region) in self.regions[..self.len].iter().flatten().enumerate() {
+            if region.area.end < area.start {
+                continue;
+            }
+            if region.area.start > area.end {
+                break;
+            }
+
+            let overlap_start = region.area.start.max(area.start);
+            let overlap_end = region.area.end.min(area.end);
+            if overlap_start != next_covered {
+                return Err("direct-map retag range is not fully covered");
+            }
+
+            match original_attribute {
+                Some(original) if original != region.memory_attribute => {
+                    return Err("direct-map retag range has mixed memory attributes");
+                }
+                None => original_attribute = Some(region.memory_attribute),
+                _ => {}
+            }
+
+            first.get_or_insert(index);
+            last = Some(index);
+            if overlap_end == area.end {
+                next_covered = area.end;
+                break;
+            }
+            next_covered = overlap_end
+                .checked_add(1)
+                .ok_or("direct-map retag range coverage overflows")?;
+        }
+
+        if first.is_none() || next_covered != area.end {
+            return Err("direct-map retag range is not fully covered");
+        }
+
+        let original_attribute = original_attribute.expect("covered range has an attribute");
+        if original_attribute == memory_attribute {
+            return Ok(original_attribute);
+        }
+
+        let first = first.expect("covered range has a first region");
+        let last = last.expect("covered range has a last region");
+        let mut replacement = [None; MAX_DIRECT_MAP_REGIONS];
+        let mut replacement_len = 0;
+
+        for (index, region) in self.regions[..self.len]
+            .iter()
+            .flatten()
+            .copied()
+            .enumerate()
+        {
+            if index < first || index > last {
+                Self::append_region(&mut replacement, &mut replacement_len, region)?;
+                continue;
+            }
+
+            if index == first {
+                if region.area.start < area.start {
+                    Self::append_region(
+                        &mut replacement,
+                        &mut replacement_len,
+                        DirectMapRegion {
+                            area: MemoryArea::new(region.area.start, area.start - 1),
+                            memory_attribute: region.memory_attribute,
+                        },
+                    )?;
+                }
+                Self::append_region(
+                    &mut replacement,
+                    &mut replacement_len,
+                    DirectMapRegion {
+                        area,
+                        memory_attribute,
+                    },
+                )?;
+            }
+
+            if index == last && region.area.end > area.end {
+                Self::append_region(
+                    &mut replacement,
+                    &mut replacement_len,
+                    DirectMapRegion {
+                        area: MemoryArea::new(area.end + 1, region.area.end),
+                        memory_attribute: region.memory_attribute,
+                    },
+                )?;
+            }
+        }
+
+        self.regions = replacement;
+        self.len = replacement_len;
+        Ok(original_attribute)
+    }
+
     /// Returns whether a physical address belongs to a sparse direct-map region.
     ///
     /// # Arguments
@@ -304,6 +433,33 @@ impl DirectMapRegions {
         self.len = replacement_len;
         Ok(())
     }
+
+    fn append_region(
+        regions: &mut [Option<DirectMapRegion>; MAX_DIRECT_MAP_REGIONS],
+        len: &mut usize,
+        candidate: DirectMapRegion,
+    ) -> Result<(), &'static str> {
+        if let Some(previous) = regions[(*len).saturating_sub(1)]
+            && previous.memory_attribute == candidate.memory_attribute
+            && areas_touch_or_overlap(previous.area, candidate.area)
+        {
+            regions[*len - 1] = Some(DirectMapRegion {
+                area: MemoryArea::new(
+                    previous.area.start.min(candidate.area.start),
+                    previous.area.end.max(candidate.area.end),
+                ),
+                memory_attribute: previous.memory_attribute,
+            });
+            return Ok(());
+        }
+
+        if *len == MAX_DIRECT_MAP_REGIONS {
+            return Err("direct-map region capacity exceeded");
+        }
+        regions[*len] = Some(candidate);
+        *len += 1;
+        Ok(())
+    }
 }
 
 impl Default for DirectMapRegions {
@@ -379,6 +535,147 @@ mod tests {
             regions
                 .validate_alias(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Device)
                 .is_err()
+        );
+    }
+
+    #[test_case]
+    fn direct_map_regions_retag_splits_a_region_and_returns_original_attribute() {
+        let mut regions = DirectMapRegions::new();
+        regions
+            .insert(MemoryArea::new(0x1000, 0x3fff), MemoryAttribute::Normal)
+            .unwrap();
+
+        assert_eq!(
+            regions
+                .retag(
+                    MemoryArea::new(0x2000, 0x2fff),
+                    MemoryAttribute::DeviceBurstable,
+                )
+                .unwrap(),
+            MemoryAttribute::Normal
+        );
+        assert_eq!(regions.len(), 3);
+        assert_eq!(
+            regions.get(0).unwrap().area(),
+            MemoryArea::new(0x1000, 0x1fff)
+        );
+        assert_eq!(
+            regions.get(1).unwrap().memory_attribute(),
+            MemoryAttribute::DeviceBurstable
+        );
+        assert_eq!(
+            regions.get(2).unwrap().area(),
+            MemoryArea::new(0x3000, 0x3fff)
+        );
+    }
+
+    #[test_case]
+    fn direct_map_regions_retag_merges_matching_neighbors() {
+        let mut regions = DirectMapRegions::new();
+        regions
+            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .unwrap();
+        regions
+            .insert(
+                MemoryArea::new(0x2000, 0x2fff),
+                MemoryAttribute::DeviceBurstable,
+            )
+            .unwrap();
+        regions
+            .insert(MemoryArea::new(0x3000, 0x3fff), MemoryAttribute::Normal)
+            .unwrap();
+
+        regions
+            .retag(MemoryArea::new(0x2000, 0x2fff), MemoryAttribute::Normal)
+            .unwrap();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions.get(0).unwrap().area(),
+            MemoryArea::new(0x1000, 0x3fff)
+        );
+        assert_eq!(
+            regions.get(0).unwrap().memory_attribute(),
+            MemoryAttribute::Normal
+        );
+    }
+
+    #[test_case]
+    fn direct_map_regions_retag_rejects_gaps_and_mixed_source_attributes() {
+        let mut regions = DirectMapRegions::new();
+        regions
+            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .unwrap();
+        regions
+            .insert(MemoryArea::new(0x3000, 0x3fff), MemoryAttribute::Normal)
+            .unwrap();
+        assert!(
+            regions
+                .retag(MemoryArea::new(0x1000, 0x3fff), MemoryAttribute::Device)
+                .is_err()
+        );
+        assert_eq!(regions.len(), 2);
+
+        let mut mixed = DirectMapRegions::new();
+        mixed
+            .insert(MemoryArea::new(0x1000, 0x1fff), MemoryAttribute::Normal)
+            .unwrap();
+        mixed
+            .insert(
+                MemoryArea::new(0x2000, 0x2fff),
+                MemoryAttribute::DeviceBurstable,
+            )
+            .unwrap();
+        assert!(
+            mixed
+                .retag(MemoryArea::new(0x1000, 0x2fff), MemoryAttribute::Device)
+                .is_err()
+        );
+        assert_eq!(
+            mixed.get(0).unwrap().memory_attribute(),
+            MemoryAttribute::Normal
+        );
+        assert_eq!(
+            mixed.get(1).unwrap().memory_attribute(),
+            MemoryAttribute::DeviceBurstable
+        );
+        assert!(
+            mixed
+                .retag(MemoryArea::new(0x1001, 0x1fff), MemoryAttribute::Device)
+                .is_err()
+        );
+    }
+
+    #[test_case]
+    fn direct_map_regions_retag_capacity_failure_does_not_mutate() {
+        let mut regions = DirectMapRegions::new();
+        for index in 0..MAX_DIRECT_MAP_REGIONS {
+            let start = 0x1000 + index * PAGE_SIZE * 4;
+            regions
+                .insert(
+                    MemoryArea::new(start, start + PAGE_SIZE * 3 - 1),
+                    MemoryAttribute::Normal,
+                )
+                .unwrap();
+        }
+        let original_first = regions.get(0).unwrap();
+
+        assert!(
+            regions
+                .retag(
+                    MemoryArea::new(
+                        original_first.area().start + PAGE_SIZE,
+                        original_first.area().start + PAGE_SIZE * 2 - 1,
+                    ),
+                    MemoryAttribute::Device,
+                )
+                .is_err()
+        );
+        assert_eq!(regions.len(), MAX_DIRECT_MAP_REGIONS);
+        assert_eq!(regions.get(0).unwrap().area(), original_first.area());
+        assert_eq!(
+            regions.get(0).unwrap().memory_attribute(),
+            MemoryAttribute::Normal
         );
     }
 }
