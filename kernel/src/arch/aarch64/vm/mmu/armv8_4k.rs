@@ -577,6 +577,83 @@ impl PageTable {
         Ok(())
     }
 
+    /// Retags existing leaf mappings without changing their physical addresses.
+    ///
+    /// Partial huge-page coverage is split before replacement so unaffected
+    /// mappings retain their original attributes. Leaf replacement uses the
+    /// same break-before-make and broadcast-TLBI path as normal remapping.
+    pub(in crate::arch::aarch64::vm) fn retag_memory_area(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+    ) -> Result<(), &'static str> {
+        if mmap.vmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.vmarea.size() % PAGE_SIZE != 0
+            || mmap.pmarea.size() % PAGE_SIZE != 0
+            || mmap.vmarea.size() != mmap.pmarea.size()
+        {
+            return Err("retag memory area is not page-aligned");
+        }
+
+        let attrs = MapAttrs {
+            permissions: mmap.permissions,
+            memory_attribute: mmap.memory_attribute,
+        };
+        let is_user_mapping = VirtualMemoryPermission::User.contained_in(mmap.permissions);
+        let mut vaddr = mmap.vmarea.start;
+        let mut paddr = mmap.pmarea.start;
+        let mut mutation = PageTableMutation::NoChange;
+
+        while vaddr <= mmap.vmarea.end {
+            let (_, level) = self
+                .walk_leaf(vaddr)
+                .ok_or("retag memory area has no existing leaf mapping")?;
+            let leaf_size = page_size_for_level(level);
+            let leaf_start = vaddr & !(leaf_size - 1);
+            let leaf_end = leaf_start
+                .checked_add(leaf_size - 1)
+                .ok_or("retag leaf range overflows")?;
+            if self.translate(vaddr) != Some(paddr) {
+                return Err("retag memory area does not match the existing physical mapping");
+            }
+
+            if level > 0 && (vaddr != leaf_start || leaf_end > mmap.vmarea.end) {
+                self.split_leaf(asid, vaddr, level)?;
+                continue;
+            }
+
+            let leaf_mutation = self.try_map_at_level(asid, vaddr, paddr, attrs, level)?;
+            mutation = mutation.aggregate(leaf_mutation);
+
+            if leaf_end == mmap.vmarea.end {
+                break;
+            }
+            vaddr = leaf_end
+                .checked_add(1)
+                .ok_or("retag virtual range overflows")?;
+            paddr = paddr
+                .checked_add(leaf_size)
+                .ok_or("retag physical range overflows")?;
+        }
+
+        if mapping_requires_final_broadcast_tlbi(mutation, is_user_mapping) {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_BEGIN,
+                mmap.vmarea.start as u64,
+                asid as u64,
+            );
+            invalidate_stage1_translations_inner_shareable();
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_DONE,
+                mmap.vmarea.start as u64,
+                asid as u64,
+            );
+        }
+
+        Ok(())
+    }
+
     /// Maps a single 4 KiB page.
     ///
     /// # Arguments
