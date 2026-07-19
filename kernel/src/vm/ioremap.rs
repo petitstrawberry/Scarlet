@@ -138,13 +138,40 @@ pub fn ioremap_init() {
 ///   this address for MMIO register accesses.
 /// * `Err(&'static str)` – Descriptive error if mapping failed.
 pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
+    map_physical_memory(paddr, size, MemoryAttribute::Device)
+}
+
+/// Map physical RAM into the kernel virtual address space as normal memory.
+///
+/// This is intended for firmware-owned RAM that is deliberately absent from
+/// the sparse runtime direct map but still needs a narrow kernel mapping. It
+/// must not be used for MMIO registers; use [`ioremap`] for device memory.
+///
+/// # Arguments
+///
+/// * `paddr` - Physical base address of the RAM range.
+/// * `size` - Number of bytes to map; must be greater than zero.
+///
+/// # Returns
+///
+/// A kernel virtual address with normal cacheable memory attributes, or an
+/// error when the range conflicts with the direct map or cannot be mapped.
+pub fn memremap_normal(paddr: usize, size: usize) -> Result<usize, &'static str> {
+    map_physical_memory(paddr, size, MemoryAttribute::Normal)
+}
+
+fn map_physical_memory(
+    paddr: usize,
+    size: usize,
+    memory_attribute: MemoryAttribute,
+) -> Result<usize, &'static str> {
     if size == 0 {
-        return Err("ioremap: size must be > 0");
+        return Err("physical map: size must be > 0");
     }
 
     let alloc_guard = IOREMAP_ALLOCATOR
         .get()
-        .ok_or("ioremap: subsystem not initialized (call ioremap_init first)")?;
+        .ok_or("physical map: subsystem not initialized")?;
 
     // Align physical address down to a page boundary.
     let offset = paddr & (PAGE_SIZE - 1);
@@ -161,13 +188,13 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
     let physical_area = MemoryArea::new(aligned_paddr, aligned_end);
 
     // Reject incompatible aliases before consuming IOREMAP virtual address space.
-    validate_direct_map_alias(physical_area, MemoryAttribute::Device)?;
+    validate_direct_map_alias(physical_area, memory_attribute)?;
 
     // Reserve virtual address space.
     let alloc_va = alloc_guard
         .lock()
         .alloc(aligned_size)
-        .ok_or("ioremap: IOREMAP virtual address space exhausted")?;
+        .ok_or("physical map: virtual address space exhausted")?;
 
     // Build the VirtualMemoryMap descriptor.
     let vmmap = VirtualMemoryMap::new(
@@ -177,7 +204,7 @@ pub fn ioremap(paddr: usize, size: usize) -> Result<usize, &'static str> {
         true, // shared: accessible from any address space using the kernel PT
         None,
     )
-    .with_memory_attribute(MemoryAttribute::Device);
+    .with_memory_attribute(memory_attribute);
 
     let km = get_kernel_vm_manager();
 

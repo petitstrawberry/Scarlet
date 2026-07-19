@@ -15,7 +15,7 @@ pub use addr::{
     get_boot_hhdm_offset, get_current_direct_map_phys_range, get_heap_phys_layout, get_hhdm_offset,
     phys_to_virt, set_hhdm_offset, transition_kernel_memory_layout, virt_to_phys,
 };
-pub use ioremap::{ioremap, iounmap};
+pub use ioremap::{ioremap, iounmap, memremap_normal};
 
 use direct_map::DirectMapRegions;
 use manager::VirtualMemoryManager;
