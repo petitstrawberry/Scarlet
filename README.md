@@ -46,7 +46,7 @@ composition is driven by `cargo-scarlet` from `scarlet-sdk` and the
 - SHV Type-2 hypervisor support with Linux `/dev/kvm` compatibility, including
   Firecracker-class AArch64 microVM workloads.
 - Device work covering VirtIO, networking, display presentation, audio, video
-  decode, and Apple Silicon bring-up.
+  decode.
 
 ## Quick Start
 
@@ -128,7 +128,6 @@ Important project variants:
 | `projects/aarch64-limine-full` | Default AArch64 QEMU full system. |
 | `projects/aarch64-limine-desktop` | AArch64 desktop-focused image. |
 | `projects/aarch64-limine-microvm` | AArch64 microvm-oriented project. |
-| `projects/aarch64-apple-limine-full` | Experimental Apple Silicon deployment target. |
 
 `scarlet.toml` is the source of truth for each project. It selects the BSP,
 kernel features, module set, ordered image layers, boot image format, and runner.
@@ -161,12 +160,7 @@ cargo make run-aarch64-microvm
 # Call cargo-scarlet directly when working on a specific project.
 cargo scarlet image --project projects/riscv64-limine-full
 cargo scarlet run --project projects/riscv64-limine-full --release
-cargo scarlet image --project projects/aarch64-apple-limine-full
 ```
-
-Apple Silicon deployment is intentionally separate from normal QEMU runs. See
-[`projects/aarch64-apple-limine-full/DEPLOY.md`](projects/aarch64-apple-limine-full/DEPLOY.md)
-for the m1n1/U-Boot/Limine flow.
 
 ## ABI Model
 
@@ -225,7 +219,6 @@ hardware support are being developed together.
 | --- | --- |
 | RISC-V 64 | Primary QEMU development target. Limine boot, kernel tests, userland, VirtIO devices, networking, and desktop-oriented images are maintained here first. |
 | AArch64 QEMU | Active target. Limine/UEFI boot, kernel tests, VirtIO devices, and desktop/full projects are supported. |
-| Apple Silicon | Experimental bring-up under `projects/aarch64-apple-limine-full`. Current work includes AIC, PMGR, DART, SMC/SPMI, SPI HID, framebuffer/display experiments, MCA/ADMAC audio, codecs, DWC3 USB, and PCIe-related drivers. Expect hardware-specific rough edges. |
 | ABI support | Scarlet native ABI works for the in-tree userland. xv6 RISC-V supports shell and common commands. Linux ABI is partial but already used for selected Buildroot/BusyBox userlands, Wayland GUI apps, and services such as Mozc. |
 | Desktop/UI | SWS, `sws-client`, ScarletUI, desktop shell, taskbar, terminal, settings, IME experiments, and selected Wayland bridge applications are in progress. |
 | Audio/media | `/dev/audioN`, VirtIO sound, Apple MCA/ADMAC playback, SAS, `sasctl`, `mplayer`, and `video_player` are available for current experiments. Audio design is still evolving around realtime and device-routing constraints. |

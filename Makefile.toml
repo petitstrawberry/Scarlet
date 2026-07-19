@@ -205,17 +205,6 @@ dependencies = ["build-debug-aarch64"]
 description = "Build host-side helper tools"
 dependencies = ["build-vhost-video-videotoolbox"]
 
-[tasks.build-apple-avd-firmware]
-description = "Build the default Apple AVD Cortex-M3 firmware"
-cwd = "firmware/apple-avd-fw-rs"
-command = "cargo"
-args = ["build", "-Zbuild-std=core", "--release"]
-
-[tasks.build-apple-avd-firmware-all]
-description = "Build Apple AVD Cortex-M3 firmware variants"
-cwd = "firmware/apple-avd-fw-rs"
-command = "scripts/build-all.sh"
-
 [tasks.build-vhost-video-videotoolbox]
 description = "Build the macOS VideoToolbox vhost-user video daemon"
 cwd = "tools/vhost-video-videotoolbox"
