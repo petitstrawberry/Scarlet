@@ -6,6 +6,7 @@ use core::fmt;
 
 use crate::environment::PAGE_SIZE;
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
+use crate::vm::vmem::{MemoryArea, MemoryAttribute};
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug)]
@@ -42,6 +43,8 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
     let vaddr = phys_to_virt(paddr) as *mut Page;
 
     // Zero-initialize the pages
+    // SAFETY: PMM returned `num_of_pages` contiguous direct-mapped pages at
+    // `vaddr`, so the byte range is writable and exactly covers the allocation.
     unsafe {
         core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
     }
@@ -70,6 +73,8 @@ pub fn allocate_raw_pages_aligned(num_of_pages: usize, align: usize) -> *mut Pag
 
     let vaddr = phys_to_virt(paddr) as *mut Page;
 
+    // SAFETY: PMM returned `num_of_pages` contiguous direct-mapped pages at
+    // `vaddr`, so the byte range is writable and exactly covers the allocation.
     unsafe {
         core::ptr::write_bytes(vaddr as *mut u8, 0, num_of_pages * PAGE_SIZE);
     }
@@ -113,6 +118,8 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
 
     let layout = Layout::array::<Page>(num_of_pages).expect("Layout calculation failed");
 
+    // SAFETY: the allocation layout describes a `num_of_pages`-long Page array
+    // returned by the global allocator immediately above.
     unsafe {
         let ptr = alloc_zeroed(layout) as *mut Page;
         if ptr.is_null() {
@@ -147,6 +154,8 @@ pub fn allocate_boxed_pages_aligned(num_of_pages: usize, align: usize) -> Box<[P
     let size = num_of_pages * PAGE_SIZE;
     let layout = Layout::from_size_align(size, align).expect("Layout calculation failed");
 
+    // SAFETY: the allocation layout describes `size` bytes returned by the
+    // global allocator immediately below.
     unsafe {
         let ptr = alloc_zeroed(layout) as *mut Page;
         if ptr.is_null() {
@@ -172,9 +181,11 @@ pub fn free_boxed_page(_page: Box<Page>) {
     drop(_page);
 }
 
+/// PMM-backed contiguous pages with an owned direct-map memory attribute.
 pub struct ContiguousPages {
     ptr: *mut Page,
     count: usize,
+    memory_attribute: MemoryAttribute,
 }
 
 impl ContiguousPages {
@@ -187,7 +198,11 @@ impl ContiguousPages {
         if ptr.is_null() {
             None
         } else {
-            Some(Self { ptr, count })
+            Some(Self {
+                ptr,
+                count,
+                memory_attribute: MemoryAttribute::Normal,
+            })
         }
     }
 
@@ -212,7 +227,11 @@ impl ContiguousPages {
         if ptr.is_null() {
             None
         } else {
-            Some(Self { ptr, count })
+            Some(Self {
+                ptr,
+                count,
+                memory_attribute: MemoryAttribute::Normal,
+            })
         }
     }
 
@@ -224,6 +243,59 @@ impl ContiguousPages {
     /// Get the physical address of the first page.
     pub fn as_paddr(&self) -> usize {
         virt_to_phys(self.ptr as usize)
+    }
+
+    /// Returns the current direct-map memory attribute for this allocation.
+    ///
+    /// # Returns
+    ///
+    /// The attribute installed for every page in this allocation's HHDM range.
+    pub const fn memory_attribute(&self) -> MemoryAttribute {
+        self.memory_attribute
+    }
+
+    /// Retags this allocation's complete physical and HHDM range.
+    ///
+    /// When transitioning away from Normal memory, prior CPU writes are
+    /// published and stale Normal cache lines are invalidated while the old
+    /// mapping is still valid. When restoring a device alias to Normal, cache
+    /// invalidation happens only after the Normal alias has been installed again.
+    ///
+    /// # Arguments
+    ///
+    /// * `memory_attribute` - Attribute to install for every page in this allocation.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the runtime direct-map metadata and active kernel HHDM
+    /// mappings have been updated, or an error if the range cannot be retagged.
+    pub fn retag_memory_attribute(
+        &mut self,
+        memory_attribute: MemoryAttribute,
+    ) -> Result<(), &'static str> {
+        if self.memory_attribute == memory_attribute {
+            return Ok(());
+        }
+
+        let byte_len = self.byte_len()?;
+        if self.memory_attribute == MemoryAttribute::Normal
+            && memory_attribute != MemoryAttribute::Normal
+        {
+            crate::arch::clean_invalidate_dcache_to_poc_range(self.as_vaddr(), byte_len);
+        }
+
+        let original_attribute =
+            crate::vm::retag_direct_map_memory_attribute(self.physical_area()?, memory_attribute)?;
+        debug_assert_eq!(original_attribute, self.memory_attribute);
+        self.memory_attribute = memory_attribute;
+
+        if self.memory_attribute == MemoryAttribute::Normal
+            && original_attribute != MemoryAttribute::Normal
+        {
+            crate::arch::invalidate_dcache_to_poc_range(self.as_vaddr(), byte_len);
+        }
+
+        Ok(())
     }
 
     /// Get the number of pages.
@@ -242,13 +314,18 @@ impl ContiguousPages {
     /// `index` must be less than `count`.
     pub unsafe fn page_ptr(&self, index: usize) -> *mut Page {
         debug_assert!(index < self.count);
-        self.ptr.add(index)
+        // SAFETY: the caller guarantees `index < self.count`, and this
+        // allocation owns a contiguous `count`-long Page array.
+        unsafe { self.ptr.add(index) }
     }
 
     /// Convert to raw parts (ptr, count) without freeing.
     ///
-    /// After calling this, the caller is responsible for freeing the memory.
-    pub fn into_raw(self) -> (*mut Page, usize) {
+    /// After restoring the allocation's direct-map range to Normal, this
+    /// transfers ownership to the caller, which is responsible for freeing the
+    /// memory.
+    pub fn into_raw(mut self) -> (*mut Page, usize) {
+        self.restore_normal_before_release();
         let ptr = self.ptr;
         let count = self.count;
         core::mem::forget(self);
@@ -263,7 +340,11 @@ impl ContiguousPages {
     pub unsafe fn from_raw(ptr: *mut Page, count: usize) -> Self {
         debug_assert!(!ptr.is_null());
         debug_assert!(count > 0);
-        Self { ptr, count }
+        Self {
+            ptr,
+            count,
+            memory_attribute: MemoryAttribute::Normal,
+        }
     }
 
     pub fn as_vaddr(&self) -> usize {
@@ -277,11 +358,34 @@ impl ContiguousPages {
 
         paddr < self_end && range_end > self_paddr
     }
+
+    fn byte_len(&self) -> Result<usize, &'static str> {
+        self.count
+            .checked_mul(PAGE_SIZE)
+            .ok_or("PMM allocation byte length overflows")
+    }
+
+    fn physical_area(&self) -> Result<MemoryArea, &'static str> {
+        let paddr = self.as_paddr();
+        let end = paddr
+            .checked_add(self.byte_len()?)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or("PMM allocation physical range overflows")?;
+        Ok(MemoryArea::new(paddr, end))
+    }
+
+    fn restore_normal_before_release(&mut self) {
+        if self.memory_attribute != MemoryAttribute::Normal {
+            self.retag_memory_attribute(MemoryAttribute::Normal)
+                .expect("failed to restore PMM allocation to Normal before release");
+        }
+    }
 }
 
 impl Drop for ContiguousPages {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.count > 0 {
+            self.restore_normal_before_release();
             free_raw_pages(self.ptr, self.count);
         }
     }
@@ -292,13 +396,34 @@ unsafe impl Sync for ContiguousPages {}
 
 impl Clone for ContiguousPages {
     fn clone(&self) -> Self {
-        let new_alloc = Self::new(self.count).expect("Failed to clone ContiguousPages");
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.ptr as *const u8,
-                new_alloc.ptr as *mut u8,
-                self.count * PAGE_SIZE,
-            );
+        let mut new_alloc = Self::new(self.count).expect("Failed to clone ContiguousPages");
+        let byte_len = self
+            .byte_len()
+            .expect("ContiguousPages clone byte length overflow");
+        if self.memory_attribute == MemoryAttribute::Normal {
+            // SAFETY: the two live PMM allocations are distinct, contiguous,
+            // and each covers `byte_len` bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.ptr as *const u8,
+                    new_alloc.ptr as *mut u8,
+                    byte_len,
+                );
+            }
+        } else {
+            for offset in 0..byte_len {
+                // SAFETY: both byte addresses are inside their respective live
+                // PMM allocations. Volatile access is used for a Device alias.
+                unsafe {
+                    let value = core::ptr::read_volatile((self.ptr as *const u8).add(offset));
+                    core::ptr::write_volatile((new_alloc.ptr as *mut u8).add(offset), value);
+                }
+            }
+        }
+        if self.memory_attribute != MemoryAttribute::Normal {
+            new_alloc
+                .retag_memory_attribute(self.memory_attribute)
+                .expect("Failed to retag cloned ContiguousPages");
         }
         new_alloc
     }
@@ -309,6 +434,7 @@ impl fmt::Debug for ContiguousPages {
         f.debug_struct("ContiguousPages")
             .field("ptr", &self.ptr)
             .field("count", &self.count)
+            .field("memory_attribute", &self.memory_attribute)
             .finish()
     }
 }
