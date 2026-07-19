@@ -117,7 +117,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     };
 
     if trap_kind == 3 {
-        super::apple_serror::print_error_status();
         print_trap_info(trapframe, esr);
         crate::println!(
             "[trap] asynchronous SError: ESR={:#x} ELR={:#x} CurrentEL=EL{} SPSR={:#x} DAIF={:#x} HCR_EL2={:#x}",

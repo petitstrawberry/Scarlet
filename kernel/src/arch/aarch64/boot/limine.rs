@@ -4,7 +4,6 @@ use core::sync::atomic::compiler_fence;
 
 use limine::mp::MpInfo;
 
-use super::platform;
 use crate::boot::limine::{
     DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, FRAMEBUFFER_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST,
     MODULE_REQUEST, MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound,
@@ -62,8 +61,6 @@ fn maybe_drop_el2_to_el1(continuation: usize, arg0: usize) {
     if !should_drop_el2_to_el1(2, hcr_el2, cfg!(feature = "hypervisor")) {
         return;
     }
-
-    platform::prepare_el2_drop();
 
     // SAFETY: The EL2 and non-VHE checks above establish that this one-way
     // transition is required before continuing in the real EL1 register bank.
@@ -289,14 +286,6 @@ extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: 
             new_hcr
         );
     }
-    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
-        early_println!(
-            "[aarch64] CPU {}: platform CPU control {:#x} -> {:#x}",
-            cpu_id,
-            old_actlr,
-            new_actlr
-        );
-    }
     // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
@@ -452,10 +441,6 @@ fn classify_cpu_node(
 ) -> crate::sched::scheduler::CpuCoreClass {
     use crate::sched::scheduler::CpuCoreClass;
 
-    if let Some(core_class) = platform::classify_cpu_node(cpu) {
-        return core_class;
-    }
-
     if min_capacity != u32::MAX
         && max_capacity > min_capacity
         && let Some(capacity) = raw_capacity
@@ -605,26 +590,11 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     );
     crate::arch::aarch64::early_console_init();
 
-    if let Some((before, after)) = platform::el2_drop_diagnostic_transition() {
-        early_println!(
-            "[aarch64] BSP: platform EL2 control before={:#x} after={:#x}",
-            before,
-            after
-        );
-    }
-
     if let Some((old_hcr, new_hcr)) = hcr_transition {
         early_println!(
             "[aarch64] BSP: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
             old_hcr,
             new_hcr
-        );
-    }
-    if let Some((old_actlr, new_actlr)) = platform::initialize_current_cpu() {
-        early_println!(
-            "[aarch64] BSP: platform CPU control {:#x} -> {:#x}",
-            old_actlr,
-            new_actlr
         );
     }
     // log_el1_memory_state("handoff", _arg0, inherited_sctlr);
@@ -736,19 +706,6 @@ mod el_drop_tests {
 
         assert!(physical_timer_mask < hcr_drop);
         assert!(virtual_timer_mask < hcr_drop);
-    }
-
-    #[test_case]
-    fn el2_drop_prepares_the_platform_before_the_transition() {
-        let source = include_str!("limine.rs");
-        let platform_prepare = source
-            .find("platform::prepare_el2_drop()")
-            .expect("EL2 drop must prepare the active boot platform");
-        let el2_drop = source
-            .find("drop_el2_to_el1(continuation, arg0)")
-            .expect("EL2 drop must enter the generic transition");
-
-        assert!(platform_prepare < el2_drop);
     }
 }
 
