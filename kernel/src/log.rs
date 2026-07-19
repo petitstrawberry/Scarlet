@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::waker::Waker;
 
-const LOG_BUF_SIZE: usize = 1 << 16; // 64 KiB
+const LOG_BUF_SIZE: usize = 1 << 18; // 256 KiB
 
 static BUF: [core::sync::atomic::AtomicU8; LOG_BUF_SIZE] =
     [const { core::sync::atomic::AtomicU8::new(0) }; LOG_BUF_SIZE];
