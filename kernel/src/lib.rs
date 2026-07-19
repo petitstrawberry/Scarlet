@@ -818,16 +818,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         device_manager.get_devices_count(),
         device_manager.get_device_by_name("tty0").is_some()
     );
-    for id in 1..=device_manager.get_devices_count() {
-        if let Some(device) = device_manager.get_device(id) {
-            println!(
-                "[boot] pre-init device: id={} name={} type={:?} capabilities={:?}",
-                id,
-                device.name(),
-                device.device_type(),
-                device.capabilities()
-            );
-        }
+    for (id, device) in device_manager.get_devices_with_ids() {
+        println!(
+            "[boot] pre-init device: id={} name={} type={:?} capabilities={:?}",
+            id,
+            device.name(),
+            device.device_type(),
+            device.capabilities()
+        );
     }
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding

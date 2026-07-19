@@ -94,34 +94,30 @@ pub fn _print(args: fmt::Arguments) {
     }
 
     // 1) Prefer devices that advertise Serial capability (raw UART-like)
-    let count = manager.get_devices_count();
-    for id in 1..=count {
-        if let Some(dev) = manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char
-                && dev.capabilities().contains(&DeviceCapability::Serial)
-                && dev.name() != "null"
-            {
-                if let Some(char_dev) = dev.as_char_device() {
-                    let mut writer = CharDeviceWriter(char_dev);
-                    if writer.write_fmt(args).is_ok() {
-                        return;
-                    }
+    let devices = manager.get_devices_with_ids();
+    for (_, dev) in &devices {
+        if dev.device_type() == DeviceType::Char
+            && dev.capabilities().contains(&DeviceCapability::Serial)
+            && dev.name() != "null"
+        {
+            if let Some(char_dev) = dev.as_char_device() {
+                let mut writer = CharDeviceWriter(char_dev);
+                if writer.write_fmt(args).is_ok() {
+                    return;
                 }
             }
         }
     }
 
     // 2) Otherwise choose any Char device that is NOT TTY-capable and NOT the null sink
-    for id in 1..=count {
-        if let Some(dev) = manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char
-                && !dev.capabilities().contains(&DeviceCapability::Tty)
-            {
-                if let Some(char_dev) = dev.as_char_device() {
-                    let mut writer = CharDeviceWriter(char_dev);
-                    if writer.write_fmt(args).is_ok() {
-                        return;
-                    }
+    for (_, dev) in &devices {
+        if dev.device_type() == DeviceType::Char
+            && !dev.capabilities().contains(&DeviceCapability::Tty)
+        {
+            if let Some(char_dev) = dev.as_char_device() {
+                let mut writer = CharDeviceWriter(char_dev);
+                if writer.write_fmt(args).is_ok() {
+                    return;
                 }
             }
         }

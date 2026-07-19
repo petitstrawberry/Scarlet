@@ -834,6 +834,13 @@ fn probe_deferred(message: &'static str) -> Result<(), &'static str> {
 }
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    if DeviceManager::get_manager()
+        .get_device_by_name("apple-dcp")
+        .is_some()
+    {
+        return Ok(());
+    }
+
     let dcp_phandle = device_phandle(device).ok_or("apple-dcp: missing phandle")?;
     let (dcp_dart_phandle, dcp_stream) =
         iommu_spec(device).ok_or("apple-dcp: missing DCP IOMMU")?;
@@ -1055,8 +1062,12 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     });
     let device_id = DeviceManager::get_manager()
         .register_device_with_name(alloc::string::String::from("apple-dcp"), graphics.clone());
-    scarlet::device::graphics::manager::GraphicsManager::get_manager()
-        .register_framebuffer_from_device(device_id, graphics)?;
+    if let Err(error) = scarlet::device::graphics::manager::GraphicsManager::get_manager()
+        .register_native_framebuffer_from_device(device_id, graphics)
+    {
+        DeviceManager::get_manager().unregister_device(device_id);
+        return Err(error);
+    }
 
     if scarlet::earlyfb::is_initialized() {
         scarlet::earlyfb::deactivate();

@@ -143,6 +143,19 @@ impl GpuDisplayResource {
 /// This trait defines the interface for graphics devices.
 /// It provides methods for framebuffer management and display operations.
 pub trait GraphicsDevice: Device {
+    /// Return whether this device is a firmware-provided boot framebuffer.
+    ///
+    /// Boot framebuffers remain available as a fallback until a native display
+    /// driver successfully takes over the display pipeline.
+    ///
+    /// # Returns
+    ///
+    /// `true` for firmware boot framebuffers that may be retired by a native
+    /// display driver, otherwise `false`.
+    fn is_boot_framebuffer(&self) -> bool {
+        false
+    }
+
     /// Get the device display name
     fn get_display_name(&self) -> &'static str;
 
@@ -318,6 +331,7 @@ pub struct GenericGraphicsDevice {
     display_name: &'static str,
     config: Option<FramebufferConfig>,
     framebuffer_addr: Option<usize>,
+    boot_framebuffer: bool,
 }
 
 impl GenericGraphicsDevice {
@@ -326,6 +340,7 @@ impl GenericGraphicsDevice {
             display_name,
             config: None,
             framebuffer_addr: None,
+            boot_framebuffer: false,
         }
     }
 
@@ -337,6 +352,15 @@ impl GenericGraphicsDevice {
     /// Set framebuffer address
     pub fn set_framebuffer_address(&mut self, addr: usize) {
         self.framebuffer_addr = Some(addr);
+    }
+
+    /// Mark this generic device as a firmware boot framebuffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `boot_framebuffer` - Whether native display takeover may retire it.
+    pub fn set_boot_framebuffer(&mut self, boot_framebuffer: bool) {
+        self.boot_framebuffer = boot_framebuffer;
     }
 }
 
@@ -404,6 +428,10 @@ impl Selectable for GenericGraphicsDevice {
 }
 
 impl GraphicsDevice for GenericGraphicsDevice {
+    fn is_boot_framebuffer(&self) -> bool {
+        self.boot_framebuffer
+    }
+
     fn get_display_name(&self) -> &'static str {
         self.display_name
     }

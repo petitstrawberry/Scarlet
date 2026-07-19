@@ -95,6 +95,10 @@ impl Selectable for SimpleFramebufferDevice {
 }
 
 impl GraphicsDevice for SimpleFramebufferDevice {
+    fn is_boot_framebuffer(&self) -> bool {
+        true
+    }
+
     fn get_display_name(&self) -> &'static str {
         self.display_name
     }

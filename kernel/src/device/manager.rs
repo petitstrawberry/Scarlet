@@ -1144,6 +1144,38 @@ impl DeviceManager {
         id
     }
 
+    /// Unregister a device by ID.
+    ///
+    /// Named devices are removed from every registry while holding the device,
+    /// name, and name-to-ID locks in registration order. The returned [`Arc`]
+    /// keeps the device alive for callers that already hold or need to retain
+    /// an endpoint after it has been unpublished.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - ID of the device to unpublish.
+    ///
+    /// # Returns
+    ///
+    /// The removed device, or `None` when no device is registered with `id`.
+    pub fn unregister_device(&self, id: usize) -> Option<SharedDevice> {
+        let mut devices = self.devices.lock();
+        let mut device_by_name = self.device_by_name.lock();
+        let mut name_to_id = self.name_to_id.lock();
+
+        let device = devices.remove(&id)?;
+        let name = name_to_id
+            .iter()
+            .find_map(|(name, device_id)| (*device_id == id).then(|| name.clone()));
+
+        if let Some(name) = name {
+            name_to_id.remove(&name);
+            device_by_name.remove(&name);
+        }
+
+        Some(device)
+    }
+
     /// Get a device by ID
     ///
     /// # Arguments
@@ -1194,6 +1226,24 @@ impl DeviceManager {
         devices.len()
     }
 
+    /// Get a coherent snapshot of all registered devices and their IDs.
+    ///
+    /// The returned [`Arc`] values keep their devices alive after the registry
+    /// lock is released, including when another caller subsequently unregisters
+    /// a device.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(id, device)` tuples for every device registered when the
+    /// snapshot was collected.
+    pub fn get_devices_with_ids(&self) -> Vec<(usize, SharedDevice)> {
+        let devices = self.devices.lock();
+        devices
+            .iter()
+            .map(|(id, device)| (*id, device.clone()))
+            .collect()
+    }
+
     /// Get the first device of a specific type
     ///
     /// # Arguments
@@ -1225,6 +1275,30 @@ impl DeviceManager {
         device_by_name
             .iter()
             .map(|(name, device)| (name.clone(), device.clone()))
+            .collect()
+    }
+
+    /// Get coherent snapshots of all named devices.
+    ///
+    /// Each returned entry is present in the ID, name, and name-to-ID
+    /// registries at the same time. Inconsistent entries are omitted rather
+    /// than returning a name, ID, and device from different registrations.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(name, id, device)` tuples for coherently registered named devices.
+    pub fn get_named_devices_with_ids(&self) -> Vec<(String, usize, SharedDevice)> {
+        let devices = self.devices.lock();
+        let device_by_name = self.device_by_name.lock();
+        let name_to_id = self.name_to_id.lock();
+
+        name_to_id
+            .iter()
+            .filter_map(|(name, id)| {
+                let device = devices.get(id)?;
+                let named_device = device_by_name.get(name)?;
+                Arc::ptr_eq(device, named_device).then(|| (name.clone(), *id, device.clone()))
+            })
             .collect()
     }
 
@@ -4911,6 +4985,51 @@ mod tests {
         assert!(retrieved_device.is_some());
         let retrieved_device = retrieved_device.unwrap();
         assert_eq!(retrieved_device.name(), "test_named");
+    }
+
+    #[test_case]
+    fn test_unregister_device_removes_all_named_registrations() {
+        let manager = DeviceManager::new();
+        let device: SharedDevice = Arc::new(GenericDevice::new("test_unregister"));
+        let id = manager.register_device_with_name("test_unregister".into(), device.clone());
+        let retained = manager
+            .get_device(id)
+            .expect("registered device should be available by ID");
+
+        let snapshots = manager.get_named_devices_with_ids();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, "test_unregister");
+        assert_eq!(snapshots[0].1, id);
+        assert!(Arc::ptr_eq(&snapshots[0].2, &retained));
+
+        let removed = manager
+            .unregister_device(id)
+            .expect("registered device should be removed");
+        assert!(Arc::ptr_eq(&removed, &retained));
+        assert_eq!(retained.name(), "test_unregister");
+        assert!(manager.get_device(id).is_none());
+        assert!(manager.get_device_by_name("test_unregister").is_none());
+        assert!(manager.get_device_id_by_name("test_unregister").is_none());
+        assert!(manager.get_named_devices_with_ids().is_empty());
+        assert!(manager.unregister_device(id).is_none());
+    }
+
+    #[test_case]
+    fn test_device_snapshot_includes_higher_id_after_lower_id_unregistered() {
+        let manager = DeviceManager::new();
+        let first: SharedDevice = Arc::new(GenericDevice::new("first-device"));
+        let second: SharedDevice = Arc::new(GenericDevice::new("second-device"));
+        let first_id = manager.register_device(first);
+        let second_id = manager.register_device(second.clone());
+
+        manager
+            .unregister_device(first_id)
+            .expect("lower device ID should be registered");
+
+        let snapshot = manager.get_devices_with_ids();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, second_id);
+        assert!(Arc::ptr_eq(&snapshot[0].1, &second));
     }
 
     #[test_case]
