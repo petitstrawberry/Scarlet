@@ -30,7 +30,7 @@ bash bundles/linux/tools/build_buildroot.sh
 bash bundles/linux/tools/build_user_programs.sh
 ```
 
-These scripts place the necessary files in `/opt/prebuilt` by default. See
+These scripts place the necessary files in `bundles/linux/prebuilt` by default. See
 [Linux Userspace Artifacts](userspace-artifacts.md) for AArch64 and
 repository-local path examples.
 
@@ -43,7 +43,7 @@ bash bundles/linux/tools/build_guest_image.sh
 ```
 
 This produces `guest-Image` and `guest-initramfs.cpio.gz` under
-`/opt/prebuilt/$ARCH/bin`.
+`bundles/linux/prebuilt/$ARCH/bin`.
 
 ### 3. Deploy Artifacts to Scarlet Rootfs
 
@@ -51,7 +51,7 @@ The build scripts create artifacts, but they need to be deployed into Scarlet's 
 For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
 
 ```bash
-# Deploy the Linux rootfs and binaries to bundles/linux/rootfs/linux-riscv64
+# Deploy the Linux rootfs and binaries to bundles/linux/rootfs/system/linux-riscv64
 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 

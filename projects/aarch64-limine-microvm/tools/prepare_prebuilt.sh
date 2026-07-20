@@ -24,7 +24,8 @@ find_guest_bin_dir() {
     fi
 
     for candidate in \
-        "$REPO_DIR/bundles/linux/rootfs/linux-aarch64/usr/bin" \
+        "$REPO_DIR/bundles/linux/prebuilt/aarch64/bin" \
+        "$REPO_DIR/bundles/linux/rootfs/system/linux-aarch64/usr/bin" \
         "/opt/prebuilt/aarch64/bin"
     do
         if [ -f "$candidate/guest-Image" ] && [ -f "$candidate/guest-initramfs.cpio.gz" ]; then

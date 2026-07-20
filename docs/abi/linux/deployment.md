@@ -6,8 +6,8 @@ artifacts into the Scarlet workspace.
 ## Overview
 
 `bundles/linux/tools/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
-additional prebuilt programs into `bundles/linux/rootfs/linux-$ARCH`, which is the
-tree included in the final Scarlet disk image.
+additional prebuilt programs into `bundles/linux/rootfs/system/linux-$ARCH`,
+which is the tree included in the final Scarlet disk image.
 
 Buildroot generation should be done on Linux. Deployment itself only needs the
 staged artifacts and can use an injected `PREBUILT_DIR`.
@@ -23,9 +23,9 @@ See [Linux Userspace Artifacts](userspace-artifacts.md). For AArch64 with
 repository-local paths on a Linux host:
 
 ```bash
-export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
-export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
-export WORKDIR="$PWD/.scarlet/cache"
+export BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64"
+export PREBUILT_DIR="$PWD/bundles/linux/prebuilt"
+export WORKDIR="$PWD/bundles/linux/cache/work"
 
 ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
@@ -49,11 +49,11 @@ For AArch64:
 
 ```bash
 ARCH=aarch64 \
-PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
-The script extracts to `bundles/linux/rootfs/linux-$ARCH`, then copies staged
+The script extracts to `bundles/linux/rootfs/system/linux-$ARCH`, then copies staged
 binaries into `usr/bin`, staged libraries into `usr/lib`, staged data into
 `usr/share`, and any staged root overlay into the extracted root.
 
@@ -68,7 +68,7 @@ deploying:
 TARGET_UID="$(id -u)" \
 TARGET_GID="$(id -g)" \
 ARCH=aarch64 \
-PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 

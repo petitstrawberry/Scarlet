@@ -5,18 +5,18 @@ set -euo pipefail
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot tree; defaults to the Docker path for ARCH
-#  PREBUILT_DIR - artifact staging directory, defaults to /opt/prebuilt
+#  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
 #  IMAGES_DIR - Buildroot images directory, defaults to output/images
 #  MAKE_JOBS - Buildroot parallelism, defaults to $(nproc)
 #  BUILDROOT_VERSION - Buildroot release to use when bootstrapping AArch64
 
 : "${ARCH:=riscv64}"
-: "${BUILDROOT_VERSION:=2025.02.6}"
-: "${PREBUILT_DIR:=/opt/prebuilt}"
-: "${IMAGES_DIR:=output/images}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+: "${BUILDROOT_VERSION:=2025.02.6}"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
+: "${IMAGES_DIR:=output/images}"
 
 require_supported_host() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -30,9 +30,9 @@ toolchains should be produced in scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example with repository-local paths:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
-  bash tools/linux/build_buildroot.sh
+  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  bash "${SCRIPT_DIR}/build_buildroot.sh"
 EOF
     exit 1
 }

@@ -11,8 +11,8 @@ Buildroot artifact generation is Linux-host work. Run these scripts in
 itself, but the Buildroot host tools and generated toolchains are not supported
 from macOS.
 
-The helper scripts keep the Docker-compatible defaults, but every important path
-can be injected:
+The helper scripts stage artifacts under `bundles/linux/prebuilt` by default.
+Docker-compatible paths remain available through environment overrides:
 
 - `BUILDROOT_DIR` - Buildroot checkout/build tree.
 - `PREBUILT_DIR` - artifact staging directory.
@@ -36,8 +36,8 @@ ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 Repository-local paths are useful outside the Docker image:
 
 ```bash
-BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
-PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ```
 
@@ -55,9 +55,9 @@ With the Buildroot toolchain ready, build the auxiliary binaries:
 
 ```bash
 ARCH=aarch64 \
-BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
-PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
-WORKDIR="$PWD/.scarlet/cache" \
+BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
+WORKDIR="$PWD/bundles/linux/cache/work" \
 bash bundles/linux/tools/build_user_programs.sh
 ```
 
@@ -79,8 +79,8 @@ built-in hypervisor:
 
 ```bash
 ARCH=aarch64 \
-BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64" \
-PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt" \
+BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 bash bundles/linux/tools/build_guest_image.sh
 ```
 
@@ -93,9 +93,9 @@ initramfs from the Buildroot rootfs, and stages `guest-Image` plus
 For AArch64 with repository-local artifacts:
 
 ```bash
-export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
-export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
-export WORKDIR="$PWD/.scarlet/cache"
+export BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64"
+export PREBUILT_DIR="$PWD/bundles/linux/prebuilt"
+export WORKDIR="$PWD/bundles/linux/cache/work"
 
 ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh

@@ -53,22 +53,22 @@ including `.session.ipc`, into the same native profile directory that
 ```sh
 ARCH=aarch64 \
 BUILDROOT_DIR=/opt/buildroot-aarch64 \
-PREBUILT_DIR=/opt/prebuilt \
-WORKDIR="$PWD/.scarlet/cache" \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
+WORKDIR="$PWD/bundles/linux/cache/work" \
 bash bundles/linux/tools/build_mozc_server.sh
 
 ARCH=aarch64 \
-PREBUILT_DIR=/opt/prebuilt \
+PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
 bash bundles/linux/tools/deploy_rootfs.sh
 ```
 
-When using the existing Scarlet devcontainer, use `BUILDROOT_DIR=/opt/buildroot-aarch64`
-and `PREBUILT_DIR=/opt/prebuilt`. If Buildroot was built into a repository-local
-cache instead, use the same `PREBUILT_DIR` for both `build_buildroot.sh` and
-`build_mozc_server.sh` so `deploy_rootfs.sh` can find `rootfs.tar`.
+When using the existing Scarlet devcontainer, `BUILDROOT_DIR=/opt/buildroot-aarch64`
+remains supported. Use the same `PREBUILT_DIR` for `build_buildroot.sh`,
+`build_mozc_server.sh`, and `deploy_rootfs.sh` so every step sees the same
+`rootfs.tar` and overlay artifacts.
 
 For an already deployed local rootfs, the staged binary can be copied into
-`bundles/linux/rootfs/linux-aarch64/usr/lib/mozc/mozc_server`.
+`bundles/linux/rootfs/system/linux-aarch64/usr/lib/mozc/mozc_server`.
 
 `build_mozc_server.sh` must be run on Linux. It intentionally does not import a
 distro `mozc_server`; the output is linked against the Buildroot musl sysroot so

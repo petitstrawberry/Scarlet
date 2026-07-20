@@ -4,23 +4,25 @@ set -euo pipefail
 # Cross-compile kvmtool (lkvm-static) for RISC-V 64-bit or AArch64.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run tools/linux/build_buildroot.sh first)
+#   - Buildroot toolchain built (run bundles/linux/tools/build_buildroot.sh first)
 #   - git
 #
 # Produces:
-#   ${PREBUILT_DIR}/bin/lkvm  (statically linked)
+#   ${PREBUILT_DIR}/${ARCH}/bin/lkvm  (statically linked)
 #
 # Environment variables:
 #  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot installation, defaults to /opt/buildroot (riscv64)
 #                  or /opt/buildroot-aarch64 (aarch64)
-#  PREBUILT_DIR  - output staging directory, defaults to /opt/prebuilt
+#  PREBUILT_DIR  - output staging directory, defaults to bundles/linux/prebuilt
 #  WORKDIR       - working directory for clones, defaults to /opt
 #  KVMTOOL_REPO  - git URL for kvmtool, defaults to upstream
 #  DTC_REPO      - git URL for dtc (libfdt), defaults to upstream
 
 : "${ARCH:=riscv64}"
-: "${PREBUILT_DIR:=/opt/prebuilt}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
 : "${WORKDIR:=/opt}"
 
 : "${KVMTOOL_REPO:=https://github.com/kvmtool/kvmtool.git}"
@@ -40,10 +42,10 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
-  WORKDIR="\$PWD/.scarlet/cache" \\
-  bash tools/linux/build_kvmtool.sh
+  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  bash "${SCRIPT_DIR}/build_kvmtool.sh"
 EOF
     exit 1
 }
@@ -71,7 +73,7 @@ require_supported_host
 
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
+    echo "Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -79,7 +81,7 @@ toolchain_gcc="${BUILDROOT_DIR}/output/host/bin/${TOOLCHAIN_PREFIX}-gcc"
 
 if [[ ! -x "${toolchain_gcc}" ]]; then
     echo "Buildroot toolchain missing at ${toolchain_gcc}." >&2
-    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
+    echo "Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -144,5 +146,5 @@ echo "==> kvmtool built successfully!"
 echo "    Binary: ${PREBUILT_DIR}/${ARCH}/bin/lkvm"
 echo "    Architecture: ${ARCH} (static)"
 echo ""
-echo "    Deploy with: bash tools/linux/deploy_rootfs.sh"
+echo "    Deploy with: bash ${SCRIPT_DIR}/deploy_rootfs.sh"
 echo "    Then run on Scarlet: lkvm run -k /path/to/Image ..."

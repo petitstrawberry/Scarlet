@@ -10,7 +10,7 @@ set -euo pipefail
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to aarch64
 #  BUILDROOT_DIR - Buildroot tree; defaults to /opt/buildroot-$ARCH
-#  PREBUILT_DIR - artifact staging directory, defaults to /opt/prebuilt
+#  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
 #  WORKDIR - checkout/build working directory, defaults to /opt
 #  MOZC_REPO - Mozc source repository
 #  MOZC_REV - optional branch, tag, or commit to check out
@@ -30,7 +30,9 @@ set -euo pipefail
 #  MOZC_BAZEL_EXTRA_ARGS - extra arguments passed before the target
 
 : "${ARCH:=aarch64}"
-: "${PREBUILT_DIR:=/opt/prebuilt}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
 : "${WORKDIR:=/opt}"
 : "${MOZC_REPO:=https://github.com/google/mozc.git}"
 : "${MOZC_DICTIONARY:=oss}"
@@ -55,10 +57,10 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example for AArch64 with repository-local paths:
   ARCH=aarch64 \\
-  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-aarch64" \\
-  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
-  WORKDIR="\$PWD/.scarlet/cache" \\
-  bash tools/linux/build_mozc_server.sh
+  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-aarch64" \\
+  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  bash "${SCRIPT_DIR}/build_mozc_server.sh"
 EOF
     exit 1
 }
@@ -84,7 +86,7 @@ require_supported_host
 
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first, or set BUILDROOT_DIR." >&2
+    echo "Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first, or set BUILDROOT_DIR." >&2
     exit 1
 fi
 
@@ -99,7 +101,7 @@ toolchain_sysroot="${BUILDROOT_DIR}/output/host/${TOOLCHAIN_PREFIX}/sysroot"
 for tool in "${toolchain_gcc}" "${toolchain_gxx}" "${toolchain_ar}" "${toolchain_ranlib}" "${toolchain_strip}"; do
     if [[ ! -x "${tool}" ]]; then
         echo "Buildroot toolchain component missing: ${tool}" >&2
-        echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
+        echo "Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first." >&2
         exit 1
     fi
 done
@@ -587,4 +589,4 @@ echo "    Binary: ${stage_dir}/mozc_server"
 echo "    ABI:    ${ARCH} musl via Buildroot"
 echo ""
 echo "Deploy with:"
-echo "  ARCH=${ARCH} PREBUILT_DIR=${PREBUILT_DIR} bash tools/linux/deploy_rootfs.sh"
+echo "  ARCH=${ARCH} PREBUILT_DIR=${PREBUILT_DIR} bash ${SCRIPT_DIR}/deploy_rootfs.sh"

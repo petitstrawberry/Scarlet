@@ -5,11 +5,13 @@ set -euo pipefail
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot tree; defaults to the Docker path for ARCH
-#  PREBUILT_DIR - artifact staging directory, defaults to /opt/prebuilt
+#  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
 #  WORKDIR - checkout/build working directory, defaults to /opt
 
 : "${ARCH:=riscv64}"
-: "${PREBUILT_DIR:=/opt/prebuilt}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
 : "${WORKDIR:=/opt}"
 
 : "${GREEN_REPO:=https://github.com/petitstrawberry/green.git}"
@@ -50,10 +52,10 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example for aarch64 with repository-local paths:
   ARCH=aarch64 \\
-  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-aarch64" \\
-  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
-  WORKDIR="\$PWD/.scarlet/cache" \\
-  bash tools/linux/build_user_programs.sh
+  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-aarch64" \\
+  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  bash "${SCRIPT_DIR}/build_user_programs.sh"
 EOF
     exit 1
 }
@@ -64,13 +66,13 @@ case "${ARCH}" in
         TOOLCHAIN_PREFIX="riscv64-buildroot-linux-musl"
         KVMTOOL_ARCH="riscv"
         : "${BUILDROOT_DIR:=/opt/buildroot}"
-        BUILDROOT_HELP="bash tools/linux/build_buildroot.sh"
+        BUILDROOT_HELP="ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh"
         ;;
     aarch64)
         TOOLCHAIN_PREFIX="aarch64-buildroot-linux-musl"
         KVMTOOL_ARCH="arm64"
         : "${BUILDROOT_DIR:=/opt/buildroot-aarch64}"
-        BUILDROOT_HELP="ARCH=aarch64 bash tools/linux/build_buildroot.sh"
+        BUILDROOT_HELP="ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh"
         ;;
     *)
         echo "Unsupported architecture: ${ARCH}" >&2

@@ -17,9 +17,9 @@ project-local helper scripts for external artifacts, then use `cargo-scarlet`
 for project build, image, and run operations.
 
 ```sh
-export BUILDROOT_DIR="$PWD/.scarlet/cache/buildroot-aarch64"
-export PREBUILT_DIR="$PWD/.scarlet/cache/prebuilt"
-export WORKDIR="$PWD/.scarlet/cache"
+export BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64"
+export PREBUILT_DIR="$PWD/bundles/linux/prebuilt"
+export WORKDIR="$PWD/bundles/linux/cache/work"
 
 ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
 ARCH=aarch64 bash bundles/linux/tools/build_guest_image.sh
@@ -52,12 +52,13 @@ After this setup, `cargo scarlet image` and `cargo scarlet run` use the
 project-local prebuilt artifacts and do not need to fetch Firecracker during
 image creation.
 
-If `mkfs/rootfs/system/linux-aarch64/usr/bin/guest-Image` and
+If `bundles/linux/rootfs/system/linux-aarch64/usr/bin/guest-Image` and
 `guest-initramfs.cpio.gz` already exist, `prepare_prebuilt.sh` can copy from
 there without rebuilding Buildroot.
 
-The Linux helper scripts still default to `/opt/buildroot-aarch64` and
-`/opt/prebuilt` for compatibility with the existing Docker workflow. For local
+The Linux helper scripts still accept `/opt/buildroot-aarch64` and
+`/opt/prebuilt` overrides for compatibility with the existing Docker workflow,
+but stage artifacts under `bundles/linux/prebuilt` by default. For local
 development, prefer the repository-local environment variables shown above.
 Buildroot artifact generation is Linux-host work: run it in `scarlet-dev`, a
 Linux VM, or a Linux Nix shell. macOS can build Scarlet itself, but these

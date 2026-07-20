@@ -105,8 +105,9 @@ ARCH=aarch64 bash bundles/linux/tools/deploy_rootfs.sh
 After deployment, rootfs is organized by architecture:
 ```
 bundles/linux/rootfs/
-  ├── linux-riscv64/
-  └── linux-aarch64/
+  └── system/
+      ├── linux-riscv64/
+      └── linux-aarch64/
 ```
 
 ## Running on QEMU

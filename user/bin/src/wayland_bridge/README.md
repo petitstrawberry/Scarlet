@@ -74,7 +74,7 @@ export WAYLAND_DISPLAY=wayland-0
 ```
 
 For PDF viewing, the Linux ABI rootfs can provide zathura built by
-`tools/linux/build_user_programs.sh`. The Scarlet-native `pdfview` command is
+`bundles/linux/tools/build_user_programs.sh`. The Scarlet-native `pdfview` command is
 only a launcher; rendering stays in the Linux/GTK/Wayland userland.
 
 ## Design Notes

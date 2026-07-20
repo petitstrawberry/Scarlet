@@ -4,23 +4,25 @@ set -euo pipefail
 # Build a bootable KVM guest image: guest kernel + guest initramfs.
 #
 # Prerequisites:
-#   - Buildroot built (run tools/linux/build_buildroot.sh first)
+#   - Buildroot built (run bundles/linux/tools/build_buildroot.sh first)
 #   - Buildroot toolchain available (for guest kernel cross-compilation)
 #
 # Produces:
-#   ${PREBUILT_DIR}/bin/guest-Image             (uncompressed guest kernel)
-#   ${PREBUILT_DIR}/bin/guest-initramfs.cpio.gz  (compressed cpio initramfs)
+#   ${PREBUILT_DIR}/${ARCH}/bin/guest-Image             (uncompressed guest kernel)
+#   ${PREBUILT_DIR}/${ARCH}/bin/guest-initramfs.cpio.gz  (compressed cpio initramfs)
 #
 # Environment variables:
 #  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot installation (auto-detected if unset)
-#  PREBUILT_DIR  - output staging directory, defaults to /opt/prebuilt
+#  PREBUILT_DIR  - output staging directory, defaults to bundles/linux/prebuilt
 #  WORKDIR       - working directory for clones, defaults to /opt
 #  KERNEL_REPO   - git URL for Linux kernel, defaults to stable
 #  KERNEL_BRANCH - branch/tag to checkout, defaults to v6.12
 
 : "${ARCH:=riscv64}"
-: "${PREBUILT_DIR:=/opt/prebuilt}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
 : "${WORKDIR:=/opt}"
 : "${KERNEL_REPO:=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"
 : "${KERNEL_BRANCH:=v6.12}"
@@ -38,10 +40,10 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/.scarlet/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/.scarlet/cache/prebuilt" \\
-  WORKDIR="\$PWD/.scarlet/cache" \\
-  bash tools/linux/build_guest_image.sh
+  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  bash "${SCRIPT_DIR}/build_guest_image.sh"
 EOF
     exit 1
 }
@@ -50,8 +52,8 @@ case "${ARCH}" in
     riscv64)
         : "${BUILDROOT_DIR:=/opt/buildroot}"
         TOOLCHAIN_PREFIX="riscv64-buildroot-linux-musl"
-        KERNEL_ARCH=riscv
-        KERNEL_IMAGE_PATH="arch/riscv/boot/Image"
+        LINUX_ARCH=riscv
+        KERNEL_IMAGE_PATH="arch/${LINUX_ARCH}/boot/Image"
         GUEST_KERNEL_CONFIG="
 CONFIG_VIRTUALIZATION=y
 CONFIG_KVM_GUEST=y
@@ -80,8 +82,8 @@ CONFIG_PRINTK=y
     aarch64)
         : "${BUILDROOT_DIR:=/opt/buildroot-aarch64}"
         TOOLCHAIN_PREFIX="aarch64-buildroot-linux-musl"
-        KERNEL_ARCH=arm64
-        KERNEL_IMAGE_PATH="arch/arm64/boot/Image"
+        LINUX_ARCH=arm64
+        KERNEL_IMAGE_PATH="arch/${LINUX_ARCH}/boot/Image"
         GUEST_KERNEL_CONFIG="
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
@@ -114,7 +116,7 @@ require_supported_host
 
 if [[ ! -d "${BUILDROOT_DIR}" ]]; then
     echo "Expected buildroot directory at ${BUILDROOT_DIR} not found." >&2
-    echo "Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
+    echo "Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -141,14 +143,14 @@ fi
 echo "==> Configuring guest kernel for ${ARCH}..."
 pushd "${KERNEL_DIR}" >/dev/null
 
-make CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${KERNEL_ARCH}" defconfig
+make CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${LINUX_ARCH}" defconfig
 
 echo "${GUEST_KERNEL_CONFIG}" >> .config
 
-make CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${KERNEL_ARCH}" olddefconfig
+make CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${LINUX_ARCH}" olddefconfig
 
 echo "==> Building guest kernel..."
-make -j"$(nproc)" CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${KERNEL_ARCH}" Image
+make -j"$(nproc)" CROSS_COMPILE="${TOOLCHAIN_PREFIX}-" ARCH="${LINUX_ARCH}" Image
 
 if [[ ! -f "${KERNEL_IMAGE_PATH}" ]]; then
     echo "ERROR: Image not built" >&2
@@ -164,7 +166,7 @@ echo "==> Building guest initramfs..."
 
 ROOTFS_TAR="${PREBUILT_DIR}/${ARCH}/rootfs.tar"
 if [[ ! -f "${ROOTFS_TAR}" ]]; then
-    echo "ERROR: ${ROOTFS_TAR} not found. Run ARCH=${ARCH} tools/linux/build_buildroot.sh first." >&2
+    echo "ERROR: ${ROOTFS_TAR} not found. Run ARCH=${ARCH} bash ${SCRIPT_DIR}/build_buildroot.sh first." >&2
     exit 1
 fi
 
@@ -199,5 +201,5 @@ echo "    guest-initramfs.cpio.gz -> ${PREBUILT_DIR}/${ARCH}/bin/guest-initramfs
 
 echo ""
 echo "==> Guest image built successfully!"
-echo "    Deploy with: bash tools/linux/deploy_rootfs.sh"
+echo "    Deploy with: bash ${SCRIPT_DIR}/deploy_rootfs.sh"
 echo "    Run on Scarlet: lkvm run -k /usr/bin/guest-Image -i /usr/bin/guest-initramfs.cpio.gz -p 'console=ttyS0 rdinit=/sbin/init' --console serial -n mode=none -m 512"

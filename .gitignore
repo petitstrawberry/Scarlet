@@ -20,6 +20,8 @@ scarlet.local.toml
 kernel/src/lsm/generated_symbols.rs
 /bsp/*/target
 /bsp/*/.scarlet
+/bundles/linux/cache/
+/bundles/linux/prebuilt/
 
 # Build artifacts
 tools/guest/*.o

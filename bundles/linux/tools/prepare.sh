@@ -10,7 +10,7 @@ set -euo pipefail
 #   --arch ARCH          aarch64 or riscv64 (default: aarch64)
 #   --steps STEPS        Comma-separated steps to run (default: all)
 #   --buildroot-dir DIR  Buildroot tree location
-#   --prebuilt-dir DIR   Artifact staging directory (default: ./cache/prebuilt)
+#   --prebuilt-dir DIR   Artifact staging directory (default: ../prebuilt)
 #   --workdir DIR        Checkout/build working directory (default: ./cache/work)
 #   --make-jobs N        Parallelism for make (default: $(nproc))
 #   -h, --help           Show this help
@@ -46,10 +46,6 @@ STEPS="${STEPS:-all}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CACHE_DIR="${SCARLET_LINUX_CACHE_DIR:-${BUNDLE_DIR}/cache}"
-BUILDROOT_DIR="${BUILDROOT_DIR:-${CACHE_DIR}/buildroot-${ARCH}}"
-PREBUILT_DIR="${PREBUILT_DIR:-${CACHE_DIR}/prebuilt}"
-WORKDIR="${WORKDIR:-${CACHE_DIR}/work}"
-MAKE_JOBS="${MAKE_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 ALL_STEPS=(buildroot guest-image user-programs mozc kvmtool deploy)
 
@@ -70,6 +66,11 @@ while [[ $# -gt 0 ]]; do
         *)              echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+: "${BUILDROOT_DIR:=${CACHE_DIR}/buildroot-${ARCH}}"
+: "${PREBUILT_DIR:=${BUNDLE_DIR}/prebuilt}"
+: "${WORKDIR:=${CACHE_DIR}/work}"
+: "${MAKE_JOBS:=$(nproc 2>/dev/null || echo 4)}"
 
 export ARCH BUILDROOT_DIR PREBUILT_DIR WORKDIR MAKE_JOBS
 

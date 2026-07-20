@@ -1,6 +1,6 @@
 //! Launch the Linux/Wayland PDF viewer.
 //!
-//! The renderer is the Linux zathura package built by `tools/linux/build_user_programs.sh`.
+//! The renderer is the Linux zathura package built by `bundles/linux/tools/build_user_programs.sh`.
 //! This Scarlet-native launcher only translates Scarlet-visible paths and starts
 //! zathura with the environment expected by the Linux rootfs.
 
