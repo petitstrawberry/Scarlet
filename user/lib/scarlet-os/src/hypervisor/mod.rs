@@ -187,8 +187,17 @@ impl Vcpu {
     }
 
     pub fn get_reg(&self, index: u32) -> Result<u64, ()> {
-        let result = vcpu_control(self.handle, vcpu_ctl::GET_ONE_REG, index as usize)?;
-        Ok(result as u64)
+        let mut one_reg = VcpuOneReg {
+            index,
+            _padding: 0,
+            value: 0,
+        };
+        vcpu_control(
+            self.handle,
+            vcpu_ctl::GET_ONE_REG,
+            &mut one_reg as *mut VcpuOneReg as usize,
+        )?;
+        Ok(one_reg.value)
     }
 
     pub fn set_reg(&self, index: u32, value: u64) -> Result<(), ()> {

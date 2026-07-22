@@ -614,8 +614,12 @@ impl ControlOps for Riscv64VcpuObject {
         match command {
             vcpu_ctl::RUN => Err("Use sys_shv_vcpu_run"),
             vcpu_ctl::GET_ONE_REG => {
-                let value = self.get_reg(arg as u32)?;
-                Ok(value as i32)
+                let target_ptr = translate_user_ptr(arg)?;
+                // SAFETY: translate_user_ptr validated the address; caller
+                // guarantees it points to a writable VcpuOneReg.
+                let one_reg = unsafe { &mut *(target_ptr as *mut VcpuOneReg) };
+                one_reg.value = self.get_reg(one_reg.index)?;
+                Ok(0)
             }
             vcpu_ctl::SET_ONE_REG => {
                 let target_ptr = translate_user_ptr(arg)?;
