@@ -1,15 +1,15 @@
 use limine::mp::MpInfo;
 
 use crate::boot::limine::{
-    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
-    MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound, ensure_base_revision_supported,
-    module_area, reserve_front, response, runtime_direct_map_regions, select_usable_region,
+    boot_cmdline, bootloader_hhdm_physical_bound, ensure_base_revision_supported, module_area,
+    reserve_front, response, runtime_direct_map_regions, select_usable_region, DTB_REQUEST,
+    EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST, MP_REQUEST,
 };
-use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
+use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
 use crate::environment::STACK_SIZE;
-use crate::mem::{KERNEL_STACK, init_bss};
+use crate::mem::{init_bss, KERNEL_STACK};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
-use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
+use crate::{early_println, start_ap, start_kernel, wait_for_ap_release, BootInfo, DeviceSource};
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
 
@@ -28,6 +28,12 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
 );
 
 unsafe extern "C" fn limine_ap_entry(info: &MpInfo) -> ! {
+    // SAFETY: sscratch holds whatever firmware left; explicitly clear it so
+    // try_get_cpuid() can deterministically treat 0 as "uninitialized"
+    // until init_cpu publishes the per-CPU pointer.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
     wait_for_ap_release();
     start_ap(info.hartid as usize)
 }
@@ -63,6 +69,12 @@ fn bootstrap_aps() {
 
 #[unsafe(no_mangle)]
 pub fn limine_entry() -> ! {
+    // SAFETY: sscratch holds whatever firmware left; explicitly clear it so
+    // try_get_cpuid() can deterministically treat 0 as "uninitialized"
+    // until init_cpu publishes the per-CPU pointer.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
     init_bss();
 
     let hhdm = response(HHDM_REQUEST.response(), "hhdm");

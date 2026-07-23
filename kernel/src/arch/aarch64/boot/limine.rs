@@ -236,6 +236,9 @@ unsafe extern "C" fn drop_el2_to_el1(_continuation: usize, _arg0: usize) -> ! {
 #[unsafe(naked)]
 unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
     naked_asm!(
+        // Clear TPIDR_EL1 so try_get_cpuid() treats this CPU as uninitialized
+        // until trap_init publishes the per-CPU pointer.
+        "msr tpidr_el1, xzr",
         // x0 = &MpInfo (from Limine)
         "ldr x8, [x0, #32]",        // x8 = mp_info.extra_argument = logical cpu_id
         // Compute stack_top = &KERNEL_STACK + STACK_SIZE * (cpu_id + 1)
@@ -550,6 +553,12 @@ fn configure_vhe_host_interrupt_routing() -> Option<(u64, u64)> {
 #[unsafe(link_section = ".init")]
 #[unsafe(no_mangle)]
 pub extern "C" fn limine_entry() -> ! {
+    // SAFETY: TPIDR_EL1 holds whatever firmware left; explicitly clear it
+    // so try_get_cpuid() can deterministically treat 0 as "uninitialized"
+    // until trap_init publishes the per-CPU pointer.
+    unsafe {
+        core::arch::asm!("msr tpidr_el1, xzr");
+    }
     init_bss();
     mask_exceptions();
 

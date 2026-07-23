@@ -23,33 +23,38 @@
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::arch::get_cpu;
+use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
 
 static PREEMPT_COUNT: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
 
 #[inline]
-fn current_cpu() -> usize {
-    get_cpu().get_cpuid()
+fn current_cpu() -> Option<usize> {
+    try_get_cpuid()
 }
 
 /// Return the current CPU's preemption counter.
 ///
-/// A non-zero value means the CPU is inside a non-preemptible section.
-///
 /// # Returns
 ///
-/// The current preempt count for the executing CPU.
+/// The current preempt count for the executing CPU, or `0` if the per-CPU
+/// substrate has not been published yet (early boot, before
+/// `sscratch`/`TPIDR_EL1` is programmed).
 #[inline]
 pub fn preempt_count() -> u32 {
-    PREEMPT_COUNT[current_cpu()].load(Ordering::Relaxed)
+    match current_cpu() {
+        Some(cpu) => PREEMPT_COUNT[cpu].load(Ordering::Relaxed),
+        None => 0,
+    }
 }
 
 /// Return whether the current CPU may be preempted.
 ///
 /// # Returns
 ///
-/// `true` when the preempt count is zero.
+/// `true` when the preempt count is zero. Also `true` while the per-CPU
+/// substrate is uninitialized, since lock operations are no-ops in that
+/// window.
 #[inline]
 pub fn preemptible() -> bool {
     preempt_count() == 0
@@ -58,12 +63,14 @@ pub fn preemptible() -> bool {
 /// Increment the preempt count on the current CPU.
 ///
 /// Must be paired with [`preempt_enable`]. Prefer [`PreemptGuard::new`] for
-/// RAII safety.
+/// RAII safety. No-op when the per-CPU substrate has not been published,
+/// so callers on an uninitialized CPU behave as plain busy-wait spinlocks.
 #[inline]
 pub fn preempt_disable() {
-    let cpu = current_cpu();
-    let prev = PREEMPT_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
-    let _ = prev;
+    if let Some(cpu) = current_cpu() {
+        let prev = PREEMPT_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
+        let _ = prev;
+    }
 }
 
 /// Decrement the preempt count on the current CPU.
@@ -71,13 +78,15 @@ pub fn preempt_disable() {
 /// # Panics
 ///
 /// In debug builds, panics on underflow to catch unbalanced
-/// `preempt_disable`/`preempt_enable` use.
+/// `preempt_disable`/`preempt_enable` use. No-op when the per-CPU substrate
+/// has not been published.
 #[inline]
 pub fn preempt_enable() {
-    let cpu = current_cpu();
-    let prev = PREEMPT_COUNT[cpu].fetch_sub(1, Ordering::Relaxed);
-    debug_assert!(prev > 0, "preempt_count underflow on cpu={}", cpu);
-    let _ = prev;
+    if let Some(cpu) = current_cpu() {
+        let prev = PREEMPT_COUNT[cpu].fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "preempt_count underflow on cpu={}", cpu);
+        let _ = prev;
+    }
 }
 
 /// RAII guard that disables preemption while alive.

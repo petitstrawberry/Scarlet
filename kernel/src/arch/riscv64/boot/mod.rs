@@ -7,9 +7,10 @@ use core::arch::asm;
 
 use crate::{
     arch::{
-        Riscv64, fpu,
+        fpu,
         riscv64::CPUS,
         trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler},
+        Riscv64,
     },
     early_println,
     environment::STACK_SIZE,
