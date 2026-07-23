@@ -140,15 +140,36 @@ fn resolve_guest_hpa(gpa: u64, vm: &Riscv64VmObject) -> Option<u64> {
         .map(|p| p as u64)
 }
 
-fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
-    if let Some(kva) = resolve_guest_kva(sepc, vm) {
-        // SAFETY: kva comes from translate_to_kva which returns a valid
-        // kernel virtual address. read_volatile is used because the guest
-        // memory mapping may have side effects or be concurrently modified.
-        unsafe { core::ptr::read_volatile(kva as *const u32) }
-    } else {
-        0
+fn read_guest_halfword(kva: usize) -> Option<u16> {
+    if kva & 1 != 0 {
+        return None;
     }
+
+    // SAFETY: the caller obtained kva from translate_to_kva. The explicit
+    // alignment check satisfies read_volatile's u16 alignment requirement.
+    Some(unsafe { core::ptr::read_volatile(kva as *const u16) })
+}
+
+fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
+    let Some(low_kva) = resolve_guest_kva(sepc, vm) else {
+        return 0;
+    };
+    let Some(low) = read_guest_halfword(low_kva) else {
+        return 0;
+    };
+
+    if low & 0x3 != 0x3 {
+        return u32::from(low);
+    }
+
+    let Some(high_kva) = resolve_guest_kva(sepc.wrapping_add(2), vm) else {
+        return 0;
+    };
+    let Some(high) = read_guest_halfword(high_kva) else {
+        return 0;
+    };
+
+    u32::from(low) | (u32::from(high) << 16)
 }
 
 fn decode_load_store_inst(inst: u32) -> Option<(u8, usize, bool, usize, u32)> {
@@ -422,5 +443,37 @@ pub fn clear_guest_mode() {
     let hstatus = hstatus & !HSTATUS_SPV;
     unsafe {
         asm!("csrw hstatus, {0}", in(reg) hstatus);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_guest_halfword;
+
+    #[repr(C, align(4))]
+    struct TwoByteAlignedInstruction {
+        padding: u16,
+        instruction: [u16; 2],
+    }
+
+    #[test_case]
+    fn test_read_guest_halfword_accepts_two_byte_alignment() {
+        let data = TwoByteAlignedInstruction {
+            padding: 0,
+            instruction: [0x1234, 0x5678],
+        };
+        let instruction_ptr = core::ptr::addr_of!(data.instruction) as *const u16 as usize;
+
+        assert_eq!(instruction_ptr & 0x3, 2);
+        assert_eq!(read_guest_halfword(instruction_ptr), Some(0x1234));
+        assert_eq!(read_guest_halfword(instruction_ptr + 2), Some(0x5678));
+    }
+
+    #[test_case]
+    fn test_read_guest_halfword_rejects_odd_address() {
+        let data = [0u16; 2];
+        let odd_ptr = data.as_ptr() as usize + 1;
+
+        assert_eq!(read_guest_halfword(odd_ptr), None);
     }
 }
