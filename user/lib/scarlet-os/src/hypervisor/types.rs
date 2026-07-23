@@ -25,11 +25,21 @@ pub enum VcpuExitReason {
 pub struct MmioInfo {
     pub address: u64,
     pub data: u64,
+    pub reg: u32,
     pub size: u8,
-    pub reg: u8,
     pub is_write: bool,
-    pub _padding: [u8; 5],
+    pub _padding: [u8; 2],
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<MmioInfo>() == 24);
+    assert!(core::mem::align_of::<MmioInfo>() == 8);
+    assert!(core::mem::offset_of!(MmioInfo, address) == 0);
+    assert!(core::mem::offset_of!(MmioInfo, data) == 8);
+    assert!(core::mem::offset_of!(MmioInfo, reg) == 16);
+    assert!(core::mem::offset_of!(MmioInfo, size) == 20);
+    assert!(core::mem::offset_of!(MmioInfo, is_write) == 21);
+};
 
 impl MmioInfo {
     pub fn is_write(&self) -> bool {

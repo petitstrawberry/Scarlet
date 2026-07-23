@@ -235,7 +235,7 @@ fn run_vcpu_loop(vcpu: &Vcpu, machine: &Machine, firmware: &mut dyn Firmware) {
                 let result = machine.handle_mmio_read(exit.mmio.address, exit.mmio.size);
                 let masked = mask_mmio_value(result, exit.mmio.size);
 
-                if exit.mmio.reg < 31 && vcpu.set_reg(exit.mmio.reg as u32, masked).is_err() {
+                if exit.mmio.reg < 31 && vcpu.set_reg(exit.mmio.reg, masked).is_err() {
                     println!(
                         "[ushv] Failed to write MMIO read result to reg x{}",
                         exit.mmio.reg

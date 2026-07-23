@@ -81,11 +81,11 @@ impl GuestVcpu {
         };
     }
 
-    pub fn get_mmio_data(&self, reg: u8, size: u8) -> u64 {
+    pub fn get_mmio_data(&self, reg: usize, size: u8) -> u64 {
         if reg == 0 {
             return 0;
         }
-        let val = self.get_gpr(reg as usize);
+        let val = self.get_gpr(reg);
         match size {
             1 => val & 0xFF,
             2 => val & 0xFFFF,
@@ -94,7 +94,7 @@ impl GuestVcpu {
         }
     }
 
-    pub fn set_mmio_data(&mut self, reg: u8, size: u8, data: u64) {
+    pub fn set_mmio_data(&mut self, reg: usize, size: u8, data: u64) {
         if reg == 0 {
             return;
         }
@@ -104,9 +104,9 @@ impl GuestVcpu {
             4 => 0xFFFFFFFF,
             _ => !0,
         };
-        let old = self.get_gpr(reg as usize);
+        let old = self.get_gpr(reg);
         let new = (old & !mask) | (data & mask);
-        self.set_gpr(reg as usize, new);
+        self.set_gpr(reg, new);
     }
 
     pub fn set_pc(&mut self, pc: u64) {
@@ -154,10 +154,10 @@ impl GuestVcpu {
         }
     }
 
-    pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
+    pub fn get_reg(&self, index: usize) -> Result<u64, &'static str> {
         match index {
             reg::PC => Ok(self.pc),
-            i if i < 32 => Ok(self.iregs.reg[i as usize] as u64),
+            i if i < 32 => Ok(self.iregs.reg[i] as u64),
             reg::SSTATUS => Ok(self.csrs.sstatus),
             reg::SEPC => Ok(self.csrs.sepc),
             reg::SCAUSE => Ok(self.csrs.scause),
@@ -180,7 +180,7 @@ impl GuestVcpu {
         }
     }
 
-    pub fn set_reg(&mut self, index: u32, value: u64) -> Result<(), &'static str> {
+    pub fn set_reg(&mut self, index: usize, value: u64) -> Result<(), &'static str> {
         // crate::println!("[GuestVcpu::set_reg] index={} value={:#x}", index, value);
         match index {
             reg::PC => {
@@ -189,7 +189,7 @@ impl GuestVcpu {
                 Ok(())
             }
             i if i < 32 => {
-                self.iregs.reg[i as usize] = value as usize;
+                self.iregs.reg[i] = value as usize;
                 // crate::println!(
                 //     "[GuestVcpu::set_reg] reg[{}] = {:#x}",
                 //     i,

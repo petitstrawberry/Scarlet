@@ -16,13 +16,13 @@ pub enum VmExit {
         epc: u64,
         addr: u64,
         size: u8,
-        reg: u8,
+        reg: usize,
     },
     MmioWrite {
         epc: u64,
         addr: u64,
         size: u8,
-        reg: u8,
+        reg: usize,
         data: u64,
     },
     FirmwareCall {
@@ -75,11 +75,21 @@ pub enum VcpuExitReason {
 pub struct MmioInfo {
     pub address: u64,
     pub data: u64,
+    pub reg: u32,
     pub size: u8,
-    pub reg: u8,
     pub is_write: bool,
-    pub _padding: [u8; 5],
+    pub _padding: [u8; 2],
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<MmioInfo>() == 24);
+    assert!(core::mem::align_of::<MmioInfo>() == 8);
+    assert!(core::mem::offset_of!(MmioInfo, address) == 0);
+    assert!(core::mem::offset_of!(MmioInfo, data) == 8);
+    assert!(core::mem::offset_of!(MmioInfo, reg) == 16);
+    assert!(core::mem::offset_of!(MmioInfo, size) == 20);
+    assert!(core::mem::offset_of!(MmioInfo, is_write) == 21);
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -108,14 +118,14 @@ impl VcpuExit {
                 addr,
                 size,
                 reg,
-            } => Self::mmio_read(*epc, *addr, *size, *reg),
+            } => Self::mmio_read(*epc, *addr, *size, abi_register_index(*reg)),
             VmExit::MmioWrite {
                 epc,
                 addr,
                 size,
                 reg,
                 data,
-            } => Self::mmio_write(*epc, *addr, *size, *reg, *data),
+            } => Self::mmio_write(*epc, *addr, *size, abi_register_index(*reg), *data),
             VmExit::FirmwareCall { epc } => Self {
                 reason: VcpuExitReason::FirmwareCall,
                 epc: *epc,
@@ -182,7 +192,7 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_read(epc: u64, address: u64, size: u8, reg: u8) -> Self {
+    pub fn mmio_read(epc: u64, address: u64, size: u8, reg: u32) -> Self {
         Self {
             reason: VcpuExitReason::MmioRead,
             epc,
@@ -197,7 +207,7 @@ impl VcpuExit {
         }
     }
 
-    pub fn mmio_write(epc: u64, address: u64, size: u8, reg: u8, data: u64) -> Self {
+    pub fn mmio_write(epc: u64, address: u64, size: u8, reg: u32, data: u64) -> Self {
         Self {
             reason: VcpuExitReason::MmioWrite,
             epc,
@@ -212,4 +222,8 @@ impl VcpuExit {
             ..Default::default()
         }
     }
+}
+
+fn abi_register_index(index: usize) -> u32 {
+    u32::try_from(index).expect("internal register index must fit the SHV ABI")
 }

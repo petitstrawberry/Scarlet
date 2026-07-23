@@ -170,7 +170,7 @@ struct KvmRiscvVcpuStateEntry {
 
 static KVM_RISCV_VCPU_STATES: Once<RwLock<Vec<KvmRiscvVcpuStateEntry>>> = Once::new();
 
-const PTRACE_REG_INDEX: [u32; 32] = [
+const PTRACE_REG_INDEX: [usize; 32] = [
     reg::PC,
     reg::RA,
     reg::SP,
@@ -575,7 +575,7 @@ pub fn write_kvm_to_regs(vcpu: &dyn VcpuObject, kvm_regs: &KvmRegs) {
     }
 }
 
-pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value: u64) {
+pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: usize, size: u8, value: u64) {
     if target_reg == 0 {
         return;
     }
@@ -586,7 +586,7 @@ pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value
         4 => 0xffff_ffff,
         _ => !0,
     };
-    let _ = vcpu.set_reg(target_reg as u32, value & mask);
+    let _ = vcpu.set_reg(target_reg, value & mask);
 }
 
 // ---------------------------------------------------------------------------

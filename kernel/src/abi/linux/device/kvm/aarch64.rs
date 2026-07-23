@@ -253,7 +253,7 @@ fn with_sysreg_state<R>(
 pub fn read_regs_to_kvm(vcpu: &dyn VcpuObject) -> KvmRegs {
     let mut regs = [0u64; 31];
     for (i, slot) in regs.iter_mut().enumerate() {
-        *slot = vcpu.get_reg(i as u32).unwrap_or(0);
+        *slot = vcpu.get_reg(i).unwrap_or(0);
     }
 
     let sp = vcpu.get_reg(reg::SP).unwrap_or(0);
@@ -270,14 +270,14 @@ pub fn read_regs_to_kvm(vcpu: &dyn VcpuObject) -> KvmRegs {
 
 pub fn write_kvm_to_regs(vcpu: &dyn VcpuObject, kvm_regs: &KvmRegs) {
     for (i, value) in kvm_regs.regs.iter().enumerate() {
-        let _ = vcpu.set_reg(i as u32, *value);
+        let _ = vcpu.set_reg(i, *value);
     }
     let _ = vcpu.set_reg(reg::SP, kvm_regs.sp);
     let _ = vcpu.set_reg(reg::PC, kvm_regs.pc);
     let _ = vcpu.set_reg(reg::PSTATE, kvm_regs.pstate);
 }
 
-pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value: u64) {
+pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: usize, size: u8, value: u64) {
     if target_reg >= 31 {
         return;
     }
@@ -288,7 +288,7 @@ pub fn complete_mmio_read(vcpu: &dyn VcpuObject, target_reg: u8, size: u8, value
         4 => 0xffff_ffff,
         _ => !0,
     };
-    let _ = vcpu.set_reg(target_reg as u32, value & mask);
+    let _ = vcpu.set_reg(target_reg, value & mask);
 }
 
 pub fn get_one_reg(vcpu: &dyn VcpuObject, id: u64) -> Result<u64, ()> {
@@ -334,7 +334,7 @@ fn set_one_fw_reg(id: u64, value: u64) -> Result<(), ()> {
 
 fn get_one_core_reg(vcpu: &dyn VcpuObject, index: u64) -> Result<u64, ()> {
     match index {
-        idx if idx <= 60 && idx % 2 == 0 => vcpu.get_reg((idx / 2) as u32).map_err(|_| ()),
+        idx if idx <= 60 && idx % 2 == 0 => vcpu.get_reg((idx / 2) as usize).map_err(|_| ()),
         KVM_CORE_REGS_SP => Ok(with_sysreg_state(vcpu, |s| s.sp_el0)),
         KVM_CORE_REGS_PC => vcpu.get_reg(reg::PC).map_err(|_| ()),
         KVM_CORE_REGS_PSTATE => vcpu.get_reg(reg::PSTATE).map_err(|_| ()),
@@ -357,7 +357,7 @@ fn get_one_core_reg(vcpu: &dyn VcpuObject, index: u64) -> Result<u64, ()> {
 
 fn set_one_core_reg(vcpu: &dyn VcpuObject, index: u64, value: u64) -> Result<(), ()> {
     match index {
-        idx if idx <= 60 && idx % 2 == 0 => vcpu.set_reg((idx / 2) as u32, value).map_err(|_| ()),
+        idx if idx <= 60 && idx % 2 == 0 => vcpu.set_reg((idx / 2) as usize, value).map_err(|_| ()),
         KVM_CORE_REGS_SP => {
             with_sysreg_state(vcpu, |s| s.sp_el0 = value);
             Ok(())

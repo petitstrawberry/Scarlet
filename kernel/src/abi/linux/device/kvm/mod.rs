@@ -960,9 +960,9 @@ fn handle_device_ioctl(
 // VCPU-level ioctl dispatcher
 // ---------------------------------------------------------------------------
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-static MMIO_PENDING_READ_REG: AtomicU8 = AtomicU8::new(0xFF);
+static MMIO_PENDING_READ_REG: AtomicUsize = AtomicUsize::new(usize::MAX);
 static MMIO_PENDING_VALID: AtomicBool = AtomicBool::new(false);
 static VM_EXIT_DEBUG_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -1072,7 +1072,7 @@ pub fn handle_vcpu_ioctl(
 
             if MMIO_PENDING_VALID.load(Ordering::Acquire) {
                 let reg = MMIO_PENDING_READ_REG.load(Ordering::Acquire);
-                if reg != 0xFF {
+                if reg != usize::MAX {
                     let result = if arg != 0 {
                         let task = mytask().ok_or(())?;
                         let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
