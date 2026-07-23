@@ -65,8 +65,8 @@ fn data_abort_access_size(iss: u32) -> u8 {
     1u8 << ((iss >> ESR_SAS_SHIFT) & 0x3)
 }
 
-fn data_abort_srt(iss: u32) -> u8 {
-    ((iss >> ESR_SRT_SHIFT) & ESR_SRT_MASK) as u8
+fn data_abort_srt(iss: u32) -> usize {
+    ((iss >> ESR_SRT_SHIFT) & ESR_SRT_MASK) as usize
 }
 
 fn esr_sys64_to_sysreg(iss: u32) -> u32 {
@@ -133,7 +133,7 @@ fn emulate_timer_sysreg(
     trapframe: &mut Trapframe,
     guest: &mut GuestVcpu,
     sysreg: u32,
-    reg: u8,
+    reg: usize,
     is_read: bool,
 ) -> bool {
     let mut sysregs = guest.sysregs.clone();
@@ -229,7 +229,7 @@ fn emulate_el1_sysreg(
     trapframe: &mut Trapframe,
     guest: &mut GuestVcpu,
     sysreg: u32,
-    reg: u8,
+    reg: usize,
     is_read: bool,
 ) -> bool {
     let mut sysregs = guest.sysregs.clone();
@@ -387,7 +387,7 @@ pub fn arch_guest_trap_handler(
         ESR_EC_SYS64 => {
             let epc = trapframe.elr;
             let sysreg = esr_sys64_to_sysreg(iss) as u64;
-            let reg = ((iss >> ESR_SYS64_ISS_RT_SHIFT) & ESR_SYS64_ISS_RT_MASK) as u8;
+            let reg = ((iss >> ESR_SYS64_ISS_RT_SHIFT) & ESR_SYS64_ISS_RT_MASK) as usize;
             let is_read = (iss & ESR_SYS64_ISS_DIR_READ) != 0;
 
             if emulate_el1_sysreg(trapframe, guest, sysreg as u32, reg, is_read) {

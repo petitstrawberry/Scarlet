@@ -631,11 +631,11 @@ impl VcpuObject for Aarch64VcpuObject {
             .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
     }
 
-    fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
+    fn get_reg(&self, index: usize) -> Result<u64, &'static str> {
         self.state.lock().guest.get_reg(index)
     }
 
-    fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str> {
+    fn set_reg(&self, index: usize, value: u64) -> Result<(), &'static str> {
         self.state.lock().guest.set_reg(index, value)
     }
 
@@ -1046,15 +1046,19 @@ impl ControlOps for Aarch64VcpuObject {
         match command {
             vcpu_ctl::RUN => Err("Use sys_shv_vcpu_run"),
             vcpu_ctl::GET_ONE_REG => {
-                let value = self.get_reg(arg as u32)?;
-                Ok(value as i32)
+                let target_ptr = translate_user_ptr(arg)?;
+                // SAFETY: translate_user_ptr validated the address; caller
+                // guarantees it points to a writable VcpuOneReg.
+                let one_reg = unsafe { &mut *(target_ptr as *mut VcpuOneReg) };
+                one_reg.value = self.get_reg(one_reg.index as usize)?;
+                Ok(0)
             }
             vcpu_ctl::SET_ONE_REG => {
                 let target_ptr = translate_user_ptr(arg)?;
                 // SAFETY: translate_user_ptr validated the address; caller
                 // guarantees it points to a valid VcpuOneReg.
                 let one_reg = unsafe { core::ptr::read(target_ptr as *const VcpuOneReg) };
-                self.set_reg(one_reg.index, one_reg.value)?;
+                self.set_reg(one_reg.index as usize, one_reg.value)?;
                 Ok(0)
             }
             vcpu_ctl::INJECT_INTERRUPT => {

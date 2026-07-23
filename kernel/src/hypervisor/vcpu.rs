@@ -54,8 +54,8 @@ pub trait VcpuObject: ControlOps + Send + Sync {
     fn trigger_irq(&self, irq: u32) {
         self.set_irq_line(irq, true);
     }
-    fn get_reg(&self, index: u32) -> Result<u64, &'static str>;
-    fn set_reg(&self, index: u32, value: u64) -> Result<(), &'static str>;
+    fn get_reg(&self, index: usize) -> Result<u64, &'static str>;
+    fn set_reg(&self, index: usize, value: u64) -> Result<(), &'static str>;
     fn set_virtual_timer_next_event(&self, _next_event: u64) -> Result<(), &'static str> {
         Err("Virtual timer is not supported")
     }

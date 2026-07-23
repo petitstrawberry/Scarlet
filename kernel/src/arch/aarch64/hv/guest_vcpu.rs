@@ -91,11 +91,11 @@ impl GuestVcpu {
         unsafe { self.fpu.restore() };
     }
 
-    pub fn get_mmio_data(&self, reg_idx: u8, size: u8) -> u64 {
-        if reg_idx as usize >= self.iregs.len() {
+    pub fn get_mmio_data(&self, reg_idx: usize, size: u8) -> u64 {
+        if reg_idx >= self.iregs.len() {
             return 0;
         }
-        let val = self.iregs[reg_idx as usize];
+        let val = self.iregs[reg_idx];
         match size {
             1 => val & 0xFF,
             2 => val & 0xFFFF,
@@ -104,8 +104,8 @@ impl GuestVcpu {
         }
     }
 
-    pub fn set_mmio_data(&mut self, reg_idx: u8, size: u8, data: u64) {
-        if reg_idx as usize >= self.iregs.len() {
+    pub fn set_mmio_data(&mut self, reg_idx: usize, size: u8, data: u64) {
+        if reg_idx >= self.iregs.len() {
             return;
         }
         let mask = match size {
@@ -114,14 +114,14 @@ impl GuestVcpu {
             4 => 0xFFFFFFFF,
             _ => !0,
         };
-        let old = self.iregs[reg_idx as usize];
+        let old = self.iregs[reg_idx];
         let new = (old & !mask) | (data & mask);
-        self.iregs[reg_idx as usize] = new;
+        self.iregs[reg_idx] = new;
     }
 
-    pub fn get_reg(&self, index: u32) -> Result<u64, &'static str> {
+    pub fn get_reg(&self, index: usize) -> Result<u64, &'static str> {
         match index {
-            reg::X0..=reg::X30 => Ok(self.iregs[index as usize]),
+            reg::X0..=reg::X30 => Ok(self.iregs[index]),
             reg::SP => Ok(self.sysregs.sp_el1),
             reg::PC => Ok(self.pc),
             reg::PSTATE => Ok(self.spsr),
@@ -147,10 +147,10 @@ impl GuestVcpu {
         }
     }
 
-    pub fn set_reg(&mut self, index: u32, value: u64) -> Result<(), &'static str> {
+    pub fn set_reg(&mut self, index: usize, value: u64) -> Result<(), &'static str> {
         match index {
             reg::X0..=reg::X30 => {
-                self.iregs[index as usize] = value;
+                self.iregs[index] = value;
                 Ok(())
             }
             reg::SP => {

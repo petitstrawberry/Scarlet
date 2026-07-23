@@ -93,8 +93,8 @@ fn get_gpa() -> u64 {
 struct MmioDecode {
     inst_len: u32,
     size: u8,
-    rd: u8,
-    rs2: u8,
+    rd: usize,
+    rs2: usize,
 }
 
 fn decode_mmio() -> Option<MmioDecode> {
@@ -109,8 +109,8 @@ fn decode_mmio() -> Option<MmioDecode> {
         3 => 8,
         _ => return None,
     };
-    let rd = ((htinst >> 7) & 0x1f) as u8;
-    let rs2 = ((htinst >> 20) & 0x1f) as u8;
+    let rd = ((htinst >> 7) & 0x1f) as usize;
+    let rs2 = ((htinst >> 20) & 0x1f) as usize;
 
     // Instruction length is determined by lowest 2 bits of htinst
     // bits[1:0] = 0b11 -> 32-bit instruction
@@ -151,14 +151,14 @@ fn fetch_guest_inst(sepc: u64, vm: &Riscv64VmObject) -> u32 {
     }
 }
 
-fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
+fn decode_load_store_inst(inst: u32) -> Option<(u8, usize, bool, usize, u32)> {
     // Check for compressed instruction (16-bit)
     if (inst & 0x3) != 0x3 {
         // Compressed instruction
         let c_inst = inst as u16;
         let opcode = c_inst & 0x3;
         let funct3 = (c_inst >> 13) & 0x7;
-        let rd = ((c_inst >> 7) & 0x7) as u8; // rd/rs2 for compressed
+        let rd = ((c_inst >> 7) & 0x7) as usize; // rd/rs2 for compressed
 
         match (opcode, funct3) {
             // C.LW (load word, 32-bit)
@@ -171,7 +171,7 @@ fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
             (0b10, 0b111) => Some((8, 0, true, rd + 8, 2)),
             // C.LWSP (load word from stack pointer)
             (0b10, 0b010) => {
-                let rd = ((c_inst >> 7) & 0x1f) as u8;
+                let rd = ((c_inst >> 7) & 0x1f) as usize;
                 if rd == 0 {
                     return None;
                 } // Reserved
@@ -179,7 +179,7 @@ fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
             }
             // C.LDSP (load doubleword from stack pointer)
             (0b10, 0b011) => {
-                let rd = ((c_inst >> 7) & 0x1f) as u8;
+                let rd = ((c_inst >> 7) & 0x1f) as usize;
                 if rd == 0 {
                     return None;
                 }
@@ -194,7 +194,7 @@ fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
         match opcode {
             0b0100011 => {
                 let funct3 = (inst >> 12) & 0x7;
-                let rs2 = ((inst >> 20) & 0x1f) as u8;
+                let rs2 = ((inst >> 20) & 0x1f) as usize;
                 let size = match funct3 {
                     0b000 => 1,
                     0b001 => 2,
@@ -206,7 +206,7 @@ fn decode_load_store_inst(inst: u32) -> Option<(u8, u8, bool, u8, u32)> {
             }
             0b0000011 => {
                 let funct3 = (inst >> 12) & 0x7;
-                let rd = ((inst >> 7) & 0x1f) as u8;
+                let rd = ((inst >> 7) & 0x1f) as usize;
                 let size = match funct3 {
                     0b000 => 1,
                     0b001 => 2,
@@ -273,36 +273,6 @@ fn arch_guest_trap_handler_inner(
         | CAUSE_STORE_GUEST_PAGE_FAULT => {
             let gpa = get_gpa();
 
-            let hgatp = csr::read_hgatp();
-            let root_ppn = hgatp & 0xffff_ffff_fff;
-            let root_addr = root_ppn << 12;
-
-            let vpn3 = (gpa as usize >> 39) & 0x7ff;
-            let vpn2 = (gpa as usize >> 30) & 0x1ff;
-            let vpn1 = (gpa as usize >> 21) & 0x1ff;
-            let vpn0 = (gpa as usize >> 12) & 0x1ff;
-
-            // SAFETY: root_addr comes from the stage2 page table root (hgatp),
-            // which is a valid physical address managed by the hypervisor MMU
-            // subsystem. All PTE reads use direct-mapped kernel addresses
-            // derived from validated physical addresses.
-            unsafe {
-                let root_pte = core::ptr::read((root_addr as usize + vpn3 * 8) as *const u64);
-                if root_pte & 1 != 0 {
-                    let l2_addr = ((root_pte >> 10) & 0x3ffffffffff) << 12;
-                    let l2_pte = core::ptr::read((l2_addr as usize + vpn2 * 8) as *const u64);
-                    if l2_pte & 1 != 0 {
-                        let l1_addr = ((l2_pte >> 10) & 0x3ffffffffff) << 12;
-                        let l1_pte = core::ptr::read((l1_addr as usize + vpn1 * 8) as *const u64);
-                        if l1_pte & 1 != 0 {
-                            let l0_addr = ((l1_pte >> 10) & 0x3ffffffffff) << 12;
-                            let _l0_pte =
-                                core::ptr::read((l0_addr as usize + vpn0 * 8) as *const u64);
-                        }
-                    }
-                }
-            }
-
             match vm.find_memory_slot(gpa) {
                 Some(slot) => {
                     let Some(hpa) = resolve_guest_hpa(gpa, vm) else {
@@ -311,7 +281,11 @@ fn arch_guest_trap_handler_inner(
                         });
                     };
                     let writable = !slot.flags.readonly;
-                    let _result = vm.map_stage2_page(gpa, hpa, writable);
+                    if vm.map_stage2_page(gpa, hpa, writable).is_err() {
+                        return Some(VmExit::FailEntry {
+                            hardware_entry_failure_reason: 0,
+                        });
+                    }
                     let c = PF_COUNT.fetch_add(1, Ordering::Relaxed);
                     if c % 10000 == 0 {
                         let sepc = csr::read_sepc();
