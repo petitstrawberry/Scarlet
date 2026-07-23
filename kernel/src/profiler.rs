@@ -36,13 +36,13 @@ pub use self::profiler_impl::*;
 #[cfg(feature = "profiler")]
 mod profiler_impl {
     use crate::early_println;
+    use crate::sync::Lazy;
+    use crate::sync::Mutex;
     use crate::timer::get_time_ns;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use lazy_static::lazy_static;
-    use crate::sync::Mutex;
 
     /// Tree node for hierarchical profiling
     #[derive(Clone)]
@@ -84,15 +84,13 @@ mod profiler_impl {
         pub start_time: u64,
     }
 
-    lazy_static! {
-        /// Global profiling tree root
-        pub static ref PROFILER_ROOT: Arc<Mutex<ProfileNode>> =
-            Arc::new(Mutex::new(ProfileNode::new("ROOT".to_string())));
+    /// Global profiling tree root
+    pub static PROFILER_ROOT: Lazy<Arc<Mutex<ProfileNode>>> =
+        Lazy::new(|| Arc::new(Mutex::new(ProfileNode::new("ROOT".to_string()))));
 
-        /// Call stack for tracking current execution path
-        pub static ref CALL_STACK: Arc<Mutex<Vec<CallStackEntry>>> =
-            Arc::new(Mutex::new(Vec::new()));
-    }
+    /// Call stack for tracking current execution path
+    pub static CALL_STACK: Lazy<Arc<Mutex<Vec<CallStackEntry>>>> =
+        Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 
     /// A RAII guard that records the execution time of its scope.
     ///
