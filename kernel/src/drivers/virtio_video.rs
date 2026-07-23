@@ -7,7 +7,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::device::video::{
     SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FORMAT_HEVC,

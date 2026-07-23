@@ -5,7 +5,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use alloc::sync::Arc;
 

@@ -21,8 +21,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
-use spin::Mutex;
-
+use crate::sync::{Mutex, RwLock};
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
 pub mod tty_ctl {
@@ -245,7 +244,7 @@ late_initcall!(init_tty_subsystem);
 pub struct TtyDevice {
     name: &'static str,
     backend: Arc<dyn TtyBackend>,
-    self_ref: spin::RwLock<Weak<TtyDevice>>,
+    self_ref: RwLock<Weak<TtyDevice>>,
 
     // Input buffer for line discipline
     input_buffer: Arc<Mutex<VecDeque<u8>>>,
@@ -324,7 +323,7 @@ impl TtyDevice {
         Self {
             name,
             backend,
-            self_ref: spin::RwLock::new(Weak::new()),
+            self_ref: RwLock::new(Weak::new()),
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: AtomicBool::new(true),

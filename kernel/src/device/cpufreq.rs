@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::{environment::MAX_NUM_CPUS, task::SCHED_UTIL_SCALE};
 

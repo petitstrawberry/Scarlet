@@ -28,8 +28,7 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Once;
-
+use crate::sync::{Once, RwLock};
 pub mod arp;
 pub mod config;
 pub mod ethernet;
@@ -124,54 +123,54 @@ pub trait NetworkInterface: Send + Sync {
 /// Network Manager - Global socket and connection manager
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
-    socket_factories: spin::RwLock<BTreeMap<SocketDomain, SocketFactory>>,
+    socket_factories: RwLock<BTreeMap<SocketDomain, SocketFactory>>,
 
     /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
     protocol_stacks: protocol_stack::ProtocolStackManager,
 
     /// Protocol layers registry (shared instances like VFS filesystems)
-    protocol_layers: spin::RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
+    protocol_layers: RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
 
     /// Named sockets namespace (path/name -> socket)
-    named_sockets: spin::RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
+    named_sockets: RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
 
     /// Active socket connections by ID
-    connections: spin::RwLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
+    connections: RwLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
 
     /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
-    socket_to_id: spin::RwLock<BTreeMap<usize, SocketId>>,
+    socket_to_id: RwLock<BTreeMap<usize, SocketId>>,
 
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 
     /// Registered network interfaces
-    interfaces: spin::RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    interfaces: RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
 
     /// Default interface name
-    default_interface: spin::RwLock<Option<String>>,
+    default_interface: RwLock<Option<String>>,
 
     /// ARP cache
-    arp_cache: spin::RwLock<BTreeMap<u32, ArpCacheEntry>>,
+    arp_cache: RwLock<BTreeMap<u32, ArpCacheEntry>>,
 
     /// Network configuration
-    network_config: spin::RwLock<NetworkConfig>,
+    network_config: RwLock<NetworkConfig>,
 }
 
 impl NetworkManager {
     /// Create a new NetworkManager instance
     fn new() -> Self {
         Self {
-            socket_factories: spin::RwLock::new(BTreeMap::new()),
+            socket_factories: RwLock::new(BTreeMap::new()),
             protocol_stacks: protocol_stack::ProtocolStackManager::new(),
-            protocol_layers: spin::RwLock::new(BTreeMap::new()),
-            named_sockets: spin::RwLock::new(BTreeMap::new()),
-            connections: spin::RwLock::new(BTreeMap::new()),
-            socket_to_id: spin::RwLock::new(BTreeMap::new()),
+            protocol_layers: RwLock::new(BTreeMap::new()),
+            named_sockets: RwLock::new(BTreeMap::new()),
+            connections: RwLock::new(BTreeMap::new()),
+            socket_to_id: RwLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1),
-            interfaces: spin::RwLock::new(BTreeMap::new()),
-            default_interface: spin::RwLock::new(None),
-            arp_cache: spin::RwLock::new(BTreeMap::new()),
-            network_config: spin::RwLock::new(NetworkConfig::default()),
+            interfaces: RwLock::new(BTreeMap::new()),
+            default_interface: RwLock::new(None),
+            arp_cache: RwLock::new(BTreeMap::new()),
+            network_config: RwLock::new(NetworkConfig::default()),
         }
     }
 

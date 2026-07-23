@@ -682,7 +682,7 @@ fn align_up_u64(value: u64, align: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct RecordedMap {

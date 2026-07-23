@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::request::BlockIORequestType;
 use super::*;

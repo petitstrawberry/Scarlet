@@ -16,7 +16,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;

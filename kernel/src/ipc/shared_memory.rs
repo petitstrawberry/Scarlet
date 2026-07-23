@@ -5,7 +5,7 @@
 //! providing efficient data sharing without copying.
 
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::object::capability::memory_mapping::{

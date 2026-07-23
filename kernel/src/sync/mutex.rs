@@ -112,6 +112,117 @@ where
     }
 }
 
+impl<T> core::fmt::Debug for MutexGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Display for MutexGuard<'_, T>
+where
+    T: core::fmt::Display,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Debug for IrqSafeMutexGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Display for IrqSafeMutexGuard<'_, T>
+where
+    T: core::fmt::Display,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<T> Mutex<T> {
+    ///
+    /// This is intended for restricted scheduler paths that rely on an
+    /// external exclusion mechanism (such as the `running_cpu` ownership
+    /// token) instead of the lock itself.
+    ///
+    /// # Safety
+    ///
+    /// The caller is responsible for synchronization; the lock is not
+    /// acquired. Dereferencing the returned pointer without external
+    /// exclusion is undefined behavior.
+    #[inline]
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.data.get()
+    }
+
+    #[inline]
+    fn lock_inner(&self) {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.locked.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    #[inline]
+    fn try_lock_inner(&self) -> bool {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    #[inline]
+    fn unlock_inner(&self) {
+        self.locked.store(false, Ordering::Release);
+    }
+}
+
+// SAFETY: `Mutex<()>` is a correct busy-wait mutex: `lock_inner` acquires,
+// `try_lock_inner` observes success or failure, `unlock_inner` releases.
+// Preempt count is bumped on lock and restored on unlock to keep the
+// critical section non-preemptible on the local CPU.
+unsafe impl lock_api::RawMutex for Mutex<()> {
+    type GuardMarker = lock_api::GuardSend;
+
+    const INIT: Mutex<()> = Mutex::new(());
+
+    #[inline]
+    fn lock(&self) {
+        crate::sync::preempt::preempt_disable();
+        self.lock_inner();
+    }
+
+    #[inline]
+    fn try_lock(&self) -> bool {
+        crate::sync::preempt::preempt_disable();
+        if self.try_lock_inner() {
+            true
+        } else {
+            crate::sync::preempt::preempt_enable();
+            false
+        }
+    }
+
+    #[inline]
+    unsafe fn unlock(&self) {
+        self.unlock_inner();
+        crate::sync::preempt::preempt_enable();
+    }
+}
+
 /// RAII guard granting exclusive access to a [`Mutex`]'s data.
 ///
 /// Dropping the guard releases the lock and re-enables preemption.
@@ -286,6 +397,7 @@ impl<T> Drop for IrqSafeMutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::preempt::preempt_count;
 
     #[test_case]
     fn test_mutex_lock_unlock() {

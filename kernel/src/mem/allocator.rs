@@ -1,6 +1,6 @@
 use core::alloc::Layout;
 
-use spin::Mutex;
+use crate::sync::Mutex;
 use talc::{OomHandler, Span, Talc, Talck};
 
 use crate::environment::PAGE_SIZE;

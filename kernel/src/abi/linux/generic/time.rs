@@ -18,8 +18,7 @@ use crate::{
     timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
 };
 use alloc::sync::{Arc, Weak};
-use spin::Mutex;
-
+use crate::sync::{Mutex, MutexGuard};
 const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
 const NSEC_PER_SEC_U64: u64 = 1_000_000_000;
 const TIMER_ABSTIME: i32 = 1;
@@ -37,7 +36,7 @@ impl PosixTimerShared {
         sigev_signo: i32,
         sigev_value: u64,
         owner_task_id: usize,
-        signal_state: Arc<spin::Mutex<SignalState>>,
+        signal_state: Arc<Mutex<SignalState>>,
     ) -> Self {
         Self {
             state: Mutex::new(PosixTimerState {
@@ -57,7 +56,7 @@ impl PosixTimerShared {
         }
     }
 
-    fn lock(&self) -> spin::MutexGuard<'_, PosixTimerState> {
+    fn lock(&self) -> MutexGuard<'_, PosixTimerState> {
         self.state.lock()
     }
 }
@@ -74,7 +73,7 @@ pub struct PosixTimerState {
     pub next_deadline_tick: Option<u64>,
     pub active: bool,
     pub owner_task_id: usize,
-    pub signal_state: Arc<spin::Mutex<SignalState>>,
+    pub signal_state: Arc<Mutex<SignalState>>,
     pub overrun_count: u32,
 }
 
@@ -94,7 +93,7 @@ impl PosixTimer {
         sigev_signo: i32,
         sigev_value: u64,
         owner_task_id: usize,
-        signal_state: Arc<spin::Mutex<SignalState>>,
+        signal_state: Arc<Mutex<SignalState>>,
     ) -> Self {
         let shared = Arc::new(PosixTimerShared::new(
             id,
@@ -173,7 +172,7 @@ impl PosixTimer {
         (remaining, interval)
     }
 
-    pub fn state(&self) -> spin::MutexGuard<'_, PosixTimerState> {
+    pub fn state(&self) -> MutexGuard<'_, PosixTimerState> {
         self.shared.lock()
     }
 }

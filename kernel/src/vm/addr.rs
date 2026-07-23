@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use spin::{Mutex, Once};
+use crate::sync::{Mutex, MutexGuard, Once};
 
 use crate::vm::direct_map::DirectMapRegions;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute};
@@ -468,7 +468,7 @@ pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
 
 /// Locks the published runtime direct-map metadata for an atomic internal update.
 pub(crate) fn lock_runtime_direct_map_regions()
--> Result<spin::MutexGuard<'static, DirectMapRegions>, &'static str> {
+-> Result<MutexGuard<'static, DirectMapRegions>, &'static str> {
     layout()
         .runtime_direct_map_regions()
         .map(|regions| regions.lock())

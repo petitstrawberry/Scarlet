@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     use alloc::collections::VecDeque;
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     struct FakeClient {
         rx_count: AtomicUsize,

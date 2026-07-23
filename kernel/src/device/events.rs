@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// Generic device event trait.
 ///

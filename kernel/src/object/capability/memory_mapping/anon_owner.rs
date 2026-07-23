@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::environment::PAGE_SIZE;
 use crate::mem::page::{ContiguousPages, allocate_raw_pages, free_raw_pages};

@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use crate::arch::hv::reg_index::reg;
 use crate::hypervisor::VcpuObject;

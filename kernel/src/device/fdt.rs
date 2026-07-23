@@ -103,7 +103,7 @@ use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource};
 
 use core::cell::UnsafeCell;
-use spin::Once;
+use crate::sync::Once;
 
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
 

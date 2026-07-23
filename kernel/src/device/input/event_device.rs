@@ -9,7 +9,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// Static counters for device naming
 static KEYBOARD_COUNTER: AtomicUsize = AtomicUsize::new(0);

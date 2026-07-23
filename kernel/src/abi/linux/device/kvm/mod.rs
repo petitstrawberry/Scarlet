@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use crate::abi::linux::generic::LinuxAbi;
 use crate::device::manager::DeviceManager;

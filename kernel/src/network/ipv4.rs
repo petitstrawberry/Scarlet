@@ -15,7 +15,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::early_println;
 use crate::network::protocol_stack::{

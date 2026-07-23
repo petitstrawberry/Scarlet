@@ -10,7 +10,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use crate::fs::{DeviceFileInfo, FileMetadata, FileSystemError, FileSystemErrorKind, FileType};
 use crate::object::KernelObject;

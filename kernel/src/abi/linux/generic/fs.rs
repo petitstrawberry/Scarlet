@@ -17,7 +17,7 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use super::errno;
 

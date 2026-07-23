@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::mem;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::environment::PAGE_SIZE;
 use crate::lsm::RelocateError;

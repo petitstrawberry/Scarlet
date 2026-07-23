@@ -14,7 +14,7 @@ use alloc::{
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use super::mount_tree::MountPoint;
 use crate::fs::{

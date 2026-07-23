@@ -20,8 +20,7 @@ use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
-use spin::Mutex;
-
+use crate::sync::{Mutex, MutexGuard};
 use crate::device::Device;
 use crate::device::block::{
     BlockDevice,
@@ -3456,7 +3455,7 @@ impl XhciController {
         }
     }
 
-    fn slot_runtime_mut(&self, slot_id: u8) -> Option<spin::MutexGuard<'_, Vec<SlotRuntime>>> {
+    fn slot_runtime_mut(&self, slot_id: u8) -> Option<MutexGuard<'_, Vec<SlotRuntime>>> {
         let guard = self.slot_runtime.lock();
         if guard
             .iter()

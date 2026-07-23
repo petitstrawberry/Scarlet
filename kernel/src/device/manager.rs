@@ -48,7 +48,7 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
+use crate::sync::Mutex;
 
 use crate::device::platform::PlatformDeviceInfo;
 use crate::device::platform::PlatformDeviceProperty;

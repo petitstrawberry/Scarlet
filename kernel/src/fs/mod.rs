@@ -193,8 +193,7 @@ use alloc::{
     vec::Vec,
 };
 
-use spin::RwLock;
-
+use crate::sync::{Once, RwLock};
 extern crate alloc;
 
 pub const MAX_PATH_LENGTH: usize = 1024;
@@ -705,7 +704,7 @@ pub trait FileSystemDriver: Send + Sync {
 }
 
 /// Singleton for global access to the FileSystemDriverManager
-static FS_DRIVER_MANAGER: spin::Once<FileSystemDriverManager> = spin::Once::new();
+static FS_DRIVER_MANAGER: Once<FileSystemDriverManager> = Once::new();
 
 /// Global filesystem driver manager singleton
 ///

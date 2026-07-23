@@ -1,6 +1,6 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use limine::framebuffer::{FRAMEBUFFER_RGB, Framebuffer};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 const FONT_WIDTH: usize = 8;
 const FONT_HEIGHT: usize = 8;

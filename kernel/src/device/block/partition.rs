@@ -14,7 +14,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{
     BlockDevice,

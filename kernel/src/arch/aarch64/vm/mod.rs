@@ -13,7 +13,7 @@ use hashbrown::HashMap;
 use mmu::PageTable;
 #[cfg(test)]
 use mmu::PageTableEntry;
-use spin::{Mutex, MutexGuard, Once, RwLock};
+use crate::sync::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 

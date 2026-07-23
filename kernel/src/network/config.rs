@@ -5,7 +5,7 @@
 //! until an interface is registered.
 
 use alloc::string::String;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::network::ipv4::{Ipv4Address, Ipv4AddressInfo};
 use crate::network::{NetworkManager, get_network_manager};

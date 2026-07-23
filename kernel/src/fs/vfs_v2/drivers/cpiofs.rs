@@ -13,7 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,

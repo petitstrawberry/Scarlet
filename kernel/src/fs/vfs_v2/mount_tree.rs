@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use super::core::{FileSystemOperations, VfsEntry};
 use super::manager::{PathResolutionOptions, VfsManager};

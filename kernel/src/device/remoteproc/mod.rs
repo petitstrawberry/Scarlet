@@ -349,7 +349,7 @@ mod tests {
     use alloc::collections::VecDeque;
     use alloc::collections::btree_map::BTreeMap;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     struct FakeCrashHandler {
         service: AtomicU32,

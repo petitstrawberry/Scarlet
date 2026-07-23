@@ -46,7 +46,7 @@
 //! - Route based on protocol numbers
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use super::socket::{SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
 use crate::device::network::DevicePacket;
@@ -613,14 +613,14 @@ pub trait ProtocolStack: Send + Sync {
 /// Manages registered protocol stacks and routes packets to appropriate stacks.
 pub struct ProtocolStackManager {
     /// Registered protocol stacks by domain
-    stacks: spin::RwLock<alloc::collections::BTreeMap<SocketDomain, Arc<dyn ProtocolStack>>>,
+    stacks: RwLock<alloc::collections::BTreeMap<SocketDomain, Arc<dyn ProtocolStack>>>,
 }
 
 impl ProtocolStackManager {
     /// Create a new protocol stack manager
     pub const fn new() -> Self {
         Self {
-            stacks: spin::RwLock::new(alloc::collections::BTreeMap::new()),
+            stacks: RwLock::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -758,7 +758,7 @@ mod tests {
     use crate::network::NetworkManager;
     use alloc::{string::ToString, sync::Arc};
     use core::sync::atomic::{AtomicU64, Ordering};
-    use spin::RwLock;
+    use crate::sync::RwLock;
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {

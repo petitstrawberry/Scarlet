@@ -1,5 +1,5 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::object::{KernelObject, KernelObjectRef, introspection};
 

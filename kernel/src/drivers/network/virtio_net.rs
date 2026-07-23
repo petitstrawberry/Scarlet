@@ -28,7 +28,7 @@ use core::{
     mem,
     sync::atomic::{AtomicBool, Ordering},
 };
-use spin::{Lazy, Mutex, RwLock};
+use crate::sync::{Lazy, Mutex, RwLock};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};

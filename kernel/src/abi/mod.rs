@@ -18,8 +18,7 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
-use spin::Mutex;
-
+use crate::sync::{Mutex, Once};
 pub mod linux;
 pub mod scarlet;
 pub mod xv6;
@@ -452,8 +451,8 @@ impl AbiRegistry {
     }
 
     pub fn global() -> &'static Mutex<AbiRegistry> {
-        // Thread-safe lazy initialization using spin::Once
-        static INSTANCE: spin::Once<Mutex<AbiRegistry>> = spin::Once::new();
+        // Thread-safe lazy initialization using Once
+        static INSTANCE: Once<Mutex<AbiRegistry>> = Once::new();
 
         INSTANCE.call_once(|| Mutex::new(AbiRegistry::new()))
     }

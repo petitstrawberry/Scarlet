@@ -34,7 +34,7 @@
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::fs::vfs_v2::cache::CacheId;
 use crate::mem::page::ContiguousPages;

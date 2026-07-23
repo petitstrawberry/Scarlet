@@ -42,7 +42,7 @@ mod profiler_impl {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use lazy_static::lazy_static;
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     /// Tree node for hierarchical profiling
     #[derive(Clone)]

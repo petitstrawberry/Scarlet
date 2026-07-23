@@ -40,7 +40,7 @@ use crate::environment::{
 use crate::sched::scheduler::current_task;
 use crate::task::Task;
 use core::sync::atomic::Ordering;
-use spin::{Mutex, Once};
+use crate::sync::{Mutex, Once};
 
 extern crate alloc;
 

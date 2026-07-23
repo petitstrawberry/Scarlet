@@ -15,7 +15,7 @@ use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::{
     arch::Trapframe,

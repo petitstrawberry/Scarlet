@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::memory::MemorySlotFlags;
 use super::vcpu::VcpuObject;

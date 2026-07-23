@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::hv::reg_index::reg;

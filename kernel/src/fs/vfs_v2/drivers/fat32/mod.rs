@@ -31,7 +31,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug, mem};
-use spin::{Mutex, rwlock::RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::{
     device::block::BlockDevice,

@@ -28,7 +28,7 @@ pub struct KernelTimer {
 // The ArchTimer instances are per-CPU, and the hardware registers are CPU-local.
 unsafe impl Sync for KernelTimer {}
 
-static KERNEL_TIMER: spin::Once<KernelTimer> = spin::Once::new();
+static KERNEL_TIMER: Once<KernelTimer> = Once::new();
 
 pub fn get_kernel_timer() -> &'static KernelTimer {
     KERNEL_TIMER.call_once(|| KernelTimer::new())
@@ -316,9 +316,9 @@ impl PartialOrd for SoftwareTimer {
 }
 
 use alloc::collections::BTreeMap;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, Once, RwLock};
 
-// Heap-based timer list (protected by spin::Mutex)
+// Heap-based timer list (protected by Mutex)
 static SOFTWARE_TIMER_HEAP: Mutex<BinaryHeap<SoftwareTimer>> = Mutex::new(BinaryHeap::new());
 
 // Active timer flags (protected by RwLock for efficient concurrent reads)

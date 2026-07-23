@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// PHY operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

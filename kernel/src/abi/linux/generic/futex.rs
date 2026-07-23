@@ -5,7 +5,7 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
-use spin::{Mutex, Once};
+use crate::sync::{Mutex, Once};
 
 // Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;

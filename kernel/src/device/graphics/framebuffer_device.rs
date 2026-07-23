@@ -17,7 +17,7 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::device::{
     Device, DeviceType,
@@ -1343,7 +1343,7 @@ mod tests {
         },
     };
     use alloc::{string::ToString, sync::Arc};
-    use spin::RwLock;
+    use crate::sync::RwLock;
 
     /// Test utility to create isolated managers for each test.
     fn setup_test_managers() -> (GraphicsManager, DeviceManager) {

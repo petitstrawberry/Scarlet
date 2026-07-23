@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{
     super::{Device, DeviceType},

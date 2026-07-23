@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::csr::{
     write_hcounteren, write_hedeleg, write_hgeie, write_hideleg, write_htimedelta, write_hvip,

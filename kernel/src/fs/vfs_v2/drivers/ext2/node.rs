@@ -5,7 +5,7 @@
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec, vec::Vec};
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,

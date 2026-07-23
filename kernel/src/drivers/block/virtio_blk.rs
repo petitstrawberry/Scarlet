@@ -25,7 +25,7 @@
 
 use alloc::vec;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use core::{mem, ptr};
 
@@ -406,9 +406,9 @@ impl VirtioBlockDevice {
         #[cfg(test)]
         {
             // Add batch size tracking for debugging
-            static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> =
-                spin::Mutex::new(alloc::vec::Vec::new());
-            static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            static BATCH_SIZES: Mutex<alloc::vec::Vec<usize>> =
+                Mutex::new(alloc::vec::Vec::new());
+            static CALL_COUNT: Mutex<usize> = Mutex::new(0);
             let mut sizes = BATCH_SIZES.lock();
             let mut count = CALL_COUNT.lock();
             sizes.push(requests.len());

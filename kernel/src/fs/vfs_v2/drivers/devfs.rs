@@ -33,7 +33,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::device::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};

@@ -40,6 +40,7 @@ use alloc::{
     vec::Vec,
 };
 
+use crate::sync::{Mutex, Once};
 use crate::abi::EventProcessOutcome;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_next_mode;
@@ -66,13 +67,13 @@ pub const MAX_ACTIVE_USER_TASKS: usize = 895;
 pub const MAX_ACTIVE_KERNEL_TASKS: usize = 128;
 
 /// Global task pool storing all tasks
-/// Using spin::Once with Box-ed tasks array to avoid large stack usage.
-static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
+/// Using Once with Box-ed tasks array to avoid large stack usage.
+static TASK_POOL: Once<TaskPool> = Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
-static FORK_TRACE_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
-static FORK_TRACE_PICKED_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+static FORK_TRACE_TASKS: Once<Mutex<BTreeSet<usize>>> = Once::new();
+static FORK_TRACE_PICKED_TASKS: Once<Mutex<BTreeSet<usize>>> = Once::new();
 const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
 static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
     [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
@@ -84,12 +85,12 @@ pub fn get_task_pool() -> &'static TaskPool {
     TASK_POOL.call_once(|| TaskPool::new())
 }
 
-fn fork_trace_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
-    FORK_TRACE_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+fn fork_trace_tasks() -> &'static Mutex<BTreeSet<usize>> {
+    FORK_TRACE_TASKS.call_once(|| Mutex::new(BTreeSet::new()))
 }
 
-fn fork_trace_picked_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
-    FORK_TRACE_PICKED_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+fn fork_trace_picked_tasks() -> &'static Mutex<BTreeSet<usize>> {
+    FORK_TRACE_PICKED_TASKS.call_once(|| Mutex::new(BTreeSet::new()))
 }
 
 struct TaskEntry {
@@ -138,18 +139,18 @@ pub struct TaskPool {
     // Each map entry owns one handle while the task is registered.
     //
     // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() methods
-    tasks: spin::Mutex<TaskPoolState>,
+    tasks: Mutex<TaskPoolState>,
 
     // Removed slot handles remain here until no outstanding lookup owns the
     // task. The task-reaper worker moves entries out of this lock before
     // dropping them.
-    retired_tasks: spin::Mutex<Vec<RetiredTask>>,
+    retired_tasks: Mutex<Vec<RetiredTask>>,
 }
 
 impl TaskPool {
     fn new() -> Self {
         TaskPool {
-            tasks: spin::Mutex::new(TaskPoolState {
+            tasks: Mutex::new(TaskPoolState {
                 tasks: BTreeMap::new(),
                 active_user_tasks: 0,
                 active_kernel_tasks: 0,
@@ -159,7 +160,7 @@ impl TaskPool {
                 // Zero encodes no task, and usize::MAX is intentionally never assigned.
                 next_kernel_id: usize::MAX - 1,
             }),
-            retired_tasks: spin::Mutex::new(Vec::new()),
+            retired_tasks: Mutex::new(Vec::new()),
         }
     }
 
@@ -471,11 +472,11 @@ static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
 static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
-static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
-    [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
-static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
-static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
-static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+static READY_QUEUES: [Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
+    [const { Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
+static ZOMBIE_QUEUE: Mutex<VecDeque<usize>> = Mutex::new(VecDeque::new());
+static BLOCKED_QUEUE: Mutex<VecDeque<usize>> = Mutex::new(VecDeque::new());
+static ONLINE_CPUS: Mutex<alloc::vec::Vec<usize>> = Mutex::new(alloc::vec::Vec::new());
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -2010,7 +2011,7 @@ pub fn diagnostic_snapshot(cpu_id: usize) -> Option<SchedulerDiagnosticSnapshot>
 }
 
 #[inline]
-fn ready_queue(cpu_id: usize) -> &'static spin::Mutex<VecDeque<usize>> {
+fn ready_queue(cpu_id: usize) -> &'static Mutex<VecDeque<usize>> {
     assert_valid_cpu_id(cpu_id);
     &READY_QUEUES[cpu_id]
 }

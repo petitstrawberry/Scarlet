@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use super::{FramebufferConfig, PixelFormat, manager::FramebufferResource, output::DisplayRegion};
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};

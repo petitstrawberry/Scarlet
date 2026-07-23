@@ -10,12 +10,12 @@ use crate::arch::Trapframe;
 use crate::sched::scheduler::{
     get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task, wake_task_on,
 };
+use crate::sync::Mutex;
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 
 const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 
@@ -160,7 +160,11 @@ impl Waker {
         if self
             .pending_wakes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n > 0 { Some(n - 1) } else { None }
+                if n > 0 {
+                    Some(n - 1)
+                } else {
+                    None
+                }
             })
             .is_ok()
         {
@@ -204,7 +208,11 @@ impl Waker {
 
             self.pending_wakes
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    if n > 0 { Some(n - 1) } else { None }
+                    if n > 0 {
+                        Some(n - 1)
+                    } else {
+                        None
+                    }
                 })
                 .is_ok()
         };
@@ -311,7 +319,7 @@ impl Waker {
         }
 
         if let Some(ticks) = timeout_ticks {
-            use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+            use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
             use alloc::sync::Arc;
             use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -370,7 +378,7 @@ impl Waker {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> bool {
-        use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
+        use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
         use alloc::sync::Arc;
         use core::sync::atomic::{AtomicBool, Ordering};
 

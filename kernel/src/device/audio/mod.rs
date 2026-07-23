@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::device::char::CharDevice;
 use crate::device::{DefaultDeviceOpen, Device, DeviceCapability, DeviceType};

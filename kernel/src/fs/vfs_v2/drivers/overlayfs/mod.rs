@@ -42,7 +42,7 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::{collections::BTreeSet, format, string::String, sync::Arc, vec::Vec};
 use core::any::Any;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{

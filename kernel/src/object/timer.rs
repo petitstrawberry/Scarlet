@@ -2,7 +2,7 @@
 
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,

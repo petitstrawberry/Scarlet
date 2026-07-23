@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, fmt::Write};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::{
     device::{Device, DeviceType, char::CharDevice, manager::DeviceManager},

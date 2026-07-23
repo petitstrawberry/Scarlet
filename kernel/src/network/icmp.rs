@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::early_println;
 

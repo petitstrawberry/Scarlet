@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::device::DeviceInfo;
 use crate::device::platform::PlatformDeviceInfo;

@@ -13,7 +13,7 @@ const UNINIT: u8 = 0;
 const INITIALIZING: u8 = 1;
 const COMPLETE: u8 = 2;
 
-pub struct Once<T> {
+pub struct Once<T = ()> {
     state: AtomicU8,
     data: UnsafeCell<MaybeUninit<T>>,
 }
@@ -79,6 +79,21 @@ impl<T> Once<T> {
             }
             _ => self.init_slow(f),
         }
+    }
+
+    /// Initialize with `f` if needed and return a shared reference.
+    ///
+    /// Alias for [`Once::get_or_init`] matching the `spin::Once::call_once`
+    /// surface that existing callers depend on.
+    ///
+    /// # Returns
+    ///
+    /// A shared reference to the initialized value.
+    pub fn call_once<F>(&self, f: F) -> &T
+    where
+        F: FnOnce() -> T,
+    {
+        self.get_or_init(f)
     }
 
     #[cold]

@@ -39,7 +39,7 @@ extern crate alloc;
 use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::ops::Bound;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::memory_mapping::AccessOp;

@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use core::sync::atomic::Ordering;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 #[cfg(feature = "hypervisor")]
 use crate::arch::hv::guest_vcpu::GuestVcpu;

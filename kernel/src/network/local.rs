@@ -25,7 +25,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
+use crate::sync::RwLock;
 
 use crate::sched::scheduler::current_task_id;
 

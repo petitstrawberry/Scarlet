@@ -1,6 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::early_println;
 

@@ -172,7 +172,7 @@ pub trait NvmemProvider: Send + Sync {
 mod tests {
     use super::*;
     use alloc::vec;
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     struct MemoryNvmemProvider {
         data: Mutex<[u8; 4]>,

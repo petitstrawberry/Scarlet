@@ -6,7 +6,7 @@ use crate::object::capability::{
 };
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 /// Mock FileObject for testing purposes
 pub struct MockFileObject {

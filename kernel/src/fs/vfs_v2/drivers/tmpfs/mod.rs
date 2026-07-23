@@ -14,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, rwlock::RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::device::manager::DeviceManager;
 use crate::environment::PAGE_SIZE;

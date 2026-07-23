@@ -2,7 +2,7 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::any::Any;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::initcall::early;
 use crate::{

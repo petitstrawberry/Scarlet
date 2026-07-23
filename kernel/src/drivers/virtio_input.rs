@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::device::input::event_device::EventDevice;
 use crate::device::manager::DeviceManager;

@@ -10,7 +10,7 @@
 use alloc::collections::BTreeMap;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
-use spin::Mutex;
+use crate::sync::{Mutex, Once};
 
 /// Type alias for task identifiers
 pub type TaskId = u32;
@@ -682,7 +682,7 @@ impl EventManager {
 
     /// Get the global EventManager instance
     pub fn get_manager() -> &'static EventManager {
-        static INSTANCE: spin::once::Once<EventManager> = spin::once::Once::new();
+        static INSTANCE: Once<EventManager> = Once::new();
         INSTANCE.call_once(|| EventManager::new())
     }
 

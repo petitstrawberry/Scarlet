@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::arch::asm;
 use hashbrown::HashMap;
-use spin::{Once, RwLock};
+use crate::sync::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
 use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};

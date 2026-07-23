@@ -32,7 +32,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use spin::{Mutex, Once};
+use crate::sync::{Mutex, Once};
 
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
 use crate::vm::addr::validate_direct_map_alias;

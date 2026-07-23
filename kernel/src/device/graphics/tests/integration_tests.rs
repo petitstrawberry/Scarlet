@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod integration_tests {
     use alloc::{string::ToString, sync::Arc};
-    use spin::RwLock;
+    use crate::sync::RwLock;
 
     use crate::device::{
         Device, DeviceType,

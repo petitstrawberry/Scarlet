@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::early_println;
 use crate::network::Ipv4Address;
@@ -158,7 +158,7 @@ pub struct UdpSocket {
     /// Send waker for blocking I/O
     send_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Blocking mode (default: true)
-    blocking_mode: spin::Mutex<bool>,
+    blocking_mode: Mutex<bool>,
     /// Read timeout in milliseconds. Zero means no timeout.
     read_timeout_ms: Mutex<u64>,
     /// Write timeout in milliseconds. Zero means no timeout.
@@ -178,7 +178,7 @@ impl UdpSocket {
             self_weak: weak.clone(),
             recv_waker: Mutex::new(None),
             send_waker: Mutex::new(None),
-            blocking_mode: spin::Mutex::new(true),
+            blocking_mode: Mutex::new(true),
             read_timeout_ms: Mutex::new(0),
             write_timeout_ms: Mutex::new(0),
         })

@@ -7,7 +7,7 @@
 //! according to the VirtIO GPU specification.
 
 use alloc::{sync::Arc, vec::Vec};
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::{
     device::{

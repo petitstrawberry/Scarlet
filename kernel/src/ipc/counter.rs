@@ -9,7 +9,7 @@
 //! - write(8 bytes): Adds value to counter
 
 use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{

@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::device::network::{DevicePacket, EthernetDevice, MacAddress};
 use crate::network::ipv4::Ipv4Address;

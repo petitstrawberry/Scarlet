@@ -26,6 +26,73 @@ pub struct RwLock<T> {
 unsafe impl<T: Send + Sync> Send for RwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
+impl<T> core::fmt::Debug for RwLock<T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RwLock")
+            .field("state", &self.state.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> core::fmt::Debug for RwLockReadGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Display for RwLockReadGuard<'_, T>
+where
+    T: core::fmt::Display,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Debug for RwLockWriteGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Debug for IrqSafeRwLock<T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IrqSafeRwLock")
+            .field("state", &self.state.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> core::fmt::Debug for IrqSafeRwLockReadGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T> core::fmt::Debug for IrqSafeRwLockWriteGuard<'_, T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl<T> RwLock<T> {
     /// Create a new `RwLock` initialized to `value`.
     pub const fn new(value: T) -> Self {
@@ -53,6 +120,29 @@ impl<T> RwLock<T> {
         }
     }
 
+    /// Attempt to acquire a read lock without spinning.
+    ///
+    /// # Returns
+    ///
+    /// `Some(guard)` if acquired, `None` if a writer holds the lock.
+    #[inline]
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        let preempt = PreemptGuard::new();
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(RwLockReadGuard {
+                lock: self,
+                _preempt: preempt,
+                _not_send: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Acquire an exclusive write lock, spinning until granted.
     ///
     /// Preemption is disabled for the duration of the returned guard.
@@ -69,6 +159,54 @@ impl<T> RwLock<T> {
             _preempt: preempt,
             _not_send: PhantomData,
         }
+    }
+
+    /// Attempt to acquire a write lock without spinning.
+    ///
+    /// # Returns
+    ///
+    /// `Some(guard)` if acquired, `None` if any reader or writer holds the
+    /// lock.
+    #[inline]
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        let preempt = PreemptGuard::new();
+        if self
+            .state
+            .compare_exchange(0, WRITER_BIT, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(RwLockWriteGuard {
+                lock: self,
+                _preempt: preempt,
+                _not_send: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Return the number of writers currently holding the lock (0 or 1).
+    ///
+    /// # Returns
+    ///
+    /// `1` while a writer holds the lock, `0` otherwise.
+    #[inline]
+    pub fn writer_count(&self) -> usize {
+        if self.state.load(Ordering::Relaxed) & WRITER_BIT != 0 {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Return the number of readers currently holding the lock.
+    ///
+    /// # Returns
+    ///
+    /// Current reader count.
+    #[inline]
+    pub fn reader_count(&self) -> usize {
+        self.state.load(Ordering::Relaxed) & READER_MASK
     }
 
     #[inline]

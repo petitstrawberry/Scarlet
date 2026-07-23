@@ -27,7 +27,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Mutex, Once};
+use crate::sync::{Mutex, Once};
 
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;

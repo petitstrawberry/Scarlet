@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::ops::{BitOr, BitOrAssign};
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 #[cfg(not(test))]
 use crate::arch::mmio;

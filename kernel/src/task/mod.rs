@@ -15,8 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic};
-use spin::mutex::SpinMutex;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
 use crate::device::char::tty::TtyDevice;
@@ -57,7 +56,7 @@ use core::ops::Range;
 use core::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
-use spin::Once;
+use crate::sync::Once;
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
@@ -73,9 +72,9 @@ const SCHED_UTIL_DECAY_DEN: u32 = 8;
 /// Lock type used for the architecture kernel context.
 ///
 /// The scheduler needs a stable raw pointer to this context while performing
-/// low-level context switches. `SpinMutex` exposes `as_mut_ptr()` for that
+/// low-level context switches. `Mutex` exposes `as_mut_ptr()` for that
 /// scheduler-only path, while normal setup code still uses `lock()`.
-pub type KernelContextMutex = SpinMutex<KernelContext>;
+pub type KernelContextMutex = Mutex<KernelContext>;
 
 /// Snapshot of task state exposed to user space via the `GetTaskInfo` syscall.
 ///

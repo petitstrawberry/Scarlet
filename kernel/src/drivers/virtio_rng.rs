@@ -20,7 +20,7 @@
 
 use crate::vm::addr::virt_to_phys;
 use alloc::{boxed::Box, collections::VecDeque, vec};
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::drivers::virtio::{
     device::VirtioDevice,

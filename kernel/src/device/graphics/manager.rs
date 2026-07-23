@@ -26,7 +26,7 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use super::output::DisplayOutput;
 use crate::device::{

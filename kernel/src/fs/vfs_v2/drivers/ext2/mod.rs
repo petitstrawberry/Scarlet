@@ -32,7 +32,7 @@ use alloc::{
 };
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use spin::{Mutex, rwlock::RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::{
     DeviceManager,

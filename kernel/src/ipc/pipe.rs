@@ -7,7 +7,7 @@
 #[cfg(test)]
 use alloc::vec::Vec;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::{IpcError, StreamIpcOps};
 use crate::object::KernelObject;

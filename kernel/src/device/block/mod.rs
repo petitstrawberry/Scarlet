@@ -2,7 +2,7 @@ use core::any::Any;
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use request::{BlockIORequest, BlockIOResult};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::Device;
 use crate::object::capability::selectable::Selectable;

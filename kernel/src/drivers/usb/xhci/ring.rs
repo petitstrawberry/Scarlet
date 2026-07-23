@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use super::trb::{Trb, TrbType};
 use crate::environment::PAGE_SIZE;

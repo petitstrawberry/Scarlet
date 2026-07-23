@@ -8,8 +8,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
-
+use crate::sync::{Mutex, Once};
 /// Task namespace for managing task IDs within a specific context.
 ///
 /// Each namespace maintains its own task ID counter and can be used by
@@ -163,7 +162,7 @@ impl TaskNamespace {
 ///
 /// This is the default namespace used by all tasks unless explicitly
 /// assigned to a different namespace.
-static ROOT_NAMESPACE: spin::Once<Arc<TaskNamespace>> = spin::Once::new();
+static ROOT_NAMESPACE: Once<Arc<TaskNamespace>> = Once::new();
 
 /// Get the global root task namespace.
 pub fn get_root_namespace() -> &'static Arc<TaskNamespace> {

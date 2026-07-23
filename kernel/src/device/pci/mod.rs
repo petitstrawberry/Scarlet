@@ -55,7 +55,7 @@ pub mod scan;
 extern crate alloc;
 
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
+use crate::sync::Mutex;
 
 use crate::vm;
 use crate::{early_println, println};

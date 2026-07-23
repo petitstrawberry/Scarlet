@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::device::audio::{
     AUDIO_PCM_FORMAT_F32LE, AUDIO_PCM_FORMAT_S8, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3,

@@ -12,7 +12,7 @@ mod tests {
     };
     use alloc::vec::Vec;
     use core::any::Any;
-    use spin::Mutex;
+    use crate::sync::Mutex;
 
     /// Mock character device for testing
     struct MockCharDevice {

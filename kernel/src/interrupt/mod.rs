@@ -7,6 +7,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 use hashbrown::HashMap;
 
+use crate::sync::{Lazy, Mutex, Once};
 use crate::arch::{self, interrupt::enable_external_interrupts};
 use crate::device::manager::DeviceManager;
 use crate::device::platform::resource::PlatformDeviceResource;
@@ -14,7 +15,7 @@ use crate::device::platform::resource::PlatformDeviceResource;
 pub mod controllers;
 pub mod msi;
 
-static INTERRUPT_MANAGER: spin::Once<InterruptManager> = spin::Once::new();
+static INTERRUPT_MANAGER: Once<InterruptManager> = Once::new();
 
 /// Kernel-global virtual IRQ number.
 pub type Virq = u32;
@@ -238,24 +239,24 @@ struct IrqDesc {
 }
 
 pub struct InterruptManager {
-    controllers: spin::Once<spin::Mutex<controllers::InterruptControllers>>,
-    irq_descs: spin::Lazy<spin::Mutex<HashMap<Virq, IrqDesc>>>,
-    external_handlers: spin::Lazy<spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
-    enabled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, CpuId>>>,
+    controllers: Once<Mutex<controllers::InterruptControllers>>,
+    irq_descs: Lazy<Mutex<HashMap<Virq, IrqDesc>>>,
+    external_handlers: Lazy<Mutex<HashMap<InterruptId, ExternalInterruptHandler>>>,
+    enabled_external_interrupts: Lazy<Mutex<HashMap<InterruptId, CpuId>>>,
     interrupt_sources:
-        spin::Lazy<spin::Mutex<HashMap<InterruptId, Arc<[Arc<dyn InterruptSource>]>>>>,
-    unhandled_external_interrupts: spin::Lazy<spin::Mutex<HashMap<InterruptId, usize>>>,
+        Lazy<Mutex<HashMap<InterruptId, Arc<[Arc<dyn InterruptSource>]>>>>,
+    unhandled_external_interrupts: Lazy<Mutex<HashMap<InterruptId, usize>>>,
 }
 
 impl InterruptManager {
     pub fn new() -> Self {
         Self {
-            controllers: spin::Once::new(),
-            irq_descs: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
-            external_handlers: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
-            enabled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
-            interrupt_sources: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
-            unhandled_external_interrupts: spin::Lazy::new(|| spin::Mutex::new(HashMap::new())),
+            controllers: Once::new(),
+            irq_descs: Lazy::new(|| Mutex::new(HashMap::new())),
+            external_handlers: Lazy::new(|| Mutex::new(HashMap::new())),
+            enabled_external_interrupts: Lazy::new(|| Mutex::new(HashMap::new())),
+            interrupt_sources: Lazy::new(|| Mutex::new(HashMap::new())),
+            unhandled_external_interrupts: Lazy::new(|| Mutex::new(HashMap::new())),
         }
     }
 
@@ -263,9 +264,9 @@ impl InterruptManager {
         INTERRUPT_MANAGER.call_once(Self::new)
     }
 
-    fn controllers(&self) -> &spin::Mutex<controllers::InterruptControllers> {
+    fn controllers(&self) -> &Mutex<controllers::InterruptControllers> {
         self.controllers
-            .call_once(|| spin::Mutex::new(controllers::InterruptControllers::new()))
+            .call_once(|| Mutex::new(controllers::InterruptControllers::new()))
     }
 
     pub fn init_controllers(&self) {
@@ -1180,11 +1181,11 @@ mod tests {
     }
 
     struct FakeExternalController {
-        events: Arc<spin::Mutex<Vec<&'static str>>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl FakeExternalController {
-        fn new(events: Arc<spin::Mutex<Vec<&'static str>>>) -> Self {
+        fn new(events: Arc<Mutex<Vec<&'static str>>>) -> Self {
             Self { events }
         }
     }
@@ -1267,7 +1268,7 @@ mod tests {
         interrupt_id: InterruptId,
         claim: InterruptClaim,
         event_name: &'static str,
-        events: Arc<spin::Mutex<Vec<&'static str>>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl FakeInterruptSource {
@@ -1275,7 +1276,7 @@ mod tests {
             interrupt_id: InterruptId,
             claim: InterruptClaim,
             event_name: &'static str,
-            events: Arc<spin::Mutex<Vec<&'static str>>>,
+            events: Arc<Mutex<Vec<&'static str>>>,
         ) -> Self {
             Self {
                 interrupt_id,
@@ -1419,7 +1420,7 @@ mod tests {
 
     #[test_case]
     fn test_shared_interrupt_sources_all_claim_before_controller_eoi() {
-        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let manager = InterruptManager::new();
         manager
             .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
@@ -1460,7 +1461,7 @@ mod tests {
 
     #[test_case]
     fn test_unclaimed_shared_interrupt_is_counted_and_eoi_still_runs() {
-        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let manager = InterruptManager::new();
         manager
             .register_external_controller(Box::new(FakeExternalController::new(events.clone())))
@@ -1489,7 +1490,7 @@ mod tests {
 
     #[test_case]
     fn test_register_and_enable_interrupt_source_orders_mask_clear_enable_unmask() {
-        let events = Arc::new(spin::Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let manager = InterruptManager::new();
         manager
             .register_external_controller(Box::new(FakeExternalController::new(events.clone())))

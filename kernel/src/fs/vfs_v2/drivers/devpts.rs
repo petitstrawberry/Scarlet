@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::{Mutex, RwLock};
+use crate::sync::{Mutex, RwLock};
 
 use crate::{
     device::{

@@ -1,4 +1,4 @@
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::hypervisor::mmio::VirtualMmioDevice;
 
