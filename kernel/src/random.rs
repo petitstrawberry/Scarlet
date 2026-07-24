@@ -211,7 +211,7 @@ fn next_fallback_random_u64() -> u64 {
         // can never become 0 again.
         let current = if state == 0 {
             let seed = crate::time::current_time()
-                ^ crate::timer::get_tick().rotate_left(17)
+                ^ crate::timer::get_time_ns().rotate_left(17)
                 ^ FALLBACK_RANDOM_SEED;
             let seed = if seed == 0 {
                 FALLBACK_RANDOM_SEED

@@ -32,7 +32,7 @@ use crate::object::capability::memory_mapping::{
 use crate::object::capability::selectable::Selectable;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sched::scheduler::get_task_by_id;
-use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
+use crate::timer::{TimerHandler, add_timer, get_time_ns, ms_to_ns};
 use crate::vm::addr::phys_to_virt;
 use crate::vm::vmem::MemoryAttribute;
 
@@ -428,7 +428,8 @@ impl FramebufferCharDevice {
         if let Some(context) = arm_context {
             let handler: Arc<dyn TimerHandler> = self.flush_handler.clone();
             add_timer(
-                get_tick().saturating_add(ms_to_ticks(16)),
+                get_time_ns().saturating_add(ms_to_ns(16)),
+                crate::timer::TimerPrecision::Coarse,
                 &handler,
                 context,
             );
