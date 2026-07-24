@@ -18,9 +18,9 @@
 //! from the host. Random bytes are fetched in batches and buffered internally
 //! to minimize virtqueue operations when requests are made.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use crate::vm::addr::virt_to_phys;
 use alloc::{boxed::Box, collections::VecDeque, vec};
-use spin::{Mutex, RwLock};
 
 use crate::drivers::virtio::{
     device::VirtioDevice,
@@ -41,13 +41,13 @@ pub struct VirtioRngDevice {
     /// Base memory address for MMIO access
     base_addr: usize,
     /// VirtIO queue for random number requests
-    virtqueues: Mutex<[VirtQueue<'static>; 1]>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 1]>,
     /// Internal buffer for random data
-    buffer: Mutex<VecDeque<u8>>,
+    buffer: IrqSpinLock<VecDeque<u8>>,
     /// Negotiated features
-    features: RwLock<u64>,
+    features: IrqRwSpinLock<u64>,
     /// Device initialization status
-    initialized: RwLock<bool>,
+    initialized: IrqRwSpinLock<bool>,
 }
 
 impl VirtioRngDevice {
@@ -63,10 +63,10 @@ impl VirtioRngDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
-            buffer: Mutex::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
-            features: RwLock::new(0),
-            initialized: RwLock::new(false),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
+            buffer: IrqSpinLock::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
+            features: IrqRwSpinLock::new(0),
+            initialized: IrqRwSpinLock::new(false),
         };
 
         // Initialize the device

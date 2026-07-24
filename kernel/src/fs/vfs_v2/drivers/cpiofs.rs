@@ -3,6 +3,7 @@
 //! This is a simplified read-only filesystem for handling CPIO archives
 //! used as initramfs. It implements the VFS v2 architecture.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::sync::Weak;
 use alloc::{
     boxed::Box,
@@ -13,7 +14,6 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use spin::RwLock;
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -54,16 +54,16 @@ pub struct CpioNode {
     content: Vec<u8>,
 
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<CpioNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<CpioNode>>>,
 
     /// Reference to filesystem
-    filesystem: RwLock<Option<Arc<CpioFS>>>,
+    filesystem: IrqRwSpinLock<Option<Arc<CpioFS>>>,
 
     /// File ID
     file_id: usize,
 
     /// Parent node (weak reference)
-    parent: RwLock<Option<Weak<CpioNode>>>,
+    parent: IrqRwSpinLock<Option<Weak<CpioNode>>>,
 }
 
 impl CpioNode {
@@ -73,10 +73,10 @@ impl CpioNode {
             name,
             file_type,
             content,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
             file_id,
-            parent: RwLock::new(None),
+            parent: IrqRwSpinLock::new(None),
         })
     }
 
@@ -492,14 +492,14 @@ impl FileSystemOperations for CpioFS {
 /// File object for CPIO regular files
 pub struct CpioFileObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioFileObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -666,14 +666,14 @@ impl crate::object::capability::selectable::Selectable for CpioFileObject {
 /// Directory object for CPIO directories
 pub struct CpioDirectoryObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioDirectoryObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }
@@ -828,14 +828,14 @@ impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
 /// Symbolic link object for CPIO symbolic links
 pub struct CpioSymlinkObject {
     node: Arc<dyn VfsNode>,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl CpioSymlinkObject {
     pub fn new(node: Arc<dyn VfsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }

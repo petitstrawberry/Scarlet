@@ -1,9 +1,9 @@
 //! Guest MMU management for RISC-V H-extension
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::vec::Vec;
 use core::arch::asm;
 use hashbrown::HashMap;
-use spin::{Once, RwLock};
 
 use crate::arch::vm::mmu::{PageTable, PageTableEntry};
 use crate::mem::page::{allocate_raw_pages, allocate_raw_pages_aligned, free_raw_pages};
@@ -14,15 +14,15 @@ const STAGE2_ROOT_SIZE: usize = 16384;
 const STAGE2_PPN_MASK: u64 = 0x0fff_ffff_ffff;
 pub const STAGE2_MAX_PAGE_LEVEL: usize = 3;
 
-static STAGE2_ROOTS: Once<RwLock<HashMap<u16, usize>>> = Once::new();
-static STAGE2_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
+static STAGE2_ROOTS: Once<IrqRwSpinLock<HashMap<u16, usize>>> = Once::new();
+static STAGE2_TABLES: Once<IrqRwSpinLock<HashMap<u16, Vec<usize>>>> = Once::new();
 
-fn get_stage2_roots() -> &'static RwLock<HashMap<u16, usize>> {
-    STAGE2_ROOTS.call_once(|| RwLock::new(HashMap::new()))
+fn get_stage2_roots() -> &'static IrqRwSpinLock<HashMap<u16, usize>> {
+    STAGE2_ROOTS.call_once(|| IrqRwSpinLock::new(HashMap::new()))
 }
 
-fn get_stage2_tables() -> &'static RwLock<HashMap<u16, Vec<usize>>> {
-    STAGE2_TABLES.call_once(|| RwLock::new(HashMap::new()))
+fn get_stage2_tables() -> &'static IrqRwSpinLock<HashMap<u16, Vec<usize>>> {
+    STAGE2_TABLES.call_once(|| IrqRwSpinLock::new(HashMap::new()))
 }
 
 pub fn alloc_vmid() -> u16 {

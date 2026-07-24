@@ -1,8 +1,8 @@
 //! AArch64 KVM register conversion and arch-specific hooks
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Once, RwLock};
 
 use crate::arch::hv::reg_index::reg;
 use crate::hypervisor::VcpuObject;
@@ -218,10 +218,10 @@ struct KvmArmVcpuSysregEntry {
     state: KvmArmVcpuSysregState,
 }
 
-static KVM_ARM_SYSREG_STATES: Once<RwLock<Vec<KvmArmVcpuSysregEntry>>> = Once::new();
+static KVM_ARM_SYSREG_STATES: Once<IrqRwSpinLock<Vec<KvmArmVcpuSysregEntry>>> = Once::new();
 
-fn get_sysreg_states() -> &'static RwLock<Vec<KvmArmVcpuSysregEntry>> {
-    KVM_ARM_SYSREG_STATES.call_once(|| RwLock::new(Vec::new()))
+fn get_sysreg_states() -> &'static IrqRwSpinLock<Vec<KvmArmVcpuSysregEntry>> {
+    KVM_ARM_SYSREG_STATES.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
 fn with_sysreg_state<R>(
@@ -751,10 +751,10 @@ struct KvmArmVcpuInitEntry {
     powered_off: bool,
 }
 
-static KVM_ARM_VCPU_INIT_STATES: Once<RwLock<Vec<KvmArmVcpuInitEntry>>> = Once::new();
+static KVM_ARM_VCPU_INIT_STATES: Once<IrqRwSpinLock<Vec<KvmArmVcpuInitEntry>>> = Once::new();
 
-fn get_vcpu_init_states() -> &'static RwLock<Vec<KvmArmVcpuInitEntry>> {
-    KVM_ARM_VCPU_INIT_STATES.call_once(|| RwLock::new(Vec::new()))
+fn get_vcpu_init_states() -> &'static IrqRwSpinLock<Vec<KvmArmVcpuInitEntry>> {
+    KVM_ARM_VCPU_INIT_STATES.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
 fn set_vcpu_powered_off(vcpu: &dyn VcpuObject, powered_off: bool) {

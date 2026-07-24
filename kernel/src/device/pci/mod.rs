@@ -54,8 +54,8 @@ pub mod scan;
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
 
 use crate::vm;
 use crate::{early_println, println};
@@ -104,9 +104,9 @@ pub struct PciBus {
     /// ECAM region size in bytes
     ecam_size: usize,
     /// Virtual base of the mapped ECAM region
-    ecam_vaddr: Mutex<Option<usize>>,
+    ecam_vaddr: IrqSpinLock<Option<usize>>,
     /// List of discovered PCI devices
-    devices: Mutex<Vec<device::PciDeviceInfo>>,
+    devices: IrqSpinLock<Vec<device::PciDeviceInfo>>,
 }
 
 impl PciBus {
@@ -124,8 +124,8 @@ impl PciBus {
         Self {
             ecam_base,
             ecam_size,
-            ecam_vaddr: Mutex::new(None),
-            devices: Mutex::new(Vec::new()),
+            ecam_vaddr: IrqSpinLock::new(None),
+            devices: IrqSpinLock::new(Vec::new()),
         }
     }
 

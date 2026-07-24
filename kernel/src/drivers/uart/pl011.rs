@@ -1,8 +1,8 @@
 // PL011 UART driver for ARM platforms (QEMU virt, etc.)
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::any::Any;
-use spin::{Mutex, RwLock};
 
 use crate::initcall::early;
 use crate::{
@@ -59,20 +59,20 @@ const TX_PACE_BYTES: usize = 64;
 
 pub struct Pl011Uart {
     base: usize,
-    interrupt_id: RwLock<Option<InterruptId>>,
-    rx_buffer: Mutex<VecDeque<u8>>,
-    event_emitter: Mutex<DeviceEventEmitter>,
-    tx_lock: Mutex<()>,
+    interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
+    rx_buffer: IrqSpinLock<VecDeque<u8>>,
+    event_emitter: IrqSpinLock<DeviceEventEmitter>,
+    tx_lock: IrqSpinLock<()>,
 }
 
 impl Pl011Uart {
     pub fn new(base: usize) -> Self {
         Pl011Uart {
             base,
-            interrupt_id: RwLock::new(None),
-            rx_buffer: Mutex::new(VecDeque::new()),
-            event_emitter: Mutex::new(DeviceEventEmitter::new()),
-            tx_lock: Mutex::new(()),
+            interrupt_id: IrqRwSpinLock::new(None),
+            rx_buffer: IrqSpinLock::new(VecDeque::new()),
+            event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
+            tx_lock: IrqSpinLock::new(()),
         }
     }
 

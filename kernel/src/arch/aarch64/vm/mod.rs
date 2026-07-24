@@ -6,6 +6,7 @@ pub mod mmu;
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, IrqSpinLockGuard, Once};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +14,6 @@ use hashbrown::HashMap;
 use mmu::PageTable;
 #[cfg(test)]
 use mmu::PageTableEntry;
-use spin::{Mutex, MutexGuard, Once, RwLock};
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 
@@ -78,9 +78,10 @@ unsafe extern "C" {
 }
 
 const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
-static ASID_BITMAP_TABLES: Once<RwLock<Box<[u64]>>> = Once::new();
+static ASID_BITMAP_TABLES: Once<IrqRwSpinLock<Box<[u64]>>> = Once::new();
 
-static PAGE_TABLE_LOCKS: [Mutex<()>; NUM_OF_ASID] = [const { Mutex::new(()) }; NUM_OF_ASID];
+static PAGE_TABLE_LOCKS: [IrqSpinLock<()>; NUM_OF_ASID] =
+    [const { IrqSpinLock::new(()) }; NUM_OF_ASID];
 const NO_LOCK_OWNER: u64 = u64::MAX;
 static PAGE_TABLE_LOCK_OWNERS: [AtomicU64; NUM_OF_ASID] =
     [const { AtomicU64::new(NO_LOCK_OWNER) }; NUM_OF_ASID];
@@ -88,7 +89,7 @@ static PAGE_TABLE_LOCK_OWNERS: [AtomicU64; NUM_OF_ASID] =
 struct PageTableLockGuard {
     asid: u16,
     owner_cpu: u64,
-    guard: Option<MutexGuard<'static, ()>>,
+    guard: Option<IrqSpinLockGuard<'static, ()>>,
 }
 
 impl Drop for PageTableLockGuard {
@@ -263,19 +264,19 @@ impl RootPageTableGuard {
     }
 }
 
-fn get_asid_tables() -> &'static RwLock<Box<[u64]>> {
+fn get_asid_tables() -> &'static IrqRwSpinLock<Box<[u64]>> {
     ASID_BITMAP_TABLES.call_once(|| {
         // Directly allocate on heap to avoid stack overflow
         let mut tables = alloc::vec![0u64; NUM_OF_ASID / 64].into_boxed_slice();
         tables[0] = 1; // Mark the first ASID as used to avoid returning 0, which is reserved
-        RwLock::new(tables)
+        IrqRwSpinLock::new(tables)
     })
 }
 
-static PAGE_TABLES: Once<RwLock<HashMap<u16, Vec<usize>>>> = Once::new();
+static PAGE_TABLES: Once<IrqRwSpinLock<HashMap<u16, Vec<usize>>>> = Once::new();
 
-fn get_page_tables() -> &'static RwLock<HashMap<u16, Vec<usize>>> {
-    PAGE_TABLES.call_once(|| RwLock::new(HashMap::new()))
+fn get_page_tables() -> &'static IrqRwSpinLock<HashMap<u16, Vec<usize>>> {
+    PAGE_TABLES.call_once(|| IrqRwSpinLock::new(HashMap::new()))
 }
 
 fn new_pagetable() -> *mut PageTable {

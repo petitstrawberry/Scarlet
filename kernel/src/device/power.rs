@@ -1,8 +1,8 @@
 //! Power-domain registration and device power sequencing.
 
+use crate::sync::IrqSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use spin::Mutex;
 
 use crate::device::DeviceInfo;
 use crate::device::platform::PlatformDeviceInfo;
@@ -50,7 +50,7 @@ pub trait PowerDomain: Send + Sync {
     }
 }
 
-static POWER_MANAGER: Mutex<Option<PowerManagerInner>> = Mutex::new(None);
+static POWER_MANAGER: IrqSpinLock<Option<PowerManagerInner>> = IrqSpinLock::new(None);
 
 struct PowerManagerInner {
     domains: BTreeMap<u32, Arc<dyn PowerDomain>>,

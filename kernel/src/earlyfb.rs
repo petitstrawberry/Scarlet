@@ -1,6 +1,6 @@
+use crate::sync::IrqSpinLock;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use limine::framebuffer::{FRAMEBUFFER_RGB, Framebuffer};
-use spin::Mutex;
 
 const FONT_WIDTH: usize = 8;
 const FONT_HEIGHT: usize = 8;
@@ -183,7 +183,7 @@ impl FramebufferConsole {
     }
 }
 
-static EARLY_CONSOLE: Mutex<FramebufferConsole> = Mutex::new(FramebufferConsole::new());
+static EARLY_CONSOLE: IrqSpinLock<FramebufferConsole> = IrqSpinLock::new(FramebufferConsole::new());
 
 pub fn console_lock_addr() -> usize {
     &EARLY_CONSOLE as *const _ as usize

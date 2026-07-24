@@ -12,11 +12,11 @@
 //!
 //! This design supports multiple network interfaces (eth0, eth1, wlan0, etc.).
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::RwLock;
 
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
@@ -117,26 +117,26 @@ pub struct EthernetInterfaceInfo {
 /// Manages multiple interfaces and routes frames based on EtherType field.
 pub struct EthernetLayer {
     /// Registered interfaces: name -> info
-    interfaces: RwLock<BTreeMap<String, EthernetInterfaceInfo>>,
+    interfaces: IrqRwSpinLock<BTreeMap<String, EthernetInterfaceInfo>>,
     /// Interface devices: name -> device (kept separate for Arc<dyn> handling)
-    devices: RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    devices: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
     /// Default interface name
-    default_interface: RwLock<Option<String>>,
+    default_interface: IrqRwSpinLock<Option<String>>,
     /// Protocol handlers registered by EtherType
-    protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
+    protocols: IrqRwSpinLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
 }
 
 impl EthernetLayer {
     /// Create a new Ethernet layer
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            interfaces: RwLock::new(BTreeMap::new()),
-            devices: RwLock::new(BTreeMap::new()),
-            default_interface: RwLock::new(None),
-            protocols: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            interfaces: IrqRwSpinLock::new(BTreeMap::new()),
+            devices: IrqRwSpinLock::new(BTreeMap::new()),
+            default_interface: IrqRwSpinLock::new(None),
+            protocols: IrqRwSpinLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
         })
     }
 

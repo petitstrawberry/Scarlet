@@ -1,8 +1,8 @@
 use core::any::Any;
 
+use crate::sync::IrqSpinLock;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use request::{BlockIORequest, BlockIOResult};
-use spin::Mutex;
 
 use super::Device;
 use crate::object::capability::selectable::Selectable;
@@ -63,7 +63,7 @@ pub struct GenericBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
     request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
 }
 
 impl GenericBlockDevice {
@@ -76,7 +76,7 @@ impl GenericBlockDevice {
             disk_name,
             disk_size,
             request_fn,
-            request_queue: Mutex::new(Vec::new()),
+            request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
 }
@@ -158,7 +158,7 @@ impl BlockDevice for GenericBlockDevice {
     }
 
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
-        // Use Mutex for internal mutability
+        // Use an IRQ spin lock for internal mutability.
         self.request_queue.lock().push(request);
     }
 

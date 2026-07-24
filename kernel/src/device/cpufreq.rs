@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use spin::Mutex;
+use crate::sync::IrqSpinLock;
 
 use crate::{environment::MAX_NUM_CPUS, task::SCHED_UTIL_SCALE};
 
@@ -224,12 +224,13 @@ impl CpuFrequencyPolicy {
 
 static CPU_PERF_DOMAINS: [AtomicU32; MAX_NUM_CPUS] =
     [const { AtomicU32::new(INVALID_PERFORMANCE_DOMAIN) }; MAX_NUM_CPUS];
-static CPUFREQ_BACKENDS: Mutex<[Option<CpuFrequencyBackend>; MAX_CPUFREQ_BACKENDS]> =
-    Mutex::new([None; MAX_CPUFREQ_BACKENDS]);
-static CPUFREQ_POLICIES: Mutex<[CpuFrequencyPolicy; MAX_CPUFREQ_POLICIES]> =
-    Mutex::new([CpuFrequencyPolicy::empty(); MAX_CPUFREQ_POLICIES]);
-static CPUFREQ_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
-static CPUFREQ_PENDING_REQUESTS: Mutex<PendingRequests> = Mutex::new(PendingRequests::empty());
+static CPUFREQ_BACKENDS: IrqSpinLock<[Option<CpuFrequencyBackend>; MAX_CPUFREQ_BACKENDS]> =
+    IrqSpinLock::new([None; MAX_CPUFREQ_BACKENDS]);
+static CPUFREQ_POLICIES: IrqSpinLock<[CpuFrequencyPolicy; MAX_CPUFREQ_POLICIES]> =
+    IrqSpinLock::new([CpuFrequencyPolicy::empty(); MAX_CPUFREQ_POLICIES]);
+static CPUFREQ_TRANSITION_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
+static CPUFREQ_PENDING_REQUESTS: IrqSpinLock<PendingRequests> =
+    IrqSpinLock::new(PendingRequests::empty());
 static CPUFREQ_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static CPUFREQ_FIRST_WORKER_REQUEST: AtomicBool = AtomicBool::new(true);
 static CPUFREQ_WORKER_WAKER: crate::sync::Waker =

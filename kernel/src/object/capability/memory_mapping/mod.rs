@@ -270,19 +270,21 @@ pub enum ResolveFaultError {
 
 #[cfg(test)]
 mod tests {
+    use crate::sync::IrqRwSpinLock;
+
     use super::*;
 
     // Mock object that implements MemoryMappingOps for testing
     struct MockMappableObject {
         should_fail: bool,
-        mapped_regions: spin::RwLock<alloc::vec::Vec<(usize, usize)>>, // (vaddr, length)
+        mapped_regions: IrqRwSpinLock<alloc::vec::Vec<(usize, usize)>>, // (vaddr, length)
     }
 
     impl MockMappableObject {
         fn new(should_fail: bool) -> Self {
             MockMappableObject {
                 should_fail,
-                mapped_regions: spin::RwLock::new(alloc::vec::Vec::new()),
+                mapped_regions: IrqRwSpinLock::new(alloc::vec::Vec::new()),
             }
         }
     }

@@ -3,11 +3,11 @@
 //! This module provides ARP implementation for resolving IP addresses to MAC addresses.
 //! It implements the NetworkLayer trait and manages an ARP cache.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::{Mutex, RwLock};
 
 use crate::early_println;
 use crate::network::ipv4::Ipv4Address;
@@ -202,7 +202,7 @@ struct ArpPendingEntry {
     /// Cache entry
     entry: ArpCacheEntry,
     /// Packets waiting for this ARP resolution
-    packet_queue: Mutex<Vec<Vec<u8>>>,
+    packet_queue: IrqSpinLock<Vec<Vec<u8>>>,
 }
 
 /// ARP cache key: (interface_name, IP as u32)
@@ -224,15 +224,15 @@ type ArpPendingKey = (alloc::string::String, u32);
 /// - MAC/IP addresses are obtained from EthernetLayer/Ipv4Layer
 pub struct ArpLayer {
     /// ARP cache: (interface_name, IP) -> entry
-    cache: RwLock<BTreeMap<ArpCacheKey, ArpCacheEntry>>,
+    cache: IrqRwSpinLock<BTreeMap<ArpCacheKey, ArpCacheEntry>>,
     /// Pending ARP resolutions: (interface_name, IP) -> pending entry
-    pending: RwLock<BTreeMap<ArpPendingKey, ArpPendingEntry>>,
+    pending: IrqRwSpinLock<BTreeMap<ArpPendingKey, ArpPendingEntry>>,
     /// Packet timeout (in ticks)
     timeout_ticks: u64,
     /// Cache timeout (in ticks)
     cache_timeout: u64,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Counter for packet queueing
     packet_counter: AtomicU32,
 }
@@ -241,11 +241,11 @@ impl ArpLayer {
     /// Create a new ARP layer
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            cache: RwLock::new(BTreeMap::new()),
-            pending: RwLock::new(BTreeMap::new()),
+            cache: IrqRwSpinLock::new(BTreeMap::new()),
+            pending: IrqRwSpinLock::new(BTreeMap::new()),
             timeout_ticks: 1000,  // 1 second
             cache_timeout: 60000, // 1 minute
-            stats: RwLock::new(NetworkLayerStats::default()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             packet_counter: AtomicU32::new(0),
         })
     }
@@ -416,7 +416,7 @@ impl ArpLayer {
             pending_key,
             ArpPendingEntry {
                 entry: ArpCacheEntry::pending(target_ip),
-                packet_queue: Mutex::new(Vec::new()),
+                packet_queue: IrqSpinLock::new(Vec::new()),
             },
         );
         drop(pending);
@@ -681,7 +681,7 @@ impl ArpLayer {
                 pending_key,
                 ArpPendingEntry {
                     entry: ArpCacheEntry::pending(ip_address),
-                    packet_queue: Mutex::new(queue),
+                    packet_queue: IrqSpinLock::new(queue),
                 },
             );
         }

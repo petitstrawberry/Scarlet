@@ -14,6 +14,7 @@ use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
 use self::time::PosixTimer;
 use crate::arch::Trapframe;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 
 const MAX_FDS: usize = 1024;
 
@@ -57,8 +58,8 @@ impl Default for LinuxFdTable {
 #[derive(Clone)]
 pub struct LinuxAbi {
     pub namespace: Arc<crate::task::namespace::TaskNamespace>,
-    fd_table: Arc<spin::RwLock<LinuxFdTable>>,
-    pub signal_state: Arc<spin::Mutex<signal::SignalState>>,
+    fd_table: Arc<IrqRwSpinLock<LinuxFdTable>>,
+    pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
     pub thread_state: LinuxThreadState,
     pub posix_timers: BTreeMap<u64, PosixTimer>,
     pub next_timer_id: u64,
@@ -70,8 +71,8 @@ impl Default for LinuxAbi {
 
         Self {
             namespace,
-            fd_table: Arc::new(spin::RwLock::new(LinuxFdTable::default())),
-            signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
+            fd_table: Arc::new(IrqRwSpinLock::new(LinuxFdTable::default())),
+            signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
             posix_timers: BTreeMap::new(),
             next_timer_id: 1,
@@ -89,7 +90,7 @@ impl LinuxAbi {
 
     pub fn unshare_fd_table(&mut self) {
         let snapshot = self.fd_table.read().clone();
-        self.fd_table = Arc::new(spin::RwLock::new(snapshot));
+        self.fd_table = Arc::new(IrqRwSpinLock::new(snapshot));
     }
 
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {

@@ -87,14 +87,19 @@ unsafe fn cpu_state_for_init(cpu_id: usize) -> &'static mut Aarch64 {
     unsafe { &mut *(&raw mut CPUS).cast::<Aarch64>().add(cpu_id) }
 }
 
+/// Initialize the current AArch64 CPU's per-CPU trap state.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned to the current CPU.
 pub fn init_arch(cpu_id: usize) {
-    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
     // SAFETY: The bootstrap CPU initializes its uniquely assigned slot once,
     // before the slot is exposed through TPIDR_EL1.
     let aarch64 = unsafe { cpu_state_for_init(cpu_id) };
     aarch64.cpuid = cpu_id as u64;
 
     trap_init(aarch64);
+    early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
 }
 
 /// Initialize AArch64 per-CPU state for a secondary CPU.
@@ -457,6 +462,8 @@ fn trap_init(aarch64: &mut Aarch64) {
     let scratch_addr = aarch64 as *const _ as usize;
 
     // Set up thread pointer registers to point to our aarch64 struct
+    // SAFETY: `aarch64` is this CPU's initialized per-CPU state and must be
+    // published through TPIDR_EL1 before lock-backed operations can run.
     unsafe {
         asm!(
             "msr tpidr_el1, {0}",
@@ -592,6 +599,37 @@ pub fn get_cpu() -> &'static mut Aarch64 {
 
     // Kernel context always has access to this mapping.
     return unsafe { transmute(tpidr_el1) };
+}
+
+/// Return the current CPU's ID if its per-CPU pointer is published.
+///
+/// Reads `TPIDR_EL1` directly. Boot entry code explicitly clears
+/// `TPIDR_EL1` to zero, so a zero value deterministically means "before
+/// init_arch/init_ap_cpu". `trap_init` publishes the per-CPU pointer in
+/// `TPIDR_EL1` last, after `cpuid` has been stored.
+///
+/// # Returns
+///
+/// `Some(cpu_id)` when `TPIDR_EL1` is non-zero (initialized), otherwise
+/// `None`.
+#[inline]
+pub fn try_get_cpuid() -> Option<usize> {
+    let tpidr_el1: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, tpidr_el1",
+            out(reg) tpidr_el1,
+            options(nostack, preserves_flags),
+        );
+    }
+    if tpidr_el1 == 0 {
+        return None;
+    }
+    // SAFETY: Non-zero `TPIDR_EL1` is published only by `trap_init` after
+    // `cpuid` is set. Boot entry code zeroes `TPIDR_EL1` first, so any
+    // non-zero value here is the per-CPU pointer.
+    let aarch64 = unsafe { &*(tpidr_el1 as *const Aarch64) };
+    Some(aarch64.cpuid as usize)
 }
 
 pub fn set_next_mode(mode: crate::arch::Mode) {

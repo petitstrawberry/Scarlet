@@ -6,8 +6,8 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
 
 use crate::device::video::{
     SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FORMAT_HEVC,
@@ -154,26 +154,26 @@ impl DecodeCommandBuffers {
 
 struct VideoSession {
     stream_id: u32,
-    stream_created: RwLock<bool>,
-    stream_coded_format: RwLock<u32>,
-    mapped_frame: Mutex<Option<MappedFrameInfo>>,
-    mapped_resources: Mutex<Option<MappedResourceSet>>,
-    async_command_buffers: Mutex<Option<DecodeCommandBuffers>>,
-    pending_decode: Mutex<Option<PendingDecode>>,
-    next_timestamp: Mutex<u64>,
+    stream_created: IrqRwSpinLock<bool>,
+    stream_coded_format: IrqRwSpinLock<u32>,
+    mapped_frame: IrqSpinLock<Option<MappedFrameInfo>>,
+    mapped_resources: IrqSpinLock<Option<MappedResourceSet>>,
+    async_command_buffers: IrqSpinLock<Option<DecodeCommandBuffers>>,
+    pending_decode: IrqSpinLock<Option<PendingDecode>>,
+    next_timestamp: IrqSpinLock<u64>,
 }
 
 impl VideoSession {
     fn new(index: usize) -> Self {
         Self {
             stream_id: (index + 1) as u32,
-            stream_created: RwLock::new(false),
-            stream_coded_format: RwLock::new(0),
-            mapped_frame: Mutex::new(None),
-            mapped_resources: Mutex::new(None),
-            async_command_buffers: Mutex::new(DecodeCommandBuffers::new()),
-            pending_decode: Mutex::new(None),
-            next_timestamp: Mutex::new(1),
+            stream_created: IrqRwSpinLock::new(false),
+            stream_coded_format: IrqRwSpinLock::new(0),
+            mapped_frame: IrqSpinLock::new(None),
+            mapped_resources: IrqSpinLock::new(None),
+            async_command_buffers: IrqSpinLock::new(DecodeCommandBuffers::new()),
+            pending_decode: IrqSpinLock::new(None),
+            next_timestamp: IrqSpinLock::new(1),
         }
     }
 }
@@ -182,15 +182,15 @@ impl VideoSession {
 pub struct VirtioVideoDevice {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: Mutex<[VirtQueue<'static>; QUEUE_COUNT]>,
-    features: RwLock<u64>,
-    input_capability_descs: RwLock<u32>,
-    output_capability_descs: RwLock<u32>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; QUEUE_COUNT]>,
+    features: IrqRwSpinLock<u64>,
+    input_capability_descs: IrqRwSpinLock<u32>,
+    output_capability_descs: IrqRwSpinLock<u32>,
     sessions: [VideoSession; MAX_VIDEO_SESSIONS],
-    decoded_frame: Mutex<DecodedFrameState>,
-    sync_command_buffers: Mutex<Option<CommandBuffers>>,
-    next_session_index: Mutex<usize>,
-    interrupt_id: Mutex<Option<InterruptId>>,
+    decoded_frame: IrqSpinLock<DecodedFrameState>,
+    sync_command_buffers: IrqSpinLock<Option<CommandBuffers>>,
+    next_session_index: IrqSpinLock<usize>,
+    interrupt_id: IrqSpinLock<Option<InterruptId>>,
 }
 
 impl VirtioVideoDevice {
@@ -224,18 +224,18 @@ impl VirtioVideoDevice {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: Mutex::new([VirtQueue::new(QUEUE_SIZE), VirtQueue::new(QUEUE_SIZE)]),
-            features: RwLock::new(0),
-            input_capability_descs: RwLock::new(0),
-            output_capability_descs: RwLock::new(0),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(QUEUE_SIZE), VirtQueue::new(QUEUE_SIZE)]),
+            features: IrqRwSpinLock::new(0),
+            input_capability_descs: IrqRwSpinLock::new(0),
+            output_capability_descs: IrqRwSpinLock::new(0),
             sessions: core::array::from_fn(VideoSession::new),
-            decoded_frame: Mutex::new(DecodedFrameState {
+            decoded_frame: IrqSpinLock::new(DecodedFrameState {
                 frame_count: 0,
                 last_error: None,
             }),
-            sync_command_buffers: Mutex::new(CommandBuffers::new()),
-            next_session_index: Mutex::new(0),
-            interrupt_id: Mutex::new(None),
+            sync_command_buffers: IrqSpinLock::new(CommandBuffers::new()),
+            next_session_index: IrqSpinLock::new(0),
+            interrupt_id: IrqSpinLock::new(None),
         };
 
         let negotiated_features = match device.init() {

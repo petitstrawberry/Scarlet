@@ -38,11 +38,11 @@
 //! - Upper layer is required for write operations
 //! - Whiteout files follow the `.wh.filename` convention
 
+use crate::sync::IrqRwSpinLock;
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::{collections::BTreeSet, format, string::String, sync::Arc, vec::Vec};
 use core::any::Any;
-use spin::RwLock;
 
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{
@@ -105,7 +105,7 @@ pub struct OverlayNode {
     /// Node name
     name: String,
     /// Reference to overlay filesystem
-    overlay_fs: RwLock<Option<Arc<OverlayFS>>>,
+    overlay_fs: IrqRwSpinLock<Option<Arc<OverlayFS>>>,
     /// Path in the overlay
     path: String,
     /// File type (resolved from layers)
@@ -118,7 +118,7 @@ impl OverlayNode {
     pub fn new(name: String, path: String, file_type: FileType, file_id: u64) -> Arc<Self> {
         Arc::new(Self {
             name,
-            overlay_fs: RwLock::new(None),
+            overlay_fs: IrqRwSpinLock::new(None),
             path,
             file_type,
             file_id,
@@ -134,7 +134,7 @@ impl Clone for OverlayNode {
     fn clone(&self) -> Self {
         let cloned = Self {
             name: self.name.clone(),
-            overlay_fs: RwLock::new(None),
+            overlay_fs: IrqRwSpinLock::new(None),
             path: self.path.clone(),
             file_type: self.file_type.clone(),
             file_id: self.file_id,
@@ -1182,7 +1182,7 @@ impl FileSystemOperations for OverlayFS {
 pub struct OverlayDirectoryObject {
     overlay_fs: Arc<OverlayFS>,
     path: String, // Store path instead of node
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 }
 
 impl OverlayDirectoryObject {
@@ -1190,7 +1190,7 @@ impl OverlayDirectoryObject {
         Self {
             overlay_fs,
             path,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 

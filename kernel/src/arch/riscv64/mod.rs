@@ -698,7 +698,39 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         out(reg) scratch,
         );
     }
+
     unsafe { &mut *(scratch as *mut Riscv64) }
+}
+
+/// Return the current CPU's ID if its per-CPU pointer is published.
+///
+/// Reads `sscratch` directly. Boot entry code explicitly clears `sscratch`
+/// to zero, so a zero value deterministically means "before init_cpu".
+/// `init_cpu` publishes the per-CPU pointer in `sscratch` last, after
+/// `hartid` has been stored.
+///
+/// # Returns
+///
+/// `Some(cpu_id)` when `sscratch` is non-zero (initialized), otherwise
+/// `None`.
+#[inline]
+pub fn try_get_cpuid() -> Option<usize> {
+    let scratch: usize;
+    unsafe {
+        asm!(
+            "csrr {0}, sscratch",
+            out(reg) scratch,
+            options(nostack, preserves_flags),
+        );
+    }
+    if scratch == 0 {
+        return None;
+    }
+    // SAFETY: Non-zero `sscratch` is published only by `init_cpu` after
+    // `hartid` is set. Boot entry code zeroes `sscratch` first, so any
+    // non-zero value here is the per-CPU pointer.
+    let riscv = unsafe { &*(scratch as *const Riscv64) };
+    Some(riscv.hartid as usize)
 }
 
 pub fn set_next_mode(mode: Mode) {

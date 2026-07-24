@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use spin::Mutex;
+use crate::sync::IrqSpinLock;
 
 use crate::device::char::CharDevice;
 use crate::device::{DefaultDeviceOpen, Device, DeviceCapability, DeviceType};
@@ -666,8 +666,8 @@ impl AudioPcmRing {
 pub struct AudioCharDevice {
     backend: Arc<dyn AudioPlaybackDevice>,
     info: AudioDeviceInfo,
-    ring: Mutex<Option<AudioPcmRing>>,
-    opened: Mutex<bool>,
+    ring: IrqSpinLock<Option<AudioPcmRing>>,
+    opened: IrqSpinLock<bool>,
 }
 
 impl AudioCharDevice {
@@ -698,8 +698,8 @@ impl AudioCharDevice {
         Self {
             backend,
             info,
-            ring: Mutex::new(None),
-            opened: Mutex::new(false),
+            ring: IrqSpinLock::new(None),
+            opened: IrqSpinLock::new(false),
         }
     }
 

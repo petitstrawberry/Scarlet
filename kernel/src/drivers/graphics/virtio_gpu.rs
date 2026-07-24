@@ -6,8 +6,8 @@
 //! The driver supports basic framebuffer operations and display management
 //! according to the VirtIO GPU specification.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{sync::Arc, vec::Vec};
-use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
@@ -302,18 +302,18 @@ fn append_pod_bytes<T>(buffer: &mut Vec<u8>, value: &T) {
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: Mutex<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
-    display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
-    framebuffer_addr: RwLock<Option<usize>>,
-    framebuffer_alloc: RwLock<Option<ContiguousPages>>,
-    retired_framebuffer_allocs: Mutex<Vec<ContiguousPages>>,
-    resource_id: Mutex<u32>,
-    current_resource_id: RwLock<Option<u32>>,
-    scanout_resource_id: RwLock<Option<u32>>,
-    negotiated_features: RwLock<u64>,
-    initialized: Mutex<bool>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
+    display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
+    framebuffer_addr: IrqRwSpinLock<Option<usize>>,
+    framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
+    retired_framebuffer_allocs: IrqSpinLock<Vec<ContiguousPages>>,
+    resource_id: IrqSpinLock<u32>,
+    current_resource_id: IrqRwSpinLock<Option<u32>>,
+    scanout_resource_id: IrqRwSpinLock<Option<u32>>,
+    negotiated_features: IrqRwSpinLock<u64>,
+    initialized: IrqSpinLock<bool>,
     // Track resources and their associated memory
-    resources: Mutex<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
+    resources: IrqSpinLock<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
 }
 
 impl VirtioGpuDeviceCore {
@@ -347,17 +347,17 @@ impl VirtioGpuDeviceCore {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
-            display_info: RwLock::new(None),
-            framebuffer_addr: RwLock::new(None),
-            framebuffer_alloc: RwLock::new(None),
-            retired_framebuffer_allocs: Mutex::new(Vec::new()),
-            resource_id: Mutex::new(1),
-            current_resource_id: RwLock::new(None),
-            scanout_resource_id: RwLock::new(None),
-            negotiated_features: RwLock::new(0),
-            initialized: Mutex::new(false),
-            resources: Mutex::new(alloc::collections::BTreeMap::new()),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
+            display_info: IrqRwSpinLock::new(None),
+            framebuffer_addr: IrqRwSpinLock::new(None),
+            framebuffer_alloc: IrqRwSpinLock::new(None),
+            retired_framebuffer_allocs: IrqSpinLock::new(Vec::new()),
+            resource_id: IrqSpinLock::new(1),
+            current_resource_id: IrqRwSpinLock::new(None),
+            scanout_resource_id: IrqRwSpinLock::new(None),
+            negotiated_features: IrqRwSpinLock::new(0),
+            initialized: IrqSpinLock::new(false),
+            resources: IrqSpinLock::new(alloc::collections::BTreeMap::new()),
         };
 
         // Initialize virtqueues first
@@ -1266,7 +1266,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 }
 
 pub struct VirtioGpuDevice {
-    core: Arc<Mutex<VirtioGpuDeviceCore>>,
+    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
 }
 
 impl VirtioGpuDevice {
@@ -1281,7 +1281,7 @@ impl VirtioGpuDevice {
     /// A new instance of `VirtioGpuDevice`
     pub fn new(base_addr: usize) -> Self {
         Self {
-            core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
+            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new(base_addr))),
         }
     }
 
@@ -1296,7 +1296,7 @@ impl VirtioGpuDevice {
     /// A new instance of `VirtioGpuDevice`.
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
         Self {
-            core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new_pci(transport))),
+            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new_pci(transport))),
         }
     }
 }

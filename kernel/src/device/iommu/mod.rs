@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{BitOr, BitOrAssign};
 
-use crate::sync::Mutex;
+use crate::sync::IrqSpinLock;
 
 /// Physical address type used by DMA mappings.
 pub type PhysAddr = usize;
@@ -268,7 +268,7 @@ pub struct DmaContext {
     pub additional_iommus: Vec<IommuAttachment>,
     /// Offset applied to physical addresses for direct DMA.
     pub direct_dma_offset: isize,
-    iova_allocator: Option<Arc<Mutex<DmaIovaAllocator>>>,
+    iova_allocator: Option<Arc<IrqSpinLock<DmaIovaAllocator>>>,
 }
 
 /// Owned DMA mapping that is unmapped when dropped.
@@ -472,7 +472,7 @@ impl DmaContext {
         config: IommuDomainConfig,
     ) -> Self {
         let iova_allocator = if iommu.is_some() && config.iova_base != 0 && config.iova_size != 0 {
-            Some(Arc::new(Mutex::new(DmaIovaAllocator::new(
+            Some(Arc::new(IrqSpinLock::new(DmaIovaAllocator::new(
                 config.iova_base,
                 config.iova_size,
             ))))
@@ -682,7 +682,7 @@ fn align_up_u64(value: u64, align: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spin::Mutex;
+    use crate::sync::IrqSpinLock;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct RecordedMap {
@@ -693,9 +693,9 @@ mod tests {
     }
 
     struct TestDomain {
-        last_map: Mutex<Option<RecordedMap>>,
-        last_unmap: Mutex<Option<(Iova, usize)>>,
-        unmap_count: Mutex<usize>,
+        last_map: IrqSpinLock<Option<RecordedMap>>,
+        last_unmap: IrqSpinLock<Option<(Iova, usize)>>,
+        unmap_count: IrqSpinLock<usize>,
         page_size: usize,
     }
 
@@ -706,9 +706,9 @@ mod tests {
 
         fn with_page_size(page_size: usize) -> Self {
             Self {
-                last_map: Mutex::new(None),
-                last_unmap: Mutex::new(None),
-                unmap_count: Mutex::new(0),
+                last_map: IrqSpinLock::new(None),
+                last_unmap: IrqSpinLock::new(None),
+                unmap_count: IrqSpinLock::new(0),
                 page_size,
             }
         }

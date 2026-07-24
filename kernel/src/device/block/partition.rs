@@ -6,6 +6,7 @@
 use core::any::Any;
 use core::fmt;
 
+use crate::sync::IrqSpinLock;
 use alloc::{
     boxed::Box,
     format,
@@ -14,7 +15,6 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use spin::Mutex;
 
 use super::{
     BlockDevice,
@@ -44,7 +44,7 @@ pub struct PartitionBlockDevice {
     first_lba: u64,
     lba_count: u64,
     sector_size: usize,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
 }
 
 impl PartitionBlockDevice {
@@ -75,7 +75,7 @@ impl PartitionBlockDevice {
             first_lba,
             lba_count,
             sector_size,
-            request_queue: Mutex::new(Vec::new()),
+            request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
 

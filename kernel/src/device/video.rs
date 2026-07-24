@@ -24,7 +24,7 @@ use crate::object::capability::{
     ControlOps, MemoryMappingInfo, MemoryMappingOps,
     selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable},
 };
-use crate::sync::{IrqGuard, Mutex, Waker};
+use crate::sync::{IrqGuard, IrqSpinLock, Waker};
 use crate::task::mytask;
 
 /// FourCC-like Scarlet frame stream magic.
@@ -469,7 +469,7 @@ pub trait VideoDecodeBackend: Send + Sync {
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str>;
 }
 
-static VIDEO_BACKENDS: Mutex<Vec<Arc<dyn VideoDecodeBackend>>> = Mutex::new(Vec::new());
+static VIDEO_BACKENDS: IrqSpinLock<Vec<Arc<dyn VideoDecodeBackend>>> = IrqSpinLock::new(Vec::new());
 static VIDEO_DEVICE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const DEFAULT_STREAM_ID: u32 = 1;
 const VIDEO_MAPPED_BUFFER_ALIGN: usize = 0x4000;
@@ -626,12 +626,12 @@ pub fn register_video_decode_device(backend: Arc<dyn VideoDecodeBackend>) -> Str
 
 struct ScarletVideoDevice {
     backend: Arc<dyn VideoDecodeBackend>,
-    scheduler: Mutex<VideoSchedulerState>,
+    scheduler: IrqSpinLock<VideoSchedulerState>,
     completion_waker: Waker,
     max_inflight_decodes: usize,
-    mapped_buffer: Mutex<Option<ContiguousPages>>,
-    last_error: Mutex<Option<&'static str>>,
-    next_timestamp: Mutex<u64>,
+    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    last_error: IrqSpinLock<Option<&'static str>>,
+    next_timestamp: IrqSpinLock<u64>,
 }
 
 impl ScarletVideoDevice {
@@ -639,12 +639,12 @@ impl ScarletVideoDevice {
         let max_inflight_decodes = max_inflight_from_capabilities(backend.capabilities());
         Self {
             backend,
-            scheduler: Mutex::new(VideoSchedulerState::new(max_inflight_decodes)),
+            scheduler: IrqSpinLock::new(VideoSchedulerState::new(max_inflight_decodes)),
             completion_waker: Waker::new_interruptible("scarlet_video"),
             max_inflight_decodes,
-            mapped_buffer: Mutex::new(None),
-            last_error: Mutex::new(None),
-            next_timestamp: Mutex::new(1),
+            mapped_buffer: IrqSpinLock::new(None),
+            last_error: IrqSpinLock::new(None),
+            next_timestamp: IrqSpinLock::new(1),
         }
     }
 
@@ -1234,11 +1234,11 @@ impl ScarletVideoDevice {
 
 struct ScarletVideoOpen {
     device: Arc<ScarletVideoDevice>,
-    mapped_buffer: Mutex<Option<ContiguousPages>>,
-    last_error: Mutex<Option<&'static str>>,
-    next_timestamp: Mutex<u64>,
-    stream_id: Mutex<Option<u32>>,
-    coded_format: Mutex<u32>,
+    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    last_error: IrqSpinLock<Option<&'static str>>,
+    next_timestamp: IrqSpinLock<u64>,
+    stream_id: IrqSpinLock<Option<u32>>,
+    coded_format: IrqSpinLock<u32>,
 }
 
 impl ScarletVideoOpen {
@@ -1256,11 +1256,11 @@ impl ScarletVideoOpen {
         };
         Ok(Self {
             device,
-            mapped_buffer: Mutex::new(None),
-            last_error: Mutex::new(None),
-            next_timestamp: Mutex::new(1),
-            stream_id: Mutex::new(Some(stream_id)),
-            coded_format: Mutex::new(SCARLET_VIDEO_FORMAT_H264),
+            mapped_buffer: IrqSpinLock::new(None),
+            last_error: IrqSpinLock::new(None),
+            next_timestamp: IrqSpinLock::new(1),
+            stream_id: IrqSpinLock::new(Some(stream_id)),
+            coded_format: IrqSpinLock::new(SCARLET_VIDEO_FORMAT_H264),
         })
     }
 

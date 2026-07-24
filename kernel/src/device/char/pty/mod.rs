@@ -5,6 +5,7 @@
 //! namespace policy outside the char-device core so each filesystem open can
 //! create an independent master endpoint.
 
+use crate::sync::IrqSpinLock;
 use alloc::{
     collections::VecDeque,
     sync::{Arc, Weak},
@@ -15,7 +16,6 @@ use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use spin::Mutex;
 
 use crate::{
     arch::Trapframe,
@@ -37,7 +37,7 @@ use crate::{
 };
 
 struct PtyCore {
-    master_input: Mutex<VecDeque<u8>>,
+    master_input: IrqSpinLock<VecDeque<u8>>,
     master_waker: Waker,
     slave_open_count: AtomicUsize,
 }
@@ -45,7 +45,7 @@ struct PtyCore {
 impl PtyCore {
     fn new() -> Self {
         Self {
-            master_input: Mutex::new(VecDeque::new()),
+            master_input: IrqSpinLock::new(VecDeque::new()),
             master_waker: Waker::new_interruptible("pty_master_input"),
             slave_open_count: AtomicUsize::new(0),
         }

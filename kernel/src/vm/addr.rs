@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use spin::{Mutex, Once};
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Once};
 
 use crate::vm::direct_map::DirectMapRegions;
 use crate::vm::vmem::{MemoryArea, MemoryAttribute};
@@ -113,7 +113,7 @@ struct KernelMemoryLayout {
     bootloader_direct_map_phys_end: AtomicUsize,
     runtime_direct_map_phys_start: AtomicUsize,
     runtime_direct_map_phys_end: AtomicUsize,
-    runtime_direct_map_regions: Once<Mutex<DirectMapRegions>>,
+    runtime_direct_map_regions: Once<IrqSpinLock<DirectMapRegions>>,
     heap_phys_base: AtomicUsize,
     heap_virt_base: AtomicUsize,
     heap_size: AtomicUsize,
@@ -181,7 +181,7 @@ impl KernelMemoryLayout {
             .bounding_area()
             .expect("runtime direct-map regions are empty");
         self.runtime_direct_map_regions
-            .call_once(|| Mutex::new(direct_map_regions));
+            .call_once(|| IrqSpinLock::new(direct_map_regions));
         self.runtime_direct_map_offset
             .store(direct_map_offset, Ordering::Release);
         self.runtime_direct_map_phys_start
@@ -265,7 +265,7 @@ impl KernelMemoryLayout {
         })
     }
 
-    fn runtime_direct_map_regions(&self) -> Option<&Mutex<DirectMapRegions>> {
+    fn runtime_direct_map_regions(&self) -> Option<&IrqSpinLock<DirectMapRegions>> {
         self.runtime_direct_map_regions.get()
     }
 
@@ -468,7 +468,7 @@ pub fn runtime_direct_map_regions() -> Option<DirectMapRegions> {
 
 /// Locks the published runtime direct-map metadata for an atomic internal update.
 pub(crate) fn lock_runtime_direct_map_regions()
--> Result<spin::MutexGuard<'static, DirectMapRegions>, &'static str> {
+-> Result<IrqSpinLockGuard<'static, DirectMapRegions>, &'static str> {
     layout()
         .runtime_direct_map_regions()
         .map(|regions| regions.lock())

@@ -3,9 +3,9 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec, vec::Vec};
 use core::{any::Any, fmt::Debug};
-use spin::{Mutex, RwLock};
 
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
@@ -45,7 +45,7 @@ pub struct Ext2Node {
     /// Unique file ID for VFS
     file_id: u64,
     /// Weak reference to the filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl Ext2Node {
@@ -55,7 +55,7 @@ impl Ext2Node {
             inode_number,
             file_type,
             file_id,
-            filesystem: RwLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -184,19 +184,19 @@ pub struct Ext2FileObject {
     /// File ID
     file_id: u64,
     /// Current position in the file
-    position: Mutex<u64>,
+    position: IrqSpinLock<u64>,
     /// Optional logical size override after in-memory writes (not yet flushed)
-    size_override: Mutex<Option<usize>>,
+    size_override: IrqSpinLock<Option<usize>>,
     /// Dirty flag indicating in-memory changes not yet persisted to disk
-    dirty: Mutex<bool>,
+    dirty: IrqSpinLock<bool>,
     /// Weak reference to the filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Page-aligned backing for mmap operations (lazy initialized)
-    mmap_backing: RwLock<Option<ContiguousPages>>,
+    mmap_backing: IrqRwSpinLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
-    mmap_backing_len: Mutex<usize>,
+    mmap_backing_len: IrqSpinLock<usize>,
     /// Active mmap ranges keyed by starting virtual address
-    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
+    mmap_ranges: IrqRwSpinLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Ext2FileObject {
@@ -205,13 +205,13 @@ impl Ext2FileObject {
         Self {
             inode_number,
             file_id,
-            position: Mutex::new(0),
-            size_override: Mutex::new(None),
-            dirty: Mutex::new(false),
-            filesystem: RwLock::new(None),
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            position: IrqSpinLock::new(0),
+            size_override: IrqSpinLock::new(None),
+            dirty: IrqSpinLock::new(false),
+            filesystem: IrqRwSpinLock::new(None),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -1174,13 +1174,13 @@ pub struct Ext2DirectoryObject {
     /// File ID
     file_id: u64,
     /// Current position in directory listing
-    position: Mutex<u64>,
+    position: IrqSpinLock<u64>,
     /// Weak reference to the filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Cached directory entries to avoid re-reading on every access
-    cached_entries: Mutex<Option<Vec<crate::fs::DirectoryEntryInternal>>>,
+    cached_entries: IrqSpinLock<Option<Vec<crate::fs::DirectoryEntryInternal>>>,
     /// Cache generation (based on directory modification time) to detect stale cache
-    cache_generation: Mutex<u32>,
+    cache_generation: IrqSpinLock<u32>,
 }
 
 impl Ext2DirectoryObject {
@@ -1189,10 +1189,10 @@ impl Ext2DirectoryObject {
         Self {
             inode_number,
             file_id,
-            position: Mutex::new(0),
-            filesystem: RwLock::new(None),
-            cached_entries: Mutex::new(None),
-            cache_generation: Mutex::new(0),
+            position: IrqSpinLock::new(0),
+            filesystem: IrqRwSpinLock::new(None),
+            cached_entries: IrqSpinLock::new(None),
+            cache_generation: IrqSpinLock::new(0),
         }
     }
 
@@ -1482,9 +1482,9 @@ pub struct Ext2CharDeviceFileObject {
     /// File ID
     file_id: u64,
     /// Current position in the device (for seekable devices)
-    position: Mutex<u64>,
+    position: IrqSpinLock<u64>,
     /// Weak reference to the filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl Ext2CharDeviceFileObject {
@@ -1493,8 +1493,8 @@ impl Ext2CharDeviceFileObject {
         Self {
             device_info,
             file_id,
-            position: Mutex::new(0),
-            filesystem: RwLock::new(None),
+            position: IrqSpinLock::new(0),
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 

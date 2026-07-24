@@ -1,8 +1,8 @@
 //! xHCI TRB Ring management with DMA support.
 
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::Mutex;
 
 use super::trb::{Trb, TrbType};
 use crate::environment::PAGE_SIZE;
@@ -11,11 +11,11 @@ use crate::mem::page::ContiguousPages;
 /// DMA-allocated TRB ring for xHCI command/event/transfer rings.
 pub struct DmaTrbRing {
     pages: ContiguousPages,
-    dma_addr: Mutex<usize>,
+    dma_addr: IrqSpinLock<usize>,
     capacity: usize,
     linked: bool,
-    producer_index: Mutex<usize>,
-    cycle_state: Mutex<bool>,
+    producer_index: IrqSpinLock<usize>,
+    cycle_state: IrqSpinLock<bool>,
 }
 
 impl DmaTrbRing {
@@ -88,12 +88,12 @@ impl DmaTrbRing {
         }
 
         let ring = Self {
-            dma_addr: Mutex::new(pages.as_paddr()),
+            dma_addr: IrqSpinLock::new(pages.as_paddr()),
             pages,
             capacity,
             linked,
-            producer_index: Mutex::new(0),
-            cycle_state: Mutex::new(true),
+            producer_index: IrqSpinLock::new(0),
+            cycle_state: IrqSpinLock::new(true),
         };
 
         if linked {
@@ -454,10 +454,10 @@ impl ErstEntry {
 pub struct EventRing {
     ring: DmaTrbRing,
     erst: ContiguousPages,
-    erst_dma_addr: Mutex<usize>,
+    erst_dma_addr: IrqSpinLock<usize>,
     erst_count: usize,
-    dequeue_index: Mutex<usize>,
-    current_cycle: Mutex<bool>,
+    dequeue_index: IrqSpinLock<usize>,
+    current_cycle: IrqSpinLock<bool>,
 }
 
 impl EventRing {
@@ -496,11 +496,11 @@ impl EventRing {
 
         Some(Self {
             ring,
-            erst_dma_addr: Mutex::new(erst.as_paddr()),
+            erst_dma_addr: IrqSpinLock::new(erst.as_paddr()),
             erst,
             erst_count: 1,
-            dequeue_index: Mutex::new(0),
-            current_cycle: Mutex::new(true),
+            dequeue_index: IrqSpinLock::new(0),
+            current_cycle: IrqSpinLock::new(true),
         })
     }
 

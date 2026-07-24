@@ -9,10 +9,10 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::Mutex;
 
 use super::memory::MemorySlotFlags;
 use super::vcpu::VcpuObject;
@@ -85,7 +85,7 @@ pub trait VmObject: ControlOps + Send + Sync {
 
 /// Global VM manager that tracks all active VMs in the system.
 pub struct VirtualMachineManager {
-    vms: Mutex<Vec<Arc<crate::arch::hv::Vm>>>,
+    vms: IrqSpinLock<Vec<Arc<crate::arch::hv::Vm>>>,
     next_id: AtomicU32,
 }
 
@@ -93,7 +93,7 @@ impl VirtualMachineManager {
     /// Creates a new, empty `VirtualMachineManager`.
     pub const fn new() -> Self {
         Self {
-            vms: Mutex::new(Vec::new()),
+            vms: IrqSpinLock::new(Vec::new()),
             next_id: AtomicU32::new(1),
         }
     }

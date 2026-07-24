@@ -24,7 +24,7 @@
 //! ## Usage
 //!
 //! The device manager is implemented as a global singleton that can be accessed via:
-//! - `DeviceManager::get_manager()` - Shared access (thread-safe via internal Mutex)
+//! - `DeviceManager::get_manager()` - Shared access (thread-safe via an internal IRQ spin lock)
 //!
 //! ### Example: Registering a device driver
 //!
@@ -43,12 +43,12 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 use core::sync::atomic::{AtomicU32, AtomicUsize};
 
+use crate::sync::IrqSpinLock;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
 
 use crate::device::platform::PlatformDeviceInfo;
 use crate::device::platform::PlatformDeviceProperty;
@@ -205,70 +205,70 @@ static MANAGER: DeviceManager = DeviceManager::new();
 /// - `next_device_id`: Atomic counter for generating unique device IDs.
 pub struct DeviceManager {
     /* Devices stored by ID */
-    devices: Mutex<BTreeMap<usize, SharedDevice>>,
+    devices: IrqSpinLock<BTreeMap<usize, SharedDevice>>,
     /* Devices stored by name */
-    device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
+    device_by_name: IrqSpinLock<BTreeMap<String, SharedDevice>>,
     /* Name to ID mapping */
-    name_to_id: Mutex<BTreeMap<String, usize>>,
+    name_to_id: IrqSpinLock<BTreeMap<String, usize>>,
     /* Registered device drivers organized by priority */
-    drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
+    drivers: IrqSpinLock<BTreeMap<DriverPriority, Vec<Arc<dyn DeviceDriver>>>>,
     /* Platform devices waiting for provider drivers to become available */
-    deferred_platform_devices: Mutex<Vec<DeferredPlatformDevice>>,
+    deferred_platform_devices: IrqSpinLock<Vec<DeferredPlatformDevice>>,
     /* Discovered PCI devices awaiting driver probe */
-    discovered_pci_devices: Mutex<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
+    discovered_pci_devices: IrqSpinLock<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
     /* Bus controller registries (phandle → bus) */
-    spi_buses: Mutex<BTreeMap<u32, Arc<dyn SpiBus>>>,
-    i2c_buses: Mutex<BTreeMap<u32, Arc<dyn I2cBus>>>,
-    usb_hosts: Mutex<BTreeMap<u32, Arc<dyn UsbHostController>>>,
-    typec_ports: Mutex<BTreeMap<u32, Arc<dyn TypecPort>>>,
-    gpio_controllers: Mutex<BTreeMap<u32, Arc<dyn GpioController>>>,
-    audio_codecs: Mutex<BTreeMap<u32, Arc<dyn AudioCodec>>>,
-    audio_dai_providers: Mutex<BTreeMap<u32, Arc<dyn AudioDaiProvider>>>,
-    clk_providers: Mutex<BTreeMap<u32, Arc<dyn ClkProvider>>>,
-    dma_controllers: Mutex<BTreeMap<u32, Arc<dyn DmaController>>>,
-    iommu_controllers: Mutex<BTreeMap<u32, Arc<dyn IommuController>>>,
-    msi_controllers: Mutex<BTreeMap<u32, Arc<dyn MsiController>>>,
-    mailbox_controllers: Mutex<BTreeMap<u32, Arc<dyn MailboxController>>>,
-    nvmem_providers: Mutex<BTreeMap<u32, Arc<dyn NvmemProvider>>>,
-    phy_providers: Mutex<BTreeMap<u32, Arc<dyn PhyProvider>>>,
-    reset_controllers: Mutex<BTreeMap<u32, Arc<dyn ResetController>>>,
-    remote_processors: Mutex<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
-    watchdogs: Mutex<Vec<Arc<dyn Watchdog>>>,
+    spi_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn SpiBus>>>,
+    i2c_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn I2cBus>>>,
+    usb_hosts: IrqSpinLock<BTreeMap<u32, Arc<dyn UsbHostController>>>,
+    typec_ports: IrqSpinLock<BTreeMap<u32, Arc<dyn TypecPort>>>,
+    gpio_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn GpioController>>>,
+    audio_codecs: IrqSpinLock<BTreeMap<u32, Arc<dyn AudioCodec>>>,
+    audio_dai_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn AudioDaiProvider>>>,
+    clk_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn ClkProvider>>>,
+    dma_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn DmaController>>>,
+    iommu_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn IommuController>>>,
+    msi_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn MsiController>>>,
+    mailbox_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn MailboxController>>>,
+    nvmem_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn NvmemProvider>>>,
+    phy_providers: IrqSpinLock<BTreeMap<u32, Arc<dyn PhyProvider>>>,
+    reset_controllers: IrqSpinLock<BTreeMap<u32, Arc<dyn ResetController>>>,
+    remote_processors: IrqSpinLock<BTreeMap<u32, Arc<dyn RemoteProcessor>>>,
+    watchdogs: IrqSpinLock<Vec<Arc<dyn Watchdog>>>,
     /* Next available device ID */
     next_device_id: AtomicUsize,
     next_auto_phandle: AtomicU32,
-    auto_phandle_cache: Mutex<BTreeMap<usize, u32>>,
+    auto_phandle_cache: IrqSpinLock<BTreeMap<usize, u32>>,
 }
 
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
-            devices: Mutex::new(BTreeMap::new()),
-            device_by_name: Mutex::new(BTreeMap::new()),
-            name_to_id: Mutex::new(BTreeMap::new()),
-            drivers: Mutex::new(BTreeMap::new()),
-            deferred_platform_devices: Mutex::new(Vec::new()),
-            discovered_pci_devices: Mutex::new(Vec::new()),
-            spi_buses: Mutex::new(BTreeMap::new()),
-            i2c_buses: Mutex::new(BTreeMap::new()),
-            usb_hosts: Mutex::new(BTreeMap::new()),
-            typec_ports: Mutex::new(BTreeMap::new()),
-            gpio_controllers: Mutex::new(BTreeMap::new()),
-            audio_codecs: Mutex::new(BTreeMap::new()),
-            audio_dai_providers: Mutex::new(BTreeMap::new()),
-            clk_providers: Mutex::new(BTreeMap::new()),
-            dma_controllers: Mutex::new(BTreeMap::new()),
-            iommu_controllers: Mutex::new(BTreeMap::new()),
-            msi_controllers: Mutex::new(BTreeMap::new()),
-            mailbox_controllers: Mutex::new(BTreeMap::new()),
-            nvmem_providers: Mutex::new(BTreeMap::new()),
-            phy_providers: Mutex::new(BTreeMap::new()),
-            reset_controllers: Mutex::new(BTreeMap::new()),
-            remote_processors: Mutex::new(BTreeMap::new()),
-            watchdogs: Mutex::new(Vec::new()),
+            devices: IrqSpinLock::new(BTreeMap::new()),
+            device_by_name: IrqSpinLock::new(BTreeMap::new()),
+            name_to_id: IrqSpinLock::new(BTreeMap::new()),
+            drivers: IrqSpinLock::new(BTreeMap::new()),
+            deferred_platform_devices: IrqSpinLock::new(Vec::new()),
+            discovered_pci_devices: IrqSpinLock::new(Vec::new()),
+            spi_buses: IrqSpinLock::new(BTreeMap::new()),
+            i2c_buses: IrqSpinLock::new(BTreeMap::new()),
+            usb_hosts: IrqSpinLock::new(BTreeMap::new()),
+            typec_ports: IrqSpinLock::new(BTreeMap::new()),
+            gpio_controllers: IrqSpinLock::new(BTreeMap::new()),
+            audio_codecs: IrqSpinLock::new(BTreeMap::new()),
+            audio_dai_providers: IrqSpinLock::new(BTreeMap::new()),
+            clk_providers: IrqSpinLock::new(BTreeMap::new()),
+            dma_controllers: IrqSpinLock::new(BTreeMap::new()),
+            iommu_controllers: IrqSpinLock::new(BTreeMap::new()),
+            msi_controllers: IrqSpinLock::new(BTreeMap::new()),
+            mailbox_controllers: IrqSpinLock::new(BTreeMap::new()),
+            nvmem_providers: IrqSpinLock::new(BTreeMap::new()),
+            phy_providers: IrqSpinLock::new(BTreeMap::new()),
+            reset_controllers: IrqSpinLock::new(BTreeMap::new()),
+            remote_processors: IrqSpinLock::new(BTreeMap::new()),
+            watchdogs: IrqSpinLock::new(Vec::new()),
             next_device_id: AtomicUsize::new(1),
             next_auto_phandle: AtomicU32::new(0x8000),
-            auto_phandle_cache: Mutex::new(BTreeMap::new()),
+            auto_phandle_cache: IrqSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -1327,7 +1327,9 @@ impl DeviceManager {
             .collect()
     }
 
-    pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
+    pub fn borrow_drivers(
+        &self,
+    ) -> &IrqSpinLock<BTreeMap<DriverPriority, Vec<Arc<dyn DeviceDriver>>>> {
         &self.drivers
     }
 
@@ -2917,112 +2919,116 @@ impl DeviceManager {
         priority: DriverPriority,
         device: &PlatformDeviceInfo,
     ) -> ProbeOutcome {
-        let drivers = self.drivers.lock();
-        if let Some(driver_list) = drivers.get(&priority) {
-            for driver in driver_list.iter() {
-                if driver
-                    .match_table()
+        let driver = {
+            let drivers = self.drivers.lock();
+            drivers.get(&priority).and_then(|driver_list| {
+                driver_list
                     .iter()
-                    .any(|&c| device.compatible().contains(&c))
-                {
-                    if let Err(e) =
-                        crate::device::power::PowerManager::enable_device_domains(device)
-                    {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        crate::early_println!(
-                            "Failed to enable power domains for {} device {}: {}",
-                            priority.description(),
-                            device.name(),
-                            e
-                        );
-                    }
-                    if let Err(e) = self.apply_assigned_clocks(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[clk] failed to apply assigned clocks: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
-                    if let Err(e) = self.deassert_device_resets(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[reset] failed to deassert device resets: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+                    .find(|driver| {
+                        driver
+                            .match_table()
+                            .iter()
+                            .any(|&compatible| device.compatible().contains(&compatible))
+                    })
+                    .cloned()
+            })
+        };
 
-                    if let Err(e) = self.apply_pinctrl_default(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[pinctrl] failed to apply default state: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+        if let Some(driver) = driver {
+            if let Err(e) = crate::device::power::PowerManager::enable_device_domains(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                crate::early_println!(
+                    "Failed to enable power domains for {} device {}: {}",
+                    priority.description(),
+                    device.name(),
+                    e
+                );
+            }
+            if let Err(e) = self.apply_assigned_clocks(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[clk] failed to apply assigned clocks: {}", e);
+                return ProbeOutcome::Failed;
+            }
+            if let Err(e) = self.deassert_device_resets(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[reset] failed to deassert device resets: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    if let Err(e) = self.pre_probe_resolve_iommu(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[iommu] failed to resolve IOMMU: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+            if let Err(e) = self.apply_pinctrl_default(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[pinctrl] failed to apply default state: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    if let Err(e) = self.pre_probe_resolve_dma(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[dma] failed to resolve DMA: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+            if let Err(e) = self.pre_probe_resolve_iommu(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[iommu] failed to resolve IOMMU: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    if let Err(e) = self.pre_probe_resolve_mailbox(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[mailbox] failed to resolve mailbox: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+            if let Err(e) = self.pre_probe_resolve_dma(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[dma] failed to resolve DMA: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    if let Err(e) = self.pre_probe_resolve_nvmem(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[nvmem] failed to resolve NVMEM cell: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+            if let Err(e) = self.pre_probe_resolve_mailbox(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[mailbox] failed to resolve mailbox: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    if let Err(e) = self.pre_probe_resolve_phy(device) {
-                        if is_probe_defer(e) {
-                            return ProbeOutcome::Deferred;
-                        }
-                        early_println!("[phy] failed to resolve PHY: {}", e);
-                        return ProbeOutcome::Failed;
-                    }
+            if let Err(e) = self.pre_probe_resolve_nvmem(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[nvmem] failed to resolve NVMEM cell: {}", e);
+                return ProbeOutcome::Failed;
+            }
 
-                    match driver.probe(device) {
-                        Ok(_) => {
-                            early_println!(
-                                "Successfully probed {} device: {}",
-                                priority.description(),
-                                device.name()
-                            );
-                            return ProbeOutcome::Probed;
-                        }
-                        Err(e) => {
-                            if is_probe_defer(e) {
-                                return ProbeOutcome::Deferred;
-                            }
-                            early_println!(
-                                "Failed to probe {} device {}: {}",
-                                priority.description(),
-                                device.name(),
-                                e
-                            );
-                            return ProbeOutcome::Failed;
-                        }
+            if let Err(e) = self.pre_probe_resolve_phy(device) {
+                if is_probe_defer(e) {
+                    return ProbeOutcome::Deferred;
+                }
+                early_println!("[phy] failed to resolve PHY: {}", e);
+                return ProbeOutcome::Failed;
+            }
+
+            match driver.probe(device) {
+                Ok(_) => {
+                    early_println!(
+                        "Successfully probed {} device: {}",
+                        priority.description(),
+                        device.name()
+                    );
+                    return ProbeOutcome::Probed;
+                }
+                Err(e) => {
+                    if is_probe_defer(e) {
+                        return ProbeOutcome::Deferred;
                     }
+                    early_println!(
+                        "Failed to probe {} device {}: {}",
+                        priority.description(),
+                        device.name(),
+                        e
+                    );
+                    return ProbeOutcome::Failed;
                 }
             }
         }
@@ -3146,7 +3152,7 @@ impl DeviceManager {
     /// ```
     pub fn register_driver(&self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
         let mut drivers = self.drivers.lock();
-        drivers.entry(priority).or_default().push(driver);
+        drivers.entry(priority).or_default().push(Arc::from(driver));
     }
 
     /// Registers a device driver with default Standard priority.
@@ -3180,7 +3186,7 @@ impl DeviceManager {
     /// `register_pci_device()`) and all drivers have been registered.
     /// Typically called from the init sequence after platform probing.
     pub fn probe_pci_devices(&self) {
-        let discovered = self.discovered_pci_devices.lock();
+        let discovered: Vec<_> = self.discovered_pci_devices.lock().iter().cloned().collect();
         if discovered.is_empty() {
             return;
         }
@@ -3188,20 +3194,24 @@ impl DeviceManager {
         let count = discovered.len();
         early_println!("Probing {} discovered PCI devices...", count);
 
-        // Hold drivers lock during probing. This is safe because PCI driver
-        // probe functions do not re-enter the drivers lock.
-        let drivers = self.drivers.lock();
+        let drivers: Vec<Vec<Arc<dyn DeviceDriver>>> = {
+            let registered = self.drivers.lock();
+            DriverPriority::all()
+                .iter()
+                .filter_map(|priority| {
+                    registered
+                        .get(priority)
+                        .filter(|driver_list| !driver_list.is_empty())
+                        .cloned()
+                })
+                .collect()
+        };
 
-        for priority in DriverPriority::all() {
-            let driver_list = match drivers.get(priority) {
-                Some(list) if !list.is_empty() => list,
-                _ => continue,
-            };
-
+        for driver_list in drivers {
             let mut claimed_ids: Vec<usize> = Vec::new();
 
-            for driver in driver_list.iter() {
-                for device in discovered.iter() {
+            for driver in driver_list {
+                for device in &discovered {
                     if claimed_ids.contains(&device.id()) {
                         continue;
                     }
@@ -3950,13 +3960,13 @@ mod tests {
     }
 
     struct TestIommuDomain {
-        attached_streams: Mutex<Vec<IommuStreamId>>,
+        attached_streams: IrqSpinLock<Vec<IommuStreamId>>,
     }
 
     impl TestIommuDomain {
         fn new() -> Self {
             Self {
-                attached_streams: Mutex::new(Vec::new()),
+                attached_streams: IrqSpinLock::new(Vec::new()),
             }
         }
     }
@@ -4014,7 +4024,7 @@ mod tests {
 
     struct TestMailboxChannel {
         id: MailboxChannelId,
-        last_message: Mutex<Option<MailboxMessage>>,
+        last_message: IrqSpinLock<Option<MailboxMessage>>,
         client_set: AtomicBool,
     }
 
@@ -4022,7 +4032,7 @@ mod tests {
         fn new(id: MailboxChannelId) -> Self {
             Self {
                 id,
-                last_message: Mutex::new(None),
+                last_message: IrqSpinLock::new(None),
                 client_set: AtomicBool::new(false),
             }
         }
@@ -4101,19 +4111,19 @@ mod tests {
     }
 
     struct TestNvmemProvider {
-        data: Mutex<Vec<u8>>,
+        data: IrqSpinLock<Vec<u8>>,
         cell_cells: usize,
     }
 
     struct TestPhy {
-        mode: Mutex<Option<PhyMode>>,
+        mode: IrqSpinLock<Option<PhyMode>>,
         power_on_count: AtomicUsize,
     }
 
     impl TestPhy {
         fn new() -> Self {
             Self {
-                mode: Mutex::new(None),
+                mode: IrqSpinLock::new(None),
                 power_on_count: AtomicUsize::new(0),
             }
         }
@@ -4224,7 +4234,7 @@ mod tests {
     impl TestNvmemProvider {
         fn new(data: Vec<u8>) -> Self {
             Self {
-                data: Mutex::new(data),
+                data: IrqSpinLock::new(data),
                 cell_cells: 2,
             }
         }
@@ -4749,14 +4759,14 @@ mod tests {
 
     struct RecordingProvider {
         clk: ClkHandle,
-        events: Mutex<Vec<&'static str>>,
+        events: IrqSpinLock<Vec<&'static str>>,
     }
 
     impl RecordingProvider {
         fn new() -> Self {
             Self {
                 clk: ClkHandle::new(Arc::new(ClkFixedRate::new("recorded", 1))),
-                events: Mutex::new(Vec::new()),
+                events: IrqSpinLock::new(Vec::new()),
             }
         }
     }

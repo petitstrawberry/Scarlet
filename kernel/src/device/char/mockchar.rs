@@ -1,6 +1,6 @@
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
 use core::any::Any;
-use spin::Mutex;
 
 use super::{
     super::{Device, DeviceType},
@@ -15,8 +15,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub struct MockCharDevice {
     name: &'static str,
     read_buffer: Vec<u8>,
-    write_buffer: Mutex<Vec<u8>>,
-    read_index: Mutex<usize>,
+    write_buffer: IrqSpinLock<Vec<u8>>,
+    read_index: IrqSpinLock<usize>,
 }
 
 impl MockCharDevice {
@@ -24,8 +24,8 @@ impl MockCharDevice {
         Self {
             name,
             read_buffer: Vec::new(),
-            write_buffer: Mutex::new(Vec::new()),
-            read_index: Mutex::new(0),
+            write_buffer: IrqSpinLock::new(Vec::new()),
+            read_index: IrqSpinLock::new(0),
         }
     }
 

@@ -1,0 +1,252 @@
+//! Per-CPU preemption counter.
+//!
+//! `preempt_count > 0` marks the current CPU as non-preemptible. While the
+//! count is elevated, the scheduler must not switch out the running task.
+//! Locks own a `PreemptGuard` to prevent preemption for the duration of
+//! their critical sections.
+//!
+//! # Current Status
+//!
+//! Scarlet still disables interrupts at trap entry, which already prevents
+//! involuntary preemption. `preempt_count` becomes load-bearing once
+//! interrupt-enabled trap handlers are introduced; today it documents the
+//! "no schedule here" contract that lock holders rely on and gives the
+//! scheduler a single predicate to check at safe boundaries.
+//!
+//! # Ordering
+//!
+//! Operations use `Relaxed` ordering. The counter is per-CPU and read by
+//! the same CPU that writes it; cross-CPU synchronization of the count
+//! itself is unnecessary. Reentrancy via interrupt is gated by IRQ state,
+//! not by the count value.
+
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::arch::try_get_cpuid;
+use crate::environment::MAX_NUM_CPUS;
+
+static PREEMPT_COUNT: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
+
+#[inline]
+fn current_cpu() -> Option<usize> {
+    try_get_cpuid()
+}
+
+#[inline]
+fn increment_preempt_count(cpu: usize) {
+    let previous = PREEMPT_COUNT[cpu]
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_add(1)
+        })
+        .expect("preempt_count overflow");
+    debug_assert!(previous < u32::MAX);
+}
+
+#[inline]
+fn decrement_preempt_count(cpu: usize) {
+    let previous = PREEMPT_COUNT[cpu]
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_sub(1)
+        })
+        .expect("preempt_count underflow");
+    debug_assert!(previous > 0);
+}
+
+/// Return the current CPU's preemption counter.
+///
+/// # Returns
+///
+/// The current preempt count for the executing CPU, or `0` if the per-CPU
+/// substrate has not been published yet (early boot, before
+/// `sscratch`/`TPIDR_EL1` is programmed).
+#[inline]
+pub fn preempt_count() -> u32 {
+    match current_cpu() {
+        Some(cpu) => PREEMPT_COUNT[cpu].load(Ordering::Relaxed),
+        None => 0,
+    }
+}
+
+/// Return whether the current CPU may be preempted.
+///
+/// # Returns
+///
+/// `true` when the preempt count is zero. Also `true` while the per-CPU
+/// substrate is uninitialized, since lock operations are no-ops in that
+/// window.
+#[inline]
+pub fn preemptible() -> bool {
+    preempt_count() == 0
+}
+
+/// Increment the preempt count on the current CPU.
+///
+/// Must be paired with [`preempt_enable`]. Prefer [`PreemptGuard::new`] for
+/// RAII safety. No-op when the per-CPU substrate has not been published,
+/// so callers on an uninitialized CPU behave as plain busy-wait spinlocks.
+#[inline]
+pub fn preempt_disable() {
+    if let Some(cpu) = current_cpu() {
+        increment_preempt_count(cpu);
+    }
+}
+
+/// Decrement the preempt count on the current CPU.
+///
+/// # Panics
+///
+/// Panics on underflow to catch unbalanced
+/// `preempt_disable`/`preempt_enable` use. No-op when the per-CPU substrate
+/// has not been published.
+#[inline]
+pub fn preempt_enable() {
+    if let Some(cpu) = current_cpu() {
+        decrement_preempt_count(cpu);
+    }
+}
+
+/// RAII guard that disables preemption while alive.
+///
+/// Dropping the guard restores the previous preempt state. The guard is
+/// `!Send` because preemption state is per-CPU.
+///
+/// # Examples
+///
+/// ```
+/// let _guard = PreemptGuard::new();
+/// // Preemption is disabled for the duration of this scope.
+/// ```
+pub struct PreemptGuard {
+    cpu: Option<usize>,
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl PreemptGuard {
+    /// Disable preemption on the current CPU and return a guard that
+    /// re-enables it on drop.
+    ///
+    /// # Returns
+    ///
+    /// A guard bound to the current CPU. If the per-CPU substrate has not
+    /// been published yet, the guard remains unarmed and requires that state
+    /// to stay uninitialized until it is dropped.
+    #[inline]
+    pub fn new() -> Self {
+        let cpu = current_cpu();
+        if let Some(cpu) = cpu {
+            increment_preempt_count(cpu);
+        }
+        Self {
+            cpu,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Default for PreemptGuard {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for PreemptGuard {
+    #[inline]
+    fn drop(&mut self) {
+        match self.cpu {
+            Some(cpu) => {
+                assert_eq!(
+                    current_cpu(),
+                    Some(cpu),
+                    "PreemptGuard dropped on a different CPU"
+                );
+                decrement_preempt_count(cpu);
+            }
+            None => {
+                assert!(
+                    current_cpu().is_none(),
+                    "unarmed PreemptGuard crossed into initialized per-CPU state"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl PreemptGuard {
+    /// Test-only helper to reset the current CPU's preempt count.
+    ///
+    /// Callers must ensure no other `PreemptGuard` is live on this CPU.
+    pub(crate) fn reset_count_for_test() {
+        if let Some(cpu) = current_cpu() {
+            PREEMPT_COUNT[cpu].store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_preempt_count_starts_zero() {
+        PreemptGuard::reset_count_for_test();
+        assert_eq!(preempt_count(), 0);
+        assert!(preemptible());
+    }
+
+    #[test_case]
+    fn test_guard_increments_and_decrements() {
+        PreemptGuard::reset_count_for_test();
+        assert_eq!(preempt_count(), 0);
+        {
+            let _g = PreemptGuard::new();
+            assert_eq!(preempt_count(), 1);
+            assert!(!preemptible());
+        }
+        assert_eq!(preempt_count(), 0);
+        assert!(preemptible());
+    }
+
+    #[test_case]
+    fn test_nested_guards_accumulate() {
+        PreemptGuard::reset_count_for_test();
+        {
+            let _a = PreemptGuard::new();
+            assert_eq!(preempt_count(), 1);
+            {
+                let _b = PreemptGuard::new();
+                assert_eq!(preempt_count(), 2);
+            }
+            assert_eq!(preempt_count(), 1);
+        }
+        assert_eq!(preempt_count(), 0);
+    }
+
+    #[test_case]
+    fn test_non_lifo_guards_decrement_their_acquisition_cpu() {
+        PreemptGuard::reset_count_for_test();
+
+        let first = PreemptGuard::new();
+        let second = PreemptGuard::new();
+        assert_eq!(preempt_count(), 2);
+
+        drop(first);
+        assert_eq!(preempt_count(), 1);
+
+        drop(second);
+        assert_eq!(preempt_count(), 0);
+    }
+
+    #[test_case]
+    fn test_explicit_disable_enable_balance() {
+        PreemptGuard::reset_count_for_test();
+        preempt_disable();
+        preempt_disable();
+        assert_eq!(preempt_count(), 2);
+        preempt_enable();
+        preempt_enable();
+        assert_eq!(preempt_count(), 0);
+    }
+}

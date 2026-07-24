@@ -171,11 +171,11 @@ pub trait NvmemProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::IrqSpinLock;
     use alloc::vec;
-    use spin::Mutex;
 
     struct MemoryNvmemProvider {
-        data: Mutex<[u8; 4]>,
+        data: IrqSpinLock<[u8; 4]>,
     }
 
     impl NvmemProvider for MemoryNvmemProvider {
@@ -215,7 +215,7 @@ mod tests {
     #[test_case]
     fn test_nvmem_cell_read_write_validates_size() {
         let provider = Arc::new(MemoryNvmemProvider {
-            data: Mutex::new([1, 2, 3, 4]),
+            data: IrqSpinLock::new([1, 2, 3, 4]),
         });
         let cell = NvmemCell::new(provider, 1, 2, "cell");
 

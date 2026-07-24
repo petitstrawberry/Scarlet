@@ -10,12 +10,12 @@ use crate::arch::Trapframe;
 use crate::sched::scheduler::{
     get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task, wake_task_on,
 };
+use crate::sync::IrqSpinLock;
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 
 const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 
@@ -39,7 +39,7 @@ const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 /// ```
 pub struct Waker {
     /// Queue of waiting task IDs
-    wait_queue: Mutex<VecDeque<usize>>,
+    wait_queue: IrqSpinLock<VecDeque<usize>>,
     /// The type of blocking this waker uses (interruptible or uninterruptible)
     block_type: BlockedType,
     /// Human-readable name for debugging purposes
@@ -76,7 +76,7 @@ impl Waker {
     /// ```
     pub const fn new_interruptible(name: &'static str) -> Self {
         Self {
-            wait_queue: Mutex::new(VecDeque::new()),
+            wait_queue: IrqSpinLock::new(VecDeque::new()),
             block_type: BlockedType::Interruptible,
             name,
             pending_wakes: AtomicUsize::new(0),
@@ -100,7 +100,7 @@ impl Waker {
     /// ```
     pub const fn new_uninterruptible(name: &'static str) -> Self {
         Self {
-            wait_queue: Mutex::new(VecDeque::new()),
+            wait_queue: IrqSpinLock::new(VecDeque::new()),
             block_type: BlockedType::Uninterruptible,
             name,
             pending_wakes: AtomicUsize::new(0),

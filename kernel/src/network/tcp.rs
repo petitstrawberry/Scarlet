@@ -3,12 +3,12 @@
 //! This module provides a full TCP implementation with 3-way handshake,
 //! flow control, and retransmission.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use spin::{Mutex, RwLock};
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
@@ -233,15 +233,15 @@ impl crate::timer::TimerHandler for RetransTimer {
 /// TCP socket (full implementation)
 pub struct TcpSocket {
     /// TCP connection state
-    state: Mutex<TcpState>,
+    state: IrqSpinLock<TcpState>,
 
     /// Local IP address
-    local_ip: Mutex<Option<Ipv4Address>>,
+    local_ip: IrqSpinLock<Option<Ipv4Address>>,
     /// Local port
     pub(crate) local_port: AtomicU16,
 
     /// Remote IP address
-    remote_ip: Mutex<Option<Ipv4Address>>,
+    remote_ip: IrqSpinLock<Option<Ipv4Address>>,
     /// Remote port
     remote_port: AtomicU16,
 
@@ -256,17 +256,17 @@ pub struct TcpSocket {
     recv_window: AtomicU16,
 
     /// Data buffers
-    send_buffer: Mutex<VecDeque<u8>>,
-    recv_buffer: Mutex<VecDeque<u8>>,
+    send_buffer: IrqSpinLock<VecDeque<u8>>,
+    recv_buffer: IrqSpinLock<VecDeque<u8>>,
 
     /// Reference to TCP layer
     tcp_layer: Weak<TcpLayer>,
     /// Weak self reference for registration
     self_weak: Weak<TcpSocket>,
     /// Pending accepted connections (listener only)
-    pending_accept: Mutex<VecDeque<Arc<TcpSocket>>>,
+    pending_accept: IrqSpinLock<VecDeque<Arc<TcpSocket>>>,
     /// Half-open connections waiting for the final ACK (listener only).
-    pending_syn: Mutex<VecDeque<Arc<TcpSocket>>>,
+    pending_syn: IrqSpinLock<VecDeque<Arc<TcpSocket>>>,
     /// Maximum backlog size (from listen())
     max_backlog: AtomicUsize,
 
@@ -284,7 +284,7 @@ pub struct TcpSocket {
     /// Retransmission count for exponential backoff
     retrans_count: AtomicU16,
     /// Timer ID for retransmission timer
-    retrans_timer_id: Mutex<Option<u64>>,
+    retrans_timer_id: IrqSpinLock<Option<u64>>,
     /// Timestamp of last segment transmission (for RTT measurement)
     last_send_time: AtomicU64,
     /// Whether we're timing an RTT measurement (Karn's algorithm)
@@ -293,17 +293,17 @@ pub struct TcpSocket {
     timed_seq: AtomicU32,
 
     /// List of unacknowledged segments for retransmission
-    unacked_segments: Mutex<VecDeque<UnackedSegment>>,
+    unacked_segments: IrqSpinLock<VecDeque<UnackedSegment>>,
 
     /// Out-of-order segments for reassembly (sorted by sequence number)
-    out_of_order: Mutex<BTreeMap<u32, OutOfOrderSegment>>,
+    out_of_order: IrqSpinLock<BTreeMap<u32, OutOfOrderSegment>>,
 
     /// Waker for blocking accept() operations
-    accept_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
+    accept_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
     /// Waker for blocking recv() operations
-    recv_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
+    recv_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
     /// Waker for blocking send() operations
-    send_waker: Mutex<Option<Arc<crate::sync::Waker>>>,
+    send_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
     /// Block mode: true for blocking, false for non-blocking
     blocking_mode: AtomicBool,
     /// Read timeout in milliseconds. Zero means no timeout.
@@ -311,9 +311,9 @@ pub struct TcpSocket {
     /// Write timeout in milliseconds. Zero means no timeout.
     write_timeout_ms: AtomicU64,
     /// Direct peer for in-kernel loopback connections.
-    loopback_peer: Mutex<Weak<TcpSocket>>,
+    loopback_peer: IrqSpinLock<Weak<TcpSocket>>,
     /// Listening socket that should receive this socket once the handshake completes.
-    accept_listener: Mutex<Weak<TcpSocket>>,
+    accept_listener: IrqSpinLock<Weak<TcpSocket>>,
     /// Whether this socket has already been queued for accept().
     accept_queued: AtomicBool,
 
@@ -379,10 +379,10 @@ impl TcpSocket {
     /// Create a new TCP socket
     pub fn new(tcp_layer: Weak<TcpLayer>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            state: Mutex::new(TcpState::Closed),
-            local_ip: Mutex::new(None),
+            state: IrqSpinLock::new(TcpState::Closed),
+            local_ip: IrqSpinLock::new(None),
             local_port: AtomicU16::new(0),
-            remote_ip: Mutex::new(None),
+            remote_ip: IrqSpinLock::new(None),
             remote_port: AtomicU16::new(0),
             send_seq: AtomicU32::new(0),
             send_unacked: AtomicU32::new(0),
@@ -390,12 +390,12 @@ impl TcpSocket {
             recv_ack: AtomicU32::new(0),
             send_window: AtomicU16::new(65535),
             recv_window: AtomicU16::new(65535),
-            send_buffer: Mutex::new(VecDeque::new()),
-            recv_buffer: Mutex::new(VecDeque::new()),
+            send_buffer: IrqSpinLock::new(VecDeque::new()),
+            recv_buffer: IrqSpinLock::new(VecDeque::new()),
             tcp_layer,
             self_weak: weak.clone(),
-            pending_accept: Mutex::new(VecDeque::new()),
-            pending_syn: Mutex::new(VecDeque::new()),
+            pending_accept: IrqSpinLock::new(VecDeque::new()),
+            pending_syn: IrqSpinLock::new(VecDeque::new()),
             max_backlog: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
@@ -406,26 +406,26 @@ impl TcpSocket {
             rttvar: AtomicU32::new(0),
             rto: AtomicU32::new(100), // 1 second in ticks
             retrans_count: AtomicU16::new(0),
-            retrans_timer_id: Mutex::new(None),
+            retrans_timer_id: IrqSpinLock::new(None),
             last_send_time: AtomicU64::new(0),
             timing_rtt: AtomicU16::new(0),
             timed_seq: AtomicU32::new(0),
 
             // Unacked segments list
-            unacked_segments: Mutex::new(VecDeque::new()),
+            unacked_segments: IrqSpinLock::new(VecDeque::new()),
 
             // Out-of-order segments map
-            out_of_order: Mutex::new(BTreeMap::new()),
+            out_of_order: IrqSpinLock::new(BTreeMap::new()),
 
             // Blocking support
-            accept_waker: Mutex::new(None),
-            recv_waker: Mutex::new(None),
-            send_waker: Mutex::new(None),
+            accept_waker: IrqSpinLock::new(None),
+            recv_waker: IrqSpinLock::new(None),
+            send_waker: IrqSpinLock::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
             read_timeout_ms: AtomicU64::new(0),
             write_timeout_ms: AtomicU64::new(0),
-            loopback_peer: Mutex::new(Weak::new()),
-            accept_listener: Mutex::new(Weak::new()),
+            loopback_peer: IrqSpinLock::new(Weak::new()),
+            accept_listener: IrqSpinLock::new(Weak::new()),
             accept_queued: AtomicBool::new(false),
 
             // Fast Retransmit - duplicate ACK tracking
@@ -2515,9 +2515,9 @@ impl Drop for TcpSocket {
 /// Manages TCP port bindings and routes packets to sockets.
 pub struct TcpLayer {
     /// Port-to-socket mapping for receiving packets
-    port_map: RwLock<BTreeMap<u16, Vec<Weak<TcpSocket>>>>,
+    port_map: IrqRwSpinLock<BTreeMap<u16, Vec<Weak<TcpSocket>>>>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     self_weak: Weak<TcpLayer>,
 }
 
@@ -2525,8 +2525,8 @@ impl TcpLayer {
     /// Create a new TCP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            port_map: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            port_map: IrqRwSpinLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             self_weak: weak.clone(),
         })
     }

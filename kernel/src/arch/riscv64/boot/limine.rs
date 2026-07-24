@@ -28,6 +28,12 @@ static PAGING_MODE_REQUEST: PagingModeRequest = PagingModeRequest::new(
 );
 
 unsafe extern "C" fn limine_ap_entry(info: &MpInfo) -> ! {
+    // SAFETY: sscratch holds whatever firmware left; explicitly clear it so
+    // try_get_cpuid() can deterministically treat 0 as "uninitialized"
+    // until init_cpu publishes the per-CPU pointer.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
     wait_for_ap_release();
     start_ap(info.hartid as usize)
 }
@@ -63,13 +69,21 @@ fn bootstrap_aps() {
 
 #[unsafe(no_mangle)]
 pub fn limine_entry() -> ! {
+    // SAFETY: sscratch holds whatever firmware left; explicitly clear it so
+    // try_get_cpuid() can deterministically treat 0 as "uninitialized"
+    // until init_cpu publishes the per-CPU pointer.
+    unsafe {
+        core::arch::asm!("csrw sscratch, zero");
+    }
     init_bss();
+
+    let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
+    crate::arch::riscv64::boot::init_cpu(bsp.bsp_hartid as usize);
 
     let hhdm = response(HHDM_REQUEST.response(), "hhdm");
     let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
     let memmap = response(MEMMAP_REQUEST.response(), "memmap");
     let dtb = response(DTB_REQUEST.response(), "dtb");
-    let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
 
     ensure_base_revision_supported();
 
@@ -131,7 +145,6 @@ pub fn limine_entry() -> ! {
 
     crate::arch::init_user_context_from_fdt();
     bootstrap_aps();
-    crate::arch::riscv64::boot::init_cpu(bootinfo.cpu_id);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;

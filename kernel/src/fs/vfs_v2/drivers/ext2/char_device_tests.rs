@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::sync::IrqSpinLock;
     use crate::{
         device::{Device, DeviceType, char::CharDevice},
         fs::{DeviceFileInfo, FileObject, FileType},
@@ -12,21 +13,20 @@ mod tests {
     };
     use alloc::vec::Vec;
     use core::any::Any;
-    use spin::Mutex;
 
     /// Mock character device for testing
     struct MockCharDevice {
         name: &'static str,
-        data: Mutex<Vec<u8>>,
-        position: Mutex<usize>,
+        data: IrqSpinLock<Vec<u8>>,
+        position: IrqSpinLock<usize>,
     }
 
     impl MockCharDevice {
         fn new(name: &'static str) -> Self {
             Self {
                 name,
-                data: Mutex::new(Vec::new()),
-                position: Mutex::new(0),
+                data: IrqSpinLock::new(Vec::new()),
+                position: IrqSpinLock::new(0),
             }
         }
     }

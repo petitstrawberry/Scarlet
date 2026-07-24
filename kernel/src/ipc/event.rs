@@ -7,10 +7,10 @@
 //! - Subscription: Channel-based pub/sub delivery
 //! - Group: Broadcast delivery to multiple targets
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
-use spin::Mutex;
 
 /// Type alias for task identifiers
 pub type TaskId = u32;
@@ -646,43 +646,43 @@ impl TaskEventQueue {
 /// Event Manager - Main implementation of the event system
 pub struct EventManager {
     /// Task group memberships
-    groups: Mutex<HashMap<GroupId, Vec<u32>>>,
+    groups: IrqSpinLock<HashMap<GroupId, Vec<u32>>>,
     /// Session memberships
-    sessions: Mutex<HashMap<SessionId, Vec<u32>>>,
+    sessions: IrqSpinLock<HashMap<SessionId, Vec<u32>>>,
     /// Named/custom group memberships
-    named_groups: Mutex<HashMap<String, Vec<u32>>>,
+    named_groups: IrqSpinLock<HashMap<String, Vec<u32>>>,
 
     /// Delivery configurations per task
-    configs: Mutex<HashMap<u32, DeliveryConfig>>,
+    configs: IrqSpinLock<HashMap<u32, DeliveryConfig>>,
 
     /// Task-specific event filters (handler_id, filter)
-    task_filters: Mutex<HashMap<u32, Vec<(usize, EventFilter)>>>,
+    task_filters: IrqSpinLock<HashMap<u32, Vec<(usize, EventFilter)>>>,
 
     /// Next event ID
     #[allow(dead_code)]
-    next_event_id: Mutex<u64>,
+    next_event_id: IrqSpinLock<u64>,
 
     /// Channel registry - EventManager only manages channels, channels manage their own subscriptions
-    channels: Mutex<HashMap<String, Arc<EventChannelObject>>>,
+    channels: IrqSpinLock<HashMap<String, Arc<EventChannelObject>>>,
 }
 
 impl EventManager {
     /// Create a new EventManager
     pub fn new() -> Self {
         Self {
-            groups: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            named_groups: Mutex::new(HashMap::new()),
-            configs: Mutex::new(HashMap::new()),
-            task_filters: Mutex::new(HashMap::new()),
-            next_event_id: Mutex::new(1),
-            channels: Mutex::new(HashMap::new()),
+            groups: IrqSpinLock::new(HashMap::new()),
+            sessions: IrqSpinLock::new(HashMap::new()),
+            named_groups: IrqSpinLock::new(HashMap::new()),
+            configs: IrqSpinLock::new(HashMap::new()),
+            task_filters: IrqSpinLock::new(HashMap::new()),
+            next_event_id: IrqSpinLock::new(1),
+            channels: IrqSpinLock::new(HashMap::new()),
         }
     }
 
     /// Get the global EventManager instance
     pub fn get_manager() -> &'static EventManager {
-        static INSTANCE: spin::once::Once<EventManager> = spin::once::Once::new();
+        static INSTANCE: Once<EventManager> = Once::new();
         INSTANCE.call_once(|| EventManager::new())
     }
 
@@ -1461,7 +1461,7 @@ impl Event {
 pub struct EventChannelObject {
     name: String,
     /// Channel manages its own subscriptions as EventSubscriptionObjects
-    subscriptions: Mutex<HashMap<String, Arc<EventSubscriptionObject>>>,
+    subscriptions: IrqSpinLock<HashMap<String, Arc<EventSubscriptionObject>>>,
     #[allow(dead_code)]
     manager_ref: &'static EventManager,
 }
@@ -1470,7 +1470,7 @@ impl EventChannelObject {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            subscriptions: Mutex::new(HashMap::new()),
+            subscriptions: IrqSpinLock::new(HashMap::new()),
             manager_ref: EventManager::get_manager(),
         }
     }
@@ -1554,7 +1554,7 @@ pub struct EventSubscriptionObject {
     channel_name: String,
     task_id: u32,
     /// Local registry of filters keyed by handler ID for this subscription
-    filters: Mutex<HashMap<usize, EventFilter>>,
+    filters: IrqSpinLock<HashMap<usize, EventFilter>>,
 }
 
 impl EventSubscriptionObject {
@@ -1563,7 +1563,7 @@ impl EventSubscriptionObject {
             subscription_id,
             channel_name,
             task_id,
-            filters: Mutex::new(HashMap::new()),
+            filters: IrqSpinLock::new(HashMap::new()),
         }
     }
 
@@ -1701,7 +1701,7 @@ impl crate::object::capability::CloneOps for EventSubscriptionObject {
 
 /// Generate unique event ID
 fn generate_event_id() -> u64 {
-    static COUNTER: Mutex<u64> = Mutex::new(1);
+    static COUNTER: IrqSpinLock<u64> = IrqSpinLock::new(1);
     let mut counter = COUNTER.lock();
     let id = *counter;
     *counter += 1;

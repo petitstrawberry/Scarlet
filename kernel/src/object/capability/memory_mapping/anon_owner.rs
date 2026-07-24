@@ -1,7 +1,7 @@
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
-use spin::RwLock;
 
 use crate::environment::PAGE_SIZE;
 use crate::mem::page::{ContiguousPages, allocate_raw_pages, free_raw_pages};
@@ -10,13 +10,13 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use super::{AccessKind, AccessOp, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
 
 pub struct AnonymousPageOwner {
-    pages: RwLock<BTreeMap<usize, usize>>,
+    pages: IrqRwSpinLock<BTreeMap<usize, usize>>,
 }
 
 impl AnonymousPageOwner {
     pub fn new() -> Self {
         Self {
-            pages: RwLock::new(BTreeMap::new()),
+            pages: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -117,20 +117,20 @@ pub fn fork_clone_owner(owner: &AnonymousPageOwner) -> Option<Arc<dyn MemoryMapp
     drop(pages);
 
     Some(Arc::new(AnonymousPageOwner {
-        pages: RwLock::new(new_pages),
+        pages: IrqRwSpinLock::new(new_pages),
     }))
 }
 
 pub struct ForkCowPageOwner {
     base_page_idx: usize,
-    pages: RwLock<Option<ContiguousPages>>,
+    pages: IrqRwSpinLock<Option<ContiguousPages>>,
 }
 
 impl ForkCowPageOwner {
     pub fn new(base_page_idx: usize, pages: ContiguousPages) -> Self {
         Self {
             base_page_idx,
-            pages: RwLock::new(Some(pages)),
+            pages: IrqRwSpinLock::new(Some(pages)),
         }
     }
 }

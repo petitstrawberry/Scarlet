@@ -38,16 +38,16 @@ use crate::environment::{
     KERNEL_KSTACK_SLOT_SIZE, KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
 };
 use crate::sched::scheduler::current_task;
+use crate::sync::{IrqSpinLock, Once};
 use crate::task::Task;
 use core::sync::atomic::Ordering;
-use spin::{Mutex, Once};
 
 extern crate alloc;
 
 static KERNEL_VM_MANAGER: Once<VirtualMemoryManager> = Once::new();
 static KERNEL_HEAP_AREA: Once<MemoryArea> = Once::new();
 static KERNEL_HEAP_PHYS_AREA: Once<MemoryArea> = Once::new();
-static DIRECT_MAP_RETAG_LOCK: Mutex<()> = Mutex::new(());
+static DIRECT_MAP_RETAG_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
 
 fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
@@ -585,10 +585,10 @@ impl KernelKstackAllocator {
     }
 }
 
-static KSTACK_ALLOC_ONCE: Once<Mutex<KernelKstackAllocator>> = Once::new();
+static KSTACK_ALLOC_ONCE: Once<IrqSpinLock<KernelKstackAllocator>> = Once::new();
 
-fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
-    KSTACK_ALLOC_ONCE.call_once(|| Mutex::new(KernelKstackAllocator::new()))
+fn kstack_alloc() -> &'static IrqSpinLock<KernelKstackAllocator> {
+    KSTACK_ALLOC_ONCE.call_once(|| IrqSpinLock::new(KernelKstackAllocator::new()))
 }
 
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
@@ -782,7 +782,7 @@ pub fn setup_user_stack(task: &Task) -> (usize, usize) {
 static TRAMPOLINE_TRAP_VECTOR: Once<usize> = Once::new();
 // Per-CPU trampoline Arch address. Written once at CPU bring-up and read on
 // every context switch, so it is a plain per-CPU atomic rather than a shared
-// Mutex. A shared Mutex here serialized every context switch across all CPUs
+// IRQ spin lock. A shared IRQ spin lock here serialized every context switch across all CPUs
 // and could deadlock the whole machine if a holder panicked or stalled.
 static TRAMPOLINE_ARCH: [core::sync::atomic::AtomicUsize; MAX_NUM_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_NUM_CPUS];

@@ -1,5 +1,5 @@
+use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 use crate::early_println;
 use crate::environment::PAGE_SIZE;
@@ -588,7 +588,7 @@ impl PmmInner {
     }
 }
 
-static PMM: Mutex<PmmInner> = Mutex::new(PmmInner::new());
+static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 
 pub unsafe fn init(area: MemoryArea) {
     early_println!(

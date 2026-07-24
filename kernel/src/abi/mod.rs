@@ -6,6 +6,7 @@
 //! interfaces.
 //!
 
+use crate::sync::{IrqSpinLock, Once};
 use crate::{
     arch::Trapframe,
     fs::VfsManager,
@@ -18,8 +19,6 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
-use spin::Mutex;
-
 pub mod linux;
 pub mod scarlet;
 pub mod xv6;
@@ -451,11 +450,11 @@ impl AbiRegistry {
         }
     }
 
-    pub fn global() -> &'static Mutex<AbiRegistry> {
-        // Thread-safe lazy initialization using spin::Once
-        static INSTANCE: spin::Once<Mutex<AbiRegistry>> = spin::Once::new();
+    pub fn global() -> &'static IrqSpinLock<AbiRegistry> {
+        // Thread-safe lazy initialization using Once
+        static INSTANCE: Once<IrqSpinLock<AbiRegistry>> = Once::new();
 
-        INSTANCE.call_once(|| Mutex::new(AbiRegistry::new()))
+        INSTANCE.call_once(|| IrqSpinLock::new(AbiRegistry::new()))
     }
 
     pub fn register<T>()

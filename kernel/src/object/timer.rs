@@ -1,8 +1,8 @@
 //! Kernel timer objects.
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
 
 use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
@@ -36,14 +36,14 @@ struct TimerState {
 }
 
 struct TimerShared {
-    state: Mutex<TimerState>,
+    state: IrqSpinLock<TimerState>,
     read_waker: Waker,
 }
 
 impl TimerShared {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(TimerState {
+            state: IrqSpinLock::new(TimerState {
                 interval_ns: 0,
                 timer_entry_id: None,
                 next_deadline_tick: None,

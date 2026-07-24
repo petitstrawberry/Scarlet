@@ -45,6 +45,7 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::set_next_mode;
 use crate::print;
 use crate::println;
+use crate::sync::{IrqSpinLock, Once};
 use crate::{arch::set_trapvector, vm::get_trampoline_trap_vector};
 use crate::{
     arch::{
@@ -66,13 +67,13 @@ pub const MAX_ACTIVE_USER_TASKS: usize = 895;
 pub const MAX_ACTIVE_KERNEL_TASKS: usize = 128;
 
 /// Global task pool storing all tasks
-/// Using spin::Once with Box-ed tasks array to avoid large stack usage.
-static TASK_POOL: spin::Once<TaskPool> = spin::Once::new();
+/// Using Once with Box-ed tasks array to avoid large stack usage.
+static TASK_POOL: Once<TaskPool> = Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
-static FORK_TRACE_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
-static FORK_TRACE_PICKED_TASKS: spin::Once<spin::Mutex<BTreeSet<usize>>> = spin::Once::new();
+static FORK_TRACE_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
+static FORK_TRACE_PICKED_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
 const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
 static FORK_TRACE_ATOMIC_TASKS: [AtomicUsize; FORK_TRACE_ATOMIC_SLOTS] =
     [const { AtomicUsize::new(0) }; FORK_TRACE_ATOMIC_SLOTS];
@@ -84,12 +85,12 @@ pub fn get_task_pool() -> &'static TaskPool {
     TASK_POOL.call_once(|| TaskPool::new())
 }
 
-fn fork_trace_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
-    FORK_TRACE_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+fn fork_trace_tasks() -> &'static IrqSpinLock<BTreeSet<usize>> {
+    FORK_TRACE_TASKS.call_once(|| IrqSpinLock::new(BTreeSet::new()))
 }
 
-fn fork_trace_picked_tasks() -> &'static spin::Mutex<BTreeSet<usize>> {
-    FORK_TRACE_PICKED_TASKS.call_once(|| spin::Mutex::new(BTreeSet::new()))
+fn fork_trace_picked_tasks() -> &'static IrqSpinLock<BTreeSet<usize>> {
+    FORK_TRACE_PICKED_TASKS.call_once(|| IrqSpinLock::new(BTreeSet::new()))
 }
 
 struct TaskEntry {
@@ -138,18 +139,18 @@ pub struct TaskPool {
     // Each map entry owns one handle while the task is registered.
     //
     // ⚠️ DO NOT ACCESS DIRECTLY - Use get_task() methods
-    tasks: spin::Mutex<TaskPoolState>,
+    tasks: IrqSpinLock<TaskPoolState>,
 
     // Removed slot handles remain here until no outstanding lookup owns the
     // task. The task-reaper worker moves entries out of this lock before
     // dropping them.
-    retired_tasks: spin::Mutex<Vec<RetiredTask>>,
+    retired_tasks: IrqSpinLock<Vec<RetiredTask>>,
 }
 
 impl TaskPool {
     fn new() -> Self {
         TaskPool {
-            tasks: spin::Mutex::new(TaskPoolState {
+            tasks: IrqSpinLock::new(TaskPoolState {
                 tasks: BTreeMap::new(),
                 active_user_tasks: 0,
                 active_kernel_tasks: 0,
@@ -159,7 +160,7 @@ impl TaskPool {
                 // Zero encodes no task, and usize::MAX is intentionally never assigned.
                 next_kernel_id: usize::MAX - 1,
             }),
-            retired_tasks: spin::Mutex::new(Vec::new()),
+            retired_tasks: IrqSpinLock::new(Vec::new()),
         }
     }
 
@@ -471,11 +472,11 @@ static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
 static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
-static READY_QUEUES: [spin::Mutex<VecDeque<usize>>; MAX_NUM_CPUS] =
-    [const { spin::Mutex::new(VecDeque::new()) }; MAX_NUM_CPUS];
-static ZOMBIE_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
-static BLOCKED_QUEUE: spin::Mutex<VecDeque<usize>> = spin::Mutex::new(VecDeque::new());
-static ONLINE_CPUS: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+static READY_QUEUES: [IrqSpinLock<VecDeque<usize>>; MAX_NUM_CPUS] =
+    [const { IrqSpinLock::new(VecDeque::new()) }; MAX_NUM_CPUS];
+static ZOMBIE_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
+static BLOCKED_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
+static ONLINE_CPUS: IrqSpinLock<alloc::vec::Vec<usize>> = IrqSpinLock::new(alloc::vec::Vec::new());
 static IDLE_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] = [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
 static PENDING_IDLE_TO_USER_TRAP_TASK: [AtomicUsize; MAX_NUM_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_NUM_CPUS];
@@ -741,9 +742,10 @@ pub fn scheduler_ready(cpu_id: usize) -> bool {
 ///
 /// # Returns
 ///
-/// `true` after the CPU has published its initial current task.
+/// `true` after the CPU has published its initial current task and the current
+/// execution context holds no preemption-disabling guards.
 pub fn may_schedule_from_interrupt(cpu_id: usize) -> bool {
-    scheduler_ready(cpu_id)
+    scheduler_ready(cpu_id) && crate::sync::preemptible()
 }
 
 #[inline]
@@ -2010,7 +2012,7 @@ pub fn diagnostic_snapshot(cpu_id: usize) -> Option<SchedulerDiagnosticSnapshot>
 }
 
 #[inline]
-fn ready_queue(cpu_id: usize) -> &'static spin::Mutex<VecDeque<usize>> {
+fn ready_queue(cpu_id: usize) -> &'static IrqSpinLock<VecDeque<usize>> {
     assert_valid_cpu_id(cpu_id);
     &READY_QUEUES[cpu_id]
 }
@@ -2543,6 +2545,10 @@ pub fn sched_on_tick_with_reschedule(
 
 /// Schedule tasks on the CPU with kernel context switching.
 pub fn schedule(trapframe: &mut Trapframe) {
+    assert!(
+        crate::sync::preemptible(),
+        "schedule called while preemption is disabled"
+    );
     crate::breadcrumb::drop(
         crate::breadcrumb::SCHED_ENTER,
         get_cpu().get_cpuid() as u64,
@@ -2736,7 +2742,9 @@ pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
             cpu_id,
             "first kernel task must be owned by the executing CPU"
         );
-        task.kernel_context.as_mut_ptr() as *const crate::arch::context::KernelContext
+        // SAFETY: `running_cpu == cpu_id` above grants this CPU exclusive
+        // access to the task's kernel context through the first switch.
+        unsafe { task.kernel_context.as_mut_ptr() as *const crate::arch::context::KernelContext }
     };
 
     // SAFETY: `task_id` is the current runnable task selected by
@@ -3024,7 +3032,10 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             // locks, and blocking in the scheduler makes SMP remote wakeups
             // deadlock-prone. The `running_cpu` ownership token provides the
             // required exclusion for context switching.
-            from_ctx_ptr = from_task.kernel_context.as_mut_ptr();
+            // SAFETY: `from_task` is the task currently owned and executed by
+            // this CPU, so its `running_cpu` token excludes concurrent context
+            // mutation while the scheduler saves it.
+            from_ctx_ptr = unsafe { from_task.kernel_context.as_mut_ptr() };
 
             #[cfg(feature = "user-fpu")]
             crate::arch::fpu::kernel_switch_out_user_fpu(&mut *from_task.vcpu.lock());
@@ -3041,7 +3052,10 @@ fn kernel_context_switch(cpu_id: usize, from_task_id: usize, to_task_id: usize) 
             // CPU before reaching this point, so no other CPU may save/restore
             // this kernel context concurrently. Read it locklessly for the same
             // reason as `from_ctx_ptr` above.
-            to_ctx_ptr = to_task.kernel_context.as_mut_ptr() as *const _;
+            // SAFETY: `pick_next()` claimed `to_task.running_cpu` for this CPU,
+            // excluding concurrent context mutation until ownership is
+            // released after a later switch.
+            to_ctx_ptr = unsafe { to_task.kernel_context.as_mut_ptr() as *const _ };
         }
 
         if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
@@ -3391,6 +3405,19 @@ mod tests {
         reset();
         assert!(!scheduler_ready(0));
         assert!(!may_schedule_from_interrupt(0));
+    }
+
+    #[test_case]
+    fn test_interrupt_schedule_gate_honors_preempt_count() {
+        reset();
+        set_scheduler_ready(0, true);
+        assert!(may_schedule_from_interrupt(0));
+
+        let preempt_guard = crate::sync::PreemptGuard::new();
+        assert!(!may_schedule_from_interrupt(0));
+        drop(preempt_guard);
+
+        assert!(may_schedule_from_interrupt(0));
     }
 
     #[test_case]

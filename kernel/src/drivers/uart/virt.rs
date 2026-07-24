@@ -1,8 +1,8 @@
 // UART driver for QEMU virt machine
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::any::Any;
-use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
@@ -25,13 +25,13 @@ use crate::{
 const TX_PACE_BYTES: usize = 64;
 
 pub struct Uart {
-    // inner: Arc<Mutex<UartInner>>,
+    // inner: Arc<IrqSpinLock<UartInner>>,
     base: usize,
-    interrupt_id: RwLock<Option<InterruptId>>,
-    rx_buffer: Mutex<VecDeque<u8>>,
-    event_emitter: Mutex<DeviceEventEmitter>,
+    interrupt_id: IrqRwSpinLock<Option<InterruptId>>,
+    rx_buffer: IrqSpinLock<VecDeque<u8>>,
+    event_emitter: IrqSpinLock<DeviceEventEmitter>,
     // Serializes TX access across all callers (kernel _print, TTY write, echo).
-    tx_lock: Mutex<()>,
+    tx_lock: IrqSpinLock<()>,
 }
 
 pub const RHR_OFFSET: usize = 0x00;
@@ -65,10 +65,10 @@ impl Uart {
     pub fn new(base: usize) -> Self {
         Uart {
             base,
-            interrupt_id: RwLock::new(None),
-            rx_buffer: Mutex::new(VecDeque::new()),
-            event_emitter: Mutex::new(DeviceEventEmitter::new()),
-            tx_lock: Mutex::new(()),
+            interrupt_id: IrqRwSpinLock::new(None),
+            rx_buffer: IrqSpinLock::new(VecDeque::new()),
+            event_emitter: IrqSpinLock::new(DeviceEventEmitter::new()),
+            tx_lock: IrqSpinLock::new(()),
         }
     }
 

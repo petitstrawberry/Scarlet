@@ -32,9 +32,9 @@
 //! PageCacheManager::global().unpin(cache_id, page_index);
 //! ```
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::RwLock;
 
 use crate::fs::vfs_v2::cache::CacheId;
 use crate::mem::page::ContiguousPages;
@@ -109,21 +109,21 @@ impl PageCacheEntry {
 /// as the key to uniquely identify pages across the entire system.
 pub struct PageCacheManager {
     /// Map from (CacheId, PageIndex) to cached page entry
-    entries: RwLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
+    entries: IrqRwSpinLock<BTreeMap<(CacheId, PageIndex), PageCacheEntry>>,
     /// Best-known object sizes for dirty page-cache-backed files.
-    object_sizes: RwLock<BTreeMap<CacheId, usize>>,
+    object_sizes: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
     /// Object-level lock counts for eviction prevention
     /// Maps CacheId to lock count (>0 means object is unevictable)
-    object_locks: RwLock<BTreeMap<CacheId, usize>>,
+    object_locks: IrqRwSpinLock<BTreeMap<CacheId, usize>>,
 }
 
 impl PageCacheManager {
     /// Create a new empty page cache manager
     pub const fn new() -> Self {
         Self {
-            entries: RwLock::new(BTreeMap::new()),
-            object_sizes: RwLock::new(BTreeMap::new()),
-            object_locks: RwLock::new(BTreeMap::new()),
+            entries: IrqRwSpinLock::new(BTreeMap::new()),
+            object_sizes: IrqRwSpinLock::new(BTreeMap::new()),
+            object_locks: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -382,6 +382,6 @@ pub static GLOBAL_PAGE_CACHE: PageCacheManager = PageCacheManager::new();
 
 // TODO (Phase 2): Replace single global structure with sharded structure:
 // - Hash (CacheId, PageIndex) -> shard index (e.g. 16 or 32 shards)
-// - Each shard: Mutex/PageCacheShard { entries }
+// - Each shard: IrqSpinLock/PageCacheShard { entries }
 // - object_locks separated or distributed
 // Instance methods remain the stable API; callers use PageCacheManager::global().

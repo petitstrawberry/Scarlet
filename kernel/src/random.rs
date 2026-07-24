@@ -21,13 +21,13 @@
 //! RandomManager::get_random_bytes(&mut buffer);
 //! ```
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::{Mutex, Once};
 
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;
@@ -70,17 +70,17 @@ pub trait EntropySource: Send + Sync {
 /// random numbers to the rest of the kernel.
 pub struct RandomManager {
     /// Registered entropy sources
-    sources: Mutex<Vec<Arc<dyn EntropySource>>>,
+    sources: IrqSpinLock<Vec<Arc<dyn EntropySource>>>,
     /// Internal random pool buffer
-    pool: Mutex<VecDeque<u8>>,
+    pool: IrqSpinLock<VecDeque<u8>>,
 }
 
 impl RandomManager {
     /// Create a new RandomManager
     fn new() -> Self {
         Self {
-            sources: Mutex::new(Vec::new()),
-            pool: Mutex::new(VecDeque::with_capacity(RANDOM_POOL_SIZE)),
+            sources: IrqSpinLock::new(Vec::new()),
+            pool: IrqSpinLock::new(VecDeque::with_capacity(RANDOM_POOL_SIZE)),
         }
     }
 

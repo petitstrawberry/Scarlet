@@ -8,8 +8,8 @@
 //!   (or decrements by 1 in semaphore mode)
 //! - write(8 bytes): Adds value to counter
 
+use crate::sync::IrqSpinLock;
 use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
-use spin::Mutex;
 
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{
@@ -35,25 +35,25 @@ struct CounterState {
 /// Shared counter data including state and wakers
 struct SharedCounterData {
     /// Protected state
-    state: Mutex<CounterState>,
+    state: IrqSpinLock<CounterState>,
     /// Waker for tasks waiting to read
     read_waker: Waker,
     /// Waker for tasks waiting to write
     write_waker: Waker,
     /// Listeners notified after successful writes
-    write_listeners: Mutex<Vec<Arc<dyn CounterWriteListener>>>,
+    write_listeners: IrqSpinLock<Vec<Arc<dyn CounterWriteListener>>>,
 }
 
 impl SharedCounterData {
     fn new(initval: u32, semaphore: bool) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(CounterState {
+            state: IrqSpinLock::new(CounterState {
                 counter: initval as u64,
                 semaphore,
             }),
             read_waker: Waker::new_interruptible("counter_read"),
             write_waker: Waker::new_interruptible("counter_write"),
-            write_listeners: Mutex::new(Vec::new()),
+            write_listeners: IrqSpinLock::new(Vec::new()),
         })
     }
 }

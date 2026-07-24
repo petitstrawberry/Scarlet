@@ -23,9 +23,9 @@
 //! Requests are processed through the VirtIO descriptor chain mechanism, with proper
 //! memory management using Box allocations to ensure data remains valid during transfers.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::vec;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
-use spin::{Mutex, RwLock};
 
 use core::{mem, ptr};
 
@@ -116,12 +116,12 @@ pub struct VirtioBlkReqHeader {
 pub struct VirtioBlockDevice {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: Mutex<[VirtQueue<'static>; 1]>, // Only one queue for request/response
-    capacity: RwLock<u64>,
-    sector_size: RwLock<u32>,
-    features: RwLock<u64>,
-    read_only: RwLock<bool>,
-    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 1]>, // Only one queue for request/response
+    capacity: IrqRwSpinLock<u64>,
+    sector_size: IrqRwSpinLock<u32>,
+    features: IrqRwSpinLock<u64>,
+    read_only: IrqRwSpinLock<bool>,
+    request_queue: IrqSpinLock<VecDeque<Box<BlockIORequest>>>,
 }
 
 impl VirtioBlockDevice {
@@ -151,12 +151,12 @@ impl VirtioBlockDevice {
             // - Observed max: <5 requests per batch typically
             // - Each request uses 3 descriptors (header + data + status)
             // 32 descriptors = ~10 concurrent requests (5x typical usage)
-            virtqueues: Mutex::new([VirtQueue::new(32)]),
-            capacity: RwLock::new(0),
-            sector_size: RwLock::new(512), // Default sector size
-            features: RwLock::new(0),
-            read_only: RwLock::new(false),
-            request_queue: Mutex::new(VecDeque::new()),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(32)]),
+            capacity: IrqRwSpinLock::new(0),
+            sector_size: IrqRwSpinLock::new(512), // Default sector size
+            features: IrqRwSpinLock::new(0),
+            read_only: IrqRwSpinLock::new(false),
+            request_queue: IrqSpinLock::new(VecDeque::new()),
         };
 
         // Initialize the device
@@ -406,9 +406,9 @@ impl VirtioBlockDevice {
         #[cfg(test)]
         {
             // Add batch size tracking for debugging
-            static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> =
-                spin::Mutex::new(alloc::vec::Vec::new());
-            static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            static BATCH_SIZES: IrqSpinLock<alloc::vec::Vec<usize>> =
+                IrqSpinLock::new(alloc::vec::Vec::new());
+            static CALL_COUNT: IrqSpinLock<usize> = IrqSpinLock::new(0);
             let mut sizes = BATCH_SIZES.lock();
             let mut count = CALL_COUNT.lock();
             sizes.push(requests.len());

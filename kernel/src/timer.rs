@@ -28,7 +28,7 @@ pub struct KernelTimer {
 // The ArchTimer instances are per-CPU, and the hardware registers are CPU-local.
 unsafe impl Sync for KernelTimer {}
 
-static KERNEL_TIMER: spin::Once<KernelTimer> = spin::Once::new();
+static KERNEL_TIMER: Once<KernelTimer> = Once::new();
 
 pub fn get_kernel_timer() -> &'static KernelTimer {
     KERNEL_TIMER.call_once(|| KernelTimer::new())
@@ -315,15 +315,16 @@ impl PartialOrd for SoftwareTimer {
     }
 }
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
-use spin::{Mutex, RwLock};
 
-// Heap-based timer list (protected by spin::Mutex)
-static SOFTWARE_TIMER_HEAP: Mutex<BinaryHeap<SoftwareTimer>> = Mutex::new(BinaryHeap::new());
+// Heap-based timer list protected by an IRQ spin lock.
+static SOFTWARE_TIMER_HEAP: IrqSpinLock<BinaryHeap<SoftwareTimer>> =
+    IrqSpinLock::new(BinaryHeap::new());
 
-// Active timer flags (protected by RwLock for efficient concurrent reads)
+// Active timer flags protected by an IRQ reader-writer spin lock.
 // Maps timer ID -> active status
-static TIMER_ACTIVE_FLAGS: RwLock<BTreeMap<u64, bool>> = RwLock::new(BTreeMap::new());
+static TIMER_ACTIVE_FLAGS: IrqRwSpinLock<BTreeMap<u64, bool>> = IrqRwSpinLock::new(BTreeMap::new());
 
 /// Add a new software timer. Returns timer id.
 pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) -> u64 {

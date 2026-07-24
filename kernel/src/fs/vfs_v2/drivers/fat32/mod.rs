@@ -21,6 +21,7 @@
 //! - `Fat32Driver`: Filesystem driver for registration
 //! - Data structures for FAT32 format (boot sector, directory entries, etc.)
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -31,7 +32,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug, mem};
-use spin::{Mutex, rwlock::RwLock};
 
 use crate::{
     device::block::BlockDevice,
@@ -71,13 +71,13 @@ pub struct Fat32FileSystem {
     /// Bytes per sector
     bytes_per_sector: u32,
     /// Root directory node
-    root: RwLock<Arc<Fat32Node>>,
+    root: IrqRwSpinLock<Arc<Fat32Node>>,
     /// Filesystem name
     name: String,
     /// Next file ID generator
-    next_file_id: Mutex<u64>,
+    next_file_id: IrqSpinLock<u64>,
     /// Cached FAT table entries
-    fat_cache: Mutex<BTreeMap<u32, u32>>,
+    fat_cache: IrqSpinLock<BTreeMap<u32, u32>>,
 }
 
 impl Debug for Fat32FileSystem {
@@ -115,10 +115,10 @@ impl Fat32FileSystem {
             root_cluster,
             sectors_per_cluster,
             bytes_per_sector,
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             name: "fat32".to_string(),
-            next_file_id: Mutex::new(2), // Start from 2, root is 1
-            fat_cache: Mutex::new(BTreeMap::new()),
+            next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
+            fat_cache: IrqSpinLock::new(BTreeMap::new()),
         });
 
         // Set filesystem reference in root node

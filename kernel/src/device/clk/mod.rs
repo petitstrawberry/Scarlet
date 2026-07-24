@@ -5,12 +5,12 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{BitOr, BitOrAssign};
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-use spin::Mutex;
 
 #[cfg(not(test))]
 use crate::arch::mmio;
@@ -237,7 +237,7 @@ pub struct ClkState {
 /// Reference-counted handle to a clock.
 #[derive(Clone)]
 pub struct ClkHandle {
-    state: Arc<Mutex<ClkState>>,
+    state: Arc<IrqSpinLock<ClkState>>,
 }
 
 impl ClkHandle {
@@ -252,7 +252,7 @@ impl ClkHandle {
     /// A handle with zero prepare and enable users.
     pub fn new(clk: Arc<dyn Clk>) -> Self {
         Self {
-            state: Arc::new(Mutex::new(ClkState {
+            state: Arc::new(IrqSpinLock::new(ClkState {
                 clk,
                 prepare_count: 0,
                 enable_count: 0,
