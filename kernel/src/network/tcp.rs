@@ -225,9 +225,17 @@ struct RetransTimer {
 impl crate::timer::TimerHandler for RetransTimer {
     fn on_timer_expired(self: Arc<Self>, _context: usize) {
         if let Some(socket) = self.socket.upgrade() {
-            socket.handle_retrans_timeout(self.seq);
+            let handler: Arc<dyn crate::timer::TimerHandler> = self.clone();
+            if socket.take_active_retrans_timer(&handler) {
+                socket.handle_retrans_timeout(self.seq);
+            }
         }
     }
+}
+
+struct ActiveRetransTimer {
+    handle: crate::timer::TimerHandle,
+    handler: Arc<dyn crate::timer::TimerHandler>,
 }
 
 /// TCP socket (full implementation)
@@ -275,16 +283,16 @@ pub struct TcpSocket {
     bytes_received: AtomicU64,
 
     /// RTO (Retransmission Timeout) calculation - RFC 6298
-    /// Smoothed RTT (8 * srtt for fixed-point arithmetic)
-    srtt: AtomicU32,
-    /// RTT variation (4 * rttvar for fixed-point arithmetic)
-    rttvar: AtomicU32,
-    /// Current RTO in ticks (initial: 1 second = 100 ticks @ 10ms)
-    rto: AtomicU32,
+    /// Smoothed RTT in nanoseconds, scaled by eight for fixed-point arithmetic.
+    srtt_ns: AtomicU64,
+    /// RTT variation in nanoseconds, scaled by four for fixed-point arithmetic.
+    rttvar_ns: AtomicU64,
+    /// Current retransmission timeout in nanoseconds.
+    rto_ns: AtomicU64,
     /// Retransmission count for exponential backoff
     retrans_count: AtomicU16,
-    /// Timer ID for retransmission timer
-    retrans_timer_id: IrqSpinLock<Option<u64>>,
+    /// Active retransmission timer and its strongly retained callback.
+    retrans_timer: IrqSpinLock<Option<ActiveRetransTimer>>,
     /// Timestamp of last segment transmission (for RTT measurement)
     last_send_time: AtomicU64,
     /// Whether we're timing an RTT measurement (Karn's algorithm)
@@ -324,6 +332,10 @@ pub struct TcpSocket {
 }
 
 impl TcpSocket {
+    const INITIAL_RTO_NS: u64 = crate::timer::ms_to_ns(1_000);
+    const MIN_RTO_NS: u64 = crate::timer::ms_to_ns(10);
+    const MAX_RTO_NS: u64 = crate::timer::ms_to_ns(120_000);
+
     /// Safely downcast a SocketObject to TcpSocket using Any trait
     ///
     /// Returns None if socket is not a TcpSocket.
@@ -401,12 +413,11 @@ impl TcpSocket {
             bytes_received: AtomicU64::new(0),
 
             // RTO initialization - RFC 6298
-            // Initial RTO = 1 second = 100 ticks (10ms/tick)
-            srtt: AtomicU32::new(0),
-            rttvar: AtomicU32::new(0),
-            rto: AtomicU32::new(100), // 1 second in ticks
+            srtt_ns: AtomicU64::new(0),
+            rttvar_ns: AtomicU64::new(0),
+            rto_ns: AtomicU64::new(Self::INITIAL_RTO_NS),
             retrans_count: AtomicU16::new(0),
-            retrans_timer_id: IrqSpinLock::new(None),
+            retrans_timer: IrqSpinLock::new(None),
             last_send_time: AtomicU64::new(0),
             timing_rtt: AtomicU16::new(0),
             timed_seq: AtomicU32::new(0),
@@ -619,24 +630,20 @@ impl TcpSocket {
         if port < 49152 { 49152 } else { port }
     }
 
-    fn timeout_ms_to_ticks(timeout_ms: u64) -> Option<u64> {
+    fn timeout_ms_to_ns(timeout_ms: u64) -> Option<u64> {
         if timeout_ms == 0 {
             None
         } else {
-            let us = timeout_ms.saturating_mul(1_000);
-            Some(
-                us.saturating_add(crate::timer::TICK_INTERVAL_US - 1)
-                    / crate::timer::TICK_INTERVAL_US,
-            )
+            Some(timeout_ms.saturating_mul(crate::timer::NANOSECONDS_PER_MILLISECOND))
         }
     }
 
-    fn read_timeout_ticks(&self) -> Option<u64> {
-        Self::timeout_ms_to_ticks(self.read_timeout_ms.load(Ordering::SeqCst))
+    fn read_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(self.read_timeout_ms.load(Ordering::SeqCst))
     }
 
-    fn write_timeout_ticks(&self) -> Option<u64> {
-        Self::timeout_ms_to_ticks(self.write_timeout_ms.load(Ordering::SeqCst))
+    fn write_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(self.write_timeout_ms.load(Ordering::SeqCst))
     }
 
     fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
@@ -852,9 +859,9 @@ impl TcpSocket {
         self.recv_window.store(65535, Ordering::SeqCst);
 
         // Reset RTO state
-        self.srtt.store(0, Ordering::SeqCst);
-        self.rttvar.store(0, Ordering::SeqCst);
-        self.rto.store(100, Ordering::SeqCst); // Reset to initial value
+        self.srtt_ns.store(0, Ordering::SeqCst);
+        self.rttvar_ns.store(0, Ordering::SeqCst);
+        self.rto_ns.store(Self::INITIAL_RTO_NS, Ordering::SeqCst);
         self.retrans_count.store(0, Ordering::SeqCst);
         self.timing_rtt.store(0, Ordering::SeqCst);
 
@@ -1190,30 +1197,39 @@ impl TcpSocket {
 
     /// Fast Retransmit - immediately retransmit unacknowledged segments
     fn fast_retransmit(&self) {
-        let mut unacked = self.unacked_segments.lock();
-        if let Some(first_seg) = unacked.front() {
-            // Retransmit the oldest unacknowledged segment
-            if let Some(dest_ip) = self.remote_ip.lock().clone() {
-                let dest_port = self.remote_port.load(Ordering::SeqCst);
-                let local_port = self.local_port.load(Ordering::SeqCst);
+        let first_seg = { self.unacked_segments.lock().front().cloned() };
+        let Some(first_seg) = first_seg else {
+            return;
+        };
+        let Some(dest_ip) = self.remote_ip.lock().clone() else {
+            return;
+        };
 
-                let mut header = TcpHeader::new(local_port, dest_port);
-                header.seq_number = first_seg.seq;
-                header.ack_number = self.recv_ack.load(Ordering::SeqCst);
-                header.set_flags(first_seg.flags);
+        let dest_port = self.remote_port.load(Ordering::SeqCst);
+        let local_port = self.local_port.load(Ordering::SeqCst);
+        let mut header = TcpHeader::new(local_port, dest_port);
+        header.seq_number = first_seg.seq;
+        header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+        header.set_flags(first_seg.flags);
 
-                // Retransmit (don't update sequence number, mark as retransmission)
-                self.send_segment(dest_ip, header, &first_seg.data, false, true);
+        self.send_segment(dest_ip, header, &first_seg.data, false, true);
 
-                // Update transmission count
-                if let Some(seg) = unacked.front_mut() {
-                    seg.tx_count += 1;
-                    seg.last_tx_time = crate::timer::get_tick();
-                }
-
-                // Reset RTO for next retransmission
-                self.retrans_count.store(1, Ordering::SeqCst);
+        let rearm_seq = {
+            let mut unacked = self.unacked_segments.lock();
+            let Some(current_head) = unacked.front_mut() else {
+                return;
+            };
+            if current_head.seq != first_seg.seq {
+                return;
             }
+            current_head.tx_count = current_head.tx_count.saturating_add(1);
+            current_head.last_tx_time = crate::timer::get_time_ns();
+            Some(current_head.seq)
+        };
+
+        self.retrans_count.store(1, Ordering::SeqCst);
+        if let Some(seq) = rearm_seq {
+            self.schedule_retrans_timer(seq);
         }
     }
 
@@ -1525,7 +1541,7 @@ impl TcpSocket {
                             })
                             .clone()
                     };
-                    if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ticks()) {
+                    if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ns()) {
                         return Err(SocketError::WouldBlock);
                     }
                     continue;
@@ -1571,7 +1587,7 @@ impl TcpSocket {
                         continue;
                     }
                 }
-                if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ticks()) {
+                if !waker.wait_with_timeout(task_id, trapframe, self.write_timeout_ns()) {
                     return Err(SocketError::WouldBlock);
                 }
             }
@@ -1683,7 +1699,7 @@ impl TcpSocket {
                 if !self.recv_buffer.lock().is_empty() {
                     continue;
                 }
-                if !waker.wait_with_timeout(task_id, trapframe, self.read_timeout_ticks()) {
+                if !waker.wait_with_timeout(task_id, trapframe, self.read_timeout_ns()) {
                     return Err(SocketError::WouldBlock);
                 }
             }
@@ -1696,7 +1712,7 @@ impl TcpSocket {
 
     /// Update RTO based on RTT measurement (Jacobson/Karels algorithm)
     /// Uses fixed-point arithmetic for better precision in no_std
-    fn update_rto(&self, rtt_ticks: u32) {
+    fn update_rto(&self, rtt_ns: u64) {
         // RFC 6298: RTO calculation
         // SRTT = (1 - alpha) * SRTT + alpha * RTT
         // RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
@@ -1705,59 +1721,53 @@ impl TcpSocket {
 
         const ALPHA_SHIFT: u32 = 3; // alpha = 1/8
         const BETA_SHIFT: u32 = 2; // beta = 1/4
-        const K: u32 = 4; // multiplier for RTTVAR
+        const K: u64 = 4; // multiplier for RTTVAR
 
-        let srtt = self.srtt.load(Ordering::SeqCst);
-        let rttvar = self.rttvar.load(Ordering::SeqCst);
+        let srtt = self.srtt_ns.load(Ordering::SeqCst);
+        let rttvar = self.rttvar_ns.load(Ordering::SeqCst);
 
         if srtt == 0 {
             // First RTT measurement
             // SRTT = RTT
             // RTTVAR = RTT / 2
-            self.srtt.store(rtt_ticks << 3, Ordering::SeqCst); // 8 * RTT
-            self.rttvar.store((rtt_ticks << 2) >> 1, Ordering::SeqCst); // 4 * RTT / 2
+            self.srtt_ns
+                .store(rtt_ns.saturating_mul(8), Ordering::SeqCst);
+            self.rttvar_ns
+                .store(rtt_ns.saturating_mul(2), Ordering::SeqCst);
         } else {
             // Subsequent measurements
             // RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
             // SRTT = (1 - alpha) * SRTT + alpha * RTT
             let srtt_val = srtt >> 3; // Divide by 8
-            let diff = if srtt_val > rtt_ticks {
-                srtt_val - rtt_ticks
+            let diff = if srtt_val > rtt_ns {
+                srtt_val - rtt_ns
             } else {
-                rtt_ticks - srtt_val
+                rtt_ns - srtt_val
             };
 
             // RTTVAR = (3/4) * RTTVAR + (1/4) * |diff|
-            let new_rttvar = ((rttvar * 3) >> BETA_SHIFT) + ((diff << 2) >> BETA_SHIFT);
-            self.rttvar.store(new_rttvar, Ordering::SeqCst);
+            let new_rttvar = ((rttvar.saturating_mul(3)) >> BETA_SHIFT).saturating_add(diff);
+            self.rttvar_ns.store(new_rttvar, Ordering::SeqCst);
 
             // SRTT = (7/8) * SRTT + (1/8) * RTT
-            let new_srtt = ((srtt * 7) >> ALPHA_SHIFT) + (rtt_ticks << (3 - ALPHA_SHIFT));
-            self.srtt.store(new_srtt, Ordering::SeqCst);
+            let new_srtt = ((srtt.saturating_mul(7)) >> ALPHA_SHIFT).saturating_add(rtt_ns);
+            self.srtt_ns.store(new_srtt, Ordering::SeqCst);
         }
 
         // RTO = SRTT + max(G, K * RTTVAR)
-        // G = 1 tick (10ms), K = 4
-        let srtt_val = self.srtt.load(Ordering::SeqCst) >> 3;
-        let rttvar_val = self.rttvar.load(Ordering::SeqCst) >> 2;
-        let mut rto = srtt_val + (K * rttvar_val).max(1);
+        let srtt_ns = self.srtt_ns.load(Ordering::SeqCst) >> ALPHA_SHIFT;
+        let rttvar_ns = self.rttvar_ns.load(Ordering::SeqCst) >> BETA_SHIFT;
+        let mut rto_ns = srtt_ns.saturating_add(K.saturating_mul(rttvar_ns).max(Self::MIN_RTO_NS));
 
         // Clamp RTO to bounds
-        // Min: 1 tick (10ms), Max: 12000 ticks (120 seconds)
-        rto = rto.max(1).min(12000);
+        rto_ns = rto_ns.clamp(Self::MIN_RTO_NS, Self::MAX_RTO_NS);
 
-        self.rto.store(rto, Ordering::SeqCst);
+        self.rto_ns.store(rto_ns, Ordering::SeqCst);
     }
 
-    /// Get current RTO in milliseconds
-    fn get_rto_ms(&self) -> u32 {
-        // Convert ticks to milliseconds (10ms per tick)
-        self.rto.load(Ordering::SeqCst) * 10
-    }
-
-    /// Get current RTO in ticks
-    fn get_rto_ticks(&self) -> u32 {
-        self.rto.load(Ordering::SeqCst)
+    /// Get the current RTO in nanoseconds.
+    fn get_rto_ns(&self) -> u64 {
+        self.rto_ns.load(Ordering::SeqCst)
     }
 
     /// Start RTT measurement for a sequence number
@@ -1766,7 +1776,7 @@ impl TcpSocket {
         if self.timing_rtt.load(Ordering::SeqCst) == 0 {
             self.timed_seq.store(seq, Ordering::SeqCst);
             self.last_send_time
-                .store(crate::timer::get_tick(), Ordering::SeqCst);
+                .store(crate::timer::get_time_ns(), Ordering::SeqCst);
             self.timing_rtt.store(1, Ordering::SeqCst);
         }
     }
@@ -1780,10 +1790,9 @@ impl TcpSocket {
             // Note: Sequence number comparison needs to handle wraparound
             if is_seq_acknowledged(timed_seq, ack_seq) {
                 let send_time = self.last_send_time.load(Ordering::SeqCst);
-                let now = crate::timer::get_tick();
+                let now = crate::timer::get_time_ns();
                 if now > send_time {
-                    let rtt = (now - send_time) as u32;
-                    self.update_rto(rtt);
+                    self.update_rto(now - send_time);
                 }
                 self.timing_rtt.store(0, Ordering::SeqCst);
                 // Reset retransmission count on successful ACK
@@ -1798,9 +1807,11 @@ impl TcpSocket {
         if count < 6 {
             // Double RTO (exponential backoff), max 64x
             let backoff = 1u32 << count.min(6);
-            let base_rto = self.rto.load(Ordering::SeqCst);
-            let new_rto = (base_rto * backoff).min(12000); // Max 120 seconds
-            self.rto.store(new_rto, Ordering::SeqCst);
+            let base_rto = self.rto_ns.load(Ordering::SeqCst);
+            let new_rto = base_rto
+                .saturating_mul(backoff as u64)
+                .min(Self::MAX_RTO_NS);
+            self.rto_ns.store(new_rto, Ordering::SeqCst);
             self.retrans_count.store(count + 1, Ordering::SeqCst);
         }
     }
@@ -1819,92 +1830,127 @@ impl TcpSocket {
             _ => {}
         }
 
-        // Find the segment to retransmit
-        let mut unacked = self.unacked_segments.lock();
-        if let Some(pos) = unacked.iter().position(|seg| seg.seq == seq) {
-            if let Some(mut seg) = unacked.get(pos).cloned() {
-                // Check max retransmissions
-                if seg.tx_count >= 12 {
-                    // Too many retransmissions, close connection
-                    self.set_state(TcpState::Closed);
-                    if let Some(waker) = self.send_waker.lock().as_ref() {
-                        waker.wake_all();
-                    }
-                    if let Some(waker) = self.recv_waker.lock().as_ref() {
-                        waker.wake_all();
-                    }
-                    return;
-                }
-
-                // Exponential backoff
-                self.backoff_rto();
-
-                // Retransmit the segment
-                if let Some(dest_ip) = self.remote_ip.lock().clone() {
-                    let dest_port = self.remote_port.load(Ordering::SeqCst);
-                    let local_port = self.local_port.load(Ordering::SeqCst);
-
-                    let mut header = TcpHeader::new(local_port, dest_port);
-                    header.seq_number = seg.seq;
-                    header.ack_number = self.recv_ack.load(Ordering::SeqCst);
-                    header.set_flags(seg.flags);
-
-                    // Retransmit (don't update sequence number, mark as retransmission)
-                    self.send_segment(dest_ip, header, &seg.data, false, true);
-
-                    // Update segment info
-                    seg.tx_count += 1;
-                    seg.last_tx_time = crate::timer::get_tick();
-
-                    // Update in queue
-                    if let Some(existing) = unacked.get_mut(pos) {
-                        *existing = seg;
-                    }
-
-                    // Schedule next retransmission timer
-                    self.schedule_retrans_timer(seq);
-                }
+        let retransmit = {
+            let unacked = self.unacked_segments.lock();
+            let Some(seg) = unacked.front().cloned() else {
+                return;
+            };
+            if seg.seq != seq {
+                return;
             }
+
+            if seg.tx_count >= 12 {
+                self.set_state(TcpState::Closed);
+                if let Some(waker) = self.send_waker.lock().as_ref() {
+                    waker.wake_all();
+                }
+                if let Some(waker) = self.recv_waker.lock().as_ref() {
+                    waker.wake_all();
+                }
+                return;
+            }
+
+            self.backoff_rto();
+
+            let Some(dest_ip) = self.remote_ip.lock().clone() else {
+                return;
+            };
+            let dest_port = self.remote_port.load(Ordering::SeqCst);
+            let local_port = self.local_port.load(Ordering::SeqCst);
+
+            let mut header = TcpHeader::new(local_port, dest_port);
+            header.seq_number = seg.seq;
+            header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+            header.set_flags(seg.flags);
+
+            (seg, dest_ip, header)
+        };
+
+        self.send_segment(retransmit.1, retransmit.2, &retransmit.0.data, false, true);
+
+        let rearm_seq = {
+            let mut unacked = self.unacked_segments.lock();
+            let Some(current_head) = unacked.front_mut() else {
+                return;
+            };
+            if current_head.seq != retransmit.0.seq {
+                return;
+            }
+            current_head.tx_count = current_head.tx_count.saturating_add(1);
+            current_head.last_tx_time = crate::timer::get_time_ns();
+            Some(current_head.seq)
+        };
+
+        if let Some(seq) = rearm_seq {
+            self.schedule_retrans_timer(seq);
         }
     }
 
-    /// Schedule retransmission timer for a segment
+    /// Schedule the retransmission timer if `seq` is still the unacknowledged head.
     fn schedule_retrans_timer(&self, seq: u32) {
-        let rto_ticks = self.get_rto_ticks();
-        let expires = crate::timer::get_tick() + rto_ticks as u64;
+        let previous = {
+            let unacked = self.unacked_segments.lock();
+            let Some(head) = unacked.front() else {
+                return;
+            };
+            if !retransmission_request_matches_head(seq, Some(head.seq)) {
+                return;
+            }
 
-        let timer: Arc<dyn crate::timer::TimerHandler> = Arc::new(RetransTimer {
-            socket: self.self_weak.clone(),
-            seq,
-        });
+            let expires = retransmission_deadline_ns(head.last_tx_time, self.get_rto_ns());
+            let timer: Arc<dyn crate::timer::TimerHandler> = Arc::new(RetransTimer {
+                socket: self.self_weak.clone(),
+                seq,
+            });
+            let handle =
+                crate::timer::add_timer(expires, crate::timer::TimerPrecision::Normal, &timer, 0);
+            self.retrans_timer.lock().replace(ActiveRetransTimer {
+                handle,
+                handler: timer,
+            })
+        };
 
-        let timer_id = crate::timer::add_timer(expires, &timer, 0);
-
-        // Store timer ID
-        *self.retrans_timer_id.lock() = Some(timer_id);
+        if let Some(previous) = previous {
+            crate::timer::cancel_timer(previous.handle);
+        }
     }
 
     /// Cancel retransmission timer
     fn cancel_retrans_timer(&self) {
-        let timer_id = {
-            let mut timer_lock = self.retrans_timer_id.lock();
+        let active = {
+            let mut timer_lock = self.retrans_timer.lock();
             timer_lock.take()
         };
 
-        if let Some(timer_id) = timer_id {
-            crate::timer::cancel_timer(timer_id);
+        if let Some(active) = active {
+            crate::timer::cancel_timer(active.handle);
         }
+    }
+
+    /// Clear the retained callback only when this timer owns the active slot.
+    fn take_active_retrans_timer(&self, handler: &Arc<dyn crate::timer::TimerHandler>) -> bool {
+        let active = {
+            let mut timer_lock = self.retrans_timer.lock();
+            if timer_lock
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.handler, handler))
+            {
+                timer_lock.take()
+            } else {
+                None
+            }
+        };
+        active.is_some()
     }
 
     /// Add segment to unacked list and schedule retransmission
     fn add_unacked_segment(&self, seq: u32, data: Vec<u8>, flags: u8) {
         // Check unacked segment limit to prevent memory exhaustion
         let mut unacked = self.unacked_segments.lock();
+        let previous_head = unacked.front().map(|segment| segment.seq);
         if unacked.len() >= MAX_UNACKED_SEGMENTS {
             // Remove oldest segment if limit reached
-            if let Some(old) = unacked.pop_front() {
-                // Cancel its timer (timer will be skipped when it fires)
-            }
+            let _ = unacked.pop_front();
         }
 
         let segment = UnackedSegment {
@@ -1912,14 +1958,20 @@ impl TcpSocket {
             data,
             flags,
             tx_count: 1,
-            last_tx_time: crate::timer::get_tick(),
+            last_tx_time: crate::timer::get_time_ns(),
         };
 
         unacked.push_back(segment);
+        let next_head = unacked.front().map(|segment| segment.seq);
         drop(unacked);
 
-        // Schedule retransmission timer
-        self.schedule_retrans_timer(seq);
+        if retransmission_head_changed(previous_head, next_head) {
+            if let Some(seq) = next_head {
+                self.schedule_retrans_timer(seq);
+            } else {
+                self.cancel_retrans_timer();
+            }
+        }
 
         // Start RTT measurement if not already timing
         self.start_rtt_measurement(seq);
@@ -1928,6 +1980,7 @@ impl TcpSocket {
     /// Remove acknowledged segments from unacked list
     fn remove_acked_segments(&self, ack_seq: u32) {
         let mut unacked = self.unacked_segments.lock();
+        let previous_head = unacked.front().map(|segment| segment.seq);
         // Remove all segments that are fully acknowledged
         unacked.retain(|seg| {
             let seg_end = seg.seq.wrapping_add(seg.data.len() as u32);
@@ -1935,12 +1988,32 @@ impl TcpSocket {
             !is_seq_acknowledged(seg_end, ack_seq)
         });
 
-        // If all segments are acknowledged, cancel timer
-        if unacked.is_empty() {
-            drop(unacked);
-            self.cancel_retrans_timer();
+        let next_head = unacked.front().map(|segment| segment.seq);
+        drop(unacked);
+
+        if retransmission_head_changed(previous_head, next_head) {
+            if let Some(seq) = next_head {
+                self.schedule_retrans_timer(seq);
+            } else {
+                self.cancel_retrans_timer();
+            }
         }
     }
+}
+
+#[inline]
+fn retransmission_head_changed(previous_head: Option<u32>, next_head: Option<u32>) -> bool {
+    previous_head != next_head
+}
+
+#[inline]
+fn retransmission_request_matches_head(requested_seq: u32, head_seq: Option<u32>) -> bool {
+    head_seq == Some(requested_seq)
+}
+
+#[inline]
+fn retransmission_deadline_ns(last_tx_time: u64, rto_ns: u64) -> u64 {
+    last_tx_time.saturating_add(rto_ns)
 }
 
 /// Check if a sequence number is acknowledged by an ACK number
@@ -2380,15 +2453,16 @@ impl crate::object::capability::Selectable for TcpSocket {
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        timeout_ticks: Option<u64>,
-        _min_wait_ticks: u64,
+        timeout_ns: Option<u64>,
+        _min_wait_ns: u64,
     ) -> crate::object::capability::selectable::SelectWaitOutcome {
         let task_id = {
             use crate::arch::get_cpu;
             let cpu_id = get_cpu().get_cpuid();
             current_task_id(cpu_id).unwrap_or(0)
         };
-        let deadline = timeout_ticks.map(|ticks| crate::timer::get_tick().saturating_add(ticks));
+        let deadline =
+            timeout_ns.map(|duration_ns| crate::timer::get_time_ns().saturating_add(duration_ns));
 
         loop {
             let current = self.current_ready(interest);
@@ -2398,7 +2472,7 @@ impl crate::object::capability::Selectable for TcpSocket {
 
             let remaining = match deadline {
                 Some(deadline) => {
-                    let now = crate::timer::get_tick();
+                    let now = crate::timer::get_time_ns();
                     if now >= deadline {
                         return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
                     }
@@ -2786,5 +2860,33 @@ mod tests {
         let checksum = header.calculate_checksum(local_ip, dest_ip, data);
 
         assert_ne!(checksum, 0);
+    }
+
+    #[test_case]
+    fn retransmission_timer_retargets_only_when_the_unacked_head_changes() {
+        assert!(retransmission_head_changed(None, Some(10)));
+        assert!(!retransmission_head_changed(Some(10), Some(10)));
+        assert!(retransmission_head_changed(Some(10), Some(20)));
+        assert!(retransmission_head_changed(Some(20), None));
+    }
+
+    #[test_case]
+    fn retransmission_deadline_uses_the_head_transmit_time_and_saturates() {
+        assert_eq!(retransmission_deadline_ns(100, 2), 102);
+        assert_eq!(retransmission_deadline_ns(u64::MAX - 1, 1), u64::MAX);
+    }
+
+    #[test_case]
+    fn rto_nanosecond_bounds_preserve_the_legacy_durations() {
+        assert_eq!(TcpSocket::INITIAL_RTO_NS, crate::timer::ms_to_ns(1_000));
+        assert_eq!(TcpSocket::MIN_RTO_NS, crate::timer::ms_to_ns(10));
+        assert_eq!(TcpSocket::MAX_RTO_NS, crate::timer::ms_to_ns(120_000));
+    }
+
+    #[test_case]
+    fn stale_retransmission_requests_do_not_match_a_new_head() {
+        assert!(retransmission_request_matches_head(10, Some(10)));
+        assert!(!retransmission_request_matches_head(10, Some(20)));
+        assert!(!retransmission_request_matches_head(10, None));
     }
 }
