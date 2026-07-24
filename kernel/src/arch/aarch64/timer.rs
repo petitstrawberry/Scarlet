@@ -44,6 +44,11 @@ pub fn set_timer(_time: u64) {
     let _ = crate::interrupt::InterruptManager::global().set_timer(cpu_id, _time);
 }
 
+#[inline]
+fn saturating_u128_to_u64(value: u128) -> u64 {
+    value.min(u64::MAX as u128) as u64
+}
+
 pub struct ArchTimer {
     next_event: u64,
     running: bool,
@@ -139,12 +144,22 @@ impl ArchTimer {
         self.set_next_event(deadline);
     }
 
-    pub(crate) fn deadline_from_us(&self, deadline_us: u64) -> u64 {
+    /// Program an absolute monotonic nanosecond deadline.
+    ///
+    /// Expired or very-near deadlines are moved at least one microsecond into
+    /// the future so a stale queue head cannot create an interrupt storm.
+    pub fn set_deadline_ns(&mut self, deadline_ns: u64) {
+        let now = self.get_time();
         if self.frequency == 0 {
-            return self.get_time();
+            self.set_next_event(now.saturating_add(1));
+            return;
         }
 
-        deadline_us.saturating_mul(self.frequency) / 1_000_000
+        let deadline = saturating_u128_to_u64(
+            (deadline_ns as u128).saturating_mul(self.frequency as u128) / 1_000_000_000,
+        );
+        let minimum_delta = self.frequency.div_ceil(1_000_000).max(1);
+        self.set_next_event(deadline.max(now.saturating_add(minimum_delta)));
     }
 
     pub fn get_time_us(&self) -> u64 {
@@ -155,11 +170,31 @@ impl ArchTimer {
         (now.saturating_mul(1_000_000)) / self.frequency
     }
 
+    pub fn get_time_ns(&self) -> u64 {
+        if self.frequency == 0 {
+            return 0;
+        }
+        saturating_u128_to_u64(
+            (self.get_time() as u128).saturating_mul(1_000_000_000) / self.frequency as u128,
+        )
+    }
+
     fn get_next_event(&self) -> u64 {
         self.next_event
     }
 
     fn set_next_event(&mut self, next_event: u64) {
         self.next_event = next_event;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saturating_u128_to_u64;
+
+    #[test_case]
+    fn counter_conversion_saturates_instead_of_truncating() {
+        assert_eq!(saturating_u128_to_u64(u64::MAX as u128), u64::MAX);
+        assert_eq!(saturating_u128_to_u64((u64::MAX as u128) + 1), u64::MAX);
     }
 }
