@@ -3,11 +3,11 @@
 //! This module provides UDP datagram handling for the network stack.
 //! It implements the NetworkLayer trait and provides UDP socket functionality.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use crate::sync::{Mutex, RwLock};
 
 use crate::early_println;
 use crate::network::Ipv4Address;
@@ -140,47 +140,47 @@ impl UdpHeader {
 /// Implements SocketObject for UDP datagram communication.
 pub struct UdpSocket {
     /// Local address
-    local_addr: RwLock<Option<SocketAddress>>,
+    local_addr: IrqRwSpinLock<Option<SocketAddress>>,
     /// Remote address (for connected sockets)
-    remote_addr: RwLock<Option<SocketAddress>>,
+    remote_addr: IrqRwSpinLock<Option<SocketAddress>>,
     /// Send buffer
-    send_buffer: Mutex<Vec<Vec<u8>>>,
+    send_buffer: IrqSpinLock<Vec<Vec<u8>>>,
     /// Receive buffer
-    recv_buffer: Mutex<Vec<Vec<u8>>>,
+    recv_buffer: IrqSpinLock<Vec<Vec<u8>>>,
     /// Socket state
-    state: RwLock<SocketState>,
+    state: IrqRwSpinLock<SocketState>,
     /// Reference to UDP layer
     udp_layer: Arc<UdpLayer>,
     /// Weak self reference for registration
     self_weak: Weak<UdpSocket>,
     /// Receive waker for blocking I/O
-    recv_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    recv_waker: IrqSpinLock<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Send waker for blocking I/O
-    send_waker: Mutex<Option<alloc::sync::Arc<crate::sync::Waker>>>,
+    send_waker: IrqSpinLock<Option<alloc::sync::Arc<crate::sync::Waker>>>,
     /// Blocking mode (default: true)
-    blocking_mode: Mutex<bool>,
+    blocking_mode: IrqSpinLock<bool>,
     /// Read timeout in milliseconds. Zero means no timeout.
-    read_timeout_ms: Mutex<u64>,
+    read_timeout_ms: IrqSpinLock<u64>,
     /// Write timeout in milliseconds. Zero means no timeout.
-    write_timeout_ms: Mutex<u64>,
+    write_timeout_ms: IrqSpinLock<u64>,
 }
 
 impl UdpSocket {
     /// Create a new UDP socket
     pub fn new(udp_layer: Arc<UdpLayer>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            local_addr: RwLock::new(None),
-            remote_addr: RwLock::new(None),
-            send_buffer: Mutex::new(Vec::new()),
-            recv_buffer: Mutex::new(Vec::new()),
-            state: RwLock::new(SocketState::Unconnected),
+            local_addr: IrqRwSpinLock::new(None),
+            remote_addr: IrqRwSpinLock::new(None),
+            send_buffer: IrqSpinLock::new(Vec::new()),
+            recv_buffer: IrqSpinLock::new(Vec::new()),
+            state: IrqRwSpinLock::new(SocketState::Unconnected),
             udp_layer,
             self_weak: weak.clone(),
-            recv_waker: Mutex::new(None),
-            send_waker: Mutex::new(None),
-            blocking_mode: Mutex::new(true),
-            read_timeout_ms: Mutex::new(0),
-            write_timeout_ms: Mutex::new(0),
+            recv_waker: IrqSpinLock::new(None),
+            send_waker: IrqSpinLock::new(None),
+            blocking_mode: IrqSpinLock::new(true),
+            read_timeout_ms: IrqSpinLock::new(0),
+            write_timeout_ms: IrqSpinLock::new(0),
         })
     }
 
@@ -613,11 +613,11 @@ impl ControlOps for UdpSocket {
 /// Manages UDP port bindings and handles UDP datagrams.
 pub struct UdpLayer {
     /// Port-to-socket mapping for receiving datagrams
-    port_map: RwLock<BTreeMap<u16, alloc::sync::Weak<UdpSocket>>>,
+    port_map: IrqRwSpinLock<BTreeMap<u16, alloc::sync::Weak<UdpSocket>>>,
     /// Port allocation (ephemeral ports start from 49152)
-    next_ephemeral_port: Mutex<u16>,
+    next_ephemeral_port: IrqSpinLock<u16>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     self_weak: Weak<UdpLayer>,
 }
 
@@ -625,9 +625,9 @@ impl UdpLayer {
     /// Create a new UDP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            port_map: RwLock::new(BTreeMap::new()),
-            next_ephemeral_port: Mutex::new(49152),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            port_map: IrqRwSpinLock::new(BTreeMap::new()),
+            next_ephemeral_port: IrqSpinLock::new(49152),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             self_weak: weak.clone(),
         })
     }

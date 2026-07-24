@@ -315,15 +315,16 @@ impl PartialOrd for SoftwareTimer {
     }
 }
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
-use crate::sync::{Mutex, Once, RwLock};
 
-// Heap-based timer list (protected by Mutex)
-static SOFTWARE_TIMER_HEAP: Mutex<BinaryHeap<SoftwareTimer>> = Mutex::new(BinaryHeap::new());
+// Heap-based timer list protected by an IRQ spin lock.
+static SOFTWARE_TIMER_HEAP: IrqSpinLock<BinaryHeap<SoftwareTimer>> =
+    IrqSpinLock::new(BinaryHeap::new());
 
-// Active timer flags (protected by RwLock for efficient concurrent reads)
+// Active timer flags protected by an IRQ reader-writer spin lock.
 // Maps timer ID -> active status
-static TIMER_ACTIVE_FLAGS: RwLock<BTreeMap<u64, bool>> = RwLock::new(BTreeMap::new());
+static TIMER_ACTIVE_FLAGS: IrqRwSpinLock<BTreeMap<u64, bool>> = IrqRwSpinLock::new(BTreeMap::new());
 
 /// Add a new software timer. Returns timer id.
 pub fn add_timer(expires: u64, handler: &Arc<dyn TimerHandler>, context: usize) -> u64 {

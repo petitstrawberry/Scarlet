@@ -4,10 +4,10 @@
 //! This bridges Ethernet-capable devices into the NetworkManager without
 //! tying the core network stack to a specific device driver implementation.
 
+use crate::sync::IrqSpinLock;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::device::network::{DevicePacket, EthernetDevice, MacAddress};
 use crate::network::ipv4::Ipv4Address;
@@ -16,7 +16,7 @@ use crate::network::{InterfaceStats, NetworkInterface};
 pub struct EthernetNetworkInterface {
     name: String,
     device: Arc<dyn EthernetDevice>,
-    ip_address: Mutex<Option<Ipv4Address>>,
+    ip_address: IrqSpinLock<Option<Ipv4Address>>,
 }
 
 impl EthernetNetworkInterface {
@@ -24,7 +24,7 @@ impl EthernetNetworkInterface {
         Self {
             name: String::from(name),
             device,
-            ip_address: Mutex::new(None),
+            ip_address: IrqSpinLock::new(None),
         }
     }
 }

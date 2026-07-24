@@ -24,6 +24,7 @@
 //! let tty_file = vfs.open("/dev/tty0", O_RDWR)?;
 //! ```
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -33,7 +34,6 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use crate::sync::RwLock;
 
 use crate::device::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
@@ -62,7 +62,7 @@ pub struct DevFS {
     /// Unique filesystem identifier
     fs_id: FileSystemId,
     /// Root directory node
-    root: RwLock<Arc<DevNode>>,
+    root: IrqRwSpinLock<Arc<DevNode>>,
     /// Filesystem name
     name: String,
     #[cfg(test)]
@@ -75,7 +75,7 @@ impl DevFS {
         let root = Arc::new(DevNode::new_directory("/".to_string()));
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             name: "devfs".to_string(),
             #[cfg(test)]
             device_manager_addr: None,
@@ -91,7 +91,7 @@ impl DevFS {
         root.set_device_manager(device_manager);
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             name: "devfs".to_string(),
             device_manager_addr: Some(device_manager as *const DeviceManager as usize),
         });
@@ -296,11 +296,11 @@ pub struct DevNode {
     /// File ID
     file_id: u64,
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<DevNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<DevNode>>>,
     /// Reference to filesystem
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     #[cfg(test)]
-    device_manager_addr: RwLock<Option<usize>>,
+    device_manager_addr: IrqRwSpinLock<Option<usize>>,
 }
 
 impl Clone for DevNode {
@@ -309,10 +309,10 @@ impl Clone for DevNode {
             name: self.name.clone(),
             file_type: self.file_type.clone(),
             file_id: self.file_id,
-            children: RwLock::new(self.children.read().clone()),
-            filesystem: RwLock::new(self.filesystem.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
+            filesystem: IrqRwSpinLock::new(self.filesystem.read().clone()),
             #[cfg(test)]
-            device_manager_addr: RwLock::new(*self.device_manager_addr.read()),
+            device_manager_addr: IrqRwSpinLock::new(*self.device_manager_addr.read()),
         }
     }
 }
@@ -328,10 +328,10 @@ impl DevNode {
             name,
             file_type: FileType::Directory,
             file_id,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
             #[cfg(test)]
-            device_manager_addr: RwLock::new(None),
+            device_manager_addr: IrqRwSpinLock::new(None),
         }
     }
 
@@ -341,10 +341,10 @@ impl DevNode {
             name,
             file_type,
             file_id,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
             #[cfg(test)]
-            device_manager_addr: RwLock::new(None),
+            device_manager_addr: IrqRwSpinLock::new(None),
         }
     }
 
@@ -354,10 +354,10 @@ impl DevNode {
             name,
             file_type: FileType::SymbolicLink(target),
             file_id,
-            children: RwLock::new(BTreeMap::new()),
-            filesystem: RwLock::new(None),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            filesystem: IrqRwSpinLock::new(None),
             #[cfg(test)]
-            device_manager_addr: RwLock::new(None),
+            device_manager_addr: IrqRwSpinLock::new(None),
         }
     }
 
@@ -520,7 +520,7 @@ pub struct DevFileObject {
     /// Reference to the DevNode
     node: Arc<DevNode>,
     /// Current file position (for seekable devices)
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
     /// Device ID for lookup in DeviceManager
     #[allow(dead_code)]
     device_id: usize,
@@ -558,7 +558,7 @@ impl DevFileObject {
                 })?;
                 Ok(Self {
                     node,
-                    position: RwLock::new(0),
+                    position: IrqRwSpinLock::new(0),
                     device_id,
                     device_type,
                     device_open: Some(device_open),
@@ -995,7 +995,7 @@ pub struct DevDirectoryObject {
     /// Reference to the DevNode
     node: Arc<DevNode>,
     /// Current position in directory entries (entry index)
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
 }
 
 impl DevDirectoryObject {
@@ -1003,7 +1003,7 @@ impl DevDirectoryObject {
     pub fn new(node: Arc<DevNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }

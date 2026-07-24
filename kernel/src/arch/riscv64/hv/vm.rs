@@ -1,9 +1,9 @@
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use crate::sync::Mutex;
 
 use super::csr::{
     write_hcounteren, write_hedeleg, write_hgeie, write_hideleg, write_htimedelta, write_hvip,
@@ -85,7 +85,7 @@ fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
 pub struct Riscv64VcpuObject {
     id: VcpuId,
     vm: Weak<Riscv64VmObject>,
-    state: Mutex<VcpuInternalState>,
+    state: IrqSpinLock<VcpuInternalState>,
     irqs_pending: AtomicU64,
     irqs_pending_mask: AtomicU64,
     last_hvip: AtomicU64,
@@ -102,7 +102,7 @@ impl Riscv64VcpuObject {
         Arc::new(Self {
             id,
             vm: Arc::downgrade(vm),
-            state: Mutex::new(VcpuInternalState {
+            state: IrqSpinLock::new(VcpuInternalState {
                 guest: GuestVcpu::new(vm.id(), id),
             }),
             irqs_pending: AtomicU64::new(0),
@@ -357,7 +357,7 @@ pub struct Riscv64VmObject {
     /// construction — stored outside the mutex so `owner_mm()` can return
     /// a reference without locking.
     owner_mm: VirtualMemoryManager,
-    state: Mutex<VmInternalState>,
+    state: IrqSpinLock<VmInternalState>,
 }
 
 impl Drop for Riscv64VmObject {
@@ -375,7 +375,7 @@ impl Riscv64VmObject {
         Ok(Self {
             id,
             owner_mm,
-            state: Mutex::new(VmInternalState {
+            state: IrqSpinLock::new(VmInternalState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
                 vmid,

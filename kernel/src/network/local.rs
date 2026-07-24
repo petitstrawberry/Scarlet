@@ -17,6 +17,7 @@
 //! 3. **Listening**: Server socket accepting connections
 //! 4. **Connected**: Client socket or accepted connection
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::VecDeque,
     format,
@@ -25,7 +26,6 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use crate::sync::RwLock;
 
 use crate::sched::scheduler::current_task_id;
 
@@ -80,16 +80,16 @@ fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
 /// Shared buffer structure for socket data
 struct SocketBuffer {
     /// Data buffer
-    data: RwLock<VecDeque<u8>>,
+    data: IrqRwSpinLock<VecDeque<u8>>,
     /// Flag indicating this buffer has been closed (peer shutdown)
-    closed: RwLock<bool>,
+    closed: IrqRwSpinLock<bool>,
 }
 
 impl SocketBuffer {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            data: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
-            closed: RwLock::new(false),
+            data: IrqRwSpinLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
+            closed: IrqRwSpinLock::new(false),
         })
     }
 }
@@ -107,36 +107,36 @@ pub struct LocalSocket {
     ///
     /// This is used to establish peer relationships in methods that only
     /// have `&self` (e.g., connect()), where we still need an `Arc<Self>`.
-    self_weak: RwLock<Weak<LocalSocket>>,
+    self_weak: IrqRwSpinLock<Weak<LocalSocket>>,
 
     /// Socket protocol
     protocol: SocketProtocol,
 
     /// Current socket state
-    state: RwLock<SocketState>,
+    state: IrqRwSpinLock<SocketState>,
 
     /// Local address (if bound)
-    local_addr: RwLock<Option<String>>,
+    local_addr: IrqRwSpinLock<Option<String>>,
 
     /// Peer address (if connected)
-    peer_addr: RwLock<Option<String>>,
+    peer_addr: IrqRwSpinLock<Option<String>>,
 
     /// Read buffer: data received from peer (shared with peer for writing)
-    read_buffer: RwLock<Arc<SocketBuffer>>,
+    read_buffer: IrqRwSpinLock<Arc<SocketBuffer>>,
 
     /// Write buffer reference: shared with peer socket for writing
     /// When we write, we push to peer's read_buffer
-    peer_read_buffer: RwLock<Option<Arc<SocketBuffer>>>,
+    peer_read_buffer: IrqRwSpinLock<Option<Arc<SocketBuffer>>>,
 
     /// Peer socket reference (for waking read waiters)
-    peer_socket: RwLock<Option<Weak<LocalSocket>>>,
+    peer_socket: IrqRwSpinLock<Option<Weak<LocalSocket>>>,
 
     /// Backlog queue for listening sockets
     /// Contains pending connections waiting to be accepted
-    backlog: RwLock<Vec<Arc<LocalSocket>>>,
+    backlog: IrqRwSpinLock<Vec<Arc<LocalSocket>>>,
 
     /// Maximum backlog size (set by listen())
-    max_backlog: RwLock<usize>,
+    max_backlog: IrqRwSpinLock<usize>,
 
     /// Waker for blocking accept() operations
     accept_waker: Waker,
@@ -149,10 +149,10 @@ pub struct LocalSocket {
 
     /// Queue of handles (KernelObjects) received from peer
     /// This allows passing file descriptors / kernel objects between tasks
-    handle_queue: RwLock<VecDeque<KernelObject>>,
+    handle_queue: IrqRwSpinLock<VecDeque<KernelObject>>,
 
     /// Nonblocking I/O flag
-    nonblocking: RwLock<bool>,
+    nonblocking: IrqRwSpinLock<bool>,
 }
 
 impl LocalSocket {
@@ -183,20 +183,20 @@ impl LocalSocket {
         Self {
             socket_type,
             protocol,
-            state: RwLock::new(SocketState::Unconnected),
-            local_addr: RwLock::new(None),
-            peer_addr: RwLock::new(None),
-            read_buffer: RwLock::new(SocketBuffer::new()),
-            peer_read_buffer: RwLock::new(None),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Unconnected),
+            local_addr: IrqRwSpinLock::new(None),
+            peer_addr: IrqRwSpinLock::new(None),
+            read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
+            peer_read_buffer: IrqRwSpinLock::new(None),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            handle_queue: IrqRwSpinLock::new(VecDeque::new()),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         }
     }
 
@@ -476,20 +476,20 @@ impl LocalSocket {
         let local_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(local_addr.clone())),
-            peer_addr: RwLock::new(Some(peer_addr.clone())),
-            read_buffer: RwLock::new(local_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
+            read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(peer_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            handle_queue: IrqRwSpinLock::new(VecDeque::new()),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         // Create peer socket (client side)
@@ -497,20 +497,20 @@ impl LocalSocket {
         let peer_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(peer_addr)),
-            peer_addr: RwLock::new(Some(local_addr)),
-            read_buffer: RwLock::new(peer_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(peer_addr)),
+            peer_addr: IrqRwSpinLock::new(Some(local_addr)),
+            read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(local_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None),
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            handle_queue: IrqRwSpinLock::new(VecDeque::new()),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         Self::init_self_weak(&local_socket);
@@ -843,20 +843,20 @@ impl SocketControl for LocalSocket {
         let server_conn = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
-            state: RwLock::new(SocketState::Connected),
-            local_addr: RwLock::new(Some(name.clone())),
-            peer_addr: RwLock::new(Some(local_addr.clone())),
-            read_buffer: RwLock::new(server_read_buffer.clone()),
-            peer_read_buffer: RwLock::new(Some(client_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Will be set below
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
+            state: IrqRwSpinLock::new(SocketState::Connected),
+            local_addr: IrqRwSpinLock::new(Some(name.clone())),
+            peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
+            peer_read_buffer: IrqRwSpinLock::new(Some(client_read_buffer.clone())),
+            peer_socket: IrqRwSpinLock::new(None), // Will be set below
+            backlog: IrqRwSpinLock::new(Vec::new()),
+            max_backlog: IrqRwSpinLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_waker: Waker::new_interruptible("socket_handle"),
-            handle_queue: RwLock::new(VecDeque::new()),
-            self_weak: RwLock::new(Weak::new()),
-            nonblocking: RwLock::new(false),
+            handle_queue: IrqRwSpinLock::new(VecDeque::new()),
+            self_weak: IrqRwSpinLock::new(Weak::new()),
+            nonblocking: IrqRwSpinLock::new(false),
         });
 
         Self::init_self_weak(&server_conn);

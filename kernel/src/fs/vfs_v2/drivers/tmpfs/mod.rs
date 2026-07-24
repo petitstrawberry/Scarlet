@@ -4,6 +4,7 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -14,7 +15,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use crate::sync::{Mutex, RwLock};
 
 use crate::device::manager::DeviceManager;
 use crate::environment::PAGE_SIZE;
@@ -45,13 +45,13 @@ pub struct TmpFS {
     /// Unique filesystem identifier
     fs_id: FileSystemId,
     /// Root directory node
-    root: RwLock<Arc<TmpNode>>,
+    root: IrqRwSpinLock<Arc<TmpNode>>,
     /// Memory limit (0 = unlimited)
     memory_limit: usize,
     /// Current memory usage
-    current_memory: Mutex<usize>,
+    current_memory: IrqSpinLock<usize>,
     /// Next file ID generator
-    next_file_id: Mutex<u64>,
+    next_file_id: IrqSpinLock<u64>,
     /// Filesystem name
     name: String,
 }
@@ -62,10 +62,10 @@ impl TmpFS {
         let root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(Arc::clone(&root)),
+            root: IrqRwSpinLock::new(Arc::clone(&root)),
             memory_limit,
-            current_memory: Mutex::new(0),
-            next_file_id: Mutex::new(2), // Start from 2, root is 1
+            current_memory: IrqSpinLock::new(0),
+            next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             name: "tmpfs_v2".to_string(),
         });
         let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
@@ -688,19 +688,19 @@ impl FileSystemOperations for TmpFS {
 /// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
     /// File name
-    name: RwLock<String>,
+    name: IrqRwSpinLock<String>,
     /// File type
-    file_type: RwLock<FileType>,
+    file_type: IrqRwSpinLock<FileType>,
     /// File metadata
-    metadata: RwLock<FileMetadata>,
+    metadata: IrqRwSpinLock<FileMetadata>,
     /// File content (for symlinks)
-    content: RwLock<Vec<u8>>,
+    content: IrqRwSpinLock<Vec<u8>>,
     /// Child nodes (for directories)
-    children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
-    parent: RwLock<Option<Weak<TmpNode>>>,
+    parent: IrqRwSpinLock<Option<Weak<TmpNode>>>,
     /// Reference to filesystem (Weak<dyn FileSystemOperations>)
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl Debug for TmpNode {
@@ -721,9 +721,9 @@ impl TmpNode {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::RegularFile),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::RegularFile),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -737,19 +737,19 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::Directory),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::Directory),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -763,19 +763,19 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new device file node
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(file_type.clone()),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(file_type.clone()),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type,
                 size: 0,
                 permissions: FilePermission {
@@ -789,19 +789,19 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(Vec::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
     /// Create a new symbolic link node
     pub fn new_symlink(name: String, target: String, file_id: u64) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::SymbolicLink(target.clone())),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::SymbolicLink(target.clone())),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::SymbolicLink(target.clone()),
                 size: target.len(),
                 permissions: FilePermission {
@@ -816,10 +816,10 @@ impl TmpNode {
                 link_count: 1,
             }),
             // Store symlink target in content as UTF-8 bytes
-            content: RwLock::new(target.into_bytes()),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None), // No parent initially
-            filesystem: RwLock::new(None),
+            content: IrqRwSpinLock::new(target.into_bytes()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None), // No parent initially
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -917,7 +917,7 @@ pub struct TmpFileObject {
     node: Arc<TmpNode>,
 
     /// Current file position
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
 
     /// Optional device guard for device files
     device_guard: Option<Arc<dyn Device>>,
@@ -925,11 +925,11 @@ pub struct TmpFileObject {
     /// Optional socket reference for socket files
     socket_ref: Option<Arc<dyn crate::network::SocketObject>>,
     /// Page-aligned backing for private mmap operations
-    mmap_backing: RwLock<Option<ContiguousPages>>,
+    mmap_backing: IrqRwSpinLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
-    mmap_backing_len: Mutex<usize>,
+    mmap_backing_len: IrqSpinLock<usize>,
     /// Active mmap ranges keyed by starting virtual address
-    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
+    mmap_ranges: IrqRwSpinLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl TmpFileObject {
@@ -937,12 +937,12 @@ impl TmpFileObject {
     pub fn new_regular(node: Arc<TmpNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             device_guard: None,
             socket_ref: None,
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -950,12 +950,12 @@ impl TmpFileObject {
     pub fn new_directory(node: Arc<TmpNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             device_guard: None,
             socket_ref: None,
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -965,12 +965,12 @@ impl TmpFileObject {
         match DeviceManager::get_manager().get_device(info.device_id) {
             Some(device_guard) => Self {
                 node,
-                position: RwLock::new(0),
+                position: IrqRwSpinLock::new(0),
                 device_guard: Some(device_guard),
                 socket_ref: None,
-                mmap_backing: RwLock::new(None),
-                mmap_backing_len: Mutex::new(0),
-                mmap_ranges: RwLock::new(BTreeMap::new()),
+                mmap_backing: IrqRwSpinLock::new(None),
+                mmap_backing_len: IrqSpinLock::new(0),
+                mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
             },
             None => {
                 // If borrowing fails, return an error
@@ -985,12 +985,12 @@ impl TmpFileObject {
         match NetworkManager::get_manager().get_socket(info.socket_id) {
             Some(socket) => Self {
                 node,
-                position: RwLock::new(0),
+                position: IrqRwSpinLock::new(0),
                 device_guard: None,
                 socket_ref: Some(socket),
-                mmap_backing: RwLock::new(None),
-                mmap_backing_len: Mutex::new(0),
-                mmap_ranges: RwLock::new(BTreeMap::new()),
+                mmap_backing: IrqRwSpinLock::new(None),
+                mmap_backing_len: IrqSpinLock::new(0),
+                mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
             },
             None => {
                 // Socket not found in NetworkManager. This can happen in legitimate
@@ -1000,12 +1000,12 @@ impl TmpFileObject {
                 // operations can fail gracefully with a FileSystemError.
                 Self {
                     node,
-                    position: RwLock::new(0),
+                    position: IrqRwSpinLock::new(0),
                     device_guard: None,
                     socket_ref: None,
-                    mmap_backing: RwLock::new(None),
-                    mmap_backing_len: Mutex::new(0),
-                    mmap_ranges: RwLock::new(BTreeMap::new()),
+                    mmap_backing: IrqRwSpinLock::new(None),
+                    mmap_backing_len: IrqSpinLock::new(0),
+                    mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
                 }
             }
         }

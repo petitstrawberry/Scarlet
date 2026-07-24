@@ -4,15 +4,15 @@ use crate::fs::{FileMetadata, FileType, SeekFrom};
 use crate::object::capability::{
     CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamError, StreamOps,
 };
+use crate::sync::IrqSpinLock;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 /// Mock FileObject for testing purposes
 pub struct MockFileObject {
     pub name: String,
     pub data: Vec<u8>,
-    pub position: Mutex<usize>,
+    pub position: IrqSpinLock<usize>,
 }
 
 impl MockFileObject {
@@ -20,7 +20,7 @@ impl MockFileObject {
         Self {
             name: "unnamed".to_string(),
             data,
-            position: Mutex::new(0),
+            position: IrqSpinLock::new(0),
         }
     }
 
@@ -28,7 +28,7 @@ impl MockFileObject {
         Self {
             name: name.to_string(),
             data: content.as_bytes().to_vec(),
-            position: Mutex::new(0),
+            position: IrqSpinLock::new(0),
         }
     }
 
@@ -36,7 +36,7 @@ impl MockFileObject {
         Self {
             name: "unnamed".to_string(),
             data,
-            position: Mutex::new(0),
+            position: IrqSpinLock::new(0),
         }
     }
 }
@@ -148,14 +148,14 @@ impl crate::fs::FileObject for MockFileObject {
 /// Mock FileObject for testing task integration
 pub struct MockTaskFileObject {
     pub data: Vec<u8>,
-    pub position: Mutex<usize>,
+    pub position: IrqSpinLock<usize>,
 }
 
 impl MockTaskFileObject {
     pub fn new(data: Vec<u8>) -> Self {
         Self {
             data,
-            position: Mutex::new(0),
+            position: IrqSpinLock::new(0),
         }
     }
 }
@@ -265,22 +265,22 @@ impl crate::fs::FileObject for MockTaskFileObject {
 
 /// Mock PipeObject for testing purposes
 pub struct MockPipeObject {
-    pub read_buffer: Mutex<Vec<u8>>,
-    pub write_buffer: Mutex<Vec<u8>>,
+    pub read_buffer: IrqSpinLock<Vec<u8>>,
+    pub write_buffer: IrqSpinLock<Vec<u8>>,
 }
 
 impl MockPipeObject {
     pub fn new() -> Self {
         Self {
-            read_buffer: Mutex::new(Vec::new()),
-            write_buffer: Mutex::new(Vec::new()),
+            read_buffer: IrqSpinLock::new(Vec::new()),
+            write_buffer: IrqSpinLock::new(Vec::new()),
         }
     }
 
     pub fn with_data(data: &str) -> Self {
         Self {
-            read_buffer: Mutex::new(data.as_bytes().to_vec()),
-            write_buffer: Mutex::new(Vec::new()),
+            read_buffer: IrqSpinLock::new(data.as_bytes().to_vec()),
+            write_buffer: IrqSpinLock::new(Vec::new()),
         }
     }
 }
@@ -318,8 +318,8 @@ impl CloneOps for MockPipeObject {
         let write_data = self.write_buffer.lock().clone();
 
         let cloned = MockPipeObject {
-            read_buffer: Mutex::new(read_data),
-            write_buffer: Mutex::new(write_data),
+            read_buffer: IrqSpinLock::new(read_data),
+            write_buffer: IrqSpinLock::new(write_data),
         };
 
         KernelObject::Pipe(Arc::new(cloned))

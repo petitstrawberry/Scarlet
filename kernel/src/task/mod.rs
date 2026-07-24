@@ -8,6 +8,7 @@ pub mod syscall;
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     string::{String, ToString},
@@ -15,10 +16,10 @@ use alloc::{
     vec::Vec,
 };
 use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, ptr::NonNull, sync::atomic};
-use crate::sync::{Mutex, RwLock};
 
 use crate::abi::{AbiModule, EventProcessOutcome, scarlet::ScarletAbi};
 use crate::device::char::tty::TtyDevice;
+use crate::sync::Once;
 use crate::sync::waker::Waker;
 use crate::{
     arch::{
@@ -56,7 +57,6 @@ use core::ops::Range;
 use core::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
-use crate::sync::Once;
 
 const INIT_TASK_ID: usize = 1;
 const LOG_EXIT_GROUP_SIBLINGS: bool = false;
@@ -69,12 +69,12 @@ const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
 const SCHED_UTIL_DECAY_NUM: u32 = 7;
 const SCHED_UTIL_DECAY_DEN: u32 = 8;
 
-/// Lock type used for the architecture kernel context.
+/// IRQ-masking spin lock type used for the architecture kernel context.
 ///
 /// The scheduler needs a stable raw pointer to this context while performing
-/// low-level context switches. `Mutex` exposes `as_mut_ptr()` for that
-/// scheduler-only path, while normal setup code still uses `lock()`.
-pub type KernelContextMutex = Mutex<KernelContext>;
+/// low-level context switches. `IrqSpinLock` exposes an unsafe `as_mut_ptr()`
+/// for that scheduler-only path, while normal setup code still uses `lock()`.
+pub type KernelContextIrqSpinLock = IrqSpinLock<KernelContext>;
 
 /// Snapshot of task state exposed to user space via the `GetTaskInfo` syscall.
 ///
@@ -155,23 +155,23 @@ pub struct CpuUsageInfo {
 }
 
 /// Global registry of task-specific wakers for waitpid
-static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
+static WAITPID_WAKERS: Once<IrqSpinLock<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Note: task ID counters live in `TaskPool` for better ID management,
 /// with stable, never-reused global task IDs.
 ///
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Arc<Waker>>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<IrqSpinLock<BTreeMap<usize, Arc<Waker>>>> = Once::new();
 
 /// Initialize the waitpid wakers registry
-fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
-    Mutex::new(BTreeMap::new())
+fn init_waitpid_wakers() -> IrqSpinLock<BTreeMap<usize, Arc<Waker>>> {
+    IrqSpinLock::new(BTreeMap::new())
 }
 
 /// Initialize the parent waitpid waker registry
-fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Arc<Waker>>> {
-    Mutex::new(BTreeMap::new())
+fn init_parent_waitpid_wakers() -> IrqSpinLock<BTreeMap<usize, Arc<Waker>>> {
+    IrqSpinLock::new(BTreeMap::new())
 }
 
 /// Get or create a waker for waitpid/wait operations for a specific task
@@ -483,7 +483,7 @@ pub struct Task {
     /// Task ID within the task's namespace (may differ from global ID)
     namespace_id: atomic::AtomicUsize,
     /// Task namespace for ID management
-    namespace: RwLock<Arc<namespace::TaskNamespace>>,
+    namespace: IrqRwSpinLock<Arc<namespace::TaskNamespace>>,
     pub task_type: TaskType,
     pub entry: usize,
     parent_id: AtomicUsize,
@@ -505,7 +505,7 @@ pub struct Task {
     /// POSIX process group ID (PGID), stored as a global task ID.
     process_group_id: AtomicUsize,
     /// Controlling terminal for this task, if any.
-    controlling_tty: RwLock<Option<Weak<TtyDevice>>>,
+    controlling_tty: IrqRwSpinLock<Option<Weak<TtyDevice>>>,
     /// Whether this task is the leader of its POSIX session.
     is_session_leader: AtomicBool,
     pub max_stack_size: usize,
@@ -563,23 +563,23 @@ pub struct Task {
     /// Program break (already thread-safe)
     pub brk: Arc<AtomicUsize>,
 
-    // === RwLock fields (frequent reads) ===
+    // === IRQ reader-writer spin lock fields (frequent reads) ===
     /// Task name
-    pub name: RwLock<String>,
+    pub name: IrqRwSpinLock<String>,
     /// List of child task IDs
-    pub children: RwLock<Vec<usize>>,
+    pub children: IrqRwSpinLock<Vec<usize>>,
     /// Contiguous page allocations (PMM-backed, auto-freed on drop).
     ///
     /// Each entry is a `ContiguousPages` RAII wrapper that returns its pages to the
     /// buddy-system PMM when dropped. Used for ELF segment and anonymous mappings
     /// that require physically contiguous memory.
-    pub page_allocations: RwLock<Vec<ContiguousPages>>,
+    pub page_allocations: IrqRwSpinLock<Vec<ContiguousPages>>,
     /// Non-contiguous individual page allocations (PMM-backed, auto-freed on drop).
     ///
     /// Each entry is a `TaskPages` RAII wrapper holding a list of individual
     /// physical page addresses. Used for anonymous private mappings where
     /// physical contiguity is not required and partial reclaim on unmap is needed.
-    pub task_pages: RwLock<Vec<crate::mem::page::TaskPages>>,
+    pub task_pages: IrqRwSpinLock<Vec<crate::mem::page::TaskPages>>,
     /// Virtual File System Manager
     ///
     /// # Usage Patterns
@@ -590,16 +590,16 @@ pub struct Task {
     /// # Thread Safety
     ///
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
-    /// All internal operations use RwLock for concurrent access protection.
-    pub vfs: RwLock<Option<Arc<VfsManager>>>,
+    /// All internal operations use `IrqRwSpinLock` for concurrent access protection.
+    pub vfs: IrqRwSpinLock<Option<Arc<VfsManager>>>,
     /// Software timer handlers
-    pub software_timers_handlers: RwLock<Vec<Arc<dyn TimerHandler>>>,
+    pub software_timers_handlers: IrqRwSpinLock<Vec<Arc<dyn TimerHandler>>>,
 
-    // === Mutex fields (complex operations) ===
+    // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
-    pub vcpu: Mutex<Vcpu>,
+    pub vcpu: IrqSpinLock<Vcpu>,
     /// Kernel context for context switching
-    pub kernel_context: KernelContextMutex,
+    pub kernel_context: KernelContextIrqSpinLock,
     /// Virtual memory manager (already thread-safe internally)
     pub vm_manager: VirtualMemoryManager,
     /// Default ABI module (task-local: only accessed by the executing hart)
@@ -607,15 +607,15 @@ pub struct Task {
     /// ABI zones map (task-local: only accessed by the executing hart)
     pub abi_zones: TaskLocal<BTreeMap<usize, AbiZone>>,
     /// Exit request deferred until the active ABI mutable borrow is released.
-    deferred_exit_request: Mutex<Option<DeferredExitRequest>>,
+    deferred_exit_request: IrqSpinLock<Option<DeferredExitRequest>>,
     /// Linux CLONE_CHILD_CLEARTID state kept outside task-local ABI storage.
-    clear_child_tid: Mutex<Option<usize>>,
+    clear_child_tid: IrqSpinLock<Option<usize>>,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
     /// Waker for sleep operations (already thread-safe internally)
     pub sleep_waker: Waker,
     /// Kernel stack window base (slot_index, base_vaddr)
-    pub kernel_stack_window_base: Mutex<Option<(usize, usize)>>,
+    pub kernel_stack_window_base: IrqSpinLock<Option<(usize, usize)>>,
     pub pinned_cpu: Option<usize>,
     pub last_cpu: atomic::AtomicUsize,
     /// CPU that currently "owns" this task (has saved its context or is
@@ -625,9 +625,9 @@ pub struct Task {
 
     // === Already protected fields ===
     /// Task-local event queue with priority ordering
-    pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
+    pub event_queue: IrqSpinLock<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag
-    pub events_enabled: Mutex<bool>,
+    pub events_enabled: IrqSpinLock<bool>,
 }
 
 /// A non-owning reference to the task executing on the current CPU.
@@ -774,7 +774,7 @@ impl Task {
             // Read-only fields
             id: 0,
             namespace_id: AtomicUsize::new(0),
-            namespace: RwLock::new(ns),
+            namespace: IrqRwSpinLock::new(ns),
             task_type,
             entry: 0,
             parent_id: AtomicUsize::new(0),
@@ -783,7 +783,7 @@ impl Task {
             task_group_id: AtomicUsize::new(0),
             session_id: AtomicUsize::new(0),
             process_group_id: AtomicUsize::new(0),
-            controlling_tty: RwLock::new(None),
+            controlling_tty: IrqRwSpinLock::new(None),
             is_session_leader: AtomicBool::new(false),
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
@@ -812,33 +812,33 @@ impl Task {
             process_control_stopped: AtomicBool::new(false),
             process_control_stop_reported: AtomicBool::new(false),
             brk: Arc::new(AtomicUsize::new(usize::MAX)),
-            // RwLock fields
-            name: RwLock::new(name),
-            children: RwLock::new(Vec::new()),
-            page_allocations: RwLock::new(Vec::new()),
-            task_pages: RwLock::new(Vec::new()),
-            vfs: RwLock::new(None),
-            software_timers_handlers: RwLock::new(Vec::new()),
-            // Mutex fields
-            vcpu: Mutex::new(Vcpu::new(match task_type {
+            // IRQ reader-writer spin lock fields
+            name: IrqRwSpinLock::new(name),
+            children: IrqRwSpinLock::new(Vec::new()),
+            page_allocations: IrqRwSpinLock::new(Vec::new()),
+            task_pages: IrqRwSpinLock::new(Vec::new()),
+            vfs: IrqRwSpinLock::new(None),
+            software_timers_handlers: IrqRwSpinLock::new(Vec::new()),
+            // IRQ spin lock fields
+            vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
                 TaskType::User => crate::arch::Mode::User,
             })),
-            kernel_context: KernelContextMutex::new(KernelContext::new()),
+            kernel_context: KernelContextIrqSpinLock::new(KernelContext::new()),
             vm_manager: VirtualMemoryManager::new(),
             default_abi: TaskLocal::new(Some(Box::new(ScarletAbi::default()))),
             abi_zones: TaskLocal::new(BTreeMap::new()),
-            deferred_exit_request: Mutex::new(None),
-            clear_child_tid: Mutex::new(None),
+            deferred_exit_request: IrqSpinLock::new(None),
+            clear_child_tid: IrqSpinLock::new(None),
             handle_table: HandleTable::new(),
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
-            kernel_stack_window_base: Mutex::new(None),
+            kernel_stack_window_base: IrqSpinLock::new(None),
             pinned_cpu: None,
             last_cpu: atomic::AtomicUsize::new(0),
             running_cpu: atomic::AtomicUsize::new(usize::MAX),
             // Already protected
-            event_queue: Mutex::new(crate::ipc::event::TaskEventQueue::new()),
-            events_enabled: Mutex::new(true),
+            event_queue: IrqSpinLock::new(crate::ipc::event::TaskEventQueue::new()),
+            events_enabled: IrqSpinLock::new(true),
         }
     }
 
@@ -3064,7 +3064,7 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
 }
 
 #[cfg(test)]
-static MOCK_CURRENT_TASK: Mutex<Option<Arc<Task>>> = Mutex::new(None);
+static MOCK_CURRENT_TASK: IrqSpinLock<Option<Arc<Task>>> = IrqSpinLock::new(None);
 
 #[cfg(test)]
 /// Set a mock current task for testing purposes

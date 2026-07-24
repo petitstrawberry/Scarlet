@@ -23,12 +23,12 @@
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Lazy};
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     mem,
     sync::atomic::{AtomicBool, Ordering},
 };
-use crate::sync::{Lazy, Mutex, RwLock};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
@@ -91,8 +91,8 @@ struct QueuedRxPacket {
 }
 
 static RX_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
-static RX_PACKET_QUEUE: Lazy<Mutex<VecDeque<QueuedRxPacket>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
+static RX_PACKET_QUEUE: Lazy<IrqSpinLock<VecDeque<QueuedRxPacket>>> =
+    Lazy::new(|| IrqSpinLock::new(VecDeque::new()));
 static RX_PACKET_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("virtio-net-rx");
 
@@ -232,14 +232,14 @@ impl VirtioNetHdrBasic {
 pub struct VirtioNetDevice {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: Mutex<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
-    config: RwLock<Option<NetworkInterfaceConfig>>,
-    features: RwLock<u64>,
-    stats: Mutex<NetworkStats>,
-    initialized: Mutex<bool>,
-    rx_buffers: Mutex<Vec<ContiguousPages>>,
-    interrupt_id: Mutex<Option<InterruptId>>,
-    interface_name: Mutex<Option<String>>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
+    config: IrqRwSpinLock<Option<NetworkInterfaceConfig>>,
+    features: IrqRwSpinLock<u64>,
+    stats: IrqSpinLock<NetworkStats>,
+    initialized: IrqSpinLock<bool>,
+    rx_buffers: IrqSpinLock<Vec<ContiguousPages>>,
+    interrupt_id: IrqSpinLock<Option<InterruptId>>,
+    interface_name: IrqSpinLock<Option<String>>,
 }
 
 impl VirtioNetDevice {
@@ -273,14 +273,14 @@ impl VirtioNetDevice {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: Mutex::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
-            config: RwLock::new(None),
-            features: RwLock::new(0),
-            stats: Mutex::new(NetworkStats::default()),
-            initialized: Mutex::new(false),
-            rx_buffers: Mutex::new(Vec::new()),
-            interrupt_id: Mutex::new(None),
-            interface_name: Mutex::new(None),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
+            config: IrqRwSpinLock::new(None),
+            features: IrqRwSpinLock::new(0),
+            stats: IrqSpinLock::new(NetworkStats::default()),
+            initialized: IrqSpinLock::new(false),
+            rx_buffers: IrqSpinLock::new(Vec::new()),
+            interrupt_id: IrqSpinLock::new(None),
+            interface_name: IrqSpinLock::new(None),
         };
 
         // Initialize the VirtIO device first

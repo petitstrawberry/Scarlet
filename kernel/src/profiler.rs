@@ -36,8 +36,8 @@ pub use self::profiler_impl::*;
 #[cfg(feature = "profiler")]
 mod profiler_impl {
     use crate::early_println;
+    use crate::sync::IrqSpinLock;
     use crate::sync::Lazy;
-    use crate::sync::Mutex;
     use crate::timer::get_time_ns;
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
@@ -85,12 +85,12 @@ mod profiler_impl {
     }
 
     /// Global profiling tree root
-    pub static PROFILER_ROOT: Lazy<Arc<Mutex<ProfileNode>>> =
-        Lazy::new(|| Arc::new(Mutex::new(ProfileNode::new("ROOT".to_string()))));
+    pub static PROFILER_ROOT: Lazy<Arc<IrqSpinLock<ProfileNode>>> =
+        Lazy::new(|| Arc::new(IrqSpinLock::new(ProfileNode::new("ROOT".to_string()))));
 
     /// Call stack for tracking current execution path
-    pub static CALL_STACK: Lazy<Arc<Mutex<Vec<CallStackEntry>>>> =
-        Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
+    pub static CALL_STACK: Lazy<Arc<IrqSpinLock<Vec<CallStackEntry>>>> =
+        Lazy::new(|| Arc::new(IrqSpinLock::new(Vec::new())));
 
     /// A RAII guard that records the execution time of its scope.
     ///

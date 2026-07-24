@@ -1,3 +1,4 @@
+use crate::sync::{IrqRwSpinLock, Once};
 use crate::{
     abi::linux::generic::LinuxAbi,
     arch::Trapframe,
@@ -17,13 +18,12 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::sync::{Once, RwLock};
 
 use super::errno;
 
 static XORSHIFT_STATE: AtomicU64 = AtomicU64::new(0);
 static NEXT_EPOLL_HANDLE_ID: AtomicU32 = AtomicU32::new(1);
-static EPOLL_INTERESTS: Once<RwLock<Vec<EpollInterest>>> = Once::new();
+static EPOLL_INTERESTS: Once<IrqRwSpinLock<Vec<EpollInterest>>> = Once::new();
 
 fn mozc_ipc_path(file: &dyn crate::object::capability::FileObject) -> Option<&str> {
     let vfs_file = file
@@ -71,8 +71,8 @@ struct EpollInterest {
     data: u64,
 }
 
-fn epoll_interests() -> &'static RwLock<Vec<EpollInterest>> {
-    EPOLL_INTERESTS.call_once(|| RwLock::new(Vec::new()))
+fn epoll_interests() -> &'static IrqRwSpinLock<Vec<EpollInterest>> {
+    EPOLL_INTERESTS.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
 fn is_epoll_handle(handle: u32) -> bool {

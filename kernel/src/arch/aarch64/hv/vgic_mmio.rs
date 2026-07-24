@@ -1,4 +1,4 @@
-use crate::sync::Mutex;
+use crate::sync::IrqSpinLock;
 
 use crate::hypervisor::mmio::VirtualMmioDevice;
 
@@ -27,7 +27,7 @@ struct VgicDistState {
 pub struct VgicDist {
     base: u64,
     num_lrs: usize,
-    state: Mutex<VgicDistState>,
+    state: IrqSpinLock<VgicDistState>,
 }
 
 impl VgicDist {
@@ -36,7 +36,7 @@ impl VgicDist {
         Self {
             base,
             num_lrs,
-            state: Mutex::new(VgicDistState {
+            state: IrqSpinLock::new(VgicDistState {
                 ctlr: 0,
                 typer,
                 iidr: GIC_IIDR_ARM,
@@ -217,7 +217,7 @@ struct VgicRedistState {
 pub struct VgicRedist {
     base: u64,
     num_lrs: usize,
-    state: Mutex<VgicRedistState>,
+    state: IrqSpinLock<VgicRedistState>,
 }
 
 impl VgicRedist {
@@ -225,7 +225,7 @@ impl VgicRedist {
         Self {
             base,
             num_lrs,
-            state: Mutex::new(VgicRedistState {
+            state: IrqSpinLock::new(VgicRedistState {
                 typer: 1 << 4,
                 waker: GICR_WAKER_PROCESSOR_SLEEP | GICR_WAKER_CHILDREN_ASLEEP,
                 sgi_enabled: 0,

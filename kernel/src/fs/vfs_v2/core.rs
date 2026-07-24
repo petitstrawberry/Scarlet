@@ -5,6 +5,7 @@
 //! - VfsNode: Abstract interface for file entities
 //! - FileSystemOperations: Driver API for filesystem operations
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -14,7 +15,6 @@ use alloc::{
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
-use crate::sync::RwLock;
 
 use super::mount_tree::MountPoint;
 use crate::fs::{
@@ -65,7 +65,7 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 /// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
     /// Weak reference to parent VfsEntry (prevents circular references)
-    parent: RwLock<Weak<VfsEntry>>,
+    parent: IrqRwSpinLock<Weak<VfsEntry>>,
 
     /// Name of this VfsEntry (e.g., "user", "file.txt")
     name: String,
@@ -74,7 +74,7 @@ pub struct VfsEntry {
     node: Arc<dyn VfsNode>,
 
     /// Cache of child VfsEntries for fast lookup (using Weak to prevent memory leaks)
-    children: RwLock<BTreeMap<String, Weak<VfsEntry>>>,
+    children: IrqRwSpinLock<BTreeMap<String, Weak<VfsEntry>>>,
 }
 
 impl VfsEntry {
@@ -93,10 +93,10 @@ impl VfsEntry {
         );
 
         Arc::new(Self {
-            parent: RwLock::new(parent.unwrap_or_else(|| Weak::new())),
+            parent: IrqRwSpinLock::new(parent.unwrap_or_else(|| Weak::new())),
             name,
             node,
-            children: RwLock::new(BTreeMap::new()),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
         })
     }
 
@@ -163,10 +163,10 @@ impl VfsEntry {
 impl Clone for VfsEntry {
     fn clone(&self) -> Self {
         Self {
-            parent: RwLock::new(self.parent.read().clone()),
+            parent: IrqRwSpinLock::new(self.parent.read().clone()),
             name: self.name.clone(),
             node: Arc::clone(&self.node),
-            children: RwLock::new(self.children.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
         }
     }
 }

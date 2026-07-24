@@ -15,13 +15,13 @@ use crate::object::capability::selectable::{
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 use crate::sync::waker::Waker;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use crate::task::mytask;
 use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
-use crate::sync::{Mutex, RwLock};
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
 pub mod tty_ctl {
@@ -244,10 +244,10 @@ late_initcall!(init_tty_subsystem);
 pub struct TtyDevice {
     name: &'static str,
     backend: Arc<dyn TtyBackend>,
-    self_ref: RwLock<Weak<TtyDevice>>,
+    self_ref: IrqRwSpinLock<Weak<TtyDevice>>,
 
     // Input buffer for line discipline
-    input_buffer: Arc<Mutex<VecDeque<u8>>>,
+    input_buffer: Arc<IrqSpinLock<VecDeque<u8>>>,
 
     // Waker for blocking reads
     input_waker: Waker,
@@ -274,8 +274,8 @@ pub struct TtyDevice {
     read_timeout_ms: AtomicU16,
 
     // Window size in character cells (OS/ABI-neutral)
-    winsize_cols: Mutex<u16>,
-    winsize_rows: Mutex<u16>,
+    winsize_cols: IrqSpinLock<u16>,
+    winsize_rows: IrqSpinLock<u16>,
     // Debug logging flag
     debug_enabled: AtomicBool,
 
@@ -284,14 +284,14 @@ pub struct TtyDevice {
 
     // Simple escape sequence parser state for arrow keys in raw-ish mode
     // 0: none, 1: got ESC (0x1B), 2: got ESC '[', 3: got ESC 'O'
-    esc_state: Mutex<u8>,
+    esc_state: IrqSpinLock<u8>,
     // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
     nonblocking: AtomicBool,
     exclusive: AtomicBool,
-    foreground_task_group_id: Mutex<Option<usize>>,
-    controlling_session_id: Mutex<Option<usize>>,
+    foreground_task_group_id: IrqSpinLock<Option<usize>>,
+    controlling_session_id: IrqSpinLock<Option<usize>>,
     // Serializes write operations (Linux tty_struct::atomic_write_lock equivalent)
-    write_lock: Mutex<()>,
+    write_lock: IrqSpinLock<()>,
 }
 
 impl TtyDevice {
@@ -323,8 +323,8 @@ impl TtyDevice {
         Self {
             name,
             backend,
-            self_ref: RwLock::new(Weak::new()),
-            input_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            self_ref: IrqRwSpinLock::new(Weak::new()),
+            input_buffer: Arc::new(IrqSpinLock::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: AtomicBool::new(true),
             echo_enabled: AtomicBool::new(true),
@@ -343,17 +343,17 @@ impl TtyDevice {
             tostop_enabled: AtomicBool::new(false),
             read_min_ready_bytes: AtomicU16::new(1),
             read_timeout_ms: AtomicU16::new(0),
-            winsize_cols: Mutex::new(80),
-            winsize_rows: Mutex::new(25),
+            winsize_cols: IrqSpinLock::new(80),
+            winsize_rows: IrqSpinLock::new(25),
             // Disable per-byte debug logging by default (can be enabled via SCTL_TTY_SET_DEBUG)
             debug_enabled: AtomicBool::new(false),
             kb_mode: core::sync::atomic::AtomicU8::new(0),
-            esc_state: Mutex::new(0),
+            esc_state: IrqSpinLock::new(0),
             nonblocking: AtomicBool::new(false),
             exclusive: AtomicBool::new(false),
-            foreground_task_group_id: Mutex::new(None),
-            controlling_session_id: Mutex::new(None),
-            write_lock: Mutex::new(()),
+            foreground_task_group_id: IrqSpinLock::new(None),
+            controlling_session_id: IrqSpinLock::new(None),
+            write_lock: IrqSpinLock::new(()),
         }
     }
 

@@ -1,5 +1,5 @@
+use crate::sync::IrqRwSpinLock;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
-use crate::sync::RwLock;
 
 use crate::object::{KernelObject, KernelObjectRef, introspection};
 
@@ -12,7 +12,7 @@ mod tests;
 pub type Handle = u32;
 
 /// Internal structure containing the actual handle table data.
-/// This is wrapped in Arc<RwLock<...>> to enable sharing between tasks.
+/// This is wrapped in Arc<IrqRwSpinLock<...>> to enable sharing between tasks.
 struct HandleTableInner {
     /// Fixed-size handle table allocated on heap to avoid stack overflow
     handles: Box<[Option<KernelObject>; HandleTable::MAX_HANDLES]>,
@@ -24,12 +24,12 @@ struct HandleTableInner {
 
 /// Handle table for managing kernel objects with support for sharing between tasks.
 ///
-/// This structure uses interior mutability via `Arc<RwLock<...>>` to enable
+/// This structure uses interior mutability via `Arc<IrqRwSpinLock<...>>` to enable
 /// sharing between parent and child tasks when using CLONE_FILES flag.
 /// The `Clone` implementation creates a shallow copy (Arc clone) that shares
 /// the same underlying data. Use `deep_clone()` for an independent copy.
 pub struct HandleTable {
-    inner: Arc<RwLock<HandleTableInner>>,
+    inner: Arc<IrqRwSpinLock<HandleTableInner>>,
 }
 
 impl HandleTable {
@@ -54,7 +54,7 @@ impl HandleTable {
             .unwrap_or_else(|_| panic!("Failed to create boxed slice for metadata"));
 
         Self {
-            inner: Arc::new(RwLock::new(HandleTableInner {
+            inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles,
                 metadata,
                 free_handles,
@@ -83,7 +83,7 @@ impl HandleTable {
         };
 
         Self {
-            inner: Arc::new(RwLock::new(HandleTableInner {
+            inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles: handles_clone,
                 metadata: metadata_clone,
                 free_handles: inner.free_handles.clone(),
@@ -168,7 +168,7 @@ impl HandleTable {
 
     /// O(1) access - executes a closure with a reference to the KernelObject
     ///
-    /// Since the internal data is protected by RwLock, we cannot return a direct
+    /// Since the internal data is protected by an IRQ reader-writer spin lock, we cannot return a direct
     /// reference. Instead, use this method to access the object within a closure.
     pub fn with_object<F, R>(&self, handle: Handle, f: F) -> Option<R>
     where
@@ -208,7 +208,7 @@ impl HandleTable {
 
     /// O(1) borrowed access that hides `Arc` ownership from the caller.
     ///
-    /// Since the internal data is protected by RwLock, the borrowed view is
+    /// Since the internal data is protected by an IRQ reader-writer spin lock, the borrowed view is
     /// available only for the duration of the closure. Use this for ordinary
     /// handle operations that should not extend object lifetime beyond the
     /// owning handle table.

@@ -5,11 +5,11 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::Mutex;
 
 /// Static counters for device naming
 static KEYBOARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -40,11 +40,11 @@ pub struct EventDevice {
     /// Device name (e.g., "input0")
     name: String,
     /// Event queue (ring buffer)
-    queue: Mutex<VecDeque<InputEvent>>,
+    queue: IrqSpinLock<VecDeque<InputEvent>>,
     /// Waker for blocking reads
     waker: Waker,
     /// Non-blocking mode flag
-    nonblocking: Mutex<bool>,
+    nonblocking: IrqSpinLock<bool>,
 }
 
 impl EventDevice {
@@ -77,9 +77,9 @@ impl EventDevice {
 
         Self {
             name,
-            queue: Mutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            queue: IrqSpinLock::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             waker: Waker::new_interruptible(waker_name),
-            nonblocking: Mutex::new(false),
+            nonblocking: IrqSpinLock::new(false),
         }
     }
 

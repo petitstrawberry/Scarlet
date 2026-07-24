@@ -4,13 +4,13 @@
 //! built on the improved VFS v2 architecture with enhanced mount tree management,
 //! VfsEntry-based caching, and better isolation support.
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::{
     string::{String, ToString},
     sync::Arc,
     vec,
     vec::Vec,
 };
-use crate::sync::{Once, RwLock};
 
 use crate::fs::{DeviceFileInfo, FileMetadata, FileSystemError, FileSystemErrorKind, FileType};
 use crate::object::KernelObject;
@@ -60,9 +60,9 @@ pub struct VfsManager {
     /// Mount tree for hierarchical mount point management
     pub mount_tree: Arc<MountTree>,
     /// Current working directory: (VfsEntry, MountPoint) pair
-    pub cwd: RwLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
+    pub cwd: IrqRwSpinLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
     /// Strong references to all currently mounted filesystems
-    pub mounted_filesystems: Arc<RwLock<Vec<Arc<dyn FileSystemOperations>>>>,
+    pub mounted_filesystems: Arc<IrqRwSpinLock<Vec<Arc<dyn FileSystemOperations>>>>,
 }
 
 static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
@@ -81,8 +81,8 @@ impl VfsManager {
         Self {
             id: VfsManagerId::new(),
             mount_tree,
-            cwd: RwLock::new(None),
-            mounted_filesystems: Arc::new(RwLock::new(vec![root_fs.clone()])),
+            cwd: IrqRwSpinLock::new(None),
+            mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
         }
     }
 
@@ -94,8 +94,8 @@ impl VfsManager {
         Self {
             id: VfsManagerId::new(),
             mount_tree,
-            cwd: RwLock::new(None),
-            mounted_filesystems: Arc::new(RwLock::new(vec![root_fs.clone()])),
+            cwd: IrqRwSpinLock::new(None),
+            mounted_filesystems: Arc::new(IrqRwSpinLock::new(vec![root_fs.clone()])),
         }
     }
 
@@ -105,7 +105,7 @@ impl VfsManager {
         Arc::new(Self {
             id: VfsManagerId::new(),
             mount_tree: source.mount_tree.clone(),
-            cwd: RwLock::new(source.cwd.read().clone()),
+            cwd: IrqRwSpinLock::new(source.cwd.read().clone()),
             mounted_filesystems: source.mounted_filesystems.clone(),
         })
     }

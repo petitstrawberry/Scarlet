@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     format,
     string::{String, ToString},
@@ -26,7 +27,6 @@ use alloc::{
     vec::Vec,
 };
 use hashbrown::HashMap;
-use crate::sync::{Mutex, RwLock};
 
 use super::output::DisplayOutput;
 use crate::device::{
@@ -54,9 +54,9 @@ pub struct FramebufferResource {
     /// For the logical pixel data size, use config.size() instead.
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
-    pub created_char_device_id: RwLock<Option<usize>>,
+    pub created_char_device_id: IrqRwSpinLock<Option<usize>>,
     /// ID of the created /dev/displayX character device (if any)
-    pub created_display_device_id: RwLock<Option<usize>>,
+    pub created_display_device_id: IrqRwSpinLock<Option<usize>>,
 }
 
 impl FramebufferResource {
@@ -74,8 +74,8 @@ impl FramebufferResource {
             config,
             physical_addr,
             size,
-            created_char_device_id: RwLock::new(None),
-            created_display_device_id: RwLock::new(None),
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
         }
     }
 }
@@ -111,17 +111,17 @@ pub struct MmapRegion {
 /// Graphics Manager - singleton for managing graphics resources
 pub struct GraphicsManager {
     /// Framebuffer resources mapped by logical name
-    framebuffers: Mutex<Option<HashMap<String, Arc<FramebufferResource>>>>,
+    framebuffers: IrqSpinLock<Option<HashMap<String, Arc<FramebufferResource>>>>,
     /// Coordinates firmware boot framebuffer publication with native takeover.
-    takeover_state: Mutex<FramebufferTakeoverState>,
+    takeover_state: IrqSpinLock<FramebufferTakeoverState>,
     /// Multi-display configuration (future use)
     #[allow(dead_code)]
-    display_configs: Mutex<Vec<DisplayConfiguration>>,
+    display_configs: IrqSpinLock<Vec<DisplayConfiguration>>,
     /// Active mmap regions (future use)
     #[allow(dead_code)]
-    active_mappings: Mutex<Vec<MmapRegion>>,
+    active_mappings: IrqSpinLock<Vec<MmapRegion>>,
     #[cfg(test)]
-    endpoint_publication_failure: Mutex<Option<EndpointPublicationFailure>>,
+    endpoint_publication_failure: IrqSpinLock<Option<EndpointPublicationFailure>>,
 }
 
 static MANAGER: GraphicsManager = GraphicsManager::new();
@@ -152,12 +152,12 @@ impl GraphicsManager {
     /// Create a new GraphicsManager instance
     pub const fn new() -> Self {
         Self {
-            framebuffers: Mutex::new(None),
-            takeover_state: Mutex::new(FramebufferTakeoverState::BootAllowed),
-            display_configs: Mutex::new(Vec::new()),
-            active_mappings: Mutex::new(Vec::new()),
+            framebuffers: IrqSpinLock::new(None),
+            takeover_state: IrqSpinLock::new(FramebufferTakeoverState::BootAllowed),
+            display_configs: IrqSpinLock::new(Vec::new()),
+            active_mappings: IrqSpinLock::new(Vec::new()),
             #[cfg(test)]
-            endpoint_publication_failure: Mutex::new(None),
+            endpoint_publication_failure: IrqSpinLock::new(None),
         }
     }
 

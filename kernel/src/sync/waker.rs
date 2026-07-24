@@ -10,7 +10,7 @@ use crate::arch::Trapframe;
 use crate::sched::scheduler::{
     get_task_by_id, remove_from_ready_queues, schedule, unmark_blocked, wake_task, wake_task_on,
 };
-use crate::sync::Mutex;
+use crate::sync::IrqSpinLock;
 use crate::task::{BlockedType, TaskState};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -39,7 +39,7 @@ const DIAGNOSTIC_WAKE_EVENT_WAITERS_ON_SOURCE_CPU: bool = false;
 /// ```
 pub struct Waker {
     /// Queue of waiting task IDs
-    wait_queue: Mutex<VecDeque<usize>>,
+    wait_queue: IrqSpinLock<VecDeque<usize>>,
     /// The type of blocking this waker uses (interruptible or uninterruptible)
     block_type: BlockedType,
     /// Human-readable name for debugging purposes
@@ -76,7 +76,7 @@ impl Waker {
     /// ```
     pub const fn new_interruptible(name: &'static str) -> Self {
         Self {
-            wait_queue: Mutex::new(VecDeque::new()),
+            wait_queue: IrqSpinLock::new(VecDeque::new()),
             block_type: BlockedType::Interruptible,
             name,
             pending_wakes: AtomicUsize::new(0),
@@ -100,7 +100,7 @@ impl Waker {
     /// ```
     pub const fn new_uninterruptible(name: &'static str) -> Self {
         Self {
-            wait_queue: Mutex::new(VecDeque::new()),
+            wait_queue: IrqSpinLock::new(VecDeque::new()),
             block_type: BlockedType::Uninterruptible,
             name,
             pending_wakes: AtomicUsize::new(0),
@@ -160,11 +160,7 @@ impl Waker {
         if self
             .pending_wakes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                if n > 0 {
-                    Some(n - 1)
-                } else {
-                    None
-                }
+                if n > 0 { Some(n - 1) } else { None }
             })
             .is_ok()
         {
@@ -208,11 +204,7 @@ impl Waker {
 
             self.pending_wakes
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                    if n > 0 {
-                        Some(n - 1)
-                    } else {
-                        None
-                    }
+                    if n > 0 { Some(n - 1) } else { None }
                 })
                 .is_ok()
         };
@@ -319,7 +311,7 @@ impl Waker {
         }
 
         if let Some(ticks) = timeout_ticks {
-            use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
+            use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
             use alloc::sync::Arc;
             use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -378,7 +370,7 @@ impl Waker {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> bool {
-        use crate::timer::{add_timer, cancel_timer, get_tick, TimerHandler};
+        use crate::timer::{TimerHandler, add_timer, cancel_timer, get_tick};
         use alloc::sync::Arc;
         use core::sync::atomic::{AtomicBool, Ordering};
 

@@ -4,10 +4,10 @@
 //! - PipeEndpoint: Basic pipe endpoint with read/write capabilities
 //! - UnidirectionalPipe: Traditional unidirectional pipe (read-only or write-only)
 
+use crate::sync::IrqSpinLock;
 #[cfg(test)]
 use alloc::vec::Vec;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc};
-use crate::sync::Mutex;
 
 use super::{IpcError, StreamIpcOps};
 use crate::object::KernelObject;
@@ -90,10 +90,10 @@ struct PipeState {
 }
 
 /// Shared pipe data including both state and wakers
-/// Wakers are kept outside the Mutex to avoid deadlock when calling wait()
+/// Wakers are kept outside the IRQ spin lock to avoid deadlock when calling wait()
 struct SharedPipeData {
     /// Main pipe state (protected by mutex)
-    state: Mutex<PipeState>,
+    state: IrqSpinLock<PipeState>,
     /// Waker for tasks waiting to read (outside mutex to avoid deadlock)
     read_waker: Waker,
     /// Waker for tasks waiting to write (outside mutex to avoid deadlock)
@@ -103,7 +103,7 @@ struct SharedPipeData {
 impl SharedPipeData {
     fn new(buffer_size: usize) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(PipeState {
+            state: IrqSpinLock::new(PipeState {
                 buffer: VecDeque::with_capacity(buffer_size),
                 max_size: buffer_size,
                 reader_count: 0,

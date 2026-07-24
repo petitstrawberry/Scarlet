@@ -6,13 +6,13 @@
 //! - Proper path resolution across mount boundaries
 //! - Efficient mount point lookup and traversal
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::sync::RwLock;
 
 use super::core::{FileSystemOperations, VfsEntry};
 use super::manager::{PathResolutionOptions, VfsManager};
@@ -78,17 +78,17 @@ pub struct MountPoint {
     /// Type of mount
     pub mount_type: MountType,
     /// Mount path (relative to parent mount)
-    pub path: RwLock<String>,
+    pub path: IrqRwSpinLock<String>,
     /// Root entry of the mounted filesystem
     pub root: VfsEntryRef,
     /// Strong reference to the mounted filesystem (Regular mounts only)
     pub filesystem: Option<Arc<dyn FileSystemOperations>>,
     /// Parent mount (weak reference to avoid cycles)
-    pub parent: RwLock<Option<Weak<MountPoint>>>,
+    pub parent: IrqRwSpinLock<Option<Weak<MountPoint>>>,
     /// Parent entry (strong reference to the VFS entry at the mount point to ensure it stays alive)
-    pub parent_entry: RwLock<Option<VfsEntryRef>>,
+    pub parent_entry: IrqRwSpinLock<Option<VfsEntryRef>>,
     /// Child mounts: shared map of VfsEntry ID to MountPoint
-    pub children: Arc<RwLock<BTreeMap<u64, Arc<MountPoint>>>>,
+    pub children: Arc<IrqRwSpinLock<BTreeMap<u64, Arc<MountPoint>>>>,
 }
 
 impl MountPoint {
@@ -101,12 +101,12 @@ impl MountPoint {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Regular,
-            path: RwLock::new(path),
+            path: IrqRwSpinLock::new(path),
             root,
             filesystem: Some(filesystem),
-            parent: RwLock::new(None),
-            parent_entry: RwLock::new(None),
-            children: Arc::new(RwLock::new(BTreeMap::new())),
+            parent: IrqRwSpinLock::new(None),
+            parent_entry: IrqRwSpinLock::new(None),
+            children: Arc::new(IrqRwSpinLock::new(BTreeMap::new())),
         })
     }
 
@@ -115,12 +115,12 @@ impl MountPoint {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Bind,
-            path: RwLock::new(path),
+            path: IrqRwSpinLock::new(path),
             root: source,
             filesystem: None,
-            parent: RwLock::new(None),
-            parent_entry: RwLock::new(None),
-            children: Arc::new(RwLock::new(BTreeMap::new())),
+            parent: IrqRwSpinLock::new(None),
+            parent_entry: IrqRwSpinLock::new(None),
+            children: Arc::new(IrqRwSpinLock::new(BTreeMap::new())),
         })
     }
 
@@ -141,12 +141,12 @@ impl MountPoint {
             mount_type: MountType::Overlay {
                 layers: layers.clone(),
             },
-            path: RwLock::new(path),
+            path: IrqRwSpinLock::new(path),
             root,
             filesystem: None,
-            parent: RwLock::new(None),
-            parent_entry: RwLock::new(None),
-            children: Arc::new(RwLock::new(BTreeMap::new())),
+            parent: IrqRwSpinLock::new(None),
+            parent_entry: IrqRwSpinLock::new(None),
+            children: Arc::new(IrqRwSpinLock::new(BTreeMap::new())),
         }))
     }
 
@@ -216,7 +216,7 @@ impl MountPoint {
 #[derive(Debug)]
 pub struct MountTree {
     /// Root mount point (can be updated when mounting at "/")
-    pub root_mount: RwLock<Arc<MountPoint>>,
+    pub root_mount: IrqRwSpinLock<Arc<MountPoint>>,
 }
 
 impl MountTree {
@@ -229,7 +229,7 @@ impl MountTree {
         mounts.insert(root_id, Arc::downgrade(&root_mount));
 
         Self {
-            root_mount: RwLock::new(root_mount.clone()),
+            root_mount: IrqRwSpinLock::new(root_mount.clone()),
         }
     }
 

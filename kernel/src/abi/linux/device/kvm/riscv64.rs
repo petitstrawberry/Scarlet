@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::vec::Vec;
-use crate::sync::{Once, RwLock};
 
 use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::hv::reg_index::reg;
@@ -168,7 +168,7 @@ struct KvmRiscvVcpuStateEntry {
     state: KvmRiscvVcpuState,
 }
 
-static KVM_RISCV_VCPU_STATES: Once<RwLock<Vec<KvmRiscvVcpuStateEntry>>> = Once::new();
+static KVM_RISCV_VCPU_STATES: Once<IrqRwSpinLock<Vec<KvmRiscvVcpuStateEntry>>> = Once::new();
 
 const PTRACE_REG_INDEX: [usize; 32] = [
     reg::PC,
@@ -205,8 +205,8 @@ const PTRACE_REG_INDEX: [usize; 32] = [
     reg::T6,
 ];
 
-fn get_vcpu_states() -> &'static RwLock<Vec<KvmRiscvVcpuStateEntry>> {
-    KVM_RISCV_VCPU_STATES.call_once(|| RwLock::new(Vec::new()))
+fn get_vcpu_states() -> &'static IrqRwSpinLock<Vec<KvmRiscvVcpuStateEntry>> {
+    KVM_RISCV_VCPU_STATES.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
 fn default_vcpu_state() -> KvmRiscvVcpuState {

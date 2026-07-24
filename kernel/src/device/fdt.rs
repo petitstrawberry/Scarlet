@@ -102,8 +102,8 @@ use crate::early_println;
 use crate::vm::vmem::MemoryArea;
 use crate::{BootInfo, DeviceSource};
 
-use core::cell::UnsafeCell;
 use crate::sync::Once;
+use core::cell::UnsafeCell;
 
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
 

@@ -12,10 +12,10 @@
 //!
 //! This design supports multiple network interfaces with multiple IP addresses each.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use crate::sync::RwLock;
 
 use crate::early_println;
 use crate::network::protocol_stack::{
@@ -232,13 +232,13 @@ pub struct RouteEntry {
 /// Manages multiple addresses per interface and routing table.
 pub struct Ipv4Layer {
     /// Interface name -> list of IPv4 addresses
-    addresses: RwLock<BTreeMap<String, Vec<Ipv4AddressInfo>>>,
+    addresses: IrqRwSpinLock<BTreeMap<String, Vec<Ipv4AddressInfo>>>,
     /// Routing table (ordered by specificity)
-    routing_table: RwLock<Vec<RouteEntry>>,
+    routing_table: IrqRwSpinLock<Vec<RouteEntry>>,
     /// Protocol handlers registered by protocol number
-    protocols: RwLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
+    protocols: IrqRwSpinLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Default TTL
     default_ttl: u8,
 }
@@ -247,10 +247,10 @@ impl Ipv4Layer {
     /// Create a new IPv4 layer
     pub fn new() -> alloc::sync::Arc<Self> {
         alloc::sync::Arc::new(Self {
-            addresses: RwLock::new(BTreeMap::new()),
-            routing_table: RwLock::new(Vec::new()),
-            protocols: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(NetworkLayerStats::default()),
+            addresses: IrqRwSpinLock::new(BTreeMap::new()),
+            routing_table: IrqRwSpinLock::new(Vec::new()),
+            protocols: IrqRwSpinLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             default_ttl: 64,
         })
     }

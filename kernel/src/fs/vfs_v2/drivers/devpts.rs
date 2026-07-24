@@ -3,6 +3,7 @@
 //! DevPTS owns Unix98-style PTY allocation. Opening `ptmx` creates a fresh
 //! master/slave pair, while active slave TTYs are exposed as numeric entries.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -12,7 +13,6 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use crate::sync::{Mutex, RwLock};
 
 use crate::{
     device::{
@@ -54,7 +54,7 @@ const SLAVE_ID_BASE: u64 = 1024;
 /// DevPTS filesystem instance.
 pub struct DevPtsFS {
     fs_id: FileSystemId,
-    root: RwLock<Arc<DevPtsNode>>,
+    root: IrqRwSpinLock<Arc<DevPtsNode>>,
     name: String,
     state: Arc<DevPtsState>,
 }
@@ -70,7 +70,7 @@ impl DevPtsFS {
         let root = Arc::new(DevPtsNode::new_root(state.clone()));
         let fs = Arc::new(Self {
             fs_id: FileSystemId::new(),
-            root: RwLock::new(root.clone()),
+            root: IrqRwSpinLock::new(root.clone()),
             name: "devpts".to_string(),
             state,
         });
@@ -231,15 +231,15 @@ impl FileSystemOperations for DevPtsFS {
 }
 
 struct DevPtsState {
-    allocated: Mutex<Vec<bool>>,
-    pairs: RwLock<BTreeMap<usize, Arc<PtyPair>>>,
+    allocated: IrqSpinLock<Vec<bool>>,
+    pairs: IrqRwSpinLock<BTreeMap<usize, Arc<PtyPair>>>,
 }
 
 impl DevPtsState {
     fn new() -> Self {
         Self {
-            allocated: Mutex::new(Vec::new()),
-            pairs: RwLock::new(BTreeMap::new()),
+            allocated: IrqSpinLock::new(Vec::new()),
+            pairs: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -292,7 +292,7 @@ enum DevPtsNodeKind {
 pub struct DevPtsNode {
     kind: DevPtsNodeKind,
     state: Arc<DevPtsState>,
-    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl DevPtsNode {
@@ -300,7 +300,7 @@ impl DevPtsNode {
         Self {
             kind: DevPtsNodeKind::Root,
             state,
-            filesystem: RwLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -308,7 +308,7 @@ impl DevPtsNode {
         Self {
             kind: DevPtsNodeKind::Ptmx,
             state,
-            filesystem: RwLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -316,7 +316,7 @@ impl DevPtsNode {
         Self {
             kind: DevPtsNodeKind::Slave(number),
             state,
-            filesystem: RwLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
         }
     }
 
@@ -424,7 +424,7 @@ enum DevPtsEndpoint {
 pub struct DevPtsFileObject {
     node: Arc<DevPtsNode>,
     endpoint: DevPtsEndpoint,
-    position: RwLock<u64>,
+    position: IrqRwSpinLock<u64>,
     pair: Arc<PtyPair>,
     release: Option<(Arc<DevPtsState>, usize)>,
 }
@@ -439,7 +439,7 @@ impl DevPtsFileObject {
         Self {
             node,
             endpoint: DevPtsEndpoint::Master(pair.master()),
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             pair,
             release: Some((state, number)),
         }
@@ -450,7 +450,7 @@ impl DevPtsFileObject {
         Self {
             node,
             endpoint: DevPtsEndpoint::Slave(pair.slave()),
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             pair,
             release: None,
         }
@@ -725,14 +725,14 @@ impl Selectable for DevPtsFileObject {
 
 struct DevPtsDirectoryObject {
     node: Arc<DevPtsNode>,
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
 }
 
 impl DevPtsDirectoryObject {
     fn new(node: Arc<DevPtsNode>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }

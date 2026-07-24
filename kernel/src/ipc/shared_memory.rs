@@ -4,8 +4,8 @@
 //! Shared memory allows multiple processes to access the same physical memory region,
 //! providing efficient data sharing without copying.
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use crate::sync::RwLock;
 
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::object::capability::memory_mapping::{
@@ -74,7 +74,7 @@ impl SharedMemoryState {
 /// processes' address spaces, allowing efficient data sharing without copying.
 pub struct SharedMemory {
     /// Shared state of the memory object
-    state: Arc<RwLock<SharedMemoryState>>,
+    state: Arc<IrqRwSpinLock<SharedMemoryState>>,
     /// Unique identifier for debugging
     id: String,
 }
@@ -110,7 +110,7 @@ impl SharedMemory {
         let id = format!("shmem_{:#x}", paddr);
 
         Ok(Self {
-            state: Arc::new(RwLock::new(state)),
+            state: Arc::new(IrqRwSpinLock::new(state)),
             id,
         })
     }
@@ -135,7 +135,7 @@ impl SharedMemory {
         let id = format!("shmem_{:#x}", paddr);
 
         Self {
-            state: Arc::new(RwLock::new(state)),
+            state: Arc::new(IrqRwSpinLock::new(state)),
             id,
         }
     }

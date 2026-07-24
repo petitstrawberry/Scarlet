@@ -15,9 +15,9 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
-use crate::sync::{Mutex, RwLock};
 
 use crate::device::{
     Device, DeviceType,
@@ -248,8 +248,8 @@ struct FbCompatDirtyState {
 
 struct FbCompatFlushHandler {
     fb_resource: Arc<FramebufferResource>,
-    mappings: Arc<RwLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
-    dirty_state: Arc<Mutex<FbCompatDirtyState>>,
+    mappings: Arc<IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
+    dirty_state: Arc<IrqSpinLock<FbCompatDirtyState>>,
     #[cfg(test)]
     device_manager_addr: Option<usize>,
 }
@@ -266,9 +266,9 @@ pub struct FramebufferCharDevice {
     /// The framebuffer resource this device represents
     fb_resource: Arc<FramebufferResource>,
     /// Track legacy framebuffer mmap aliases by (task_id, virtual_start).
-    mappings: Arc<RwLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
+    mappings: Arc<IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
     /// Dirty state for legacy fb compat one-shot flushing.
-    dirty_state: Arc<Mutex<FbCompatDirtyState>>,
+    dirty_state: Arc<IrqSpinLock<FbCompatDirtyState>>,
     /// Timer handler kept alive for the legacy fb compat one-shot flush.
     flush_handler: Arc<FbCompatFlushHandler>,
     #[cfg(test)]
@@ -292,8 +292,8 @@ impl FramebufferCharDevice {
     ///
     /// A new FramebufferCharDevice instance
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
-        let mappings = Arc::new(RwLock::new(BTreeMap::new()));
-        let dirty_state = Arc::new(Mutex::new(FbCompatDirtyState {
+        let mappings = Arc::new(IrqRwSpinLock::new(BTreeMap::new()));
+        let dirty_state = Arc::new(IrqSpinLock::new(FbCompatDirtyState {
             dirty: false,
             timer_armed: false,
             generation: 0,
@@ -321,8 +321,8 @@ impl FramebufferCharDevice {
         fb_resource: Arc<FramebufferResource>,
         device_manager: &DeviceManager,
     ) -> Self {
-        let mappings = Arc::new(RwLock::new(BTreeMap::new()));
-        let dirty_state = Arc::new(Mutex::new(FbCompatDirtyState {
+        let mappings = Arc::new(IrqRwSpinLock::new(BTreeMap::new()));
+        let dirty_state = Arc::new(IrqSpinLock::new(FbCompatDirtyState {
             dirty: false,
             timer_armed: false,
             generation: 0,
@@ -476,7 +476,7 @@ impl FramebufferCharDevice {
     }
 
     fn write_protect_mappings(
-        mappings: &RwLock<BTreeMap<(usize, usize), FramebufferMapping>>,
+        mappings: &IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>,
         info: &CurrentFramebufferInfo,
     ) {
         let snapshot: Vec<FramebufferMapping> = mappings.read().values().cloned().collect();
@@ -1342,8 +1342,8 @@ mod tests {
             FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
         },
     };
+    use crate::sync::IrqRwSpinLock;
     use alloc::{string::ToString, sync::Arc};
-    use crate::sync::RwLock;
 
     /// Test utility to create isolated managers for each test.
     fn setup_test_managers() -> (GraphicsManager, DeviceManager) {
@@ -1654,8 +1654,8 @@ mod tests {
             config: invalid_config,
             physical_addr: 0, // Invalid address
             size: 300,
-            created_char_device_id: RwLock::new(None),
-            created_display_device_id: RwLock::new(None),
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
         });
         let invalid_device = FramebufferCharDevice::new(invalid_resource);
 

@@ -11,16 +11,6 @@ pub mod trb;
 
 extern crate alloc;
 
-use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::string::ToString;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::any::Any;
-use core::mem::size_of;
-use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
-use crate::sync::{Mutex, MutexGuard};
 use crate::device::Device;
 use crate::device::block::{
     BlockDevice,
@@ -54,9 +44,19 @@ use crate::drivers::usb::xhci::trb::{Trb, TrbType};
 use crate::interrupt::{InterruptClaim, InterruptId, InterruptManager};
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard};
 use crate::timer::{TimerHandler, add_timer, get_tick, ms_to_ticks};
 use crate::vm;
 use crate::{print, println};
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::any::Any;
+use core::mem::size_of;
+use core::ptr::{read_unaligned, read_volatile, write_volatile};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -579,19 +579,19 @@ pub struct XhciController {
     regs: RegisterSpace,
     caps: XhciCapabilities,
     operational: XhciOperational,
-    state: Mutex<XhciState>,
+    state: IrqSpinLock<XhciState>,
     max_slots: u8,
     max_ports: u8,
     max_intrs: u16,
     context_size: usize,
-    dcbaa: Mutex<Option<ContiguousPages>>,
-    scratchpads: Mutex<Option<ScratchpadBuffers>>,
-    cmd_ring: Mutex<Option<DmaTrbRing>>,
-    event_ring: Mutex<Option<EventRing>>,
-    pending_events: Mutex<Vec<Trb>>,
-    devices: Mutex<Vec<UsbDevice>>,
-    slot_runtime: Mutex<Vec<SlotRuntime>>,
-    interrupt_id: Mutex<Option<InterruptId>>,
+    dcbaa: IrqSpinLock<Option<ContiguousPages>>,
+    scratchpads: IrqSpinLock<Option<ScratchpadBuffers>>,
+    cmd_ring: IrqSpinLock<Option<DmaTrbRing>>,
+    event_ring: IrqSpinLock<Option<EventRing>>,
+    pending_events: IrqSpinLock<Vec<Trb>>,
+    devices: IrqSpinLock<Vec<UsbDevice>>,
+    slot_runtime: IrqSpinLock<Vec<SlotRuntime>>,
+    interrupt_id: IrqSpinLock<Option<InterruptId>>,
 }
 
 impl XhciController {
@@ -664,19 +664,19 @@ impl XhciController {
             regs,
             caps,
             operational,
-            state: Mutex::new(XhciState::Uninitialized),
+            state: IrqSpinLock::new(XhciState::Uninitialized),
             max_slots,
             max_ports,
             max_intrs,
             context_size,
-            dcbaa: Mutex::new(None),
-            scratchpads: Mutex::new(None),
-            cmd_ring: Mutex::new(None),
-            event_ring: Mutex::new(None),
-            pending_events: Mutex::new(Vec::new()),
-            devices: Mutex::new(Vec::new()),
-            slot_runtime: Mutex::new(Vec::new()),
-            interrupt_id: Mutex::new(None),
+            dcbaa: IrqSpinLock::new(None),
+            scratchpads: IrqSpinLock::new(None),
+            cmd_ring: IrqSpinLock::new(None),
+            event_ring: IrqSpinLock::new(None),
+            pending_events: IrqSpinLock::new(Vec::new()),
+            devices: IrqSpinLock::new(Vec::new()),
+            slot_runtime: IrqSpinLock::new(Vec::new()),
+            interrupt_id: IrqSpinLock::new(None),
         })
     }
 
@@ -3455,7 +3455,7 @@ impl XhciController {
         }
     }
 
-    fn slot_runtime_mut(&self, slot_id: u8) -> Option<MutexGuard<'_, Vec<SlotRuntime>>> {
+    fn slot_runtime_mut(&self, slot_id: u8) -> Option<IrqSpinLockGuard<'_, Vec<SlotRuntime>>> {
         let guard = self.slot_runtime.lock();
         if guard
             .iter()
@@ -3607,10 +3607,10 @@ struct UsbMassStorageBlockDevice {
     interface_number: u8,
     bulk_in_endpoint: u8,
     bulk_out_endpoint: u8,
-    sector_size: Mutex<usize>,
-    sector_count: Mutex<usize>,
-    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
-    command_lock: Mutex<()>,
+    sector_size: IrqSpinLock<usize>,
+    sector_count: IrqSpinLock<usize>,
+    request_queue: IrqSpinLock<VecDeque<Box<BlockIORequest>>>,
+    command_lock: IrqSpinLock<()>,
     next_tag: AtomicUsize,
 }
 
@@ -3628,10 +3628,10 @@ impl UsbMassStorageBlockDevice {
             interface_number,
             bulk_in_endpoint,
             bulk_out_endpoint,
-            sector_size: Mutex::new(512),
-            sector_count: Mutex::new(0),
-            request_queue: Mutex::new(VecDeque::new()),
-            command_lock: Mutex::new(()),
+            sector_size: IrqSpinLock::new(512),
+            sector_count: IrqSpinLock::new(0),
+            request_queue: IrqSpinLock::new(VecDeque::new()),
+            command_lock: IrqSpinLock::new(()),
             next_tag: AtomicUsize::new(1),
         }
     }

@@ -193,7 +193,7 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::sync::{Once, RwLock};
+use crate::sync::{IrqRwSpinLock, Once};
 extern crate alloc;
 
 pub const MAX_PATH_LENGTH: usize = 1024;
@@ -748,7 +748,7 @@ pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
 /// - **Driver Registration**: Register filesystem drivers for system-wide use
 /// - **Type-Safe Creation**: Create filesystems with structured parameter validation
 /// - **Multi-Source Support**: Support for block device, memory, and virtual filesystems
-/// - **Thread Safety**: All operations are thread-safe using RwLock protection
+/// - **Thread Safety**: All operations are thread-safe using IRQ reader-writer spin-lock protection
 /// - **Future Extensibility**: Designed for dynamic filesystem module loading
 ///
 /// # Architecture
@@ -774,7 +774,7 @@ pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
 /// ```
 pub struct FileSystemDriverManager {
     /// Registered file system drivers indexed by name
-    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+    drivers: IrqRwSpinLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
 }
 
 impl FileSystemDriverManager {
@@ -789,7 +789,7 @@ impl FileSystemDriverManager {
     /// A new FileSystemDriverManager instance
     pub fn new() -> Self {
         Self {
-            drivers: RwLock::new(BTreeMap::new()),
+            drivers: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 

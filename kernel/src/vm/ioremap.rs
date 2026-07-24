@@ -31,8 +31,8 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqSpinLock, Once};
 use alloc::collections::BTreeMap;
-use crate::sync::{Mutex, Once};
 
 use crate::environment::{IOREMAP_END, IOREMAP_START, PAGE_SIZE};
 use crate::vm::addr::validate_direct_map_alias;
@@ -99,7 +99,7 @@ impl IoremapAllocatorInner {
     }
 }
 
-static IOREMAP_ALLOCATOR: Once<Mutex<IoremapAllocatorInner>> = Once::new();
+static IOREMAP_ALLOCATOR: Once<IrqSpinLock<IoremapAllocatorInner>> = Once::new();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -112,7 +112,7 @@ static IOREMAP_ALLOCATOR: Once<Mutex<IoremapAllocatorInner>> = Once::new();
 /// no-ops.
 pub fn ioremap_init() {
     IOREMAP_ALLOCATOR.call_once(|| {
-        Mutex::new(IoremapAllocatorInner {
+        IrqSpinLock::new(IoremapAllocatorInner {
             next: IOREMAP_START,
             end: IOREMAP_END.wrapping_add(1), // exclusive end
             free_list: BTreeMap::new(),

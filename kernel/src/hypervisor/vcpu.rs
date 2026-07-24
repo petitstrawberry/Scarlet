@@ -1,9 +1,9 @@
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use core::sync::atomic::Ordering;
-use crate::sync::Mutex;
 
 #[cfg(feature = "hypervisor")]
 use crate::arch::hv::guest_vcpu::GuestVcpu;

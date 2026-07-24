@@ -4,10 +4,10 @@
 //! with each other without tight coupling.
 
 extern crate alloc;
-use alloc::sync::Weak;
+use crate::sync::IrqSpinLock;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::sync::Mutex;
 
 /// Generic device event trait.
 ///
@@ -38,13 +38,13 @@ pub trait EventCapableDevice {
 ///
 /// This struct provides a generic implementation for event emission.
 pub struct DeviceEventEmitter {
-    listeners: Mutex<Vec<Weak<dyn DeviceEventListener>>>,
+    listeners: IrqSpinLock<Vec<Weak<dyn DeviceEventListener>>>,
 }
 
 impl DeviceEventEmitter {
     pub fn new() -> Self {
         Self {
-            listeners: Mutex::new(Vec::new()),
+            listeners: IrqSpinLock::new(Vec::new()),
         }
     }
 
@@ -54,23 +54,35 @@ impl DeviceEventEmitter {
     }
 
     pub fn emit(&self, event: &dyn DeviceEvent) {
-        let mut listeners = self.listeners.lock();
+        let (listeners, removed_count): (Vec<Arc<dyn DeviceEventListener>>, usize) = {
+            let mut registered = self.listeners.lock();
+            let mut live = Vec::with_capacity(registered.len());
+            let initial_count = registered.len();
 
-        // Notify living listeners only and remove dead references
-        listeners.retain(|weak_listener| {
-            if let Some(listener) = weak_listener.upgrade() {
-                if listener.interested_in(event.event_type()) {
-                    listener.on_device_event(event);
+            registered.retain(|weak_listener| {
+                if let Some(listener) = weak_listener.upgrade() {
+                    live.push(listener);
+                    true
+                } else {
+                    false
                 }
-                true // Keep alive
-            } else {
-                crate::println!(
-                    "Removing dead listener for event type: {}",
-                    event.event_type()
-                );
-                false // Remove dead reference
+            });
+
+            (live, initial_count - registered.len())
+        };
+
+        for _ in 0..removed_count {
+            crate::println!(
+                "Removing dead listener for event type: {}",
+                event.event_type()
+            );
+        }
+
+        for listener in listeners {
+            if listener.interested_in(event.event_type()) {
+                listener.on_device_event(event);
             }
-        });
+        }
     }
 }
 

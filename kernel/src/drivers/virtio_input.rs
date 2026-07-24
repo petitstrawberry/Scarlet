@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -15,7 +16,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use crate::sync::Mutex;
 
 use crate::device::input::event_device::EventDevice;
 use crate::device::manager::DeviceManager;
@@ -66,12 +66,12 @@ mod config_select {
 /// VirtIO Input Device
 pub struct VirtioInputDevice {
     base_addr: usize,
-    eventq: Mutex<VirtQueue<'static>>, // Event queue (device -> driver)
-    statusq: Mutex<VirtQueue<'static>>, // Status queue (driver -> device)
+    eventq: IrqSpinLock<VirtQueue<'static>>, // Event queue (device -> driver)
+    statusq: IrqSpinLock<VirtQueue<'static>>, // Status queue (driver -> device)
     event_device: Arc<EventDevice>,
-    initialized: Mutex<bool>,
-    event_buffer_alloc: Mutex<Option<ContiguousPages>>, // Single page for all event buffers
-    interrupt_id: Mutex<Option<u32>>,
+    initialized: IrqSpinLock<bool>,
+    event_buffer_alloc: IrqSpinLock<Option<ContiguousPages>>, // Single page for all event buffers
+    interrupt_id: IrqSpinLock<Option<u32>>,
 }
 
 impl VirtioInputDevice {
@@ -147,12 +147,12 @@ impl VirtioInputDevice {
         // Create a temporary device to read configuration
         let temp_device = Self {
             base_addr,
-            eventq: Mutex::new(VirtQueue::new(8)),
-            statusq: Mutex::new(VirtQueue::new(8)),
+            eventq: IrqSpinLock::new(VirtQueue::new(8)),
+            statusq: IrqSpinLock::new(VirtQueue::new(8)),
             event_device: Arc::new(EventDevice::new("input")),
-            initialized: Mutex::new(false),
-            event_buffer_alloc: Mutex::new(None),
-            interrupt_id: Mutex::new(None),
+            initialized: IrqSpinLock::new(false),
+            event_buffer_alloc: IrqSpinLock::new(None),
+            interrupt_id: IrqSpinLock::new(None),
         };
 
         // Read device name from VirtIO config
@@ -177,12 +177,12 @@ impl VirtioInputDevice {
 
         let mut device = Self {
             base_addr,
-            eventq: Mutex::new(VirtQueue::new(8)),
-            statusq: Mutex::new(VirtQueue::new(8)),
+            eventq: IrqSpinLock::new(VirtQueue::new(8)),
+            statusq: IrqSpinLock::new(VirtQueue::new(8)),
             event_device: event_device.clone(),
-            initialized: Mutex::new(false),
-            event_buffer_alloc: Mutex::new(None),
-            interrupt_id: Mutex::new(None),
+            initialized: IrqSpinLock::new(false),
+            event_buffer_alloc: IrqSpinLock::new(None),
+            interrupt_id: IrqSpinLock::new(None),
         };
 
         // Initialize the VirtIO device

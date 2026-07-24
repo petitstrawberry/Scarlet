@@ -4,8 +4,8 @@
 //! Applies IP/gateway/netmask settings and handles deferred IP assignment
 //! until an interface is registered.
 
+use crate::sync::IrqSpinLock;
 use alloc::string::String;
-use crate::sync::Mutex;
 
 use crate::network::ipv4::{Ipv4Address, Ipv4AddressInfo};
 use crate::network::{NetworkManager, get_network_manager};
@@ -17,7 +17,7 @@ struct PendingNetworkConfig {
     iface: Option<String>,
 }
 
-static PENDING_CONFIG: Mutex<PendingNetworkConfig> = Mutex::new(PendingNetworkConfig {
+static PENDING_CONFIG: IrqSpinLock<PendingNetworkConfig> = IrqSpinLock::new(PendingNetworkConfig {
     ip: None,
     netmask: None,
     iface: None,

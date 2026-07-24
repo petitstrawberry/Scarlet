@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::sync::IrqSpinLock;
 use core::mem;
-use crate::sync::Mutex;
 
 use crate::environment::PAGE_SIZE;
 use crate::lsm::RelocateError;
@@ -162,9 +162,10 @@ impl ModuleVaAllocator {
     }
 }
 
-static MODULE_VA_ALLOCATOR: Mutex<ModuleVaAllocator> = Mutex::new(ModuleVaAllocator::new());
-static MODULE_REGISTRY: Mutex<Vec<LoadedModule>> = Mutex::new(Vec::new());
-static NEXT_MODULE_ID: Mutex<u64> = Mutex::new(1);
+static MODULE_VA_ALLOCATOR: IrqSpinLock<ModuleVaAllocator> =
+    IrqSpinLock::new(ModuleVaAllocator::new());
+static MODULE_REGISTRY: IrqSpinLock<Vec<LoadedModule>> = IrqSpinLock::new(Vec::new());
+static NEXT_MODULE_ID: IrqSpinLock<u64> = IrqSpinLock::new(1);
 
 fn allocate_module_va(size: usize, alignment: usize) -> Option<usize> {
     let mut allocator = MODULE_VA_ALLOCATOR.lock();

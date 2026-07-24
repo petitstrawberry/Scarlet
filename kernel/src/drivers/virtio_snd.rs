@@ -4,9 +4,9 @@
 //! specification. The native Scarlet audio layer provides the mmap ring buffer;
 //! this driver consumes complete periods and sends them to the device tx queue.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::sync::{Mutex, RwLock};
 
 use crate::device::audio::{
     AUDIO_PCM_FORMAT_F32LE, AUDIO_PCM_FORMAT_S8, AUDIO_PCM_FORMAT_S16LE, AUDIO_PCM_FORMAT_S24LE3,
@@ -173,16 +173,16 @@ struct TxPeriod {
 pub struct VirtioSndDevice {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
-    virtqueues: Mutex<[VirtQueue<'static>; QUEUE_RX + 1]>,
-    features: RwLock<u64>,
-    streams: RwLock<u32>,
-    stream_id: RwLock<Option<u32>>,
-    capabilities: RwLock<AudioPcmCapabilities>,
-    configured_periods: RwLock<usize>,
-    configured_params: RwLock<Option<AudioPcmParams>>,
-    pcm_buffer: RwLock<Option<AudioPcmBuffer>>,
-    in_flight: Mutex<Vec<TxPeriod>>,
-    event_buffers: Mutex<Vec<(usize, ContiguousPages)>>,
+    virtqueues: IrqSpinLock<[VirtQueue<'static>; QUEUE_RX + 1]>,
+    features: IrqRwSpinLock<u64>,
+    streams: IrqRwSpinLock<u32>,
+    stream_id: IrqRwSpinLock<Option<u32>>,
+    capabilities: IrqRwSpinLock<AudioPcmCapabilities>,
+    configured_periods: IrqRwSpinLock<usize>,
+    configured_params: IrqRwSpinLock<Option<AudioPcmParams>>,
+    pcm_buffer: IrqRwSpinLock<Option<AudioPcmBuffer>>,
+    in_flight: IrqSpinLock<Vec<TxPeriod>>,
+    event_buffers: IrqSpinLock<Vec<(usize, ContiguousPages)>>,
 }
 
 impl VirtioSndDevice {
@@ -216,21 +216,21 @@ impl VirtioSndDevice {
         let mut device = Self {
             base_addr,
             pci_transport,
-            virtqueues: Mutex::new([
+            virtqueues: IrqSpinLock::new([
                 VirtQueue::new(QUEUE_CONTROL_SIZE),
                 VirtQueue::new(QUEUE_EVENT_SIZE),
                 VirtQueue::new(QUEUE_TX_SIZE),
                 VirtQueue::new(QUEUE_RX_SIZE),
             ]),
-            features: RwLock::new(0),
-            streams: RwLock::new(0),
-            stream_id: RwLock::new(None),
-            capabilities: RwLock::new(default_capabilities()),
-            configured_periods: RwLock::new(4),
-            configured_params: RwLock::new(None),
-            pcm_buffer: RwLock::new(None),
-            in_flight: Mutex::new(Vec::new()),
-            event_buffers: Mutex::new(Vec::new()),
+            features: IrqRwSpinLock::new(0),
+            streams: IrqRwSpinLock::new(0),
+            stream_id: IrqRwSpinLock::new(None),
+            capabilities: IrqRwSpinLock::new(default_capabilities()),
+            configured_periods: IrqRwSpinLock::new(4),
+            configured_params: IrqRwSpinLock::new(None),
+            pcm_buffer: IrqRwSpinLock::new(None),
+            in_flight: IrqSpinLock::new(Vec::new()),
+            event_buffers: IrqSpinLock::new(Vec::new()),
         };
 
         match device.init() {

@@ -7,11 +7,11 @@
 
 extern crate alloc;
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use crate::sync::{Once, RwLock};
 
 use crate::abi::linux::generic::LinuxAbi;
 use crate::device::manager::DeviceManager;
@@ -391,8 +391,8 @@ struct KvmRunPageEntry {
     page: KvmRunPage,
 }
 
-static KVM_RUN_PAGES: Once<RwLock<Vec<KvmRunPageEntry>>> = Once::new();
-static KVM_IOEVENTS: Once<RwLock<Vec<KvmIoEvent>>> = Once::new();
+static KVM_RUN_PAGES: Once<IrqRwSpinLock<Vec<KvmRunPageEntry>>> = Once::new();
+static KVM_IOEVENTS: Once<IrqRwSpinLock<Vec<KvmIoEvent>>> = Once::new();
 
 pub(super) fn vcpu_key(vcpu: &dyn VcpuObject) -> usize {
     vcpu as *const dyn VcpuObject as *const () as usize
@@ -402,12 +402,12 @@ fn vm_key(vm: &VmRef) -> usize {
     Arc::as_ptr(vm) as *const () as usize
 }
 
-fn get_run_pages() -> &'static RwLock<Vec<KvmRunPageEntry>> {
-    KVM_RUN_PAGES.call_once(|| RwLock::new(Vec::new()))
+fn get_run_pages() -> &'static IrqRwSpinLock<Vec<KvmRunPageEntry>> {
+    KVM_RUN_PAGES.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
-fn get_ioevents() -> &'static RwLock<Vec<KvmIoEvent>> {
-    KVM_IOEVENTS.call_once(|| RwLock::new(Vec::new()))
+fn get_ioevents() -> &'static IrqRwSpinLock<Vec<KvmIoEvent>> {
+    KVM_IOEVENTS.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
 /// Allocate a shared kvm_run page for the given vCPU and register it.

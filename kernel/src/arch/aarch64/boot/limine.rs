@@ -281,14 +281,7 @@ pub extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
 
 extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
     prepare_el1_runtime();
-    if let Some((old_hcr, new_hcr)) = configure_vhe_host_interrupt_routing() {
-        early_println!(
-            "[aarch64] CPU {}: HCR_EL2 host interrupt routing {:#x} -> {:#x}",
-            cpu_id,
-            old_hcr,
-            new_hcr
-        );
-    }
+    let _ = configure_vhe_host_interrupt_routing();
     // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
     wait_for_ap_release();
     start_ap(cpu_id)
@@ -597,6 +590,8 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         executable.virtual_base as usize,
         kernel_end - kernel_start,
     );
+    let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
+    crate::arch::aarch64::init_arch(cpu_id);
     crate::arch::aarch64::early_console_init();
 
     if let Some((old_hcr, new_hcr)) = hcr_transition {
@@ -639,8 +634,6 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
     let cmdline = boot_cmdline(fdt_cmdline);
-    let cpu_id = logical_cpu_id_from_mpidr(current_mpidr());
-
     // Cache the wall-clock epoch now; the Limine response pointer is invalid
     // after the page-table switch in start_kernel.
     crate::boot::limine::capture_date_at_boot();
@@ -662,7 +655,6 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     );
 
     crate::arch::init_user_context_from_fdt();
-    crate::arch::aarch64::init_arch(cpu_id);
 
     let current_el = unsafe {
         let el: usize;

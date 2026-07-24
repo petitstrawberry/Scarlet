@@ -7,30 +7,36 @@ use core::arch::asm;
 
 use crate::{
     arch::{
-        fpu,
+        Riscv64, fpu,
         riscv64::CPUS,
         trap::kernel::{_kernel_trap_entry, arch_kernel_trap_handler},
-        Riscv64,
     },
     early_println,
     environment::STACK_SIZE,
     mem::KERNEL_STACK,
 };
 
+/// Initialize the current RISC-V CPU's per-CPU trap state.
+///
+/// # Arguments
+///
+/// * `cpu_id` - Logical CPU ID assigned to the current hart.
 pub fn init_cpu(cpu_id: usize) {
-    early_println!("[riscv64] init_cpu: cpu_id={}", cpu_id);
+    // SAFETY: Boot code initializes each `CPUS[cpu_id]` slot exactly once on
+    // its assigned hart before publishing the pointer through `sscratch`.
     let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
     riscv.hartid = cpu_id as u64;
+    trap_init(riscv);
     early_println!(
-        "[riscv64] init_cpu: cpu struct={:#x}",
+        "[riscv64] init_cpu: cpu_id={} cpu struct={:#x} done",
+        cpu_id,
         riscv as *mut _ as usize
     );
-    trap_init(riscv);
-    early_println!("[riscv64] init_cpu: done");
 }
 
 #[allow(static_mut_refs)]
 pub(crate) fn trap_init(riscv: &mut Riscv64) {
+    // SAFETY: Per-hart boot owns its assigned kernel-stack slot.
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 
@@ -39,14 +45,9 @@ pub(crate) fn trap_init(riscv: &mut Riscv64) {
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
     let scratch_addr = riscv as *const _ as usize;
 
-    early_println!(
-        "[riscv64] trap_init: hart={} trap_stack={:#x} scratch={:#x}",
-        riscv.hartid,
-        trap_stack,
-        scratch_addr
-    );
-
     let sie: usize = 0x20;
+    // SAFETY: This runs during per-hart boot with interrupts disabled. The
+    // prepared stack, trap vector, and per-CPU pointer are valid for this hart.
     unsafe {
         asm!("
         csrci sstatus, 0x2 // Disable interrupts
@@ -60,7 +61,12 @@ pub(crate) fn trap_init(riscv: &mut Riscv64) {
         );
     }
 
-    early_println!("[riscv64] trap_init: trap CSRs installed");
+    early_println!(
+        "[riscv64] trap_init: hart={} trap_stack={:#x} scratch={:#x} trap CSRs installed",
+        riscv.hartid,
+        trap_stack,
+        scratch_addr
+    );
 
     // Enable FPU for user-space and kernel access
     fpu::enable_fpu();

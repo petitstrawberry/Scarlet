@@ -1,6 +1,6 @@
+use crate::sync::IrqSpinLock;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use crate::early_println;
 
@@ -62,9 +62,9 @@ impl SymbolRegistry {
     }
 }
 
-static SYMBOL_REGISTRY: Mutex<SymbolRegistry> = Mutex::new(SymbolRegistry::new());
+static SYMBOL_REGISTRY: IrqSpinLock<SymbolRegistry> = IrqSpinLock::new(SymbolRegistry::new());
 
-pub fn get_symbol_registry() -> &'static Mutex<SymbolRegistry> {
+pub fn get_symbol_registry() -> &'static IrqSpinLock<SymbolRegistry> {
     &SYMBOL_REGISTRY
 }
 

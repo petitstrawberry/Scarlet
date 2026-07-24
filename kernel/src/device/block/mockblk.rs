@@ -1,10 +1,10 @@
 use core::any::Any;
 
+use crate::sync::IrqSpinLock;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::sync::Mutex;
 
 use super::request::BlockIORequestType;
 use super::*;
@@ -17,8 +17,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub struct MockBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
-    data: Mutex<Vec<Vec<u8>>>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    data: IrqSpinLock<Vec<Vec<u8>>>,
+    request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
 }
 
 impl MockBlockDevice {
@@ -31,8 +31,8 @@ impl MockBlockDevice {
         Self {
             disk_name,
             disk_size: sector_size * sector_count,
-            data: Mutex::new(data),
-            request_queue: Mutex::new(Vec::new()),
+            data: IrqSpinLock::new(data),
+            request_queue: IrqSpinLock::new(Vec::new()),
         }
     }
 }

@@ -6,9 +6,9 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::{string::String, sync::Arc};
 use core::{any::Any, fmt::Write};
-use crate::sync::Mutex;
 
 use crate::{
     device::{Device, DeviceType, char::CharDevice, manager::DeviceManager},
@@ -24,7 +24,7 @@ use crate::{
 
 /// Read-only CPU topology character device.
 pub struct CpuInfoDevice {
-    snapshot: Mutex<String>,
+    snapshot: IrqSpinLock<String>,
 }
 
 impl CpuInfoDevice {
@@ -35,7 +35,7 @@ impl CpuInfoDevice {
     /// A new CPU information character device.
     pub fn new() -> Self {
         Self {
-            snapshot: Mutex::new(String::new()),
+            snapshot: IrqSpinLock::new(String::new()),
         }
     }
 

@@ -192,9 +192,9 @@ pub trait MailboxController: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::IrqSpinLock;
     use alloc::collections::VecDeque;
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-    use crate::sync::Mutex;
 
     struct FakeClient {
         rx_count: AtomicUsize,
@@ -231,16 +231,16 @@ mod tests {
 
     struct FakeChannel {
         id: MailboxChannelId,
-        queue: Mutex<VecDeque<MailboxMessage>>,
-        client: Mutex<Option<Arc<dyn MailboxClient>>>,
+        queue: IrqSpinLock<VecDeque<MailboxMessage>>,
+        client: IrqSpinLock<Option<Arc<dyn MailboxClient>>>,
     }
 
     impl FakeChannel {
         fn new(id: MailboxChannelId) -> Self {
             Self {
                 id,
-                queue: Mutex::new(VecDeque::new()),
-                client: Mutex::new(None),
+                queue: IrqSpinLock::new(VecDeque::new()),
+                client: IrqSpinLock::new(None),
             }
         }
     }

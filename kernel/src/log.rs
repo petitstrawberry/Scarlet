@@ -8,8 +8,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::sync::{Mutex, MutexGuard};
 use crate::sync::waker::Waker;
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard};
 
 const LOG_BUF_SIZE: usize = 1 << 18; // 256 KiB
 
@@ -21,21 +21,16 @@ static TAIL: AtomicUsize = AtomicUsize::new(0);
 
 pub static READER_WAKER: Waker = Waker::new_interruptible("kmsg");
 
-static PRINT_LOCK: Mutex<()> = Mutex::new(());
+static PRINT_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
 
 pub struct PrintGuard {
-    _irq_guard: crate::sync::irq_guard::IrqGuard,
-    _lock: MutexGuard<'static, ()>,
+    _lock: IrqSpinLockGuard<'static, ()>,
 }
 
 impl PrintGuard {
     pub fn acquire() -> Self {
-        let irq_guard = crate::sync::irq_guard::IrqGuard::new();
         let lock = PRINT_LOCK.lock();
-        Self {
-            _irq_guard: irq_guard,
-            _lock: lock,
-        }
+        Self { _lock: lock }
     }
 }
 

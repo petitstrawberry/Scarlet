@@ -1,10 +1,10 @@
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
-use crate::sync::Mutex;
 
 use super::guest_vcpu::GuestVcpu;
 use super::mmu::{
@@ -153,13 +153,13 @@ struct VcpuInternalState {
 pub struct Aarch64VcpuObject {
     id: VcpuId,
     vm: Weak<Aarch64VmObject>,
-    state: Mutex<VcpuInternalState>,
+    state: IrqSpinLock<VcpuInternalState>,
     irqs_pending: AtomicU64,
     irqs_pending_mask: AtomicU64,
-    external_irqs_pending: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
-    external_irqs_changed: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
-    external_irqs_edge: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
-    external_irqs_injected: Mutex<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_pending: IrqSpinLock<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_changed: IrqSpinLock<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_edge: IrqSpinLock<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
+    external_irqs_injected: IrqSpinLock<[u64; EXTERNAL_IRQ_BITMAP_WORDS]>,
     wfi_waker: Waker,
     last_irq_state: AtomicU64,
     vgic_num_lrs: usize,
@@ -171,16 +171,16 @@ impl Aarch64VcpuObject {
         Arc::new(Self {
             id,
             vm: Arc::downgrade(vm),
-            state: Mutex::new(VcpuInternalState {
+            state: IrqSpinLock::new(VcpuInternalState {
                 guest: GuestVcpu::new(vm.id(), id),
                 vgic: VgicState::new(num_lrs),
             }),
             irqs_pending: AtomicU64::new(0),
             irqs_pending_mask: AtomicU64::new(0),
-            external_irqs_pending: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
-            external_irqs_changed: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
-            external_irqs_edge: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
-            external_irqs_injected: Mutex::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_pending: IrqSpinLock::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_changed: IrqSpinLock::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_edge: IrqSpinLock::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
+            external_irqs_injected: IrqSpinLock::new([0; EXTERNAL_IRQ_BITMAP_WORDS]),
             wfi_waker: Waker::new_interruptible("aarch64-vcpu-wfi"),
             last_irq_state: AtomicU64::new(0),
             vgic_num_lrs: num_lrs,
@@ -721,7 +721,7 @@ pub type Vm = Aarch64VmObject;
 pub struct Aarch64VmObject {
     id: VmId,
     owner_mm: VirtualMemoryManager,
-    state: Mutex<VmInternalState>,
+    state: IrqSpinLock<VmInternalState>,
 }
 
 impl Drop for Aarch64VmObject {
@@ -739,7 +739,7 @@ impl Aarch64VmObject {
         Ok(Self {
             id,
             owner_mm,
-            state: Mutex::new(VmInternalState {
+            state: IrqSpinLock::new(VmInternalState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
                 vmid,

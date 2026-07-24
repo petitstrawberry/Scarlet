@@ -21,6 +21,7 @@
 //! ABI modules implement SocketObject trait and register socket implementations
 //! with the NetworkManager.
 
+use crate::sync::{IrqRwSpinLock, Once};
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -28,7 +29,6 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::{Once, RwLock};
 pub mod arp;
 pub mod config;
 pub mod ethernet;
@@ -123,54 +123,54 @@ pub trait NetworkInterface: Send + Sync {
 /// Network Manager - Global socket and connection manager
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
-    socket_factories: RwLock<BTreeMap<SocketDomain, SocketFactory>>,
+    socket_factories: IrqRwSpinLock<BTreeMap<SocketDomain, SocketFactory>>,
 
     /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
     protocol_stacks: protocol_stack::ProtocolStackManager,
 
     /// Protocol layers registry (shared instances like VFS filesystems)
-    protocol_layers: RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
+    protocol_layers: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
 
     /// Named sockets namespace (path/name -> socket)
-    named_sockets: RwLock<BTreeMap<String, Weak<dyn SocketObject>>>,
+    named_sockets: IrqRwSpinLock<BTreeMap<String, Weak<dyn SocketObject>>>,
 
     /// Active socket connections by ID
-    connections: RwLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
+    connections: IrqRwSpinLock<BTreeMap<SocketId, Weak<dyn SocketObject>>>,
 
     /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
-    socket_to_id: RwLock<BTreeMap<usize, SocketId>>,
+    socket_to_id: IrqRwSpinLock<BTreeMap<usize, SocketId>>,
 
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 
     /// Registered network interfaces
-    interfaces: RwLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
+    interfaces: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
 
     /// Default interface name
-    default_interface: RwLock<Option<String>>,
+    default_interface: IrqRwSpinLock<Option<String>>,
 
     /// ARP cache
-    arp_cache: RwLock<BTreeMap<u32, ArpCacheEntry>>,
+    arp_cache: IrqRwSpinLock<BTreeMap<u32, ArpCacheEntry>>,
 
     /// Network configuration
-    network_config: RwLock<NetworkConfig>,
+    network_config: IrqRwSpinLock<NetworkConfig>,
 }
 
 impl NetworkManager {
     /// Create a new NetworkManager instance
     fn new() -> Self {
         Self {
-            socket_factories: RwLock::new(BTreeMap::new()),
+            socket_factories: IrqRwSpinLock::new(BTreeMap::new()),
             protocol_stacks: protocol_stack::ProtocolStackManager::new(),
-            protocol_layers: RwLock::new(BTreeMap::new()),
-            named_sockets: RwLock::new(BTreeMap::new()),
-            connections: RwLock::new(BTreeMap::new()),
-            socket_to_id: RwLock::new(BTreeMap::new()),
+            protocol_layers: IrqRwSpinLock::new(BTreeMap::new()),
+            named_sockets: IrqRwSpinLock::new(BTreeMap::new()),
+            connections: IrqRwSpinLock::new(BTreeMap::new()),
+            socket_to_id: IrqRwSpinLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1),
-            interfaces: RwLock::new(BTreeMap::new()),
-            default_interface: RwLock::new(None),
-            arp_cache: RwLock::new(BTreeMap::new()),
-            network_config: RwLock::new(NetworkConfig::default()),
+            interfaces: IrqRwSpinLock::new(BTreeMap::new()),
+            default_interface: IrqRwSpinLock::new(None),
+            arp_cache: IrqRwSpinLock::new(BTreeMap::new()),
+            network_config: IrqRwSpinLock::new(NetworkConfig::default()),
         }
     }
 

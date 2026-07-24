@@ -346,10 +346,10 @@ pub trait RemoteProcessor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::IrqSpinLock;
     use alloc::collections::VecDeque;
     use alloc::collections::btree_map::BTreeMap;
     use core::sync::atomic::{AtomicU32, Ordering};
-    use crate::sync::Mutex;
 
     struct FakeCrashHandler {
         service: AtomicU32,
@@ -374,16 +374,16 @@ mod tests {
 
     struct FakeService {
         id: RemoteprocServiceId,
-        queue: Mutex<VecDeque<RemoteprocMessage>>,
-        client: Mutex<Option<Arc<dyn RemoteprocServiceClient>>>,
+        queue: IrqSpinLock<VecDeque<RemoteprocMessage>>,
+        client: IrqSpinLock<Option<Arc<dyn RemoteprocServiceClient>>>,
     }
 
     impl FakeService {
         fn new(id: RemoteprocServiceId) -> Self {
             Self {
                 id,
-                queue: Mutex::new(VecDeque::new()),
-                client: Mutex::new(None),
+                queue: IrqSpinLock::new(VecDeque::new()),
+                client: IrqSpinLock::new(None),
             }
         }
     }
@@ -419,17 +419,17 @@ mod tests {
     }
 
     struct FakeProcessor {
-        state: Mutex<RemoteprocState>,
-        services: Mutex<BTreeMap<RemoteprocServiceId, Arc<dyn RemoteprocService>>>,
-        crash_handler: Mutex<Option<Arc<dyn RemoteprocCrashHandler>>>,
+        state: IrqSpinLock<RemoteprocState>,
+        services: IrqSpinLock<BTreeMap<RemoteprocServiceId, Arc<dyn RemoteprocService>>>,
+        crash_handler: IrqSpinLock<Option<Arc<dyn RemoteprocCrashHandler>>>,
     }
 
     impl FakeProcessor {
         fn new() -> Self {
             Self {
-                state: Mutex::new(RemoteprocState::Offline),
-                services: Mutex::new(BTreeMap::new()),
-                crash_handler: Mutex::new(None),
+                state: IrqSpinLock::new(RemoteprocState::Offline),
+                services: IrqSpinLock::new(BTreeMap::new()),
+                crash_handler: IrqSpinLock::new(None),
             }
         }
 

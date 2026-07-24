@@ -1,15 +1,15 @@
 use limine::mp::MpInfo;
 
 use crate::boot::limine::{
-    boot_cmdline, bootloader_hhdm_physical_bound, ensure_base_revision_supported, module_area,
-    reserve_front, response, runtime_direct_map_regions, select_usable_region, DTB_REQUEST,
-    EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST, MP_REQUEST,
+    DTB_REQUEST, EXECUTABLE_ADDRESS_REQUEST, HHDM_REQUEST, MEMMAP_REQUEST, MODULE_REQUEST,
+    MP_REQUEST, boot_cmdline, bootloader_hhdm_physical_bound, ensure_base_revision_supported,
+    module_area, reserve_front, response, runtime_direct_map_regions, select_usable_region,
 };
-use crate::device::fdt::{init_fdt, relocate_fdt, FdtManager};
+use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::STACK_SIZE;
-use crate::mem::{init_bss, KERNEL_STACK};
+use crate::mem::{KERNEL_STACK, init_bss};
 use crate::vm::addr::{init_bootloader_direct_map_bound, init_limine_addressing, phys_to_virt};
-use crate::{early_println, start_ap, start_kernel, wait_for_ap_release, BootInfo, DeviceSource};
+use crate::{BootInfo, DeviceSource, early_println, start_ap, start_kernel, wait_for_ap_release};
 use limine::paging;
 use limine::request::{BspHartidRequest, PagingModeRequest};
 
@@ -77,11 +77,13 @@ pub fn limine_entry() -> ! {
     }
     init_bss();
 
+    let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
+    crate::arch::riscv64::boot::init_cpu(bsp.bsp_hartid as usize);
+
     let hhdm = response(HHDM_REQUEST.response(), "hhdm");
     let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
     let memmap = response(MEMMAP_REQUEST.response(), "memmap");
     let dtb = response(DTB_REQUEST.response(), "dtb");
-    let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
 
     ensure_base_revision_supported();
 
@@ -143,7 +145,6 @@ pub fn limine_entry() -> ! {
 
     crate::arch::init_user_context_from_fdt();
     bootstrap_aps();
-    crate::arch::riscv64::boot::init_cpu(bootinfo.cpu_id);
 
     unsafe {
         let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;

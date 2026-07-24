@@ -33,6 +33,26 @@ fn current_cpu() -> Option<usize> {
     try_get_cpuid()
 }
 
+#[inline]
+fn increment_preempt_count(cpu: usize) {
+    let previous = PREEMPT_COUNT[cpu]
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_add(1)
+        })
+        .expect("preempt_count overflow");
+    debug_assert!(previous < u32::MAX);
+}
+
+#[inline]
+fn decrement_preempt_count(cpu: usize) {
+    let previous = PREEMPT_COUNT[cpu]
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_sub(1)
+        })
+        .expect("preempt_count underflow");
+    debug_assert!(previous > 0);
+}
+
 /// Return the current CPU's preemption counter.
 ///
 /// # Returns
@@ -68,8 +88,7 @@ pub fn preemptible() -> bool {
 #[inline]
 pub fn preempt_disable() {
     if let Some(cpu) = current_cpu() {
-        let prev = PREEMPT_COUNT[cpu].fetch_add(1, Ordering::Relaxed);
-        let _ = prev;
+        increment_preempt_count(cpu);
     }
 }
 
@@ -77,15 +96,13 @@ pub fn preempt_disable() {
 ///
 /// # Panics
 ///
-/// In debug builds, panics on underflow to catch unbalanced
+/// Panics on underflow to catch unbalanced
 /// `preempt_disable`/`preempt_enable` use. No-op when the per-CPU substrate
 /// has not been published.
 #[inline]
 pub fn preempt_enable() {
     if let Some(cpu) = current_cpu() {
-        let prev = PREEMPT_COUNT[cpu].fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(prev > 0, "preempt_count underflow on cpu={}", cpu);
-        let _ = prev;
+        decrement_preempt_count(cpu);
     }
 }
 
@@ -101,16 +118,27 @@ pub fn preempt_enable() {
 /// // Preemption is disabled for the duration of this scope.
 /// ```
 pub struct PreemptGuard {
+    cpu: Option<usize>,
     _not_send: PhantomData<*mut ()>,
 }
 
 impl PreemptGuard {
     /// Disable preemption on the current CPU and return a guard that
     /// re-enables it on drop.
+    ///
+    /// # Returns
+    ///
+    /// A guard bound to the current CPU. If the per-CPU substrate has not
+    /// been published yet, the guard remains unarmed and requires that state
+    /// to stay uninitialized until it is dropped.
     #[inline]
     pub fn new() -> Self {
-        preempt_disable();
+        let cpu = current_cpu();
+        if let Some(cpu) = cpu {
+            increment_preempt_count(cpu);
+        }
         Self {
+            cpu,
             _not_send: PhantomData,
         }
     }
@@ -126,7 +154,22 @@ impl Default for PreemptGuard {
 impl Drop for PreemptGuard {
     #[inline]
     fn drop(&mut self) {
-        preempt_enable();
+        match self.cpu {
+            Some(cpu) => {
+                assert_eq!(
+                    current_cpu(),
+                    Some(cpu),
+                    "PreemptGuard dropped on a different CPU"
+                );
+                decrement_preempt_count(cpu);
+            }
+            None => {
+                assert!(
+                    current_cpu().is_none(),
+                    "unarmed PreemptGuard crossed into initialized per-CPU state"
+                );
+            }
+        }
     }
 }
 
@@ -136,7 +179,9 @@ impl PreemptGuard {
     ///
     /// Callers must ensure no other `PreemptGuard` is live on this CPU.
     pub(crate) fn reset_count_for_test() {
-        PREEMPT_COUNT[current_cpu()].store(0, Ordering::Relaxed);
+        if let Some(cpu) = current_cpu() {
+            PREEMPT_COUNT[cpu].store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -176,6 +221,21 @@ mod tests {
             }
             assert_eq!(preempt_count(), 1);
         }
+        assert_eq!(preempt_count(), 0);
+    }
+
+    #[test_case]
+    fn test_non_lifo_guards_decrement_their_acquisition_cpu() {
+        PreemptGuard::reset_count_for_test();
+
+        let first = PreemptGuard::new();
+        let second = PreemptGuard::new();
+        assert_eq!(preempt_count(), 2);
+
+        drop(first);
+        assert_eq!(preempt_count(), 1);
+
+        drop(second);
         assert_eq!(preempt_count(), 0);
     }
 

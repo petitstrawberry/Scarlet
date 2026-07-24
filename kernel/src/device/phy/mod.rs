@@ -5,8 +5,8 @@
 
 extern crate alloc;
 
+use crate::sync::IrqSpinLock;
 use alloc::sync::Arc;
-use crate::sync::Mutex;
 
 /// PHY operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub enum PhyOrientation {
 #[derive(Clone)]
 pub struct PhyHandle {
     phy: Arc<dyn Phy>,
-    state: Arc<Mutex<PhyState>>,
+    state: Arc<IrqSpinLock<PhyState>>,
 }
 
 struct PhyState {
@@ -89,7 +89,7 @@ impl PhyHandle {
     pub fn new(phy: Arc<dyn Phy>) -> Self {
         Self {
             phy,
-            state: Arc::new(Mutex::new(PhyState {
+            state: Arc::new(IrqSpinLock::new(PhyState {
                 power_count: 0,
                 mode: None,
                 orientation: None,
@@ -306,7 +306,7 @@ mod tests {
         power_on_count: AtomicUsize,
         power_off_count: AtomicUsize,
         reset_count: AtomicUsize,
-        mode: Mutex<Option<PhyMode>>,
+        mode: IrqSpinLock<Option<PhyMode>>,
     }
 
     impl TestPhy {
@@ -315,7 +315,7 @@ mod tests {
                 power_on_count: AtomicUsize::new(0),
                 power_off_count: AtomicUsize::new(0),
                 reset_count: AtomicUsize::new(0),
-                mode: Mutex::new(None),
+                mode: IrqSpinLock::new(None),
             }
         }
     }

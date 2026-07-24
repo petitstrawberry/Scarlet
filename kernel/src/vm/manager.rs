@@ -36,10 +36,10 @@
 //!
 
 extern crate alloc;
+use crate::sync::IrqRwSpinLock;
 use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::ops::Bound;
-use crate::sync::RwLock;
 
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::memory_mapping::AccessOp;
@@ -71,7 +71,7 @@ const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
-    inner: Arc<RwLock<InnerVmm>>, // shared, internally synchronized
+    inner: Arc<IrqRwSpinLock<InnerVmm>>, // shared, internally synchronized
 }
 
 #[derive(Debug)]
@@ -134,7 +134,7 @@ impl VirtualMemoryManager {
             private_page_allocations: Vec::new(),
         };
         VirtualMemoryManager {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(IrqRwSpinLock::new(inner)),
         }
     }
 

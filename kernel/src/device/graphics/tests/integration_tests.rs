@@ -5,8 +5,8 @@
 
 #[cfg(test)]
 mod integration_tests {
+    use crate::sync::IrqRwSpinLock;
     use alloc::{string::ToString, sync::Arc};
-    use crate::sync::RwLock;
 
     use crate::device::{
         Device, DeviceType,
@@ -275,8 +275,8 @@ mod integration_tests {
             config: invalid_config.clone(),
             physical_addr: 0, // Invalid address
             size: invalid_config.size(),
-            created_char_device_id: RwLock::new(None),
-            created_display_device_id: RwLock::new(None),
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
         });
 
         let char_device = FramebufferCharDevice::new(invalid_resource);
@@ -299,8 +299,8 @@ mod integration_tests {
             config,
             physical_addr: 0x1003,
             size: crate::environment::PAGE_SIZE,
-            created_char_device_id: RwLock::new(None),
-            created_display_device_id: RwLock::new(None),
+            created_char_device_id: IrqRwSpinLock::new(None),
+            created_display_device_id: IrqRwSpinLock::new(None),
         });
         let char_device = FramebufferCharDevice::new(resource);
 

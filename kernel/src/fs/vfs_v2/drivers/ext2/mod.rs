@@ -21,6 +21,7 @@
 //! - `Ext2Driver`: Filesystem driver for registration
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -32,7 +33,6 @@ use alloc::{
 };
 use core::{any::Any, mem};
 use hashbrown::HashMap;
-use crate::sync::{Mutex, RwLock};
 
 use crate::{
     DeviceManager,
@@ -294,20 +294,20 @@ pub struct Ext2FileSystem {
     /// Root directory inode
     root_inode: u32,
     /// Root directory node
-    root: RwLock<Arc<Ext2Node>>,
+    root: IrqRwSpinLock<Arc<Ext2Node>>,
     /// Filesystem name
     name: String,
     /// Next file ID generator
-    next_file_id: Mutex<u64>,
+    next_file_id: IrqSpinLock<u64>,
     /// LRU cached inodes
-    inode_cache: Mutex<InodeLruCache>,
+    inode_cache: IrqSpinLock<InodeLruCache>,
     /// LRU cached blocks
-    block_cache: Mutex<BlockLruCache>,
+    block_cache: IrqSpinLock<BlockLruCache>,
     /// Per-inode locks to serialize directory-mutating operations on the same inode,
     /// preventing concurrent read-modify-write races on directory blocks
-    inode_locks: Mutex<BTreeMap<u32, Arc<Mutex<()>>>>,
+    inode_locks: IrqSpinLock<BTreeMap<u32, Arc<IrqSpinLock<()>>>>,
     /// Global lock to serialize block allocation operations
-    allocation_lock: Mutex<()>,
+    allocation_lock: IrqSpinLock<()>,
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -778,13 +778,13 @@ impl Ext2FileSystem {
             superblock,
             block_size,
             root_inode,
-            root: RwLock::new(Arc::new(root)),
+            root: IrqRwSpinLock::new(Arc::new(root)),
             name: "ext2".to_string(),
-            next_file_id: Mutex::new(2), // Start from 2, root is 1
-            inode_cache: Mutex::new(InodeLruCache::new(8192)),
-            block_cache: Mutex::new(BlockLruCache::new(8192)),
-            inode_locks: Mutex::new(BTreeMap::new()),
-            allocation_lock: Mutex::new(()),
+            next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
+            inode_cache: IrqSpinLock::new(InodeLruCache::new(8192)),
+            block_cache: IrqSpinLock::new(BlockLruCache::new(8192)),
+            inode_locks: IrqSpinLock::new(BTreeMap::new()),
+            allocation_lock: IrqSpinLock::new(()),
         });
 
         // Set filesystem reference in root node
@@ -830,11 +830,11 @@ impl Ext2FileSystem {
         }
     }
 
-    fn get_inode_lock(&self, inode_num: u32) -> Arc<Mutex<()>> {
+    fn get_inode_lock(&self, inode_num: u32) -> Arc<IrqSpinLock<()>> {
         let mut locks = self.inode_locks.lock();
         locks
             .entry(inode_num)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(IrqSpinLock::new(())))
             .clone()
     }
 

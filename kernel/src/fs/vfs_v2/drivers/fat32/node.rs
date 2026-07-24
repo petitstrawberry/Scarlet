@@ -3,6 +3,7 @@
 //! This module implements the VfsNode trait for FAT32 filesystem nodes.
 //! It provides the interface between the VFS layer and FAT32-specific node data.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -12,7 +13,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{any::Any, fmt::Debug};
-use crate::sync::{Mutex, RwLock};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -33,21 +33,21 @@ use crate::vm::addr::phys_to_virt;
 /// Content is read/written directly from/to the block device, not stored in memory.
 pub struct Fat32Node {
     /// Node name
-    pub name: RwLock<String>,
+    pub name: IrqRwSpinLock<String>,
     /// File type (file or directory)
-    pub file_type: RwLock<FileType>,
+    pub file_type: IrqRwSpinLock<FileType>,
     /// File metadata
-    pub metadata: RwLock<FileMetadata>,
+    pub metadata: IrqRwSpinLock<FileMetadata>,
     /// Child nodes (for directories) - cached, but loaded from disk on demand
-    pub children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
+    pub children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
-    pub parent: RwLock<Option<Weak<Fat32Node>>>,
+    pub parent: IrqRwSpinLock<Option<Weak<Fat32Node>>>,
     /// Reference to filesystem
-    pub filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    pub filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Starting cluster number in FAT32
-    pub cluster: RwLock<u32>,
+    pub cluster: IrqRwSpinLock<u32>,
     /// Directory entries loaded flag (for directories)
-    pub children_loaded: RwLock<bool>,
+    pub children_loaded: IrqRwSpinLock<bool>,
 }
 
 impl Debug for Fat32Node {
@@ -70,9 +70,9 @@ impl Fat32Node {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64, cluster: u32) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::RegularFile),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::RegularFile),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -86,20 +86,20 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None),
-            filesystem: RwLock::new(None),
-            cluster: RwLock::new(cluster),
-            children_loaded: RwLock::new(false),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
+            cluster: IrqRwSpinLock::new(cluster),
+            children_loaded: IrqRwSpinLock::new(false),
         }
     }
 
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64, cluster: u32) -> Self {
         Self {
-            name: RwLock::new(name),
-            file_type: RwLock::new(FileType::Directory),
-            metadata: RwLock::new(FileMetadata {
+            name: IrqRwSpinLock::new(name),
+            file_type: IrqRwSpinLock::new(FileType::Directory),
+            metadata: IrqRwSpinLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -113,11 +113,11 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            children: RwLock::new(BTreeMap::new()),
-            parent: RwLock::new(None),
-            filesystem: RwLock::new(None),
-            cluster: RwLock::new(cluster),
-            children_loaded: RwLock::new(false),
+            children: IrqRwSpinLock::new(BTreeMap::new()),
+            parent: IrqRwSpinLock::new(None),
+            filesystem: IrqRwSpinLock::new(None),
+            cluster: IrqRwSpinLock::new(cluster),
+            children_loaded: IrqRwSpinLock::new(false),
         }
     }
 
@@ -167,14 +167,14 @@ impl VfsNode for Fat32Node {
 impl Clone for Fat32Node {
     fn clone(&self) -> Self {
         Self {
-            name: RwLock::new(self.name.read().clone()),
-            file_type: RwLock::new(self.file_type.read().clone()),
-            metadata: RwLock::new(self.metadata.read().clone()),
-            children: RwLock::new(self.children.read().clone()),
-            parent: RwLock::new(self.parent.read().clone()),
-            filesystem: RwLock::new(self.filesystem.read().clone()),
-            cluster: RwLock::new(*self.cluster.read()),
-            children_loaded: RwLock::new(*self.children_loaded.read()),
+            name: IrqRwSpinLock::new(self.name.read().clone()),
+            file_type: IrqRwSpinLock::new(self.file_type.read().clone()),
+            metadata: IrqRwSpinLock::new(self.metadata.read().clone()),
+            children: IrqRwSpinLock::new(self.children.read().clone()),
+            parent: IrqRwSpinLock::new(self.parent.read().clone()),
+            filesystem: IrqRwSpinLock::new(self.filesystem.read().clone()),
+            cluster: IrqRwSpinLock::new(*self.cluster.read()),
+            children_loaded: IrqRwSpinLock::new(*self.children_loaded.read()),
         }
     }
 }
@@ -184,29 +184,29 @@ pub struct Fat32FileObject {
     /// Reference to the FAT32 node
     node: Arc<Fat32Node>,
     /// Current file position
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
     /// Parent directory cluster (for directory entry updates)
     parent_cluster: u32,
     /// File-level dirty flag to avoid unnecessary writeback
-    dirty: Mutex<bool>,
+    dirty: IrqSpinLock<bool>,
     /// Page-aligned backing for mmap operations (lazy initialized)
-    mmap_backing: RwLock<Option<ContiguousPages>>,
+    mmap_backing: IrqRwSpinLock<Option<ContiguousPages>>,
     /// Byte length of the mmap backing (file size snapshot)
-    mmap_backing_len: Mutex<usize>,
+    mmap_backing_len: IrqSpinLock<usize>,
     /// Active mmap ranges keyed by starting virtual address
-    mmap_ranges: RwLock<BTreeMap<usize, MmapRange>>,
+    mmap_ranges: IrqRwSpinLock<BTreeMap<usize, MmapRange>>,
 }
 
 impl Fat32FileObject {
     pub fn new(node: Arc<Fat32Node>, parent_cluster: u32) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
             parent_cluster,
-            dirty: Mutex::new(false),
-            mmap_backing: RwLock::new(None),
-            mmap_backing_len: Mutex::new(0),
-            mmap_ranges: RwLock::new(BTreeMap::new()),
+            dirty: IrqSpinLock::new(false),
+            mmap_backing: IrqRwSpinLock::new(None),
+            mmap_backing_len: IrqSpinLock::new(0),
+            mmap_ranges: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -1099,14 +1099,14 @@ pub struct Fat32DirectoryObject {
     /// Reference to the FAT32 node
     node: Arc<Fat32Node>,
     /// Current position in directory listing
-    position: RwLock<usize>,
+    position: IrqRwSpinLock<usize>,
 }
 
 impl Fat32DirectoryObject {
     pub fn new(node: Arc<Fat32Node>) -> Self {
         Self {
             node,
-            position: RwLock::new(0),
+            position: IrqRwSpinLock::new(0),
         }
     }
 }

@@ -732,8 +732,6 @@ pub fn try_get_cpuid() -> Option<usize> {
     let riscv = unsafe { &*(scratch as *const Riscv64) };
     Some(riscv.hartid as usize)
 }
-    unsafe { &mut *(scratch as *mut Riscv64) }
-}
 
 pub fn set_next_mode(mode: Mode) {
     match mode {

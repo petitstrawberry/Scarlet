@@ -3,13 +3,13 @@
 //! This module provides ICMP handling for network stack.
 //! It implements NetworkLayer trait for ICMP messages.
 
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use crate::sync::{Mutex, RwLock};
 
 use crate::early_println;
 
@@ -184,9 +184,9 @@ impl IcmpEcho {
 /// Handles ICMP messages for network diagnostics.
 pub struct IcmpLayer {
     /// Statistics
-    stats: RwLock<NetworkLayerStats>,
+    stats: IrqRwSpinLock<NetworkLayerStats>,
     /// ICMP sockets by identifier
-    sockets: RwLock<BTreeMap<u16, Weak<IcmpSocket>>>,
+    sockets: IrqRwSpinLock<BTreeMap<u16, Weak<IcmpSocket>>>,
     /// Identifier allocator
     next_identifier: AtomicU16,
     self_weak: Weak<IcmpLayer>,
@@ -222,8 +222,8 @@ impl IcmpLayer {
     /// Create a new ICMP layer
     pub fn new() -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
-            stats: RwLock::new(NetworkLayerStats::default()),
-            sockets: RwLock::new(BTreeMap::new()),
+            stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
+            sockets: IrqRwSpinLock::new(BTreeMap::new()),
             next_identifier: AtomicU16::new(1),
             self_weak: weak.clone(),
         })
@@ -478,11 +478,11 @@ pub struct IcmpSocket {
     identifier: u16,
     sequence: AtomicU16,
     expected_sequence: AtomicU16,
-    local_addr: Mutex<Option<SocketAddress>>,
-    remote_addr: RwLock<Option<SocketAddress>>,
-    recv_queue: Mutex<VecDeque<(Vec<u8>, SocketAddress)>>,
+    local_addr: IrqSpinLock<Option<SocketAddress>>,
+    remote_addr: IrqRwSpinLock<Option<SocketAddress>>,
+    recv_queue: IrqSpinLock<VecDeque<(Vec<u8>, SocketAddress)>>,
     recv_waker: crate::sync::waker::Waker,
-    nonblocking: RwLock<bool>,
+    nonblocking: IrqRwSpinLock<bool>,
 }
 
 impl IcmpSocket {
@@ -492,11 +492,11 @@ impl IcmpSocket {
             identifier,
             sequence: AtomicU16::new(0),
             expected_sequence: AtomicU16::new(0),
-            local_addr: Mutex::new(None),
-            remote_addr: RwLock::new(None),
-            recv_queue: Mutex::new(VecDeque::new()),
+            local_addr: IrqSpinLock::new(None),
+            remote_addr: IrqRwSpinLock::new(None),
+            recv_queue: IrqSpinLock::new(VecDeque::new()),
             recv_waker: crate::sync::waker::Waker::new_interruptible("icmp_recv"),
-            nonblocking: RwLock::new(false),
+            nonblocking: IrqRwSpinLock::new(false),
         })
     }
 

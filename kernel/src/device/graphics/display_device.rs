@@ -6,9 +6,9 @@
 
 extern crate alloc;
 
+use crate::sync::IrqRwSpinLock;
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
-use crate::sync::RwLock;
 
 use super::{FramebufferConfig, PixelFormat, manager::FramebufferResource, output::DisplayRegion};
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
@@ -149,7 +149,7 @@ pub struct DisplayCharDevice {
     /// The graphics resource this display surface presents.
     fb_resource: Arc<FramebufferResource>,
     /// Track mappings for testing and diagnostics.
-    mappings: RwLock<BTreeMap<usize, DisplayMapping>>,
+    mappings: IrqRwSpinLock<BTreeMap<usize, DisplayMapping>>,
     #[cfg(test)]
     device_manager_addr: Option<usize>,
 }
@@ -167,7 +167,7 @@ impl DisplayCharDevice {
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
         Self {
             fb_resource,
-            mappings: RwLock::new(BTreeMap::new()),
+            mappings: IrqRwSpinLock::new(BTreeMap::new()),
             #[cfg(test)]
             device_manager_addr: None,
         }
@@ -190,7 +190,7 @@ impl DisplayCharDevice {
     ) -> Self {
         Self {
             fb_resource,
-            mappings: RwLock::new(BTreeMap::new()),
+            mappings: IrqRwSpinLock::new(BTreeMap::new()),
             device_manager_addr: Some(device_manager as *const DeviceManager as usize),
         }
     }

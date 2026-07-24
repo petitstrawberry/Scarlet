@@ -1,11 +1,11 @@
 use crate::abi::linux::generic::LinuxAbi;
 use crate::arch::Trapframe;
+use crate::sync::{IrqSpinLock, Once};
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
-use crate::sync::{Mutex, Once};
 
 // Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;
@@ -16,22 +16,22 @@ const FUTEX_WAKE_BITSET: u32 = 10;
 const FUTEX_CMD_MASK: u32 = 0x3f; // per Linux uapi
 
 struct FutexQueue {
-    waiters: Mutex<VecDeque<usize>>,
+    waiters: IrqSpinLock<VecDeque<usize>>,
 }
 
 impl FutexQueue {
     const fn new() -> Self {
         Self {
-            waiters: Mutex::new(VecDeque::new()),
+            waiters: IrqSpinLock::new(VecDeque::new()),
         }
     }
 }
 
 // Global registry of futex wait queues keyed by user address.
-static FUTEX_QUEUES: Once<Mutex<BTreeMap<usize, &'static FutexQueue>>> = Once::new();
+static FUTEX_QUEUES: Once<IrqSpinLock<BTreeMap<usize, &'static FutexQueue>>> = Once::new();
 
-fn init_futex_queues() -> Mutex<BTreeMap<usize, &'static FutexQueue>> {
-    Mutex::new(BTreeMap::new())
+fn init_futex_queues() -> IrqSpinLock<BTreeMap<usize, &'static FutexQueue>> {
+    IrqSpinLock::new(BTreeMap::new())
 }
 
 fn get_futex_queue(uaddr: usize) -> &'static FutexQueue {
