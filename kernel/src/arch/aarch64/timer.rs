@@ -130,6 +130,23 @@ impl ArchTimer {
         self.set_next_event(current.saturating_add(delta));
     }
 
+    /// Program the next timer event at an absolute hardware-counter deadline.
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - Absolute hardware-counter value to fire at.
+    pub fn set_deadline(&mut self, deadline: u64) {
+        self.set_next_event(deadline);
+    }
+
+    pub(crate) fn deadline_from_us(&self, deadline_us: u64) -> u64 {
+        if self.frequency == 0 {
+            return self.get_time();
+        }
+
+        deadline_us.saturating_mul(self.frequency) / 1_000_000
+    }
+
     pub fn get_time_us(&self) -> u64 {
         let now = self.get_time();
         if self.frequency == 0 {

@@ -2713,9 +2713,11 @@ pub fn start_scheduler() -> Option<usize> {
     // crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
     timer.stop(cpu_id);
     // crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
-    // crate::println!("[sched] cpu={} timer interval setup begin", cpu_id);
-    timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
-    // crate::println!("[sched] cpu={} timer interval setup complete", cpu_id);
+    // Arm the first tick as a one-shot from now + TICK_INTERVAL_US.
+    let now_us = timer.get_time_us(cpu_id);
+    let deadline_us = now_us.saturating_add(crate::timer::TICK_INTERVAL_US);
+    let deadline = timer.deadline_from_us(cpu_id, deadline_us);
+    timer.set_deadline(cpu_id, deadline);
     // crate::println!("[sched] cpu={} timer.start begin", cpu_id);
     timer.start(cpu_id);
     // crate::println!("[sched] cpu={} timer.start complete", cpu_id);
@@ -2799,6 +2801,34 @@ pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
     assert_valid_cpu_id(cpu_id);
     decode_task_id(CURRENT_TASK_IDS[cpu_id].load(Ordering::SeqCst))
+}
+
+/// Return the current CPU's running task remaining time slice in ticks.
+///
+/// Returns `None` when there is no current task, the current task is the idle
+/// task, or the scheduler is not ready. Returns `Some(0)` when the slice has
+/// already expired.
+///
+/// # Arguments
+///
+/// * `cpu_id` - The current CPU's scheduler ID.
+///
+/// # Returns
+///
+/// The running task's remaining time slice in ticks, or `None` when no
+/// schedulable task is running.
+pub fn current_task_slice_remaining(cpu_id: usize) -> Option<u32> {
+    if !scheduler_ready(cpu_id) {
+        return None;
+    }
+
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let task_id = current_task_id(cpu_id)?;
+    if task_id == idle_id {
+        return None;
+    }
+    let task = TaskPool::get_task(task_id)?;
+    Some(task.time_slice.load(Ordering::SeqCst))
 }
 
 pub fn current_task_is_idle(cpu_id: usize) -> bool {

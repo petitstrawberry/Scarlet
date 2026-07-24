@@ -7,7 +7,7 @@
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
 use crate::environment::MAX_NUM_CPUS;
-use crate::sched::scheduler::sched_on_tick;
+use crate::sched::scheduler::{current_task_slice_remaining, sched_on_tick};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 extern crate alloc;
@@ -72,6 +72,22 @@ impl KernelTimer {
     pub fn set_interval_us(&self, cpu_id: usize, interval: u64) {
         // SAFETY: Each CPU only accesses its own timer
         unsafe { (*self.core_local_timer[cpu_id].get()).set_interval_us(interval) };
+    }
+
+    /// Program the next timer event at an absolute hardware-counter deadline.
+    ///
+    /// # Arguments
+    ///
+    /// * `cpu_id` - The ID of the CPU whose timer should be programmed.
+    /// * `deadline` - Absolute hardware-counter value to fire at.
+    pub fn set_deadline(&self, cpu_id: usize, deadline: u64) {
+        // SAFETY: Each CPU only accesses its own timer
+        unsafe { (*self.core_local_timer[cpu_id].get()).set_deadline(deadline) };
+    }
+
+    pub(crate) fn deadline_from_us(&self, cpu_id: usize, deadline_us: u64) -> u64 {
+        // SAFETY: Each CPU only accesses its own timer.
+        unsafe { (*self.core_local_timer[cpu_id].get()).deadline_from_us(deadline_us) }
     }
 
     pub fn get_time_us(&self, cpu_id: usize) -> u64 {
@@ -240,8 +256,6 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
         run_scheduler as u64,
     );
     let timer = get_kernel_timer();
-    timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
-    timer.start(cpu_id);
 
     // Only the designated global timekeeper advances global time and fires
     // software timers. All other CPUs skip this block entirely.
@@ -256,6 +270,41 @@ pub fn tick_with_scheduler(trapframe: &mut Trapframe, run_scheduler: bool) {
         // Per-CPU scheduler accounting runs on every CPU when preemption is safe.
         sched_on_tick(cpu_id, trapframe);
     }
+
+    // Compute the next deadline in microseconds from now.
+    let now_us = timer.get_time_us(cpu_id);
+    let now_tick = now_us / TICK_INTERVAL_US;
+
+    // A running non-idle task must be interrupted when its current time slice
+    // expires. Idle CPUs have no time-slice constraint.
+    let slice_us = current_task_slice_remaining(cpu_id)
+        .map(|slice| (slice as u64).saturating_mul(TICK_INTERVAL_US))
+        .unwrap_or(0);
+
+    // Software timers are globally serviced only by the timekeeper CPU.
+    let timer_us = if cpu_id as u64 == GLOBAL_TIMEKEEPER_CPU.load(Ordering::Relaxed) {
+        peek_next_software_timer_deadline()
+            .map(|deadline| {
+                deadline
+                    .saturating_sub(now_tick)
+                    .saturating_mul(TICK_INTERVAL_US)
+            })
+            .unwrap_or(u64::MAX)
+    } else {
+        u64::MAX
+    };
+
+    // Keep the existing tick quantum as the minimum accounting interval and
+    // cap the one-shot interval as a safety net.
+    const MAX_TICK_INTERVAL_US: u64 = 100_000;
+    let next_delta_us = slice_us
+        .min(timer_us)
+        .clamp(TICK_INTERVAL_US, MAX_TICK_INTERVAL_US);
+
+    let deadline_us = now_us.saturating_add(next_delta_us);
+    let deadline = timer.deadline_from_us(cpu_id, deadline_us);
+    timer.set_deadline(cpu_id, deadline);
+    timer.start(cpu_id);
 }
 
 /// Get the current tick count (monotonic, since boot)
@@ -356,6 +405,23 @@ pub fn cancel_timer(id: u64) {
     }
 }
 
+/// Return the earliest pending software timer deadline in tick units, or `None`.
+///
+/// The heap can retain cancelled timers until `check_software_timers()` reaches
+/// them. This function therefore returns the earliest heap entry even when it
+/// was cancelled; the result may cause an early tick, but never delays a live
+/// timer past its deadline.
+///
+/// # Returns
+///
+/// The earliest deadline in tick units, or `None` when no software timer is
+/// queued.
+pub fn peek_next_software_timer_deadline() -> Option<u64> {
+    let heap = SOFTWARE_TIMER_HEAP.lock();
+    let _active_flags = TIMER_ACTIVE_FLAGS.read();
+    heap.peek().map(|timer| timer.expires)
+}
+
 /// Check if a timer is active (used by check_software_timers)
 #[inline]
 fn is_timer_active(id: u64) -> bool {
@@ -452,6 +518,55 @@ pub fn ticks_to_us(ticks: u64) -> u64 {
 #[inline]
 pub fn ticks_to_ns(ticks: u64) -> u64 {
     (ticks * TICK_INTERVAL_US) * 1_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestTimerHandler;
+
+    impl TimerHandler for TestTimerHandler {
+        fn on_timer_expired(self: Arc<Self>, _context: usize) {}
+    }
+
+    fn reset_software_timers() {
+        SOFTWARE_TIMER_HEAP.lock().clear();
+        TIMER_ACTIVE_FLAGS.write().clear();
+    }
+
+    #[test_case]
+    fn peek_next_software_timer_deadline_returns_none_for_an_empty_heap() {
+        reset_software_timers();
+
+        assert_eq!(peek_next_software_timer_deadline(), None);
+
+        reset_software_timers();
+    }
+
+    #[test_case]
+    fn peek_next_software_timer_deadline_returns_the_only_timer() {
+        reset_software_timers();
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        add_timer(42, &handler, 0);
+
+        assert_eq!(peek_next_software_timer_deadline(), Some(42));
+
+        reset_software_timers();
+    }
+
+    #[test_case]
+    fn peek_next_software_timer_deadline_returns_the_earliest_timer() {
+        reset_software_timers();
+        let handler: Arc<dyn TimerHandler> = Arc::new(TestTimerHandler);
+        add_timer(50, &handler, 0);
+        add_timer(10, &handler, 0);
+        add_timer(20, &handler, 0);
+
+        assert_eq!(peek_next_software_timer_deadline(), Some(10));
+
+        reset_software_timers();
+    }
 }
 
 // static mut TEST_HANDLER: Option<Arc<dyn TimerHandler>> = None;
