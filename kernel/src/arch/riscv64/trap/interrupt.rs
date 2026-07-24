@@ -62,9 +62,12 @@ fn handle_timer_interrupt(trapframe: &mut Trapframe, from_kernel: bool) {
         }
     }
 
-    // Increment the global tick counter.  Only run scheduler accounting when
-    // the trapframe is safe to store as the current task context.
-    crate::timer::tick_with_scheduler(trapframe, can_schedule_from_interrupt(from_kernel));
+    crate::timer::handle_local_timer_irq();
+    crate::sched::scheduler::handle_timer_reschedule(
+        get_cpu().get_cpuid(),
+        trapframe,
+        can_schedule_from_interrupt(from_kernel),
+    );
 }
 
 /// Handle external interrupt from PLIC

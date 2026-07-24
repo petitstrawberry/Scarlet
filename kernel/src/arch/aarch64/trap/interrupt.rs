@@ -131,7 +131,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 if DEBUG_IRQ_LIVENESS_LOGGING {
                     report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
                 }
-                crate::timer::tick_with_scheduler(trapframe, false);
+                crate::timer::handle_local_timer_irq();
             }
 
             match claim {
@@ -142,30 +142,42 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                         from_kernel,
                         can_schedule,
                     );
-                    if can_schedule {
-                        let _ = crate::sched::scheduler::take_deferred_reschedule(cpu_id as usize);
-                        if timer_pending {
-                            crate::sched::scheduler::sched_on_tick_with_reschedule(
-                                cpu_id as usize,
-                                trapframe,
-                                true,
-                            );
-                        } else {
-                            crate::sched::scheduler::schedule(trapframe);
-                        }
+                    let timer_scheduled = if timer_pending {
+                        crate::sched::scheduler::handle_timer_reschedule(
+                            cpu_id as usize,
+                            trapframe,
+                            can_schedule,
+                        )
                     } else {
-                        crate::sched::scheduler::defer_reschedule(cpu_id as usize);
+                        false
+                    };
+                    if !timer_scheduled {
+                        if can_schedule {
+                            let _ =
+                                crate::sched::scheduler::take_deferred_reschedule(cpu_id as usize);
+                            crate::sched::scheduler::schedule(trapframe);
+                        } else {
+                            crate::sched::scheduler::defer_reschedule(cpu_id as usize);
+                        }
                     }
                 }
                 Ok(_) => {
-                    if timer_pending && can_schedule {
-                        crate::sched::scheduler::sched_on_tick(cpu_id as usize, trapframe);
+                    if timer_pending {
+                        crate::sched::scheduler::handle_timer_reschedule(
+                            cpu_id as usize,
+                            trapframe,
+                            can_schedule,
+                        );
                     }
                 }
                 Err(e) => {
                     crate::println!("[aarch64][fiq] failed to claim fast interrupt: {}", e);
-                    if timer_pending && can_schedule {
-                        crate::sched::scheduler::sched_on_tick(cpu_id as usize, trapframe);
+                    if timer_pending {
+                        crate::sched::scheduler::handle_timer_reschedule(
+                            cpu_id as usize,
+                            trapframe,
+                            can_schedule,
+                        );
                     }
                 }
             }
@@ -177,7 +189,12 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             if DEBUG_IRQ_LIVENESS_LOGGING {
                 report_timer_fiq_irq_liveness(cpu_id as usize, trapframe);
             }
-            crate::timer::tick_with_scheduler(trapframe, can_schedule);
+            crate::timer::handle_local_timer_irq();
+            crate::sched::scheduler::handle_timer_reschedule(
+                cpu_id as usize,
+                trapframe,
+                can_schedule,
+            );
             return;
         }
     }
@@ -203,14 +220,22 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                     crate::sched::scheduler::defer_reschedule(cpu_id as usize);
                 }
             } else if interrupt_id == crate::drivers::pic::arm_generic_timer::timer_ppi_irq() {
-                crate::timer::tick_with_scheduler(trapframe, can_schedule);
-                ran_scheduler = can_schedule;
+                crate::timer::handle_local_timer_irq();
+                ran_scheduler = crate::sched::scheduler::handle_timer_reschedule(
+                    cpu_id as usize,
+                    trapframe,
+                    can_schedule,
+                );
             }
         }
         Ok(None) => {
             if crate::arch::interrupt::is_arch_timer_pending() {
-                crate::timer::tick_with_scheduler(trapframe, can_schedule);
-                ran_scheduler = can_schedule;
+                crate::timer::handle_local_timer_irq();
+                ran_scheduler = crate::sched::scheduler::handle_timer_reschedule(
+                    cpu_id as usize,
+                    trapframe,
+                    can_schedule,
+                );
             }
         }
         Err(e) => {
