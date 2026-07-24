@@ -6,13 +6,40 @@
 //! current readiness, and can block the current task until the interest
 //! becomes ready or an optional timeout expires.
 //!
-//! Timeout semantics use kernel ticks to avoid coupling to any specific time
-//! unit representation at the ABI layer. See `crate::timer` for conversion
-//! helpers (e.g., `ns_to_ticks`).
+//! Timeout semantics use relative nanoseconds at the ABI boundary and absolute
+//! monotonic nanosecond deadlines in the timer core.
 
 pub mod syscall;
 
 use crate::arch::Trapframe;
+
+/// Maximum one-shot delay between readiness scans when multi-registration is
+/// unavailable. The delay is always clipped to the caller's absolute deadline.
+pub const MULTI_READINESS_RECHECK_NS: u64 = crate::timer::NANOSECONDS_PER_MILLISECOND;
+
+/// Return the next deadline-clipped readiness recheck delay.
+///
+/// Multi-object waits cannot yet register a single task with every object's
+/// Waker. Callers therefore use bounded one-shot rechecks until Selectable
+/// gains multi-registration support.
+///
+/// # Arguments
+///
+/// * `deadline_ns` - Optional absolute monotonic timeout deadline.
+/// * `now_ns` - Current monotonic time in nanoseconds.
+///
+/// # Returns
+///
+/// The next relative recheck delay, or `None` when the deadline elapsed.
+pub fn multi_readiness_recheck_delay(deadline_ns: Option<u64>, now_ns: u64) -> Option<u64> {
+    match deadline_ns {
+        Some(deadline_ns) => {
+            let remaining_ns = deadline_ns.saturating_sub(now_ns);
+            (remaining_ns > 0).then_some(remaining_ns.min(MULTI_READINESS_RECHECK_NS))
+        }
+        None => Some(MULTI_READINESS_RECHECK_NS),
+    }
+}
 
 /// Interest mask for readiness queries and waits.
 #[derive(Clone, Copy, Debug, Default)]
@@ -90,10 +117,10 @@ pub trait Selectable {
     }
 
     /// Block the current task using the provided trapframe until the interest
-    /// becomes ready or the optional timeout (in ticks) expires.
+    /// becomes ready or the optional timeout (in nanoseconds) expires.
     ///
-    /// If `min_wait_ticks > 0`, the task will remain blocked for at least that
-    /// many ticks even if the interest becomes ready earlier. After the minimum
+    /// If `min_wait_ns > 0`, the task will remain blocked for at least that
+    /// duration even if the interest becomes ready earlier. After the minimum
     /// wait elapses, normal readiness-check + timeout semantics apply.
     ///
     /// Return `SelectWaitOutcome::TimedOut` if the timeout elapsed before
@@ -102,8 +129,8 @@ pub trait Selectable {
         &self,
         interest: ReadyInterest,
         trapframe: &mut Trapframe,
-        timeout_ticks: Option<u64>,
-        min_wait_ticks: u64,
+        timeout_ns: Option<u64>,
+        min_wait_ns: u64,
     ) -> SelectWaitOutcome;
 
     /// Enable or disable non-blocking I/O semantics on this object.
@@ -116,5 +143,28 @@ pub trait Selectable {
     /// Query whether non-blocking I/O semantics are enabled on this object.
     fn is_nonblocking(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn multi_readiness_recheck_clips_to_remaining_deadline() {
+        assert_eq!(multi_readiness_recheck_delay(Some(1_500), 1_000), Some(500));
+        assert_eq!(
+            multi_readiness_recheck_delay(Some(MULTI_READINESS_RECHECK_NS.saturating_mul(3)), 0,),
+            Some(MULTI_READINESS_RECHECK_NS)
+        );
+    }
+
+    #[test_case]
+    fn multi_readiness_recheck_stops_at_elapsed_deadline() {
+        assert_eq!(multi_readiness_recheck_delay(Some(1_000), 1_000), None);
+        assert_eq!(
+            multi_readiness_recheck_delay(None, 0),
+            Some(MULTI_READINESS_RECHECK_NS)
+        );
     }
 }

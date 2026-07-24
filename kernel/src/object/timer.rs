@@ -11,8 +11,8 @@ use crate::object::capability::{StreamError, StreamOps};
 use crate::sched::scheduler::current_task_id;
 use crate::sync::waker::Waker;
 use crate::timer::{
-    TimerHandler as SoftwareTimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks,
-    ticks_to_ns,
+    TimerHandle, TimerHandler as SoftwareTimerHandler, add_timer, cancel_timer,
+    coalesce_periodic_deadline, get_time_ns,
 };
 
 /// Kernel timer object usable through ABI handle layers.
@@ -29,10 +29,11 @@ pub trait TimerObject: StreamOps + Selectable {
 
 struct TimerState {
     interval_ns: u64,
-    timer_entry_id: Option<u64>,
-    next_deadline_tick: Option<u64>,
+    timer_entry_id: Option<TimerHandle>,
+    next_deadline_ns: Option<u64>,
     expirations: u64,
     active: bool,
+    generation: u64,
 }
 
 struct TimerShared {
@@ -46,9 +47,10 @@ impl TimerShared {
             state: IrqSpinLock::new(TimerState {
                 interval_ns: 0,
                 timer_entry_id: None,
-                next_deadline_tick: None,
+                next_deadline_ns: None,
                 expirations: 0,
                 active: false,
+                generation: 0,
             }),
             read_waker: Waker::new_interruptible("timer_read"),
         })
@@ -83,34 +85,28 @@ impl Timer {
         self.clock_id
     }
 
-    fn delay_ns_to_ticks(ns: u64) -> u64 {
-        if ns == 0 {
-            0
-        } else {
-            core::cmp::max(ns_to_ticks(ns), 1)
-        }
-    }
-
-    fn first_deadline_tick(first_ns: u64, absolute: bool) -> Option<u64> {
+    fn first_deadline_ns(first_ns: u64, absolute: bool) -> Option<u64> {
         if first_ns == 0 {
             return None;
         }
 
-        let now = get_tick();
-        if absolute {
-            let now_ns = ticks_to_ns(now);
-            let delay_ns = first_ns.saturating_sub(now_ns);
-            Some(now.saturating_add(Self::delay_ns_to_ticks(delay_ns).max(1)))
+        Some(if absolute {
+            first_ns
         } else {
-            Some(now.saturating_add(Self::delay_ns_to_ticks(first_ns)))
-        }
+            get_time_ns().saturating_add(first_ns)
+        })
     }
 
-    fn arm_at_locked(&self, state: &mut TimerState, target_tick: u64) {
+    fn arm_at_locked(&self, state: &mut TimerState, target_deadline_ns: u64, generation: u64) {
         let handler_dyn: Arc<dyn SoftwareTimerHandler> = self.handler.clone();
-        let entry_id = add_timer(target_tick, &handler_dyn, 0);
+        let entry_id = add_timer(
+            target_deadline_ns,
+            crate::timer::TimerPrecision::Exact,
+            &handler_dyn,
+            generation as usize,
+        );
         state.timer_entry_id = Some(entry_id);
-        state.next_deadline_tick = Some(target_tick);
+        state.next_deadline_ns = Some(target_deadline_ns);
         state.active = true;
     }
 }
@@ -128,27 +124,22 @@ impl TimerObject for Timer {
             cancel_timer(entry_id);
         }
 
+        state.generation = state.generation.wrapping_add(1);
         state.interval_ns = interval_ns;
-        state.next_deadline_tick = None;
+        state.next_deadline_ns = None;
         state.expirations = 0;
         state.active = false;
 
-        if let Some(target_tick) = Self::first_deadline_tick(first_ns, absolute) {
-            self.arm_at_locked(&mut state, target_tick);
+        if let Some(target_deadline_ns) = Self::first_deadline_ns(first_ns, absolute) {
+            let generation = state.generation;
+            self.arm_at_locked(&mut state, target_deadline_ns, generation);
         }
     }
 
     fn snapshot(&self) -> (u64, u64) {
         let state = self.shared.state.lock();
-        let remaining = match state.next_deadline_tick {
-            Some(deadline) => {
-                let now = get_tick();
-                if deadline > now {
-                    ticks_to_ns(deadline - now)
-                } else {
-                    0
-                }
-            }
+        let remaining = match state.next_deadline_ns {
+            Some(deadline) => deadline.saturating_sub(get_time_ns()),
             None => 0,
         };
         (remaining, state.interval_ns)
@@ -159,7 +150,8 @@ impl TimerObject for Timer {
         if let Some(entry_id) = state.timer_entry_id.take() {
             cancel_timer(entry_id);
         }
-        state.next_deadline_tick = None;
+        state.generation = state.generation.wrapping_add(1);
+        state.next_deadline_ns = None;
         state.active = false;
     }
 }
@@ -206,8 +198,8 @@ impl Selectable for Timer {
         &self,
         interest: ReadyInterest,
         trapframe: &mut crate::arch::Trapframe,
-        timeout_ticks: Option<u64>,
-        min_wait_ticks: u64,
+        timeout_ns: Option<u64>,
+        min_wait_ns: u64,
     ) -> SelectWaitOutcome {
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
@@ -219,21 +211,21 @@ impl Selectable for Timer {
             current_task_id(cpu_id).unwrap_or(0)
         };
 
-        let woke = if min_wait_ticks > 0 {
+        let woke = if min_wait_ns > 0 {
             self.shared.read_waker.wait_with_min_timeout(
                 task_id,
                 trapframe,
-                timeout_ticks,
-                min_wait_ticks,
+                timeout_ns,
+                min_wait_ns,
             )
         } else {
             self.shared
                 .read_waker
-                .wait_with_timeout(task_id, trapframe, timeout_ticks)
+                .wait_with_timeout(task_id, trapframe, timeout_ns)
         };
 
         let after = self.current_ready(interest);
-        if timeout_ticks.is_some() && !woke && !after.read && !after.write {
+        if timeout_ns.is_some() && !woke && !after.read && !after.write {
             SelectWaitOutcome::TimedOut
         } else {
             SelectWaitOutcome::Ready
@@ -254,34 +246,52 @@ struct TimerCallback {
 }
 
 impl SoftwareTimerHandler for TimerCallback {
-    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
 
-        {
+        let generation = context as u64;
+        let next_period = {
             let mut state = shared.state.lock();
-            if !state.active {
+            if !state.active || state.generation != generation {
                 return;
             }
 
             state.timer_entry_id = None;
-            state.next_deadline_tick = None;
-            state.expirations = state.expirations.saturating_add(1);
-
+            let now_ns = get_time_ns();
+            let expired_deadline_ns = state.next_deadline_ns.take().unwrap_or(now_ns);
             if state.interval_ns > 0 {
-                let delay_ticks = Timer::delay_ns_to_ticks(state.interval_ns);
-                let target_tick = get_tick().saturating_add(delay_ticks);
-                let handler_dyn: Arc<dyn SoftwareTimerHandler> = self.clone();
-                let entry_id = add_timer(target_tick, &handler_dyn, 0);
-                state.timer_entry_id = Some(entry_id);
-                state.next_deadline_tick = Some(target_tick);
-                state.active = true;
+                let (target_deadline_ns, overruns) =
+                    coalesce_periodic_deadline(expired_deadline_ns, state.interval_ns, now_ns);
+                state.expirations = state.expirations.saturating_add(overruns.saturating_add(1));
+                Some(target_deadline_ns)
             } else {
+                state.expirations = state.expirations.saturating_add(1);
                 state.active = false;
+                None
             }
-        }
+        };
 
         shared.read_waker.wake_all();
+
+        let Some(target_deadline_ns) = next_period else {
+            return;
+        };
+
+        let mut state = shared.state.lock();
+        if !state.active || state.generation != generation {
+            return;
+        }
+
+        let handler_dyn: Arc<dyn SoftwareTimerHandler> = self.clone();
+        let entry_id = add_timer(
+            target_deadline_ns,
+            crate::timer::TimerPrecision::Exact,
+            &handler_dyn,
+            generation as usize,
+        );
+        state.timer_entry_id = Some(entry_id);
+        state.next_deadline_ns = Some(target_deadline_ns);
     }
 }
