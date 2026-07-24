@@ -12,7 +12,7 @@ use crate::object::capability::ControlOps;
 
 pub type VcpuId = u32;
 
-const HV_VCPU_TIME_SLICE: u32 = 10;
+const HV_VCPU_TIME_SLICE_NS: u64 = 100_000_000;
 
 pub mod vcpu_ctl {
     pub const RUN: u32 = 0x01;
@@ -32,11 +32,9 @@ pub struct VcpuOneReg {
 pub fn mark_current_task_running_hv_vcpu() {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     if let Some(task) = crate::sched::scheduler::current_task(cpu_id) {
-        task.default_time_slice
-            .store(HV_VCPU_TIME_SLICE, Ordering::SeqCst);
-        if task.time_slice.load(Ordering::SeqCst) < HV_VCPU_TIME_SLICE {
-            task.time_slice.store(HV_VCPU_TIME_SLICE, Ordering::SeqCst);
-        }
+        task.time_slice_duration_ns
+            .store(HV_VCPU_TIME_SLICE_NS, Ordering::SeqCst);
+        crate::sched::scheduler::refresh_current_task_slice(cpu_id);
     }
 }
 

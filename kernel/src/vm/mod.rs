@@ -598,9 +598,20 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
     // Hold this lock through the shared page-table update so concurrent slots
     // cannot allocate competing intermediate tables for the same parent PTE.
     let mut allocator = kstack_alloc().lock();
-    let (slot_idx, base, _top) = allocator
-        .alloc_slot()
-        .ok_or("No free kernel stack window slots")?;
+    let (slot_idx, base, _top) = match allocator.alloc_slot() {
+        Some(slot) => slot,
+        None => {
+            // Do not fail a clone while a retired task is the sole owner of a
+            // reclaimable stack slot. Drop the allocator lock before reaping:
+            // Task::drop tears down its kstack window and takes this lock.
+            drop(allocator);
+            let _ = crate::sched::scheduler::get_task_pool().reclaim_retired_tasks_now();
+            allocator = kstack_alloc().lock();
+            allocator
+                .alloc_slot()
+                .ok_or("No free kernel stack window slots")?
+        }
+    };
 
     // Virtual window (skip guard page at the bottom)
     let vaddr_start = base + crate::environment::PAGE_SIZE;

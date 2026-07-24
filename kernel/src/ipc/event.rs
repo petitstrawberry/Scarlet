@@ -748,7 +748,7 @@ impl EventManager {
             event.metadata.sender = self.get_current_task_id();
         }
         // Use kernel timer tick as timestamp source
-        event.metadata.timestamp = crate::timer::get_tick();
+        event.metadata.timestamp = crate::timer::get_time_ns();
 
         match event.delivery.clone() {
             EventDelivery::Direct {
