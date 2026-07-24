@@ -47,8 +47,28 @@ const KVM_ARM_IRQ_TYPE_PPI: u32 = 2;
 static GUEST_TIMER_PPI_ENABLED_CPUS: AtomicU64 = AtomicU64::new(0);
 static GUEST_TIMER_PPI_ENABLE_WARNED: AtomicU32 = AtomicU32::new(0);
 
+#[inline]
+fn cycles_to_timeout_ns(delta_cycles: u64, frequency_hz: u64) -> u64 {
+    ((delta_cycles as u128)
+        .saturating_mul(1_000_000_000)
+        .saturating_div(frequency_hz as u128))
+    .max(1)
+    .min(u64::MAX as u128) as u64
+}
+
 fn stage2_page_size(level: usize) -> u64 {
     1u64 << (12 + 9 * level)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cycles_to_timeout_ns;
+
+    #[test_case]
+    fn guest_timer_timeout_saturates() {
+        assert_eq!(cycles_to_timeout_ns(1, 1), 1_000_000_000);
+        assert_eq!(cycles_to_timeout_ns(u64::MAX, 1), u64::MAX);
+    }
 }
 
 fn best_stage2_page_level(slot: &MemorySlot, gpa: u64, hpa: u64) -> usize {
@@ -527,7 +547,7 @@ impl Aarch64VcpuObject {
             .any(|word| *word != 0)
     }
 
-    fn guest_timer_timeout_ticks(&self) -> Option<u64> {
+    fn guest_timer_timeout_ns(&self) -> Option<u64> {
         let state = self.state.lock();
         let sysregs = &state.guest.sysregs;
         let enabled = (sysregs.cntv_ctl_el0 & TIMER_CTL_ENABLE) != 0;
@@ -546,12 +566,7 @@ impl Aarch64VcpuObject {
             return Some(1);
         }
 
-        let delta_cycles = sysregs.cntv_cval_el0 - count;
-        let tick_cycles =
-            ((freq as u128) * (crate::timer::TICK_INTERVAL_US as u128)).div_ceil(1_000_000) as u64;
-        let tick_cycles = tick_cycles.max(1);
-
-        Some(delta_cycles.div_ceil(tick_cycles).max(1))
+        Some(cycles_to_timeout_ns(sysregs.cntv_cval_el0 - count, freq))
     }
 
     fn wake_wfi_waiters(&self) {
@@ -619,16 +634,20 @@ impl VcpuObject for Aarch64VcpuObject {
             return;
         }
 
-        let timeout_ticks = self.guest_timer_timeout_ticks();
-        if matches!(timeout_ticks, Some(0)) {
+        let timeout_ns = self.guest_timer_timeout_ns();
+        if matches!(timeout_ns, Some(0)) {
             return;
         }
 
         let Some(task) = mytask() else {
             return;
         };
-        self.wfi_waker
-            .wait_with_timeout(task.get_id(), trapframe, timeout_ticks);
+        self.wfi_waker.wait_with_timeout_precision(
+            task.get_id(),
+            trapframe,
+            timeout_ns,
+            crate::timer::TimerPrecision::Exact,
+        );
     }
 
     fn get_reg(&self, index: usize) -> Result<u64, &'static str> {
