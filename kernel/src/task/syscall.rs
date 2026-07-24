@@ -33,7 +33,6 @@ use crate::task::{
     CloneFlags, CloneFlagsDef, SCHED_UTIL_SCALE, TaskState, WaitError, get_parent_waitpid_waker,
     get_waitpid_waker,
 };
-use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -952,13 +951,11 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     let nanosecs = trapframe.get_arg(0) as u64;
     let task = mytask().unwrap();
 
-    let ticks = ns_to_ticks(nanosecs);
-
     // Increment PC before sleeping to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
     // Call the blocking sleep method - this will return when sleep completes
-    task.sleep(trapframe, ticks);
+    task.sleep(trapframe, nanosecs);
 
     // Set return value to 0 for successful sleep
     0
