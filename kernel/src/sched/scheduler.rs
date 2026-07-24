@@ -58,7 +58,10 @@ use crate::{
         CurrentTaskRef, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
         wake_parent_waiters, wake_task_waiters,
     },
-    timer::{get_kernel_timer, get_time_ns},
+    timer::{
+        SCHEDULER_ACCOUNTING_QUANTUM_NS, TimerHandle, TimerHandler, add_timer, cancel_timer,
+        get_time_ns,
+    },
 };
 
 /// Maximum number of concurrently active user tasks.
@@ -72,6 +75,79 @@ static TASK_POOL: Once<TaskPool> = Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
+static SLICE_CALLBACK_TOKENS: AtomicU64 = AtomicU64::new(1);
+static SLICE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<u64, SliceCallbackContext>>> =
+    Once::new();
+static SLICE_STATES: Once<[IrqSpinLock<SliceState>; MAX_NUM_CPUS]> = Once::new();
+static SLICE_TIMER_HANDLER: Once<Arc<SliceTimerHandler>> = Once::new();
+
+#[derive(Clone, Copy)]
+struct SliceCallbackContext {
+    cpu_id: usize,
+    task_id: usize,
+    task_generation: usize,
+    generation: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveSlice {
+    handle: Option<TimerHandle>,
+    token: u64,
+}
+
+struct SliceState {
+    active: Option<ActiveSlice>,
+    generation: u64,
+    task_id: Option<usize>,
+    task_generation: Option<usize>,
+    need_resched: bool,
+}
+
+impl SliceState {
+    fn new() -> Self {
+        Self {
+            active: None,
+            generation: 0,
+            task_id: None,
+            task_generation: None,
+            need_resched: false,
+        }
+    }
+}
+
+struct SliceTimerHandler;
+
+impl TimerHandler for SliceTimerHandler {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
+        let token = context as u64;
+        let Some(context) = slice_callback_contexts().lock().remove(&token) else {
+            return;
+        };
+        let mut state = slice_states()[context.cpu_id].lock();
+        if state.generation == context.generation
+            && state.task_id == Some(context.task_id)
+            && state.task_generation == Some(context.task_generation)
+            && state.active.is_some_and(|active| active.token == token)
+        {
+            state.active = None;
+            state.need_resched = true;
+        }
+    }
+}
+
+fn slice_callback_contexts() -> &'static IrqSpinLock<BTreeMap<u64, SliceCallbackContext>> {
+    SLICE_CALLBACK_CONTEXTS.call_once(|| IrqSpinLock::new(BTreeMap::new()))
+}
+
+fn slice_states() -> &'static [IrqSpinLock<SliceState>; MAX_NUM_CPUS] {
+    SLICE_STATES.call_once(|| core::array::from_fn(|_| IrqSpinLock::new(SliceState::new())))
+}
+
+fn slice_timer_handler() -> Arc<dyn TimerHandler> {
+    SLICE_TIMER_HANDLER
+        .call_once(|| Arc::new(SliceTimerHandler))
+        .clone()
+}
 static FORK_TRACE_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
 static FORK_TRACE_PICKED_TASKS: Once<IrqSpinLock<BTreeSet<usize>>> = Once::new();
 const FORK_TRACE_ATOMIC_SLOTS: usize = 1024;
@@ -374,6 +450,15 @@ impl TaskPool {
         reclaimed
     }
 
+    /// Drop reclaimable retired tasks immediately from normal task context.
+    ///
+    /// This is used by resource allocation slow paths that can recover by
+    /// releasing tasks already retired by the scheduler. It preserves the
+    /// reaper's ownership rule: only retirement's sole `Arc<Task>` is dropped.
+    pub(crate) fn reclaim_retired_tasks_now(&self) -> usize {
+        self.reap_retired_tasks()
+    }
+
     fn has_retired_tasks(&self) -> bool {
         !self.retired_tasks.lock().is_empty()
     }
@@ -430,7 +515,7 @@ impl TaskPool {
     }
 }
 
-const TASK_REAPER_RETRY_TICKS: u64 = 1;
+const TASK_REAPER_RETRY_NS: u64 = SCHEDULER_ACCOUNTING_QUANTUM_NS;
 
 fn task_reaper_worker_entry() {
     loop {
@@ -444,7 +529,7 @@ fn task_reaper_worker_entry() {
             TASK_REAPER_WAKER.wait_with_timeout(
                 task.get_id(),
                 task.get_trapframe(),
-                Some(TASK_REAPER_RETRY_TICKS),
+                Some(TASK_REAPER_RETRY_NS),
             );
         } else {
             TASK_REAPER_WAKER.wait(task.get_id(), task.get_trapframe());
@@ -994,6 +1079,14 @@ fn update_cpu_util_avg(cpu_id: usize) {
     CPU_RUNNABLE_TASKS[cpu_id].store(runnable_tasks, Ordering::SeqCst);
 }
 
+fn update_scheduler_observers(cpu_id: usize) {
+    if !scheduler_ready(cpu_id) {
+        return;
+    }
+    update_cpu_util_avg(cpu_id);
+    crate::device::cpufreq::on_scheduler_tick(cpu_id);
+}
+
 /// Return scheduler utilization for one CPU.
 ///
 /// # Arguments
@@ -1054,6 +1147,19 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
         if let Some(task) = TaskPool::get_task(next_id) {
             task.start_cpu_accounting(now_ns);
         }
+    }
+}
+
+fn account_current_task_slice_boundary(cpu_id: usize) {
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let Some(task_id) = current_task_id(cpu_id) else {
+        return;
+    };
+    if task_id == idle_id {
+        return;
+    }
+    if let Some(task) = TaskPool::get_task(task_id) {
+        task.account_sched_util_running(get_time_ns());
     }
 }
 
@@ -1124,11 +1230,165 @@ fn try_claim_ready_task(task: &Task, cpu_id: usize) -> bool {
         return false;
     }
     task.last_cpu.store(cpu_id, Ordering::SeqCst);
-    task.time_slice.store(
-        task.default_time_slice.load(Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
     true
+}
+
+fn invalidate_local_slice(cpu_id: usize) {
+    let active = {
+        let mut state = slice_states()[cpu_id].lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.need_resched = false;
+        state.task_id = None;
+        state.task_generation = None;
+        state.active.take()
+    };
+    if let Some(active) = active {
+        slice_callback_contexts().lock().remove(&active.token);
+        if let Some(handle) = active.handle {
+            let _ = cancel_timer(handle);
+        }
+    }
+}
+
+fn arm_local_slice(cpu_id: usize, task_id: usize) {
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    if task_id == idle_id {
+        return;
+    }
+    let Some(task) = TaskPool::get_task(task_id) else {
+        return;
+    };
+    let Some(task_generation) = get_task_pool().task_generation(task_id) else {
+        return;
+    };
+    let duration_ns = task.time_slice_duration_ns.load(Ordering::SeqCst);
+    drop(task);
+    let token = SLICE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
+    let generation = {
+        let mut state = slice_states()[cpu_id].lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.need_resched = false;
+        state.task_id = Some(task_id);
+        state.task_generation = Some(task_generation);
+        state.active = Some(ActiveSlice {
+            handle: None,
+            token,
+        });
+        state.generation
+    };
+    slice_callback_contexts().lock().insert(
+        token,
+        SliceCallbackContext {
+            cpu_id,
+            task_id,
+            task_generation,
+            generation,
+        },
+    );
+    let handler = slice_timer_handler();
+    let handle = add_timer(
+        get_time_ns().saturating_add(duration_ns),
+        crate::timer::TimerPrecision::Exact,
+        &handler,
+        token as usize,
+    );
+    let keep_handle = {
+        let mut state = slice_states()[cpu_id].lock();
+        if state.generation == generation
+            && state.task_id == Some(task_id)
+            && state.active.is_some_and(|active| active.token == token)
+        {
+            state.active = Some(ActiveSlice {
+                handle: Some(handle),
+                token,
+            });
+            true
+        } else {
+            false
+        }
+    };
+    if !keep_handle {
+        let _ = cancel_timer(handle);
+    }
+}
+
+fn replace_local_slice(cpu_id: usize, next_task_id: Option<usize>) {
+    invalidate_local_slice(cpu_id);
+    if let Some(task_id) = next_task_id {
+        arm_local_slice(cpu_id, task_id);
+    }
+}
+
+fn take_local_slice_reschedule(cpu_id: usize) -> bool {
+    if cpu_id >= MAX_NUM_CPUS {
+        return false;
+    }
+
+    let mut state = slice_states()[cpu_id].lock();
+    let requested = state.need_resched;
+    state.need_resched = false;
+    requested
+}
+
+/// Consume a scheduler slice-expiry request after local software timer callbacks.
+///
+/// Architecture interrupt layers retain the trapframe and pass whether entering
+/// the scheduler is safe for this interrupt origin. A deferred request is never
+/// lost when the interrupted context is kernel or guest state.
+pub fn handle_timer_reschedule(
+    cpu_id: usize,
+    trapframe: &mut Trapframe,
+    can_schedule: bool,
+) -> bool {
+    let requested = take_local_slice_reschedule(cpu_id);
+    let needs_idle_handoff = current_task_is_idle(cpu_id) && has_ready_tasks(cpu_id);
+    if !(requested || needs_idle_handoff) {
+        return false;
+    }
+    if can_schedule && may_schedule_from_interrupt(cpu_id) {
+        schedule(trapframe);
+        true
+    } else {
+        defer_reschedule(cpu_id);
+        false
+    }
+}
+
+/// Consume a local slice expiry while the CPU is executing a guest.
+///
+/// Guest trapframes describe guest state and must never be passed to the host
+/// scheduler. This helper consumes the local slice request, records deferred
+/// host scheduler work, and reports whether guest execution must exit.
+///
+/// # Arguments
+///
+/// * `cpu_id` - CPU handling the guest-originated host timer IRQ.
+///
+/// # Returns
+///
+/// `true` when the guest must return to the host so the deferred schedule can
+/// be consumed at a host-safe point.
+pub fn consume_guest_timer_reschedule(cpu_id: usize) -> bool {
+    if cpu_id >= MAX_NUM_CPUS {
+        return false;
+    }
+
+    let requested = take_local_slice_reschedule(cpu_id);
+    let needs_idle_handoff = current_task_is_idle(cpu_id) && has_ready_tasks(cpu_id);
+    if requested || needs_idle_handoff {
+        defer_reschedule(cpu_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Refresh the current non-idle task's local slice after its duration changes.
+pub fn refresh_current_task_slice(cpu_id: usize) {
+    if current_task_is_idle(cpu_id) {
+        return;
+    }
+    replace_local_slice(cpu_id, current_task_id(cpu_id));
 }
 
 /// Register a CPU as available to the scheduler.
@@ -2322,11 +2582,10 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                 }
                 if next_id.is_none() {
                     ot.state.store(TaskState::Running, Ordering::SeqCst);
-                    ot.time_slice.store(
-                        ot.default_time_slice.load(Ordering::SeqCst),
-                        Ordering::SeqCst,
-                    );
+                    account_current_task_slice_boundary(cpu_id);
+                    replace_local_slice(cpu_id, Some(oid));
                     set_current_task_id(cpu_id, Some(oid));
+                    update_scheduler_observers(cpu_id);
                     return (old_id, Some(oid));
                 }
                 // Fall through to the normal context-switch path. The old task
@@ -2347,13 +2606,19 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
     }
 
     let Some(next_id) = next_id else {
+        invalidate_local_slice(cpu_id);
         account_task_switch(cpu_id, old_id, None);
         set_current_task_id(cpu_id, None);
+        update_scheduler_observers(cpu_id);
         return (old_id, None);
     };
 
     if let (Some(oid), Some(ot), Some(nid)) = (old_id, old_task.as_deref(), Some(next_id)) {
         if oid != nid {
+            // Invalidate before publishing a new running owner. A returning
+            // kernel switch can be delayed indefinitely, so this cannot wait
+            // for release_deferred_prev().
+            invalidate_local_slice(cpu_id);
             // Publish every real switch-out before state-specific handling.
             // `release_deferred_prev()` runs only after the low-level context
             // switch and releases the ownership token for blocked, zombie, and
@@ -2376,6 +2641,10 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
 
     account_task_switch(cpu_id, old_id, Some(next_id));
     set_current_task_id(cpu_id, Some(next_id));
+    update_scheduler_observers(cpu_id);
+    if old_id != Some(next_id) {
+        arm_local_slice(cpu_id, next_id);
+    }
     if DEBUG_SMP_TASK_FLOW {
         let (expected_task, from_cpu, seq) = debug_remote_enqueue_snapshot(cpu_id);
         if expected_task.is_some() && expected_task != Some(next_id) {
@@ -2482,64 +2751,6 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
             task_id as u64,
             target_cpu as u64,
         );
-    }
-}
-
-/// Called every timer tick. Decrements the current task's time_slice.
-/// If time_slice reaches 0, triggers a reschedule.
-pub fn sched_on_tick(cpu_id: usize, trapframe: &mut Trapframe) {
-    sched_on_tick_with_reschedule(cpu_id, trapframe, false);
-}
-
-/// Account a timer tick and optionally force a reschedule.
-///
-/// This is used when a timer and reschedule IPI share one interrupt entry. It
-/// preserves normal tick accounting while ensuring the co-pending IPI causes
-/// exactly one scheduler invocation.
-///
-/// # Arguments
-///
-/// * `cpu_id` - Logical CPU handling the timer tick.
-/// * `trapframe` - Interrupted task context to save if scheduling occurs.
-/// * `force_reschedule` - Whether a co-pending reschedule IPI requires an
-///   immediate scheduler invocation regardless of the remaining time slice.
-///
-/// # Returns
-///
-/// This function returns no value.
-pub fn sched_on_tick_with_reschedule(
-    cpu_id: usize,
-    trapframe: &mut Trapframe,
-    force_reschedule: bool,
-) {
-    if !may_schedule_from_interrupt(cpu_id) {
-        return;
-    }
-
-    let _tick = DEBUG_TICK.fetch_add(1, Ordering::Relaxed);
-    update_cpu_util_avg(cpu_id);
-    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-    if let Some(task_id) = current_task_id(cpu_id)
-        && task_id != idle_id
-        && let Some(task) = TaskPool::get_task(task_id)
-    {
-        task.account_sched_util_running(get_time_ns());
-    }
-    crate::device::cpufreq::on_scheduler_tick(cpu_id);
-
-    let should_schedule = current_task_id(cpu_id).is_some_and(|task_id| {
-        let Some(task) = TaskPool::get_task(task_id) else {
-            return true;
-        };
-        let current_slice = task.time_slice.load(Ordering::SeqCst);
-        if current_slice > 0 {
-            task.time_slice.store(current_slice - 1, Ordering::SeqCst);
-        }
-        task.time_slice.load(Ordering::SeqCst) == 0
-    });
-
-    if force_reschedule || should_schedule || current_task_id(cpu_id).is_none() {
-        schedule(trapframe);
     }
 }
 
@@ -2707,21 +2918,6 @@ pub fn start_scheduler() -> Option<usize> {
     //         BOOT_CPU_ID.load(Ordering::Acquire)
     //     );
     // }
-    // crate::println!("[sched] cpu={} get_kernel_timer begin", cpu_id);
-    let timer = get_kernel_timer();
-    // crate::println!("[sched] cpu={} get_kernel_timer complete", cpu_id);
-    // crate::println!("[sched] cpu={} timer.stop begin", cpu_id);
-    timer.stop(cpu_id);
-    // crate::println!("[sched] cpu={} timer.stop complete", cpu_id);
-    // Arm the first tick as a one-shot from now + TICK_INTERVAL_US.
-    let now_us = timer.get_time_us(cpu_id);
-    let deadline_us = now_us.saturating_add(crate::timer::TICK_INTERVAL_US);
-    let deadline = timer.deadline_from_us(cpu_id, deadline_us);
-    timer.set_deadline(cpu_id, deadline);
-    // crate::println!("[sched] cpu={} timer.start begin", cpu_id);
-    timer.start(cpu_id);
-    // crate::println!("[sched] cpu={} timer.start complete", cpu_id);
-
     // crate::println!("[sched] cpu={} pick_next begin", cpu_id);
     let (_current_task_id, next_task_id) = pick_next(cpu);
     // crate::println!(
@@ -2801,34 +2997,6 @@ pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
 pub fn current_task_id(cpu_id: usize) -> Option<usize> {
     assert_valid_cpu_id(cpu_id);
     decode_task_id(CURRENT_TASK_IDS[cpu_id].load(Ordering::SeqCst))
-}
-
-/// Return the current CPU's running task remaining time slice in ticks.
-///
-/// Returns `None` when there is no current task, the current task is the idle
-/// task, or the scheduler is not ready. Returns `Some(0)` when the slice has
-/// already expired.
-///
-/// # Arguments
-///
-/// * `cpu_id` - The current CPU's scheduler ID.
-///
-/// # Returns
-///
-/// The running task's remaining time slice in ticks, or `None` when no
-/// schedulable task is running.
-pub fn current_task_slice_remaining(cpu_id: usize) -> Option<u32> {
-    if !scheduler_ready(cpu_id) {
-        return None;
-    }
-
-    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-    let task_id = current_task_id(cpu_id)?;
-    if task_id == idle_id {
-        return None;
-    }
-    let task = TaskPool::get_task(task_id)?;
-    Some(task.time_slice.load(Ordering::SeqCst))
 }
 
 pub fn current_task_is_idle(cpu_id: usize) -> bool {
@@ -3261,7 +3429,9 @@ pub fn reset() {
         DEBUG_REMOTE_ENQUEUE_TASK[cpu_id].store(0, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_FROM_CPU[cpu_id].store(NO_CPU, Ordering::SeqCst);
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
+        *slice_states()[cpu_id].lock() = SliceState::new();
     }
+    slice_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
     DEBUG_TICK.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
@@ -3388,6 +3558,17 @@ mod tests {
         acknowledge_reschedule_ipi(0);
         assert!(reserve_reschedule_ipi(0));
         acknowledge_reschedule_ipi(0);
+    }
+
+    #[test_case]
+    fn test_guest_timer_reschedule_defers_without_scheduling() {
+        reset();
+        slice_states()[0].lock().need_resched = true;
+
+        assert!(consume_guest_timer_reschedule(0));
+        assert!(take_deferred_reschedule(0));
+        assert!(!consume_guest_timer_reschedule(0));
+        assert!(!consume_guest_timer_reschedule(MAX_NUM_CPUS));
     }
 
     #[test_case]
