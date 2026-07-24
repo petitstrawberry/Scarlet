@@ -101,7 +101,7 @@ impl Timer {
         let handler_dyn: Arc<dyn SoftwareTimerHandler> = self.handler.clone();
         let entry_id = add_timer(
             target_deadline_ns,
-            crate::timer::TimerPrecision::Exact,
+            crate::timer::TimerPrecision::Normal,
             &handler_dyn,
             generation as usize,
         );
@@ -287,7 +287,7 @@ impl SoftwareTimerHandler for TimerCallback {
         let handler_dyn: Arc<dyn SoftwareTimerHandler> = self.clone();
         let entry_id = add_timer(
             target_deadline_ns,
-            crate::timer::TimerPrecision::Exact,
+            crate::timer::TimerPrecision::Normal,
             &handler_dyn,
             generation as usize,
         );
