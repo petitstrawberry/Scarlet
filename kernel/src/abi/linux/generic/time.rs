@@ -16,7 +16,9 @@ use crate::{
     sched::scheduler::wake_task,
     task::mytask,
     time::{current_time, current_time_ns},
-    timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
+    timer::{
+        TimerHandle, TimerHandler, add_timer, cancel_timer, coalesce_periodic_deadline, get_time_ns,
+    },
 };
 use alloc::sync::{Arc, Weak};
 const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
@@ -47,11 +49,12 @@ impl PosixTimerShared {
                 sigev_value,
                 interval_ns: 0,
                 timer_entry_id: None,
-                next_deadline_tick: None,
+                next_deadline_ns: None,
                 active: false,
                 owner_task_id,
                 signal_state,
                 overrun_count: 0,
+                generation: 0,
             }),
         }
     }
@@ -69,20 +72,26 @@ pub struct PosixTimerState {
     pub sigev_signo: i32,
     pub sigev_value: u64,
     pub interval_ns: u64,
-    pub timer_entry_id: Option<u64>,
-    pub next_deadline_tick: Option<u64>,
+    pub timer_entry_id: Option<TimerHandle>,
+    pub next_deadline_ns: Option<u64>,
     pub active: bool,
     pub owner_task_id: usize,
     pub signal_state: Arc<IrqSpinLock<SignalState>>,
     pub overrun_count: u32,
+    generation: u64,
 }
 
 /// Public representation of a POSIX timer stored in the Linux ABI state.
-#[derive(Clone)]
 pub struct PosixTimer {
     pub id: u64,
     shared: Arc<PosixTimerShared>,
     handler: Arc<PosixTimerHandler>,
+}
+
+impl Drop for PosixTimer {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 impl PosixTimer {
@@ -105,7 +114,6 @@ impl PosixTimer {
             signal_state,
         ));
         let handler = Arc::new(PosixTimerHandler {
-            timer_id: id,
             shared: Arc::downgrade(&shared),
         });
         Self {
@@ -123,24 +131,26 @@ impl PosixTimer {
         if let Some(entry_id) = state.timer_entry_id.take() {
             cancel_timer(entry_id);
         }
+        state.generation = state.generation.wrapping_add(1);
         state.interval_ns = interval_ns;
         state.overrun_count = 0;
 
         if first_ns == 0 {
             state.active = false;
-            state.next_deadline_tick = None;
+            state.next_deadline_ns = None;
             return;
         }
 
-        let mut ticks = ns_to_ticks(first_ns);
-        if ticks == 0 {
-            ticks = 1;
-        }
-        let target_tick = get_tick().saturating_add(ticks);
+        let target_deadline_ns = get_time_ns().saturating_add(first_ns);
         let handler_dyn: Arc<dyn TimerHandler> = self.handler.clone();
-        let new_id = add_timer(target_tick, &handler_dyn, self.id as usize);
+        let new_id = add_timer(
+            target_deadline_ns,
+            crate::timer::TimerPrecision::Exact,
+            &handler_dyn,
+            state.generation as usize,
+        );
         state.timer_entry_id = Some(new_id);
-        state.next_deadline_tick = Some(target_tick);
+        state.next_deadline_ns = Some(target_deadline_ns);
         state.active = true;
     }
 
@@ -150,23 +160,17 @@ impl PosixTimer {
         if let Some(entry_id) = state.timer_entry_id.take() {
             cancel_timer(entry_id);
         }
+        state.generation = state.generation.wrapping_add(1);
         state.active = false;
-        state.next_deadline_tick = None;
+        state.next_deadline_ns = None;
     }
 
     /// Snapshot the remaining time (in ns) and current interval (in ns).
     pub fn snapshot(&self) -> (u64, u64) {
         let state = self.shared.lock();
         let interval = state.interval_ns;
-        let remaining = match state.next_deadline_tick {
-            Some(deadline) => {
-                let now = get_tick();
-                if deadline > now {
-                    ticks_to_ns(deadline - now)
-                } else {
-                    0
-                }
-            }
+        let remaining = match state.next_deadline_ns {
+            Some(deadline) => deadline.saturating_sub(get_time_ns()),
             None => 0,
         };
         (remaining, interval)
@@ -178,30 +182,40 @@ impl PosixTimer {
 }
 
 struct PosixTimerHandler {
-    timer_id: u64,
     shared: Weak<PosixTimerShared>,
 }
 
 impl TimerHandler for PosixTimerHandler {
-    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
 
-        // Snapshot data while holding the state lock
-        let (notify, signo, interval_ns, owner_task_id, signal_state) = {
+        let generation = context as u64;
+        let (notify, signo, owner_task_id, signal_state, next_period) = {
             let mut state = shared.lock();
-            if !state.active {
+            if !state.active || state.generation != generation {
                 return;
             }
             state.timer_entry_id = None;
-            state.next_deadline_tick = None;
+            let now_ns = get_time_ns();
+            let expired_deadline_ns = state.next_deadline_ns.take().unwrap_or(now_ns);
+            let next_period = if state.interval_ns > 0 {
+                let (target_deadline_ns, overruns) =
+                    coalesce_periodic_deadline(expired_deadline_ns, state.interval_ns, now_ns);
+                state.overrun_count = overruns.min(u32::MAX as u64) as u32;
+                Some(target_deadline_ns)
+            } else {
+                state.overrun_count = 0;
+                state.active = false;
+                None
+            };
             (
                 state.sigev_notify,
                 state.sigev_signo,
-                state.interval_ns,
                 state.owner_task_id,
                 state.signal_state.clone(),
+                next_period,
             )
         };
 
@@ -219,23 +233,24 @@ impl TimerHandler for PosixTimerHandler {
             // No wake required for SIGEV_NONE.
         }
 
-        // Re-arm periodic timers.
-        if interval_ns > 0 {
-            let mut state = shared.lock();
-            let mut ticks = ns_to_ticks(interval_ns);
-            if ticks == 0 {
-                ticks = 1;
-            }
-            let target_tick = get_tick().saturating_add(ticks);
-            let handler_dyn: Arc<dyn TimerHandler> = self.clone();
-            let entry_id = add_timer(target_tick, &handler_dyn, self.timer_id as usize);
-            state.timer_entry_id = Some(entry_id);
-            state.next_deadline_tick = Some(target_tick);
-            state.active = true;
-        } else {
-            let mut state = shared.lock();
-            state.active = false;
+        let Some(target_deadline_ns) = next_period else {
+            return;
+        };
+
+        let mut state = shared.lock();
+        if !state.active || state.generation != generation {
+            return;
         }
+
+        let handler_dyn: Arc<dyn TimerHandler> = self.clone();
+        let entry_id = add_timer(
+            target_deadline_ns,
+            crate::timer::TimerPrecision::Exact,
+            &handler_dyn,
+            generation as usize,
+        );
+        state.timer_entry_id = Some(entry_id);
+        state.next_deadline_ns = Some(target_deadline_ns);
     }
 }
 
@@ -540,17 +555,20 @@ pub fn sys_timer_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         }
     }
 
-    let timer_id = abi.allocate_posix_timer_id();
-    let timer = PosixTimer::new(
-        timer_id,
-        clock_id,
-        sigev_notify,
-        sigev_signo,
-        sigev_value,
-        task.get_id(),
-        abi.signal_state.clone(),
-    );
-    abi.store_posix_timer(timer);
+    let timer_id = match abi.create_posix_timer(|timer_id| {
+        Arc::new(PosixTimer::new(
+            timer_id,
+            clock_id,
+            sigev_notify,
+            sigev_signo,
+            sigev_value,
+            task.get_id(),
+            abi.signal_state.clone(),
+        ))
+    }) {
+        Ok(timer_id) => timer_id,
+        Err(()) => return errno::to_result(errno::EAGAIN),
+    };
 
     unsafe {
         *timerid_paddr = timer_id as u64;
@@ -806,7 +824,8 @@ pub fn sys_nanosleep(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(ptr) => unsafe { &*(ptr as *const TimeSpec) },
         None => return (-14_isize) as usize, // -EFAULT
     };
-    // Convert timespec to nanoseconds
+    // Preserve the existing nanosleep validation behavior here. Broader
+    // timespec validation is tracked separately from the tickless migration.
     let ns = rqtp
         .tv_sec
         .saturating_mul(1_000_000_000)
@@ -814,11 +833,8 @@ pub fn sys_nanosleep(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if ns <= 0 {
         return 0;
     }
-    // Convert nanoseconds to kernel ticks
-    let ticks = ns_to_ticks(ns as u64);
     trapframe.set_return_value(0); // Set return value to 0 (success)
-    // Sleep the current task for the specified ticks
-    task.sleep(trapframe, ticks);
+    task.sleep(trapframe, ns as u64);
     // If sleep is successful, this will not be reached. If interrupted, return -EINTR (not implemented)
     0
 }

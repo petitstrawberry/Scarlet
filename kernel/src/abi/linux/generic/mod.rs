@@ -17,6 +17,46 @@ use crate::arch::Trapframe;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 
 const MAX_FDS: usize = 1024;
+/// Maximum POSIX timers owned by one Linux process/thread group.
+pub const MAX_POSIX_TIMERS: usize = 1024;
+
+struct PosixTimerTable {
+    timers: BTreeMap<u64, Arc<PosixTimer>>,
+    next_timer_id: u64,
+}
+
+impl PosixTimerTable {
+    fn new() -> Self {
+        Self {
+            timers: BTreeMap::new(),
+            next_timer_id: 1,
+        }
+    }
+
+    fn reserve_id(&mut self) -> Option<u64> {
+        if self.timers.len() >= MAX_POSIX_TIMERS {
+            return None;
+        }
+
+        let mut id = self.next_timer_id.max(1);
+        for _ in 0..MAX_POSIX_TIMERS {
+            if !self.timers.contains_key(&id) {
+                self.next_timer_id = id.wrapping_add(1).max(1);
+                return Some(id);
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        None
+    }
+}
+
+impl Drop for PosixTimerTable {
+    fn drop(&mut self) {
+        for timer in self.timers.values() {
+            timer.cancel();
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct LinuxThreadState {
@@ -61,8 +101,7 @@ pub struct LinuxAbi {
     fd_table: Arc<IrqRwSpinLock<LinuxFdTable>>,
     pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
     pub thread_state: LinuxThreadState,
-    pub posix_timers: BTreeMap<u64, PosixTimer>,
-    pub next_timer_id: u64,
+    posix_timers: Arc<IrqSpinLock<PosixTimerTable>>,
 }
 
 impl Default for LinuxAbi {
@@ -74,8 +113,7 @@ impl Default for LinuxAbi {
             fd_table: Arc::new(IrqRwSpinLock::new(LinuxFdTable::default())),
             signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
-            posix_timers: BTreeMap::new(),
-            next_timer_id: 1,
+            posix_timers: Arc::new(IrqSpinLock::new(PosixTimerTable::new())),
         }
     }
 }
@@ -296,28 +334,46 @@ impl LinuxAbi {
         signal_state.next_deliverable_signal().is_some()
     }
 
-    pub fn allocate_posix_timer_id(&mut self) -> u64 {
-        let mut id = self.next_timer_id;
-        if id == 0 {
-            id = 1;
+    pub fn create_posix_timer<F>(&self, create: F) -> Result<u64, ()>
+    where
+        F: FnOnce(u64) -> Arc<PosixTimer>,
+    {
+        let mut table = self.posix_timers.lock();
+        let id = table.reserve_id().ok_or(())?;
+        table.timers.insert(id, create(id));
+        Ok(id)
+    }
+
+    pub fn get_posix_timer(&self, id: u64) -> Option<Arc<PosixTimer>> {
+        self.posix_timers.lock().timers.get(&id).cloned()
+    }
+
+    pub fn remove_posix_timer(&self, id: u64) -> Option<Arc<PosixTimer>> {
+        self.posix_timers.lock().timers.remove(&id)
+    }
+
+    pub fn reset_posix_timers(&mut self) {
+        self.posix_timers = Arc::new(IrqSpinLock::new(PosixTimerTable::new()));
+    }
+
+    /// Release this ABI instance's reference to its process-shared timer table.
+    ///
+    /// A thread exit must not cancel timers still shared by sibling threads; the
+    /// final reference releases the table and its Drop implementation cancels any
+    /// remaining timers.
+    pub fn release_posix_timers_on_task_exit(&mut self) {
+        self.reset_posix_timers();
+    }
+
+    /// Cancel all timers in the process-shared timer table.
+    ///
+    /// This is idempotent and is used by exit_group before sibling tasks retain
+    /// the shared table through their zombie lifetime.
+    pub fn cancel_posix_timers_on_process_exit(&self) {
+        let table = self.posix_timers.lock();
+        for timer in table.timers.values() {
+            timer.cancel();
         }
-        self.next_timer_id = id.wrapping_add(1);
-        if self.next_timer_id == 0 {
-            self.next_timer_id = 1;
-        }
-        id
-    }
-
-    pub fn store_posix_timer(&mut self, timer: PosixTimer) {
-        self.posix_timers.insert(timer.id, timer);
-    }
-
-    pub fn get_posix_timer(&self, id: u64) -> Option<&PosixTimer> {
-        self.posix_timers.get(&id)
-    }
-
-    pub fn remove_posix_timer(&mut self, id: u64) -> Option<PosixTimer> {
-        self.posix_timers.remove(&id)
     }
 }
 
@@ -482,4 +538,70 @@ syscall_table! {
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => proc::sys_membarrier,
     FaccessAt2 = 439 => fs::sys_faccessat2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn posix_timer(id: u64) -> Arc<PosixTimer> {
+        Arc::new(PosixTimer::new(
+            id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Arc::new(IrqSpinLock::new(signal::SignalState::new())),
+        ))
+    }
+
+    #[test_case]
+    fn posix_timer_table_rejects_capacity_exhaustion() {
+        let mut table = PosixTimerTable::new();
+        for id in 1..=MAX_POSIX_TIMERS as u64 {
+            table.timers.insert(id, posix_timer(id));
+        }
+
+        assert_eq!(table.reserve_id(), None);
+    }
+
+    #[test_case]
+    fn posix_timer_table_skips_collisions_across_id_wrap() {
+        let mut table = PosixTimerTable::new();
+        table.next_timer_id = u64::MAX;
+        table.timers.insert(u64::MAX, posix_timer(u64::MAX));
+        table.timers.insert(1, posix_timer(1));
+
+        assert_eq!(table.reserve_id(), Some(2));
+        assert_eq!(table.next_timer_id, 3);
+    }
+
+    #[test_case]
+    fn dropping_posix_timer_table_cancels_retained_timers() {
+        let timer = posix_timer(1);
+        timer.state().active = true;
+
+        {
+            let mut table = PosixTimerTable::new();
+            table.timers.insert(1, timer.clone());
+        }
+
+        assert!(!timer.state().active);
+    }
+
+    #[test_case]
+    fn task_exit_releases_only_its_posix_timer_table_reference() {
+        let mut exiting = LinuxAbi::default();
+        let mut sibling = exiting.clone();
+        let timer = posix_timer(1);
+        timer.state().active = true;
+        exiting.posix_timers.lock().timers.insert(1, timer.clone());
+
+        exiting.release_posix_timers_on_task_exit();
+        assert!(timer.state().active);
+
+        sibling.cancel_posix_timers_on_process_exit();
+        assert!(!timer.state().active);
+    }
 }
