@@ -905,6 +905,10 @@ pub struct TaskInfo {
     sched_required_capacity: u32,
     core_preference: TaskCorePreference,
     sched_migration_count: u64,
+    sched_nice: i32,
+    sched_weight: u32,
+    sched_vruntime: u64,
+    sched_deadline: u64,
 }
 
 impl TaskInfo {
@@ -963,6 +967,22 @@ impl TaskInfo {
     /// Number of scheduler-directed migrations for this task.
     pub fn sched_migration_count(&self) -> u64 {
         self.sched_migration_count
+    }
+    /// EEVDF nice value in the range -20 through +19.
+    pub fn sched_nice(&self) -> i32 {
+        self.sched_nice
+    }
+    /// EEVDF load weight derived from the nice value.
+    pub fn sched_weight(&self) -> u32 {
+        self.sched_weight
+    }
+    /// Current EEVDF virtual runtime.
+    pub fn sched_vruntime(&self) -> u64 {
+        self.sched_vruntime
+    }
+    /// Current EEVDF virtual deadline.
+    pub fn sched_deadline(&self) -> u64 {
+        self.sched_deadline
     }
 }
 
@@ -1026,6 +1046,10 @@ pub struct RawTaskInfo {
     pub core_preference: u8,
     pub _reserved2: [u8; 3],
     pub sched_migration_count: u64,
+    pub sched_nice: i32,
+    pub sched_weight: u32,
+    pub sched_vruntime: u64,
+    pub sched_deadline: u64,
 }
 
 /// Opaque raw CPU usage layout shared with the kernel (`#[repr(C)]`).
@@ -1065,6 +1089,10 @@ impl RawTaskInfo {
             sched_required_capacity: self.sched_required_capacity,
             core_preference: TaskCorePreference::from_u8(self.core_preference),
             sched_migration_count: self.sched_migration_count,
+            sched_nice: self.sched_nice,
+            sched_weight: self.sched_weight,
+            sched_vruntime: self.sched_vruntime,
+            sched_deadline: self.sched_deadline,
         }
     }
 }
@@ -1111,6 +1139,7 @@ pub fn info_raw() -> crate::vec::Vec<RawTaskInfo> {
         _reserved: 0, exit_status: 0, tgid: 0, name: [0; 64], cpu_time_ns: 0,
         sched_util_avg: 0, sched_util_min: 0, sched_required_capacity: 0,
         core_preference: 0, _reserved2: [0; 3], sched_migration_count: 0,
+        sched_nice: 0, sched_weight: 0, sched_vruntime: 0, sched_deadline: 0,
     }; total];
     let n = syscall2(
         Syscall::GetTaskInfoList,

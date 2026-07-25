@@ -1,10 +1,10 @@
 //! Scheduler module
 //!
 //! The scheduler module is responsible for scheduling tasks on the CPU.
-//! Currently, the scheduler is a simple round-robin scheduler with separate
-//! queues for different task states to improve efficiency:
+//! Runnable tasks use a per-CPU EEVDF fair queue. Blocked and zombie tasks use
+//! separate FIFO queues to keep them out of the scheduling hot path:
 //!
-//! - `ready_queue`: Tasks that are ready to run
+//! - `fair_queue`: Runnable tasks ordered by eligibility and virtual deadline
 //! - `blocked_queue`: Tasks waiting for I/O or other events
 //! - `zombie_queue`: Finished tasks waiting to be cleaned up
 //!
@@ -55,8 +55,8 @@ use crate::{
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
     task::{
-        CurrentTaskRef, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
-        wake_parent_waiters, wake_task_waiters,
+        CurrentTaskRef, NICE_0_LOAD, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState,
+        new_kernel_task, wake_parent_waiters, wake_task_waiters,
     },
     timer::{
         SCHEDULER_ACCOUNTING_QUANTUM_NS, TimerHandle, TimerHandler, add_timer, cancel_timer,
@@ -557,8 +557,8 @@ static CURRENT_TASK_IDS: [AtomicUsize; MAX_NUM_CPUS] =
 static SCHEDULER_READY: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static BOOT_CPU_ID: AtomicUsize = AtomicUsize::new(0);
-static READY_QUEUES: [IrqSpinLock<VecDeque<usize>>; MAX_NUM_CPUS] =
-    [const { IrqSpinLock::new(VecDeque::new()) }; MAX_NUM_CPUS];
+static FAIR_QUEUES: [IrqSpinLock<FairQueue>; MAX_NUM_CPUS] =
+    [const { IrqSpinLock::new(FairQueue::new()) }; MAX_NUM_CPUS];
 static ZOMBIE_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
 static BLOCKED_QUEUE: IrqSpinLock<VecDeque<usize>> = IrqSpinLock::new(VecDeque::new());
 static ONLINE_CPUS: IrqSpinLock<alloc::vec::Vec<usize>> = IrqSpinLock::new(alloc::vec::Vec::new());
@@ -589,6 +589,296 @@ const SCHED_DEMOTION_MARGIN: u32 = 128;
 const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 const SCHED_LATERAL_BALANCE_MARGIN: u64 = TASK_LOAD_SCALE / 4;
+
+/// Target fair-scheduling period in nanoseconds. With few runners the queue
+/// aims to cycle every task within this window.
+const SCHED_LATENCY_NS: u64 = 5_000_000;
+/// Per-task minimum quantum in nanoseconds. Below this a task cannot be
+/// preempted mid-run, which bounds pick frequency under load.
+const SCHED_MIN_GRANULARITY_NS: u64 = 750_000;
+
+/// Compute the fair-scheduling period for a queue with `nr_running` entities.
+///
+/// Matches Linux's `__sched_period`: when the queue fits inside
+/// [`SCHED_LATENCY_NS`], every entity gets a slice each period; otherwise the
+/// period grows so each entity receives at least [`SCHED_MIN_GRANULARITY_NS`].
+#[inline]
+const fn sched_period(nr_running: usize) -> u64 {
+    if nr_running * (SCHED_MIN_GRANULARITY_NS as usize) > SCHED_LATENCY_NS as usize {
+        (nr_running as u64).saturating_mul(SCHED_MIN_GRANULARITY_NS)
+    } else {
+        SCHED_LATENCY_NS
+    }
+}
+
+/// Translate a real-time delta into virtual time for an entity of `weight`.
+///
+/// Mirrors Linux's `calc_delta_fair`: heavier weights advance virtual time
+/// more slowly, so they receive more real CPU per virtual unit. Uses u128
+/// intermediates to avoid overflow at hour-scale uptimes.
+#[inline]
+fn calc_delta_fair(delta_ns: u64, weight: u32) -> u64 {
+    if weight == 0 {
+        return delta_ns;
+    }
+    let result = (delta_ns as u128).saturating_mul(NICE_0_LOAD as u128) / weight as u128;
+    result.min(u64::MAX as u128) as u64
+}
+
+/// Compute the per-entity quantum for a queue whose total weight is
+/// `total_weight` and whose scheduling period is `period_ns`.
+///
+/// `slice = period * weight / total_weight`, clamped to
+/// [`SCHED_MIN_GRANULARITY_NS`] so a low-weight task cannot be starved of
+/// runnable time.
+#[inline]
+fn sched_slice(period_ns: u64, weight: u32, total_weight: u64) -> u64 {
+    if total_weight == 0 {
+        return SCHED_MIN_GRANULARITY_NS;
+    }
+    let slice = ((period_ns as u128).saturating_mul(weight as u128) / total_weight as u128) as u64;
+    slice.max(SCHED_MIN_GRANULARITY_NS)
+}
+
+/// Recompute an entity's virtual deadline.
+///
+/// `deadline = vruntime + calc_delta_fair(slice, weight)`. The fair scheduler
+/// picks the eligible entity with the smallest deadline.
+#[inline]
+fn fair_deadline(vruntime: u64, slice_ns: u64, weight: u32) -> u64 {
+    vruntime.saturating_add(calc_delta_fair(slice_ns, weight))
+}
+
+/// Convert an entity's remaining virtual request into the wall-time duration
+/// for its next one-shot slice timer.
+#[inline]
+fn fair_slice_remaining_ns(vruntime: u64, deadline: u64, slice_ns: u64, weight: u32) -> u64 {
+    if slice_ns == 0 || deadline <= vruntime {
+        return slice_ns;
+    }
+
+    let remaining_virtual = deadline - vruntime;
+    let numerator = (remaining_virtual as u128).saturating_mul(u128::from(weight.max(1)));
+    let wall_ns = numerator.saturating_add(u128::from(NICE_0_LOAD - 1)) / u128::from(NICE_0_LOAD);
+    let wall_ns = wall_ns.min(u128::from(u64::MAX)) as u64;
+    wall_ns.clamp(1, slice_ns)
+}
+
+#[inline]
+fn renew_deadline_if_consumed(vruntime: u64, deadline: u64, slice_ns: u64, weight: u32) -> u64 {
+    if vruntime >= deadline {
+        fair_deadline(vruntime, slice_ns, weight)
+    } else {
+        deadline
+    }
+}
+
+/// Composite key ordering fair-queue entities.
+///
+/// Primary key is the virtual deadline (EEVDF picks the smallest eligible
+/// deadline). Ties fall back to virtual runtime, then to task id, so two
+/// entities with identical EEVDF coordinates still have a deterministic
+/// `BTreeMap` order.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug)]
+struct FairKey {
+    deadline: u64,
+    vruntime: u64,
+    task_id: usize,
+}
+
+impl FairKey {
+    const fn new(deadline: u64, vruntime: u64, task_id: usize) -> Self {
+        Self {
+            deadline,
+            vruntime,
+            task_id,
+        }
+    }
+}
+
+/// Per-CPU fair run queue.
+///
+/// Holds runnable task ids keyed by [`FairKey`] for O(log n) eligible
+/// min-deadline picks. Authoritative per-entity state (`vruntime`,
+/// `deadline`, `slice`, `weight`) lives on [`Task`]; the queue caches only
+/// the aggregates needed to advance virtual time without re-scanning.
+struct FairQueue {
+    tree: BTreeMap<FairKey, usize>,
+    entries: BTreeMap<usize, FairKey>,
+    weights: BTreeMap<usize, u32>,
+    min_vruntime: u64,
+    sum_w_vruntime: i128,
+    avg_load: u64,
+    nr_running: usize,
+}
+
+impl FairQueue {
+    const fn new() -> Self {
+        Self {
+            tree: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            weights: BTreeMap::new(),
+            min_vruntime: 0,
+            sum_w_vruntime: 0,
+            avg_load: 0,
+            nr_running: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nr_running == 0
+    }
+
+    fn len(&self) -> usize {
+        self.nr_running
+    }
+
+    fn contains(&self, task_id: &usize) -> bool {
+        self.entries.contains_key(task_id)
+    }
+
+    fn task_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.entries.keys().copied()
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.tree.clear();
+        self.entries.clear();
+        self.weights.clear();
+        self.min_vruntime = 0;
+        self.sum_w_vruntime = 0;
+        self.avg_load = 0;
+        self.nr_running = 0;
+    }
+
+    /// Weighted average virtual runtime over queued entities.
+    ///
+    /// EEVDF defines `lag_i = avg_vruntime - vruntime_i`; an entity is
+    /// eligible iff its lag is non-negative. Returns [`FairQueue::min_vruntime`]
+    /// when the queue is empty so the value stays monotonic and sensible.
+    fn avg_vruntime(&self) -> u64 {
+        if self.avg_load == 0 {
+            return self.min_vruntime;
+        }
+        let avg = self.sum_w_vruntime / self.avg_load as i128;
+        if avg < 0 {
+            self.min_vruntime
+        } else {
+            avg as u64
+        }
+    }
+
+    /// Return the entity key for `task_id`, if it is currently queued.
+    #[cfg(test)]
+    fn key_for(&self, task_id: usize) -> Option<FairKey> {
+        self.entries.get(&task_id).copied()
+    }
+
+    /// Insert a freshly-placed entity into the queue.
+    ///
+    /// Caller is responsible for setting `vruntime`, `deadline`, and `on_rq`
+    /// on the [`Task`] before calling this; the queue only indexes what is
+    /// already authoritative.
+    fn insert(&mut self, task_id: usize, key: FairKey, vruntime: u64, weight: u32) {
+        debug_assert!(!self.entries.contains_key(&task_id), "double enqueue");
+        self.tree.insert(key, task_id);
+        self.entries.insert(task_id, key);
+        self.weights.insert(task_id, weight);
+        self.sum_w_vruntime = self
+            .sum_w_vruntime
+            .saturating_add((vruntime as i128).saturating_mul(weight as i128));
+        self.avg_load = self.avg_load.saturating_add(weight as u64);
+        self.nr_running = self.nr_running.saturating_add(1);
+        self.bump_min_vruntime(vruntime);
+    }
+
+    /// Remove an entity from the queue using its insertion-time weight so the
+    /// weighted-sum bookkeeping stays balanced if its nice value changed.
+    fn remove(&mut self, task_id: usize) -> Option<FairKey> {
+        let key = self.entries.remove(&task_id)?;
+        let weight = self
+            .weights
+            .remove(&task_id)
+            .expect("fair queue weight missing for entity");
+        self.tree.remove(&key);
+        self.sum_w_vruntime = self
+            .sum_w_vruntime
+            .saturating_sub((key.vruntime as i128).saturating_mul(weight as i128));
+        self.avg_load = self.avg_load.saturating_sub(weight as u64);
+        self.nr_running = self.nr_running.saturating_sub(1);
+        self.bump_min_vruntime(key.vruntime);
+        Some(key)
+    }
+
+    /// Re-insert under a new key after `vruntime` or `deadline` advanced,
+    /// applying the resulting weighted-sum delta to `sum_w_vruntime`.
+    #[cfg(test)]
+    fn rekey(&mut self, task_id: usize, vruntime: u64, weight: u32, new_key: FairKey) {
+        let prev = self
+            .entries
+            .remove(&task_id)
+            .expect("rekey on missing entity");
+        let removed = self.tree.remove(&prev);
+        debug_assert!(removed.is_some(), "rekey missing tree entry");
+        self.tree.insert(new_key, task_id);
+        self.entries.insert(task_id, new_key);
+        let prev_weight = self
+            .weights
+            .insert(task_id, weight)
+            .expect("rekey weight missing for entity");
+        self.sum_w_vruntime = self
+            .sum_w_vruntime
+            .saturating_sub((prev.vruntime as i128).saturating_mul(prev_weight as i128))
+            .saturating_add((vruntime as i128).saturating_mul(weight as i128));
+        self.avg_load = self
+            .avg_load
+            .saturating_sub(prev_weight as u64)
+            .saturating_add(weight as u64);
+        self.bump_min_vruntime(vruntime);
+    }
+
+    /// Advance the queue's monotonic floor.
+    ///
+    /// `min_vruntime` is the smaller of the candidate (typically the
+    /// currently-running entity's vruntime) and the smallest queued
+    /// vruntime. It never decreases. This is the same invariant Linux's
+    /// `update_min_vruntime` maintains and is what lets migrating entities
+    /// be re-placed without gaining virtual time.
+    fn bump_min_vruntime(&mut self, candidate: u64) {
+        let min_queued = self.tree.keys().map(|k| k.vruntime).min();
+        let new_floor = match min_queued {
+            Some(m) => candidate.min(m),
+            None => candidate,
+        };
+        if new_floor > self.min_vruntime {
+            self.min_vruntime = new_floor;
+        }
+    }
+
+    /// Pick the eligible entity with the smallest virtual deadline.
+    ///
+    /// Returns `None` for an empty queue. If every queued entity is currently
+    /// over-served (`lag < 0`), the queue snaps `avg_vruntime` forward to the
+    /// smallest queued `vruntime` and re-evaluates, mirroring the
+    /// "no eligible entity" rule from Zircon and the EEVDF paper.
+    fn pick_eligible_min_deadline(&self) -> Option<FairKey> {
+        let avg = self.avg_vruntime();
+        // BTreeMap iterates in FairKey order (deadline, vruntime, task_id),
+        // so the first queued entity whose vruntime is at or below avg is
+        // already the smallest-deadline eligible pick.
+        if let Some((&key, _)) = self.tree.iter().find(|(k, _)| k.vruntime <= avg) {
+            return Some(key);
+        }
+        // Nobody eligible: snap avg forward to the smallest queued vruntime
+        // and return the smallest-deadline entity at that point.
+        let snap = self.tree.keys().map(|k| k.vruntime).min()?;
+        self.tree
+            .iter()
+            .find(|(k, _)| k.vruntime == snap)
+            .map(|(k, _)| *k)
+    }
+}
 
 // DIAGNOSTIC: Set these constants to false after the Apple SMP fork/migration
 // experiment. The normal placement and work-stealing code remains below.
@@ -930,7 +1220,7 @@ pub fn debug_log_reschedule_ipi(cpu_id: usize, from_kernel: bool, can_schedule: 
             .unwrap_or_else(|| "<none>".to_string()),
         from_cpu,
         seq,
-        ready_queue(cpu_id).lock().len(),
+        fair_queue(cpu_id).lock().len(),
     );
 }
 
@@ -981,8 +1271,13 @@ fn release_deferred_prev(cpu_id: usize) {
                 if target_cpu != cpu_id {
                     record_scheduler_migration(&task, cpu_id, target_cpu, now_ns);
                 }
+                let mode = if target_cpu == cpu_id {
+                    PlaceMode::LocalPreempt
+                } else {
+                    PlaceMode::Migrate
+                };
+                push_ready_task_with_mode(target_cpu, prev_id, mode);
                 task.last_cpu.store(target_cpu, Ordering::SeqCst);
-                push_ready_task(target_cpu, prev_id);
                 notify_remote_ready_task(target_cpu, prev_id, "migrate-ipi-send");
             }
             TaskState::Zombie => {
@@ -1049,8 +1344,8 @@ fn cpu_instant_util(cpu_id: usize) -> (u32, u32, usize) {
         util_min = util_min.max(task_util_min_by_id(task_id));
     }
 
-    let queue = ready_queue(cpu_id).lock();
-    for &task_id in queue.iter() {
+    let queue = fair_queue(cpu_id).lock();
+    for task_id in queue.task_ids() {
         if task_id == idle_id {
             continue;
         }
@@ -1134,9 +1429,12 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
 
     if let Some(old_id) = old_id {
         if let Some(task) = TaskPool::get_task(old_id) {
+            let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+            if old_id != idle_id {
+                update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
+            }
             let delta_ns = task.stop_cpu_accounting(now_ns);
             charge_finished_cpu_time(cpu_id, old_id, delta_ns);
-            let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
             if old_id != idle_id {
                 task.account_sched_util_running(now_ns);
             }
@@ -1159,7 +1457,25 @@ fn account_current_task_slice_boundary(cpu_id: usize) {
         return;
     }
     if let Some(task) = TaskPool::get_task(task_id) {
-        task.account_sched_util_running(get_time_ns());
+        let now_ns = get_time_ns();
+        update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
+        task.account_sched_util_running(now_ns);
+    }
+}
+
+fn account_local_fair_clock(cpu_id: usize, now_ns: u64) {
+    if get_cpu().get_cpuid() != cpu_id {
+        return;
+    }
+    let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
+    let Some(task_id) = current_task_id(cpu_id) else {
+        return;
+    };
+    if task_id == idle_id {
+        return;
+    }
+    if let Some(task) = TaskPool::get_task(task_id) {
+        update_curr_fair(&task, &mut fair_queue(cpu_id).lock(), now_ns);
     }
 }
 
@@ -1261,7 +1577,17 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let Some(task_generation) = get_task_pool().task_generation(task_id) else {
         return;
     };
-    let duration_ns = task.time_slice_duration_ns.load(Ordering::SeqCst);
+    let fair_slice_ns = task.sched_slice_ns.load(Ordering::SeqCst);
+    let duration_ns = if fair_slice_ns == 0 {
+        task.time_slice_duration_ns.load(Ordering::SeqCst)
+    } else {
+        fair_slice_remaining_ns(
+            task.sched_vruntime.load(Ordering::SeqCst),
+            task.sched_deadline.load(Ordering::SeqCst),
+            fair_slice_ns,
+            task.sched_weight(),
+        )
+    };
     drop(task);
     let token = SLICE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
     let generation = {
@@ -1602,7 +1928,7 @@ fn task_present_on_cpu(cpu_id: usize, task_id: usize) -> bool {
         return true;
     }
 
-    ready_queue(cpu_id).lock().contains(&task_id)
+    fair_queue(cpu_id).lock().contains(&task_id)
 }
 
 fn cpu_runnable_weight(cpu_id: usize) -> u64 {
@@ -1615,8 +1941,8 @@ fn cpu_runnable_weight(cpu_id: usize) -> u64 {
         }
     }
 
-    let queue = ready_queue(cpu_id).lock();
-    for &task_id in queue.iter() {
+    let queue = fair_queue(cpu_id).lock();
+    for task_id in queue.task_ids() {
         if task_id != idle_id {
             weight = weight.saturating_add(runnable_task_weight(task_id));
         }
@@ -1806,11 +2132,11 @@ fn steal_candidate_from_cpu(
     now_ns: u64,
 ) -> Option<(usize, u64)> {
     let idle_id = IDLE_TASK_IDS[victim_cpu].load(Ordering::SeqCst);
-    let queue = ready_queue(victim_cpu).lock();
+    let queue = fair_queue(victim_cpu).lock();
     let mut weight = 0u64;
     let mut candidate = None;
 
-    for &task_id in queue.iter() {
+    for task_id in queue.task_ids() {
         if task_id == idle_id {
             continue;
         }
@@ -1843,11 +2169,14 @@ fn steal_candidate_from_cpu(
 }
 
 fn remove_ready_task_from_cpu(cpu_id: usize, task_id: usize) -> bool {
-    let mut queue = ready_queue(cpu_id).lock();
-    let Some(index) = queue.iter().position(|&queued_id| queued_id == task_id) else {
+    let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
-    queue.remove(index).is_some()
+    let removed = fair_queue(cpu_id).lock().remove(task_id).is_some();
+    if removed {
+        task.sched_on_rq.store(false, Ordering::SeqCst);
+    }
+    removed
 }
 
 fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
@@ -1896,11 +2225,15 @@ fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
     let Some(task) = TaskPool::get_task(task_id) else {
         return None;
     };
+    {
+        let queue = fair_queue(target_cpu).lock();
+        place_entity(&task, &queue, PlaceMode::Migrate);
+    }
     if !try_claim_ready_task(&task, target_cpu) {
         if matches!(task.state.load(Ordering::SeqCst), TaskState::Ready)
             && task.running_cpu.load(Ordering::SeqCst) == NO_CPU
         {
-            push_ready_task(victim_cpu, task_id);
+            push_ready_task_with_mode(victim_cpu, task_id, PlaceMode::LocalPreempt);
         }
         return None;
     }
@@ -2160,7 +2493,7 @@ fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static s
             target_cpu,
             task_id,
             debug_task_name(task_id),
-            ready_queue(target_cpu).lock().len(),
+            fair_queue(target_cpu).lock().len(),
         );
     }
     request_remote_reschedule(target_cpu);
@@ -2272,9 +2605,139 @@ pub fn diagnostic_snapshot(cpu_id: usize) -> Option<SchedulerDiagnosticSnapshot>
 }
 
 #[inline]
-fn ready_queue(cpu_id: usize) -> &'static IrqSpinLock<VecDeque<usize>> {
+fn fair_queue(cpu_id: usize) -> &'static IrqSpinLock<FairQueue> {
     assert_valid_cpu_id(cpu_id);
-    &READY_QUEUES[cpu_id]
+    &FAIR_QUEUES[cpu_id]
+}
+
+/// How a task is being placed onto a fair queue.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PlaceMode {
+    /// First-time enqueue of a freshly created or newly woken task. Initialise
+    /// `vruntime` against the queue's average so the task starts at fair share.
+    New,
+    /// Re-enqueue after running on this CPU (preempted but staying local).
+    /// Keep `vruntime` as-is.
+    LocalPreempt,
+    /// Enqueue onto a different CPU than the one that last ran the task.
+    /// Normalise `vruntime` up to the destination's `min_vruntime` so the
+    /// migrant cannot consume backlog virtual time.
+    Migrate,
+}
+
+/// Initialise or normalise a task's EEVDF state against `queue` and return
+/// the [`FairKey`] the caller should use when inserting.
+///
+/// Updates the task's `vruntime`, `slice`, and `deadline` fields. Does not
+/// touch the queue itself; pair with [`FairQueue::insert`] to make the
+/// placement visible.
+fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
+    let weight = task.sched_weight();
+    let avg = queue.avg_vruntime();
+    let min_vruntime = queue.min_vruntime;
+    let vruntime = match mode {
+        PlaceMode::New => avg,
+        PlaceMode::LocalPreempt => task.sched_vruntime(),
+        PlaceMode::Migrate => task.sched_vruntime().max(min_vruntime),
+    };
+    task.sched_vruntime.store(vruntime, Ordering::SeqCst);
+
+    let (slice, deadline) = match mode {
+        PlaceMode::LocalPreempt => {
+            let slice = task.sched_slice_ns.load(Ordering::SeqCst);
+            let deadline = task.sched_deadline.load(Ordering::SeqCst);
+            if slice != 0 && deadline > vruntime {
+                (slice, deadline)
+            } else {
+                let period = sched_period(queue.nr_running.saturating_add(1));
+                let total_weight = queue.avg_load.saturating_add(weight as u64);
+                let slice = sched_slice(period, weight, total_weight);
+                (slice, fair_deadline(vruntime, slice, weight))
+            }
+        }
+        PlaceMode::New | PlaceMode::Migrate => {
+            let period = sched_period(queue.nr_running.saturating_add(1));
+            let total_weight = queue.avg_load.saturating_add(weight as u64);
+            let slice = sched_slice(period, weight, total_weight);
+            (slice, fair_deadline(vruntime, slice, weight))
+        }
+    };
+    task.sched_slice_ns.store(slice, Ordering::SeqCst);
+    task.sched_deadline.store(deadline, Ordering::SeqCst);
+
+    FairKey::new(deadline, vruntime, task.get_id())
+}
+
+/// Advance a running task's `vruntime` and `deadline` by the wall-time delta
+/// since its last update.
+///
+/// The task is not in the queue while it runs (it was popped by `pick_fair`),
+/// so this only updates authoritative Task fields plus the queue's
+/// `min_vruntime` floor; no `rekey` is needed.
+fn update_curr_fair(task: &Task, queue: &mut FairQueue, now_ns: u64) {
+    let last = task.sched_exec_start_ns.load(Ordering::SeqCst);
+    if last == 0 {
+        return;
+    }
+    let delta_ns = now_ns.saturating_sub(last);
+    if delta_ns == 0 {
+        return;
+    }
+    task.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
+
+    let weight = task.sched_weight();
+    let delta_fair = calc_delta_fair(delta_ns, weight);
+    let vruntime = task.sched_vruntime.load(Ordering::SeqCst);
+    let new_vruntime = vruntime.saturating_add(delta_fair);
+    task.sched_vruntime.store(new_vruntime, Ordering::SeqCst);
+
+    let prev_deadline = task.sched_deadline.load(Ordering::SeqCst);
+    let slice = task.sched_slice_ns.load(Ordering::SeqCst);
+    let renewed_deadline = renew_deadline_if_consumed(new_vruntime, prev_deadline, slice, weight);
+    if renewed_deadline != prev_deadline {
+        task.sched_deadline
+            .store(renewed_deadline, Ordering::SeqCst);
+    }
+
+    queue.bump_min_vruntime(new_vruntime);
+}
+
+/// Place and insert a task into the destination CPU's fair queue.
+fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
+    if task
+        .sched_on_rq
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let mut queue = fair_queue(cpu_id).lock();
+    let key = place_entity(task, &queue, mode);
+    queue.insert(
+        task.get_id(),
+        key,
+        task.sched_vruntime.load(Ordering::SeqCst),
+        task.sched_weight(),
+    );
+}
+
+/// Pop the eligible min-deadline entity from the local fair queue and return
+/// its task id. Returns `None` when the queue is empty or no entity can be
+/// claimed.
+fn pick_fair(cpu_id: usize) -> Option<usize> {
+    loop {
+        let key = {
+            let mut queue = fair_queue(cpu_id).lock();
+            let key = queue.pick_eligible_min_deadline()?;
+            queue.remove(key.task_id);
+            key
+        };
+        let Some(task) = TaskPool::get_task(key.task_id) else {
+            continue;
+        };
+        task.sched_on_rq.store(false, Ordering::SeqCst);
+        return Some(key.task_id);
+    }
 }
 
 #[inline]
@@ -2285,16 +2748,31 @@ fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
 
 #[inline]
 pub fn push_ready_task(cpu_id: usize, task_id: usize) {
+    let mode = TaskPool::get_task(task_id).map(|task| {
+        if task.sched_deadline.load(Ordering::SeqCst) == 0 {
+            PlaceMode::New
+        } else if task.last_cpu.load(Ordering::SeqCst) != cpu_id {
+            PlaceMode::Migrate
+        } else {
+            PlaceMode::LocalPreempt
+        }
+    });
+    if let Some(mode) = mode {
+        push_ready_task_with_mode(cpu_id, task_id, mode);
+    }
+}
+
+fn push_ready_task_with_mode(cpu_id: usize, task_id: usize, mode: PlaceMode) {
     let cpu_id =
         if TaskPool::get_task(task_id).is_some_and(|task| diagnostic_run_task_on_bsp(&task)) {
             BOOT_CPU_ID.load(Ordering::Acquire)
         } else {
             cpu_id
         };
-    let mut queue = ready_queue(cpu_id).lock();
-    if !queue.contains(&task_id) {
-        queue.push_back(task_id);
-    }
+    let Some(task) = TaskPool::get_task(task_id) else {
+        return;
+    };
+    enqueue_fair(cpu_id, &task, mode);
 }
 
 /// Mark a process-fork child for focused first-run tracing.
@@ -2475,7 +2953,7 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
 
     let mut next_id: Option<usize> = None;
     'outer: loop {
-        let candidate = { ready_queue(cpu_id).lock().pop_front() };
+        let candidate = pick_fair(cpu_id);
         crate::breadcrumb::drop(
             crate::breadcrumb::PICK_QUEUE_DONE,
             cpu_id as u64,
@@ -2487,7 +2965,11 @@ fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
                     continue;
                 };
                 if task.pinned_cpu.is_some_and(|p| p != cpu_id) {
-                    push_ready_task(task.pinned_cpu.unwrap(), task_id);
+                    push_ready_task_with_mode(
+                        task.pinned_cpu.unwrap(),
+                        task_id,
+                        PlaceMode::Migrate,
+                    );
                     continue;
                 }
                 match task.state.load(Ordering::SeqCst) {
@@ -2712,7 +3194,7 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
     if let Some(task) = TaskPool::get_task(task_id) {
         task.last_cpu.store(target_cpu, Ordering::SeqCst);
     }
-    push_ready_task(target_cpu, task_id);
+    push_ready_task_with_mode(target_cpu, task_id, PlaceMode::New);
     if DEBUG_SMP_TASK_FLOW {
         println!(
             "[SMPDBG enqueue] seq={} from_cpu={} target_cpu={} task={} name={} remote={} ready_len={}",
@@ -2722,7 +3204,7 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
             task_id,
             debug_task_name(task_id),
             target_cpu != current_cpu,
-            ready_queue(target_cpu).lock().len(),
+            fair_queue(target_cpu).lock().len(),
         );
     }
     let remote = is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid();
@@ -2739,7 +3221,7 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
                 target_cpu,
                 task_id,
                 debug_task_name(task_id),
-                ready_queue(target_cpu).lock().len(),
+                fair_queue(target_cpu).lock().len(),
             );
         }
         request_remote_reschedule(target_cpu);
@@ -3006,7 +3488,7 @@ pub fn current_task_is_idle(cpu_id: usize) -> bool {
 
 pub fn has_ready_tasks(cpu_id: usize) -> bool {
     assert_valid_cpu_id(cpu_id);
-    !READY_QUEUES[cpu_id].lock().is_empty()
+    !FAIR_QUEUES[cpu_id].lock().is_empty()
 }
 
 pub fn get_task_by_id(task_id: usize) -> Option<Arc<Task>> {
@@ -3028,7 +3510,8 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
-    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, target_cpu, get_time_ns()) else {
+    let now_ns = get_time_ns();
+    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, target_cpu, now_ns) else {
         return false;
     };
 
@@ -3052,6 +3535,7 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     }
 
     unmark_blocked(task_id);
+    account_local_fair_clock(target_cpu, now_ns);
     if DEBUG_SMP_TASK_FLOW {
         println!(
             "[SMPDBG wake-task-on] current_cpu={} target_cpu={} task={} name={} state=Ready enqueue",
@@ -3061,7 +3545,8 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
             debug_task_name(task_id),
         );
     }
-    push_ready_task(target_cpu, task_id);
+    push_ready_task_with_mode(target_cpu, task_id, PlaceMode::New);
+    task.last_cpu.store(target_cpu, Ordering::SeqCst);
 
     if target_cpu != get_cpu().get_cpuid() {
         let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3077,7 +3562,7 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
                 target_cpu,
                 task_id,
                 debug_task_name(task_id),
-                ready_queue(target_cpu).lock().len(),
+                fair_queue(target_cpu).lock().len(),
             );
         }
         request_remote_reschedule(target_cpu);
@@ -3136,10 +3621,13 @@ pub fn complete_non_current_task_exit(task_id: usize) {
 pub fn remove_from_ready_queues(task_id: usize) {
     let _irq_guard = IrqGuard::new();
 
+    let Some(task) = TaskPool::get_task(task_id) else {
+        return;
+    };
+
     for_each_online_cpu(|cpu_id| {
-        let mut queue = ready_queue(cpu_id).lock();
-        while let Some(pos) = queue.iter().position(|&id| id == task_id) {
-            queue.remove(pos);
+        if fair_queue(cpu_id).lock().remove(task_id).is_some() {
+            task.sched_on_rq.store(false, Ordering::SeqCst);
         }
     });
 }
@@ -3169,8 +3657,8 @@ pub fn get_all_task_ids() -> alloc::vec::Vec<usize> {
             }
         }
 
-        let queue = ready_queue(cpu_id).lock();
-        for &task_id in queue.iter() {
+        let queue = fair_queue(cpu_id).lock();
+        for task_id in queue.task_ids() {
             if !ids.contains(&task_id) {
                 ids.push(task_id);
             }
@@ -3415,7 +3903,7 @@ pub fn setup_task_execution(cpu: &mut Arch, task: &Task) {
 #[cfg(test)]
 pub fn reset() {
     for cpu_id in 0..MAX_NUM_CPUS {
-        ready_queue(cpu_id).lock().clear();
+        fair_queue(cpu_id).lock().clear();
         set_current_task_id(cpu_id, None);
         set_scheduler_ready(cpu_id, false);
         SCHEDULE_PREV_TASK[cpu_id].store(0, Ordering::SeqCst);
@@ -3636,7 +4124,7 @@ mod tests {
         reset();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         add_task(task, 0);
-        assert_eq!(READY_QUEUES[0].lock().len(), 1);
+        assert_eq!(FAIR_QUEUES[0].lock().len(), 1);
     }
 
     #[test_case]
@@ -3811,11 +4299,11 @@ mod tests {
 
         let first_id = register_task(Task::new("FirstTask".to_string(), 1, TaskType::Kernel));
         enqueue_task(first_id, 0);
-        assert!(ready_queue(0).lock().contains(&first_id));
+        assert!(fair_queue(0).lock().contains(&first_id));
 
         let second_id = register_task(Task::new("SecondTask".to_string(), 1, TaskType::Kernel));
         enqueue_task(second_id, 0);
-        assert!(ready_queue(1).lock().contains(&second_id));
+        assert!(fair_queue(1).lock().contains(&second_id));
     }
 
     #[test_case]
@@ -3832,7 +4320,7 @@ mod tests {
         push_ready_task(0, task_id);
 
         assert_eq!(steal_ready_task_for_cpu(1, 20_000_000), Some(task_id));
-        assert!(!ready_queue(0).lock().contains(&task_id));
+        assert!(!fair_queue(0).lock().contains(&task_id));
         assert_eq!(task.running_cpu.load(Ordering::SeqCst), 1);
         assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
         assert_eq!(task.sched_migration_count(), 1);
@@ -3872,7 +4360,7 @@ mod tests {
             None
         );
         assert_eq!(steal_ready_task_for_cpu(target_cpu, 20_000_000), None);
-        assert!(ready_queue(source_cpu).lock().contains(&task_id));
+        assert!(fair_queue(source_cpu).lock().contains(&task_id));
     }
 
     #[test_case]
@@ -3895,7 +4383,32 @@ mod tests {
         );
         assert!(wake_task_on(task_id, MAX_NUM_CPUS));
         assert_eq!(task.state.load(Ordering::SeqCst), TaskState::Ready);
-        assert!(ready_queue(local_cpu).lock().contains(&task_id));
+        assert!(fair_queue(local_cpu).lock().contains(&task_id));
+        assert_eq!(task.last_cpu.load(Ordering::SeqCst), local_cpu);
+    }
+
+    #[test_case]
+    fn test_wake_publishes_remote_queued_cpu() {
+        if MAX_NUM_CPUS < 2 {
+            return;
+        }
+
+        reset();
+        register_online_cpu(0);
+        register_online_cpu(1);
+        let mut new_task = Task::new("RemoteWakeTask".to_string(), 1, TaskType::Kernel);
+        new_task.pinned_cpu = Some(1);
+        let task_id = register_task(new_task);
+        let task = TaskPool::get_task(task_id).unwrap();
+        task.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        mark_blocked(task_id);
+
+        assert!(wake_task_on(task_id, 1));
+        assert!(fair_queue(1).lock().contains(&task_id));
+        assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
     }
 
     #[test_case]
@@ -3919,7 +4432,7 @@ mod tests {
         push_ready_task(0, task_id);
 
         assert_eq!(steal_ready_task_for_cpu(1, 20_000_000), None);
-        assert!(ready_queue(0).lock().contains(&task_id));
+        assert!(fair_queue(0).lock().contains(&task_id));
 
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 0);
@@ -4117,7 +4630,7 @@ mod tests {
 
         assert_eq!(task.running_cpu.load(Ordering::SeqCst), NO_CPU);
         assert_eq!(task.last_cpu.load(Ordering::SeqCst), 1);
-        assert!(ready_queue(1).lock().contains(&task_id));
+        assert!(fair_queue(1).lock().contains(&task_id));
         assert_eq!(task.sched_migration_count(), 1);
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 1);
@@ -4165,7 +4678,7 @@ mod tests {
             blocked.state.load(Ordering::SeqCst),
             TaskState::Blocked(crate::task::BlockedType::Interruptible)
         );
-        assert!(!ready_queue(cpu_id).lock().contains(&blocked_id));
+        assert!(!fair_queue(cpu_id).lock().contains(&blocked_id));
 
         assert!(wake_task(blocked_id));
         assert!(remove_ready_task_from_cpu(cpu_id, blocked_id));
@@ -4351,6 +4864,334 @@ mod tests {
         assert_eq!(
             task_pool.reap_retired_tasks_for_test(),
             MAX_ACTIVE_USER_TASKS
+        );
+    }
+}
+
+#[cfg(test)]
+mod fair_tests {
+    use super::*;
+
+    fn key(deadline: u64, vruntime: u64, task_id: usize) -> FairKey {
+        FairKey::new(deadline, vruntime, task_id)
+    }
+
+    fn insert_at(q: &mut FairQueue, task_id: usize, vruntime: u64, deadline: u64, weight: u32) {
+        q.insert(task_id, key(deadline, vruntime, task_id), vruntime, weight);
+    }
+
+    #[test_case]
+    fn sched_period_uses_latency_when_runners_fit() {
+        // 5ms / 0.75ms = 6.66, so up to 6 runners stay inside the latency
+        // target and the period equals SCHED_LATENCY_NS.
+        assert_eq!(sched_period(1), SCHED_LATENCY_NS);
+        assert_eq!(sched_period(6), SCHED_LATENCY_NS);
+    }
+
+    #[test_case]
+    fn sched_period_grows_with_runner_count() {
+        // 7 runners at 0.75 ms each exceeds 5 ms, so the period grows to
+        // nr_running * SCHED_MIN_GRANULARITY_NS.
+        assert_eq!(sched_period(7), 7 * SCHED_MIN_GRANULARITY_NS);
+    }
+
+    #[test_case]
+    fn calc_delta_fair_scales_by_weight_ratio() {
+        // delta * NICE_0_LOAD / weight; heavier weight => slower virtual time.
+        assert_eq!(calc_delta_fair(1_000_000, NICE_0_LOAD), 1_000_000);
+        // nice -5 weight 3121 vs nice 0 weight 1024: ratio ~3.05x slower
+        let heavy = calc_delta_fair(1_000_000, 3121);
+        let normal = calc_delta_fair(1_000_000, NICE_0_LOAD);
+        assert!(heavy * 3 < normal);
+        assert!(heavy * 4 > normal);
+    }
+
+    #[test_case]
+    fn calc_delta_fair_handles_zero_weight() {
+        // A zero weight must not divide by zero; fall back to real time.
+        assert_eq!(calc_delta_fair(1_000, 0), 1_000);
+    }
+
+    #[test_case]
+    fn sched_slice_proportional_to_weight() {
+        // Two tasks of weight 1024 each on a queue whose total weight is 2048
+        // each get half the period.
+        let period = sched_period(2);
+        let slice = sched_slice(period, 1024, 2048);
+        assert_eq!(slice, period / 2);
+    }
+
+    #[test_case]
+    fn sched_slice_clamps_to_min_granularity() {
+        // A vanishingly-small weight must still receive at least
+        // SCHED_MIN_GRANULARITY_NS so it is not starved of runnable time.
+        let period = sched_period(2);
+        let slice = sched_slice(period, 1, 1_000_000);
+        assert_eq!(slice, SCHED_MIN_GRANULARITY_NS);
+    }
+
+    #[test_case]
+    fn fair_deadline_is_vruntime_plus_virtual_slice() {
+        // deadline = vruntime + slice * NICE_0_LOAD / weight.
+        let deadline = fair_deadline(1_000, 1_000_000, NICE_0_LOAD);
+        assert_eq!(deadline, 1_000 + 1_000_000);
+    }
+
+    #[test_case]
+    fn partial_request_preserves_virtual_deadline() {
+        let deadline = 1_000_000;
+        assert_eq!(
+            renew_deadline_if_consumed(500_000, deadline, 1_000_000, NICE_0_LOAD),
+            deadline
+        );
+    }
+
+    #[test_case]
+    fn consumed_request_renews_virtual_deadline() {
+        assert_eq!(
+            renew_deadline_if_consumed(1_000_000, 1_000_000, 1_000_000, NICE_0_LOAD),
+            2_000_000
+        );
+    }
+
+    #[test_case]
+    fn partial_request_timer_uses_remaining_wall_time() {
+        assert_eq!(
+            fair_slice_remaining_ns(500_000, 1_000_000, 1_000_000, NICE_0_LOAD),
+            500_000
+        );
+        assert_eq!(fair_slice_remaining_ns(500, 1_500, 5_000, 3072), 3_000);
+    }
+
+    #[test_case]
+    fn expired_request_timer_falls_back_to_full_slice() {
+        assert_eq!(
+            fair_slice_remaining_ns(1_000_000, 1_000_000, 750_000, NICE_0_LOAD),
+            750_000
+        );
+    }
+
+    #[test_case]
+    fn new_entity_inherits_queue_average_vruntime() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        insert_at(&mut q, 2, 300, 400, NICE_0_LOAD);
+        let mut task = Task::new("NewFairTask".to_string(), 1, crate::task::TaskType::Kernel);
+        task.set_id(3);
+
+        let expected_avg = q.avg_vruntime();
+        let placed = place_entity(&task, &q, PlaceMode::New);
+
+        assert_eq!(placed.vruntime, expected_avg);
+        assert_eq!(task.sched_vruntime(), expected_avg);
+    }
+
+    #[test_case]
+    fn migrating_entity_is_normalized_to_destination_floor() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 500, 600, NICE_0_LOAD);
+        let mut task = Task::new(
+            "MigratingFairTask".to_string(),
+            1,
+            crate::task::TaskType::Kernel,
+        );
+        task.set_id(2);
+        task.sched_vruntime.store(100, Ordering::SeqCst);
+
+        let placed = place_entity(&task, &q, PlaceMode::Migrate);
+
+        assert_eq!(placed.vruntime, q.min_vruntime);
+        assert_eq!(task.sched_vruntime(), q.min_vruntime);
+    }
+
+    #[test_case]
+    fn local_preemption_preserves_unconsumed_request() {
+        let q = FairQueue::new();
+        let mut task = Task::new(
+            "PreemptedFairTask".to_string(),
+            1,
+            crate::task::TaskType::Kernel,
+        );
+        task.set_id(1);
+        task.sched_vruntime.store(100, Ordering::SeqCst);
+        task.sched_slice_ns.store(1_000, Ordering::SeqCst);
+        task.sched_deadline.store(1_100, Ordering::SeqCst);
+
+        let placed = place_entity(&task, &q, PlaceMode::LocalPreempt);
+
+        assert_eq!(placed.vruntime, 100);
+        assert_eq!(placed.deadline, 1_100);
+        assert_eq!(task.sched_slice_ns(), 1_000);
+    }
+
+    #[test_case]
+    fn empty_queue_picks_none() {
+        let q = FairQueue::new();
+        assert!(q.pick_eligible_min_deadline().is_none());
+        assert!(q.is_empty());
+        assert_eq!(q.avg_vruntime(), 0);
+    }
+
+    #[test_case]
+    fn single_entity_is_always_eligible() {
+        let mut q = FairQueue::new();
+        insert_at(
+            &mut q,
+            1,
+            /* vruntime */ 100,
+            /* deadline */ 200,
+            NICE_0_LOAD,
+        );
+        let picked = q
+            .pick_eligible_min_deadline()
+            .expect("single task eligible");
+        assert_eq!(picked.task_id, 1);
+    }
+
+    #[test_case]
+    fn pick_returns_smallest_deadline_among_eligible() {
+        let mut q = FairQueue::new();
+        // Two tasks at vruntime 100, eligible by construction. Their
+        // deadlines differ; the smaller-deadline one must be picked first.
+        insert_at(&mut q, 1, 100, 300, NICE_0_LOAD);
+        insert_at(&mut q, 2, 100, 200, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty queue");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn pick_skips_over_served_entity_then_snaps_forward() {
+        let mut q = FairQueue::new();
+        // Task 1 ran ahead: high vruntime. Task 2 is fresh: vruntime 0.
+        // avg_vruntime is somewhere between; task 2 is the only eligible one.
+        insert_at(&mut q, 1, 1_000_000, 1_000_500, NICE_0_LOAD);
+        insert_at(&mut q, 2, 0, 500, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty queue");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn min_vruntime_never_decreases_on_removal() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        insert_at(&mut q, 2, 500, 600, NICE_0_LOAD);
+        let mid_min = q.min_vruntime;
+        // Removing the lower-vruntime entity must not pull min backwards.
+        q.remove(1);
+        assert!(q.min_vruntime >= mid_min);
+    }
+
+    #[test_case]
+    fn removal_uses_insertion_weight_for_aggregate_balance() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, 2048);
+
+        q.remove(1);
+
+        assert_eq!(q.avg_load, 0);
+        assert_eq!(q.sum_w_vruntime, 0);
+        assert!(q.is_empty());
+    }
+
+    #[test_case]
+    fn min_vruntime_advances_on_higher_vruntime_insert() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let prev_min = q.min_vruntime;
+        insert_at(&mut q, 2, 50, 60, NICE_0_LOAD);
+        // The newly inserted entity has vruntime 50 < prev_min, so the floor
+        // candidate is min(50, leftmost.vruntime=50)=50. min_vruntime only
+        // advances, never decreases.
+        assert!(q.min_vruntime >= prev_min);
+    }
+
+    #[test_case]
+    fn rekey_advances_weighted_average() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let avg_before = q.avg_vruntime();
+        // Simulate running: vruntime 100 -> 200, deadline 200 -> 300.
+        let new_key = key(300, 200, 1);
+        q.rekey(1, 200, NICE_0_LOAD, new_key);
+        let avg_after = q.avg_vruntime();
+        assert!(avg_after > avg_before);
+        assert_eq!(avg_after, 200);
+    }
+
+    #[test_case]
+    fn rekey_key_for_returns_new_key() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let new_key = key(300, 200, 1);
+        q.rekey(1, 200, NICE_0_LOAD, new_key);
+        assert_eq!(q.key_for(1), Some(new_key));
+    }
+
+    #[test_case]
+    fn pick_with_all_eligible_returns_smallest_deadline() {
+        let mut q = FairQueue::new();
+        // Three entities all at vruntime 0 (all eligible), distinct deadlines.
+        insert_at(&mut q, 1, 0, 900, NICE_0_LOAD);
+        insert_at(&mut q, 2, 0, 100, NICE_0_LOAD);
+        insert_at(&mut q, 3, 0, 500, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn avg_vruntime_uses_weighted_mean() {
+        let mut q = FairQueue::new();
+        // Task 1: vruntime 0, weight 1024. Task 2: vruntime 1000, weight 1024.
+        // avg = (0*1024 + 1000*1024) / 2048 = 500.
+        insert_at(&mut q, 1, 0, 100, NICE_0_LOAD);
+        insert_at(&mut q, 2, 1000, 1100, NICE_0_LOAD);
+        assert_eq!(q.avg_vruntime(), 500);
+    }
+
+    #[test_case]
+    fn weighted_avg_scales_with_unbalanced_weights() {
+        let mut q = FairQueue::new();
+        // Task 1 weight 1024 at vruntime 0, task 2 weight 3072 at vruntime 1000.
+        // avg = (0*1024 + 1000*3072) / 4096 = 750.
+        insert_at(&mut q, 1, 0, 100, 1024);
+        insert_at(&mut q, 2, 1000, 1100, 3072);
+        assert_eq!(q.avg_vruntime(), 750);
+    }
+
+    #[test_case]
+    fn repeated_eevdf_picks_do_not_starve_equal_entities() {
+        let mut q = FairQueue::new();
+        let virtual_slice = 100;
+        for task_id in 1..=3 {
+            insert_at(&mut q, task_id, 0, virtual_slice, NICE_0_LOAD);
+        }
+
+        let mut picks = [0usize; 3];
+        for _ in 0..300 {
+            let selected = q.pick_eligible_min_deadline().expect("runnable entity");
+            q.remove(selected.task_id);
+            picks[selected.task_id - 1] += 1;
+            let vruntime = selected.vruntime + virtual_slice;
+            let deadline = fair_deadline(vruntime, virtual_slice, NICE_0_LOAD);
+            insert_at(&mut q, selected.task_id, vruntime, deadline, NICE_0_LOAD);
+        }
+
+        assert_eq!(picks, [100, 100, 100]);
+    }
+
+    #[test_case]
+    fn proportional_slices_produce_weighted_cpu_share() {
+        let heavy_weight = 3072;
+        let normal_weight = NICE_0_LOAD;
+        let total_weight = u64::from(heavy_weight + normal_weight);
+        let period = sched_period(2);
+        let heavy_slice = sched_slice(period, heavy_weight, total_weight);
+        let normal_slice = sched_slice(period, normal_weight, total_weight);
+
+        assert_eq!(heavy_slice, normal_slice * 3);
+        assert_eq!(
+            calc_delta_fair(heavy_slice, heavy_weight),
+            calc_delta_fair(normal_slice, normal_weight)
         );
     }
 }

@@ -1487,6 +1487,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             core_preference: target.core_preference().to_u8(),
             _reserved2: [0; 3],
             sched_migration_count: target.sched_migration_count(),
+            sched_nice: target.nice(),
+            sched_weight: target.sched_weight(),
+            sched_vruntime: target.sched_vruntime(),
+            sched_deadline: target.sched_deadline(),
         };
 
         let info_bytes = unsafe {

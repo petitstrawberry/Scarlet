@@ -1,8 +1,8 @@
 # Scheduler Benchmark Scenarios
 
 This document defines repeatable scheduler workloads for validating placement,
-utilization tracking, and responsiveness on both homogeneous and heterogeneous
-systems.
+utilization tracking, EEVDF fairness, and responsiveness on both homogeneous
+and heterogeneous systems.
 
 The benchmark driver is `sched_bench` from `user/std-bin`.
 
@@ -80,6 +80,29 @@ Regression signal:
   imbalanced.
 - `top` shows CPU-bound workers stuck on one CPU for the whole run.
 
+## EEVDF Fairness Baseline
+
+Run more CPU-bound workers than available CPUs:
+
+```sh
+sched_bench --scenario cpu --threads 16 --seconds 60
+```
+
+Expected behavior:
+
+- Every worker continues to accumulate CPU time; no worker remains runnable
+  without making progress.
+- Equal-nice workers on the same CPU converge toward equal CPU time over a long
+  run, allowing for migration and sampling noise.
+- Per-task virtual runtime remains close among continuously runnable workers,
+  while virtual deadlines advance as requests are consumed.
+- The local scheduler uses one-shot slice deadlines rather than a periodic tick.
+
+The in-kernel fair-queue conformance tests additionally validate eligible
+minimum-deadline selection, weighted average virtual runtime, new-task and
+migration placement, request renewal, proportional nice weights, monotonic
+minimum virtual runtime, and starvation freedom under repeated selection.
+
 ## Apple Silicon Heterogeneous Baseline
 
 Apple Silicon exposes efficiency and performance classes when topology probing
@@ -122,5 +145,5 @@ Expected behavior:
 - On Apple Silicon, sustained heavy workers may move to P cores, but small
   services should not require manual app-name special cases.
 
-This check is currently manual. Once timer preemption and richer scheduler
-metrics exist, it should become an automated regression test.
+The desktop interaction check remains manual. Queue ordering, weighted slices,
+and starvation freedom are covered by deterministic in-kernel tests.

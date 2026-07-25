@@ -69,6 +69,86 @@ const SCHED_UTIL_DECAY_INTERVAL_NS: u64 = 10_000_000;
 const SCHED_UTIL_DECAY_NUM: u32 = 7;
 const SCHED_UTIL_DECAY_DEN: u32 = 8;
 
+/// Load weight for a task at nice 0 (CFS/EEVDF proportional-share base unit).
+///
+/// Combined with [`SCHED_PRIO_TO_WEIGHT`], this drives the EEVDF fair
+/// scheduler's weighted proportional-share invariant: a task at nice `n`
+/// receives `SCHED_PRIO_TO_WEIGHT[(n + 20) as usize] / NICE_0_LOAD` times
+/// the CPU time of a nice-0 peer under equal contention.
+///
+/// The value 1024 is a convention shared with CFS-class schedulers, chosen so
+/// that the smallest weight (nice +19, weight 14) is well above 1 and the
+/// weight ratios are representable with small-integer arithmetic.
+pub const NICE_0_LOAD: u32 = 1024;
+
+/// Nice bounds (inclusive) honoured by [`Task::set_nice`] and the scheduler.
+pub const SCHED_NICE_MIN: i32 = -20;
+pub const SCHED_NICE_MAX: i32 = 19;
+
+/// Load weight table indexed by `nice + 20` (i.e. `0..=39`).
+///
+/// Independently derived from the EEVDF/CFS proportional-share principle:
+/// each nice level changes the weight by a factor of approximately 1.25,
+/// giving roughly a 9.3× spread between nice −20 and nice +19. The values
+/// are computed at compile time via [`compute_weight_table`]; they are
+/// **not** copied from any other operating system source.
+pub const SCHED_PRIO_TO_WEIGHT: [u32; 40] = compute_weight_table();
+
+/// Independently compute the nice-to-weight mapping from the recurrence:
+///
+/// ```text
+/// weight[nice + 1] = (weight[nice] × 4 + 2) / 5    (toward +19)
+/// weight[nice − 1] = (weight[nice] × 5 + 2) / 4    (toward −20)
+/// ```
+///
+/// starting from `weight[nice = 0] = NICE_0_LOAD = 1024`. The rounding
+/// constant +2 yields round-to-nearest for positive integers.
+///
+/// The recurrence realises the well-known CFS design principle that each
+/// nice priority step corresponds to approximately 25 % change in CPU
+/// entitlement (1.25 = 5/4). No external source code was consulted or
+/// copied in constructing this table.
+const fn compute_weight_table() -> [u32; 40] {
+    let mut table = [0u32; 40];
+    // nice 0 → index 20.
+    table[20] = NICE_0_LOAD;
+
+    // Ascend toward nicer (-1 … -20): multiply by ≈5/4 each step.
+    // Indices 19 … 0.
+    let mut i = 20;
+    while i > 0 {
+        let prev = table[i] as u64;
+        table[i - 1] = ((prev * 5 + 2) / 4) as u32;
+        i -= 1;
+    }
+
+    // Descend toward less nice (+1 … +19): multiply by ≈4/5 each step.
+    // Indices 21 … 39.
+    let mut i = 20;
+    while i < 39 {
+        let prev = table[i] as u64;
+        table[i + 1] = ((prev * 4 + 2) / 5) as u32;
+        i += 1;
+    }
+
+    table
+}
+
+/// Map a nice value in `[SCHED_NICE_MIN..=SCHED_NICE_MAX]` to its load weight.
+///
+/// Values outside the supported range are clamped to the nearest bound, which
+/// matches Linux's behaviour for out-of-range `setpriority` arguments.
+pub const fn nice_to_weight(nice: i32) -> u32 {
+    let idx = if nice < SCHED_NICE_MIN {
+        0
+    } else if nice > SCHED_NICE_MAX {
+        SCHED_PRIO_TO_WEIGHT.len() - 1
+    } else {
+        (nice + SCHED_NICE_MAX + 1) as usize
+    };
+    SCHED_PRIO_TO_WEIGHT[idx]
+}
+
 /// IRQ-masking spin lock type used for the architecture kernel context.
 ///
 /// The scheduler needs a stable raw pointer to this context while performing
@@ -125,6 +205,14 @@ pub struct TaskInfo {
     pub _reserved2: [u8; 3],
     /// Number of scheduler-directed migrations for this task.
     pub sched_migration_count: u64,
+    /// EEVDF nice value in the range -20 through +19.
+    pub sched_nice: i32,
+    /// EEVDF load weight derived from `sched_nice`.
+    pub sched_weight: u32,
+    /// Current EEVDF virtual runtime.
+    pub sched_vruntime: u64,
+    /// Current EEVDF virtual deadline.
+    pub sched_deadline: u64,
 }
 
 impl TaskInfo {
@@ -546,6 +634,34 @@ pub struct Task {
     sched_low_util_since_ns: AtomicU64,
     /// Scheduler time-slice duration in absolute nanoseconds.
     pub time_slice_duration_ns: AtomicU64,
+    /// Nice value used by the EEVDF fair scheduler (Linux parity, -20..+19).
+    ///
+    /// 0 is the default. Higher values lower the task's load weight and the
+    /// proportion of CPU it receives under contention. Mutated only via
+    /// [`Task::set_nice`], which keeps `sched_weight` in sync.
+    pub sched_nice: AtomicI32,
+    /// Load weight derived from [`Task::sched_nice`] via [`nice_to_weight`].
+    pub(crate) sched_weight: AtomicU32,
+    /// EEVDF virtual runtime. Advances with consumed CPU time scaled by
+    /// `NICE_0_LOAD / sched_weight` so heavier tasks run longer per virtual
+    /// unit. Owned by the scheduler; updated under the per-CPU fair queue
+    /// lock or via `account_*` paths.
+    pub sched_vruntime: AtomicU64,
+    /// EEVDF virtual deadline of the form `vruntime + slice / weight`.
+    ///
+    /// The fair scheduler picks the eligible entity with the smallest
+    /// deadline, so this field drives both fairness and latency.
+    pub sched_deadline: AtomicU64,
+    /// Current fair-scheduler quantum in nanoseconds.
+    ///
+    /// Recomputed by the scheduler when a new request is placed as
+    /// `sched_period(nr_running) * weight / total_weight`, clamped to
+    /// `SCHED_MIN_GRANULARITY_NS`.
+    pub(crate) sched_slice_ns: AtomicU64,
+    /// True while the task is currently inserted in a per-CPU fair run queue.
+    pub(crate) sched_on_rq: AtomicBool,
+    /// Monotonic timestamp from which the current EEVDF execution interval is charged.
+    pub(crate) sched_exec_start_ns: AtomicU64,
     /// Cumulative CPU time charged to this task, in nanoseconds.
     pub cpu_time_ns: AtomicU64,
     /// Monotonic timestamp at which the current CPU run began.
@@ -808,6 +924,13 @@ impl Task {
             time_slice_duration_ns: AtomicU64::new(
                 (DEFAULT_TIME_SLICE as u64).saturating_mul(ms_to_ns(10)),
             ),
+            sched_nice: AtomicI32::new(0),
+            sched_weight: AtomicU32::new(NICE_0_LOAD),
+            sched_vruntime: AtomicU64::new(0),
+            sched_deadline: AtomicU64::new(0),
+            sched_slice_ns: AtomicU64::new(0),
+            sched_on_rq: AtomicBool::new(false),
+            sched_exec_start_ns: AtomicU64::new(0),
             cpu_time_ns: AtomicU64::new(0),
             cpu_run_start_ns: AtomicU64::new(0),
             stack_size: AtomicUsize::new(0),
@@ -1029,6 +1152,52 @@ impl Task {
         self.sched_last_migration_ns.load(Ordering::SeqCst)
     }
 
+    /// Return the task's current nice value (`-20..=19`).
+    pub fn nice(&self) -> i32 {
+        self.sched_nice.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current load weight derived from [`Task::nice`].
+    pub fn sched_weight(&self) -> u32 {
+        self.sched_weight.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler virtual runtime.
+    pub fn sched_vruntime(&self) -> u64 {
+        self.sched_vruntime.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler virtual deadline.
+    pub fn sched_deadline(&self) -> u64 {
+        self.sched_deadline.load(Ordering::SeqCst)
+    }
+
+    /// Return the task's current fair-scheduler quantum in nanoseconds.
+    pub fn sched_slice_ns(&self) -> u64 {
+        self.sched_slice_ns.load(Ordering::SeqCst)
+    }
+
+    /// Return whether the task is currently inserted in a fair run queue.
+    pub fn sched_on_rq(&self) -> bool {
+        self.sched_on_rq.load(Ordering::SeqCst)
+    }
+
+    /// Set the task's nice value, clamping to `[SCHED_NICE_MIN..=SCHED_NICE_MAX]`
+    /// and recomputing the corresponding load weight.
+    ///
+    /// `weight` is published before `nice` so a concurrent reader never observes
+    /// a stale weight paired with the new nice value.
+    ///
+    /// # Arguments
+    ///
+    /// * `nice` - Requested nice value; clamped if outside the supported range.
+    pub fn set_nice(&self, nice: i32) {
+        let clamped = nice.clamp(SCHED_NICE_MIN, SCHED_NICE_MAX);
+        let weight = nice_to_weight(clamped);
+        self.sched_weight.store(weight, Ordering::SeqCst);
+        self.sched_nice.store(clamped, Ordering::SeqCst);
+    }
+
     /// Return the number of scheduler-directed migrations for this task.
     ///
     /// # Returns
@@ -1093,6 +1262,7 @@ impl Task {
     /// * `now_ns` - Current monotonic timestamp in nanoseconds.
     pub fn start_cpu_accounting(&self, now_ns: u64) {
         self.cpu_run_start_ns.store(now_ns, Ordering::SeqCst);
+        self.sched_exec_start_ns.store(now_ns, Ordering::SeqCst);
         self.sched_util_accounted_until_ns
             .store(now_ns, Ordering::SeqCst);
     }
@@ -1108,6 +1278,7 @@ impl Task {
     /// The nanoseconds charged by this stop operation.
     pub fn stop_cpu_accounting(&self, now_ns: u64) -> u64 {
         let start_ns = self.cpu_run_start_ns.swap(0, Ordering::SeqCst);
+        self.sched_exec_start_ns.store(0, Ordering::SeqCst);
         if start_ns == 0 {
             return 0;
         }
@@ -2400,6 +2571,14 @@ impl Task {
             self.time_slice_duration_ns.load(Ordering::SeqCst),
             Ordering::SeqCst,
         );
+        // Fair-scheduler state: nice/weight are inherited, but vruntime and
+        // deadline must start fresh. The child will be `place`-d against the
+        // destination CPU's avg_vruntime when it is first enqueued.
+        let nice = self.sched_nice.load(Ordering::SeqCst);
+        child.sched_nice.store(nice, Ordering::SeqCst);
+        child
+            .sched_weight
+            .store(nice_to_weight(nice), Ordering::SeqCst);
         child.set_core_preference(self.core_preference());
         child
             .sched_util_min

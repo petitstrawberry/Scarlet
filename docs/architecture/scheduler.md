@@ -1,7 +1,7 @@
 # Scheduler Placement and Fairness
 
-This document describes the current Scarlet scheduler policy and the intended
-path toward priority, fairness, and preemption-aware scheduling.
+This document describes Scarlet's capacity-aware placement policy and its
+tickless EEVDF fair runtime scheduler.
 
 ## Goals
 
@@ -14,9 +14,10 @@ path toward priority, fairness, and preemption-aware scheduling.
 
 ## Current Model
 
-Scarlet currently uses per-CPU ready queues. A task is associated with one
+Scarlet uses one EEVDF fair run queue per CPU. A task is associated with one
 scheduler CPU while it is queued or running. Sleeping tasks keep their last CPU
-as placement history.
+as placement history and are placed at the destination queue's current virtual
+time when they wake.
 
 The scheduler tracks:
 
@@ -25,14 +26,17 @@ The scheduler tracks:
 - Per-task utilization: an exponentially decayed `util_avg` in
   `SCHED_UTIL_SCALE` units.
 - Per-task hints: `util_min` and core preference.
+- Per-task fair state: nice-derived load weight, virtual runtime, virtual
+  deadline, and current slice.
 - Per-CPU load: current task, ready queue weight, utilization clamp, and
   runnable task count.
+- Per-CPU fair state: weighted average virtual runtime, total runnable weight,
+  runnable count, and a monotonic minimum-virtual-runtime floor.
 - Migration statistics: promotions, demotions, cooldown skips, and work steals.
 
-The current implementation is not a fully preemptive fair scheduler. Placement
-decisions happen at enqueue, wakeup, idle work stealing, and normal task switch
-boundaries. This is intentional for the current stage: correctness and
-observability are more important than aggressive balancing.
+Placement decisions happen at enqueue, wakeup, idle work stealing, and normal
+task switch boundaries. Runtime preemption uses a per-task one-shot timer; no
+periodic scheduler tick is required.
 
 ## Placement Capacity
 
@@ -98,40 +102,41 @@ capacity change is actually needed.
 
 ## Priority and Fairness
 
-Priority currently influences load weight, not time entitlement. A higher
-priority task makes its CPU look more loaded, which biases future placement away
-from stacking more work on that CPU. This is deliberately weaker than a hard
-priority scheduler.
+Legacy task priority influences placement load. Fair CPU-time entitlement is
+controlled separately by the task's nice value. Nice values from -20 through
++19 map to the Linux scheduler weight table, with nice 0 using
+`NICE_0_LOAD = 1024`. A task with a larger weight receives a proportionally
+larger wall-time slice while its virtual runtime advances more slowly:
 
-Minimum viable fairness before full preemption:
+```text
+vruntime += delta_exec * NICE_0_LOAD / weight
+slice = max(0.75 ms, period * weight / total_weight)
+virtual_deadline = vruntime + slice * NICE_0_LOAD / weight
+```
 
-- Do not use `util_min` as a permanent monopoly on P cores.
-- Keep work stealing available so idle CPUs can drain overloaded queues.
-- Keep migration cooldowns to prevent thrash.
-- Keep `util_min` bounded by `SCHED_UTIL_SCALE`.
-- Keep latency-sensitive hints visible through diagnostics so bad hints can be
-  found.
+The target period is 5 ms while the runnable set fits within that latency. It
+grows by the 0.75 ms minimum granularity when more tasks are runnable. `util_min`
+and core preference affect CPU placement only; they do not grant extra runtime.
 
-Known limitation: without preemption, a CPU-bound task can still run until it
-reaches an existing scheduling boundary. Fair CPU-time distribution requires
-timer-driven preemption.
+Among eligible entities (`vruntime <= avg_vruntime`), the scheduler selects the
+smallest virtual deadline. Deadline ties use virtual runtime and then task ID,
+making selection deterministic. If no entity is eligible, selection advances to
+the entity at the smallest virtual runtime so every runnable task continues to
+make progress.
 
 ## Preemption Integration
 
-When timer preemption is added, the scheduler should keep the existing
-placement policy and add a fair runtime policy on top:
+The scheduler charges EEVDF runtime on every switch-out and one-shot slice
+boundary. A partially consumed request retains its virtual deadline; reaching
+the deadline renews the request from the updated virtual runtime. The selected
+task's fair slice arms the local exact timer, falling back to the legacy task
+slice only for tasks without initialized fair state.
 
-1. Charge runtime on every preemption tick.
-2. Maintain per-task virtual runtime or a comparable fairness metric.
-3. Select the next task from the local CPU by fairness first, then placement
-   constraints.
-4. Use priority to weight CPU-time entitlement rather than only load score.
-5. Treat `util_min` and core preference as placement hints, not as extra CPU-time
-   entitlement.
-6. Make migration decisions at controlled points after accounting is updated.
-
-This keeps the current capacity-aware work useful while leaving room for a real
-fair scheduler.
+Runnable tasks remain in a per-CPU `BTreeMap` ordered by virtual deadline,
+virtual runtime, and task ID. Work stealing removes an entity from the donor
+queue, normalizes its virtual runtime to the destination's monotonic floor, and
+then claims it on the idle CPU. Normal post-switch migration uses the same
+normalization before insertion.
 
 ## Queue Invariants
 
@@ -152,7 +157,8 @@ cpufreq state when available.
 
 `GetTaskInfoList` exposes per-task placement state. User tools such as `top`
 can show the current CPU, measured utilization, requested minimum utilization,
-effective required capacity, core preference, and migration count.
+effective required capacity, core preference, migration count, nice value, fair
+weight, virtual runtime, and virtual deadline.
 
 These interfaces are not stable ABI yet. They exist to validate the scheduler
 while the algorithm is still changing.
