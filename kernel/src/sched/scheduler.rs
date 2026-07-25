@@ -55,8 +55,8 @@ use crate::{
     environment::MAX_NUM_CPUS,
     sync::{CpuLocal, IrqGuard},
     task::{
-        CurrentTaskRef, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState, new_kernel_task,
-        wake_parent_waiters, wake_task_waiters,
+        CurrentTaskRef, NICE_0_LOAD, SCHED_UTIL_SCALE, Task, TaskCorePreference, TaskState,
+        new_kernel_task, wake_parent_waiters, wake_task_waiters,
     },
     timer::{
         SCHEDULER_ACCOUNTING_QUANTUM_NS, TimerHandle, TimerHandler, add_timer, cancel_timer,
@@ -589,6 +589,224 @@ const SCHED_DEMOTION_MARGIN: u32 = 128;
 const SCHED_DEMOTION_SUSTAIN_NS: u64 = 250_000_000;
 const SCHED_STEAL_SCAN_LIMIT: usize = 8;
 const SCHED_LATERAL_BALANCE_MARGIN: u64 = TASK_LOAD_SCALE / 4;
+
+/// Target fair-scheduling period in nanoseconds. With few runners the queue
+/// aims to cycle every task within this window.
+const SCHED_LATENCY_NS: u64 = 5_000_000;
+/// Per-task minimum quantum in nanoseconds. Below this a task cannot be
+/// preempted mid-run, which bounds pick frequency under load.
+const SCHED_MIN_GRANULARITY_NS: u64 = 750_000;
+
+/// Compute the fair-scheduling period for a queue with `nr_running` entities.
+///
+/// Matches Linux's `__sched_period`: when the queue fits inside
+/// [`SCHED_LATENCY_NS`], every entity gets a slice each period; otherwise the
+/// period grows so each entity receives at least [`SCHED_MIN_GRANULARITY_NS`].
+#[inline]
+const fn sched_period(nr_running: usize) -> u64 {
+    if nr_running * (SCHED_MIN_GRANULARITY_NS as usize) > SCHED_LATENCY_NS as usize {
+        (nr_running as u64).saturating_mul(SCHED_MIN_GRANULARITY_NS)
+    } else {
+        SCHED_LATENCY_NS
+    }
+}
+
+/// Translate a real-time delta into virtual time for an entity of `weight`.
+///
+/// Mirrors Linux's `calc_delta_fair`: heavier weights advance virtual time
+/// more slowly, so they receive more real CPU per virtual unit. Uses u128
+/// intermediates to avoid overflow at hour-scale uptimes.
+#[inline]
+fn calc_delta_fair(delta_ns: u64, weight: u32) -> u64 {
+    if weight == 0 {
+        return delta_ns;
+    }
+    let result = (delta_ns as u128).saturating_mul(NICE_0_LOAD as u128) / weight as u128;
+    result.min(u64::MAX as u128) as u64
+}
+
+/// Compute the per-entity quantum for a queue whose total weight is
+/// `total_weight` and whose scheduling period is `period_ns`.
+///
+/// `slice = period * weight / total_weight`, clamped to
+/// [`SCHED_MIN_GRANULARITY_NS`] so a low-weight task cannot be starved of
+/// runnable time.
+#[inline]
+fn sched_slice(period_ns: u64, weight: u32, total_weight: u64) -> u64 {
+    if total_weight == 0 {
+        return SCHED_MIN_GRANULARITY_NS;
+    }
+    let slice = ((period_ns as u128).saturating_mul(weight as u128) / total_weight as u128) as u64;
+    slice.max(SCHED_MIN_GRANULARITY_NS)
+}
+
+/// Recompute an entity's virtual deadline.
+///
+/// `deadline = vruntime + calc_delta_fair(slice, weight)`. The fair scheduler
+/// picks the eligible entity with the smallest deadline.
+#[inline]
+fn fair_deadline(vruntime: u64, slice_ns: u64, weight: u32) -> u64 {
+    vruntime.saturating_add(calc_delta_fair(slice_ns, weight))
+}
+
+/// Composite key ordering fair-queue entities.
+///
+/// Primary key is the virtual deadline (EEVDF picks the smallest eligible
+/// deadline). Ties fall back to virtual runtime, then to task id, so two
+/// entities with identical EEVDF coordinates still have a deterministic
+/// `BTreeMap` order.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug)]
+struct FairKey {
+    deadline: u64,
+    vruntime: u64,
+    task_id: usize,
+}
+
+impl FairKey {
+    const fn new(deadline: u64, vruntime: u64, task_id: usize) -> Self {
+        Self {
+            deadline,
+            vruntime,
+            task_id,
+        }
+    }
+}
+
+/// Per-CPU fair run queue.
+///
+/// Holds runnable task ids keyed by [`FairKey`] for O(log n) eligible
+/// min-deadline picks. Authoritative per-entity state (`vruntime`,
+/// `deadline`, `slice`, `weight`) lives on [`Task`]; the queue caches only
+/// the aggregates needed to advance virtual time without re-scanning.
+struct FairQueue {
+    tree: BTreeMap<FairKey, usize>,
+    entries: BTreeMap<usize, FairKey>,
+    min_vruntime: u64,
+    sum_w_vruntime: i128,
+    avg_load: u64,
+    nr_running: usize,
+}
+
+impl FairQueue {
+    const fn new() -> Self {
+        Self {
+            tree: BTreeMap::new(),
+            entries: BTreeMap::new(),
+            min_vruntime: 0,
+            sum_w_vruntime: 0,
+            avg_load: 0,
+            nr_running: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nr_running == 0
+    }
+
+    /// Weighted average virtual runtime over queued entities.
+    ///
+    /// EEVDF defines `lag_i = avg_vruntime - vruntime_i`; an entity is
+    /// eligible iff its lag is non-negative. Returns [`FairQueue::min_vruntime`]
+    /// when the queue is empty so the value stays monotonic and sensible.
+    fn avg_vruntime(&self) -> u64 {
+        if self.avg_load == 0 {
+            return self.min_vruntime;
+        }
+        let avg = self.sum_w_vruntime / self.avg_load as i128;
+        if avg < 0 {
+            self.min_vruntime
+        } else {
+            avg as u64
+        }
+    }
+
+    /// Return the entity key for `task_id`, if it is currently queued.
+    fn key_for(&self, task_id: usize) -> Option<FairKey> {
+        self.entries.get(&task_id).copied()
+    }
+
+    /// Insert a freshly-placed entity into the queue.
+    ///
+    /// Caller is responsible for setting `vruntime`, `deadline`, and `on_rq`
+    /// on the [`Task`] before calling this; the queue only indexes what is
+    /// already authoritative.
+    fn insert(&mut self, task_id: usize, key: FairKey, vruntime: u64, weight: u32) {
+        debug_assert!(!self.entries.contains_key(&task_id), "double enqueue");
+        self.tree.insert(key, task_id);
+        self.entries.insert(task_id, key);
+        self.sum_w_vruntime = self
+            .sum_w_vruntime
+            .saturating_add((vruntime as i128).saturating_mul(weight as i128));
+        self.avg_load = self.avg_load.saturating_add(weight as u64);
+        self.nr_running = self.nr_running.saturating_add(1);
+        self.bump_min_vruntime(vruntime);
+    }
+
+    /// Remove an entity from the queue. Caller updates authoritative Task
+    /// state separately; this only drops the queue index.
+    fn remove(&mut self, task_id: usize) -> Option<FairKey> {
+        let key = self.entries.remove(&task_id)?;
+        self.tree.remove(&key);
+        Some(key)
+    }
+
+    /// Re-insert under a new key after `vruntime` or `deadline` advanced,
+    /// applying the resulting weighted-sum delta to `sum_w_vruntime`.
+    fn rekey(&mut self, task_id: usize, vruntime: u64, weight: u32, new_key: FairKey) {
+        let prev = self
+            .entries
+            .remove(&task_id)
+            .expect("rekey on missing entity");
+        let removed = self.tree.remove(&prev);
+        debug_assert!(removed.is_some(), "rekey missing tree entry");
+        self.tree.insert(new_key, task_id);
+        self.entries.insert(task_id, new_key);
+        let delta = (vruntime as i128).saturating_sub(prev.vruntime as i128);
+        self.sum_w_vruntime = self
+            .sum_w_vruntime
+            .saturating_add(delta.saturating_mul(weight as i128));
+        self.bump_min_vruntime(vruntime);
+    }
+
+    /// Advance the queue's monotonic floor.
+    ///
+    /// `min_vruntime` never decreases; it tracks the smaller of the just-updated
+    /// entity and the previous floor, then refuses to go backwards. This is
+    /// the same invariant Linux's `update_min_vruntime` maintains and is what
+    /// lets migrating entities be re-placed without gaining virtual time.
+    fn bump_min_vruntime(&mut self, candidate: u64) {
+        let floor = match self.tree.first_key_value() {
+            Some((k, _)) => k.vruntime.min(candidate),
+            None => candidate,
+        };
+        if floor > self.min_vruntime {
+            self.min_vruntime = floor;
+        }
+    }
+
+    /// Pick the eligible entity with the smallest virtual deadline.
+    ///
+    /// Returns `None` for an empty queue. If every queued entity is currently
+    /// over-served (`lag < 0`), the queue snaps `avg_vruntime` forward to the
+    /// smallest queued `vruntime` and re-evaluates, mirroring the
+    /// "no eligible entity" rule from Zircon and the EEVDF paper.
+    fn pick_eligible_min_deadline(&self) -> Option<FairKey> {
+        let avg = self.avg_vruntime();
+        // BTreeMap iterates in FairKey order (deadline, vruntime, task_id),
+        // so the first queued entity whose vruntime is at or below avg is
+        // already the smallest-deadline eligible pick.
+        if let Some((&key, _)) = self.tree.iter().find(|(k, _)| k.vruntime <= avg) {
+            return Some(key);
+        }
+        // Nobody eligible: snap avg forward to the smallest queued vruntime
+        // and return the smallest-deadline entity at that point.
+        let snap = self.tree.keys().map(|k| k.vruntime).min()?;
+        self.tree
+            .iter()
+            .find(|(k, _)| k.vruntime == snap)
+            .map(|(k, _)| *k)
+    }
+}
 
 // DIAGNOSTIC: Set these constants to false after the Apple SMP fork/migration
 // experiment. The normal placement and work-stealing code remains below.
@@ -4352,5 +4570,197 @@ mod tests {
             task_pool.reap_retired_tasks_for_test(),
             MAX_ACTIVE_USER_TASKS
         );
+    }
+}
+
+#[cfg(test)]
+mod fair_tests {
+    use super::*;
+
+    fn key(deadline: u64, vruntime: u64, task_id: usize) -> FairKey {
+        FairKey::new(deadline, vruntime, task_id)
+    }
+
+    fn insert_at(q: &mut FairQueue, task_id: usize, vruntime: u64, deadline: u64, weight: u32) {
+        q.insert(task_id, key(deadline, vruntime, task_id), vruntime, weight);
+    }
+
+    #[test_case]
+    fn sched_period_uses_latency_when_runners_fit() {
+        // 5ms / 0.75ms = 6.66, so up to 6 runners stay inside the latency
+        // target and the period equals SCHED_LATENCY_NS.
+        assert_eq!(sched_period(1), SCHED_LATENCY_NS);
+        assert_eq!(sched_period(6), SCHED_LATENCY_NS);
+    }
+
+    #[test_case]
+    fn sched_period_grows_with_runner_count() {
+        // 7 runners at 0.75 ms each exceeds 5 ms, so the period grows to
+        // nr_running * SCHED_MIN_GRANULARITY_NS.
+        assert_eq!(sched_period(7), 7 * SCHED_MIN_GRANULARITY_NS);
+    }
+
+    #[test_case]
+    fn calc_delta_fair_scales_by_weight_ratio() {
+        // delta * NICE_0_LOAD / weight; heavier weight => slower virtual time.
+        assert_eq!(calc_delta_fair(1_000_000, NICE_0_LOAD), 1_000_000);
+        // nice -5 weight 3121 vs nice 0 weight 1024: ratio ~3.05x slower
+        let heavy = calc_delta_fair(1_000_000, 3121);
+        let normal = calc_delta_fair(1_000_000, NICE_0_LOAD);
+        assert!(heavy * 3 < normal);
+        assert!(heavy * 4 > normal);
+    }
+
+    #[test_case]
+    fn calc_delta_fair_handles_zero_weight() {
+        // A zero weight must not divide by zero; fall back to real time.
+        assert_eq!(calc_delta_fair(1_000, 0), 1_000);
+    }
+
+    #[test_case]
+    fn sched_slice_proportional_to_weight() {
+        // Two tasks of weight 1024 each on a queue whose total weight is 2048
+        // each get half the period.
+        let period = sched_period(2);
+        let slice = sched_slice(period, 1024, 2048);
+        assert_eq!(slice, period / 2);
+    }
+
+    #[test_case]
+    fn sched_slice_clamps_to_min_granularity() {
+        // A vanishingly-small weight must still receive at least
+        // SCHED_MIN_GRANULARITY_NS so it is not starved of runnable time.
+        let period = sched_period(2);
+        let slice = sched_slice(period, 1, 1_000_000);
+        assert_eq!(slice, SCHED_MIN_GRANULARITY_NS);
+    }
+
+    #[test_case]
+    fn fair_deadline_is_vruntime_plus_virtual_slice() {
+        // deadline = vruntime + slice * NICE_0_LOAD / weight.
+        let deadline = fair_deadline(1_000, 1_000_000, NICE_0_LOAD);
+        assert_eq!(deadline, 1_000 + 1_000_000);
+    }
+
+    #[test_case]
+    fn empty_queue_picks_none() {
+        let q = FairQueue::new();
+        assert!(q.pick_eligible_min_deadline().is_none());
+        assert!(q.is_empty());
+        assert_eq!(q.avg_vruntime(), 0);
+    }
+
+    #[test_case]
+    fn single_entity_is_always_eligible() {
+        let mut q = FairQueue::new();
+        insert_at(
+            &mut q,
+            1,
+            /* vruntime */ 100,
+            /* deadline */ 200,
+            NICE_0_LOAD,
+        );
+        let picked = q
+            .pick_eligible_min_deadline()
+            .expect("single task eligible");
+        assert_eq!(picked.task_id, 1);
+    }
+
+    #[test_case]
+    fn pick_returns_smallest_deadline_among_eligible() {
+        let mut q = FairQueue::new();
+        // Two tasks at vruntime 100, eligible by construction. Their
+        // deadlines differ; the smaller-deadline one must be picked first.
+        insert_at(&mut q, 1, 100, 300, NICE_0_LOAD);
+        insert_at(&mut q, 2, 100, 200, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty queue");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn pick_skips_over_served_entity_then_snaps_forward() {
+        let mut q = FairQueue::new();
+        // Task 1 ran ahead: high vruntime. Task 2 is fresh: vruntime 0.
+        // avg_vruntime is somewhere between; task 2 is the only eligible one.
+        insert_at(&mut q, 1, 1_000_000, 1_000_500, NICE_0_LOAD);
+        insert_at(&mut q, 2, 0, 500, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty queue");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn min_vruntime_never_decreases_on_removal() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        insert_at(&mut q, 2, 500, 600, NICE_0_LOAD);
+        let mid_min = q.min_vruntime;
+        // Removing the lower-vruntime entity must not pull min backwards.
+        q.remove(1);
+        assert!(q.min_vruntime >= mid_min);
+    }
+
+    #[test_case]
+    fn min_vruntime_advances_on_higher_vruntime_insert() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let prev_min = q.min_vruntime;
+        insert_at(&mut q, 2, 50, 60, NICE_0_LOAD);
+        // The newly inserted entity has vruntime 50 < prev_min, so the floor
+        // candidate is min(50, leftmost.vruntime=50)=50. min_vruntime only
+        // advances, never decreases.
+        assert!(q.min_vruntime >= prev_min);
+    }
+
+    #[test_case]
+    fn rekey_advances_weighted_average() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let avg_before = q.avg_vruntime();
+        // Simulate running: vruntime 100 -> 200, deadline 200 -> 300.
+        let new_key = key(300, 200, 1);
+        q.rekey(1, 200, NICE_0_LOAD, new_key);
+        let avg_after = q.avg_vruntime();
+        assert!(avg_after > avg_before);
+        assert_eq!(avg_after, 200);
+    }
+
+    #[test_case]
+    fn rekey_key_for_returns_new_key() {
+        let mut q = FairQueue::new();
+        insert_at(&mut q, 1, 100, 200, NICE_0_LOAD);
+        let new_key = key(300, 200, 1);
+        q.rekey(1, 200, NICE_0_LOAD, new_key);
+        assert_eq!(q.key_for(1), Some(new_key));
+    }
+
+    #[test_case]
+    fn pick_with_all_eligible_returns_smallest_deadline() {
+        let mut q = FairQueue::new();
+        // Three entities all at vruntime 0 (all eligible), distinct deadlines.
+        insert_at(&mut q, 1, 0, 900, NICE_0_LOAD);
+        insert_at(&mut q, 2, 0, 100, NICE_0_LOAD);
+        insert_at(&mut q, 3, 0, 500, NICE_0_LOAD);
+        let picked = q.pick_eligible_min_deadline().expect("non-empty");
+        assert_eq!(picked.task_id, 2);
+    }
+
+    #[test_case]
+    fn avg_vruntime_uses_weighted_mean() {
+        let mut q = FairQueue::new();
+        // Task 1: vruntime 0, weight 1024. Task 2: vruntime 1000, weight 1024.
+        // avg = (0*1024 + 1000*1024) / 2048 = 500.
+        insert_at(&mut q, 1, 0, 100, NICE_0_LOAD);
+        insert_at(&mut q, 2, 1000, 1100, NICE_0_LOAD);
+        assert_eq!(q.avg_vruntime(), 500);
+    }
+
+    #[test_case]
+    fn weighted_avg_scales_with_unbalanced_weights() {
+        let mut q = FairQueue::new();
+        // Task 1 weight 1024 at vruntime 0, task 2 weight 3072 at vruntime 1000.
+        // avg = (0*1024 + 1000*3072) / 4096 = 750.
+        insert_at(&mut q, 1, 0, 100, 1024);
+        insert_at(&mut q, 2, 1000, 1100, 3072);
+        assert_eq!(q.avg_vruntime(), 750);
     }
 }
