@@ -415,7 +415,7 @@ fn print_table(samples: &[TaskSample]) {
     let widths = TableWidths::from_samples(samples);
 
     println!(
-        "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:>command$}",
+        "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
         "PID",
         "TGID",
         "USER",
@@ -461,7 +461,7 @@ fn print_table(samples: &[TaskSample]) {
             TaskType::User => "U",
         };
         println!(
-            "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:>command$}",
+            "{:>pid$} {:>tgid$} {:>user$} {:>priority$} {:>nice$} {:>weight$} {:>state$} {:>cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:>preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
             task.pid,
             task.tgid,
             user,
@@ -655,7 +655,7 @@ struct Percent(u64);
 
 impl fmt::Display for Percent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{:01}", self.0 / 10, self.0 % 10)
+        f.pad(&format!("{}.{:01}", self.0 / 10, self.0 % 10))
     }
 }
 
@@ -663,7 +663,7 @@ struct CpuLabel(u8);
 
 impl fmt::Display for CpuLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CPU{}", self.0)
+        f.pad(&format!("CPU{}", self.0))
     }
 }
 
@@ -672,11 +672,12 @@ struct TimeNs(u64);
 impl fmt::Display for TimeNs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (hours, mins, secs, ms) = split_time_ns(self.0);
-        if hours > 0 {
-            write!(f, "{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+        let rendered = if hours > 0 {
+            format!("{}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
         } else {
-            write!(f, "{:02}:{:02}.{:03}", mins, secs, ms)
-        }
+            format!("{:02}:{:02}.{:03}", mins, secs, ms)
+        };
+        f.pad(&rendered)
     }
 }
 
