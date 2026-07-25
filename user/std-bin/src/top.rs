@@ -415,7 +415,7 @@ fn print_table(samples: &[TaskSample]) {
     let widths = TableWidths::from_samples(samples);
 
     println!(
-        "{:>pid$} {:>tgid$} {:<user$} {:<priority$} {:>nice$} {:>weight$} {:<state$} {:<cpu$} {:>percent$} {:>util$} {:>util_min$} {:>required$} {:<preference$} {:>migrations$} {:>vruntime$} {:>deadline$} {:>time$} {:<command$}",
+        "{:<pid$} {:<tgid$} {:<user$} {:<priority$} {:<nice$} {:<weight$} {:<state$} {:<cpu$} {:<percent$} {:<util$} {:<util_min$} {:<required$} {:<preference$} {:<migrations$} {:<vruntime$} {:<deadline$} {:<time$} {:<command$}",
         "PID",
         "TGID",
         "USER",
