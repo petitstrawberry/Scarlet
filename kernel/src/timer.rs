@@ -350,6 +350,7 @@ impl TimerQueue {
         self.heap.peek().map(|timer| timer.0.hard_deadline_ns)
     }
 
+    #[cfg(test)]
     fn has_due(&mut self, now_ns: u64) -> bool {
         self.discard_non_pending_head();
         self.heap
@@ -508,15 +509,11 @@ pub const fn local_timer_program(next_deadline_ns: Option<u64>) -> LocalTimerPro
 
 /// Program or stop the current CPU's hardware timer from its queue head.
 pub fn reprogram_local_timer() {
-    reprogram_local_timer_not_before(None);
-}
-
-fn reprogram_local_timer_not_before(not_before_ns: Option<u64>) {
     let cpu_id = local_cpu_id();
     match local_timer_program(peek_local_deadline()) {
         LocalTimerProgram::Deadline(deadline_ns) => {
             let timer = get_kernel_timer();
-            timer.set_deadline_ns(cpu_id, deadline_ns.max(not_before_ns.unwrap_or(0)));
+            timer.set_deadline_ns(cpu_id, deadline_ns);
             timer.start(cpu_id);
         }
         LocalTimerProgram::Stop => get_kernel_timer().stop(cpu_id),
@@ -529,15 +526,16 @@ fn reprogram_local_timer_not_before(not_before_ns: Option<u64>) {
 /// then callbacks execute with all timer locks released. A callback may freely
 /// arm, cancel, or wake other timers before the queue is inspected again.
 ///
-/// Returns `true` when the per-IRQ callback budget left at least one due entry
-/// queued. The caller must then defer it to a later hardware IRQ.
-fn drain_local_due_timers() -> bool {
+/// Processing stops after the per-IRQ callback budget. Any remaining queue head
+/// is reprogrammed by the caller through the architecture's safe comparator
+/// delta.
+fn drain_local_due_timers() {
     let cpu_id = local_cpu_id();
     for _ in 0..MAX_DUE_CALLBACKS_PER_IRQ {
         let now_ns = get_time_ns();
         let timer = { timer_queues()[cpu_id].lock().claim_due(now_ns) };
         let Some(timer) = timer else {
-            return false;
+            return;
         };
 
         if let Some(handler) = timer.handler.upgrade() {
@@ -546,9 +544,6 @@ fn drain_local_due_timers() -> bool {
 
         timer_queues()[cpu_id].lock().finish(&timer);
     }
-
-    let now_ns = get_time_ns();
-    timer_queues()[cpu_id].lock().has_due(now_ns)
 }
 
 /// Process a local hardware timer IRQ without making scheduler decisions.
@@ -564,14 +559,10 @@ pub fn handle_local_timer_irq() {
     }
     crate::breadcrumb::drop(crate::breadcrumb::TIMER_TICK, irq_count, 0);
     crate::breadcrumb::drop(crate::breadcrumb::TIMER_SW_TIMERS, irq_count, 0);
-    let due_work_deferred = drain_local_due_timers();
-    if due_work_deferred {
-        reprogram_local_timer_not_before(Some(
-            get_time_ns().saturating_add(SOFTWARE_TIMER_MIN_INTERVAL_NS),
-        ));
-    } else {
-        reprogram_local_timer();
-    }
+    drain_local_due_timers();
+    // A remaining queue head may already be due. Program it unchanged and let
+    // the architecture timer apply its safe minimum comparator delta.
+    reprogram_local_timer();
 }
 
 /// Get monotonic local time in nanoseconds.
